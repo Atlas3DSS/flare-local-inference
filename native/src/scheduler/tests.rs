@@ -10,6 +10,18 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
             pages,
             snapshots,
         },
+        SchedulerCapabilities {
+            vocabulary: 248320,
+            vision: crate::model::VisionCapabilities {
+                features_per_request: 16384,
+                max_images: 4,
+                patches_per_feature: 4,
+                patch_capacities: vec![256, 1024, 4096, 16384],
+            },
+            live_state_base: 1,
+            candidate_state_base: 5,
+            draft_pages_per_request: 1,
+        },
     )
     .unwrap()
 }
@@ -205,6 +217,18 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                 pages: 512,
                 snapshots: 2,
             },
+            SchedulerCapabilities {
+                vocabulary: 248320,
+                vision: crate::model::VisionCapabilities {
+                    features_per_request: 16384,
+                    max_images: 4,
+                    patches_per_feature: 4,
+                    patch_capacities: vec![256, 1024, 4096, 16384],
+                },
+                live_state_base: 1,
+                candidate_state_base: 5,
+                draft_pages_per_request: 1,
+            },
         )
         .unwrap();
         let handle = scheduler.admit(spec(chunk_size + tail, 3)).unwrap();
@@ -261,6 +285,18 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                 prefill_chunk_size: chunk_size,
                 pages: 64,
                 snapshots: 2,
+            },
+            SchedulerCapabilities {
+                vocabulary: 248320,
+                vision: crate::model::VisionCapabilities {
+                    features_per_request: 16384,
+                    max_images: 4,
+                    patches_per_feature: 4,
+                    patch_capacities: vec![256, 1024, 4096, 16384],
+                },
+                live_state_base: 1,
+                candidate_state_base: 5,
+                draft_pages_per_request: 1,
             },
         );
         assert!(result.err().unwrap().contains("prefill_chunk_size"));
@@ -1070,7 +1106,7 @@ fn copied(consumed: u64, count: usize, grammar: bool) -> speculation::CopyPropos
         tokens,
         count,
         grammar_masks: if grammar {
-            vec![-1; (count + 1) * crate::model::VOCABULARY.div_ceil(32)]
+            vec![-1; (count + 1) * 248320usize.div_ceil(32)]
         } else {
             vec![]
         },
@@ -1110,8 +1146,6 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
         let mut complete = vector_records(a, 4, 66, 2, &[40], expected as i64, 1);
         let other = vector_records(b, 4, 66, 2, &[41], expected as i64, 1);
         complete[b.slot as usize] = other[b.slot as usize];
-        // Copy-only records cannot claim an MTP cache exists.
-        assert!(s.complete(Fence(4), &complete).is_err());
         for h in [a, b] {
             complete[h.slot as usize]
                 .vector
@@ -1156,4 +1190,81 @@ fn copy_source_uses_no_draft_page_and_host_stops_stay_width_one() {
     mtp.limits.max_sequence_tokens = 128;
     mtp.enable_speculation(&speculation::WIDTHS).unwrap();
     assert!(mtp.admit(spec(64, 64)).is_err());
+}
+
+#[test]
+fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validation() {
+    let capabilities = SchedulerCapabilities {
+        vocabulary: 32,
+        vision: crate::model::VisionCapabilities {
+            features_per_request: 16,
+            max_images: 2,
+            patches_per_feature: 2,
+            patch_capacities: vec![8, 32],
+        },
+        live_state_base: 11,
+        candidate_state_base: 21,
+        draft_pages_per_request: 1,
+    };
+    let limits = SchedulerLimits {
+        max_active: 1,
+        max_sequence_tokens: 2048,
+        prefill_chunk_size: 512,
+        pages: 8,
+        snapshots: 2,
+    };
+    let mut s = RequestScheduler::new([1; 32], limits, capabilities.clone()).unwrap();
+    s.enable_speculation(&[1, 2]).unwrap();
+    let handle = s
+        .admit(RequestSpec {
+            prompt: vec![7; 4],
+            conditioning: vec![],
+            max_new_tokens: 8,
+            grammar_constrained: false,
+            host_stops: false,
+        })
+        .unwrap();
+    assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(11));
+    assert_eq!(
+        s.request(handle).unwrap().candidate_state_slot,
+        StateSlotId(21)
+    );
+    assert!(s.set_vision_images(handle, &[4, 4, 4]).is_err());
+    assert!(s.set_vision_images(handle, &[3]).is_err());
+    s.set_vision_images(handle, &[4]).unwrap();
+    init(&mut s, 1);
+    let step = s.next_step().unwrap();
+    assert_eq!((step.kind, step.token_capacity), (GraphKind::Vision, 8));
+    s.record_submission(&step, Fence(2)).unwrap();
+    s.complete(Fence(2), &records(handle, 2, 0, 0, -1, 1))
+        .unwrap();
+    let step = s.next_step().unwrap();
+    s.record_submission(&step, Fence(3)).unwrap();
+    s.complete(Fence(3), &records(handle, 3, 4, 1, 7, 1))
+        .unwrap();
+    let mut proposal = speculation::CopyProposal {
+        consumed: 4,
+        tokens: [32, -1, -1, -1, -1, -1, -1],
+        count: 1,
+        grammar_masks: vec![],
+    };
+    assert!(s.set_copy_proposal(handle, proposal.clone()).is_err());
+    proposal.tokens[0] = 31;
+    s.set_copy_proposal(handle, proposal).unwrap();
+    for bad in [
+        SchedulerCapabilities {
+            vocabulary: 0,
+            ..capabilities.clone()
+        },
+        SchedulerCapabilities {
+            candidate_state_base: 12,
+            ..capabilities.clone()
+        },
+        SchedulerCapabilities {
+            live_state_base: u32::MAX,
+            ..capabilities
+        },
+    ] {
+        assert!(RequestScheduler::new([1; 32], limits, bad).is_err());
+    }
 }

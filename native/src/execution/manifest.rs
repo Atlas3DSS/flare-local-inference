@@ -258,13 +258,10 @@ impl ExecutionManifest {
                 GraphKind::Prefill => {
                     graph.batch_capacity == 1
                         && ([1, 16].contains(&graph.token_capacity)
-                            || ((64..=262144).contains(&graph.token_capacity)
+                            || (graph.token_capacity >= 64
                                 && graph.token_capacity.is_multiple_of(64)))
                 }
-                GraphKind::Vision => {
-                    graph.batch_capacity == 1
-                        && [256, 1024, 4096, 16384].contains(&graph.token_capacity)
-                }
+                GraphKind::Vision => graph.batch_capacity == 1 && graph.token_capacity > 0,
                 _ => [1, 2, 4].contains(&graph.batch_capacity) && graph.token_capacity == 1,
             };
             if !valid {

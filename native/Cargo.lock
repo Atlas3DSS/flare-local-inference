@@ -1575,6 +1575,7 @@ dependencies = [
  "png",
  "pyo3",
  "ryu",
+ "serde",
  "serde_json",
  "sha2",
  "tokenizers",

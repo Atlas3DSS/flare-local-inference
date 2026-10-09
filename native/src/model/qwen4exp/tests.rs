@@ -1,12 +1,22 @@
 use super::*;
+use super::{
+    config::required_buffers,
+    inputs::{Admission, Inputs},
+};
 use crate::{
     cache::Fence,
     execution::{ABI_VERSION, BufferDescriptor, CompletionRecord, GraphDescriptor, InputBinding},
     scheduler::{RequestScheduler, RequestSpec},
 };
+use crate::{
+    execution::Dtype,
+    model::SamplingParameters,
+    scheduler::{SchedulerLimits, prefill_capacities},
+};
 
 fn config() -> ModelConfig {
     ModelConfig {
+        contract: Qwen4Exp::metadata(),
         identity: [1; 32],
         model_id: "qwen38".into(),
         limits: SchedulerLimits {
@@ -17,7 +27,6 @@ fn config() -> ModelConfig {
             snapshots: 8,
         },
         eos_token_ids: vec![248046, 248044],
-        vision_features_per_request: 16384,
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
@@ -27,10 +36,7 @@ fn config() -> ModelConfig {
     }
 }
 fn manifest(config: &ModelConfig) -> ExecutionManifest {
-    let mut descriptions = required_buffers(
-        config.limits.max_sequence_tokens,
-        config.limits.prefill_chunk_size,
-    );
+    let mut descriptions = required_buffers(config);
     let speculative = !config.speculative_widths.is_empty();
     if speculative {
         descriptions.extend([
@@ -178,16 +184,20 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
                 .position(|graph| graph.kind == kind && graph.sampling_mode == mode)
                 .unwrap();
             let removed = missing.graphs.remove(index);
-            assert!(config.validate(&missing).unwrap_err().contains("lacks"));
-            let selected = config
-                .graph(
-                    &original,
-                    kind,
-                    removed.batch_capacity,
-                    removed.token_capacity,
-                    mode,
-                )
-                .unwrap();
+            assert!(
+                Qwen4Exp::validate(&config, &missing)
+                    .unwrap_err()
+                    .contains("lacks")
+            );
+            let selected = Qwen4Exp::graph(
+                &config,
+                &original,
+                kind,
+                removed.batch_capacity,
+                removed.token_capacity,
+                mode,
+            )
+            .unwrap();
             assert_eq!(original.graphs[selected].name, removed.name);
             let mut duplicate = original.clone();
             let mut extra = removed;
@@ -195,8 +205,7 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
             extra.handle = duplicate.graphs.len() + 1;
             duplicate.graphs.push(extra);
             assert!(
-                config
-                    .validate(&duplicate)
+                Qwen4Exp::validate(&config, &duplicate)
                     .unwrap_err()
                     .contains("ambiguous")
             );
@@ -209,7 +218,7 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
     let mut config = config();
     config.speculative_widths = (1..=8).collect();
     let original = manifest(&config);
-    config.validate(&original).unwrap();
+    Qwen4Exp::validate(&config, &original).unwrap();
     assert_eq!(original.graphs.len(), 36);
     assert!(
         original
@@ -228,8 +237,7 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
         let mut missing = original.clone();
         missing.graphs.remove(index);
         assert!(
-            config
-                .validate(&missing)
+            Qwen4Exp::validate(&config, &missing)
                 .unwrap_err()
                 .contains("lacks Speculative")
         );
@@ -248,8 +256,7 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
             .input_bindings
             .retain(|i| i.buffer_name != "draft_page_tables");
         assert!(
-            config
-                .validate(&missing)
+            Qwen4Exp::validate(&config, &missing)
                 .unwrap_err()
                 .contains("draft_page_tables")
         );
@@ -268,17 +275,16 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
             .find(|b| b.name == name)
             .unwrap()
             .dtype = Dtype::Float32;
-        assert!(config.validate(&wrong).is_err());
+        assert!(Qwen4Exp::validate(&config, &wrong).is_err());
     }
     config.speculative_fixed_width = Some(9);
     assert!(
-        config
-            .validate(&original)
+        Qwen4Exp::validate(&config, &original)
             .unwrap_err()
             .contains("speculative_fixed_width")
     );
     config.speculative_fixed_width = Some(8);
-    config.validate(&original).unwrap();
+    Qwen4Exp::validate(&config, &original).unwrap();
 }
 
 #[test]
@@ -289,7 +295,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     let mut config = config();
     config.speculative_widths = vec![1, 2, 4, 8];
     let manifest = manifest(&config);
-    let body = json!({"model_id":"qwen38","identity":"01".repeat(32),
+    let body = json!({"model_contract":metadata_json(),"model_id":"qwen38","identity":"01".repeat(32),
         "max_sequence_tokens":2048,"prefill_chunk_size":512,"pages":64,"snapshots":8,
         "eos_token_ids":[],"speculative_widths":[1,2,4,8]});
     for width in [json!(null), json!(1), json!(2), json!(4), json!(8)] {
@@ -298,7 +304,9 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
             body["speculative_fixed_width"] = width.clone();
             body["speculative_copy"] = json!(copy);
             assert_eq!(
-                Bootstrap::load(&body.to_string(), &manifest).err().unwrap(),
+                Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
+                    .err()
+                    .unwrap(),
                 "assets must contain verified frontend descriptors"
             );
         }
@@ -315,7 +323,9 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     ] {
         let mut body = body.clone();
         body[key] = value;
-        let error = Bootstrap::load(&body.to_string(), &manifest).err().unwrap();
+        let error = Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
+            .err()
+            .unwrap();
         assert!(error.contains("speculative"), "{error}");
     }
     config.speculative_proposal_source = crate::scheduler::speculation::ProposalSource::Copy;
@@ -323,7 +333,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     let mut body = body;
     body["speculative_proposal_source"] = json!("copy");
     assert_eq!(
-        Bootstrap::load(&body.to_string(), &copy_manifest)
+        Bootstrap::load::<Qwen4Exp>(&body.to_string(), &copy_manifest)
             .err()
             .unwrap(),
         "assets must contain verified frontend descriptors"
@@ -332,9 +342,17 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
 
 #[test]
 fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_guards() {
+    let mut wire_fixture = WireFixture::new(
+        "mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_guards",
+    );
     let mut config = config();
     config.speculative_widths = vec![1, 2, 4, 8];
-    let mut scheduler = RequestScheduler::new(config.identity, config.limits).unwrap();
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        Qwen4Exp::scheduler_capabilities(&config),
+    )
+    .unwrap();
     scheduler
         .enable_speculation(&config.speculative_widths)
         .unwrap();
@@ -363,7 +381,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         grammar_mask: None,
         ignore_eos: false,
     });
-    let mut inputs = ModelInputs::new();
+    let mut inputs = Inputs::new();
     let mut records = [CompletionRecord::default(); 4];
     for (fence, consumed, generated, token) in [(1, 0, 0, -1), (2, 65, 1, 7)] {
         let step = scheduler.next_step().unwrap();
@@ -371,6 +389,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         inputs
             .pack(&config, &scheduler, &step, &admissions)
             .unwrap();
+        wire_fixture.observe(&inputs.uploads());
         if fence == 2 {
             let uploads = inputs.uploads();
             let target = uploads.iter().find(|u| u.buffer == "page_tables").unwrap();
@@ -400,6 +419,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         inputs
             .pack(&config, &scheduler, &step, &admissions)
             .unwrap();
+        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         assert!(!uploads.iter().any(|u| u.buffer.ends_with("page_tables")));
         let expected = uploads
@@ -428,6 +448,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         inputs
             .pack(&config, &scheduler, &step, &admissions)
             .unwrap();
+        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         assert!(
             uploads
@@ -476,12 +497,16 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
 fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
     let config = config();
     let manifest = manifest(&config);
-    config.validate(&manifest).unwrap();
+    Qwen4Exp::validate(&config, &manifest).unwrap();
     let mut missing = manifest.clone();
     missing
         .graphs
         .retain(|graph| graph.kind != GraphKind::Resume);
-    assert!(config.validate(&missing).unwrap_err().contains("Resume"));
+    assert!(
+        Qwen4Exp::validate(&config, &missing)
+            .unwrap_err()
+            .contains("Resume")
+    );
     let mut missing = manifest.clone();
     let graph = missing
         .graphs
@@ -492,8 +517,7 @@ fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
         .input_bindings
         .retain(|input| input.buffer_name != "vision_token_indices");
     assert!(
-        config
-            .validate(&missing)
+        Qwen4Exp::validate(&config, &missing)
             .unwrap_err()
             .contains("vision_token_indices")
     );
@@ -504,7 +528,7 @@ fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
         .find(|buffer| buffer.name == "admission_seed_bits")
         .unwrap()
         .dtype = Dtype::Float32;
-    assert!(config.validate(&wrong).is_err());
+    assert!(Qwen4Exp::validate(&config, &wrong).is_err());
 }
 
 #[test]
@@ -514,7 +538,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
         config.limits.max_sequence_tokens = 32768;
         config.limits.prefill_chunk_size = chunk_size;
         let original = manifest(&config);
-        config.validate(&original).unwrap();
+        Qwen4Exp::validate(&config, &original).unwrap();
         {
             let mode = SamplingMode::General;
             let mut missing = original.clone();
@@ -523,7 +547,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
                     && graph.sampling_mode == mode
                     && graph.token_capacity == chunk_size)
             });
-            let error = config.validate(&missing).unwrap_err();
+            let error = Qwen4Exp::validate(&config, &missing).unwrap_err();
             assert!(error.contains("lacks Prefill") && error.contains(&chunk_size.to_string()));
         }
         for name in ["token_ids", "prefill_positions", "vision_token_indices"] {
@@ -544,8 +568,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
                     .nbytes /= 2;
             }
             assert!(
-                config
-                    .validate(&short)
+                Qwen4Exp::validate(&config, &short)
                     .unwrap_err()
                     .contains(&format!("semantic buffer {name}"))
             );
@@ -562,10 +585,10 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
     let mut config = config();
     config.limits.max_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
-    let mut body = json!({"model_id": "qwen38", "identity": "01".repeat(32),
+    let mut body = json!({"model_contract": metadata_json(),"model_id": "qwen38", "identity": "01".repeat(32),
         "max_sequence_tokens": 8192, "pages": 64, "snapshots": 8, "eos_token_ids": []});
     let failure = |body: &serde_json::Value, config: &ModelConfig| {
-        Bootstrap::load(&body.to_string(), &manifest(config))
+        Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest(config))
             .err()
             .unwrap()
     };
@@ -595,8 +618,16 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
 
 #[test]
 fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics() {
+    let mut wire_fixture = WireFixture::new(
+        "admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics",
+    );
     let config = config();
-    let mut scheduler = RequestScheduler::new(config.identity, config.limits).unwrap();
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        Qwen4Exp::scheduler_capabilities(&config),
+    )
+    .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
             prompt: vec![7; 65],
@@ -621,13 +652,14 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         grammar_mask: None,
         ignore_eos: false,
     });
-    admissions[0].as_ref().unwrap().validate().unwrap();
-    let mut inputs = ModelInputs::new();
+    admissions[0].as_ref().unwrap().validate(&config).unwrap();
+    let mut inputs = Inputs::new();
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(1)).unwrap();
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
+    wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
     let seed = uploads
         .iter()
@@ -647,6 +679,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         inputs
             .pack(&config, &scheduler, &step, &admissions)
             .unwrap();
+        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         let count = uploads
             .iter()
@@ -680,6 +713,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
+    wire_fixture.observe(&inputs.uploads());
     assert_eq!(
         inputs
             .uploads()
@@ -706,6 +740,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
+    wire_fixture.observe(&inputs.uploads());
     assert!(!inputs.uploads().iter().any(|u| u.buffer == "page_tables"));
     assert!(
         !inputs
@@ -717,11 +752,19 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
 
 #[test]
 fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_padding() {
+    let mut wire_fixture = WireFixture::new(
+        "large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_padding",
+    );
     let mut config = config();
     config.limits.max_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
     config.limits.pages = 128;
-    let mut scheduler = RequestScheduler::new(config.identity, config.limits).unwrap();
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        Qwen4Exp::scheduler_capabilities(&config),
+    )
+    .unwrap();
     let prompt: Vec<u32> = (0..4113).collect();
     let handle = scheduler
         .admit(RequestSpec {
@@ -757,7 +800,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         ..Default::default()
     };
     scheduler.complete(Fence(1), &records).unwrap();
-    let mut inputs = ModelInputs::new();
+    let mut inputs = Inputs::new();
     for (sequence, start, count, capacity) in [(2, 0, 4096, 4096), (3, 4096, 17, 64)] {
         let step = scheduler.next_step().unwrap();
         assert_eq!(
@@ -768,6 +811,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         inputs
             .pack(&config, &scheduler, &step, &admissions)
             .unwrap();
+        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         let bytes = |name| {
             uploads
@@ -839,7 +883,7 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
     config.speculative_widths = (1..=8).collect();
     config.speculative_proposal_source = ProposalSource::Copy;
     let original = manifest(&config);
-    config.validate(&original).unwrap();
+    Qwen4Exp::validate(&config, &original).unwrap();
     assert!(
         !original
             .buffers
@@ -859,7 +903,11 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
             .unwrap()
             .input_bindings
             .retain(|b| b.buffer_name != name);
-        assert!(config.validate(&missing).unwrap_err().contains(name));
+        assert!(
+            Qwen4Exp::validate(&config, &missing)
+                .unwrap_err()
+                .contains(name)
+        );
         let mut wrong = original.clone();
         wrong
             .buffers
@@ -867,12 +915,11 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
             .find(|b| b.name == name)
             .unwrap()
             .dtype = Dtype::Float32;
-        assert!(config.validate(&wrong).is_err());
+        assert!(Qwen4Exp::validate(&config, &wrong).is_err());
     }
     config.speculative_widths.clear();
     assert!(
-        config
-            .validate(&original)
+        Qwen4Exp::validate(&config, &original)
             .unwrap_err()
             .contains("requires speculative")
     );
@@ -881,11 +928,18 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
 
 #[test]
 fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
+    let mut wire_fixture =
+        WireFixture::new("copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask");
     use crate::scheduler::speculation::{CopyProposal, ProposalSource};
     let mut config = config();
     config.speculative_widths = (1..=8).collect();
     config.speculative_proposal_source = ProposalSource::Copy;
-    let mut scheduler = RequestScheduler::new(config.identity, config.limits).unwrap();
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        Qwen4Exp::scheduler_capabilities(&config),
+    )
+    .unwrap();
     scheduler
         .enable_speculation(&config.speculative_widths)
         .unwrap();
@@ -934,12 +988,13 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         grammar_mask: Some(vec![1; words]),
         ignore_eos: false,
     });
-    let mut inputs = ModelInputs::new();
+    let mut inputs = Inputs::new();
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
+    wire_fixture.observe(&inputs.uploads());
     assert!(
         !inputs
             .uploads()
@@ -975,6 +1030,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
+    wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
     let bytes = |name| uploads.iter().find(|u| u.buffer == name).unwrap().bytes;
     let i64s = |name| {
@@ -1041,6 +1097,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
+    wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
     let counts = uploads
         .iter()
@@ -1058,4 +1115,286 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
             .chunks_exact(4)
             .all(|b| i32::from_le_bytes(b.try_into().unwrap()) == 16)
     );
+}
+
+#[cfg(feature = "server")]
+fn metadata_json() -> serde_json::Value {
+    serde_json::json!({"schema":super::INPUT_SCHEMA,"vocabulary":248320,"vision":{"features_per_request":16384,"max_images":4,"patches_per_feature":4,"patch_capacities":[256,1024,4096,16384]}})
+}
+
+#[test]
+#[cfg(feature = "server")]
+fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
+    use crate::server::Bootstrap;
+    use serde_json::json;
+    let config = config();
+    let manifest = manifest(&config);
+    let body = json!({"model_id":"qwen38","identity":"01".repeat(32),
+        "max_sequence_tokens":2048,"prefill_chunk_size":512,"pages":64,"snapshots":8,
+        "eos_token_ids":[],"model_contract":metadata_json()});
+    assert_eq!(
+        Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
+            .err()
+            .unwrap(),
+        "assets must contain verified frontend descriptors"
+    );
+    let mut cases = Vec::new();
+    let mut value = body.clone();
+    value.as_object_mut().unwrap().remove("model_contract");
+    cases.push(value);
+    for invalid in [json!(null), json!({}), json!("qwen4exp.graph-inputs.v1")] {
+        let mut value = body.clone();
+        value["model_contract"] = invalid;
+        cases.push(value);
+    }
+    for (key, invalid) in [
+        ("schema", json!("qwen4exp.graph-inputs.v2")),
+        ("vocabulary", json!(248319)),
+        ("vocabulary", json!(true)),
+        ("extra", json!(0)),
+    ] {
+        let mut value = body.clone();
+        value["model_contract"][key] = invalid;
+        cases.push(value);
+    }
+    for (key, invalid) in [
+        ("max_images", json!(0)),
+        ("features_per_request", json!(16383)),
+        ("patches_per_feature", json!(2)),
+        ("patch_capacities", json!([256, 1024, 16384, 4096])),
+        ("extra", json!(1)),
+    ] {
+        let mut value = body.clone();
+        value["model_contract"]["vision"][key] = invalid;
+        cases.push(value);
+    }
+    for value in cases {
+        let error = Bootstrap::load::<Qwen4Exp>(&value.to_string(), &manifest)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("model_contract") || error.contains("graph-input schema"),
+            "{error}: {value}"
+        );
+    }
+    let mut manifest = manifest;
+    manifest
+        .graphs
+        .iter_mut()
+        .find(|g| g.kind == GraphKind::Vision)
+        .unwrap()
+        .token_capacity = 512;
+    manifest.validate().unwrap();
+    assert!(
+        Qwen4Exp::validate(&config, &manifest)
+            .unwrap_err()
+            .contains("undeclared Qwen4Exp capacity")
+    );
+}
+
+#[test]
+fn model_interprets_draft_cache_and_exported_boundary_without_inferring_abi3_candidate() {
+    use crate::execution::TokenVector;
+    let mut config = config();
+    config.speculative_widths = vec![1, 2, 4, 8];
+    let mut record = CompletionRecord {
+        consumed_tokens: 65,
+        token_id: 7,
+        status: 1,
+        ..Default::default()
+    };
+    assert_eq!(Qwen4Exp::candidate_boundary(&record), 64);
+    record.vector = Some(TokenVector {
+        emitted_count: 1,
+        tokens: [7, -1, -1, -1, -1, -1, -1, -1],
+        draft_cache_consumed: 64,
+        ..Default::default()
+    });
+    assert_eq!(Qwen4Exp::candidate_boundary(&record), 0);
+    Qwen4Exp::validate_completion(&config, GraphKind::Speculative, &record).unwrap();
+    record.vector.as_mut().unwrap().candidate_consumed = 64;
+    assert_eq!(Qwen4Exp::candidate_boundary(&record), 64);
+    config.speculative_proposal_source = crate::scheduler::speculation::ProposalSource::Copy;
+    assert!(Qwen4Exp::validate_completion(&config, GraphKind::Speculative, &record).is_err());
+    record.vector.as_mut().unwrap().draft_cache_consumed = -1;
+    Qwen4Exp::validate_completion(&config, GraphKind::Speculative, &record).unwrap();
+    // Ordinary completions do not claim speculative draft-cache conservation.
+    record.vector.as_mut().unwrap().draft_cache_consumed = 64;
+    Qwen4Exp::validate_completion(&config, GraphKind::Resume, &record).unwrap();
+    record.vector.as_mut().unwrap().tokens[0] = config.contract.vocabulary as i64;
+    assert!(Qwen4Exp::validate_completion(&config, GraphKind::Speculative, &record).is_err());
+}
+
+#[test]
+fn state_transfer_and_resume_upload_fixture() {
+    let mut wire_fixture = WireFixture::new("state_transfer_and_resume_upload_fixture");
+    let config = config();
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        Qwen4Exp::scheduler_capabilities(&config),
+    )
+    .unwrap();
+    let mut inputs = Inputs::new();
+    for cycle in 0..2 {
+        let prompt = vec![7; 64];
+        let handle = scheduler
+            .admit(RequestSpec {
+                prompt: prompt.clone(),
+                conditioning: vec![],
+                max_new_tokens: 2,
+                grammar_constrained: false,
+                host_stops: false,
+            })
+            .unwrap();
+        let mut admissions = std::array::from_fn(|_| None);
+        admissions[handle.slot as usize] = Some(Admission {
+            handle,
+            sampling: SamplingParameters::default(),
+            max_new_tokens: 2,
+            prompt,
+            positions: (0..64).map(|i| [i, i + 1, i + 2]).collect(),
+            vision_token_indices: vec![-1; 64],
+            grammar_mask: None,
+            ignore_eos: false,
+        });
+        for (offset, kind, consumed, generated, token, status) in if cycle == 0 {
+            vec![
+                (1, GraphKind::Init, 0, 0, -1, 1),
+                (2, GraphKind::Prefill, 64, 1, 7, 1),
+                (3, GraphKind::Decode, 65, 2, 8, 2),
+                (4, GraphKind::Snapshot, 65, 2, -1, 1),
+            ]
+        } else {
+            vec![
+                (1, GraphKind::Restore, 64, 0, -1, 1),
+                (2, GraphKind::Resume, 64, 1, 7, 1),
+                (3, GraphKind::Decode, 65, 2, 8, 2),
+            ]
+        } {
+            let fence = Fence(cycle * 4 + offset);
+            let step = scheduler.next_step().unwrap();
+            assert_eq!(step.kind, kind);
+            scheduler.record_submission(&step, fence).unwrap();
+            inputs
+                .pack(&config, &scheduler, &step, &admissions)
+                .unwrap();
+            wire_fixture.observe(&inputs.uploads());
+            assert!(!inputs.uploads().is_empty());
+            let mut records = [CompletionRecord::default(); 4];
+            records[handle.slot as usize] = CompletionRecord {
+                generation: handle.generation as i64,
+                submission_sequence: fence.0 as i64,
+                consumed_tokens: consumed,
+                generated_tokens: generated,
+                token_id: token,
+                status,
+                ..Default::default()
+            };
+            if cycle == 0 && kind == GraphKind::Prefill {
+                scheduler.record_candidate(handle, 64, fence).unwrap();
+            }
+            scheduler.complete(fence, &records).unwrap();
+        }
+        scheduler.finish(handle).unwrap();
+    }
+}
+
+#[test]
+#[cfg(feature = "images")]
+fn vision_upload_fixture_retains_second_image_feature_offset() {
+    let mut wire_fixture =
+        WireFixture::new("vision_upload_fixture_retains_second_image_feature_offset");
+    use crate::frontend::images::{ImageGeometry, ProcessedImages};
+    let config = config();
+    let images = ProcessedImages {
+        pixel_values: (0..8 * 1536).map(|i| (i as f32 - 71.) / 32.).collect(),
+        geometry: (0..2)
+            .map(|_| ImageGeometry {
+                height: 32,
+                width: 32,
+                grid_thw: [1, 2, 2],
+                patches: 4,
+                tokens: 1,
+            })
+            .collect(),
+        position_ids: (0..8).map(|i| [i, i + 1]).collect(),
+        interpolation_indices: (0..8).map(|i| [i, i + 1, i + 2, i + 3]).collect(),
+        interpolation_weights: vec![[0.25; 4]; 8],
+        cu_seqlens: vec![0, 4, 8],
+    };
+    let mut inputs = Inputs::new();
+    for image in 0..2 {
+        inputs
+            .pack_vision(
+                &config,
+                RequestHandle {
+                    slot: 3,
+                    generation: 19,
+                },
+                &images,
+                image,
+            )
+            .unwrap();
+        wire_fixture.observe(&inputs.uploads());
+        let uploads = inputs.uploads();
+        assert_eq!(
+            uploads
+                .iter()
+                .find(|u| u.buffer == "vision_feature_offset")
+                .unwrap()
+                .bytes,
+            (image as i32).to_le_bytes()
+        );
+    }
+}
+
+struct WireFixture {
+    name: &'static str,
+    index: usize,
+}
+impl WireFixture {
+    fn new(name: &'static str) -> Self {
+        Self { name, index: 0 }
+    }
+    fn observe(&mut self, uploads: &[crate::execution::Upload<'_>]) {
+        use blake2::{Blake2b512, Digest};
+        let mut hash = Blake2b512::new();
+        for upload in uploads {
+            hash.update((upload.buffer.len() as u64).to_le_bytes());
+            hash.update(upload.buffer.as_bytes());
+            hash.update((upload.offset as u64).to_le_bytes());
+            hash.update((upload.bytes.len() as u64).to_le_bytes());
+            hash.update(upload.bytes);
+        }
+        let digest = format!("{:x}", hash.finalize());
+        let line = include_str!("wire-fixtures.txt")
+            .lines()
+            .find(|line| {
+                let mut columns = line.split_whitespace();
+                columns.next() == Some(self.name)
+                    && columns.next().and_then(|n| n.parse::<usize>().ok()) == Some(self.index)
+            })
+            .expect("upload fixture covers every packing call");
+        assert_eq!(
+            digest,
+            line.split_whitespace().nth(2).unwrap(),
+            "{} packing call {}",
+            self.name,
+            self.index
+        );
+        self.index += 1;
+    }
+}
+
+impl Drop for WireFixture {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let count = include_str!("wire-fixtures.txt")
+                .lines()
+                .filter(|line| line.split_whitespace().next() == Some(self.name))
+                .count();
+            assert_eq!(self.index, count, "{} packing fixture coverage", self.name);
+        }
+    }
 }

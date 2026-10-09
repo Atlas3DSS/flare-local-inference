@@ -1,6 +1,13 @@
 # Qwen4Exp native model contract
 
-The Rust server consumes the transport manifest in [manifest.md](manifest.md)
+`ModelRuntime<M>` and `Server<M>` statically select a `ModelContract`. The
+contract owns prepared-schema validation, prompt interpretation, admission,
+input packing, model-specific completion checks, and the associated
+`ModelOutput` implementation. The Python entrypoint selects `Qwen4Exp`.
+Transport owns graph handles, four physical completion lanes, bounded output
+vectors, host spans, fences, and confirmed resource drain.
+
+The server consumes the transport manifest in [manifest.md](manifest.md)
 and the Qwen4Exp semantics below. Python prepares graphs and persistent storage,
 synchronizes preparation, then transfers exclusive mutation access to Rust.
 Every tensor listed here is contiguous and remains allocated through confirmed
@@ -38,7 +45,7 @@ must prohibit explicit graph, session and mapped-allocation teardown in that cas
 | `pages` | Prepared KV page capacity |
 | `snapshots` | Prepared immutable state-snapshot capacity |
 | `eos_token_ids` | Up to eight vocabulary token IDs |
-| `vision_features_per_request` | 16384 |
+| `model_contract` | Required closed model input-schema metadata shown below |
 | `assets` | Verified asset descriptors, each `{path, sha256}` |
 | `template_defaults` | Optional Jinja defaults |
 | `generation_defaults` | Optional overrides of checkpoint sampling defaults |
@@ -52,6 +59,20 @@ must prohibit explicit graph, session and mapped-allocation teardown in that cas
 | `event_capacity` | Buffered token/completion events per request, 128 if omitted |
 | `frontend_workers` | Concurrent CPU request-preparation jobs, 2 if omitted |
 | `max_body_bytes` | HTTP body bound, 32 MiB if omitted |
+
+The preparation recipe declares this metadata alongside its graph catalog:
+
+```json
+{"schema":"qwen4exp.graph-inputs.v1","vocabulary":248320,"vision":{"features_per_request":16384,"max_images":4,"patches_per_feature":4,"patch_capacities":[256,1024,4096,16384]}}
+```
+
+Missing or unknown fields, unsupported schema versions, different model
+capabilities, and graph/buffer extents inconsistent with the metadata are
+rejected before asset loading or CUDA worker construction. Context and prefill
+capacities remain the explicit top-level values checked against the catalog.
+Vocabulary-dependent masks and histograms are packed using the validated
+vocabulary. Qwen image geometry, rotary positions, state-row mappings, and
+speculative draft-cache interpretation live under `model/qwen4exp`.
 
 Asset keys are `tokenizer`, `tokenizer_config`, `chat_template`,
 `preprocessor_config`, `model_config` and `generation_config`. Paths must be

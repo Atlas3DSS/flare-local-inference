@@ -1,4 +1,5 @@
 //! Verify frozen generation-corpus prompts through native HTTP request preparation.
+use sparkgap_native::model::qwen4exp::Qwen4Exp;
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -8,7 +9,7 @@ use sparkgap_native::{
         images::{ImageLimits, ImageProcessor},
     },
     grammar::GrammarCompiler,
-    model::{ModelConfig, SamplingParameters, VOCABULARY},
+    model::{ModelConfig, SamplingParameters, qwen4exp::VOCABULARY},
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
@@ -53,6 +54,7 @@ fn main() -> Result<(), String> {
         ImageLimits::default(),
     )?;
     let model = ModelConfig {
+        contract: Qwen4Exp::metadata(),
         model_id: corpus["model_id"]
             .as_str()
             .ok_or("missing corpus model_id")?
@@ -66,7 +68,6 @@ fn main() -> Result<(), String> {
             snapshots: 37,
         },
         eos_token_ids: vec![248046, 248044],
-        vision_features_per_request: 16384,
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
@@ -86,7 +87,7 @@ fn main() -> Result<(), String> {
             .as_object_mut()
             .ok_or("invalid corpus request")?
             .insert("model".into(), Value::String(model.model_id.clone()));
-        let prepared = prepare_request(&frontend, &images, &compiler, &model, request)
+        let prepared = prepare_request::<Qwen4Exp>(&frontend, &images, &compiler, &model, request)
             .map_err(|error| format!("{id}: {error}"))?;
         let expected: Vec<u32> = serde_json::from_value(case["prompt_tokens"].clone())
             .map_err(|error| format!("{id}: {error}"))?;

@@ -122,7 +122,10 @@ def fixture(snapshot):
     config = {"model_id": MODEL_ID, "identity": "01" * 32, "max_sequence_tokens": context,
         "prefill_chunk_size": 512,
         "pages": 4096, "snapshots": 4, "eos_token_ids": [248046, 248044],
-        "vision_features_per_request": 16384, "bind": "127.0.0.1:0",
+        "model_contract": {"schema": "qwen4exp.graph-inputs.v1", "vocabulary": vocabulary,
+            "vision": {"features_per_request": 16384, "max_images": 4,
+                "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
+        "bind": "127.0.0.1:0",
         "assets": {key: {"path": str((snapshot / filename).resolve(strict=True)), "sha256": sha}
             for key, (filename, sha) in assets.items()}}
     return manifest, config

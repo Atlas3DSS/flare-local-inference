@@ -1,16 +1,16 @@
-use crate::{Result, model::VOCABULARY};
+use crate::Result;
 
 pub(super) struct TokenStops {
     sequences: Vec<Vec<u32>>,
     held: Vec<u32>,
 }
 impl TokenStops {
-    pub fn new(sequences: Vec<Vec<u32>>) -> Result<Self> {
+    pub fn new(sequences: Vec<Vec<u32>>, vocabulary: usize) -> Result<Self> {
         if sequences.len() > 16
             || sequences.iter().any(|sequence| {
                 sequence.is_empty()
                     || sequence.len() > 64
-                    || sequence.iter().any(|token| *token as usize >= VOCABULARY)
+                    || sequence.iter().any(|token| *token as usize >= vocabulary)
             })
         {
             return Err(
@@ -203,7 +203,7 @@ mod tests {
     use super::*;
     #[test]
     fn overlapping_stop_prefixes_are_held_without_losing_ordinary_tokens() {
-        let mut stops = TokenStops::new(vec![vec![1, 2, 3], vec![2, 4]]).unwrap();
+        let mut stops = TokenStops::new(vec![vec![1, 2, 3], vec![2, 4]], 248320).unwrap();
         assert_eq!(stops.push(9), (vec![9], false));
         assert_eq!(stops.push(1), (vec![], false));
         assert_eq!(stops.push(2), (vec![], false));
@@ -212,7 +212,7 @@ mod tests {
     }
     #[test]
     fn terminal_flush_preserves_an_unfinished_stop_prefix() {
-        let mut stops = TokenStops::new(vec![vec![1, 2, 3]]).unwrap();
+        let mut stops = TokenStops::new(vec![vec![1, 2, 3]], 248320).unwrap();
         assert_eq!(stops.push(1), (vec![], false));
         assert_eq!(stops.finish(), vec![1]);
     }

@@ -31,13 +31,12 @@ pub struct SchedulerLimits {
 
 impl SchedulerLimits {
     pub(crate) fn validate_prefill(&self) -> Result<()> {
-        if !(64..=262144).contains(&self.prefill_chunk_size)
+        if self.prefill_chunk_size < crate::cache::PAGE_SIZE
             || !self.prefill_chunk_size.is_multiple_of(64)
             || self.prefill_chunk_size > self.max_sequence_tokens
         {
             return Err(
-                "prefill_chunk_size must be divisible by 64 and within 64..=min(context, 262144)"
-                    .into(),
+                "prefill_chunk_size must be divisible by 64 and within 64..=context".into(),
             );
         }
         Ok(())
@@ -53,6 +52,15 @@ pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
                 .take_while(move |capacity| *capacity <= chunk_size),
         )
         .chain((!chunk_size.is_power_of_two()).then_some(chunk_size))
+}
+
+#[derive(Clone, Debug)]
+pub struct SchedulerCapabilities {
+    pub vocabulary: usize,
+    pub vision: crate::model::VisionCapabilities,
+    pub live_state_base: u32,
+    pub candidate_state_base: u32,
+    pub draft_pages_per_request: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -192,6 +200,7 @@ struct Slot {
 
 pub struct RequestScheduler {
     limits: SchedulerLimits,
+    capabilities: SchedulerCapabilities,
     identity: [u8; 32],
     cache: PrefixCheckpointCache,
     slots: Vec<Slot>,
@@ -210,8 +219,45 @@ pub struct RequestScheduler {
 }
 
 impl RequestScheduler {
-    pub fn new(identity: [u8; 32], limits: SchedulerLimits) -> Result<Self> {
+    pub fn new(
+        identity: [u8; 32],
+        limits: SchedulerLimits,
+        capabilities: SchedulerCapabilities,
+    ) -> Result<Self> {
         limits.validate_prefill()?;
+        let vision = &capabilities.vision;
+        if capabilities.draft_pages_per_request > limits.pages as usize
+            || capabilities.vocabulary == 0
+            || capabilities.vocabulary > i32::MAX as usize
+            || capabilities
+                .live_state_base
+                .checked_add(REQUEST_LANES as u32)
+                .is_none()
+            || capabilities
+                .candidate_state_base
+                .checked_add(REQUEST_LANES as u32)
+                .is_none()
+            || capabilities.live_state_base
+                < capabilities
+                    .candidate_state_base
+                    .saturating_add(REQUEST_LANES as u32)
+                && capabilities.candidate_state_base
+                    < capabilities
+                        .live_state_base
+                        .saturating_add(REQUEST_LANES as u32)
+            || vision.patches_per_feature == 0
+            || vision.max_images == 0
+            || vision.features_per_request == 0
+            || vision.patch_capacities.is_empty()
+            || vision
+                .patch_capacities
+                .iter()
+                .any(|n| *n == 0 || !n.is_multiple_of(vision.patches_per_feature))
+            || vision.patch_capacities.windows(2).any(|p| p[0] >= p[1])
+        {
+            return Err("invalid model scheduling capabilities".into());
+        }
+
         if !(1..=REQUEST_LANES).contains(&limits.max_active)
             || limits.max_sequence_tokens == 0
             || limits.pages == 0
@@ -222,6 +268,7 @@ impl RequestScheduler {
         }
         Ok(Self {
             limits,
+            capabilities,
             identity,
             cache: PrefixCheckpointCache::new(identity, limits.pages, limits.snapshots),
             slots: (0..limits.max_active)
@@ -277,15 +324,16 @@ impl RequestScheduler {
         handle: RequestHandle,
         proposal: speculation::CopyProposal,
     ) -> Result<()> {
+        let vocabulary = self.capabilities.vocabulary;
+        let words = vocabulary.div_ceil(32);
         let request = self.request_mut(handle)?;
-        let words = crate::model::VOCABULARY.div_ceil(32);
         if request.phase != RequestPhase::Decode
             || request.pending != 0
             || proposal.consumed != request.consumed_tokens
             || proposal.count > 7
             || proposal.tokens[..proposal.count]
                 .iter()
-                .any(|id| *id < 0 || *id >= crate::model::VOCABULARY as i64)
+                .any(|id| *id < 0 || *id >= vocabulary as i64)
             || proposal.tokens[proposal.count..].iter().any(|id| *id != -1)
             || proposal.grammar_masks.len()
                 != if request.grammar_constrained {
@@ -460,10 +508,13 @@ impl RequestScheduler {
         let execution_limit = (spec.prompt.len() + spec.max_new_tokens as usize)
             .saturating_add(extra)
             .min(self.limits.max_sequence_tokens);
-        let draft_page = usize::from(
-            !self.speculative_widths.is_empty()
-                && self.proposal_source == speculation::ProposalSource::Mtp,
-        );
+        let draft_page = if !self.speculative_widths.is_empty()
+            && self.proposal_source == speculation::ProposalSource::Mtp
+        {
+            self.capabilities.draft_pages_per_request
+        } else {
+            0
+        };
         let reserved_count =
             (execution_limit - prefix.consumed_tokens as usize).div_ceil(PAGE_SIZE) + draft_page;
         if let Err(error) = self.ensure_resources(reserved_count, 1) {
@@ -485,8 +536,8 @@ impl RequestScheduler {
         self.slots[slot].generation = generation;
         self.slots[slot].request = Some(LiveRequest {
             handle,
-            state_slot: StateSlotId(slot as u32 + 1),
-            candidate_state_slot: StateSlotId(slot as u32 + 5),
+            state_slot: StateSlotId(slot as u32 + self.capabilities.live_state_base),
+            candidate_state_slot: StateSlotId(slot as u32 + self.capabilities.candidate_state_base),
             candidate_snapshot,
             phase: if prefix.checkpoint.is_some() {
                 RequestPhase::Restore
@@ -522,13 +573,20 @@ impl RequestScheduler {
     }
 
     pub fn set_vision_images(&mut self, handle: RequestHandle, patches: &[usize]) -> Result<()> {
+        let vision = &self.capabilities.vision;
+        let maximum = *vision
+            .patch_capacities
+            .last()
+            .ok_or("vision is unsupported")?;
+        let maximum_images = vision.max_images;
+        let merge = vision.patches_per_feature;
         let request = self.request_mut(handle)?;
         if request.last_use != Fence(0)
             || !request.vision_patches.is_empty()
-            || patches.len() > 4
+            || patches.len() > maximum_images
             || patches
                 .iter()
-                .any(|count| *count == 0 || *count > 16384 || *count % 4 != 0)
+                .any(|count| *count == 0 || *count > maximum || *count % merge != 0)
         {
             return Err("vision images must be assigned once before request initialization".into());
         }
@@ -662,8 +720,11 @@ impl RequestScheduler {
                 .unwrap()
         } else if kind == GraphKind::Vision {
             let patches = selected[0].vision_patches[0];
-            [256, 1024, 4096, 16384]
-                .into_iter()
+            self.capabilities
+                .vision
+                .patch_capacities
+                .iter()
+                .copied()
                 .find(|capacity| *capacity >= patches)
                 .unwrap()
         } else {
@@ -701,10 +762,13 @@ impl RequestScheduler {
             return Err("scheduled step is stale or does not match request state".into());
         }
         let mut needed = Vec::new();
-        let draft_page = usize::from(
-            !self.speculative_widths.is_empty()
-                && self.proposal_source == speculation::ProposalSource::Mtp,
-        );
+        let draft_page = if !self.speculative_widths.is_empty()
+            && self.proposal_source == speculation::ProposalSource::Mtp
+        {
+            self.capabilities.draft_pages_per_request
+        } else {
+            0
+        };
         for lane in &step.lanes {
             if step.kind == GraphKind::Prefill && lane.start_position % PAGE_SIZE as u64 != 0 {
                 return Err("prefill must start at a 64-token state boundary".into());
@@ -837,15 +901,7 @@ impl RequestScheduler {
                 if vector.emitted_count != emitted
                     || (step.kind == GraphKind::Speculative
                         && (vector.verification_width != width
-                            || record.consumed_tokens - request.consumed_tokens as i64 != emitted
-                            || (record.status != 3
-                                && vector.draft_cache_consumed
-                                    != if self.proposal_source == speculation::ProposalSource::Copy
-                                    {
-                                        -1
-                                    } else {
-                                        (record.consumed_tokens - 1).max(0)
-                                    })))
+                            || record.consumed_tokens - request.consumed_tokens as i64 != emitted))
                 {
                     return Err("token vector does not match committed request progress".into());
                 }

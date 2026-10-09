@@ -14,14 +14,13 @@ use crate::{
     Result, Shutdown,
     cache::ConditioningEvent,
     execution::{ExecutionManifest, GraphExecutor, GraphKind, SamplingMode},
-    model::{Admission, ModelConfig, ModelInputs, SamplingParameters, VOCABULARY},
+    model::{ModelConfig, ModelContract, SamplingParameters},
     scheduler::{RequestHandle, RequestPhase, RequestScheduler, RequestSpec, ScheduledStep},
 };
 
-pub struct Prompt {
+pub struct Prompt<M: ModelContract> {
     pub tokens: Vec<u32>,
-    pub positions: Vec<[i64; 3]>,
-    pub vision_token_indices: Vec<i32>,
+    pub data: M::PromptData,
     pub images: Option<crate::frontend::images::ProcessedImages>,
     pub conditioning: Vec<ConditioningEvent>,
     pub sampling: SamplingParameters,
@@ -31,7 +30,7 @@ pub struct Prompt {
     pub grammar: Option<crate::grammar::RequestGrammar>,
 }
 
-impl Prompt {
+impl<M: ModelContract> Prompt<M> {
     fn has_host_stops(&self) -> bool {
         !self.stop_sequences.is_empty() || !self.stop_strings.is_empty()
     }
@@ -78,8 +77,8 @@ impl Drop for Generation {
     }
 }
 
-struct Incoming {
-    prompt: Prompt,
+struct Incoming<M: ModelContract> {
+    prompt: Prompt<M>,
     events: async_mpsc::Sender<GenerationEvent>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
@@ -87,7 +86,7 @@ struct Incoming {
     qualification: bool,
     observation: Option<bool>,
 }
-impl Incoming {
+impl<M: ModelContract> Incoming<M> {
     fn fail(&self, error: String) {
         self.finish_error(error, GenerationEvent::Error);
     }
@@ -123,16 +122,16 @@ impl Incoming {
     }
 }
 
-struct Active<'a> {
+struct Active<'a, M: ModelContract> {
     request: RequestHandle,
-    incoming: Incoming,
+    incoming: Incoming<M>,
     last_token: Option<u32>,
     next_image: usize,
     stops: super::stops::TokenStops,
     text_stops: Option<super::stops::TextStops<'a>>,
 }
 
-impl Active<'_> {
+impl<M: ModelContract> Active<'_, M> {
     fn emit_output(&mut self, token: u32, eos: &[u32]) -> Result<bool> {
         if let Some(stops) = &mut self.text_stops {
             if eos.contains(&token) {
@@ -153,8 +152,8 @@ impl Active<'_> {
     }
 }
 
-pub struct ModelRuntime {
-    sender: mpsc::SyncSender<Incoming>,
+pub struct ModelRuntime<M: ModelContract> {
+    sender: mpsc::SyncSender<Incoming<M>>,
     stop: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     config: Arc<ModelConfig>,
@@ -165,7 +164,7 @@ pub struct ModelRuntime {
     metrics: Arc<super::metrics::Metrics>,
 }
 
-impl ModelRuntime {
+impl<M: ModelContract> ModelRuntime<M> {
     /// # Safety
     /// The caller retains every prepared graph/context/allocation until close
     /// confirms drain, and grants this runtime exclusive graph mutation access.
@@ -176,7 +175,7 @@ impl ModelRuntime {
         event_capacity: usize,
         frontend: Arc<crate::frontend::Frontend>,
     ) -> Result<Self> {
-        config.validate(&manifest)?;
+        M::validate(&config, &manifest)?;
         super::observation::initialize_clock();
         if queue_capacity == 0 || queue_capacity > 1024 || !(2..=4096).contains(&event_capacity) {
             return Err("invalid native request/event queue capacity".into());
@@ -209,16 +208,19 @@ impl ModelRuntime {
                         };
                     }
                 };
-                let mut scheduler =
-                    match RequestScheduler::new(worker_config.identity, worker_config.limits) {
-                        Ok(scheduler) => scheduler,
-                        Err(error) => {
-                            let _ = ready_tx.send(Err(error.clone()));
-                            let mut shutdown = executor.close();
-                            shutdown.error = Some(error);
-                            return shutdown;
-                        }
-                    };
+                let mut scheduler = match RequestScheduler::new(
+                    worker_config.identity,
+                    worker_config.limits,
+                    M::scheduler_capabilities(&worker_config),
+                ) {
+                    Ok(scheduler) => scheduler,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.clone()));
+                        let mut shutdown = executor.close();
+                        shutdown.error = Some(error);
+                        return shutdown;
+                    }
+                };
                 if let Err(error) = scheduler
                     .enable_speculation(&worker_config.speculative_widths)
                     .and_then(|()| {
@@ -233,7 +235,7 @@ impl ModelRuntime {
                     shutdown.error = Some(error);
                     return shutdown;
                 }
-                let mut active: [Option<Active>; 4] = std::array::from_fn(|_| None);
+                let mut active: [Option<Active<M>>; 4] = std::array::from_fn(|_| None);
                 let mut pending = VecDeque::with_capacity(queue_capacity);
                 worker_metrics.scheduler(scheduler.stats());
                 worker_health.store(true, Ordering::Release);
@@ -326,22 +328,26 @@ impl ModelRuntime {
             .wait_timeout_while(finished, timeout, |finished| !*finished);
         self.healthy()
     }
-    pub fn generate(&self, prompt: Prompt) -> Result<Generation> {
+    pub fn generate(&self, prompt: Prompt<M>) -> Result<Generation> {
         self.enqueue(prompt, false, None)
     }
 
-    pub(super) fn generate_observed(&self, prompt: Prompt, timestamps: bool) -> Result<Generation> {
+    pub(super) fn generate_observed(
+        &self,
+        prompt: Prompt<M>,
+        timestamps: bool,
+    ) -> Result<Generation> {
         self.enqueue(prompt, false, Some(timestamps))
     }
 
-    pub(super) fn generate_qualification(&self, prompt: Prompt) -> Result<Generation> {
+    pub(super) fn generate_qualification(&self, prompt: Prompt<M>) -> Result<Generation> {
         super::qualification::validate_prompt(&prompt)?;
         self.enqueue(prompt, true, None)
     }
 
     fn enqueue(
         &self,
-        prompt: Prompt,
+        prompt: Prompt<M>,
         qualification: bool,
         observation: Option<bool>,
     ) -> Result<Generation> {
@@ -349,37 +355,16 @@ impl ModelRuntime {
             return Err("prepared model runtime is unavailable".into());
         }
         prompt.sampling.validate()?;
-        super::stops::TokenStops::new(prompt.stop_sequences.clone())?;
+        super::stops::TokenStops::new(
+            prompt.stop_sequences.clone(),
+            self.config.contract.vocabulary,
+        )?;
         super::stops::validate_strings(
             &prompt.stop_strings,
             !prompt.stop_sequences.is_empty(),
             prompt.grammar.is_some(),
         )?;
-        if prompt.tokens.is_empty()
-            || prompt.tokens.len() != prompt.positions.len()
-            || prompt.tokens.len() != prompt.vision_token_indices.len()
-            || prompt.vision_token_indices.iter().any(|index| {
-                *index < -1 || *index >= self.config.vision_features_per_request as i32
-            })
-            || prompt
-                .tokens
-                .iter()
-                .any(|token| *token as usize >= VOCABULARY)
-            || prompt
-                .positions
-                .iter()
-                .flatten()
-                .any(|position| *position < 0)
-            || prompt.max_new_tokens == 0
-            || prompt.max_new_tokens > i32::MAX as u32
-            || prompt
-                .tokens
-                .len()
-                .checked_add(prompt.max_new_tokens as usize)
-                .is_none_or(|total| total > self.config.limits.max_sequence_tokens)
-        {
-            return Err("prompt and output limit exceed the prepared model contract".into());
-        }
+        M::validate_prompt(&self.config, &prompt)?;
         let (events, receiver) = async_mpsc::channel(self.event_capacity);
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
@@ -437,27 +422,27 @@ impl ModelRuntime {
         shutdown
     }
 }
-impl Drop for ModelRuntime {
+impl<M: ModelContract> Drop for ModelRuntime<M> {
     fn drop(&mut self) {
         self.close();
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop<'a>(
+fn run_loop<'a, M: ModelContract>(
     config: &ModelConfig,
     frontend: &'a crate::frontend::Frontend,
     executor: &mut GraphExecutor,
     scheduler: &mut RequestScheduler,
-    receiver: &mpsc::Receiver<Incoming>,
+    receiver: &mpsc::Receiver<Incoming<M>>,
     stop: &AtomicBool,
-    active: &mut [Option<Active<'a>>; 4],
-    pending: &mut VecDeque<Incoming>,
+    active: &mut [Option<Active<'a, M>>; 4],
+    pending: &mut VecDeque<Incoming<M>>,
     queue_capacity: usize,
     metrics: &super::metrics::Metrics,
 ) -> Result<()> {
-    let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
-    let mut inputs = ModelInputs::new();
+    let mut admissions: [Option<M::Admission>; 4] = std::array::from_fn(|_| None);
+    let mut inputs = M::Inputs::default();
     while !stop.load(Ordering::Acquire) {
         let mut progress = false;
         pending.retain(|request| {
@@ -532,23 +517,18 @@ fn run_loop<'a>(
                     continue;
                 }
             }
-            admissions[slot] = Some(Admission {
+            admissions[slot] = Some(M::admission(
+                config,
                 handle,
-                sampling: incoming.prompt.sampling.clone(),
-                max_new_tokens: incoming.prompt.max_new_tokens,
-                prompt: incoming.prompt.tokens.clone(),
-                positions: incoming.prompt.positions.clone(),
-                vision_token_indices: incoming.prompt.vision_token_indices.clone(),
-                grammar_mask: incoming
-                    .prompt
-                    .grammar
-                    .as_ref()
-                    .map(|grammar| grammar.mask().to_vec()),
-                ignore_eos: incoming.qualification,
-            });
+                &incoming.prompt,
+                incoming.qualification,
+            )?);
             active[slot] = Some(Active {
                 request: handle,
-                stops: super::stops::TokenStops::new(incoming.prompt.stop_sequences.clone())?,
+                stops: super::stops::TokenStops::new(
+                    incoming.prompt.stop_sequences.clone(),
+                    config.contract.vocabulary,
+                )?,
                 text_stops: if incoming.prompt.stop_strings.is_empty() {
                     None
                 } else {
@@ -565,6 +545,11 @@ fn run_loop<'a>(
         }
         while let Some(completion) = executor.poll()? {
             let kind = executor.manifest().graphs[completion.graph_index].kind;
+            for record in &completion.records {
+                if record.status != 0 {
+                    M::validate_completion(config, kind, record)?;
+                }
+            }
             if matches!(
                 kind,
                 GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative
@@ -574,10 +559,7 @@ fn run_loop<'a>(
                     if (record.status == 1 || record.status == 2)
                         && record.generation == request.request.generation as i64
                     {
-                        let boundary = match record.vector {
-                            Some(vector) => vector.candidate_consumed.max(0) as u64,
-                            None => (record.consumed_tokens as u64 / 64) * 64,
-                        };
+                        let boundary = M::candidate_boundary(&record);
                         let prefix = scheduler
                             .request(request.request)?
                             .prefix()
@@ -633,13 +615,10 @@ fn run_loop<'a>(
                             stopped.push(token.request);
                             continue;
                         }
-                        admissions[token.request.slot as usize]
-                            .as_mut()
-                            .unwrap()
-                            .grammar_mask
-                            .as_mut()
-                            .unwrap()
-                            .copy_from_slice(grammar.mask());
+                        M::grammar_updated(
+                            admissions[token.request.slot as usize].as_mut().unwrap(),
+                            grammar.mask(),
+                        );
                     }
                     let stop = match request.emit_output(token.token, &config.eos_token_ids) {
                         Ok(matched) => matched,
@@ -810,8 +789,9 @@ fn run_loop<'a>(
         }
         if let Some(step) = scheduler.next_step() {
             if executor.can_submit(step.grammar_constrained) {
-                validate_sampling_admissions(&step, &admissions)?;
-                let graph = config.graph(
+                validate_sampling_admissions::<M>(&step, &admissions)?;
+                let graph = M::graph(
+                    config,
                     executor.manifest(),
                     step.kind,
                     step.batch_capacity,
@@ -824,7 +804,9 @@ fn run_loop<'a>(
                     let request = active[step.lanes[0].request.slot as usize]
                         .as_mut()
                         .ok_or("missing active vision request")?;
-                    inputs.pack_vision(
+                    M::pack_vision(
+                        &mut inputs,
+                        config,
                         request.request,
                         request
                             .incoming
@@ -836,9 +818,9 @@ fn run_loop<'a>(
                     )?;
                     request.next_image += 1;
                 } else {
-                    inputs.pack(config, scheduler, &step, &admissions)?;
+                    M::pack(&mut inputs, config, scheduler, &step, &admissions)?;
                 }
-                if executor.submit(graph, &inputs.uploads(), step.grammar_constrained)?
+                if executor.submit(graph, &M::uploads(&inputs), step.grammar_constrained)?
                     != Some(fence)
                 {
                     return Err("executor refused a reserved scheduler submission".into());
@@ -900,9 +882,9 @@ fn prepare_copy_proposal(
     })
 }
 
-fn validate_sampling_admissions(
+fn validate_sampling_admissions<M: ModelContract>(
     step: &ScheduledStep,
-    admissions: &[Option<Admission>; 4],
+    admissions: &[Option<M::Admission>; 4],
 ) -> Result<()> {
     if !step.kind.samples() {
         return Ok(());
@@ -914,7 +896,7 @@ fn validate_sampling_admissions(
         admissions
             .get(lane.request.slot as usize)
             .and_then(Option::as_ref)
-            .filter(|admission| admission.handle == lane.request)
+            .filter(|admission| M::admission_handle(admission) == lane.request)
             .ok_or("sampling submission lacks its matching admission")?;
     }
     Ok(())
@@ -947,6 +929,8 @@ fn observe_submission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::qwen4exp::{PromptData, Qwen4Exp, inputs::Admission};
+    use crate::scheduler::SchedulerCapabilities;
 
     #[test]
     fn general_sampler_handles_zero_positive_and_mixed_temperatures_with_matching_epochs() {
@@ -992,17 +976,17 @@ mod tests {
                 lanes: vec![lane(3), lane(1)],
                 grammar_constrained: true,
             };
-            validate_sampling_admissions(&step, &admissions).unwrap();
+            validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
             let before = step.clone();
             step.lanes.push(lane(0));
-            validate_sampling_admissions(&step, &admissions).unwrap();
+            validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
             step.lanes.remove(2);
             assert_eq!(step, before);
             step.lanes.reverse();
-            validate_sampling_admissions(&step, &admissions).unwrap();
+            validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
             step.lanes[0].request.generation += 1;
             assert!(
-                validate_sampling_admissions(&step, &admissions)
+                validate_sampling_admissions::<Qwen4Exp>(&step, &admissions)
                     .unwrap_err()
                     .contains("matching admission")
             );
@@ -1014,9 +998,9 @@ mod tests {
             lanes: vec![lane(0)],
             grammar_constrained: false,
         };
-        validate_sampling_admissions(&step, &admissions).unwrap();
+        validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
         admissions[0] = None;
-        assert!(validate_sampling_admissions(&step, &admissions).is_err());
+        assert!(validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).is_err());
         for kind in [
             GraphKind::Init,
             GraphKind::Restore,
@@ -1024,7 +1008,7 @@ mod tests {
             GraphKind::Vision,
         ] {
             step.kind = kind;
-            validate_sampling_admissions(&step, &admissions).unwrap();
+            validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
         }
     }
 
@@ -1083,6 +1067,18 @@ mod tests {
                 prefill_chunk_size: 64,
                 pages: 4,
                 snapshots: 4,
+            },
+            SchedulerCapabilities {
+                vocabulary: 248320,
+                vision: crate::model::VisionCapabilities {
+                    features_per_request: 16384,
+                    max_images: 4,
+                    patches_per_feature: 4,
+                    patch_capacities: vec![256, 1024, 4096, 16384],
+                },
+                live_state_base: 1,
+                candidate_state_base: 5,
+                draft_pages_per_request: 1,
             },
         )
         .unwrap();
@@ -1143,15 +1139,17 @@ mod tests {
         assert!(text.contains("sparkgap_graph_launches_total{kind=\"decode\"} 3\n"));
     }
 
-    fn stream(capacity: usize) -> (Incoming, Generation) {
+    fn stream(capacity: usize) -> (Incoming<Qwen4Exp>, Generation) {
         let (events, receiver) = async_mpsc::channel(capacity);
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
             prompt: Prompt {
                 tokens: vec![7],
-                positions: vec![[0; 3]],
-                vision_token_indices: vec![-1],
+                data: PromptData {
+                    positions: vec![[0; 3]],
+                    vision_token_indices: vec![-1],
+                },
                 images: None,
                 conditioning: vec![],
                 sampling: SamplingParameters::default(),
@@ -1203,7 +1201,7 @@ mod tests {
             incoming,
             last_token: None,
             next_image: 0,
-            stops: super::super::stops::TokenStops::new(vec![]).unwrap(),
+            stops: super::super::stops::TokenStops::new(vec![], 248320).unwrap(),
             text_stops: Some(
                 super::super::stops::TextStops::new(&frontend, vec!["END".into()]).unwrap(),
             ),
@@ -1274,7 +1272,8 @@ mod tests {
             Err(async_mpsc::error::TryRecvError::Empty)
         ));
         incoming.observation = Some(false);
-        let mut stops = super::super::stops::TokenStops::new(vec![vec![10, 248046]]).unwrap();
+        let mut stops =
+            super::super::stops::TokenStops::new(vec![vec![10, 248046]], 248320).unwrap();
         for token in [9, 10, 248046] {
             incoming.observe_token(token);
             let (visible, _) = stops.push(token);
@@ -1367,6 +1366,18 @@ mod tests {
                 prefill_chunk_size: 64,
                 pages: 1,
                 snapshots: 2,
+            },
+            SchedulerCapabilities {
+                vocabulary: 248320,
+                vision: crate::model::VisionCapabilities {
+                    features_per_request: 16384,
+                    max_images: 4,
+                    patches_per_feature: 4,
+                    patch_capacities: vec![256, 1024, 4096, 16384],
+                },
+                live_state_base: 1,
+                candidate_state_base: 5,
+                draft_pages_per_request: 1,
             },
         )
         .unwrap();

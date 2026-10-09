@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn validate_prompt(prompt: &Prompt) -> Result<()> {
+pub(super) fn validate_prompt<M: ModelContract>(prompt: &Prompt<M>) -> Result<()> {
     let sampling = &prompt.sampling;
     if prompt.max_new_tokens != 64
         || sampling.temperature != 0.
@@ -14,14 +14,14 @@ pub(super) fn validate_prompt(prompt: &Prompt) -> Result<()> {
         || prompt.grammar.is_some()
         || prompt.images.is_some()
         || !prompt.conditioning.is_empty()
-        || prompt.vision_token_indices.iter().any(|index| *index != -1)
+        || !M::text_only(&prompt.data)
     {
         return Err("token qualification requires text, temperature=0, max_tokens=64, neutral penalties, and no grammar or stops".into());
     }
     Ok(())
 }
 
-fn envelope(body: Value) -> Result<(String, Value, Vec<u32>)> {
+fn envelope(body: Value, vocabulary: usize) -> Result<(String, Value, Vec<u32>)> {
     if body.get("schema_version").and_then(Value::as_u64) != Some(1)
         || body.get("ignore_eos") != Some(&Value::Bool(true))
     {
@@ -44,22 +44,18 @@ fn envelope(body: Value) -> Result<(String, Value, Vec<u32>)> {
             .clone(),
     )
     .map_err(|error| format!("invalid expected_prompt_tokens: {error}"))?;
-    if expected.is_empty()
-        || expected
-            .iter()
-            .any(|token| *token as usize >= crate::model::VOCABULARY)
-    {
+    if expected.is_empty() || expected.iter().any(|token| *token as usize >= vocabulary) {
         return Err("expected prompt requires nonempty, valid vocabulary IDs".into());
     }
     Ok((id, request, expected))
 }
 
-pub(super) async fn generate(
-    State(state): State<Arc<HttpState>>,
+pub(super) async fn generate<M: ModelContract>(
+    State(state): State<Arc<HttpState<M>>>,
     Extension(ingress): Extension<Arc<OwnedSemaphorePermit>>,
     Json(body): Json<Value>,
 ) -> Response {
-    let (id, body, expected) = match envelope(body) {
+    let (id, body, expected) = match envelope(body, state.model.config().contract.vocabulary) {
         Ok(value) => value,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
@@ -77,7 +73,7 @@ pub(super) async fn generate(
     let prepared = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _ingress = preparation_ingress;
-        let prepared = request::prepare(
+        let prepared = request::prepare::<M>(
             &preparation_state.frontend,
             &preparation_state.images,
             &preparation_state.grammar,
@@ -159,7 +155,10 @@ pub(super) async fn generate(
     error(StatusCode::INTERNAL_SERVER_ERROR, generation.failure())
 }
 
-fn validate_prepared(prepared: &PreparedRequest, expected: &[u32]) -> Result<()> {
+fn validate_prepared<M: ModelContract>(
+    prepared: &PreparedRequest<M>,
+    expected: &[u32],
+) -> Result<()> {
     if prepared.stream {
         return Err("token qualification requires stream=false".into());
     }
@@ -173,13 +172,16 @@ fn validate_prepared(prepared: &PreparedRequest, expected: &[u32]) -> Result<()>
 mod tests {
     use super::*;
     use crate::model::SamplingParameters;
+    use crate::model::qwen4exp::{PromptData, Qwen4Exp, output::OutputConfig};
 
-    fn prepared() -> PreparedRequest {
+    fn prepared() -> PreparedRequest<Qwen4Exp> {
         PreparedRequest {
             prompt: Prompt {
                 tokens: vec![760, 6511],
-                positions: vec![[0; 3], [1; 3]],
-                vision_token_indices: vec![-1; 2],
+                data: PromptData {
+                    positions: vec![[0; 3], [1; 3]],
+                    vision_token_indices: vec![-1; 2],
+                },
                 images: None,
                 conditioning: vec![],
                 sampling: SamplingParameters {
@@ -229,7 +231,7 @@ mod tests {
         prepared.prompt.sampling.repetition_penalty = 1.1;
         assert!(validate_prepared(&prepared, &[760, 6511]).is_err());
         prepared.prompt.sampling.repetition_penalty = 1.;
-        prepared.prompt.vision_token_indices[0] = 0;
+        prepared.prompt.data.vision_token_indices[0] = 0;
         assert!(validate_prepared(&prepared, &[760, 6511]).is_err());
     }
 
@@ -239,7 +241,7 @@ mod tests {
             "continue_final_message":true,"temperature":0,"max_tokens":64});
         let body = json!({"schema_version":1,"ignore_eos":true,"id":"tool-case",
             "request":request,"expected_prompt_tokens":[760,6511]});
-        let (id, actual, tokens) = envelope(body.clone()).unwrap();
+        let (id, actual, tokens) = envelope(body.clone(), 248320).unwrap();
         assert_eq!(id, "tool-case");
         assert_eq!(actual, request);
         assert_eq!(tokens, [760, 6511]);
@@ -252,7 +254,7 @@ mod tests {
         ] {
             let mut invalid = body.clone();
             invalid.as_object_mut().unwrap().remove(field);
-            assert!(envelope(invalid).is_err());
+            assert!(envelope(invalid, 248320).is_err());
         }
     }
 }

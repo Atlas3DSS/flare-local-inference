@@ -1,6 +1,7 @@
 use base64::Engine;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use sparkgap_native::model::qwen4exp::Qwen4Exp;
 use sparkgap_native::{
     frontend::{
         Asset, Frontend, FrontendAssets,
@@ -43,6 +44,7 @@ fn main() -> Result<(), String> {
         ImageLimits::default(),
     )?;
     let config = ModelConfig {
+        contract: Qwen4Exp::metadata(),
         model_id: text["model_id"].as_str().unwrap().into(),
         identity: [0; 32],
         limits: SchedulerLimits {
@@ -53,7 +55,6 @@ fn main() -> Result<(), String> {
             snapshots: 37,
         },
         eos_token_ids: vec![248046, 248044],
-        vision_features_per_request: 16384,
         sampling_defaults: SamplingParameters {
             temperature: 0.25,
             top_k: 50,
@@ -77,7 +78,8 @@ fn main() -> Result<(), String> {
             continue;
         }
         let body = json!({"model":config.model_id,"messages":case["messages"],"chat_template_kwargs":case["options"],"temperature":0});
-        let result = prepare_request(&frontend, &processor, &compiler, &config, body.clone());
+        let result =
+            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone());
         if let Some(expected) = case.get("error") {
             let expected = expected
                 .as_str()
@@ -117,7 +119,8 @@ fn main() -> Result<(), String> {
                 }
             }
             if changed {
-                let roundtrip = prepare_request(&frontend, &processor, &compiler, &config, wire)?;
+                let roundtrip =
+                    prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, wire)?;
                 if roundtrip.prompt.tokens != prepared.prompt.tokens {
                     return Err(format!(
                         "{}: JSON-string tool arguments changed rendered tokens",
@@ -139,8 +142,10 @@ fn main() -> Result<(), String> {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Reply with text."}],"stop":stop});
         let mut plain = body.clone();
         plain.as_object_mut().unwrap().remove("stop");
-        let expected = prepare_request(&frontend, &processor, &compiler, &config, plain)?;
-        let prepared = prepare_request(&frontend, &processor, &compiler, &config, body)?;
+        let expected =
+            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, plain)?;
+        let prepared =
+            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body)?;
         if prepared.prompt.tokens != expected.prompt.tokens
             || prepared.prompt.max_new_tokens != expected.prompt.max_new_tokens
         {
@@ -190,7 +195,7 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-        let prepared = prepare_request(
+        let prepared = prepare_request::<Qwen4Exp>(
             &frontend,
             &processor,
             &compiler,
@@ -223,7 +228,7 @@ fn main() -> Result<(), String> {
     ] {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."}],"response_format":format,"add_generation_prompt":true});
         let mut prepared =
-            prepare_request(&frontend, &processor, &compiler, &config, body.clone())?;
+            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone())?;
         if prepared.output.reasoning || !prepared.output.verbatim {
             return Err("structured request entered reasoning mode".into());
         }
@@ -240,12 +245,14 @@ fn main() -> Result<(), String> {
         }
         let mut conflict = body.clone();
         conflict["stop_token_ids"] = json!([90]);
-        if prepare_request(&frontend, &processor, &compiler, &config, conflict).is_ok() {
+        if prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, conflict).is_ok()
+        {
             return Err("structured request accepted custom token stop".into());
         }
         let mut conflict = body;
         conflict["continue_final_message"] = json!(true);
-        if prepare_request(&frontend, &processor, &compiler, &config, conflict).is_ok() {
+        if prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, conflict).is_ok()
+        {
             return Err("structured request accepted assistant continuation".into());
         }
     }
@@ -262,7 +269,7 @@ fn main() -> Result<(), String> {
                 .clone(),
         )?;
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."},{"role":"assistant","content":"{"}],"response_format":{"type":"json_object"}});
-        match prepare_request(&frontend, &processor, &compiler, &config, body.clone()) {
+        match prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone()) {
             Err(error)
                 if error == "structured output cannot continue an existing assistant message" => {}
             Err(error) => {
@@ -285,7 +292,8 @@ fn main() -> Result<(), String> {
                 .as_object_mut()
                 .unwrap()
                 .extend(overrides.as_object().unwrap().clone());
-            let mut prepared = prepare_request(&frontend, &processor, &compiler, &config, request)?;
+            let mut prepared =
+                prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, request)?;
             let grammar = prepared
                 .prompt
                 .grammar

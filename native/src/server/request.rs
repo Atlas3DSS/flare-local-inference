@@ -1,28 +1,27 @@
 use super::runtime::Prompt;
 use crate::{
     Result,
-    cache::ConditioningEvent,
     frontend::{Frontend, images::ImageProcessor},
-    model::{ModelConfig, SamplingParameters},
+    model::{ModelConfig, ModelContract, SamplingParameters},
 };
 use base64::Engine;
 use serde_json::{Map, Value};
 
-pub struct PreparedRequest {
-    pub prompt: Prompt,
+pub struct PreparedRequest<M: ModelContract> {
+    pub prompt: Prompt<M>,
     pub stream: bool,
-    pub output: crate::model::OutputConfig,
+    pub output: M::OutputConfig,
     pub rendered_prompt: String,
     pub(crate) observation: super::observation::ObservationOptions,
 }
 
-pub fn prepare(
+pub fn prepare<M: ModelContract>(
     frontend: &Frontend,
     processor: &ImageProcessor,
     compiler: &crate::grammar::GrammarCompiler,
     config: &ModelConfig,
     body: Value,
-) -> Result<PreparedRequest> {
+) -> Result<PreparedRequest<M>> {
     let object = body.as_object().ok_or("request must be a JSON object")?;
     let observation = super::observation::ObservationOptions::parse(object)?;
     let model = object
@@ -162,81 +161,19 @@ pub fn prepare(
         options.insert("add_generation_prompt".into(), Value::Bool(false));
     }
     let rendered = frontend.render_chat(&normalized, &options)?;
-    let output = crate::model::prepare_output(
+    let output = M::prepare_output(
         frontend,
         &rendered,
         &normalized,
         &options,
         grammar.is_some(),
     );
-    let (tokens, positions, vision_token_indices, conditioning, images) = if images.is_empty() {
-        if rendered
-            .token_ids
-            .iter()
-            .any(|id| *id == 248056 || *id == 248057)
-        {
-            return Err("image/video placeholders require matching supported image inputs".into());
-        }
-        let positions = (0..rendered.token_ids.len())
-            .map(|position| [position as i64; 3])
-            .collect();
-        let indices = vec![-1; rendered.token_ids.len()];
-        (rendered.token_ids, positions, indices, Vec::new(), None)
-    } else {
-        let processed = processor.process(&images)?;
-        let expanded = processor.expand_prompt(frontend, &rendered.text, &processed)?;
-        let positions = (0..expanded.token_ids.len())
-            .map(|position| {
-                [
-                    expanded.position_ids[1][position],
-                    expanded.position_ids[2][position],
-                    expanded.position_ids[3][position],
-                ]
-            })
-            .collect();
-        let mut conditioning = Vec::with_capacity(images.len());
-        let mut image = 0;
-        use sha2::{Digest, Sha256};
-        for (position, kind) in expanded.mm_token_type_ids.iter().enumerate() {
-            if *kind == 1 && (position == 0 || expanded.mm_token_type_ids[position - 1] != 1) {
-                let source = &images[image];
-                let mut hash = Sha256::new();
-                hash.update(b"sparkgap-rgb-image-v1\0");
-                hash.update((source.width() as u64).to_le_bytes());
-                hash.update((source.height() as u64).to_le_bytes());
-                hash.update(source.pixels());
-                conditioning.push(ConditioningEvent {
-                    position: position as u64,
-                    identity: hash.finalize().into(),
-                });
-                image += 1;
-            }
-        }
-        if image != images.len() {
-            return Err("expanded image spans do not match input image count".into());
-        }
-        let mut index = 0;
-        let indices = expanded
-            .mm_token_type_ids
-            .iter()
-            .map(|kind| {
-                if *kind == 1 {
-                    let value = index;
-                    index += 1;
-                    value
-                } else {
-                    -1
-                }
-            })
-            .collect();
-        (
-            expanded.token_ids,
-            positions,
-            indices,
-            conditioning,
-            Some(processed),
-        )
-    };
+    let crate::model::PreparedInput {
+        tokens,
+        data,
+        conditioning,
+        images,
+    } = M::prepare_input(frontend, processor, &rendered, images)?;
     let sampling = sampling_parameters(object, &config.sampling_defaults)?;
     let mut stop_sequences: Vec<Vec<u32>> = object
         .get("stop_token_sequences")
@@ -251,7 +188,7 @@ pub fn prepare(
             .map_err(|error| format!("invalid stop_token_ids: {error}"))?;
         stop_sequences.extend(ids.into_iter().map(|id| vec![id]));
     }
-    super::stops::TokenStops::new(stop_sequences.clone())?;
+    super::stops::TokenStops::new(stop_sequences.clone(), config.contract.vocabulary)?;
     let stop_strings = string_stops(object.get("stop"))?;
     super::stops::validate_strings(&stop_strings, !stop_sequences.is_empty(), grammar.is_some())?;
     if grammar.is_some() && !stop_sequences.is_empty() {
@@ -288,8 +225,7 @@ pub fn prepare(
     Ok(PreparedRequest {
         prompt: Prompt {
             tokens,
-            positions,
-            vision_token_indices,
+            data,
             images,
             conditioning,
             sampling,

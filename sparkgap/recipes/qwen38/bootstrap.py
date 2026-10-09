@@ -429,7 +429,10 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "snapshots": snapshots,
-            "eos_token_ids": [248046, 248044], "vision_features_per_request": 16384,
+            "eos_token_ids": [248046, 248044],
+            "model_contract": {"schema": "qwen4exp.graph-inputs.v1", "vocabulary": 248320,
+                "vision": {"features_per_request": 16384, "max_images": 4,
+                    "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}
                        for name, (filename, digest) in hashes.items()}}
         if speculation is not None:

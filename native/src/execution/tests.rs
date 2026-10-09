@@ -134,15 +134,15 @@ fn graph_variants_share_one_nonoverlapping_input_layout() {
 }
 
 #[test]
-fn all_prefill_buckets_are_valid_but_other_capacities_are_not() {
+fn prefill_transport_alignment_is_independent_of_model_context_limit() {
     let mut manifest = manifest();
     manifest.graphs[0].kind = GraphKind::Prefill;
     manifest.graphs[0].batch_capacity = 1;
-    for capacity in [1, 16, 64, 128, 256, 512, 3072, 4096, 8192, 262144] {
+    for capacity in [1, 16, 64, 128, 256, 512, 3072, 4096, 8192, 262144, 262208] {
         manifest.graphs[0].token_capacity = capacity;
         manifest.validate().unwrap();
     }
-    for capacity in [0, 2, 15, 32, 63, 65, 513, 4095, 262208, usize::MAX] {
+    for capacity in [0, 2, 15, 32, 63, 65, 513, 4095, usize::MAX] {
         manifest.graphs[0].token_capacity = capacity;
         assert!(manifest.validate().is_err());
     }

@@ -17,9 +17,10 @@ extension-module = ["python", "pyo3/extension-module"]
 frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
-server = ["images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64"]
+server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64"]
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }
 blake2 = "0.10"
 libloading = "0.8.9"
 pyo3 = { version = "0.28.3", optional = true }

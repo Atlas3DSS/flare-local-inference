@@ -1,64 +1,9 @@
-use super::{ModelConfig, VOCABULARY};
 use crate::{
     Result,
     execution::{GraphKind, OwnedUpload, Upload},
+    model::{ModelConfig, SamplingParameters},
     scheduler::{RequestHandle, RequestScheduler, ScheduledStep},
 };
-
-#[derive(Clone, Debug)]
-pub struct SamplingParameters {
-    pub seed: u64,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub min_p: f32,
-    pub repetition_penalty: f32,
-    pub presence_penalty: f32,
-    pub frequency_penalty: f32,
-    pub top_k: i32,
-}
-
-impl Default for SamplingParameters {
-    fn default() -> Self {
-        Self {
-            seed: 0,
-            temperature: 1.,
-            top_p: 0.95,
-            min_p: 0.,
-            repetition_penalty: 1.,
-            presence_penalty: 0.,
-            frequency_penalty: 0.,
-            top_k: 20,
-        }
-    }
-}
-
-impl SamplingParameters {
-    fn values(&self) -> [f32; 6] {
-        [
-            self.temperature,
-            self.top_p,
-            self.min_p,
-            self.repetition_penalty,
-            self.presence_penalty,
-            self.frequency_penalty,
-        ]
-    }
-    pub fn validate(&self) -> Result<()> {
-        if self.values().iter().any(|value| !value.is_finite())
-            || self.temperature < 0.
-            || !(0. < self.top_p && self.top_p <= 1.)
-            || !(0. ..=1.).contains(&self.min_p)
-            || self.repetition_penalty <= 0.
-            || [self.temperature, self.top_p, self.repetition_penalty]
-                .iter()
-                .any(|value| *value > 0. && *value < f32::MIN_POSITIVE)
-            || !(-1..=VOCABULARY as i32).contains(&self.top_k)
-        {
-            return Err("invalid sampling parameters".into());
-        }
-        Ok(())
-    }
-}
 
 pub struct Admission {
     pub handle: RequestHandle,
@@ -73,9 +18,10 @@ pub struct Admission {
 }
 
 impl Admission {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, config: &ModelConfig) -> Result<()> {
         self.sampling.validate()?;
-        if self.handle.slot >= 4
+        if self.sampling.top_k > config.contract.vocabulary as i32
+            || self.handle.slot >= 4
             || self.handle.generation == 0
             || self.handle.generation > i64::MAX as u64
             || self.max_new_tokens == 0
@@ -83,15 +29,17 @@ impl Admission {
             || self.prompt.is_empty()
             || self.prompt.len() != self.positions.len()
             || self.prompt.len() != self.vision_token_indices.len()
-            || self
-                .vision_token_indices
-                .iter()
-                .any(|index| *index < -1 || *index >= 16384)
+            || self.vision_token_indices.iter().any(|index| {
+                *index < -1 || *index >= config.contract.vision.features_per_request as i32
+            })
             || self
                 .grammar_mask
                 .as_ref()
-                .is_some_and(|mask| mask.len() != VOCABULARY.div_ceil(32))
-            || self.prompt.iter().any(|id| *id as usize >= VOCABULARY)
+                .is_some_and(|mask| mask.len() != config.contract.vocabulary.div_ceil(32))
+            || self
+                .prompt
+                .iter()
+                .any(|id| *id as usize >= config.contract.vocabulary)
             || self
                 .positions
                 .iter()
@@ -107,20 +55,20 @@ impl Admission {
 }
 
 /// Reusable host upload storage; GraphExecutor copies these bytes before submit returns.
-pub struct ModelInputs {
+pub struct Inputs {
     uploads: Vec<OwnedUpload>,
     used: usize,
     page_counts: [(u64, usize); 4],
     draft_page_counts: [(u64, usize); 4],
 }
 
-impl Default for ModelInputs {
+impl Default for Inputs {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ModelInputs {
+impl Inputs {
     pub fn new() -> Self {
         Self {
             uploads: Vec::with_capacity(40),
@@ -226,7 +174,7 @@ impl ModelInputs {
                 {
                     self.i32(
                         "sampling_grammar_mask",
-                        lane.request.slot as usize * VOCABULARY.div_ceil(32) * 4,
+                        lane.request.slot as usize * config.contract.vocabulary.div_ceil(32) * 4,
                         mask.iter().copied(),
                     );
                 }
@@ -287,12 +235,13 @@ impl ModelInputs {
                     counts[slot] = proposal.count as i32;
                     expected[slot] = proposal.consumed as i64;
                     copy_generations[slot] = lane.request.generation as i64;
-                    mask_counts[slot] =
-                        (proposal.grammar_masks.len() / VOCABULARY.div_ceil(32)) as i32;
+                    mask_counts[slot] = (proposal.grammar_masks.len()
+                        / config.contract.vocabulary.div_ceil(32))
+                        as i32;
                     if !proposal.grammar_masks.is_empty() {
                         self.i32(
                             "copy_grammar_mask",
-                            slot * 8 * VOCABULARY.div_ceil(32) * 4,
+                            slot * 8 * config.contract.vocabulary.div_ceil(32) * 4,
                             proposal.grammar_masks.iter().copied(),
                         );
                     }
@@ -437,24 +386,28 @@ impl ModelInputs {
                         config.eos_token_ids.len() as i32
                     }],
                 );
-                let mut histogram = vec![0i32; VOCABULARY];
+                let mut histogram = vec![0i32; config.contract.vocabulary];
                 for token in &admission.prompt {
                     histogram[*token as usize] = histogram[*token as usize]
                         .checked_add(1)
                         .ok_or("prompt histogram overflow")?;
                 }
-                self.i32("admission_histogram", row * VOCABULARY * 4, histogram);
+                self.i32(
+                    "admission_histogram",
+                    row * config.contract.vocabulary * 4,
+                    histogram,
+                );
                 if let Some(mask) = &admission.grammar_mask {
                     self.i32(
                         "admission_grammar_mask",
-                        row * VOCABULARY.div_ceil(32) * 4,
+                        row * config.contract.vocabulary.div_ceil(32) * 4,
                         mask.iter().copied(),
                     );
                 } else {
                     self.i32(
                         "admission_grammar_mask",
-                        row * VOCABULARY.div_ceil(32) * 4,
-                        std::iter::repeat_n(-1, VOCABULARY.div_ceil(32)),
+                        row * config.contract.vocabulary.div_ceil(32) * 4,
+                        std::iter::repeat_n(-1, config.contract.vocabulary.div_ceil(32)),
                     );
                 }
                 self.i32(
@@ -470,6 +423,7 @@ impl ModelInputs {
     #[cfg(feature = "images")]
     pub fn pack_vision(
         &mut self,
+        config: &ModelConfig,
         handle: RequestHandle,
         images: &crate::frontend::images::ProcessedImages,
         image: usize,
@@ -485,8 +439,15 @@ impl ModelInputs {
             .sum();
         let end = start + geometry.patches;
         if geometry.patches == 0
-            || geometry.patches > 16384
-            || end / 4 > 16384
+            || geometry.patches
+                > *config
+                    .contract
+                    .vision
+                    .patch_capacities
+                    .last()
+                    .ok_or("missing vision capacities")?
+            || end / config.contract.vision.patches_per_feature
+                > config.contract.vision.features_per_request
             || handle.slot >= 4
             || handle.generation == 0
             || handle.generation > i64::MAX as u64
@@ -542,7 +503,11 @@ impl ModelInputs {
         self.i32("vision_num_patches", 0, [geometry.patches as i32]);
         self.i32("vision_slot", 0, [handle.slot as i32]);
         self.i64("vision_generation", 0, [handle.generation as i64]);
-        self.i32("vision_feature_offset", 0, [(start / 4) as i32]);
+        self.i32(
+            "vision_feature_offset",
+            0,
+            [(start / config.contract.vision.patches_per_feature) as i32],
+        );
         Ok(())
     }
 }

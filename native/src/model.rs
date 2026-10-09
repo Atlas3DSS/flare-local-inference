@@ -1,25 +1,42 @@
-//! Qwen4Exp prepared graph semantics and native input packing.
+//! Statically dispatched prepared-model semantics; CUDA transport remains model-independent.
 
-mod inputs;
-#[cfg(test)]
-mod tests;
-pub use inputs::{Admission, ModelInputs, SamplingParameters};
-
+pub mod qwen4exp;
 use crate::{
     Result,
-    execution::{Dtype, ExecutionManifest, GraphKind, SamplingMode},
-    scheduler::{SchedulerLimits, prefill_capacities},
+    execution::{
+        CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, SamplingMode, Upload,
+    },
+    scheduler::{
+        RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities, SchedulerLimits,
+    },
 };
 
-pub const VOCABULARY: usize = 248_320;
+#[cfg_attr(feature = "server", derive(serde::Deserialize))]
+#[cfg_attr(feature = "server", serde(deny_unknown_fields))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisionCapabilities {
+    pub features_per_request: usize,
+    pub max_images: usize,
+    pub patches_per_feature: usize,
+    pub patch_capacities: Vec<usize>,
+}
+
+#[cfg_attr(feature = "server", derive(serde::Deserialize))]
+#[cfg_attr(feature = "server", serde(deny_unknown_fields))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractMetadata {
+    pub schema: String,
+    pub vocabulary: usize,
+    pub vision: VisionCapabilities,
+}
 
 #[derive(Clone, Debug)]
 pub struct ModelConfig {
+    pub contract: ContractMetadata,
     pub identity: [u8; 32],
     pub model_id: String,
     pub limits: SchedulerLimits,
     pub eos_token_ids: Vec<u32>,
-    pub vision_features_per_request: usize,
     pub sampling_defaults: SamplingParameters,
     pub max_new_tokens: u32,
     pub speculative_widths: Vec<usize>,
@@ -28,345 +45,144 @@ pub struct ModelConfig {
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
 }
 
+#[derive(Clone, Debug)]
+pub struct SamplingParameters {
+    pub seed: u64,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub min_p: f32,
+    pub repetition_penalty: f32,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
+    pub top_k: i32,
+}
+
+impl Default for SamplingParameters {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            temperature: 1.,
+            top_p: 0.95,
+            min_p: 0.,
+            repetition_penalty: 1.,
+            presence_penalty: 0.,
+            frequency_penalty: 0.,
+            top_k: 20,
+        }
+    }
+}
+
+impl SamplingParameters {
+    pub(crate) fn values(&self) -> [f32; 6] {
+        [
+            self.temperature,
+            self.top_p,
+            self.min_p,
+            self.repetition_penalty,
+            self.presence_penalty,
+            self.frequency_penalty,
+        ]
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.values().iter().any(|value| !value.is_finite())
+            || self.temperature < 0.
+            || !(0. < self.top_p && self.top_p <= 1.)
+            || !(0. ..=1.).contains(&self.min_p)
+            || self.repetition_penalty <= 0.
+            || [self.temperature, self.top_p, self.repetition_penalty]
+                .iter()
+                .any(|value| *value > 0. && *value < f32::MIN_POSITIVE)
+            || self.top_k < -1
+        {
+            return Err("invalid sampling parameters".into());
+        }
+        Ok(())
+    }
+}
+
 impl ModelConfig {
     pub fn has_draft_cache(&self) -> bool {
         !self.speculative_widths.is_empty()
             && self.speculative_proposal_source
                 == crate::scheduler::speculation::ProposalSource::Mtp
     }
+}
 
-    pub fn validate(&self, manifest: &ExecutionManifest) -> Result<()> {
-        manifest.validate()?;
-        crate::scheduler::speculation::validate_widths(&self.speculative_widths)?;
-        if self
-            .speculative_fixed_width
-            .is_some_and(|w| !self.speculative_widths.contains(&w))
-        {
-            return Err(
-                "speculative_fixed_width must belong to the prepared speculative_widths".into(),
-            );
-        }
-        if !self.speculative_widths.is_empty() {
-            if manifest.abi_version != crate::execution::SPECULATIVE_ABI_VERSION {
-                return Err("speculative catalog requires ABI3".into());
-            }
-            let mut buffers = vec![
-                ("copy_token_ids", Dtype::Int64, vec![4, 7]),
-                ("copy_token_count", Dtype::Int32, vec![4]),
-                ("copy_expected_consumed", Dtype::Int64, vec![4]),
-                ("copy_generation", Dtype::Int64, vec![4]),
-            ];
-            if self.has_draft_cache() {
-                buffers.push((
-                    "draft_page_tables",
-                    Dtype::Int32,
-                    vec![4, self.limits.max_sequence_tokens / 64],
-                ));
-            } else {
-                buffers.extend([
-                    (
-                        "copy_grammar_mask",
-                        Dtype::Int32,
-                        vec![4, 8, VOCABULARY.div_ceil(32)],
-                    ),
-                    ("copy_grammar_mask_count", Dtype::Int32, vec![4]),
-                ]);
-            }
-            for (name, dtype, shape) in buffers {
-                let buffer = manifest.buffer(name)?;
-                if buffer.dtype != dtype || buffer.shape != shape {
-                    return Err(format!("invalid speculative buffer {name}"));
-                }
-            }
-            for width in &self.speculative_widths {
-                for batch in [1, 2, 4]
-                    .into_iter()
-                    .filter(|b| *b <= self.limits.max_active.next_power_of_two())
-                {
-                    if batch * width > 8 {
-                        continue;
-                    }
-                    self.graph(
-                        manifest,
-                        GraphKind::Speculative,
-                        batch,
-                        *width,
-                        SamplingMode::General,
-                    )?;
-                }
-            }
-        }
-        if self.speculative_widths.is_empty()
-            && self.speculative_proposal_source
-                == crate::scheduler::speculation::ProposalSource::Copy
-        {
-            return Err("copy proposal source requires speculative graphs".into());
-        }
-        self.sampling_defaults.validate()?;
-        self.limits.validate_prefill()?;
-        if self.model_id.is_empty()
-            || self.limits.max_active != manifest.max_active
-            || self.limits.max_sequence_tokens == 0
-            || !self.limits.max_sequence_tokens.is_multiple_of(64)
-            || self.limits.pages == 0
-            || self.limits.pages > i32::MAX as u32
-            || self.limits.snapshots == 0
-            || self.limits.snapshots > i32::MAX as u32 - 9
-            || self.vision_features_per_request != 16384
-            || self.max_new_tokens == 0
-            || self.max_new_tokens > i32::MAX as u32
-            || self.eos_token_ids.len() > 8
-            || self
-                .eos_token_ids
-                .iter()
-                .any(|id| *id as usize >= VOCABULARY)
-        {
-            return Err("invalid prepared Qwen4Exp model configuration".into());
-        }
-        for (name, dtype, shape) in required_buffers(
-            self.limits.max_sequence_tokens,
-            self.limits.prefill_chunk_size,
-        ) {
-            let buffer = manifest.buffer(name)?;
-            if buffer.dtype != dtype || buffer.shape != shape {
-                return Err(format!(
-                    "invalid Qwen4Exp semantic buffer {name}: expected {dtype:?}{shape:?}"
-                ));
-            }
-        }
-        for kind in [
-            GraphKind::Init,
-            GraphKind::Restore,
-            GraphKind::Snapshot,
-            GraphKind::Resume,
-            GraphKind::Decode,
-        ] {
-            if kind == GraphKind::Decode && !self.speculative_widths.is_empty() {
-                continue;
-            }
-            for batch in [1, 2, 4]
-                .into_iter()
-                .filter(|batch| *batch <= self.limits.max_active.next_power_of_two())
-            {
-                self.graph(manifest, kind, batch, 1, SamplingMode::General)?;
-            }
-        }
-        for tokens in prefill_capacities(self.limits.prefill_chunk_size) {
-            self.graph(
-                manifest,
-                GraphKind::Prefill,
-                1,
-                tokens,
-                SamplingMode::General,
-            )?;
-        }
-        for patches in [256, 1024, 4096, 16384] {
-            self.graph(
-                manifest,
-                GraphKind::Vision,
-                1,
-                patches,
-                SamplingMode::General,
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn graph(
-        &self,
+pub trait ModelContract: Send + Sync + Sized + 'static {
+    type Admission;
+    type Inputs: Default;
+    fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()>;
+    fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities;
+    fn graph(
+        config: &ModelConfig,
         manifest: &ExecutionManifest,
         kind: GraphKind,
         batch: usize,
         tokens: usize,
-        sampling_mode: SamplingMode,
-    ) -> Result<usize> {
-        let mut candidates = manifest.graphs.iter().enumerate().filter(|(_, graph)| {
-            graph.kind == kind
-                && graph.batch_capacity == batch
-                && graph.token_capacity == tokens
-                && graph.sampling_mode == sampling_mode
-        });
-        let (index, graph) = candidates.next().ok_or_else(|| {
-            format!("prepared model lacks {kind:?}/{sampling_mode:?} graph with batch {batch}, tokens {tokens}")
-        })?;
-        if candidates.next().is_some() {
-            return Err("ambiguous prepared model graph capacity".into());
-        }
-        if self.has_draft_cache()
-            && matches!(
-                kind,
-                GraphKind::Prefill | GraphKind::Decode | GraphKind::Resume | GraphKind::Speculative
-            )
-            && !graph
-                .input_bindings
-                .iter()
-                .any(|binding| binding.buffer_name == "draft_page_tables")
-        {
-            return Err(format!(
-                "prepared graph {} lacks required input draft_page_tables",
-                graph.name
-            ));
-        }
-        if kind == GraphKind::Speculative && !self.has_draft_cache() {
-            for name in ["copy_grammar_mask", "copy_grammar_mask_count"] {
-                if !graph.input_bindings.iter().any(|b| b.buffer_name == name) {
-                    return Err(format!(
-                        "prepared graph {} lacks required input {name}",
-                        graph.name
-                    ));
-                }
-            }
-        }
-        for name in required_inputs(kind) {
-            if !graph
-                .input_bindings
-                .iter()
-                .any(|binding| binding.buffer_name == *name)
-            {
-                return Err(format!(
-                    "prepared graph {} lacks required input {name}",
-                    graph.name
-                ));
-            }
-        }
-        Ok(index)
-    }
-}
-
-fn required_buffers(
-    context: usize,
-    prefill_chunk_size: usize,
-) -> Vec<(&'static str, Dtype, Vec<usize>)> {
-    use Dtype::{Float32 as F32, Int32 as I32, Int64 as I64};
-    vec![
-        ("row_slot_ids", I32, vec![4]),
-        ("row_generations", I64, vec![4]),
-        ("live_rows", I32, vec![1]),
-        ("query_lengths", I32, vec![4]),
-        ("token_ids", I64, vec![prefill_chunk_size]),
-        ("prefill_positions", I64, vec![prefill_chunk_size, 3]),
-        ("page_tables", I32, vec![4, context / 64]),
-        ("sample_enabled", I32, vec![4]),
-        (
-            "sampling_grammar_mask",
-            I32,
-            vec![4, VOCABULARY.div_ceil(32)],
-        ),
-        ("vision_token_indices", I32, vec![prefill_chunk_size]),
-        ("vision_pixel_values", F32, vec![16384, 1536]),
-        ("vision_interpolation_indices", I64, vec![16384, 4]),
-        ("vision_interpolation_weights", F32, vec![16384, 4]),
-        ("vision_position_ids", I64, vec![16384, 2]),
-        ("vision_cu_seqlens", I32, vec![2]),
-        ("vision_num_patches", I32, vec![1]),
-        ("vision_slot", I32, vec![1]),
-        ("vision_generation", I64, vec![1]),
-        ("vision_feature_offset", I32, vec![1]),
-        ("admission_count", I32, vec![1]),
-        ("admission_slots", I32, vec![4]),
-        ("admission_generations", I64, vec![4]),
-        ("admission_seed_bits", I64, vec![4]),
-        ("admission_parameters", F32, vec![4, 6]),
-        ("admission_top_k", I32, vec![4]),
-        ("admission_max_new_tokens", I64, vec![4]),
-        ("admission_eos_token_ids", I64, vec![4, 8]),
-        ("admission_eos_count", I32, vec![4]),
-        ("admission_histogram", I32, vec![4, VOCABULARY]),
-        (
-            "admission_grammar_mask",
-            I32,
-            vec![4, VOCABULARY.div_ceil(32)],
-        ),
-        ("admission_grammar_enabled", I32, vec![4]),
-        ("state_source_slots", I64, vec![4]),
-        ("state_destination_slots", I64, vec![4]),
-        ("state_operation", I32, vec![4]),
-        ("state_qsa_slots", I64, vec![4]),
-        ("state_accepted_tokens", I32, vec![4]),
-        ("state_num_ops", I32, vec![1]),
-    ]
-}
-
-fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
-    match kind {
-        GraphKind::Init | GraphKind::Restore => &[
-            "admission_count",
-            "admission_slots",
-            "admission_generations",
-            "admission_seed_bits",
-            "admission_parameters",
-            "admission_top_k",
-            "admission_max_new_tokens",
-            "admission_eos_token_ids",
-            "admission_eos_count",
-            "admission_histogram",
-            "admission_grammar_mask",
-            "admission_grammar_enabled",
-            "state_source_slots",
-            "state_destination_slots",
-            "state_operation",
-            "state_qsa_slots",
-            "state_accepted_tokens",
-            "state_num_ops",
-        ],
-        GraphKind::Snapshot => &[
-            "state_source_slots",
-            "state_destination_slots",
-            "state_operation",
-            "state_qsa_slots",
-            "state_accepted_tokens",
-            "state_num_ops",
-            "row_slot_ids",
-            "row_generations",
-            "live_rows",
-        ],
-        GraphKind::Prefill => &[
-            "row_slot_ids",
-            "row_generations",
-            "live_rows",
-            "query_lengths",
-            "token_ids",
-            "prefill_positions",
-            "vision_token_indices",
-            "page_tables",
-            "sample_enabled",
-            "sampling_grammar_mask",
-        ],
-        GraphKind::Speculative => &[
-            "row_slot_ids",
-            "row_generations",
-            "live_rows",
-            "page_tables",
-            "sample_enabled",
-            "sampling_grammar_mask",
-            "copy_token_ids",
-            "copy_token_count",
-            "copy_expected_consumed",
-            "copy_generation",
-        ],
-        GraphKind::Decode | GraphKind::Resume => &[
-            "row_slot_ids",
-            "row_generations",
-            "live_rows",
-            "page_tables",
-            "sample_enabled",
-            "sampling_grammar_mask",
-        ],
-        GraphKind::Vision => &[
-            "vision_pixel_values",
-            "vision_interpolation_indices",
-            "vision_interpolation_weights",
-            "vision_position_ids",
-            "vision_cu_seqlens",
-            "vision_num_patches",
-            "vision_slot",
-            "vision_generation",
-            "vision_feature_offset",
-        ],
-    }
+        mode: SamplingMode,
+    ) -> Result<usize>;
+    fn pack(
+        inputs: &mut Self::Inputs,
+        config: &ModelConfig,
+        scheduler: &RequestScheduler,
+        step: &ScheduledStep,
+        admissions: &[Option<Self::Admission>; REQUEST_LANES],
+    ) -> Result<()>;
+    fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>>;
+    fn admission_handle(admission: &Self::Admission) -> RequestHandle;
+    fn grammar_updated(admission: &mut Self::Admission, mask: &[i32]);
+    fn validate_completion(
+        config: &ModelConfig,
+        kind: GraphKind,
+        record: &CompletionRecord,
+    ) -> Result<()>;
+    fn candidate_boundary(record: &CompletionRecord) -> u64;
+    #[cfg(feature = "images")]
+    fn pack_vision(
+        inputs: &mut Self::Inputs,
+        config: &ModelConfig,
+        handle: RequestHandle,
+        images: &crate::frontend::images::ProcessedImages,
+        image: usize,
+    ) -> Result<()>;
+    #[cfg(feature = "server")]
+    type PromptData: Send;
+    #[cfg(feature = "server")]
+    type OutputConfig: Send;
+    #[cfg(feature = "server")]
+    type Output: crate::output::ModelOutput<Config = Self::OutputConfig> + Send;
+    #[cfg(feature = "server")]
+    fn prepare_input(
+        frontend: &crate::frontend::Frontend,
+        processor: &crate::frontend::images::ImageProcessor,
+        rendered: &crate::frontend::RenderedPrompt,
+        images: Vec<crate::frontend::images::RgbImage>,
+    ) -> Result<PreparedInput<Self::PromptData>>;
+    #[cfg(feature = "server")]
+    fn prepare_output(
+        frontend: &crate::frontend::Frontend,
+        rendered: &crate::frontend::RenderedPrompt,
+        messages: &[serde_json::Value],
+        options: &serde_json::Map<String, serde_json::Value>,
+        structured: bool,
+    ) -> Self::OutputConfig;
+    #[cfg(feature = "server")]
+    fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()>;
+    #[cfg(feature = "server")]
+    fn text_only(data: &Self::PromptData) -> bool;
+    #[cfg(feature = "server")]
+    fn admission(
+        config: &ModelConfig,
+        handle: RequestHandle,
+        prompt: &crate::server::Prompt<Self>,
+        ignore_eos: bool,
+    ) -> Result<Self::Admission>;
 }
 
 #[cfg(feature = "server")]
-pub mod qwen4exp;
-#[cfg(feature = "server")]
-pub use qwen4exp::output::{OutputConfig, QwenOutput as OutputProtocol, prepare_output};
+pub struct PreparedInput<D> {
+    pub tokens: Vec<u32>,
+    pub data: D,
+    pub conditioning: Vec<crate::cache::ConditioningEvent>,
+    pub images: Option<crate::frontend::images::ProcessedImages>,
+}

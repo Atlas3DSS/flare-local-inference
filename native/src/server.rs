@@ -7,7 +7,6 @@ mod observation;
 pub(crate) mod output;
 mod qualification;
 mod request;
-pub use crate::model::OutputConfig;
 pub use request::{PreparedRequest, prepare as prepare_request};
 mod runtime;
 mod stops;
@@ -18,7 +17,7 @@ use crate::{
     Result, Shutdown,
     execution::ExecutionManifest,
     frontend::{Frontend, images::ImageProcessor},
-    model::ModelConfig,
+    model::{ModelConfig, ModelContract},
 };
 use axum::{
     Extension, Json, Router,
@@ -64,8 +63,8 @@ impl Default for ServerConfig {
         }
     }
 }
-struct HttpState {
-    model: Arc<ModelRuntime>,
+struct HttpState<M: ModelContract> {
+    model: Arc<ModelRuntime<M>>,
     frontend: Arc<Frontend>,
     images: Arc<ImageProcessor>,
     grammar: Arc<crate::grammar::GrammarCompiler>,
@@ -76,9 +75,9 @@ struct HttpState {
     ids: AtomicU64,
 }
 
-pub struct Server {
+pub struct Server<M: ModelContract> {
     address: SocketAddr,
-    model: Arc<ModelRuntime>,
+    model: Arc<ModelRuntime<M>>,
     control: Mutex<HttpControl>,
     shutdown: Mutex<Option<Shutdown>>,
 }
@@ -104,7 +103,7 @@ impl From<&str> for StartFailure {
         message.to_owned().into()
     }
 }
-impl Server {
+impl<M: ModelContract> Server<M> {
     /// # Safety
     /// The caller owns stable, exclusive prepared resources until close confirms
     /// both CUDA streams drained. No Python code runs on either native worker.
@@ -126,7 +125,7 @@ impl Server {
         }
         let grammar = Arc::new(crate::grammar::GrammarCompiler::new(
             frontend.tokenizer(),
-            crate::model::VOCABULARY,
+            model.contract.vocabulary,
             &model.eos_token_ids,
         )?);
         let ingress_capacity = config
@@ -138,7 +137,7 @@ impl Server {
         // their owners until drain. This server propagates that obligation to the
         // model worker and reports uncertain drain through StartFailure or close.
         let model = Arc::new(unsafe {
-            ModelRuntime::start(
+            ModelRuntime::<M>::start(
                 manifest,
                 model,
                 config.queue_capacity,
@@ -171,13 +170,13 @@ impl Server {
                 runtime.block_on(async move {
                     let shutdown_state = state.clone();
                     let mut router = Router::new()
-                        .route("/health", get(health))
-                        .route("/metrics", get(metrics))
-                        .route("/v1/models", get(models))
-                        .route("/v1/chat/completions", post(chat).layer(middleware::from_fn_with_state(state.clone(), admit_http)));
+                        .route("/health", get(health::<M>))
+                        .route("/metrics", get(metrics::<M>))
+                        .route("/v1/models", get(models::<M>))
+                        .route("/v1/chat/completions", post(chat::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
                     if config.qualification_token_trace {
-                        router = router.route("/__qualify/generate", post(qualification::generate)
-                            .layer(middleware::from_fn_with_state(state.clone(), admit_http)));
+                        router = router.route("/__qualify/generate", post(qualification::generate::<M>)
+                            .layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
                     }
                     let router = router
                         .layer(DefaultBodyLimit::max(config.max_body_bytes))
@@ -290,13 +289,13 @@ impl Server {
         shutdown
     }
 }
-impl Drop for Server {
+impl<M: ModelContract> Drop for Server<M> {
     fn drop(&mut self) {
         self.close();
     }
 }
 
-async fn health(State(state): State<Arc<HttpState>>) -> Response {
+async fn health<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
     if state.model.healthy() {
         Json(json!({"status":"ok"})).into_response()
     } else {
@@ -306,10 +305,10 @@ async fn health(State(state): State<Arc<HttpState>>) -> Response {
         )
     }
 }
-async fn models(State(state): State<Arc<HttpState>>) -> Response {
+async fn models<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
     Json(json!({"object":"list","data":[{"id":state.model.config().model_id,"object":"model","owned_by":"local"}]})).into_response()
 }
-async fn metrics(State(state): State<Arc<HttpState>>) -> Response {
+async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
     let mut text = state.model.metrics().render();
     for (name, help, value) in [
         (
@@ -349,8 +348,8 @@ fn error(status: StatusCode, message: impl AsRef<str>) -> Response {
         .into_response()
 }
 
-async fn admit_http(
-    State(state): State<Arc<HttpState>>,
+async fn admit_http<M: ModelContract>(
+    State(state): State<Arc<HttpState<M>>>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -373,8 +372,8 @@ async fn admit_http(
     next.run(request).await
 }
 
-async fn chat(
-    State(state): State<Arc<HttpState>>,
+async fn chat<M: ModelContract>(
+    State(state): State<Arc<HttpState<M>>>,
     Extension(ingress): Extension<Arc<OwnedSemaphorePermit>>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -394,7 +393,7 @@ async fn chat(
     let prepared = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _ingress = preparation_ingress;
-        request::prepare(
+        request::prepare::<M>(
             &prepare_state.frontend,
             &prepare_state.images,
             &prepare_state.grammar,
@@ -436,7 +435,7 @@ async fn chat(
         let stream = async_stream::stream! {
             let _ingress=ingress;
             let mut generation=generation;
-            let mut presentation=output::Presentation::<crate::model::OutputProtocol>::new(&state.frontend, &state.model.config().eos_token_ids, prepared.output, id.clone());
+            let mut presentation=output::Presentation::<M::Output>::new(&state.frontend, &state.model.config().eos_token_ids, prepared.output, id.clone());
             let mut first=chunk(&id,created,&state.model.config().model_id,json!({"role":"assistant"}),Value::Null,observation.include_usage);
             if let Some(ids)=&prompt_token_ids{first["prompt_token_ids"]=json!(ids);}
             yield Ok::<_,Infallible>(Event::default().data(first.to_string()));
@@ -483,7 +482,7 @@ async fn chat(
             .into_response()
     } else {
         let mut generation = generation;
-        let mut presentation = output::Presentation::<crate::model::OutputProtocol>::new(
+        let mut presentation = output::Presentation::<M::Output>::new(
             &state.frontend,
             &state.model.config().eos_token_ids,
             prepared.output,

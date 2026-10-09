@@ -367,7 +367,7 @@ mod binding_tests {
 #[cfg(feature = "server")]
 #[pyclass(name = "Server", module = "sparkgap_native")]
 struct NativeServer {
-    server: crate::server::Server,
+    server: crate::server::Server<crate::model::qwen4exp::Qwen4Exp>,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
     drained: std::sync::atomic::AtomicBool,
 }
@@ -388,7 +388,12 @@ impl NativeServer {
         }
         let manifest = execution_manifest(manifest)?;
         let bootstrap = py
-            .detach(|| crate::server::Bootstrap::load(config_json, &manifest))
+            .detach(|| {
+                crate::server::Bootstrap::load::<crate::model::qwen4exp::Qwen4Exp>(
+                    config_json,
+                    &manifest,
+                )
+            })
             .map_err(PyValueError::new_err)?;
         let server = match py.detach(|| {
             // SAFETY: The prepared owner retains every captured allocation and
@@ -396,7 +401,7 @@ impl NativeServer {
             // It stays live across startup, is retained on an undrained failure,
             // and is otherwise transferred into OwnerLease until confirmed drain.
             unsafe {
-                crate::server::Server::start(
+                crate::server::Server::<crate::model::qwen4exp::Qwen4Exp>::start(
                     manifest,
                     bootstrap.model,
                     bootstrap.frontend,

@@ -6,7 +6,7 @@ use sparkgap_native::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
     },
-    model::{ModelConfig, SamplingParameters},
+    model::{ModelConfig, SamplingParameters, qwen4exp::Qwen4Exp},
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
@@ -41,6 +41,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     )
     .unwrap();
     let config = ModelConfig {
+        contract: Qwen4Exp::metadata(),
         model_id: "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD".into(),
         identity: [0; 32],
         limits: SchedulerLimits {
@@ -51,7 +52,6 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             snapshots: 37,
         },
         eos_token_ids: vec![248046, 248044],
-        vision_features_per_request: 16384,
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 64,
         speculative_widths: vec![],
@@ -76,7 +76,8 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         );
         let request = json!({"model":config.model_id,"messages":[{"role":"user","content":[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":url}}]}],"max_tokens":8,"chat_template_kwargs":{"add_generation_prompt":true}});
         let prepared =
-            prepare_request(&frontend, &processor, &compiler, &config, request.clone()).unwrap();
+            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, request.clone())
+                .unwrap();
         let decoded = if jpeg {
             processor.decode_jpeg(&bytes)
         } else {
@@ -120,7 +121,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         )
         .unwrap();
         assert!(
-            prepare_request(&frontend, &limited, &compiler, &config, request)
+            prepare_request::<Qwen4Exp>(&frontend, &limited, &compiler, &config, request)
                 .err()
                 .unwrap()
                 .contains("byte limit")
@@ -134,7 +135,9 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         "data:image/webp;base64,AA==",
     ] {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":url}}]}]});
-        assert!(prepare_request(&frontend, &processor, &compiler, &config, body).is_err());
+        assert!(
+            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body).is_err()
+        );
     }
     println!("{counts} JPEG/EXIF checkpoint admissions and encoded-size rejections passed");
 }

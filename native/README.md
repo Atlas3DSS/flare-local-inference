@@ -216,8 +216,10 @@ pages and snapshot. `cancel` stops scheduling immediately, drops logical pins,
 and retains slot/page/snapshot ownership through final GPU use; cancelled
 private candidates are discarded. Generation reuse waits for that retirement.
 
-This scheduler operates on logical IDs and completion records. `model::ModelInputs`
-packs the Qwen4Exp admission, state, vision and forward inputs. `server::ModelRuntime`
+This scheduler operates on logical IDs and completion records. `model::ModelContract`
+selects model-owned admission, input storage, completion interpretation, and output
+protocol types. `model::qwen4exp::inputs::Inputs` packs Qwen4Exp admission, state,
+vision, and forward inputs. `server::ModelRuntime<M>`
 owns the scheduler and executor on one native model thread. It initializes prompt
 penalty counts once and uploads only newly assigned page-table entries during
 decode. [model-contract.md](model-contract.md) specifies the concrete handoff.

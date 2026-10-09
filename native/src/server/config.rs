@@ -6,7 +6,7 @@ use crate::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
     },
-    model::ModelConfig,
+    model::{ModelConfig, ModelContract},
     scheduler::SchedulerLimits,
 };
 use serde_json::Value;
@@ -18,7 +18,7 @@ pub struct Bootstrap {
     pub server: ServerConfig,
 }
 impl Bootstrap {
-    pub fn load(json: &str, manifest: &ExecutionManifest) -> Result<Self> {
+    pub fn load<M: ModelContract>(json: &str, manifest: &ExecutionManifest) -> Result<Self> {
         let value: Value = serde_json::from_str(json)
             .map_err(|error| format!("invalid server configuration JSON: {error}"))?;
         let object = value
@@ -51,7 +51,15 @@ impl Bootstrap {
             *byte = u8::from_str_radix(&identity[index * 2..index * 2 + 2], 16)
                 .map_err(|error| error.to_string())?;
         }
+        let contract = serde_json::from_value(
+            object
+                .get("model_contract")
+                .ok_or("model_contract metadata is required")?
+                .clone(),
+        )
+        .map_err(|error| format!("invalid model_contract metadata: {error}"))?;
         let mut model = ModelConfig {
+            contract,
             model_id: text("model_id")?.into(),
             identity: digest,
             limits: SchedulerLimits {
@@ -76,11 +84,6 @@ impl Bootstrap {
                         .ok_or_else(|| "invalid EOS token ID".to_owned())
                 })
                 .collect::<Result<Vec<_>>>()?,
-            vision_features_per_request: usize::try_from(integer(
-                "vision_features_per_request",
-                Some(16384),
-            )?)
-            .map_err(|_| "vision feature capacity overflow")?,
             sampling_defaults: crate::model::SamplingParameters::default(),
             speculative_fixed_width: object
                 .get("speculative_fixed_width")
@@ -121,7 +124,7 @@ impl Bootstrap {
             max_new_tokens: u32::try_from(integer("max_new_tokens", Some(256))?)
                 .map_err(|_| "default output limit overflow")?,
         };
-        model.validate(manifest)?;
+        M::validate(&model, manifest)?;
         let assets = object
             .get("assets")
             .and_then(Value::as_object)
@@ -162,6 +165,7 @@ impl Bootstrap {
         }
         model.sampling_defaults =
             super::request::sampling_parameters(&generation, &model.sampling_defaults)?;
+        M::validate(&model, manifest)?;
         let mut defaults = match object.get("template_defaults") {
             None => serde_json::Map::new(),
             Some(Value::Object(defaults)) => defaults.clone(),
