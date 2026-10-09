@@ -35,7 +35,7 @@ Same-graph replay and same-capacity restoration remain bitwise checks.
 | Agentic workloads | Copy-adaptive serving completes 23 of 24 admissions and passes 16 of 24 manual checks. The report retains the API and output failures. | [Copy-adaptive workload](speculative-agentic-serving.md), [69-scenario comparison](tool-eval-standard69-comparison.md) |
 | Copy graph execution | Forced-literal execution exercises every supported shape, accepts copied drafts, and matches independent W1 state. Ordinary-decoder and rejected-prefix comparisons remain required. | [Copy serving](speculative-copy-serving.md) |
 | Capacity | Recorded maximum-context and aggregate-image requests execute and reclaim resources. Numerical accuracy remains a separate gate. | [Context limit](server-http-context-limit.json), [aggregate images](server-http-vision-aggregate.md) |
-| Resource and failure lifecycle | Recorded pressure, cancellation, startup rejection, and worker failures test bounded ownership and drain behavior. | [Pressure](/data/sparkgap-artifacts/validation-receipts/server-http-pressure.json), [startup](native-startup-validation-abi2.md), [worker failure](native-worker-failure.md) |
+| Resource and failure lifecycle | Exact checkpoint HTTP checks cover instruction/tool identity, prompt/image restore, pressure, and cancellation. Installed typed-error checks cover fatal completion and drain; broader residue/terminal-reuse and failed-drain cases remain open. | [Exact checkpoint HTTP](exact-checkpoint-http.md), [startup](native-startup-validation-abi2.md), [worker failure](native-worker-failure.md) |
 
 The production sampler has one FlashInfer path. Temperature zero produces a
 point mass through it. Historical reports describing separate greedy graphs

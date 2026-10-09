@@ -79,7 +79,7 @@ checkpoint admission and all 26 valid-image HTTP admissions; two constrained
 outputs reach their explicit budget in whitespace loops. Typed native errors
 preserve source chains, driver codes, and status mapping; all 22 installed fatal
 completion HTTP/SSE checks pass. Private worker phases preserve transaction
-ordering and pass CPU phase tests; full-model HTTP qualification remains open.
+ordering and pass CPU phase tests and [full-model checkpoint HTTP checks](validation/exact-checkpoint-http.md).
 Tool-plus-schema grammar and the upstream AIR submission remain open. Preparation, recipes, the native
 runtime, and qualification tooling have separate source commits. The completed items in correction section 0 remain
 closed, subject to their original measurement scopes.
@@ -220,8 +220,8 @@ options, forced/named selections, and subsequent tool-result turns.
 | Item | Status and evidence | Work required to close |
 |---|---|---|
 | 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust/Python tests and six installed HTTP parsing/stop checks pass. All image fixtures are admitted, with the structured-output limitation described above. | Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
-| 6.2 Typed errors | Implemented in [error.rs](../native/src/error.rs): admission, execution, and frontend variants preserve source chains and numeric CUDA codes. CPU cause/status tests, installed startup rejection, and all 22 [fatal-completion HTTP/SSE checks](validation/native-worker-failure.md) pass. | Preserve variant-based status dispatch, first failure, terminal error events, and owner retention after failed drain. Full-model capacity rejection remains part of HTTP qualification. |
-| 6.3 Worker phases | Implemented in [runtime.rs](../native/src/server/runtime.rs) as private admit/plan/submit/complete/publish/retire methods. Exact instruction/prompt publication remains atomic in scheduler completion; stopped requests retire before another completion. Five CPU phase tests and installed fatal-completion checks pass. | Complete full-model HTTP qualification. Preserve observation-before-presentation, stop-before-next-submit, reserve-before-pack ordering, and fence-protected release. Raw graph replay passes its unchanged executor path. |
+| 6.2 Typed errors | Implemented in [error.rs](../native/src/error.rs): admission, execution, and frontend variants preserve source chains and numeric CUDA codes. CPU cause/status tests, installed startup rejection, all 22 [fatal-completion HTTP/SSE checks](validation/native-worker-failure.md), and full-model JSON/SSE capacity rejection pass. | Preserve variant-based status dispatch, first failure, terminal error events, and owner retention after failed drain. |
+| 6.3 Worker phases | Implemented in [runtime.rs](../native/src/server/runtime.rs) as private admit/plan/submit/complete/publish/retire methods. Exact instruction/prompt publication remains atomic in scheduler completion; stopped requests retire before another completion. Five CPU phase tests, installed fatal-completion checks, and [full-model HTTP checks](validation/exact-checkpoint-http.md) pass. | Preserve observation-before-presentation, stop-before-next-submit, reserve-before-pack ordering, and fence-protected release. Raw graph replay passes its unchanged executor path. |
 | 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
 | 6.5 Qualification package | Partial: HTTP and graph-execution implementations live in `qualify.server` and `qualify.graph_execution`; script entrypoints and dependent callers preserve their CLI and request contracts. CPU regression suites pass. | Move remaining diagnosis/trace/qualification scripts and the test-tree qualifier. Share existing HTTP/SSE and fixture helpers where duplication remains; preserve request bytes, assertions, and result semantics. |
 | 6.6 Unsafe safety proofs | Closed: unsafe calls outside cuda.rs state allocation, context/thread, and drain/lifetime obligations locally; ownership/failure tests pass. | Preserve the proofs when changing native ownership. |
@@ -368,10 +368,12 @@ Calibrated operator acceptance for arbitrary partitions remains open.
 Actual-model selected-column snapshot and continuation pass all 14 supported
 batch/width shapes at endpoints 65–72. Restores use different physical slots and
 private tail pages; immutable snapshots and replay allocations remain unchanged.
-HTTP retention checks remain open. Required HTTP cases include endpoints below 16 and residues 0/1/2/3/63, exact
-retries, changed user/tool suffixes, duplicate publication, pressure, cancellation,
-failed freeze, and appended conversations. Terminal retention must preserve reuse
-of consumed generated tokens alongside instruction/prompt reuse.
+[Installed HTTP checks](validation/exact-checkpoint-http.md) pass short instruction
+reuse, changed user/tool identity, exact prompt retries, image conditioning,
+snapshot/conversation/KV pressure, and cancellation. The combined run retains one
+fixture-construction error; the corrected system/tool case passes separately.
+HTTP coverage of every residue 0/1/2/3/63, duplicate publication, failed freeze,
+and explicit reuse of consumed generated terminal prefixes remains open.
 
 The malformed diff, literal-tag omission, contradictory retry recommendation,
 and four explicit-budget truncations remain failed outputs. Ordinary and pinned
