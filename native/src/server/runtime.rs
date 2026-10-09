@@ -245,24 +245,20 @@ impl<M: ModelContract> ModelRuntime<M> {
                     shutdown.error = Some(error);
                     return shutdown;
                 }
-                let mut active: [Option<Active<M>>; 4] = std::array::from_fn(|_| None);
-                let mut pending = VecDeque::with_capacity(queue_capacity);
-                worker_metrics.scheduler(scheduler.stats());
+                let mut worker = Worker::<M>::new(
+                    &worker_config,
+                    &frontend,
+                    &worker_stop,
+                    &worker_metrics,
+                    scheduler,
+                    receiver,
+                    queue_capacity,
+                );
+                worker_metrics.scheduler(worker.scheduler.stats());
                 worker_health.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_loop(
-                        &worker_config,
-                        &frontend,
-                        &mut executor,
-                        &mut scheduler,
-                        &receiver,
-                        &worker_stop,
-                        &mut active,
-                        &mut pending,
-                        queue_capacity,
-                        &worker_metrics,
-                    )
+                    worker.run(&mut executor)
                 }));
                 worker_health.store(false, Ordering::Release);
                 let error = match run {
@@ -276,19 +272,11 @@ impl<M: ModelContract> ModelRuntime<M> {
                 let final_error = error.clone().unwrap_or_else(|| {
                     Error::execution(ExecutionError::Closed, "model runtime stopped")
                 });
-                for request in active.iter().flatten() {
-                    request.incoming.fail(final_error.clone());
-                }
-                for request in &pending {
-                    request.fail(final_error.clone());
-                }
-                while let Ok(request) = receiver.try_recv() {
-                    request.fail(final_error.clone());
-                }
+                worker.fail_all(&final_error);
                 let mut shutdown = executor.close();
                 if shutdown.drained {
-                    let _ = scheduler.release_after_shutdown(&shutdown);
-                    worker_metrics.scheduler(scheduler.stats());
+                    let _ = worker.scheduler.release_after_shutdown(&shutdown);
+                    worker_metrics.scheduler(worker.scheduler.stats());
                 }
                 worker_metrics.pending.store(0, Ordering::Relaxed);
                 if shutdown.error.is_none() {
@@ -468,58 +456,128 @@ impl<M: ModelContract> Drop for ModelRuntime<M> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_loop<'a, M: ModelContract>(
-    config: &ModelConfig,
+struct Worker<'a, M: ModelContract> {
+    config: &'a ModelConfig,
     frontend: &'a crate::frontend::Frontend,
-    executor: &mut GraphExecutor,
-    scheduler: &mut RequestScheduler,
-    receiver: &mpsc::Receiver<Incoming<M>>,
-    stop: &AtomicBool,
-    active: &mut [Option<Active<'a, M>>; 4],
-    pending: &mut VecDeque<Incoming<M>>,
+    stop: &'a AtomicBool,
+    metrics: &'a super::metrics::Metrics,
+    receiver: mpsc::Receiver<Incoming<M>>,
+    scheduler: RequestScheduler,
+    pending: VecDeque<Incoming<M>>,
+    active: [Option<Active<'a, M>>; 4],
+    admissions: [Option<M::Admission>; 4],
+    inputs: Option<M::Inputs>,
     queue_capacity: usize,
-    metrics: &super::metrics::Metrics,
-) -> Result<()> {
-    let mut admissions: [Option<M::Admission>; 4] = std::array::from_fn(|_| None);
-    let mut inputs = M::Inputs::default();
-    while !stop.load(Ordering::Acquire) {
+}
+
+impl<'a, M: ModelContract> Worker<'a, M> {
+    fn new(
+        config: &'a ModelConfig,
+        frontend: &'a crate::frontend::Frontend,
+        stop: &'a AtomicBool,
+        metrics: &'a super::metrics::Metrics,
+        scheduler: RequestScheduler,
+        receiver: mpsc::Receiver<Incoming<M>>,
+        queue_capacity: usize,
+    ) -> Self {
+        Self {
+            config,
+            frontend,
+            stop,
+            metrics,
+            scheduler,
+            receiver,
+            queue_capacity,
+            pending: VecDeque::with_capacity(queue_capacity),
+            active: std::array::from_fn(|_| None),
+            admissions: std::array::from_fn(|_| None),
+            inputs: None,
+        }
+    }
+
+    fn run(&mut self, executor: &mut GraphExecutor) -> Result<()> {
+        // Input construction stays inside the worker's unwind and drain boundary.
+        self.inputs = Some(M::Inputs::default());
+        while !self.stop.load(Ordering::Acquire) {
+            let std::ops::ControlFlow::Continue(mut progress) = self.admit()? else {
+                return Ok(());
+            };
+            while let Some(completion) = executor.poll()? {
+                let kind = executor.manifest().graphs[completion.graph_index].kind;
+                self.complete(kind, completion)?;
+                progress = true;
+            }
+            progress |= self.publish()?;
+            let (step, planned) = self.plan(executor.outstanding())?;
+            progress |= planned;
+            if let Some(step) = step {
+                progress |= self.submit(executor, &step)?;
+            }
+            if progress {
+                self.metrics.scheduler(self.scheduler.stats());
+                self.metrics
+                    .pending
+                    .store(self.pending.len() as u64, Ordering::Relaxed);
+            }
+            if !progress {
+                if executor.outstanding() > 0 {
+                    std::hint::spin_loop();
+                    thread::yield_now();
+                } else {
+                    match self
+                        .receiver
+                        .recv_timeout(std::time::Duration::from_millis(2))
+                    {
+                        Ok(request) => self.pending.push_back(request),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit(&mut self) -> Result<std::ops::ControlFlow<(), bool>> {
         let mut progress = false;
-        pending.retain(|request| {
+        self.pending.retain(|request| {
             let cancelled = request.cancelled.load(Ordering::Acquire);
             if cancelled {
-                metrics.cancelled.fetch_add(1, Ordering::Relaxed);
+                self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
                 progress = true;
             }
             !cancelled
         });
-        while pending.len() < queue_capacity {
-            match receiver.try_recv() {
+        while self.pending.len() < self.queue_capacity {
+            match self.receiver.try_recv() {
                 Ok(request) => {
-                    pending.push_back(request);
+                    self.pending.push_back(request);
                     progress = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
             }
         }
         for slot in 0..4 {
-            if active[slot]
+            if self.active[slot]
                 .as_ref()
                 .is_some_and(|a| a.incoming.cancelled.load(Ordering::Acquire))
             {
-                scheduler.cancel(active[slot].take().unwrap().request)?;
-                metrics.cancelled.fetch_add(1, Ordering::Relaxed);
-                admissions[slot] = None;
+                self.scheduler
+                    .cancel(self.active[slot].take().unwrap().request)?;
+                self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
+                self.admissions[slot] = None;
                 progress = true;
             }
         }
-        while scheduler.has_available_slot() {
-            let Some(incoming) = pending.pop_front() else {
+        while self.scheduler.has_available_slot() {
+            let Some(incoming) = self.pending.pop_front() else {
                 break;
             };
             if incoming.cancelled.load(Ordering::Acquire) {
-                metrics.cancelled.fetch_add(1, Ordering::Relaxed);
+                self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             let spec = RequestSpec {
@@ -531,9 +589,9 @@ fn run_loop<'a, M: ModelContract>(
                 host_stops: incoming.prompt.has_host_stops(),
             };
             let admission = if incoming.qualification {
-                scheduler.admit_cold(spec)
+                self.scheduler.admit_cold(spec)
             } else {
-                scheduler.admit(spec)
+                self.scheduler.admit(spec)
             };
             let handle = match admission {
                 Ok(handle) => handle,
@@ -543,9 +601,9 @@ fn run_loop<'a, M: ModelContract>(
                 }
             };
             let slot = handle.slot as usize;
-            metrics.admitted.fetch_add(1, Ordering::Relaxed);
+            self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
             if let Some(images) = &incoming.prompt.images {
-                if let Err(error) = scheduler.set_vision_images(
+                if let Err(error) = self.scheduler.set_vision_images(
                     handle,
                     &images
                         .geometry
@@ -553,28 +611,28 @@ fn run_loop<'a, M: ModelContract>(
                         .map(|geometry| geometry.patches)
                         .collect::<Vec<_>>(),
                 ) {
-                    scheduler.cancel(handle)?;
+                    self.scheduler.cancel(handle)?;
                     incoming.fail(error);
                     continue;
                 }
             }
-            admissions[slot] = Some(M::admission(
-                config,
+            self.admissions[slot] = Some(M::admission(
+                self.config,
                 handle,
                 &incoming.prompt,
                 incoming.qualification,
             )?);
-            active[slot] = Some(Active {
+            self.active[slot] = Some(Active {
                 request: handle,
                 stops: super::stops::TokenStops::new(
                     incoming.prompt.stop_sequences.clone(),
-                    config.contract.vocabulary,
+                    self.config.contract.vocabulary,
                 )?,
                 text_stops: if incoming.prompt.stop_strings.is_empty() {
                     None
                 } else {
                     Some(super::stops::TextStops::new(
-                        frontend,
+                        self.frontend,
                         incoming.prompt.stop_strings.clone(),
                     )?)
                 },
@@ -584,94 +642,109 @@ fn run_loop<'a, M: ModelContract>(
             });
             progress = true;
         }
-        while let Some(completion) = executor.poll()? {
-            let kind = executor.manifest().graphs[completion.graph_index].kind;
-            for record in &completion.records {
-                if record.status != 0 {
-                    M::validate_completion(config, kind, record)?;
+        Ok(std::ops::ControlFlow::Continue(progress))
+    }
+
+    fn complete(
+        &mut self,
+        kind: GraphKind,
+        completion: crate::execution::FrameCompletion,
+    ) -> Result<()> {
+        for record in &completion.records {
+            if record.status != 0 {
+                M::validate_completion(self.config, kind, record)?;
+            }
+        }
+        let measured_step = completion
+            .elapsed_ns
+            .map(|_| self.scheduler.submitted_step(completion.fence).cloned())
+            .transpose()?;
+        let generated = self
+            .scheduler
+            .complete(completion.fence, &completion.records)?;
+        if let (Some(step), Some(nanos)) = (measured_step, completion.elapsed_ns) {
+            self.scheduler
+                .observe_round(&step, nanos, generated.len())?;
+            self.metrics.speculative_completed(
+                step.batch_capacity,
+                step.token_capacity,
+                nanos,
+                &completion.records,
+            );
+        }
+        let mut stopped = Vec::new();
+        for token in generated {
+            if let Some(request) = self.active[token.request.slot as usize]
+                .as_mut()
+                .filter(|a| a.request == token.request)
+            {
+                request.incoming.observe_token(token.token);
+                request.last_token = Some(token.token);
+                if request.incoming.qualification {
+                    request.incoming.emit_token(token.token);
+                    continue;
                 }
-            }
-            let measured_step = completion
-                .elapsed_ns
-                .map(|_| scheduler.submitted_step(completion.fence).cloned())
-                .transpose()?;
-            let generated = scheduler.complete(completion.fence, &completion.records)?;
-            if let (Some(step), Some(nanos)) = (measured_step, completion.elapsed_ns) {
-                scheduler.observe_round(&step, nanos, generated.len())?;
-                metrics.speculative_completed(
-                    step.batch_capacity,
-                    step.token_capacity,
-                    nanos,
-                    &completion.records,
-                );
-            }
-            let mut stopped = Vec::new();
-            for token in generated {
-                if let Some(request) = active[token.request.slot as usize]
-                    .as_mut()
-                    .filter(|a| a.request == token.request)
-                {
-                    request.incoming.observe_token(token.token);
-                    request.last_token = Some(token.token);
-                    if request.incoming.qualification {
-                        request.incoming.emit_token(token.token);
+                if let Some(grammar) = &mut request.incoming.prompt.grammar {
+                    if let Err(error) = grammar.advance(token.token) {
+                        request.incoming.fail(
+                            ExecutionError::Completion(Failure::caused_by(
+                                format!("grammar advancement failed: {error}"),
+                                error,
+                            ))
+                            .into(),
+                        );
+                        stopped.push(token.request);
                         continue;
                     }
-                    if let Some(grammar) = &mut request.incoming.prompt.grammar {
-                        if let Err(error) = grammar.advance(token.token) {
-                            request.incoming.fail(
-                                ExecutionError::Completion(Failure::caused_by(
-                                    format!("grammar advancement failed: {error}"),
-                                    error,
-                                ))
-                                .into(),
-                            );
-                            stopped.push(token.request);
-                            continue;
-                        }
-                        M::grammar_updated(
-                            admissions[token.request.slot as usize].as_mut().unwrap(),
-                            grammar.mask(),
-                        );
-                    }
-                    let stop = match request.emit_output(token.token, &config.eos_token_ids) {
-                        Ok(matched) => matched,
-                        Err(error) => {
-                            request.incoming.fail(error);
-                            stopped.push(token.request);
-                            continue;
-                        }
-                    };
-                    if stop {
-                        metrics.completed.fetch_add(1, Ordering::Relaxed);
-                        let live = scheduler.request(token.request)?;
-                        if request
-                            .incoming
-                            .events
-                            .try_send(GenerationEvent::Finished {
-                                prompt_tokens: live.prompt_tokens,
-                                generated_tokens: live.generated_tokens,
-                                reused_prompt_tokens: live.reused_prompt_tokens(),
-                                reason: "stop",
-                                termination: crate::output::Termination::UserStop,
-                            })
-                            .is_err()
-                        {
-                            request.incoming.fail(
-                                "generation consumer exceeded the bounded output queue".into(),
-                            );
-                        }
+                    M::grammar_updated(
+                        self.admissions[token.request.slot as usize]
+                            .as_mut()
+                            .unwrap(),
+                        grammar.mask(),
+                    );
+                }
+                let stop = match request.emit_output(token.token, &self.config.eos_token_ids) {
+                    Ok(matched) => matched,
+                    Err(error) => {
+                        request.incoming.fail(error);
                         stopped.push(token.request);
+                        continue;
                     }
+                };
+                if stop {
+                    self.metrics.completed.fetch_add(1, Ordering::Relaxed);
+                    let live = self.scheduler.request(token.request)?;
+                    if request
+                        .incoming
+                        .events
+                        .try_send(GenerationEvent::Finished {
+                            prompt_tokens: live.prompt_tokens,
+                            generated_tokens: live.generated_tokens,
+                            reused_prompt_tokens: live.reused_prompt_tokens(),
+                            reason: "stop",
+                            termination: crate::output::Termination::UserStop,
+                        })
+                        .is_err()
+                    {
+                        request
+                            .incoming
+                            .fail("generation consumer exceeded the bounded output queue".into());
+                    }
+                    stopped.push(token.request);
                 }
             }
-            cancel_stopped::<M>(&stopped, scheduler, active, &mut admissions)?;
-            progress = true;
         }
+        self.retire(&stopped)?;
+        Ok(())
+    }
+
+    fn publish(&mut self) -> Result<bool> {
+        let mut progress = false;
         for slot in 0..4 {
-            if let Some(request) = &mut active[slot] {
-                let live = scheduler.request(request.request)?;
-                if live.phase == RequestPhase::Finishing && live.last_use() <= scheduler.completed()
+            if let Some(request) = &mut self.active[slot] {
+                let live = self.scheduler.request(request.request)?;
+                if live.phase == RequestPhase::Finishing
+                    && live.last_use() <= self.scheduler.completed()
                 {
                     if let Some(error) = live.error_code {
                         request
@@ -681,7 +754,7 @@ fn run_loop<'a, M: ModelContract>(
                         let user_stop = if let Some(stops) = &mut request.text_stops {
                             let eos = request
                                 .last_token
-                                .filter(|token| config.eos_token_ids.contains(token));
+                                .filter(|token| self.config.eos_token_ids.contains(token));
                             match stops.finish(eos) {
                                 Ok((pieces, matched)) => {
                                     if !pieces.is_empty() {
@@ -691,9 +764,9 @@ fn run_loop<'a, M: ModelContract>(
                                 }
                                 Err(error) => {
                                     request.incoming.fail(error);
-                                    scheduler.cancel(request.request)?;
-                                    active[slot] = None;
-                                    admissions[slot] = None;
+                                    self.scheduler.cancel(request.request)?;
+                                    self.active[slot] = None;
+                                    self.admissions[slot] = None;
                                     progress = true;
                                     continue;
                                 }
@@ -701,7 +774,7 @@ fn run_loop<'a, M: ModelContract>(
                         } else {
                             false
                         };
-                        metrics.completed.fetch_add(1, Ordering::Relaxed);
+                        self.metrics.completed.fetch_add(1, Ordering::Relaxed);
                         for token in request.stops.finish() {
                             if request
                                 .incoming
@@ -716,10 +789,9 @@ fn run_loop<'a, M: ModelContract>(
                         }
                         let reason = if user_stop
                             || (!request.incoming.qualification
-                                && request
-                                    .last_token
-                                    .is_some_and(|token| config.eos_token_ids.contains(&token)))
-                        {
+                                && request.last_token.is_some_and(|token| {
+                                    self.config.eos_token_ids.contains(&token)
+                                })) {
                             "stop"
                         } else {
                             "length"
@@ -747,28 +819,43 @@ fn run_loop<'a, M: ModelContract>(
                             );
                         }
                         if user_stop {
-                            scheduler.cancel(request.request)?;
-                            active[slot] = None;
-                            admissions[slot] = None;
+                            self.scheduler.cancel(request.request)?;
+                            self.active[slot] = None;
+                            self.admissions[slot] = None;
                             progress = true;
                             continue;
                         }
                     }
-                    scheduler.finish(request.request)?;
-                    active[slot] = None;
-                    admissions[slot] = None;
+                    self.scheduler.finish(request.request)?;
+                    self.active[slot] = None;
+                    self.admissions[slot] = None;
                     progress = true;
                 }
             }
         }
-        if config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
-            && executor.outstanding() == 0
+        Ok(progress)
+    }
+
+    fn retire(&mut self, stopped: &[RequestHandle]) -> Result<()> {
+        cancel_stopped::<M>(
+            stopped,
+            &mut self.scheduler,
+            &mut self.active,
+            &mut self.admissions,
+        )
+    }
+
+    fn plan(&mut self, outstanding: usize) -> Result<(Option<ScheduledStep>, bool)> {
+        let mut progress = false;
+        if self.config.speculative_proposal_source
+            == crate::scheduler::speculation::ProposalSource::Copy
+            && outstanding == 0
         {
-            for slot in 0..active.len() {
-                let Some(request) = active[slot].as_ref() else {
+            for slot in 0..self.active.len() {
+                let Some(request) = self.active[slot].as_ref() else {
                     continue;
                 };
-                let live = scheduler.request(request.request)?;
+                let live = self.scheduler.request(request.request)?;
                 if live.phase != RequestPhase::Decode || live.copy_proposal().is_some() {
                     continue;
                 }
@@ -776,15 +863,17 @@ fn run_loop<'a, M: ModelContract>(
                     live.tokens(),
                     live.consumed_tokens,
                     request.incoming.prompt.grammar.as_ref(),
-                    if config.speculative_copy && !live.host_stops() {
+                    if self.config.speculative_copy && !live.host_stops() {
                         7
                     } else {
                         0
                     },
-                    &config.eos_token_ids,
+                    &self.config.eos_token_ids,
                 );
                 match proposal {
-                    Ok(proposal) => scheduler.set_copy_proposal(request.request, proposal)?,
+                    Ok(proposal) => self
+                        .scheduler
+                        .set_copy_proposal(request.request, proposal)?,
                     Err(error) => {
                         request.incoming.fail(
                             ExecutionError::State(Failure::caused_by(
@@ -793,76 +882,88 @@ fn run_loop<'a, M: ModelContract>(
                             ))
                             .into(),
                         );
-                        scheduler.cancel(request.request)?;
-                        active[slot] = None;
-                        admissions[slot] = None;
+                        self.scheduler.cancel(request.request)?;
+                        self.active[slot] = None;
+                        self.admissions[slot] = None;
                         progress = true;
                     }
                 }
             }
         }
-        if let Some(step) = scheduler.next_step() {
-            if executor.can_submit(step.grammar_constrained) {
-                validate_sampling_admissions::<M>(&step, &admissions)?;
-                let graph = M::graph(
-                    config,
-                    executor.manifest(),
-                    step.kind,
-                    step.batch_capacity,
-                    step.token_capacity,
-                    SamplingMode::General,
-                )?;
-                let fence = executor.next_fence()?;
-                scheduler.record_submission(&step, fence)?;
-                if step.kind == GraphKind::Vision {
-                    let request = active[step.lanes[0].request.slot as usize]
-                        .as_mut()
-                        .ok_or("missing active vision request")?;
-                    M::pack_vision(
-                        &mut inputs,
-                        config,
-                        request.request,
-                        request
-                            .incoming
-                            .prompt
-                            .images
-                            .as_ref()
-                            .ok_or("missing prepared vision inputs")?,
-                        request.next_image,
-                    )?;
-                    request.next_image += 1;
-                } else {
-                    M::pack(&mut inputs, config, scheduler, &step, &admissions)?;
-                }
-                if executor.submit(graph, &M::uploads(&inputs), step.grammar_constrained)?
-                    != Some(fence)
-                {
-                    return Err("executor refused a reserved scheduler submission".into());
-                }
-                observe_submission(metrics, scheduler, &step, executor.outstanding())?;
-                progress = true;
-            }
+        Ok((self.scheduler.next_step(), progress))
+    }
+
+    fn reserve_and_pack(&mut self, step: &ScheduledStep, fence: crate::cache::Fence) -> Result<()> {
+        self.scheduler.record_submission(step, fence)?;
+        let inputs = self
+            .inputs
+            .as_mut()
+            .expect("worker inputs initialized before submission");
+        if step.kind == GraphKind::Vision {
+            let request = self.active[step.lanes[0].request.slot as usize]
+                .as_mut()
+                .ok_or("missing active vision request")?;
+            M::pack_vision(
+                inputs,
+                self.config,
+                request.request,
+                request
+                    .incoming
+                    .prompt
+                    .images
+                    .as_ref()
+                    .ok_or("missing prepared vision inputs")?,
+                request.next_image,
+            )?;
+            request.next_image += 1;
+        } else {
+            M::pack(inputs, self.config, &self.scheduler, step, &self.admissions)?;
         }
-        if progress {
-            metrics.scheduler(scheduler.stats());
-            metrics
-                .pending
-                .store(pending.len() as u64, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn submit(&mut self, executor: &mut GraphExecutor, step: &ScheduledStep) -> Result<bool> {
+        if !executor.can_submit(step.grammar_constrained) {
+            return Ok(false);
         }
-        if !progress {
-            if executor.outstanding() > 0 {
-                std::hint::spin_loop();
-                thread::yield_now();
-            } else {
-                match receiver.recv_timeout(std::time::Duration::from_millis(2)) {
-                    Ok(request) => pending.push_back(request),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                }
-            }
+        validate_sampling_admissions::<M>(step, &self.admissions)?;
+        let graph = M::graph(
+            self.config,
+            executor.manifest(),
+            step.kind,
+            step.batch_capacity,
+            step.token_capacity,
+            SamplingMode::General,
+        )?;
+        let fence = executor.next_fence()?;
+        self.reserve_and_pack(step, fence)?;
+        if executor.submit(
+            graph,
+            &M::uploads(
+                self.inputs
+                    .as_ref()
+                    .expect("worker inputs initialized before submission"),
+            ),
+            step.grammar_constrained,
+        )? != Some(fence)
+        {
+            return Err("executor refused a reserved scheduler submission".into());
+        }
+        observe_submission(self.metrics, &self.scheduler, step, executor.outstanding())?;
+        Ok(true)
+    }
+
+    fn fail_all(&self, error: &Error) {
+        for request in self.active.iter().flatten() {
+            request.incoming.fail(error.clone());
+        }
+        for request in &self.pending {
+            request.fail(error.clone());
+        }
+        while let Ok(request) = self.receiver.try_recv() {
+            request.fail(error.clone());
         }
     }
-    Ok(())
 }
 
 fn cancel_stopped<M: ModelContract>(
@@ -1774,3 +1875,7 @@ mod tests {
         assert_eq!(scheduler.free_snapshot_count(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime/phase_tests.rs"]
+mod phase_tests;

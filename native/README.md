@@ -234,9 +234,20 @@ This scheduler operates on logical IDs and completion records. `model::ModelCont
 selects model-owned admission, input storage, completion interpretation, and output
 protocol types. `model::qwen4exp::inputs::Inputs` packs Qwen4Exp admission, state,
 vision, and forward inputs. `server::ModelRuntime<M>`
-owns the scheduler and executor on one native model thread. It initializes prompt
-penalty counts once and uploads only newly assigned page-table entries during
-decode. [model-contract.md](model-contract.md) specifies the concrete handoff.
+owns the scheduler and executor on one native model thread. Its private `Worker`
+owns ingress, pending and active requests, model admissions, and reusable input
+storage. Admission precedes ordered completion processing, terminal publication,
+copy-proposal planning, and submission. Completion-triggered retirement runs
+before polling another completion; exact system and prompt publication remains
+atomic inside `RequestScheduler::complete`.
+
+The model thread retains the executor outside the `catch_unwind` closure that
+runs `Worker`. Worker failure notifies active, pending, and queued consumers
+before draining the executor;
+scheduler resources release only after confirmed drain. Input storage remains
+owned through that drain. Model packing initializes prompt penalty counts once
+and uploads only newly assigned page-table entries during decode.
+[model-contract.md](model-contract.md) specifies the concrete handoff.
 
 ## Native frontend
 
