@@ -14,10 +14,10 @@ preprocessing, grammar constraints, prefix caching, and request scheduling.
 |---|---|---|
 | Text numerics | All 48 layers traced; first cross-stack difference at HC normalization, reference variation at MoE; generation agreement pending | [Layer comparison](docs/validation/text-layer-comparison.md) |
 | Vision numerics | Serving-path discrepancies require qualification | [Encoder comparisons](docs/validation/vision-serving-reference.md) |
-| Runtime parity | Complete-catalog Python/Rust replay and shared-scratch ownership pass | [Scratch ownership and replay](docs/validation/unified-scratch.md) |
+| Runtime parity | Ordinary replay and shared-scratch ownership qualified; copy-state replay qualification pending | [Acceptance coverage](docs/validation/acceptance-gaps.md) |
 | HTTP suites | Core text/image suites pass; grammar and tool API gaps remain | [Validation index](docs/validation/README.md) |
 | Performance | Replay and both serving configurations measured; decode trails vLLM, prefix-hit latency is lower; numerical acceptance remains open | [Serving measurements](docs/validation/serving-performance.md) |
-| Speculative execution | Adaptive MTP/copy proposals, branchable draft history and tree contracts designed; serving integration pending | [MTP design and research](docs/mtp-design.md) |
+| Speculative execution | Copy speculation serves all supported shapes; transaction, agentic-output, and learned-MTP qualification remain open | [MTP design](docs/mtp-design.md), [agentic workload](docs/validation/speculative-agentic-serving.md) |
 
 ## Preparation environment
 

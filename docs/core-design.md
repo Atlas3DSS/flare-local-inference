@@ -151,9 +151,9 @@ single-GPU core.
 | GDN recurrent state | FP32 |
 | PLE table placement | CUDA-mapped host memory |
 | Checkpoint boundaries | Multiples of 64 consumed tokens |
-| Structured output | Host grammar engine; one decode step in flight while a constrained request is batched |
+| Structured output | Host grammar engine; one submission in flight, with per-candidate masks during copy speculation |
 | Vision acceptance | Images; video qualification deferred |
-| Speculative decoding | Disabled until base serving passes |
+| Speculative decoding | Optional copy or learned-MTP preparation; one round in flight; qualification requirements in the MTP design |
 
 The configured prefill chunk size must be a multiple of 64 between 64 and the
 configured context limit. Its graph capacities are the sorted union of
@@ -167,20 +167,11 @@ every declared operator query and workspace envelope; unsupported geometry or
 insufficient memory fails startup without reducing the chunk size or omitting a
 graph variant.
 
-The recorded 37-graph prefix and Python/Rust qualifications use a 512-token
-chunk limit. The 4,096-token default prepares all 43 graphs and passes
-[98/98 text and 44/44 image/grammar HTTP checks](validation/prefill-capacity.md),
-including aligned prefix restoration and arbitrary prompt tails. All 12 paired
-text outputs match the 512-token configuration. The
-[4,043-token prefix test](validation/prefix-replay-prefill4096.md) passes all 595
-state, QSA-operand and logit equality predicates against a 4,032-token snapshot
-and an 11-token tail at capacities 16 and 4,096, with native replay allocation
-guards. [Complete-catalog Python/Rust replay](validation/graph-execution-parity-prefill4096.md)
-passes 3,693 checks and 413,708 byte-identical tensor observations across all
-43 variants on its recorded source snapshot, including all 234 allocation and
-234 unrelated-state checks.
-Each executor runs 124 commands in 117 groups; native shutdown drains both
-streams. Independent numerical and serving-performance acceptance remain open.
+At the default prefill limit, ordinary execution declares 28 graphs. Speculative
+execution replaces the three ordinary decode graphs with 14 verification shapes,
+producing 39 graphs. Every variant uses the common FlashInfer sampler. The
+catalog includes vision, prefill, resume, initialization, snapshot, and restore;
+startup rejects incomplete declarations.
 
 A context limit is distinct from aggregate cache capacity. Admission must reserve
 enough resources for each request's prompt and permitted output. Aggregate page
@@ -345,21 +336,10 @@ Chunks and layers reuse that storage. Selector
 capacity and cache updates retain their declared row geometry. The fixed split
 count is part of the b12x prepared-query identity, not an autotuning knob.
 
-Row-dependent direct/split dispatch changes BF16 probability rounding and can
-make a restored prefix differ from cold execution. Fixed partitions preserve
-the attention reduction order across graph capacities. The
-[short-prefix](validation/qsa-fixed-partitions.md) and
-[2,051-key operand matrices](validation/qsa-long-partitions.md), plus
-[public API tests](validation/qsa-fixed-splits-public-api.md) cover capacity
-invariance, preparation, scratch bounds and replay allocation stability.
-[Complete-model prefix replay](validation/prefix-replay-sequential-k1.md) passes
-595 bitwise state/logit/intermediate predicates, and the unchanged
-[autotuned default HTTP suite](validation/server-http-autotuned.md) and
-[image-identity suite](validation/server-http-vision-grammar-autotuned.md) pass
-152 and 44 checks respectively. These receipts use a 512-token prefill limit;
-the separate [4,096-capacity prefix receipt](validation/prefix-replay-prefill4096.md)
-passes all 595 predicates on a 4,043-token prompt restored at token 4,032.
-Independent canonical model accuracy remains unqualified.
+Row-dependent direct/split dispatch changes BF16 probability rounding. Fixed
+partitions preserve the attention reduction order across graph capacities.
+Removing the fixed policy requires calibrated cross-capacity component checks
+and a measured kernel timeline; same-capacity replay remains bitwise.
 
 ### GDN prefill arithmetic
 
@@ -372,18 +352,10 @@ recurrence change reduction association and are excluded from this recipe's
 search space. The policy is part of the prepared query and selection-cache
 identity; b12x rejects incompatible explicit configurations.
 
-[Policy validation](validation/gdn-recurrence-policy.md) checks the candidate
-space and serialized identity. [Complete-model replay with this policy](validation/prefix-replay-sequential-k1.md)
-passes all 595 unchanged bitwise predicates on the 459-token tool-result prompt,
-including restoration at token 448 followed by an 11-token capacity-16 tail.
-The [4,043-token fixture](validation/prefix-replay-prefill4096.md) also passes
-595/595 predicates with a 4,032-token snapshot and 11-token tails at capacities
-16 and 4,096. The [unconstrained tuning receipt](validation/prefix-replay-autotuned.md) retains
-its 83 failed predicates. Independent canonical GDN and complete-model accuracy
-remain separate acceptance requirements. The
-[main-source text comparison](validation/decoder-autotuned.md) matches all four
-greedy token IDs but retains logit relative L2 of 0.159–0.244 against the unchanged
-canonical reference; numerical equivalence remains unqualified.
+Allowing other recurrence schedules requires calibrated cross-capacity state
+and operator comparisons. Identical graph inputs and same-capacity restores
+must remain bitwise equal. Complete-model logit distance is diagnostic and
+does not select the recurrence policy.
 
 ### Preparation lifecycle
 
@@ -501,19 +473,6 @@ Native startup validates and consumes the model before binding the server socket
 as specified in section 3. Preparation success and cache reuse do not establish
 numerical or performance acceptance.
 
-The [recorded HTTP qualification](validation/server-http-autotuned.md) passes
-all 152 default-suite checks on its fingerprinted source snapshot. The
-[vision/grammar suite](validation/server-http-vision-grammar-autotuned.md) passes
-44/44; the [sampling-routing fixture](validation/server-http-sampling-routing-autotuned.md)
-passes 118/120, retaining its two exact-literal/terminal assertions when the
-1,024-token budget yields 3,066 of the required 3,074 bytes. All 39, eight and
-11 model-request payloads respectively are byte-identical to their recorded
-fixtures, with unchanged check names and order. These runs use the 512-token
-prefill catalog. Their 155 recorded main-source files match the qualified
-isolated snapshot and remain unchanged through execution and confirmed server
-shutdown. Qualification of shared operator-arena ownership and volatile scratch
-is tracked in [the scratch validation record](validation/unified-scratch.md).
-
 ## 3. Rust runtime and graph interface
 
 ### Process and ownership model
@@ -521,6 +480,11 @@ is tracked in [the scratch validation record](validation/unified-scratch.md).
 Start with a Python process containing a PyO3 Rust extension and a dedicated
 native GPU worker. Python completes bootstrap and invokes native server startup;
 Rust binds the listening sockets and owns the server lifetime and request paths.
+
+Captured operators use deterministic reductions. Identical graph inputs,
+persistent state, and explicit RNG state must produce bitwise-identical logits
+and state transitions. Changing graph capacity can change reduction association;
+cross-capacity comparisons use calibrated component bounds.
 
 The Python resource owner retains:
 

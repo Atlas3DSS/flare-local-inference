@@ -171,15 +171,13 @@ work remains stopped.
 | 4.1 Commit working tree | Implemented: legacy removal, native runtime, Python preparation, qualification, and documentation use separate commits. | Commit each coherent validated change as it lands. FlashInfer pinning remains item 4.3. |
 | 4.2 Externalize archives | Closed: bulk files live under `/data/sparkgap-artifacts/validation-receipts`; repository links and compact locators resolve there. | Keep generated archives out of Git using the archive ignore rules. Retain debugging data only while it remains useful. |
 | 4.3 FlashInfer commits and pin | Main checkout is clean at `c691c681ebcbda066faf5bd80fef0d257b256fbc`, with seven commits separating operator contracts, diagnostics, and sampler changes. Source validation and locked dependency checks pass. | Submit the AIR normalization change (`f1cd7bb29`) upstream separately with its correctness and performance tests. |
-| 4.4 Specification cleanup | Partial: amended acceptance, sampling, bandwidth bound, qualification link, and README acceptance table exist; receipt narrative and stale status claims remain. | Apply the first correction set's remaining exact removals and all section-7 mappings. State supported behavior and invariants directly. Keep one qualification-status link in core design and update the existing README acceptance rows. Include the native model-packing contract. |
-| 4.5 CPU bootstrap | Open. Meta model-tree and ownership tests do not invoke all production Prepared constructors. | Extract the declaration/construction stage used by `prepare_model` so a meta-device recording session calls the same constructors with production arguments. Skip materialization/priming/capture, not the constructors. Assert graph/operator declarations, capacities, dtypes, and scratch/state contracts for ordinary, copy, and MTP preparation; assert CUDA remains uninitialized. Do not add a serving fallback. |
-| 4.6 Receipt prose | Partial. Recent receipts have concrete conditions/results; the index and acceptance-gaps prose still need consolidation. acceptance-gaps still presents ABI 2, 43 graphs, and greedy/general routing as active. | Restate remaining receipts as conditions, measurement, result, conclusion. Retain all failures and measurement limits once per result. Replace index check-count narratives with acceptance state and evidence links. Correct present-state status while keeping historical arithmetic/graph counts tied to their source revisions. |
+| 4.4 Specification cleanup | Receipt narratives removed from core design; graph counts, sampling, determinism, acceptance, and README status reflect the implementation. | Complete the native model-packing contract and review the first correction set's section-7 mappings as the remaining architectural changes land. |
+| 4.5 CPU bootstrap | Open. Meta model-tree and ownership tests do not invoke all production Prepared constructors. | Drive actual `prepare_model` with a recording session and metadata-only storage, replacing IO/compilation boundaries while retaining constructors. Assert graph/operator declarations, capacities, dtypes, and scratch/state contracts for ordinary, copy, and MTP preparation; assert CUDA remains uninitialized. Do not add a serving fallback. |
+| 4.6 Receipt prose | Closed: validation index and acceptance coverage state behavior, limitations, and remaining gates; historical measurements stay in their individual reports. | Keep acceptance summaries aligned with implementation and actual test results. |
 
-Artifact relocation preserves the original receipts and failed attempts. If a large
-JSON receipt needs a compact repository index, the full original remains externally
-addressable by its original SHA-256. No archive is removed until its external copy
-and references are verified. A clean FlashInfer pin cannot be claimed while
-uncommitted changes still affect imported code.
+Debugging payloads remain outside Git while useful. Source commits and dependency
+pins identify reproducible code; uncommitted imported-code changes invalidate a
+clean-checkout claim.
 
 ### Local features
 
