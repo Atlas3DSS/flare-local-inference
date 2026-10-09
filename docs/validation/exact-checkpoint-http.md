@@ -51,8 +51,16 @@ lifetime for the exercised HTTP cases. Four serial follow-ups do not establish
 reuse of every physical slot. Image identity does not establish accepted
 image-conditioned speculative drafts or vision accuracy.
 
+The opt-in `qualify.server --checkpoint-endpoints --require-metrics` cases
+`prompt_endpoint_residues` and `generated_terminal_prefix` cover exact prompt
+lengths 128, 129, 130, 131, and 191, duplicate terminal publication, and appended
+conversations that reuse the observed consumed generated prefix. They require
+`--memory-report`, an exclusive client, and nine free snapshot slots when run
+together. Their 47 CPU fixture and entrypoint checks pass; actual HTTP execution
+remains pending.
+
 An HTTP endpoint-residue sweep, injected snapshot-copy failure, and explicit
-reuse of generated terminal prefixes remain open. GPU transfer and selected-state
+reuse of generated terminal prefixes remain unqualified. GPU transfer and selected-state
 tests cover additional endpoints independently. Learned MTP cache state and
 complete-model numerical acceptance remain open; BF16 GDN arithmetic can differ
 between arbitrary prefill partitions even when same-partition restore is exact.

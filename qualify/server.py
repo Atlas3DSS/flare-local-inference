@@ -437,11 +437,13 @@ def main() -> int:
     parser.add_argument("--max-response-bytes", type=int, default=64 << 20)
     parser.add_argument("--cases", nargs="+", choices=("initial_health", "models", "greedy_text", "canonical_chat", "concurrent_four",
         "thinking_output", "tool_call_and_result", "prefix_full_aligned_branch", "system_prefix", "structured_literal_tags", "png_image", "png_full_capacity", "image_cache_identity",
-        "cancellation_and_slot_reuse", "mixed_grammar", "cache_pressure", "conversation_pressure", "kv_pressure", "slow_consumer", "final_health"), help="Run only these named qualification cases.")
+        "cancellation_and_slot_reuse", "mixed_grammar", "cache_pressure", "conversation_pressure", "kv_pressure", "slow_consumer", "final_health",
+        "prompt_endpoint_residues", "generated_terminal_prefix"), help="Run only these named qualification cases.")
     parser.add_argument("--image-repetitions", type=int, default=1)
     parser.add_argument("--full-vision-png", type=Path, help="PNG encoding of the pinned bucket_16384 RGB fixture; exercise all 16384 image patches.")
     parser.add_argument("--mixed-grammar", action="store_true", help="Observe constrained and unconstrained requests in the same decode submission.")
     parser.add_argument("--image-cache-identity", action="store_true", help="Check cache separation and reuse for identical text with different pinned images.")
+    parser.add_argument("--checkpoint-endpoints", action="store_true", help="Check prompt residues, duplicate publication and consumed generated-prefix reuse with observed token IDs.")
     parser.add_argument("--require-metrics", action="store_true", help="Require native Prometheus metrics and record idle counter deltas.")
     parser.add_argument("--cache-pressure", action="store_true", help="Publish enough unique prefixes to exceed the exposed snapshot capacity.")
     parser.add_argument("--conversation-pressure", action="store_true", help="Exercise edited conversation prompts beyond the exact-checkpoint capacity.")
@@ -455,11 +457,13 @@ def main() -> int:
         parser.error("timeout, response byte bound and image repetitions must be positive")
     if args.slow_consumer_seconds < 0 or args.slow_consumer_seconds >= args.timeout:
         parser.error("slow-consumer duration must be nonnegative and shorter than the request timeout")
+    if args.checkpoint_endpoints and not args.require_metrics:
+        parser.error("checkpoint-endpoint qualification requires --require-metrics")
     if (args.cache_pressure or args.conversation_pressure or args.kv_pressure or args.slow_consumer_seconds or args.full_vision_png or args.mixed_grammar or args.image_cache_identity) and not args.require_metrics:
         parser.error("pressure, slow-consumer, full-vision and mixed-grammar qualification require --require-metrics")
     if args.cases and "system_prefix" in args.cases and not args.require_metrics:
         parser.error("system-prefix qualification requires --require-metrics")
-    exact_cache_cases = {"prefix_full_aligned_branch", "system_prefix", "conversation_pressure"}
+    exact_cache_cases = {"prefix_full_aligned_branch", "system_prefix", "conversation_pressure", "prompt_endpoint_residues", "generated_terminal_prefix"}
     if (args.require_metrics and args.memory_report is None
             and (args.cases is None or exact_cache_cases.intersection(args.cases))):
         parser.error("exact-checkpoint graph assertions require --memory-report for prefill geometry")
@@ -471,6 +475,7 @@ def main() -> int:
             or ("png_full_capacity" in args.cases and not args.full_vision_png)
             or ("mixed_grammar" in args.cases and not args.mixed_grammar)
             or ("image_cache_identity" in args.cases and not args.image_cache_identity)
+            or (bool({"prompt_endpoint_residues", "generated_terminal_prefix"}.intersection(args.cases)) and not args.checkpoint_endpoints)
             or ("slow_consumer" in args.cases and not args.slow_consumer_seconds)):
         parser.error("selected pressure/slow-consumer/full-vision cases require their enabling option")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -677,6 +682,18 @@ def main() -> int:
             seen.append(prefix)
     if args.require_metrics:
         run.case("system_prefix", system_prefix)
+
+    if args.checkpoint_endpoints:
+        from qualify.checkpoint_http import run_endpoint_cases
+
+        generation = json.loads((snapshot / "generation_config.json").read_text())
+        eos_ids = generation["eos_token_id"]
+        if isinstance(eos_ids, int):
+            eos_ids = [eos_ids]
+        run.receipt["provenance"]["checkpoint_endpoint_qualifier_sha256"] = digest(ROOT / "qualify/checkpoint_http.py")
+        run_endpoint_cases(run, tokenizer, model_id,
+                           hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12],
+                           chunk_size, set(eos_ids))
 
     def structured():
         literal = "<think>analysis</think><tool_call><function=lookup></function></tool_call>"
