@@ -1,0 +1,52 @@
+[package]
+name = "sparkgap-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+publish = false
+
+[lib]
+name = "sparkgap_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+extension-module = ["python", "pyo3/extension-module"]
+frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
+images = ["frontend", "dep:png"]
+grammar = ["frontend", "dep:llguidance"]
+server = ["images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64"]
+
+[dependencies]
+blake2 = "0.10"
+libloading = "0.8.9"
+pyo3 = { version = "0.28.3", optional = true }
+tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"], optional = true }
+minijinja = { version = "2.24.0", features = ["loader", "preserve_order", "loop_controls"], optional = true }
+minijinja-contrib = { version = "2.24.0", features = ["pycompat"], optional = true }
+serde_json = { version = "1.0", features = ["preserve_order", "float_roundtrip"], optional = true }
+sha2 = { version = "0.10.9", optional = true }
+ryu = { version = "1.0", optional = true }
+png = { version = "0.18.1", optional = true }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"], optional = true }
+tokio = { version = "1.53.1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "macros"], optional = true }
+async-stream = { version = "0.3.6", optional = true }
+base64 = { version = "0.22.1", optional = true }
+llguidance = { version = "=1.9.1", default-features = false, features = ["lark", "referencing", "ahash", "jsonschema_validation"], optional = true }
+
+[[example]]
+name = "qualify_frontend"
+required-features = ["frontend"]
+
+[[example]]
+name = "qualify_images"
+required-features = ["images"]
+
+[[example]]
+name = "qualify_requests"
+required-features = ["server"]
+
+[[example]]
+name = "qualify_generation_corpus"
+required-features = ["server"]

@@ -1,0 +1,347 @@
+# Native CUDA graph replay
+
+This crate supplies a native frontend, prefix cache and live-request scheduler,
+and launches Python-prepared CUDA graph executables through direct driver calls.
+The raw `ReplayWorker` and the two-frame `execution::GraphExecutor` are usable
+from Rust without Python types. The `server` feature adds HTTP/SSE, native request
+preparation and direct scheduling of the Qwen4Exp prepared model. Python loads and
+captures the model before handing it to Rust.
+
+The server exposes `/health`, `/v1/models`, `/v1/chat/completions`, and `/metrics`.
+HTTP admission reserves at most `queue_capacity + max_active` requests before
+reading JSON bodies. Admitted requests await a bounded CPU preparation worker;
+the default two workers can prepare four simultaneous generation requests.
+An admission permit survives CPU preparation and the streamed response lifetime.
+Disconnects cancel model scheduling, and slow consumers still face the bounded
+per-request event queue. HTTP capacity and physical GPU slots are independent.
+Tool-call history accepts OpenAI JSON-string arguments and object arguments;
+strings must parse as JSON objects before checkpoint-template rendering.
+
+`/metrics` emits Prometheus text without request labels, prompt text or token
+IDs. Counters cover model admission/completion/cancellation/failure, prefix
+lookups/hits/misses/reused tokens, successful launches by graph kind, ready
+checkpoint publications and logical evictions. Gauges expose live/free/retiring
+request slots, reusable pages/snapshots, cached checkpoints/pages, model pending
+requests and HTTP/frontend capacities. Prefix lookup counters include admission
+attempts later rejected for resource pressure. Publication counts unique
+checkpoints, excluding duplicate proposals. Eviction precedes GPU retirement;
+free-resource gauges count only IDs whose fences have completed. Scrapes read
+independent atomics and may span concurrent worker updates. Per-request deltas
+require terminal responses followed by model quiescence, with no other traffic.
+
+```sh
+cargo test --manifest-path native/Cargo.toml --offline
+cargo build --manifest-path native/Cargo.toml --features extension-module
+```
+
+The extension is named `sparkgap_native`. It requires the NVIDIA driver at runtime
+and dynamically loads `libcuda.so.1`; building and running native unit tests does
+not require CUDA libraries. Tests exercise queueing and teardown using explicit
+Rust test functions. Production always calls the CUDA driver.
+
+Python entrypoints:
+
+```text
+current_context() -> (context_handle, device_ordinal)
+GraphReplayWorker(owner, context, device, graph_execs, buffers, queue_capacity=8)
+worker.submit(graph_index, repetitions=1) -> ticket
+worker.poll(timeout_ms=0) -> ReplayCompletion | None
+worker.outstanding -> accepted commands whose completion has not been consumed
+worker.close()
+```
+
+`buffers` is a list of `(address, nbytes)` spans. Registration checks span
+arithmetic and executable-handle uniqueness; it cannot prove that raw addresses
+refer to live allocations. Preparation must supply valid handles and an `owner`
+that strongly retains every graph, captured tensor, module, mapped allocation,
+and CUDA context. The caller must finish warmup and synchronize preparation
+before registration. Re-instantiation, tensor resizing, and concurrent external
+mutation of captured storage are forbidden until `close()` completes.
+
+One submission repeats a selected executable entirely in Rust, synchronizes the
+worker stream, and emits a completion ticket. All submissions use the same
+nonblocking stream, so aliased graph scratch is serialized. The completion queue
+and pending command queue share a capacity bound: an unconsumed completion still
+occupies admission capacity. `poll()` releases the GIL while waiting. This is a
+replay primitive, not the model-serving loop's two-frame transfer pipeline.
+
+Serialization alone does not preserve tensors allocated inside a shared graph
+memory pool. Preparation must verify that the captured allocation lifetimes
+permit the submitted variant order. Outputs or state that survive another
+variant's replay require independent persistent storage; pooled intermediates
+cannot escape their graph unless the preparation contract protects their
+lifetimes.
+
+Raw replay bypasses PyTorch RNG bookkeeping. Prepared graphs must use explicit
+device RNG state and cannot contain generator-backed PyTorch random operations.
+
+`close()` rejects future submissions, executes queued submissions, synchronizes
+the stream, joins the thread, and then releases the Python owner. It is
+idempotent. Launch failure prevents later launches and is reported on subsequent
+completion tickets and on close. If stream drain cannot be confirmed, the owner
+is retained and ultimately leaked rather than freeing potentially referenced
+device storage. An unclosed object's destructor attempts the same drain; callers
+must close explicitly before interpreter finalization. No device context is
+created or destroyed by this crate.
+
+Qualify real PyTorch-to-Rust graph replay on an explicitly assigned idle GPU:
+
+```sh
+PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml --features extension-module
+CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python native/tests/test_cuda_graph_replay.py \
+  --extension native/target/debug/libsparkgap_native.so
+```
+
+The integration cases capture real PyTorch graphs, change device inputs between
+completed submissions, replay different graph capacities, check native repetition
+counts, and verify graph-owner lifetimes during close and destructor draining.
+They qualify interoperability and resource handling, not model correctness or
+serving throughput. The selected Python environment is read without installation
+or modification.
+
+## Two-frame execution
+
+[manifest.md](manifest.md) specifies the prepared execution ABI.
+`execution::ExecutionManifest::validate` checks graph capacities, required
+completion geometry, byte extents, contiguous strides, alignment, unique names
+and graph handles, and nonoverlapping host/device I/O spans before startup.
+The owner supplies live pointers on the declared context; metadata validation
+cannot establish allocation lifetime or graph numerical behavior.
+
+`execution::GraphExecutor` owns two pinned input frames, two pinned completion
+frames, a model stream and a copy stream. `submit` copies selected input
+subranges into a free host frame, enqueues asynchronous uploads and graph
+execution, records a production event, and queues the completion transfer on
+the copy stream behind that event. Omitted input ranges preserve device state.
+`poll` returns ordered `FrameCompletion` records after transfer completion and
+then permits frame reuse. A third submission receives backpressure; a grammar
+submission requires an empty window and blocks further submissions until its
+completion is consumed. The direct executor has no Python calls or per-step
+CUDA allocation.
+
+An executor belongs to one native OS thread. A Rust scheduler can call it
+directly. `execution::ExecutionWorker` adds a synchronous native-thread control
+channel for bootstrap and interoperability tests. The optional Python binding
+uses that worker and releases the GIL around native operations:
+
+```text
+GraphExecutor(owner, manifest)
+executor.submit(graph_index, [(buffer_name, byte_offset, bytes), ...],
+                grammar_constrained=False) -> fence | None
+executor.poll() -> ExecutionCompletion | None
+executor.outstanding -> number of occupied frames
+executor.drained -> whether close confirmed both streams drained
+executor.close()
+```
+
+`ExecutionCompletion.records` contains four physical-slot records in the ABI's
+eight-field order. `consumed_tokens` and `generated_tokens` are cumulative.
+Submission failure poisons the executor. `close` drains both streams before
+releasing pinned memory or the Python owner; failed drain retains both. Owner
+release happens outside the ownership mutex, permitting a Python finalizer to
+reenter `close`. Production request processing belongs in Rust; Python control
+methods provide a qualification surface.
+
+```bash
+PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml \
+  --features extension-module --offline
+timeout 60s env CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python \
+  native/tests/test_execution.py --extension native/target/debug/libsparkgap_native.so
+```
+
+The four CUDA integration cases cover physical-slot scatter, different graph
+capacities, partial uploads, two occupied frames, grammar serialization, changed
+resident inputs, rejected uploads, asynchronous owner retention, reentrant
+finalizers and destructor draining. They use real PyTorch-captured executables.
+
+## Live requests
+
+`scheduler::RequestScheduler` owns at most four live request slots and allocates
+private page tails and candidate state snapshots from prepared capacities.
+Request handles contain a physical slot and a positive int64-safe generation.
+Live recurrent-state slots are physical slot plus one, leaving state slot zero
+for padding. Cached pages remain immutable and shared through pinned ancestors.
+Resource pressure evicts unpinned cache leaves; retirement fences determine
+when their page and snapshot IDs become reusable.
+
+`next_step` plans initialize, restore, prefill, resume-sampling or decode work.
+Prefill consumes up to the configured `prefill_chunk_size` logical tokens
+(4096 by default in server configuration). It selects the smallest captured
+capacity from 1, 16, powers of two from 64 through the chunk limit, and the
+chunk limit itself. The limit must be 64-aligned, at least 64, and within the
+context and 262144-token transport bound. Decode batches use capacities 1,2,4.
+Prefill and
+decode alternate when both are ready. Full prompt cache hits restore state and
+resume sampling from saved hidden state without replaying prompt tokens.
+
+Before CUDA enqueue, callers check `GraphExecutor::can_submit`, obtain its
+`next_fence`, and call `record_submission` to reserve pages and record use of
+cache ancestors. Completion validation checks generations, physical slots,
+monotonic counters and per-step logical bounds before mutating request state.
+Two decode steps can reference a request concurrently; a repeated terminal
+completion does not emit its sampled token twice. A CUDA submission failure
+requires confirmed stream drain before `release_after_shutdown` releases
+resources associated with the attempted submission.
+
+The model recipe explicitly reports a candidate snapshot's exact aligned
+consumed length and producing fence through `record_candidate`. The scheduler
+never relabels an unaligned live-state snapshot by rounding its length. Once
+generation finishes, a snapshot graph copies fixed candidate row `5 + slot`
+to immutable row `9 + SnapshotId`. Failed copies prevent publication. `finish`
+publishes the immutable terminal candidate after that copy and every submitted
+write have completed, transfers its aligned tail pages into the prefix cache, and
+releases any unaligned tail. Duplicate publication releases the unused private
+pages and snapshot. `cancel` stops scheduling immediately, drops logical pins,
+and retains slot/page/snapshot ownership through final GPU use; cancelled
+private candidates are discarded. Generation reuse waits for that retirement.
+
+This scheduler operates on logical IDs and completion records. `model::ModelInputs`
+packs the Qwen4Exp admission, state, vision and forward inputs. `server::ModelRuntime`
+owns the scheduler and executor on one native model thread. It initializes prompt
+penalty counts once and uploads only newly assigned page-table entries during
+decode. [model-contract.md](model-contract.md) specifies the concrete handoff.
+
+## Native frontend
+
+The `frontend` Cargo feature provides `Frontend::load` over explicit tokenizer,
+tokenizer-config, and chat-template paths with expected SHA256 fingerprints. Each
+asset is hashed and parsed from the same bytes. No model lookup, downloading,
+Python import, or Python callback occurs in this API.
+
+`Frontend::render_chat` preserves JSON message content and tool argument order,
+applies the verified checkpoint's Jinja template, and returns prompt bytes and
+token IDs. Template defaults fill missing options; explicit request options win.
+The renderer uses MiniJinja's Python-method compatibility and a JSON filter with
+Hugging Face spacing, Unicode, and float formatting. Continuation strips the
+template's final message suffix according to the selected content field.
+
+`Frontend::encode`, `decode`, and `incremental_decoder` use Hugging Face's Rust
+tokenizers library pinned to the fixture environment's version. Incremental
+decoding preserves incomplete UTF-8 between chunks and flushes remaining bytes
+at completion. It does not parse reasoning or tool-call events.
+
+Run exact-checkpoint CPU parity qualification:
+
+```sh
+cargo run --manifest-path native/Cargo.toml --features frontend --example qualify_frontend -- \
+  /absolute/path/to/model/snapshot tests/frontend/qwen38.json
+```
+
+This compares rendered bytes, token IDs, template exceptions, full decoding,
+incremental decoding, and configured-default precedence with golden outputs
+generated by the pinned Transformers environment. Image contents render the
+template's image placeholders; image decoding, patch expansion, and preprocessing
+are separate model-processor work. The frontend does not expose HTTP sockets,
+run a model, support arbitrary Python tool callables, or claim compatibility
+with every Transformers template extension. JSON inputs use UTF-8 strings,
+64-bit integer ranges, and finite double-precision numbers.
+
+The Jinja environment and continuation semantics follow Transformers
+`utils/chat_template_utils.py` at revision
+`4cc2aa84301c9aa210b5513dab9fefae03981f6e` (Apache-2.0). vLLM's Rust renderer at
+`cb4f016c5d02c9d483e6e3f1702d51da239b1a9b` was consulted as a compatibility
+reference; this crate does not copy its implementation or depend on vLLM.
+
+## Prefix checkpoint policy
+
+`cache::PrefixHistory` incrementally hashes 64-token boundaries with BLAKE2b-128.
+The root and each block include a 32-byte model/recipe identity. Conditioning
+events carry absolute token positions and 32-byte identities, retaining their
+order even at the same position. An event at position N first affects prefixes
+that consume that position; appending a later image preserves earlier keys.
+An incomplete token block and its conditioning remain buffered until complete.
+
+`cache::PrefixCheckpointCache` owns metadata for immutable terminal checkpoints.
+A checkpoint privately owns its tail pages and one complete state snapshot;
+ancestor pages are shared through parent links. Snapshot consumed length must
+equal the aligned endpoint exactly. The parent must match the supplied history,
+and pages and snapshot IDs must fit prepared capacities without overlapping
+existing or retired ownership.
+
+Publication has two outcomes. `Created` transfers the proposed resources to the
+cache. `Existing` keeps the proposal's unused resources with its caller; any
+outstanding work on those resources must complete before the caller reuses them.
+A created checkpoint whose readiness fence is incomplete reserves resources but
+does not participate in lookup. `advance_completed` publishes it after the
+reported fence completes. Pending-publication cancellation also observes that
+fence before releasing resources.
+
+Pinning increments the selected checkpoint and every ancestor. Direct pin
+accounting prevents an ancestor unpin from consuming a descendant's reference.
+The scheduler records GPU use through `mark_used` before submission; releasing
+logical pins does not imply completion of that use. Leaf LRU eviction accepts
+separate page and snapshot pressure targets and produces `RetiredResources`,
+which explicitly carry their final-use fence. The cache continues reserving
+those IDs. Only `advance_completed(...).reusable` grants permission to reuse
+the corresponding storage.
+
+Fences describe a single monotonic completion timeline covering model execution
+and associated transfers. The caller supplies truthful completion information;
+this metadata library never queries CUDA or performs state copies. Checkpoint
+IDs are monotonic within one cache and are not reused after eviction. Resource
+IDs are zero-based logical ordinals within the prepared page/snapshot capacities;
+the prepared graph contract maps them to backing storage and padding sentinels.
+
+## Qwen4Exp image preparation
+
+The `images` feature adds `frontend::images::ImageProcessor` and the `png`
+decoder; it also enables `frontend`. Bootstrap supplies absolute paths and
+expected SHA256 values for `preprocessor_config.json` and `config.json`.
+The processor accepts the checkpoint's RGB8, bicubic-antialias profile with
+16×16 patches, temporal duplication by two, spatial merge by two, a 48×48
+learned position table, and fused normalization `(pixel - 127.5) / 127.5`.
+
+`process` produces packed `pixel_values[N,1536]` float32, image grids `[1,H,W]`,
+vision positions `[N,2]` int64, interpolation indices `[N,4]` int64 and weights
+`[N,4]` float32, and per-image cumulative patch offsets int32. Patch features
+are ordered by channel, temporal copy, pixel row, and pixel column; patches
+are ordered by 2×2 spatial merge blocks. `expand_prompt` consumes the rendered
+chat text, expands each image placeholder, tokenizes the result, and returns
+modality IDs and four unpadded position rows `[text,T,H,W]` plus the mRoPE delta.
+The model scheduler can transpose the last three rows into `[tokens,3]`.
+
+Admission limits apply before processing. Defaults admit at most four images,
+16,384 patches per image and per request, 64 million input pixels per image,
+and 32 MiB per encoded image. Exceeding a processed patch limit rejects the
+image without changing the checkpoint's resize settings. Request workers must
+bound concurrent preprocessing separately from these per-request limits.
+
+`RgbImage` accepts already oriented RGB8 pixels. `decode_png` supports lossless
+RGB, RGBA, grayscale, gray-alpha and palette PNG; RGB conversion drops alpha
+without blending. Animated PNG, 16-bit PNG and EXIF metadata are rejected.
+JPEG, WebP, video, remote URL fetching and EXIF orientation are not implemented.
+No Python image-processing callback or approximate decoder fallback exists.
+
+The resize coefficient generator and integer convolution follow PyTorch
+[`UpSampleKernel.cpp`](https://github.com/pytorch/pytorch/blob/cf30153c4c131c8164ee7798e5022d810682e2cb/aten/src/ATen/native/cpu/UpSampleKernel.cpp)
+and its uint8 antialias implementation at `cf30153c4c131c8164ee7798e5022d810682e2cb`;
+the applicable license is [licenses/PyTorch.txt](licenses/PyTorch.txt).
+The scalar Rust implementation preserves PyTorch's adaptive coefficient
+precision and intermediate uint8 rounding. The `llm-multimodal` implementation
+at `f0985ef65967615db2c79279aa07818499301bfd` uses Pillow's different coefficient
+precision and serves as an interface reference, not a pixel reference.
+
+Image fixtures in `tests/frontend/qwen38_images.json` pin Transformers
+`4cc2aa84301c9aa210b5513dab9fefae03981f6e`, PyTorch `2.13.0+cu130`, Torchvision
+`0.28.0+cu130`, Pillow `12.3.0`, and all checkpoint asset hashes. They use the
+actual `AutoProcessor` Torchvision backend and canonical Qwen4Exp position
+helpers. SHA256 checks compare every resized RGB byte and every little-endian
+float/integer tensor byte, with no numerical tolerance. The fixture set covers
+19 complete pipelines and six geometry cases, including the 16,384-patch
+boundary, half-even rounding, independent-axis resize, PNG color modes, and
+mixed/repeated image batches.
+
+```bash
+cargo test --manifest-path native/Cargo.toml --features images --offline
+cargo run --manifest-path native/Cargo.toml --features images --offline \
+  --example qualify_images -- "$SNAPSHOT" tests/frontend/qwen38_images.json
+.venv/bin/python tests/frontend/generate_image_fixtures.py \
+  "$SNAPSHOT" tests/frontend/qwen38_images.json \
+  --binary-dir /tmp/sparkgap-image-reference
+```
+
+The qualifier accepts an optional third argument for writing mismatching
+native tensor bytes. Fixtures contain fingerprints rather than the full
+100 MiB largest patch tensor; the generator's `--binary-dir` records full
+reference tensors for diagnosis. These checks qualify CPU preparation; vision
+graph execution and decoder consumption require separate model integration.
