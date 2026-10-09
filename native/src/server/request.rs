@@ -32,13 +32,7 @@ pub fn prepare(
     if model != config.model_id {
         return Err(format!("model {model:?} is not loaded"));
     }
-    for name in [
-        "stop",
-        "logprobs",
-        "top_logprobs",
-        "logit_bias",
-        "guided_json",
-    ] {
+    for name in ["logprobs", "top_logprobs", "logit_bias", "guided_json"] {
         if object
             .get(name)
             .is_some_and(|value| !value.is_null() && value != &Value::Bool(false))
@@ -245,6 +239,8 @@ pub fn prepare(
         stop_sequences.extend(ids.into_iter().map(|id| vec![id]));
     }
     super::stops::TokenStops::new(stop_sequences.clone())?;
+    let stop_strings = string_stops(object.get("stop"))?;
+    super::stops::validate_strings(&stop_strings, !stop_sequences.is_empty(), grammar.is_some())?;
     if grammar.is_some() && !stop_sequences.is_empty() {
         return Err("structured output cannot be combined with custom token stops".into());
     }
@@ -286,6 +282,7 @@ pub fn prepare(
             sampling,
             max_new_tokens,
             stop_sequences,
+            stop_strings,
             grammar,
         },
         stream,
@@ -293,6 +290,25 @@ pub fn prepare(
         rendered_prompt: rendered.text,
         observation,
     })
+}
+
+fn string_stops(value: Option<&Value>) -> Result<Vec<String>> {
+    let strings = match value {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(text)) => vec![text.clone()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "stop must be a string or an array of strings".to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => return Err("stop must be a string or an array of strings".into()),
+    };
+    super::stops::validate_strings(&strings, false, false)?;
+    Ok(strings)
 }
 
 fn requests_continuation(value: Option<&Value>) -> bool {
@@ -422,6 +438,28 @@ fn number(object: &Map<String, Value>, name: &str, default: f32) -> Result<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standard_string_stop_values_are_validated_without_coercion() {
+        assert!(string_stops(None).unwrap().is_empty());
+        assert!(string_stops(Some(&Value::Null)).unwrap().is_empty());
+        assert_eq!(
+            string_stops(Some(&serde_json::json!("\nEND_EDIT"))).unwrap(),
+            vec!["\nEND_EDIT"]
+        );
+        assert_eq!(
+            string_stops(Some(&serde_json::json!(["a", "世界"]))).unwrap(),
+            vec!["a", "世界"]
+        );
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!(1),
+            serde_json::json!(["ok", 2]),
+            serde_json::json!(""),
+            serde_json::json!(["a", "b", "c", "d", "e"]),
+        ] {
+            assert!(string_stops(Some(&value)).is_err(), "{value}");
+        }
+    }
     #[test]
     fn response_tool_arguments_round_trip_without_changing_json_types() {
         let expected = serde_json::json!({"query":"café 世界","options":{"count":2,"enabled":true,"none":null,"items":[1,"✓"]}});

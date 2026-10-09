@@ -129,6 +129,37 @@ fn main() -> Result<(), String> {
         }
         text_count += 1;
     }
+    let mut string_stop_count = 0;
+    for stop in [
+        json!(null),
+        json!("\nEND_EDIT"),
+        json!(["STOP", "世界"]),
+        json!([]),
+    ] {
+        let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Reply with text."}],"stop":stop});
+        let mut plain = body.clone();
+        plain.as_object_mut().unwrap().remove("stop");
+        let expected = prepare_request(&frontend, &processor, &compiler, &config, plain)?;
+        let prepared = prepare_request(&frontend, &processor, &compiler, &config, body)?;
+        if prepared.prompt.tokens != expected.prompt.tokens
+            || prepared.prompt.max_new_tokens != expected.prompt.max_new_tokens
+        {
+            return Err("string stop changed prompt IDs or output reservation".into());
+        }
+        let expected_stops = match stop {
+            Value::Null => vec![],
+            Value::String(value) => vec![value],
+            Value::Array(values) => values
+                .into_iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect(),
+            _ => unreachable!(),
+        };
+        if prepared.prompt.stop_strings != expected_stops {
+            return Err("string stop normalization differs".into());
+        }
+        string_stop_count += 1;
+    }
     let mut image_count = 0;
     for case in image["cases"].as_array().unwrap() {
         if !case["inputs"]
@@ -271,7 +302,7 @@ fn main() -> Result<(), String> {
         }
     }
     println!(
-        "{{\"text_request_cases\":{text_count},\"tool_argument_roundtrips\":{tool_string_count},\"image_request_cases\":{image_count},\"structured_request_cases\":16}}"
+        "{{\"string_stop_request_cases\":{string_stop_count},\"text_request_cases\":{text_count},\"tool_argument_roundtrips\":{tool_string_count},\"image_request_cases\":{image_count},\"structured_request_cases\":16}}"
     );
     Ok(())
 }

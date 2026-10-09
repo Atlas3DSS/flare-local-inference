@@ -133,17 +133,19 @@ impl Server {
             .queue_capacity
             .checked_add(model.limits.max_active)
             .ok_or("HTTP request capacity overflows")?;
+        let frontend = Arc::new(frontend);
         let model = Arc::new(unsafe {
             ModelRuntime::start(
                 manifest,
                 model,
                 config.queue_capacity,
                 config.event_capacity,
+                frontend.clone(),
             )?
         });
         let state = Arc::new(HttpState {
             model: model.clone(),
-            frontend: Arc::new(frontend),
+            frontend,
             images: Arc::new(images),
             grammar,
             frontend_slots: Arc::new(Semaphore::new(config.frontend_workers)),
@@ -447,10 +449,16 @@ async fn chat(
                             Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
                         }
                     },
+                    GenerationEvent::Protocol(pieces)=>{
+                        match presentation.push_protocol(pieces){
+                            Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},
+                            Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
+                        }
+                    },
                     GenerationEvent::Finished{prompt_tokens,generated_tokens,reused_prompt_tokens,reason,termination}=>{
                         let deltas=presentation.finish(termination);
                         match deltas{Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}}
-                        let reason=if presentation.has_tools(){"tool_calls"}else{reason};
+                        let reason=if termination != crate::output::Termination::UserStop && presentation.has_tools(){"tool_calls"}else{reason};
                         let mut last=chunk(&id,created,&state.model.config().model_id,json!({}),json!(reason),observation.include_usage);
                         observation.finish(&mut last,prompt_tokens,generated_tokens,reused_prompt_tokens,(ingress_ns,enqueue_ns),true);
                         yield Ok(Event::default().data(last.to_string()));
@@ -497,6 +505,12 @@ async fn chat(
                         return error(StatusCode::INTERNAL_SERVER_ERROR, message);
                     }
                 }
+                GenerationEvent::Protocol(pieces) => {
+                    if let Err(message) = presentation.push_protocol(pieces) {
+                        presentation.abort(crate::output::Termination::ExecutionError);
+                        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
+                    }
+                }
                 GenerationEvent::Error(message) => {
                     presentation.abort(crate::output::Termination::ExecutionError);
                     return error(StatusCode::INTERNAL_SERVER_ERROR, message);
@@ -515,7 +529,9 @@ async fn chat(
                     if let Err(message) = presentation.finish(termination) {
                         return error(StatusCode::INTERNAL_SERVER_ERROR, message);
                     }
-                    let reason = if presentation.has_tools() {
+                    let reason = if termination != crate::output::Termination::UserStop
+                        && presentation.has_tools()
+                    {
                         "tool_calls"
                     } else {
                         reason

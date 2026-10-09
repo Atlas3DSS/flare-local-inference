@@ -10,12 +10,13 @@ pub(super) fn validate_prompt(prompt: &Prompt) -> Result<()> {
         || sampling.presence_penalty != 0.
         || sampling.frequency_penalty != 0.
         || !prompt.stop_sequences.is_empty()
+        || !prompt.stop_strings.is_empty()
         || prompt.grammar.is_some()
         || prompt.images.is_some()
         || !prompt.conditioning.is_empty()
         || prompt.vision_token_indices.iter().any(|index| *index != -1)
     {
-        return Err("token qualification requires text, temperature=0, max_tokens=64, neutral penalties, and no grammar or token stops".into());
+        return Err("token qualification requires text, temperature=0, max_tokens=64, neutral penalties, and no grammar or stops".into());
     }
     Ok(())
 }
@@ -101,7 +102,7 @@ pub(super) async fn generate(
     let mut tokens = Vec::with_capacity(64);
     while let Some(event) = generation.events.recv().await {
         match event {
-            GenerationEvent::ObservedToken { .. } => {
+            GenerationEvent::ObservedToken { .. } | GenerationEvent::Protocol(_) => {
                 return error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "unexpected observation event in qualification stream",
@@ -187,6 +188,7 @@ mod tests {
                 },
                 max_new_tokens: 64,
                 stop_sequences: vec![],
+                stop_strings: vec![],
                 grammar: None,
             },
             stream: false,
@@ -215,6 +217,9 @@ mod tests {
         prepared.prompt.stop_sequences.push(vec![248046]);
         assert!(validate_prepared(&prepared, &[760, 6511]).is_err());
         prepared.prompt.stop_sequences.clear();
+        prepared.prompt.stop_strings.push("stop".into());
+        assert!(validate_prepared(&prepared, &[760, 6511]).is_err());
+        prepared.prompt.stop_strings.clear();
         prepared.prompt.max_new_tokens = 63;
         assert!(validate_prepared(&prepared, &[760, 6511]).is_err());
         prepared.prompt.max_new_tokens = 64;

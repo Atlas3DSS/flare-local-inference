@@ -27,12 +27,20 @@ pub struct Prompt {
     pub sampling: SamplingParameters,
     pub max_new_tokens: u32,
     pub stop_sequences: Vec<Vec<u32>>,
+    pub stop_strings: Vec<String>,
     pub grammar: Option<crate::grammar::RequestGrammar>,
+}
+
+impl Prompt {
+    fn has_host_stops(&self) -> bool {
+        !self.stop_sequences.is_empty() || !self.stop_strings.is_empty()
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum GenerationEvent {
     Token(u32),
+    Protocol(Vec<crate::output::Piece>),
     ObservedToken {
         token: u32,
         timestamp_ns: Option<u64>,
@@ -115,12 +123,34 @@ impl Incoming {
     }
 }
 
-struct Active {
+struct Active<'a> {
     request: RequestHandle,
     incoming: Incoming,
     last_token: Option<u32>,
     next_image: usize,
     stops: super::stops::TokenStops,
+    text_stops: Option<super::stops::TextStops<'a>>,
+}
+
+impl Active<'_> {
+    fn emit_output(&mut self, token: u32, eos: &[u32]) -> Result<bool> {
+        if let Some(stops) = &mut self.text_stops {
+            if eos.contains(&token) {
+                return Ok(false);
+            }
+            let (pieces, matched) = stops.push(token)?;
+            if !pieces.is_empty() {
+                self.incoming.emit(GenerationEvent::Protocol(pieces));
+            }
+            Ok(matched)
+        } else {
+            let (visible, matched) = self.stops.push(token);
+            for token in visible {
+                self.incoming.emit_token(token);
+            }
+            Ok(matched)
+        }
+    }
 }
 
 pub struct ModelRuntime {
@@ -144,6 +174,7 @@ impl ModelRuntime {
         config: ModelConfig,
         queue_capacity: usize,
         event_capacity: usize,
+        frontend: Arc<crate::frontend::Frontend>,
     ) -> Result<Self> {
         config.validate(&manifest)?;
         super::observation::initialize_clock();
@@ -207,6 +238,7 @@ impl ModelRuntime {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_loop(
                         &worker_config,
+                        &frontend,
                         &mut executor,
                         &mut scheduler,
                         &receiver,
@@ -315,6 +347,11 @@ impl ModelRuntime {
         }
         prompt.sampling.validate()?;
         super::stops::TokenStops::new(prompt.stop_sequences.clone())?;
+        super::stops::validate_strings(
+            &prompt.stop_strings,
+            !prompt.stop_sequences.is_empty(),
+            prompt.grammar.is_some(),
+        )?;
         if prompt.tokens.is_empty()
             || prompt.tokens.len() != prompt.positions.len()
             || prompt.tokens.len() != prompt.vision_token_indices.len()
@@ -404,13 +441,14 @@ impl Drop for ModelRuntime {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop(
+fn run_loop<'a>(
     config: &ModelConfig,
+    frontend: &'a crate::frontend::Frontend,
     executor: &mut GraphExecutor,
     scheduler: &mut RequestScheduler,
     receiver: &mpsc::Receiver<Incoming>,
     stop: &AtomicBool,
-    active: &mut [Option<Active>; 4],
+    active: &mut [Option<Active<'a>>; 4],
     pending: &mut VecDeque<Incoming>,
     queue_capacity: usize,
     metrics: &super::metrics::Metrics,
@@ -461,7 +499,7 @@ fn run_loop(
                 conditioning: incoming.prompt.conditioning.clone(),
                 max_new_tokens: incoming.prompt.max_new_tokens,
                 grammar_constrained: incoming.prompt.grammar.is_some(),
-                host_stops: !incoming.prompt.stop_sequences.is_empty(),
+                host_stops: incoming.prompt.has_host_stops(),
             };
             let admission = if incoming.qualification {
                 scheduler.admit_cold(spec)
@@ -508,6 +546,14 @@ fn run_loop(
             active[slot] = Some(Active {
                 request: handle,
                 stops: super::stops::TokenStops::new(incoming.prompt.stop_sequences.clone())?,
+                text_stops: if incoming.prompt.stop_strings.is_empty() {
+                    None
+                } else {
+                    Some(super::stops::TextStops::new(
+                        frontend,
+                        incoming.prompt.stop_strings.clone(),
+                    )?)
+                },
                 incoming,
                 last_token: None,
                 next_image: 0,
@@ -592,10 +638,14 @@ fn run_loop(
                             .unwrap()
                             .copy_from_slice(grammar.mask());
                     }
-                    let (visible, stop) = request.stops.push(token.token);
-                    for visible in visible {
-                        request.incoming.emit_token(visible);
-                    }
+                    let stop = match request.emit_output(token.token, &config.eos_token_ids) {
+                        Ok(matched) => matched,
+                        Err(error) => {
+                            request.incoming.fail(error);
+                            stopped.push(token.request);
+                            continue;
+                        }
+                    };
                     if stop {
                         metrics.completed.fetch_add(1, Ordering::Relaxed);
                         let live = scheduler.request(token.request)?;
@@ -636,6 +686,29 @@ fn run_loop(
                             .incoming
                             .fail(format!("prepared model reported device error {error}"));
                     } else {
+                        let user_stop = if let Some(stops) = &mut request.text_stops {
+                            let eos = request
+                                .last_token
+                                .filter(|token| config.eos_token_ids.contains(token));
+                            match stops.finish(eos) {
+                                Ok((pieces, matched)) => {
+                                    if !pieces.is_empty() {
+                                        request.incoming.emit(GenerationEvent::Protocol(pieces));
+                                    }
+                                    matched
+                                }
+                                Err(error) => {
+                                    request.incoming.fail(error);
+                                    scheduler.cancel(request.request)?;
+                                    active[slot] = None;
+                                    admissions[slot] = None;
+                                    progress = true;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            false
+                        };
                         metrics.completed.fetch_add(1, Ordering::Relaxed);
                         for token in request.stops.finish() {
                             if request
@@ -649,10 +722,11 @@ fn run_loop(
                                 );
                             }
                         }
-                        let reason = if !request.incoming.qualification
-                            && request
-                                .last_token
-                                .is_some_and(|token| config.eos_token_ids.contains(&token))
+                        let reason = if user_stop
+                            || (!request.incoming.qualification
+                                && request
+                                    .last_token
+                                    .is_some_and(|token| config.eos_token_ids.contains(&token)))
                         {
                             "stop"
                         } else {
@@ -666,7 +740,9 @@ fn run_loop(
                                 generated_tokens: live.generated_tokens,
                                 reused_prompt_tokens: live.reused_prompt_tokens(),
                                 reason,
-                                termination: if reason == "stop" {
+                                termination: if user_stop {
+                                    crate::output::Termination::UserStop
+                                } else if reason == "stop" {
                                     crate::output::Termination::Eos
                                 } else {
                                     crate::output::Termination::OutputLimit
@@ -677,6 +753,13 @@ fn run_loop(
                             request.incoming.fail(
                                 "generation consumer exceeded the bounded output queue".into(),
                             );
+                        }
+                        if user_stop {
+                            scheduler.cancel(request.request)?;
+                            active[slot] = None;
+                            admissions[slot] = None;
+                            progress = true;
+                            continue;
                         }
                     }
                     scheduler.finish(request.request)?;
@@ -1071,6 +1154,7 @@ mod tests {
                 sampling: SamplingParameters::default(),
                 max_new_tokens: 10,
                 stop_sequences: vec![],
+                stop_strings: vec![],
                 grammar: None,
             },
             events,
@@ -1089,6 +1173,64 @@ mod tests {
                 enqueue_ns: None,
             },
         )
+    }
+
+    #[test]
+    fn string_and_token_stops_both_require_the_host_stop_scheduler_barrier() {
+        let (mut incoming, _) = stream(4);
+        assert!(!incoming.prompt.has_host_stops());
+        incoming.prompt.stop_strings.push("END".into());
+        assert!(incoming.prompt.has_host_stops());
+        incoming.prompt.stop_strings.clear();
+        incoming.prompt.stop_sequences.push(vec![1, 2]);
+        assert!(incoming.prompt.has_host_stops());
+    }
+
+    #[test]
+    fn worker_string_stop_keeps_raw_final_token_and_suppresses_subtoken_suffix() {
+        let frontend = super::super::stops::string_tests::frontend();
+        let (mut incoming, mut generation) = stream(16);
+        incoming.observation = Some(false);
+        incoming.prompt.stop_strings = vec!["END".into()];
+        let mut request = Active {
+            request: RequestHandle {
+                slot: 0,
+                generation: 1,
+            },
+            incoming,
+            last_token: None,
+            next_image: 0,
+            stops: super::super::stops::TokenStops::new(vec![]).unwrap(),
+            text_stops: Some(
+                super::super::stops::TextStops::new(&frontend, vec!["END".into()]).unwrap(),
+            ),
+        };
+        request.incoming.observe_token(0);
+        assert!(!request.emit_output(0, &[248046]).unwrap());
+        request.incoming.observe_token(1);
+        assert!(request.emit_output(1, &[248046]).unwrap());
+        assert!(matches!(
+            generation.events.try_recv(),
+            Ok(GenerationEvent::ObservedToken {
+                token: 0,
+                timestamp_ns: None
+            })
+        ));
+        assert!(
+            matches!(generation.events.try_recv(), Ok(GenerationEvent::Protocol(pieces)) if pieces == vec![crate::output::Piece::Token(0),crate::output::Piece::Text("before".into())])
+        );
+        assert!(matches!(
+            generation.events.try_recv(),
+            Ok(GenerationEvent::ObservedToken {
+                token: 1,
+                timestamp_ns: None
+            })
+        ));
+        assert!(generation.events.try_recv().is_err());
+        assert_eq!(
+            request.text_stops.as_mut().unwrap().finish(None).unwrap(),
+            (vec![], true)
+        );
     }
 
     #[test]

@@ -67,13 +67,15 @@ readiness. Missing graph variants or required inputs fail startup. `/health`,
 streaming SSE and complete JSON responses, exact checkpoint templates, native
 tokenization, sampling controls and PNG data-URL images. At most four images
 are admitted, each at most 16384 patches, with 65536 total patches per request.
-Remote image fetching, JPEG/WebP/video, stop strings, logprobs, forced tool
+Remote image fetching, JPEG/WebP/video, logprobs, forced tool
 selection and `parallel_tool_calls=false` are rejected. Tool choices `auto` and
 `none` are supported. The checkpoint's `<think>` output is presented as
 `reasoning_content`; complete Qwen Coder function blocks become `tool_calls`
 with schema-directed JSON argument types. Partial markers and UTF-8 sequences
 remain buffered across token boundaries. Malformed or unknown tool calls are
-errors, and incomplete tool blocks cannot produce successful terminal output.
+errors. Incomplete tool blocks fail at EOS or output limits. A matched user stop
+may discard an incomplete Qwen call that has never been emitted; completed calls
+remain in the response and already-emitted argument fragments cannot be retracted.
 
 `output::ReasoningParser` and `output::ToolCallParser` consume presented token
 IDs and stable decoded spans and emit transport-neutral events. The
@@ -90,19 +92,41 @@ Parser termination distinguishes EOS, output limits, user stops, cancellation
 and execution errors. Cancellation and errors notify the protocol without
 publishing buffered output. Presented token IDs include tokens that emit no
 text and EOS; custom token stops filter their matching IDs before presentation.
-Raw generation observations retain those omitted IDs separately.
+Raw generation observations retain those omitted IDs separately. String-stop
+filtering emits ordered protocol pieces: fully visible token-associated spans
+retain their IDs, and a clipped span contributes only its visible text. A later
+token control cannot overtake text held for a possible stop match.
 
 `response_format` supports `text`, `json_object` and `json_schema`; `grammar`
 accepts a Lark grammar. Native llguidance compilation is bounded and rejects
 unsupported schema assertions, external references and compiler warnings.
 Structured requests disable thinking and reject explicit thinking, assistant
-continuation, tool generation and custom token stops. The parser initializes
+continuation, tool generation and custom stops. The parser initializes
 the admission mask, advances exactly once per generated token, and uploads
 the next physical-slot mask before another constrained sampling step. The
 scheduler admits only one in-flight step while a constrained request is batched.
 Output-length termination can return a valid but incomplete grammar prefix.
 Structured output uses verbatim presentation, so literal reasoning and tool
 tags inside generated JSON or grammar text remain part of the content.
+
+### String stops
+
+`stop` accepts null, one nonempty string or an array of up to four nonempty
+strings totaling at most 4096 UTF-8 bytes. An empty array disables string stops.
+String stops cannot be combined with token-stop IDs/sequences or structured
+output. Matching uses incremental decoded text, including reasoning and tool
+envelopes, before presentation. The first completed match removes the matched
+string and its suffix, including text within the same sampled token. Partial
+UTF-8 and overlapping stop prefixes remain buffered until resolved. Normal
+EOS or output-limit termination flushes an unmatched prefix.
+
+String stops use the host-stop scheduler barrier: width one and one outstanding
+round while such a request is active. The worker determines the match before
+submitting another round. Usage and raw-token observation count the complete
+sampled token crossing a stop; visible text excludes the stop. The response
+finishes with `stop`, including responses containing earlier completed calls.
+A matched stop cancels the private publication candidate after its GPU fence;
+previous immutable cached prefixes remain unchanged.
 
 ### Token and timing observation
 
@@ -403,7 +427,7 @@ The JSON envelope contains `schema_version: 1`, `id`, `ignore_eos: true`,
 `expected_prompt_tokens`, and `request` containing an ordinary chat request.
 The request must be nonstreaming text with temperature 0, a 64-token output
 budget, neutral repetition/presence/frequency penalties, and no grammar,
-custom token stops, or images. Tool-bearing templates and assistant
+custom stops, or images. Tool-bearing templates and assistant
 continuations retain their normal preparation semantics. Rendered token IDs
 must equal `expected_prompt_tokens` before model admission.
 

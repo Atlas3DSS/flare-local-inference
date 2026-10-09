@@ -12,6 +12,14 @@ pub enum Input<'a> {
     Text(&'a str),
 }
 
+/// Ordered presentation input after worker-owned string-stop filtering.
+/// Token IDs accompany only fully visible spans; clipped spans carry text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Piece {
+    Token(u32),
+    Text(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Termination {
     Eos,

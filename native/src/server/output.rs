@@ -137,6 +137,8 @@ pub(super) struct Presentation<'a, P: ModelOutput> {
     output: Accumulator,
     eos: &'a [u32],
     finished: bool,
+    worker_decoded: bool,
+    local_decoded: bool,
 }
 impl<'a, P: ModelOutput> Presentation<'a, P> {
     pub fn new(frontend: &'a Frontend, eos: &'a [u32], config: P::Config, id: String) -> Self {
@@ -146,17 +148,40 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
             output: Accumulator::new(id),
             eos,
             finished: false,
+            worker_decoded: false,
+            local_decoded: false,
         }
     }
     pub fn push(&mut self, token: u32) -> Result<Vec<Value>> {
         if self.finished {
             return Err("output presentation is finished".into());
         }
+        if self.worker_decoded {
+            return Err("cannot mix worker-decoded protocol pieces with token decoding".into());
+        }
+        self.local_decoded = true;
         let mut events = self.parser.push(Input::Token(token))?;
         if !self.eos.contains(&token) {
             if let Some(text) = self.decoder.push(&[token])? {
                 events.extend(self.parser.push(Input::Text(&text))?);
             }
+        }
+        self.output.apply(events)
+    }
+    pub fn push_protocol(&mut self, pieces: Vec<crate::output::Piece>) -> Result<Vec<Value>> {
+        if self.finished {
+            return Err("output presentation is finished".into());
+        }
+        if self.local_decoded {
+            return Err("cannot mix token decoding with worker-decoded protocol pieces".into());
+        }
+        self.worker_decoded = true;
+        let mut events = Vec::new();
+        for piece in pieces {
+            events.extend(match piece {
+                crate::output::Piece::Token(token) => self.parser.push(Input::Token(token))?,
+                crate::output::Piece::Text(text) => self.parser.push(Input::Text(&text))?,
+            });
         }
         self.output.apply(events)
     }
@@ -168,10 +193,13 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
             self.abort(cause);
             return Ok(vec![]);
         }
-        let final_text = self
-            .decoder
-            .finish()
-            .and_then(|text| self.parser.push(Input::Text(&text)));
+        let final_text = if self.worker_decoded {
+            Ok(vec![])
+        } else {
+            self.decoder
+                .finish()
+                .and_then(|text| self.parser.push(Input::Text(&text)))
+        };
         let mut events = match final_text {
             Ok(events) => events,
             Err(error) => {
@@ -452,7 +480,19 @@ pub(crate) mod tests {
     impl ToolCallParser for ControlTools {
         fn push(&mut self, input: Input<'_>) -> Result<Progress> {
             Ok(Progress {
-                events: if matches!(input, Input::Token(99)) {
+                events: if matches!(input, Input::Token(98)) {
+                    vec![
+                        Event::ToolBegin {
+                            index: 0,
+                            name: "partial".into(),
+                            id: None,
+                        },
+                        Event::ToolArguments {
+                            index: 0,
+                            text: "{\"value\":".into(),
+                        },
+                    ]
+                } else if matches!(input, Input::Token(99)) {
                     vec![
                         Event::ToolBegin {
                             index: 0,
@@ -574,5 +614,126 @@ pub(crate) mod tests {
             *observed.lock().unwrap(),
             vec!["Token(0)", "finish:Cancelled"]
         );
+    }
+    #[test]
+    fn string_stop_preserves_complete_calls_and_json_stream_equality() {
+        let pieces = [
+            "<think>reason</think>\n\nanswer\n\n<tool_call><function=lookup><parameter=query>first</parameter></function></tool_call>",
+            "\n<tool_call><function=lookup><parameter=query>partialST",
+            "OPdiscard</parameter></function></tool_call>",
+        ];
+        let frontend = frontend(&pieces);
+        let config = OutputConfig {
+            reasoning: false,
+            verbatim: false,
+            tools: vec![
+                json!({"function":{"name":"lookup","parameters":{"properties":{"query":{"type":"string"}}}}}),
+            ],
+        };
+        let mut streamed =
+            Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "stop".into());
+        let mut collected =
+            Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "stop".into());
+        let mut filter =
+            super::super::stops::TextStops::new(&frontend, vec!["STOP".into()]).unwrap();
+        let mut deltas = vec![];
+        for token in 0..3 {
+            let (visible, matched) = filter.push(token).unwrap();
+            deltas.extend(streamed.push_protocol(visible.clone()).unwrap());
+            collected.push_protocol(visible).unwrap();
+            assert_eq!(matched, token == 2);
+        }
+        deltas.extend(streamed.finish(Termination::UserStop).unwrap());
+        collected.finish(Termination::UserStop).unwrap();
+        assert_eq!(reconstruct(&deltas), collected.message());
+        assert_eq!(collected.message()["content"], "answer");
+        assert_eq!(collected.message()["reasoning_content"], "reason");
+        assert_eq!(
+            collected.message()["tool_calls"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            collected.message()["tool_calls"][0]["function"]["arguments"],
+            "{\"query\":\"first\"}"
+        );
+        for cause in [Termination::Eos, Termination::OutputLimit] {
+            let mut presentation =
+                Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "invalid".into());
+            presentation
+                .push_protocol(vec![crate::output::Piece::Text(
+                    "<tool_call><function=lookup>".into(),
+                )])
+                .unwrap();
+            assert!(presentation.finish(cause).is_err());
+        }
+    }
+
+    #[test]
+    fn worker_decoded_spans_do_not_reorder_a_later_control_before_held_text() {
+        let frontend = frontend(&["beforeST", "<control>"]);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut presentation =
+            Presentation::<Controls>::new(&frontend, &[99], observed.clone(), "ordered".into());
+        let mut stops =
+            super::super::stops::TextStops::new(&frontend, vec!["STOP".into()]).unwrap();
+        for token in [0, 1] {
+            let (pieces, matched) = stops.push(token).unwrap();
+            assert!(!matched);
+            presentation.push_protocol(pieces).unwrap();
+        }
+        let (pieces, matched) = stops.finish(Some(99)).unwrap();
+        assert!(!matched);
+        presentation.push_protocol(pieces).unwrap();
+        presentation.finish(Termination::Eos).unwrap();
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                "Token(0)",
+                "Text(\"beforeST\")",
+                "Token(1)",
+                "Text(\"<control>\")",
+                "Token(99)",
+                "finish:Eos"
+            ]
+        );
+    }
+    #[test]
+    fn user_stop_cannot_retract_an_already_emitted_partial_tool_call() {
+        let frontend = frontend(&["x"]);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut presentation =
+            Presentation::<Controls>::new(&frontend, &[98], observed, "partial".into());
+        let deltas = presentation.push(98).unwrap();
+        assert_eq!(deltas[0]["tool_calls"][0]["function"]["name"], "partial");
+        assert_eq!(
+            presentation.finish(Termination::UserStop).unwrap_err(),
+            "incomplete emitted tool call"
+        );
+    }
+    #[test]
+    fn decoding_sources_cannot_be_mixed_in_either_order() {
+        let frontend = frontend(&["x"]);
+        for worker_first in [false, true] {
+            let config = OutputConfig {
+                reasoning: false,
+                verbatim: false,
+                tools: vec![],
+            };
+            let mut presentation =
+                Presentation::<QwenOutput>::new(&frontend, &[99], config, "mixed".into());
+            if worker_first {
+                presentation
+                    .push_protocol(vec![crate::output::Piece::Text("x".into())])
+                    .unwrap();
+                assert!(presentation.push(0).is_err());
+            } else {
+                presentation.push(0).unwrap();
+                assert!(
+                    presentation
+                        .push_protocol(vec![crate::output::Piece::Text("x".into())])
+                        .is_err()
+                );
+            }
+        }
     }
 }

@@ -146,7 +146,10 @@ impl ToolCallParser for QwenTools {
         })
     }
     fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
-        if matches!(cause, Termination::Cancelled | Termination::ExecutionError) {
+        if matches!(
+            cause,
+            Termination::Cancelled | Termination::ExecutionError | Termination::UserStop
+        ) {
             self.buffer.clear();
             return Ok(vec![]);
         }
@@ -621,11 +624,7 @@ mod tests {
     }
     #[test]
     fn terminal_cause_preserves_incomplete_call_errors_and_never_fabricates_calls() {
-        for cause in [
-            Termination::Eos,
-            Termination::OutputLimit,
-            Termination::UserStop,
-        ] {
+        for cause in [Termination::Eos, Termination::OutputLimit] {
             let mut parser = QwenOutput::new(OutputConfig {
                 reasoning: false,
                 ..config()
@@ -638,7 +637,11 @@ mod tests {
             );
             assert!(parser.finish(cause).is_err());
         }
-        for cause in [Termination::Cancelled, Termination::ExecutionError] {
+        for cause in [
+            Termination::Cancelled,
+            Termination::ExecutionError,
+            Termination::UserStop,
+        ] {
             let mut parser = QwenOutput::new(OutputConfig {
                 reasoning: false,
                 ..config()
