@@ -73,6 +73,11 @@ GPU graph timing, but no named per-kernel GPU breakdown. Those measurements do
 not establish the overhead of the speculative sequence or the unified stochastic
 serving implementation.
 
+Matching vLLM end-to-end performance is a required acceptance floor under the
+matched-workload conditions in [performance acceptance](core-design.md#performance-acceptance).
+The historical decode and long-prefill results fall below that floor. Meeting
+the native replay-overhead limit does not close the serving-performance gate.
+
 The static native model contract owns Qwen input packing, schema validation,
 prompt interpretation, and completion semantics. JPEG/EXIF decoding passes
 checkpoint admission and all 26 valid-image HTTP admissions; two constrained

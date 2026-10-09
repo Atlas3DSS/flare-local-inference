@@ -1102,6 +1102,16 @@ unchanged warmup input is insufficient.
 
 ### Performance acceptance
 
+Matching vLLM serving performance is the minimum acceptance bar. Compare the
+same checkpoint, GPU, precision, prompt corpus, sampling settings, output
+budgets, cache conditions, and concurrency. Sparkgap must match or improve
+end-to-end TTFT, inter-token latency, and completed-work throughput across the
+required local workloads at concurrency 1, 2, and 4. Report individual workloads
+and tail latency; an aggregate win does not erase a workload regression. Repeat
+noisy measurements before declaring parity. Primary serving measurements use
+temperature 1, top-k 20, and top-p 0.95; temperature-zero diagnostics remain
+separate. Correctness and request-completion gates apply to both engines.
+
 Measure three paths with matching model, inputs, precision, and generation
 behavior:
 
@@ -1129,8 +1139,10 @@ Fusion work is guided by measured operator time and kernel count. Host graph
 launch traces alone do not establish a GPU execution breakdown.
 
 The replay harness establishes the achievable floor for the captured computation.
-The core's performance target is sustained decode within 5% of that floor for the
-same graph sequence, with frontend delivery measured separately.
+The native core must sustain decode within 5% of that floor for the same graph
+sequence, with frontend delivery measured separately. This host-overhead limit
+is an additional requirement; efficient replay of slow graphs does not satisfy
+the vLLM serving-performance floor.
 
 The weight-traffic bandwidth bound excludes kernel latency and other execution
 costs. At decode batch 1 this model reads about
@@ -1147,7 +1159,8 @@ costs. At decode batch 1 this model reads about
 | Routers, BF16 | 0.13 |
 
 At the target GPU's 1.79 TB/s this gives a bandwidth bound near 3.9 ms per token.
-The performance target is defined against measured graph replay time.
+Serving performance must meet the vLLM floor, and native replay must meet the
+measured graph-overhead limit.
 
 Keep raw traces, configurations, checkpoint revisions, and source fingerprints.
 Correctness failures block performance qualification.
