@@ -75,6 +75,23 @@ with schema-directed JSON argument types. Partial markers and UTF-8 sequences
 remain buffered across token boundaries. Malformed or unknown tool calls are
 errors, and incomplete tool blocks cannot produce successful terminal output.
 
+`output::ReasoningParser` and `output::ToolCallParser` consume presented token
+IDs and stable decoded spans and emit transport-neutral events. The
+`model::qwen4exp::output::QwenOutput` composition owns Qwen delimiters,
+reasoning/tool transitions and schema-directed parameter conversion. Its
+initial reasoning state comes from the open assistant prefix, excluding
+preceding user and tool messages. Model selection is static outside the token
+loop. `server::output::Presentation` and its accumulator serve both JSON and
+SSE, preserving append-only tool IDs and argument fragments without knowledge
+of model syntax. Qwen calls remain buffered until their closing delimiter and
+are published atomically.
+
+Parser termination distinguishes EOS, output limits, user stops, cancellation
+and execution errors. Cancellation and errors notify the protocol without
+publishing buffered output. Presented token IDs include tokens that emit no
+text and EOS; custom token stops filter their matching IDs before presentation.
+Raw generation observations retain those omitted IDs separately.
+
 `response_format` supports `text`, `json_object` and `json_schema`; `grammar`
 accepts a Lark grammar. Native llguidance compilation is bounded and rejects
 unsupported schema assertions, external references and compiler warnings.

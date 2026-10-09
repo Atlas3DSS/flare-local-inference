@@ -127,6 +127,7 @@ pub(super) async fn generate(
                 generated_tokens,
                 reused_prompt_tokens,
                 reason,
+                ..
             } => {
                 if count != prompt_tokens.len()
                     || generated_tokens != 64

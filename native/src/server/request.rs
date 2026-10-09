@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 pub struct PreparedRequest {
     pub prompt: Prompt,
     pub stream: bool,
-    pub output: super::output::OutputConfig,
+    pub output: crate::model::OutputConfig,
     pub rendered_prompt: String,
     pub(crate) observation: super::observation::ObservationOptions,
 }
@@ -155,21 +155,13 @@ pub fn prepare(
         options.insert("add_generation_prompt".into(), Value::Bool(false));
     }
     let rendered = frontend.render_chat(&normalized, &options)?;
-    let output = super::output::OutputConfig {
-        verbatim: grammar.is_some(),
-        reasoning: rendered.text.rfind("<think>").is_some_and(|open| {
-            rendered
-                .text
-                .rfind("</think>")
-                .is_none_or(|close| open > close)
-        }),
-        tools: options
-            .get("tools")
-            .or_else(|| frontend.template_default("tools"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    };
+    let output = crate::model::prepare_output(
+        frontend,
+        &rendered,
+        &normalized,
+        &options,
+        grammar.is_some(),
+    );
     let (tokens, positions, vision_token_indices, conditioning, images) = if images.is_empty() {
         if rendered
             .token_ids

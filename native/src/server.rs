@@ -4,10 +4,10 @@ mod config;
 mod listener;
 mod metrics;
 mod observation;
-mod output;
+pub(crate) mod output;
 mod qualification;
 mod request;
-pub use output::OutputConfig;
+pub use crate::model::OutputConfig;
 pub use request::{PreparedRequest, prepare as prepare_request};
 mod runtime;
 mod stops;
@@ -427,12 +427,11 @@ async fn chat(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let mut parser = output::OutputParser::new(prepared.output, id.clone());
     if prepared.stream {
         let stream = async_stream::stream! {
             let _ingress=ingress;
             let mut generation=generation;
-            let mut decoder=state.frontend.incremental_decoder(false);
+            let mut presentation=output::Presentation::<crate::model::OutputProtocol>::new(&state.frontend, &state.model.config().eos_token_ids, prepared.output, id.clone());
             let mut first=chunk(&id,created,&state.model.config().model_id,json!({"role":"assistant"}),Value::Null,observation.include_usage);
             if let Some(ids)=&prompt_token_ids{first["prompt_token_ids"]=json!(ids);}
             yield Ok::<_,Infallible>(Event::default().data(first.to_string()));
@@ -443,16 +442,15 @@ async fn chat(
                         yield Ok(Event::default().data(observed_chunk(&id,created,&state.model.config().model_id,token,timestamp_ns,observation.include_usage).to_string()));
                     },
                     GenerationEvent::Token(token)=>{
-                        if state.model.config().eos_token_ids.contains(&token){continue;}
-                        match decoder.push(&[token]).and_then(|text|parser.push(text.as_deref().unwrap_or(""))){
+                        match presentation.push(token){
                             Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},
-                            Err(message)=>{yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
+                            Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
                         }
                     },
-                    GenerationEvent::Finished{prompt_tokens,generated_tokens,reused_prompt_tokens,reason}=>{
-                        let deltas=decoder.finish().and_then(|text|parser.push(&text)).and_then(|mut deltas|{deltas.extend(parser.finish()?);Ok(deltas)});
-                        match deltas{Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},Err(message)=>{yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}}
-                        let reason=if parser.has_tools(){"tool_calls"}else{reason};
+                    GenerationEvent::Finished{prompt_tokens,generated_tokens,reused_prompt_tokens,reason,termination}=>{
+                        let deltas=presentation.finish(termination);
+                        match deltas{Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}}
+                        let reason=if presentation.has_tools(){"tool_calls"}else{reason};
                         let mut last=chunk(&id,created,&state.model.config().model_id,json!({}),json!(reason),observation.include_usage);
                         observation.finish(&mut last,prompt_tokens,generated_tokens,reused_prompt_tokens,(ingress_ns,enqueue_ns),true);
                         yield Ok(Event::default().data(last.to_string()));
@@ -464,17 +462,22 @@ async fn chat(
                         }
                         yield Ok(Event::default().data("[DONE]"));terminal=true;break;
                     },
-                    GenerationEvent::AdmissionRejected(message)|GenerationEvent::Error(message)=>{yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
+                    GenerationEvent::AdmissionRejected(message)|GenerationEvent::Error(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
                 }
             }
-            if !terminal{yield Ok(Event::default().data(json!({"error":{"message":generation.failure()}}).to_string()));}
+            if !terminal{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":generation.failure()}}).to_string()));}
         };
         Sse::new(stream)
             .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
             .into_response()
     } else {
         let mut generation = generation;
-        let mut tokens = Vec::new();
+        let mut presentation = output::Presentation::<crate::model::OutputProtocol>::new(
+            &state.frontend,
+            &state.model.config().eos_token_ids,
+            prepared.output,
+            id.clone(),
+        );
         let mut raw_tokens = Vec::new();
         let mut token_timestamps = Vec::new();
         while let Some(event) = generation.events.recv().await {
@@ -489,14 +492,17 @@ async fn chat(
                     }
                 }
                 GenerationEvent::Token(token) => {
-                    if !state.model.config().eos_token_ids.contains(&token) {
-                        tokens.push(token);
+                    if let Err(message) = presentation.push(token) {
+                        presentation.abort(crate::output::Termination::ExecutionError);
+                        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
                     }
                 }
                 GenerationEvent::Error(message) => {
+                    presentation.abort(crate::output::Termination::ExecutionError);
                     return error(StatusCode::INTERNAL_SERVER_ERROR, message);
                 }
                 GenerationEvent::AdmissionRejected(message) => {
+                    presentation.abort(crate::output::Termination::ExecutionError);
                     return error(StatusCode::SERVICE_UNAVAILABLE, message);
                 }
                 GenerationEvent::Finished {
@@ -504,20 +510,17 @@ async fn chat(
                     generated_tokens,
                     reason,
                     reused_prompt_tokens,
+                    termination,
                 } => {
-                    let text = match state.frontend.decode(&tokens, false) {
-                        Ok(text) => text,
-                        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
-                    };
-                    if let Err(message) = parser.push(&text).and_then(|_| parser.finish()) {
+                    if let Err(message) = presentation.finish(termination) {
                         return error(StatusCode::INTERNAL_SERVER_ERROR, message);
                     }
-                    let reason = if parser.has_tools() {
+                    let reason = if presentation.has_tools() {
                         "tool_calls"
                     } else {
                         reason
                     };
-                    let mut response = json!({"id":id,"object":"chat.completion","created":created,"model":state.model.config().model_id,"choices":[{"index":0,"message":parser.message(),"finish_reason":reason}],"usage":observation::usage(prompt_tokens,generated_tokens)});
+                    let mut response = json!({"id":id,"object":"chat.completion","created":created,"model":state.model.config().model_id,"choices":[{"index":0,"message":presentation.message(),"finish_reason":reason}],"usage":observation::usage(prompt_tokens,generated_tokens)});
                     if let Some(ids) = &prompt_token_ids {
                         response["prompt_token_ids"] = json!(ids);
                         response["choices"][0]["token_ids"] = json!(raw_tokens);
@@ -537,6 +540,7 @@ async fn chat(
                 }
             }
         }
+        presentation.abort(crate::output::Termination::ExecutionError);
         error(StatusCode::INTERNAL_SERVER_ERROR, generation.failure())
     }
 }

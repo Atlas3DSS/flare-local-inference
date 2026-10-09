@@ -42,6 +42,7 @@ pub enum GenerationEvent {
         generated_tokens: u32,
         reused_prompt_tokens: u64,
         reason: &'static str,
+        termination: crate::output::Termination,
     },
     AdmissionRejected(String),
     Error(String),
@@ -606,6 +607,7 @@ fn run_loop(
                                 generated_tokens: live.generated_tokens,
                                 reused_prompt_tokens: live.reused_prompt_tokens(),
                                 reason: "stop",
+                                termination: crate::output::Termination::UserStop,
                             })
                             .is_err()
                         {
@@ -664,6 +666,11 @@ fn run_loop(
                                 generated_tokens: live.generated_tokens,
                                 reused_prompt_tokens: live.reused_prompt_tokens(),
                                 reason,
+                                termination: if reason == "stop" {
+                                    crate::output::Termination::Eos
+                                } else {
+                                    crate::output::Termination::OutputLimit
+                                },
                             })
                             .is_err()
                         {

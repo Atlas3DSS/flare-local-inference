@@ -365,3 +365,8 @@ fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
         ],
     }
 }
+
+#[cfg(feature = "server")]
+pub mod qwen4exp;
+#[cfg(feature = "server")]
+pub use qwen4exp::output::{OutputConfig, QwenOutput as OutputProtocol, prepare_output};
