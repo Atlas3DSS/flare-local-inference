@@ -603,10 +603,30 @@ mod tests {
     #[test]
     #[ignore = "requires SPARKGAP_CHECKPOINT pointing to the exact Qwen3.8 checkpoint"]
     fn checkpoint_mask_trace() {
-        use sha2::{Digest, Sha256};
         let snapshot = std::path::PathBuf::from(
             std::env::var_os("SPARKGAP_CHECKPOINT").expect("SPARKGAP_CHECKPOINT is required"),
         );
+        let reference = check_checkpoint_masks(&snapshot, None);
+        let trace_path = std::env::temp_dir().join(format!(
+            "sparkgap-grammar-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let traced = check_checkpoint_masks(&snapshot, Some(&trace_path));
+        let saved: Value = serde_json::from_slice(&std::fs::read(&trace_path).unwrap()).unwrap();
+        std::fs::remove_file(trace_path).unwrap();
+        assert_eq!(reference, traced);
+        assert_eq!(reference, saved);
+    }
+
+    fn check_checkpoint_masks(
+        snapshot: &std::path::Path,
+        trace_output: Option<&std::path::Path>,
+    ) -> Value {
+        use sha2::{Digest, Sha256};
         let bytes = std::fs::read(snapshot.join("tokenizer.json")).unwrap();
         assert_eq!(
             format!("{:x}", Sha256::digest(&bytes)),
@@ -709,9 +729,9 @@ mod tests {
             .unwrap();
         assert!(incomplete.advance(248_046).is_err());
         let trace = json!({"model":"local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD","revision":"dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2","llguidance":"1.9.1","tokenizers":"0.23.2","mask_words":7760,"tokenizer_vocab":248077,"model_vocab":248320,"traces":traces});
-        println!("{}", serde_json::to_string_pretty(&trace).unwrap());
-        if let Some(path) = std::env::var_os("SPARKGAP_GRAMMAR_TRACE") {
+        if let Some(path) = trace_output {
             std::fs::write(path, serde_json::to_string_pretty(&trace).unwrap() + "\n").unwrap();
         }
+        trace
     }
 }
