@@ -2,8 +2,7 @@
 
 This plan covers every item in [the second correction set](core-design-corrections-2.md),
 including the requirements it carries forward from [the first set](core-design-corrections.md).
-The audit uses the working trees on 2026-10-09. The second document's SHA-256 is
-`5cb9d05d874683521f4e9fde80758b2280fa73c4a5fc09aff745135d93e498f2`.
+The audit uses the working trees on 2026-10-09.
 The correction documents remain the requirements; this file records implementation
 order, remaining work, and evidence required for closure.
 
@@ -74,12 +73,11 @@ closed, subject to their original measurement scopes.
 
 ## Execution order
 
-1. **Preserve evidence and establish source history.** Resolve the recorded
+1. **Establish source history and qualify replay.** Resolve the recorded
    copy-state upload discrepancy and complete qualification. Restore port 8000
-   after exclusive GPU runs. Archive large validation
-   payloads with verified hashes, repair their links, and commit Sparkgap in
-   reviewable groups. Inventory FlashInfer changes before committing the serving
-   changes and updating its pin. This work does not wait for every feature to pass.
+   after exclusive GPU runs. Keep useful debugging payloads outside Git and commit
+   validated changes in reviewable groups. Commit FlashInfer serving changes and
+   update its pin. This work does not wait for every feature to pass.
 2. **Establish numerical and construction gates.** Replace the eager-based limits,
    define calibrated cross-capacity checks, add the real-constructor CPU bootstrap
    test, and run the frozen generation/reference-variance corpus. Keep identical
@@ -172,7 +170,7 @@ work remains stopped.
 | 4.2 Externalize archives | Closed: bulk files live under `/data/sparkgap-artifacts/validation-receipts`; repository links and compact locators resolve there. | Keep generated archives out of Git using the archive ignore rules. Retain debugging data only while it remains useful. |
 | 4.3 FlashInfer commits and pin | Main checkout is clean at `c691c681ebcbda066faf5bd80fef0d257b256fbc`, with seven commits separating operator contracts, diagnostics, and sampler changes. Source validation and locked dependency checks pass. | Submit the AIR normalization change (`f1cd7bb29`) upstream separately with its correctness and performance tests. |
 | 4.4 Specification cleanup | Receipt narratives removed from core design; graph counts, sampling, determinism, acceptance, and README status reflect the implementation. | Complete the native model-packing contract and review the first correction set's section-7 mappings as the remaining architectural changes land. |
-| 4.5 CPU bootstrap | Open. Meta model-tree and ownership tests do not invoke all production Prepared constructors. | Drive actual `prepare_model` with a recording session and metadata-only storage, replacing IO/compilation boundaries while retaining constructors. Assert graph/operator declarations, capacities, dtypes, and scratch/state contracts for ordinary, copy, and MTP preparation; assert CUDA remains uninitialized. Do not add a serving fallback. |
+| 4.5 CPU bootstrap | Closed: [constructor tests](../tests/preparation/test_bootstrap_construction.py) invoke actual `prepare_model`, weight-tree assembly, Prepared constructors, and public b12x plans for ordinary/copy/MTP catalogs (28/39/39 graphs). Five tests pass with CUDA initialization forbidden. | Preserve graph/operator declarations, capacities, dtypes, scratch ownership, and malformed-weight rejection. These tests stop at tuning; compilation, capture, and numerics require GPU checks. |
 | 4.6 Receipt prose | Closed: validation index and acceptance coverage state behavior, limitations, and remaining gates; historical measurements stay in their individual reports. | Keep acceptance summaries aligned with implementation and actual test results. |
 
 Debugging payloads remain outside Git while useful. Source commits and dependency
