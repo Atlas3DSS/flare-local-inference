@@ -46,7 +46,7 @@ Ordinary execution uses ABI 2; copy and learned speculation use ABI 3.
 
 | Area | Established measurement | Remaining work |
 |---|---|---|
-| Serving and replay | [Ordinary serving](serving-performance.md) measures replay overhead, concurrency, prefill, and prefix reuse with its recorded policies. | Named B1/B4 kernel timelines and speculative replay-floor comparison. |
+| Serving and replay | [Ordinary serving](serving-performance.md) measures replay overhead, concurrency, prefill, and prefix reuse with its recorded policies. The [node attribution probe](graph-node-attribution.md) verifies capture-to-trace identity. | Named B1/B4 kernel timelines and speculative replay-floor comparison. |
 | Sampling | [FlashInfer composition](sampling-flashinfer.md) measures filtering and sampling cost with explicit RNG and allocation checks. | Bounded top-k is deferred. |
 | Chain acceptance | [Uniform-endpoint regression](flashinfer-chain-endpoint.md) verifies probability-one acceptance through the public FI sampler. | Preserve the regression during sampler changes. |
 | Attention | [Fixed split contract](qsa-fixed-splits-public-api.md) and [long partitions](qsa-long-partitions.md) qualify their tested shapes. | Measure and calibrate the adaptive split policy before removing the recipe pin. |
