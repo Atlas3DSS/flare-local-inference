@@ -14,7 +14,7 @@ preprocessing, grammar constraints, prefix caching, and request scheduling.
 |---|---|---|
 | Text numerics | All 48 layers traced; first cross-stack difference at HC normalization, reference variation at MoE; generation agreement pending | [Layer comparison](docs/validation/text-layer-comparison.md) |
 | Vision numerics | Serving-path discrepancies require qualification | [Encoder comparisons](docs/validation/vision-serving-reference.md) |
-| Runtime parity | Ordinary replay and shared-scratch ownership qualified; copy-state replay qualification pending | [Acceptance coverage](docs/validation/acceptance-gaps.md) |
+| Runtime parity | Ordinary and copy-state executor parity pass; independent width-one comparison remains open | [Acceptance coverage](docs/validation/acceptance-gaps.md) |
 | HTTP suites | Core text/image suites pass; grammar and tool API gaps remain | [Validation index](docs/validation/README.md) |
 | Performance | Replay and both serving configurations measured; decode trails vLLM, prefix-hit latency is lower; numerical acceptance remains open | [Serving measurements](docs/validation/serving-performance.md) |
 | Speculative execution | Copy speculation serves all supported shapes; transaction, agentic-output, and learned-MTP qualification remain open | [MTP design](docs/mtp-design.md), [agentic workload](docs/validation/speculative-agentic-serving.md) |
@@ -91,6 +91,10 @@ cargo test --manifest-path native/Cargo.toml --features server --offline
 Exact-checkpoint tests use the local Hugging Face cache. The checkpoint validator
 also accepts `SPARKGAP_QWEN38_SNAPSHOT` for an explicitly selected snapshot path.
 Missing cached weights cause those integration cases to skip.
+
+CUDA component tests using `PreparedGraphBundle.start_worker()` require a native
+extension built with `server,extension-module,qualification`. Normal package
+builds omit raw replay bindings; the model's production handoff uses `Server`.
 
 `tests/frontend/generate_fixtures.py` records rendered chat bytes, token IDs,
 decoding, and template errors using the pinned Transformers revision and actual

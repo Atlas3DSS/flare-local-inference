@@ -47,11 +47,10 @@ exercises all shapes with forced literal output. The
 passes. Its eight failures remain in the evidence. Learned MTP serving and
 paired speculative speedup are unqualified.
 
-The [copy-state replay run](/data/sparkgap-artifacts/mtp-implementation/speculative-state-parity/receipt.json)
-completed its 30 Python commands and native initialization, then stopped at
-`upload.1.identical` before the second native graph. The intended identical-input
-contract was not satisfied. Diagnose that upload discrepancy and retain this
-failed receipt before rerunning; Python/Rust state parity remains open.
+The [copy-state replay comparison](validation/copy-state-replay.md) passes all
+30 commands through Python and Rust with zero state mismatches and unchanged
+replay allocations. All 14 speculative shapes are covered. Independent W1/Wn
+numerics, the ordinary-decoder arm, and complete accepted-prefix coverage remain open.
 
 The [FlashInfer chain acceptance correction](validation/flashinfer-chain-endpoint.md)
 passes its endpoint and sampler regressions. The
@@ -121,7 +120,7 @@ close a serving or performance requirement.
 | Item | Status and evidence | Work required to close |
 |---|---|---|
 | 1.1 One speculative round in flight | Implemented in [scheduler.rs](../native/src/scheduler.rs); speculative submission installs a barrier. | Measure native overhead against a replay of the same useful speculative graph sequence, including required uploads and actual committed outputs. Require ≤5%; retain graph gaps and timing distributions. |
-| 1.2 Copy before learned MTP | Implemented; copy-only preparation excludes MTP weights/cache. Full state parity and agentic acceptance remain open. | Complete same-graph Python/Rust state qualification and independent W1 comparisons, then rerun the unchanged agentic corpus. Separate engine defects, unsupported API behavior, and model-output failures using the ordinary/reference arms. Load learned MTP only after transaction qualification. |
+| 1.2 Copy before learned MTP | Copy-only preparation excludes MTP weights/cache; same-graph Python/native state comparison passes all 14 shapes. Independent W1 and agentic acceptance remain open. | Run independent W1 comparisons and the unchanged agentic corpus. Separate engine defects, unsupported API behavior, and model-output failures using the ordinary/reference arms. Load learned MTP only after transaction qualification. |
 | 1.3 Widths follow kernel bands | All B1 widths 1–8, B2 widths 1–4, and B4 widths 1–2 exist. | Record repeated fixed-shape round-cost distributions for all 14 shapes. Measure the grouped-path transition with diagnostic B2×4/5 and B4×2/3 comparisons. Shapes beyond eight total rows stay outside the serving catalog until measured and qualified. |
 | 1.4 State-write cost | The design records 108 MiB recurrent state per verified row. Measured write cost remains open. | Report logical bytes written per graph and measured GDN/state-selection time. Separate compulsory checkpoint-column writes, commit/copy traffic, and total round duration. Do not present a bandwidth-derived lower bound as measured time. |
 | 1.5 Stochastic primary path | Implemented with FlashInfer; no greedy route remains. One copy-adaptive C1 workload repetition exists. | Measure ordinary, copy-only, fixed learned-MTP, adaptive MTP without copying, and adaptive MTP with copying on identical stochastic workloads at C1/2/4. Report acceptance by depth/source and completed-work latency/throughput. Report temperature-zero timings separately through the same FlashInfer path; the 82-prompt correctness run is not a performance measurement. |
@@ -210,11 +209,11 @@ options, forced/named selections, and subsequent tool-result turns.
 | 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | After contract/error extraction, introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve candidate-record-before-complete, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
 | 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
 | 6.5 Qualification package | Partial: `qualify/` exists, but large scripts retain their implementations and duplicate clients. | Move `qualify_server.py` and `qualify_graph_execution.py` logic first, then other diagnosis/trace/qualification scripts and the test-tree qualifier. Share HTTP/SSE, fixture loading, receipt/provenance, and artifact helpers. Keep scripts as thin entrypoints; preserve CLI behavior, request bytes, assertions, and receipt semantics. |
-| 6.6 Unsafe safety proofs | Open. | Add local SAFETY comments describing allocation bounds, thread/context ownership, and drain/lifetime requirements for every unsafe block outside cuda.rs. Validate the reasoning against ownership and failure tests. |
-| 6.6 Resolved upload bindings | Open. | Return resolved bindings from validate_uploads and consume them directly in submit, using bounded reusable storage rather than adding an allocation per decode. Test missing/duplicate/overlapping/out-of-range uploads and reuse of persistent staging frames; preserve exact staged bytes. |
-| 6.6 Grammar debug configuration | Open; SPARKGAP_GRAMMAR_TRACE is confined to a test fixture, not the production server. | Replace the environment switch with an explicit qualification/test debug input, disabled by default. Verify tracing leaves masks and generated output unchanged. No live-server configuration is needed for a test-only trace. |
-| 6.6 Qualification replay binding | Open. | Feature-gate the ReplayWorker Python binding as a qualification primitive. Verify the production extension excludes it and the qualification build includes it; keep production GraphExecutor/Server ownership unchanged. |
-| 6.6 Dataclass conventions | Open. | Document scratch lifetime/reuse, metadata mutability/shape, and persistent-state ownership once in the recipe package docstring. Keep model-specific state behavior beside its implementation. |
+| 6.6 Unsafe safety proofs | Closed: unsafe calls outside cuda.rs state allocation, context/thread, and drain/lifetime obligations locally; ownership/failure tests pass. | Preserve the proofs when changing native ownership. |
+| 6.6 Resolved upload bindings | Closed: validate_uploads returns reusable resolved descriptors consumed directly by staging and enqueue. CPU range/alias/reuse tests and four real-CUDA transport tests pass. | Preserve exact ranges and pending-frame ownership during model-contract extraction. |
+| 6.6 Grammar debug configuration | Closed: the checkpoint fixture takes an explicit optional trace path; no trace environment switch remains. The exact-checkpoint test compares tracing disabled/enabled and passes. | Keep debug output test-only and disabled unless explicitly selected. |
+| 6.6 Qualification replay binding | Closed: raw replay bindings require the qualification feature. Production/qualification export tests and installed production export checks pass; GraphExecutor/Server remain available. | Build component replay tests with the qualification feature. |
+| 6.6 Dataclass conventions | Closed: the recipe package docstring specifies scratch reuse, fixed storage geometry, metadata mutation, and persistent-state ownership. | Keep model-specific state behavior beside its implementation. |
 
 Four request lanes and 8/24 completion columns must be classified explicitly as
 transport/catalog constraints or Qwen semantics during extraction. Moving a

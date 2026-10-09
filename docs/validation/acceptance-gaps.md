@@ -27,7 +27,7 @@ qualification.
 | Text arithmetic | [Layer tracing](text-layer-comparison.md) locates the first cross-stack difference at hyperconnection normalization and the reference's own variation at MoE. | Run the fixed 82-prompt continuation corpus against two reference runs; extend identical-input component checks. Whole-logit L2 is diagnostic. |
 | Vision arithmetic | [Serving comparison](vision-serving-reference.md) records the encoder discrepancies. | Qualify component arithmetic and full-capacity image outputs. |
 | Ordinary replay | [Graph execution](graph-execution-parity-prefill4096.md) and [shared scratch](unified-scratch.md) qualify their recorded catalogs, ownership, and allocation stability. | Repeat the relevant gates after operator or catalog changes. Historical dual-sampler results do not qualify the common-sampler speculative catalog. |
-| Copy transaction | [Native serving](speculative-copy-serving.md) exercises all supported shapes and accepted copied drafts. | Full-state Python/Rust replay, independent one-token comparisons, every accepted-prefix length, cancellation, pressure, and image-conditioned speculation. |
+| Copy transaction | [Native serving](speculative-copy-serving.md) exercises all supported shapes and accepted copied drafts; [state replay](copy-state-replay.md) passes identical Python/native commands across all 14 shapes. | Independent one-token comparisons, every accepted-prefix length, cancellation, pressure, and image-conditioned speculation. |
 | Agentic output | [The 24-context workload](speculative-agentic-serving.md) has 16 manual passes; eight cases fail API or output requirements. | Resolve engine/API defects and compare unchanged requests against ordinary and reference arms to separate model-output limitations. |
 | Prefix restore | [Aligned prefix replay](prefix-replay-prefill4096.md) checks cold versus restored execution with fixed reduction policies. | Retain the final prompt checkpoint as well as the terminal checkpoint; qualify copied and learned-draft state across branches. Calibrate cross-capacity floating-state comparisons before freeing tuning policies. |
 | Grammar speculation | Host-side cloned grammar state produces per-candidate masks. | Require an accepted copied draft and byte-identical constrained output against independent one-token execution; cover rejection and grammar-state commit. |
@@ -46,13 +46,13 @@ page match alone is insufficient for restoration.
 - String stops remain unimplemented in the installed server.
 - Nonempty tools with a final-content schema, required/named tool selection,
   and disabling parallel tool calls remain unsupported.
-- Reasoning and tool-call parsing require separate model-owned interfaces and
+- Reasoning and tool-call parsing have separate model-owned interfaces and
   a common incremental JSON/SSE presentation path. Model-specific input packing
-  also requires an explicit native contract.
-- Native typed errors, worker-loop decomposition, prevalidated upload bindings,
-  and qualification-only binding separation remain open.
-- The CPU bootstrap smoke must execute real preparation constructors; a meta
-  Transformers tree alone does not test recipe wiring.
+  still requires an explicit native contract.
+- Native typed errors and worker-loop decomposition remain open. Upload ranges
+  are resolved once into reusable descriptors; CPU and real-CUDA transport checks pass.
+- CPU bootstrap tests invoke real preparation constructors, public plans, and
+  scratch declarations. They stop before tuning, compilation, and capture.
 
 Explicit request budgets remain authoritative. Increasing a fixture's budget
 or removing constraints does not resolve its failed output requirement.
