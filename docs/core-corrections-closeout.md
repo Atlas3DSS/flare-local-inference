@@ -82,23 +82,24 @@ closed, subject to their original measurement scopes.
 
 ## Execution order
 
-1. **Establish source history and qualify replay.** Resolve the recorded
-   copy-state upload discrepancy and complete qualification. Restore port 8000
+1. **Maintain source history and qualify replay.** Extend the passing copy-state
+   replay comparisons to changed catalogs and uncovered transaction cases. Restore port 8000
    after exclusive GPU runs. Keep useful debugging payloads outside Git and commit
-   validated changes in reviewable groups. Commit FlashInfer serving changes and
-   update its pin. This work does not wait for every feature to pass.
+   validated changes in reviewable groups. Keep the FlashInfer dependency pin
+   matched to committed serving changes. This work does not wait for every feature to pass.
 2. **Establish numerical and construction gates.** Replace the eager-based limits,
-   define calibrated cross-capacity checks, add the real-constructor CPU bootstrap
-   test, and run the frozen generation/reference-variance corpus. Keep identical
+   define calibrated cross-capacity checks, preserve the real-constructor CPU bootstrap
+   tests, and run the frozen generation/reference-variance corpus. Keep identical
    graph execution and same-capacity restore comparisons bitwise. Capture the
    unchanged ordinary common-sampler B1/B4 kernel baseline alongside this work;
    that measurement does not depend on learned MTP qualification.
-3. **Extract the native model boundary.** Introduce the statically dispatched model
-   contract, typed errors, and worker phases, in that order. Move existing
-   speculative packing, output parsing, and interpretation into the Qwen implementation before
-   adding further MTP behavior. Preserve upload bytes and transaction ordering.
-4. **Complete local serving contracts and copy qualification.** Finish string stops,
-   JPEG/EXIF, and tool-plus-schema grammars. Qualify the exact checkpoint-retention
+3. **Complete the native model boundary.** Preserve the implemented static model
+   contract and Qwen-owned packing/output semantics while introducing typed errors
+   and worker phases. Preserve upload bytes and transaction ordering.
+4. **Complete local serving contracts and copy qualification.** Implement
+   tool-plus-schema grammars and rerun the agentic workload with native string stops.
+   Preserve JPEG/EXIF admission coverage and its unresolved output failures.
+   Qualify the exact checkpoint-retention
    implementation described below. Qualify copied drafts against independent W1
    execution, including actual prefix restores, every accepted count, and failures.
 5. **Qualify learned MTP.** Use the qualified transaction with the checkpoint's MTP
@@ -130,11 +131,11 @@ close a serving or performance requirement.
 | Item | Status and evidence | Work required to close |
 |---|---|---|
 | 1.1 One speculative round in flight | Implemented in [scheduler.rs](../native/src/scheduler.rs); speculative submission installs a barrier. | Measure native overhead against a replay of the same useful speculative graph sequence, including required uploads and actual committed outputs. Require ≤5%; retain graph gaps and timing distributions. |
-| 1.2 Copy before learned MTP | Copy-only preparation excludes MTP weights/cache; same-graph Python/native state comparison passes all 14 shapes. Independent W1 and agentic acceptance remain open. | Run independent W1 comparisons and the unchanged agentic corpus. Separate engine defects, unsupported API behavior, and model-output failures using the ordinary/reference arms. Load learned MTP only after transaction qualification. |
+| 1.2 Copy before learned MTP | Copy-only preparation excludes MTP weights/cache. Same-graph Python/native replay and independent W1/Wn comparisons pass the recorded all-accepted literal cases across all 14 shapes. Agentic acceptance remains open. | Complete ordinary-decoder, rejected-prefix, and changed-catalog comparisons, then rerun the unchanged agentic corpus. Separate engine defects, unsupported API behavior, and model-output failures using ordinary/reference arms. Qualify learned MTP only after transaction qualification. |
 | 1.3 Widths follow kernel bands | All B1 widths 1–8, B2 widths 1–4, and B4 widths 1–2 exist. | Record repeated fixed-shape round-cost distributions for all 14 shapes. Measure the grouped-path transition with diagnostic B2×4/5 and B4×2/3 comparisons. Shapes beyond eight total rows stay outside the serving catalog until measured and qualified. |
 | 1.4 State-write cost | The design records 108 MiB recurrent state per verified row. Measured write cost remains open. | Report logical bytes written per graph and measured GDN/state-selection time. Separate compulsory checkpoint-column writes, commit/copy traffic, and total round duration. Do not present a bandwidth-derived lower bound as measured time. |
 | 1.5 Stochastic primary path | Implemented with FlashInfer; no greedy route remains. One copy-adaptive C1 workload repetition exists. | Measure ordinary, copy-only, fixed learned-MTP, adaptive MTP without copying, and adaptive MTP with copying on identical stochastic workloads at C1/2/4. Report acceptance by depth/source and completed-work latency/throughput. Report temperature-zero timings separately through the same FlashInfer path; the 82-prompt correctness run is not a performance measurement. |
-| 1.6 Grammar speculation | Cloned llguidance state and candidate/bonus masks are implemented; accepted grammar-constrained copied tokens are observed. | Run an independent W1 arm with the same constrained literal and require byte-identical output with at least one accepted speculative draft. Add mixed requests, rejection, EOS, empty masks, cancellation, and grammar-state commit checks. |
+| 1.6 Grammar speculation | Cloned llguidance state and candidate/bonus masks are implemented. Independent W1/Wn literal comparisons pass with all copied tokens accepted. | Cover mixed requests, rejection, EOS, empty masks, cancellation, and grammar-state commits beyond the singleton-language cases. Preserve exact accepted output and state comparisons. |
 | 1.7 Research outside specification | Closed: [mtp-design.md](mtp-design.md) links [competitive-mechanisms.md](/data/sparkgap-artifacts/mtp-research/competitive-mechanisms.md). | Preserve the external research artifact and its source fingerprints when moving documentation assets. |
 
 The copy transaction gate must cover QSA groups of four and pages of 64; all accepted
@@ -150,9 +151,9 @@ independent W1 or learned-draft-cache comparisons.
 | Item | Status and evidence | Work required to close |
 |---|---|---|
 | 2.1 Numerical acceptance | Specification amended; implementation incomplete. GDN 0.015 and vision 0.03 eager limits remain. The 82-prompt corpus/tools exist without a completed agreement receipt. | Remove whole-logit/encoder relative-L2 gates; retain diagnostic values. Replace the GDN 0.015 component assertion and associated pointwise bound with independently measured component tolerances. Run Sparkgap and two independent pinned-vLLM continuations on all 82 prompts; publish first divergence, median agreement, full-64 agreement fraction, and the reference repeatability floor. Extend identical-input coverage to all target, vision, and MTP operator families. |
-| 2.2 Determinism | The property is stated under correctness acceptance; the validation index records pinned-vLLM variance. Updated speculative-catalog evidence remains open. | Add the property to the runtime-contract section as requested and qualify repeated identical inputs across the admitted catalog. Preserve the reference-variance evidence. Keep determinism distinct from differences between capacities, plans, or sampling algorithms. |
+| 2.2 Determinism | Runtime and correctness contracts require identical graph inputs, persistent state, and explicit RNG state to produce bitwise-identical logits and transitions. The validation index records pinned-vLLM variance. Updated speculative-catalog evidence remains open. | Qualify repeated identical inputs across the admitted catalog. Preserve reference-variance evidence and distinguish determinism from differences between capacities, plans, or sampling algorithms. |
 | 3.1 Measured position | Historical baseline closed at its recorded revisions and sampling configuration. | Preserve its raw results. Establish the matching baseline for changed stochastic code before using it in any new performance comparison. Do not inherit historical timing claims after kernel or sampling changes. |
-| 3.2 Per-kernel GPU timeline | Open. Nsight software tracing contains graph GPU activity but no kernel-activity breakdown. | Obtain graph-node GPU activity with CUPTI/Nsight, or an event-instrumented diagnostic capture of the actual operator sequence. For B1 and B4, report kernel names/counts, layer/operator attribution, summed kernel time, graph span, and gaps. Verify outputs and quantify instrumentation overhead against uninstrumented replay. |
+| 3.2 Per-kernel GPU timeline | Open. The [graph-node attribution probe](validation/graph-node-attribution.md) maps a two-operation graph through explicit CUPTI/Nsight node relationships. Ordinary Qwen B1/B4 kernel measurements remain pending. | Apply node tracing to the actual ordinary operator sequence. Report kernel names/counts, layer/operator attribution, summed kernel time, graph span, and gaps. Verify outputs and quantify instrumentation overhead against uninstrumented replay. |
 | 3.3 Free autotuning and policy A/B | Open. [gdn.py](../sparkgap/recipes/qwen38/gdn.py) pins sequential_k1; [attention.py](../sparkgap/recipes/qwen38/attention.py) pins 16 splits. Prefix qualification lacks the required tolerance gate. | Calibrate and freeze cross-capacity floating-state/component predicates with exact metadata; keep same-capacity checks bitwise. Complete logits remain diagnostic under item 2.1; generation uses the reference floor. Expose pinned choices as explicit debug configuration. A/B GDN splits, QSA partitions, MoE reduction/fast-math policy, and hyperconnection composition separately, each with correctness and before/after timelines. Then allow ordinary preparation to select qualified plans freely. |
 | 3.4 Kernel-count workstream | Bandwidth-bound wording is corrected; kernel attribution/fusion work remains open. | Use the timeline to rank adjacent small-operator fusion opportunities, especially hyperconnection normalization/projection. Implement reusable compute changes in main-tree b12x, preserving scratch planning, tuning, capture, and numerical contracts. Report kernel count and full-graph benefit, not only isolated-kernel speed. |
 
@@ -178,7 +179,7 @@ work remains stopped.
 | 4.1 Commit working tree | Implemented: legacy removal, native runtime, Python preparation, qualification, and documentation use separate commits. | Commit each coherent validated change as it lands. FlashInfer pinning remains item 4.3. |
 | 4.2 Externalize archives | Closed: bulk files live under `/data/sparkgap-artifacts/validation-receipts`; repository links and compact locators resolve there. | Keep generated archives out of Git using the archive ignore rules. Retain debugging data only while it remains useful. |
 | 4.3 FlashInfer commits and pin | Main checkout is clean at `c691c681ebcbda066faf5bd80fef0d257b256fbc`, with seven commits separating operator contracts, diagnostics, and sampler changes. Source validation and locked dependency checks pass. | Submit the AIR normalization change (`f1cd7bb29`) upstream separately with its correctness and performance tests. |
-| 4.4 Specification cleanup | Receipt narratives removed from core design; graph counts, sampling, determinism, acceptance, and README status reflect the implementation. | Complete the native model-packing contract and review the first correction set's section-7 mappings as the remaining architectural changes land. |
+| 4.4 Specification cleanup | Receipt narratives are removed from core design; sampling, determinism, acceptance, and the static native model-packing contract are specified. | Keep section-7 mappings aligned with the remaining typed-error, worker-phase, and tuning-fixture extractions. |
 | 4.5 CPU bootstrap | Closed: [constructor tests](../tests/preparation/test_bootstrap_construction.py) invoke actual `prepare_model`, weight-tree assembly, Prepared constructors, and public b12x plans for ordinary/copy/MTP catalogs (28/39/39 graphs). Five tests pass with CUDA initialization forbidden. | Preserve graph/operator declarations, capacities, dtypes, scratch ownership, and malformed-weight rejection. These tests stop at tuning; compilation, capture, and numerics require GPU checks. |
 | 4.6 Receipt prose | Closed: validation index and acceptance coverage state behavior, limitations, and remaining gates; historical measurements stay in their individual reports. | Keep acceptance summaries aligned with implementation and actual test results. |
 
@@ -190,7 +191,7 @@ clean-checkout claim.
 
 | Item | Status and evidence | Work required to close |
 |---|---|---|
-| 5.1 JPEG and EXIF | Implemented with native libjpeg-turbo and all eight orientation transforms. All 26 fixed fixtures match Pillow RGB exactly under the unchanged JPEG tolerance of 2; identical-pixel preprocessing and actual checkpoint request preparation pass. | Install the updated native extension and exercise actual HTTP image requests. Preserve malformed-image, orientation-dimension, and resource-limit checks. |
+| 5.1 JPEG and EXIF | Implemented with native libjpeg-turbo and all eight orientations. All 26 CPU fixtures match Pillow RGB exactly under the unchanged tolerance of 2, and all 26 pass [installed HTTP admission](validation/jpeg-exif-http.md); four invalid image requests are rejected. | Preserve decoder, preprocessing, resource-limit, and HTTP admission coverage. Investigate the two constrained-output whitespace loops separately: PNG orientations 2 and 5 exhaust the unchanged 64-token budget. Semantic vision accuracy remains open. |
 | 5.2 Tools plus structured output | Open. [request.rs](../native/src/server/request.rs) rejects tool-plus-grammar and forced selections. | Compose checkpoint tool-call envelopes, admitted per-tool argument schemas, and final-content schema in llguidance. `auto` admits the union, `required` only tool alternatives, a named choice only that tool, and `none` only content. Share this grammar with speculative cloned-prefix masks. Require correct JSON/SSE presentation and no committed tokens outside the selected language. |
 | 5.3 Bounded top-k | Closed as an explicit deferral in [core-design.md](core-design.md). | Keep historical 120–170 µs component cost labeled by its measurement scope. No custom bounded-top-k implementation is required for correction closure. |
 
@@ -240,11 +241,11 @@ reuse an implementation; the server never assumes every model uses Qwen markers
 or a universal reasoning-then-tools pipeline.
 
 Select the protocol with the supported model/template contract at startup.
-Initialize parser state once per request from the resolved template options,
-actual assistant continuation prefix, reasoning setting, admitted tools, tool
-choice, and output grammar. Remove Qwen marker scans and whole-prompt `rfind`
-reasoning inference from generic request preparation. Literal markers in user
-or tool messages do not determine the assistant parser's initial state.
+The Qwen implementation initializes parser state once per request from resolved
+template options, assistant continuation, reasoning settings, admitted tools,
+tool choice, and output grammar. Generic request preparation delegates that
+interpretation to the model contract. Literal markers in user or tool messages
+do not determine the assistant parser's initial state.
 
 | Contract | Responsibility |
 |---|---|
@@ -272,19 +273,19 @@ path. Their transport encodings differ, but their completed semantic result must
 agree. A truncated emitted tool call cannot become a successful complete call;
 the explicit user-stop policy may discard only a never-emitted buffered call.
 
-Stop filtering must preserve this contract. Raw token observation and usage remain
-independent. If a stop occurs inside one token, presentation parsers receive only
-the visible text span, not the hidden suffix or its control markers. The isolated
-string-stop patch's text-only event path must be integrated with this token/span
-contract before application.
+Worker-side stop filtering supplies ordered token/text pieces to this protocol.
+Raw token observation and usage remain independent. If a stop occurs inside one
+token, presentation parsers receive only the visible text span; the hidden suffix
+and its control markers are suppressed.
 
-Implement Qwen reasoning and tool parsers first by extracting
-[output.rs](../native/src/server/output.rs), preserving its admitted behavior.
-Add interface-level tests for chunk invariance, initial/continued assistant state,
-literal markers, tools with reasoning, multiple calls, schema-directed argument
-types, partial calls under each termination cause, and JSON/SSE equivalence.
-Use distinct synthetic syntax in contract tests to detect hardcoded Qwen assumptions
-in generic composition; this does not add a second serving model.
+[Qwen parsers and their composer](../native/src/model/qwen4exp/output.rs) implement
+[the neutral interfaces](../native/src/output.rs). The
+[shared renderer](../native/src/server/output.rs) handles JSON/SSE presentation.
+CPU tests cover UTF-8/marker partitions, continuation state, literal markers,
+reasoning and tools, parameter types, and partial-call termination.
+[Installed HTTP checks](validation/output-protocol-http.md) cover literal markers,
+string stops, a tool call, and the unchanged stopped code-edit request. Combined
+tool/final-content grammars and the complete agentic workload remain open.
 
 This extraction changes native presentation, not CUDA graph execution. Parsers
 remain Rust-owned and do not call Python. PyTorch replay and state-comparison
@@ -309,14 +310,16 @@ Correction section 7 is an acceptance checklist for the specifications:
 
 ## Serving findings that affect copy qualification
 
-**String stops.** The unchanged agentic request `code-docstrings-stop` receives
-HTTP 400. A Rust-only patch is prepared separately for worker-side incremental
-UTF-8 matching and bounded prefix holdback. Integrate it with the model/error/worker
-boundaries above. Match before another graph submission; preserve full sampled IDs
-and usage; suppress the stop string and same-token suffix in both JSON and SSE.
-Explicit user stops may discard only a buffered, never-emitted incomplete tool
-call. Ordinary malformed-tool termination remains an error. Qualify cross-token
-and subtoken matches, overlapping prefixes, EOS/budget races, and resource release.
+**String stops.** Rust performs incremental UTF-8 matching with bounded prefix
+holdback before further model submission. JSON and SSE suppress the matched string
+and same-token suffix while retaining raw sampled IDs and usage. Installed HTTP
+checks pass, including the unchanged `code-docstrings-stop` request: all eight
+function bodies remain AST-equivalent, `END_EDIT` is hidden, and generation ends
+with `stop` after 541 tokens within its 1,024-token budget. The complete workload
+rerun is open. Requests combining string stops with structured grammar or custom
+token stops remain rejected.
+Explicit user stops discard only buffered, never-emitted incomplete tool calls;
+ordinary malformed-tool termination remains an error.
 
 **Exact checkpoint retention.** The implementation retains rendered instruction,
 final prompt, and terminal consumed endpoints independently, coalescing equal
@@ -358,8 +361,10 @@ stage is recurrence, beginning at the first resumed token; output relative L2 is
 Splitting inside a 16-token BF16 recurrence chunk changes its arithmetic partition.
 Calibrated operator acceptance for arbitrary partitions remains open.
 
-Actual-model selected-column snapshot/continuation and HTTP retention checks remain
-open. Required HTTP cases include endpoints below 16 and residues 0/1/2/3/63, exact
+Actual-model selected-column snapshot and continuation pass all 14 supported
+batch/width shapes at endpoints 65–72. Restores use different physical slots and
+private tail pages; immutable snapshots and replay allocations remain unchanged.
+HTTP retention checks remain open. Required HTTP cases include endpoints below 16 and residues 0/1/2/3/63, exact
 retries, changed user/tool suffixes, duplicate publication, pressure, cancellation,
 failed freeze, and appended conversations. Terminal retention must preserve reuse
 of consumed generated tokens alongside instruction/prompt reuse.

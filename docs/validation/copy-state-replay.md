@@ -18,11 +18,14 @@ The native service owns production execution.
 
 The [transaction comparison](../../qualify/copy_transaction_comparison.py)
 separately executes W1 continuations and wider copy-verification graphs across
-all 14 shapes. Its 309 commands pass 80,736 checks. All 22,320 compared state
-tensors are bitwise equal, including cross-width execution, a shared 64-token
-prefix, and continuations after restoring into private pages. Replay allocation
-counters and immutable source snapshots remain unchanged. The run uses forced
-literal grammar continuations with all copied tokens accepted.
+all 14 shapes. Its [exact-checkpoint run](/data/sparkgap-artifacts/mtp-implementation/exact-checkpoints/copy-selected.json)
+passes 475 commands and 175,529 checks. All 44,640 compared state tensors are
+bitwise equal. Coverage includes a shared 64-token prefix, cross-width execution,
+and selected-column snapshots at endpoints 65–72 after accepting widths 1–8.
+Snapshots restore into different physical slots and private tail pages before
+resume sampling and a following W1 step. Replay allocations, source pages, and
+immutable snapshots remain unchanged. The inputs use forced literal grammar
+continuations with all copied tokens accepted.
 
 These comparisons do not cover the ordinary decoder, every rejection prefix,
 or learned MTP. Bitwise agreement on these inputs does not establish a general
