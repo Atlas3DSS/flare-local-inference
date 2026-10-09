@@ -1,4 +1,5 @@
 use super::{ImageLimits, RgbImage, orientation, tests::processor};
+use crate::{Error, FrontendError};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf};
@@ -157,24 +158,18 @@ fn jpeg_limits_and_malformed_data_fail_before_pixel_decompression() {
         max_encoded_bytes: bytes.len() - 1,
         ..ImageLimits::default()
     });
-    assert!(
-        small
-            .decode_jpeg(&bytes)
-            .err()
-            .unwrap()
-            .contains("byte limit")
-    );
+    assert!(matches!(
+        small.decode_jpeg(&bytes).err().unwrap(),
+        Error::Frontend(FrontendError::Input(_))
+    ));
     let small = processor(ImageLimits {
         max_input_pixels: 37 * 29 - 1,
         ..ImageLimits::default()
     });
-    assert!(
-        small
-            .decode_jpeg(&bytes)
-            .err()
-            .unwrap()
-            .contains("input pixel limit")
-    );
+    assert!(matches!(
+        small.decode_jpeg(&bytes).err().unwrap(),
+        Error::Frontend(FrontendError::Input(_))
+    ));
     let normal = processor(ImageLimits::default());
     for end in [0, 1, 2, 30, bytes.len() / 2, bytes.len() - 2] {
         assert!(
@@ -185,17 +180,17 @@ fn jpeg_limits_and_malformed_data_fail_before_pixel_decompression() {
     let mut huge = bytes.clone();
     let sof = huge.windows(2).position(|v| v == [255, 192]).unwrap();
     huge[sof + 5..sof + 9].copy_from_slice(&[128, 0, 128, 0]);
-    assert!(
-        normal
-            .decode_jpeg(&huge)
-            .err()
-            .unwrap()
-            .contains("input pixel limit")
-    );
+    assert!(matches!(
+        normal.decode_jpeg(&huge).err().unwrap(),
+        Error::Frontend(FrontendError::Input(_))
+    ));
     let mut bad = vec![255, 216, 255, 225, 0, 10];
     bad.extend(b"Exif\0\0xx");
     bad.extend(&bytes[2..]);
-    assert!(normal.decode_jpeg(&bad).err().unwrap().contains("EXIF"));
+    assert!(matches!(
+        normal.decode_jpeg(&bad).err().unwrap(),
+        Error::Frontend(FrontendError::ImageDecode(_))
+    ));
     let mut duplicate = vec![255, 216];
     for _ in 0..2 {
         let payload = exif(1, true);
@@ -204,13 +199,10 @@ fn jpeg_limits_and_malformed_data_fail_before_pixel_decompression() {
         duplicate.extend(payload);
     }
     duplicate.extend(&bytes[2..]);
-    assert!(
-        normal
-            .decode_jpeg(&duplicate)
-            .err()
-            .unwrap()
-            .contains("multiple JPEG EXIF")
-    );
+    assert!(matches!(
+        normal.decode_jpeg(&duplicate).err().unwrap(),
+        Error::Frontend(FrontendError::ImageDecode(_))
+    ));
 }
 
 #[test]
@@ -225,11 +217,11 @@ fn malformed_png_exif_is_rejected() {
         let mut writer = encoder.write_header().unwrap();
         writer.write_image_data(&[1, 2, 3]).unwrap();
     }
-    assert!(
+    assert!(matches!(
         processor(ImageLimits::default())
             .decode_png(&bytes)
             .err()
-            .unwrap()
-            .contains("orientation")
-    );
+            .unwrap(),
+        Error::Frontend(FrontendError::ImageDecode(_))
+    ));
 }

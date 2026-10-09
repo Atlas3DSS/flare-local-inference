@@ -114,23 +114,35 @@ impl ModelContract for Qwen4Exp {
                     }
             })
         {
-            return Err("Qwen4Exp draft cache does not match committed request progress".into());
+            return Err(crate::Error::execution(
+                crate::ExecutionError::Completion,
+                "Qwen4Exp draft cache does not match committed request progress",
+            ));
         }
         if (record.status == 1 || record.status == 2)
             && record.token_id >= config.contract.vocabulary as i64
         {
-            return Err("completion token exceeds prepared vocabulary".into());
+            return Err(crate::Error::execution(
+                crate::ExecutionError::Completion,
+                "completion token exceeds prepared vocabulary",
+            ));
         }
         if let Some(vector) = record.vector {
             if vector.model_reserved != -1 {
-                return Err("Qwen4Exp v2 completion field 12 must be -1".into());
+                return Err(crate::Error::execution(
+                    crate::ExecutionError::Completion,
+                    "Qwen4Exp v2 completion field 12 must be -1",
+                ));
             }
             if vector
                 .tokens
                 .iter()
                 .any(|id| *id >= config.contract.vocabulary as i64)
             {
-                return Err("completion vector token exceeds prepared vocabulary".into());
+                return Err(crate::Error::execution(
+                    crate::ExecutionError::Completion,
+                    "completion vector token exceeds prepared vocabulary",
+                ));
             }
         }
         Ok(())

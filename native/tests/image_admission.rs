@@ -120,12 +120,12 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             },
         )
         .unwrap();
-        assert!(
+        assert!(matches!(
             prepare_request::<Qwen4Exp>(&frontend, &limited, &compiler, &config, request)
                 .err()
-                .unwrap()
-                .contains("byte limit")
-        );
+                .unwrap(),
+            sparkgap_native::Error::Admission(sparkgap_native::AdmissionError::Image(_))
+        ));
         counts += 1;
     }
     for url in [

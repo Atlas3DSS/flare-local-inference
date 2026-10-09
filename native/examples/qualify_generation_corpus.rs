@@ -16,6 +16,10 @@ use sparkgap_native::{
 use std::{fs, path::PathBuf};
 
 fn main() -> Result<(), String> {
+    run().map_err(|error| error.to_string())
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if arguments.len() != 3 {
         return Err("usage: qualify_generation_corpus ABSOLUTE_SNAPSHOT CORPUS_JSON".into());
@@ -94,9 +98,7 @@ fn main() -> Result<(), String> {
         if prepared.prompt.tokens != expected
             || Some(prepared.rendered_prompt.as_str()) != case["rendered_prompt"].as_str()
         {
-            return Err(format!(
-                "{id}: actual native prompt bytes or token IDs differ"
-            ));
+            return Err((format!("{id}: actual native prompt bytes or token IDs differ")).into());
         }
         if prepared.prompt.max_new_tokens != 64
             || prepared.prompt.sampling.temperature != 0.
@@ -108,9 +110,9 @@ fn main() -> Result<(), String> {
             || prepared.prompt.images.is_some()
             || !prepared.prompt.stop_sequences.is_empty()
         {
-            return Err(format!(
-                "{id}: native request violates unconstrained greedy64 contract"
-            ));
+            return Err(
+                (format!("{id}: native request violates unconstrained greedy64 contract")).into(),
+            );
         }
         let token_bytes: Vec<_> = prepared
             .prompt

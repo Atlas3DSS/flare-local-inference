@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{AdmissionError, Error, Result};
 
 pub(super) struct TokenStops {
     sequences: Vec<Vec<u32>>,
@@ -13,10 +13,10 @@ impl TokenStops {
                     || sequence.iter().any(|token| *token as usize >= vocabulary)
             })
         {
-            return Err(
-                "token stops allow at most sixteen nonempty sequences of at most 64 vocabulary IDs"
-                    .into(),
-            );
+            return Err(Error::admission(
+                AdmissionError::Invalid,
+                "token stops allow at most sixteen nonempty sequences of at most 64 vocabulary IDs",
+            ));
         }
         Ok(Self {
             sequences,
@@ -59,15 +59,22 @@ pub(super) fn validate_strings(strings: &[String], token_stops: bool, grammar: b
         || strings.iter().any(String::is_empty)
         || strings.iter().map(String::len).sum::<usize>() > 4096
     {
-        return Err(
-            "stop allows at most four nonempty strings totaling at most 4096 UTF-8 bytes".into(),
-        );
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "stop allows at most four nonempty strings totaling at most 4096 UTF-8 bytes",
+        ));
     }
     if !strings.is_empty() && token_stops {
-        return Err("stop cannot be combined with stop_token_ids or stop_token_sequences".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "stop cannot be combined with stop_token_ids or stop_token_sequences",
+        ));
     }
     if !strings.is_empty() && grammar {
-        return Err("structured output cannot be combined with string stops".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "structured output cannot be combined with string stops",
+        ));
     }
     Ok(())
 }
@@ -201,6 +208,22 @@ impl<'a> TextStops<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_stop_admission_has_typed_errors() {
+        assert!(matches!(
+            TokenStops::new(vec![vec![]], 10).err().unwrap(),
+            Error::Admission(AdmissionError::Invalid(_))
+        ));
+        assert!(matches!(
+            validate_strings(&[String::new()], false, false).unwrap_err(),
+            Error::Admission(AdmissionError::Invalid(_))
+        ));
+        assert!(matches!(
+            validate_strings(&["end".into()], true, false).unwrap_err(),
+            Error::Admission(AdmissionError::Invalid(_))
+        ));
+    }
+
     #[test]
     fn overlapping_stop_prefixes_are_held_without_losing_ordinary_tokens() {
         let mut stops = TokenStops::new(vec![vec![1, 2, 3], vec![2, 4]], 248320).unwrap();

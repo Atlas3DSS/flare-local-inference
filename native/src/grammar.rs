@@ -8,7 +8,7 @@ use llguidance::{Matcher, ParserFactory, token_bytes_from_tokenizer_json};
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
-use crate::Result;
+use crate::{AdmissionError, Error, Failure, Result};
 
 const MAX_GRAMMAR_BYTES: usize = 262_144;
 const MAX_SCHEMA_NODES: usize = 8_192;
@@ -52,18 +52,40 @@ pub struct GrammarCompiler {
 impl GrammarCompiler {
     pub fn new(tokenizer: &Tokenizer, model_vocab: usize, eos_ids: &[u32]) -> Result<Self> {
         if model_vocab == 0 || model_vocab > u32::MAX as usize {
-            return Err("grammar model vocabulary must fit a nonzero u32".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "grammar model vocabulary must fit a nonzero u32",
+            ));
         }
-        let json = tokenizer
-            .to_string(false)
-            .map_err(|error| error.to_string())?;
-        let json: Value = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let json = tokenizer.to_string(false).map_err(|error| {
+            Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                error.to_string(),
+                error,
+            )))
+        })?;
+        let json: Value = serde_json::from_str(&json).map_err(|error| {
+            Error::Admission(AdmissionError::Grammar(Failure::caused_by(
+                error.to_string(),
+                error,
+            )))
+        })?;
         if json["decoder"]["type"] != "ByteLevel" {
-            return Err("grammar requires the checkpoint ByteLevel decoder".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "grammar requires the checkpoint ByteLevel decoder",
+            ));
         }
-        let bytes = token_bytes_from_tokenizer_json(&json).map_err(|error| error.to_string())?;
+        let bytes = token_bytes_from_tokenizer_json(&json).map_err(|error| {
+            Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                error.to_string(),
+                error.into_boxed_dyn_error(),
+            )))
+        })?;
         if bytes.len() > model_vocab || bytes.is_empty() || bytes.iter().any(Vec::is_empty) {
-            return Err("grammar tokenizer has missing IDs or exceeds the model vocabulary".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "grammar tokenizer has missing IDs or exceeds the model vocabulary",
+            ));
         }
         if eos_ids.is_empty()
             || eos_ids.iter().enumerate().any(|(index, &id)| {
@@ -72,19 +94,29 @@ impl GrammarCompiler {
                     || bytes[id as usize][0] != TokTrie::SPECIAL_TOKEN_MARKER
             })
         {
-            return Err("grammar EOS IDs must be distinct checkpoint special tokens".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "grammar EOS IDs must be distinct checkpoint special tokens",
+            ));
         }
         let tokenizer_vocab = bytes.len();
         let trie = TokTrie::from(&TokRxInfo::new(tokenizer_vocab as u32, eos_ids[0]), &bytes)
             .with_eos_tokens(eos_ids);
         let mut tokenizer = tokenizer.clone();
-        tokenizer
-            .with_truncation(None)
-            .map_err(|error| error.to_string())?;
+        tokenizer.with_truncation(None).map_err(|error| {
+            Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                error.to_string(),
+                error,
+            )))
+        })?;
         tokenizer.with_padding(None);
         let environment: TokEnv = Arc::new(CheckpointTokenizer { tokenizer, trie });
-        let mut factory =
-            ParserFactory::new_simple(&environment).map_err(|error| error.to_string())?;
+        let mut factory = ParserFactory::new_simple(&environment).map_err(|error| {
+            Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                error.to_string(),
+                error.into_boxed_dyn_error(),
+            )))
+        })?;
         factory.quiet();
         *factory.limits_mut() = ParserLimits {
             max_grammar_size: 131_072,
@@ -104,7 +136,10 @@ impl GrammarCompiler {
     /// compiler option extensions are rejected before compilation.
     pub fn compile_json_schema(&self, schema: &Value) -> Result<RequestGrammar> {
         if schema.to_string().len() > MAX_GRAMMAR_BYTES {
-            return Err(format!("JSON schema exceeds {MAX_GRAMMAR_BYTES} bytes"));
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                format!("JSON schema exceeds {MAX_GRAMMAR_BYTES} bytes"),
+            ));
         }
         validate_schema_nodes(schema, "$", 0, &mut 0)?;
         self.compile(TopLevelGrammar::from_json_schema(schema.clone()))
@@ -114,27 +149,36 @@ impl GrammarCompiler {
     /// use separate APIs so they cannot override strict JSON-schema validation.
     pub fn compile_lark(&self, grammar: &str) -> Result<RequestGrammar> {
         if grammar.is_empty() || grammar.len() > MAX_GRAMMAR_BYTES {
-            return Err(format!(
-                "Lark grammar must contain 1..={MAX_GRAMMAR_BYTES} bytes"
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                format!("Lark grammar must contain 1..={MAX_GRAMMAR_BYTES} bytes"),
             ));
         }
         if grammar.contains("%json") || grammar.contains("%llguidance") {
-            return Err("Lark %json and %llguidance directives are unsupported; use the JSON-schema API for schemas".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "Lark %json and %llguidance directives are unsupported; use the JSON-schema API for schemas",
+            ));
         }
         self.compile(TopLevelGrammar::from_lark(grammar.to_owned()))
     }
 
     fn compile(&self, grammar: TopLevelGrammar) -> Result<RequestGrammar> {
-        let parser = self
-            .factory
-            .create_parser(grammar)
-            .map_err(|error| format!("invalid grammar: {error:#}"))?;
+        let parser = self.factory.create_parser(grammar).map_err(|error| {
+            Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                format!("invalid grammar: {error:#}"),
+                error.into_boxed_dyn_error(),
+            )))
+        })?;
         let mut matcher = Matcher::new(Ok(parser));
         let warnings = matcher.grammar_warnings();
         if !warnings.is_empty() {
-            return Err(format!(
-                "grammar compilation warnings are rejected: {}",
-                warnings.join("; ")
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                format!(
+                    "grammar compilation warnings are rejected: {}",
+                    warnings.join("; ")
+                ),
             ));
         }
         let mut request = RequestGrammar {
@@ -160,7 +204,7 @@ pub struct RequestGrammar {
     eos_ids: Arc<[u32]>,
     accepting: bool,
     stopped: bool,
-    error: Option<String>,
+    error: Option<Error>,
 }
 
 impl RequestGrammar {
@@ -171,10 +215,16 @@ impl RequestGrammar {
             return Err(error.clone());
         }
         if self.stopped {
-            return Err("cannot propose tokens for a stopped grammar".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "cannot propose tokens for a stopped grammar",
+            ));
         }
         if tokens.len() > 7 {
-            return Err("copy grammar supports at most seven draft tokens".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "copy grammar supports at most seven draft tokens",
+            ));
         }
         let mut tentative = Self {
             matcher: self.matcher.deep_clone(),
@@ -198,7 +248,10 @@ impl RequestGrammar {
                 break;
             }
             if let Err(error) = tentative.matcher.consume_token(token) {
-                return Err(format!("grammar advancement failed: {error:#}"));
+                return Err(Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                    format!("grammar advancement failed: {error:#}"),
+                    error.into_boxed_dyn_error(),
+                ))));
             }
             if !tentative.refresh_mask_available()? {
                 break;
@@ -229,29 +282,44 @@ impl RequestGrammar {
             return Err(error.clone());
         }
         if self.stopped {
-            return Err("grammar already consumed EOS".into());
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                "grammar already consumed EOS",
+            ));
         }
         let id = token as usize;
         if id >= self.tokenizer_vocab || (self.mask[id / 32] as u32 & (1 << (id % 32))) == 0 {
-            return self.fail(format!("token {token} is forbidden by the grammar mask"));
+            return self.fail(Error::admission(
+                AdmissionError::Grammar,
+                format!("token {token} is forbidden by the grammar mask"),
+            ));
         }
         if self.eos_ids.contains(&token) {
             if !self.accepting {
-                return self.fail("grammar EOS reached a non-accepting parser state".into());
+                return self.fail(Error::admission(
+                    AdmissionError::Grammar,
+                    "grammar EOS reached a non-accepting parser state",
+                ));
             }
             self.stopped = true;
             self.mask.fill(0);
             return Ok(());
         }
         if let Err(error) = self.matcher.consume_token(token) {
-            return self.fail(format!("grammar advancement failed: {error:#}"));
+            return self.fail(Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                format!("grammar advancement failed: {error:#}"),
+                error.into_boxed_dyn_error(),
+            ))));
         }
         self.refresh_mask()
     }
 
     fn refresh_mask(&mut self) -> Result<()> {
         if !self.refresh_mask_available()? {
-            return self.fail("grammar has no allowed checkpoint tokens".into());
+            return self.fail(Error::admission(
+                AdmissionError::Grammar,
+                "grammar has no allowed checkpoint tokens",
+            ));
         }
         Ok(())
     }
@@ -259,18 +327,28 @@ impl RequestGrammar {
     fn refresh_mask_available(&mut self) -> Result<bool> {
         self.mask.fill(0);
         if !self.matcher.stop_reason().is_ok() {
-            return self.fail(format!(
-                "grammar stopped with {:?}",
-                self.matcher.stop_reason()
+            return self.fail(Error::admission(
+                AdmissionError::Grammar,
+                format!("grammar stopped with {:?}", self.matcher.stop_reason()),
             ));
         }
         self.accepting = match self.matcher.is_accepting() {
             Ok(value) => value,
-            Err(error) => return self.fail(format!("grammar acceptance check failed: {error:#}")),
+            Err(error) => {
+                return self.fail(Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                    format!("grammar acceptance check failed: {error:#}"),
+                    error.into_boxed_dyn_error(),
+                ))));
+            }
         };
         let allowed = match self.matcher.compute_mask_or_eos() {
             Ok(mask) => mask,
-            Err(error) => return self.fail(format!("grammar mask computation failed: {error:#}")),
+            Err(error) => {
+                return self.fail(Error::Admission(AdmissionError::Grammar(Failure::boxed(
+                    format!("grammar mask computation failed: {error:#}"),
+                    error.into_boxed_dyn_error(),
+                ))));
+            }
         };
         for (destination, &word) in self.mask.iter_mut().zip(allowed.as_slice()) {
             *destination = word as i32;
@@ -282,7 +360,7 @@ impl RequestGrammar {
         Ok(self.mask.iter().any(|&word| word != 0))
     }
 
-    fn fail<T>(&mut self, error: String) -> Result<T> {
+    fn fail<T>(&mut self, error: Error) -> Result<T> {
         self.mask.fill(0);
         self.accepting = false;
         self.error = Some(error.clone());
@@ -298,14 +376,20 @@ fn validate_schema_nodes(
 ) -> Result<()> {
     *nodes += 1;
     if depth > MAX_SCHEMA_DEPTH || *nodes > MAX_SCHEMA_NODES {
-        return Err("JSON schema exceeds the depth or node limit".into());
+        return Err(Error::admission(
+            AdmissionError::Grammar,
+            "JSON schema exceeds the depth or node limit",
+        ));
     }
     if schema.is_boolean() {
         return Ok(());
     }
-    let object = schema
-        .as_object()
-        .ok_or_else(|| format!("schema {path} must be an object or boolean"))?;
+    let object = schema.as_object().ok_or_else(|| {
+        Error::admission(
+            AdmissionError::Grammar,
+            format!("schema {path} must be an object or boolean"),
+        )
+    })?;
     for (key, value) in object {
         let child = format!("{path}/{key}");
         match key.as_str() {
@@ -314,21 +398,30 @@ fn validate_schema_nodes(
                     .as_str()
                     .is_some_and(|reference| reference.starts_with('#'))
                 {
-                    return Err(format!("schema {child} must reference the same document"));
+                    return Err(Error::admission(
+                        AdmissionError::Grammar,
+                        format!("schema {child} must reference the same document"),
+                    ));
                 }
             }
             "$defs" | "definitions" | "properties" | "patternProperties" => {
-                let entries = value
-                    .as_object()
-                    .ok_or_else(|| format!("schema {child} must be an object"))?;
+                let entries = value.as_object().ok_or_else(|| {
+                    Error::admission(
+                        AdmissionError::Grammar,
+                        format!("schema {child} must be an object"),
+                    )
+                })?;
                 for (name, nested) in entries {
                     validate_schema_nodes(nested, &format!("{child}/{name}"), depth + 1, nodes)?;
                 }
             }
             "anyOf" | "oneOf" | "allOf" | "prefixItems" => {
-                let entries = value
-                    .as_array()
-                    .ok_or_else(|| format!("schema {child} must be an array"))?;
+                let entries = value.as_array().ok_or_else(|| {
+                    Error::admission(
+                        AdmissionError::Grammar,
+                        format!("schema {child} must be an array"),
+                    )
+                })?;
                 for (index, nested) in entries.iter().enumerate() {
                     validate_schema_nodes(nested, &format!("{child}/{index}"), depth + 1, nodes)?;
                 }
@@ -347,7 +440,12 @@ fn validate_schema_nodes(
             | "required" | "minProperties" | "maxProperties" | "minLength" | "maxLength"
             | "pattern" | "format" | "minimum" | "maximum" | "exclusiveMinimum"
             | "exclusiveMaximum" | "multipleOf" => {}
-            _ => return Err(format!("unsupported JSON-schema keyword {child}")),
+            _ => {
+                return Err(Error::admission(
+                    AdmissionError::Grammar,
+                    format!("unsupported JSON-schema keyword {child}"),
+                ));
+            }
         }
     }
     Ok(())
@@ -456,6 +554,65 @@ mod tests {
     }
 
     #[test]
+    fn parser_failure_preserves_typed_first_cause() {
+        use std::error::Error as _;
+
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        let mut request = compiler.compile_lark("start: \"a\"").unwrap();
+        let original = request
+            .fail::<()>(Error::Admission(AdmissionError::Grammar(
+                Failure::caused_by(
+                    "parser fixture failure",
+                    std::io::Error::from_raw_os_error(5),
+                ),
+            )))
+            .unwrap_err();
+        for cached in [
+            request.advance(b'a' as u32).unwrap_err(),
+            request.copy_masks(&[]).unwrap_err(),
+        ] {
+            assert!(matches!(
+                cached,
+                Error::Admission(AdmissionError::Grammar(_))
+            ));
+            assert_eq!(cached.to_string(), "parser fixture failure");
+            assert!(std::ptr::eq(
+                cached.source().unwrap(),
+                original.source().unwrap()
+            ));
+            assert_eq!(
+                cached
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(5)
+            );
+        }
+        assert!(request.mask().iter().all(|&word| word == 0));
+    }
+
+    #[test]
+    fn compiler_failure_retains_library_cause() {
+        use std::error::Error as _;
+
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        let error = compiler.compile_lark("start: missing_rule").err().unwrap();
+        assert!(matches!(
+            error,
+            Error::Admission(AdmissionError::Grammar(_))
+        ));
+        assert!(error.source().is_some());
+        let invalid = compiler.compile_lark("").err().unwrap();
+        assert!(matches!(
+            invalid,
+            Error::Admission(AdmissionError::Grammar(_))
+        ));
+        assert!(invalid.source().is_none());
+    }
+
+    #[test]
     fn masked_tokens_poison_parser_without_permissive_fallback() {
         let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
         let mut request = compiler
@@ -463,8 +620,20 @@ mod tests {
             .unwrap();
         assert!(!allowed(&request, 256));
         let error = request.advance(b'f' as u32).unwrap_err();
-        assert!(error.contains("forbidden"));
-        assert_eq!(request.advance(b't' as u32).unwrap_err(), error);
+        assert!(matches!(
+            error,
+            Error::Admission(AdmissionError::Grammar(_))
+        ));
+        assert_eq!(
+            error.to_string(),
+            "token 102 is forbidden by the grammar mask"
+        );
+        let cached = request.advance(b't' as u32).unwrap_err();
+        assert!(matches!(
+            cached,
+            Error::Admission(AdmissionError::Grammar(_))
+        ));
+        assert_eq!(cached.to_string(), error.to_string());
         assert!(request.mask().iter().all(|&word| word == 0));
         assert!(!request.is_accepting());
     }

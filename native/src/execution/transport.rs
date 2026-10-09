@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, rc::Rc};
 
 use crate::{
-    Result, Shutdown,
+    Error, ExecutionError, Failure, Result, Shutdown,
     cache::Fence,
     cuda::{Event, PinnedHost, Stream},
 };
@@ -82,7 +82,10 @@ impl CompletionRecord {
                         }
                     || (self.status == 3 && v.emitted_count != 0)
                 {
-                    return Err("invalid bounded token-vector completion".into());
+                    return Err(Error::execution(
+                        ExecutionError::Completion,
+                        "invalid bounded token-vector completion",
+                    ));
                 }
             }
         }
@@ -154,7 +157,7 @@ pub struct GraphExecutor {
     resolved_uploads: Vec<ResolvedUpload>,
     next_sequence: u64,
     completed: Fence,
-    poison: Option<String>,
+    poison: Option<Error>,
     shutdown: Option<Shutdown>,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -216,11 +219,24 @@ impl GraphExecutor {
     /// Fence to record on resources before the next successful submission attempt.
     /// A failed CUDA enqueue poisons the executor; shutdown must drain before reuse.
     pub fn next_fence(&self) -> Result<Fence> {
-        if self.resources.is_none() || self.poison.is_some() {
-            return Err("executor is closed or failed".into());
+        if let Some(error) = &self.poison {
+            return Err(ExecutionError::Poisoned(Failure::caused_by(
+                "executor is closed or failed",
+                error.clone(),
+            ))
+            .into());
+        }
+        if self.resources.is_none() {
+            return Err(Error::execution(
+                ExecutionError::Closed,
+                "executor is closed or failed",
+            ));
         }
         if self.next_sequence > i64::MAX as u64 {
-            return Err("submission sequence exhausted".into());
+            return Err(Error::execution(
+                ExecutionError::Capacity,
+                "submission sequence exhausted",
+            ));
         }
         Ok(Fence(self.next_sequence))
     }
@@ -256,14 +272,20 @@ impl GraphExecutor {
         grammar_constrained: bool,
     ) -> Result<Option<Fence>> {
         if let Some(error) = &self.poison {
-            return Err(format!("executor failed: {error}"));
+            return Err(ExecutionError::Poisoned(Failure::caused_by(
+                format!("executor failed: {error}"),
+                error.clone(),
+            ))
+            .into());
         }
-        let resources = self.resources.as_mut().ok_or("executor is closed")?;
-        let graph = self
-            .manifest
-            .graphs
-            .get(graph_index)
-            .ok_or("graph index out of range")?;
+        let resources = self
+            .resources
+            .as_mut()
+            .ok_or_else(|| Error::execution(ExecutionError::Closed, "executor is closed"))?;
+        let graph =
+            self.manifest.graphs.get(graph_index).ok_or_else(|| {
+                Error::execution(ExecutionError::State, "graph index out of range")
+            })?;
         let grammar_constrained = grammar_constrained || graph.kind == GraphKind::Speculative;
         let resolved = validate_uploads(
             &self.manifest,
@@ -288,7 +310,10 @@ impl GraphExecutor {
             return Ok(None);
         };
         if self.next_sequence > i64::MAX as u64 {
-            return Err("submission sequence exhausted".into());
+            return Err(Error::execution(
+                ExecutionError::Capacity,
+                "submission sequence exhausted",
+            ));
         }
         let fence = Fence(self.next_sequence);
         let frame = &mut resources.frames[index];
@@ -346,9 +371,16 @@ impl GraphExecutor {
 
     pub fn poll(&mut self) -> Result<Option<FrameCompletion>> {
         if let Some(error) = &self.poison {
-            return Err(format!("executor failed: {error}"));
+            return Err(ExecutionError::Poisoned(Failure::caused_by(
+                format!("executor failed: {error}"),
+                error.clone(),
+            ))
+            .into());
         }
-        let resources = self.resources.as_mut().ok_or("executor is closed")?;
+        let resources = self
+            .resources
+            .as_mut()
+            .ok_or_else(|| Error::execution(ExecutionError::Closed, "executor is closed"))?;
         let frame = resources
             .frames
             .iter_mut()
@@ -398,8 +430,8 @@ impl GraphExecutor {
             return shutdown.clone();
         }
         let resources = self.resources.take().unwrap();
-        let compute = resources.model.synchronize();
-        let copy = resources.copy.synchronize();
+        let compute = resources.model.synchronize().map_err(Error::drain);
+        let copy = resources.copy.synchronize().map_err(Error::drain);
         let drained = compute.is_ok() && copy.is_ok();
         let error = compute.err().or(copy.err()).or(self.poison.take());
         if drained {
@@ -471,16 +503,24 @@ pub(super) fn validate_uploads<'uploads, 'bytes, 'storage>(
     let graph = manifest
         .graphs
         .get(graph_index)
-        .ok_or("graph index out of range")?;
+        .ok_or_else(|| Error::execution(ExecutionError::Upload, "graph index out of range"))?;
     if uploads.len() > manifest.input_frame_bytes {
-        return Err("upload count exceeds the nonempty input-fragment bound".into());
+        return Err(Error::execution(
+            ExecutionError::Upload,
+            "upload count exceeds the nonempty input-fragment bound",
+        ));
     }
     let reserved = |name: &str| -> Result<ResolvedUpload> {
         let binding = graph
             .input_bindings
             .iter()
             .find(|binding| binding.buffer_name == name)
-            .ok_or("graph lacks a reserved input binding")?;
+            .ok_or_else(|| {
+                Error::execution(
+                    ExecutionError::Upload,
+                    "graph lacks a reserved input binding",
+                )
+            })?;
         let buffer = manifest.buffer(name)?;
         Ok(ResolvedUpload {
             host_offset: binding.host_offset,
@@ -492,13 +532,18 @@ pub(super) fn validate_uploads<'uploads, 'bytes, 'storage>(
     let submission_sequence = reserved("submission_sequence")?;
     for upload in uploads {
         if ["frame_index", "submission_sequence"].contains(&upload.buffer) {
-            return Err("reserved executor inputs cannot be overridden".into());
+            return Err(Error::execution(
+                ExecutionError::Upload,
+                "reserved executor inputs cannot be overridden",
+            ));
         }
         let binding = graph
             .input_bindings
             .iter()
             .find(|binding| binding.buffer_name == upload.buffer)
-            .ok_or("upload is not bound by this graph")?;
+            .ok_or_else(|| {
+                Error::execution(ExecutionError::Upload, "upload is not bound by this graph")
+            })?;
         let buffer = manifest.buffer(upload.buffer)?;
         if upload.bytes.is_empty()
             || upload.offset % buffer.dtype.size() != 0
@@ -508,9 +553,9 @@ pub(super) fn validate_uploads<'uploads, 'bytes, 'storage>(
                 .checked_add(upload.bytes.len())
                 .is_none_or(|end| end > binding.nbytes)
         {
-            return Err(format!(
-                "unaligned or out-of-range upload: {}",
-                upload.buffer
+            return Err(Error::execution(
+                ExecutionError::Upload,
+                format!("unaligned or out-of-range upload: {}", upload.buffer),
             ));
         }
         let resolved = ResolvedUpload {
@@ -523,7 +568,10 @@ pub(super) fn validate_uploads<'uploads, 'bytes, 'storage>(
             prior.host_offset < resolved.host_offset + resolved.nbytes
                 && resolved.host_offset < prior.host_offset + prior.nbytes
         }) {
-            return Err("uploads overlap within one input buffer".into());
+            return Err(Error::execution(
+                ExecutionError::Upload,
+                "uploads overlap within one input buffer",
+            ));
         }
         storage.push(resolved);
     }
@@ -541,7 +589,10 @@ pub(super) fn decode_records(
 ) -> Result<[CompletionRecord; REQUEST_LANES]> {
     let vector = bytes.len() == REQUEST_LANES * VECTOR_RECORD_FIELDS * 8;
     if !vector && bytes.len() != COMPLETION_BYTES {
-        return Err("completion extent mismatch".into());
+        return Err(Error::execution(
+            ExecutionError::Completion,
+            "completion extent mismatch",
+        ));
     }
     let mut records = [CompletionRecord::default(); REQUEST_LANES];
     for (record, bytes) in records.iter_mut().zip(bytes.chunks_exact(if vector {
@@ -574,7 +625,10 @@ pub(super) fn decode_records(
             }),
         };
         if vector && record.status != 0 && fields[14] != 0 {
-            return Err("reserved vector completion field must be zero".into());
+            return Err(Error::execution(
+                ExecutionError::Completion,
+                "reserved vector completion field must be zero",
+            ));
         }
         record.validate_vector()?;
         if !(0..=3).contains(&record.status)
@@ -587,7 +641,10 @@ pub(super) fn decode_records(
                     || record.token_id < -1
                     || (record.status != 3 && record.error_code != 0)))
         {
-            return Err("invalid or stale device completion record".into());
+            return Err(Error::execution(
+                ExecutionError::Completion,
+                "invalid or stale device completion record",
+            ));
         }
     }
     Ok(records)

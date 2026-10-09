@@ -194,9 +194,12 @@ impl PrefixCheckpointCache {
     }
 
     pub fn checkpoint(&self, id: CheckpointId) -> Result<&Checkpoint> {
-        self.nodes
-            .get(&id)
-            .ok_or_else(|| format!("unknown or retired checkpoint {}", id.0))
+        self.nodes.get(&id).ok_or_else(|| {
+            crate::Error::execution(
+                crate::ExecutionError::State,
+                format!("unknown or retired checkpoint {}", id.0),
+            )
+        })
     }
 
     fn chain(&self, id: CheckpointId) -> Result<Vec<CheckpointId>> {

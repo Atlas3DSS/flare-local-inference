@@ -2,7 +2,7 @@ use std::sync::{Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
 use super::{ExecutionManifest, FrameCompletion, GraphExecutor, Upload};
-use crate::{Result, Shutdown, cache::Fence};
+use crate::{Error, ExecutionError, Failure, Result, Shutdown, cache::Fence};
 
 pub struct OwnedUpload {
     pub buffer: String,
@@ -87,20 +87,30 @@ impl ExecutionWorker {
                 }));
                 let mut shutdown = executor.close();
                 if result.is_err() {
-                    shutdown
-                        .error
-                        .get_or_insert("native execution worker panicked".into());
+                    shutdown.error.get_or_insert_with(|| {
+                        Error::execution(ExecutionError::Worker, "native execution worker panicked")
+                    });
                 }
                 shutdown
             })
-            .map_err(|error| format!("cannot start execution worker: {error}"))?;
+            .map_err(|error| {
+                ExecutionError::Worker(Failure::caused_by(
+                    format!("cannot start execution worker: {error}"),
+                    error,
+                ))
+            })?;
         match ready.recv() {
             Ok(Ok(())) => {}
             result => {
                 let _ = thread.join();
                 return Err(match result {
                     Ok(Err(error)) => error,
-                    _ => "execution worker exited during startup".into(),
+                    Err(error) => ExecutionError::Worker(Failure::caused_by(
+                        "execution worker exited during startup",
+                        error,
+                    ))
+                    .into(),
+                    Ok(Ok(())) => unreachable!("successful startup was handled above"),
                 });
             }
         }
@@ -118,17 +128,20 @@ impl ExecutionWorker {
             .control
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let sender = control
-            .sender
-            .as_ref()
-            .ok_or("execution worker is closed")?;
+        let sender = control.sender.as_ref().ok_or_else(|| {
+            Error::execution(ExecutionError::Closed, "execution worker is closed")
+        })?;
         let (reply, receiver) = mpsc::sync_channel(1);
-        sender
-            .send(command(reply))
-            .map_err(|_| "execution worker disconnected")?;
-        receiver
-            .recv()
-            .map_err(|_| "execution worker exited without a response".into())
+        sender.send(command(reply)).map_err(|error| {
+            ExecutionError::Worker(Failure::caused_by("execution worker disconnected", error))
+        })?;
+        receiver.recv().map_err(|error| {
+            ExecutionError::Worker(Failure::caused_by(
+                "execution worker exited without a response",
+                error,
+            ))
+            .into()
+        })
     }
 
     pub fn submit(
@@ -163,7 +176,10 @@ impl ExecutionWorker {
             Ok(shutdown) => shutdown,
             Err(_) => Shutdown {
                 drained: false,
-                error: Some("execution worker panicked before reporting drain".into()),
+                error: Some(Error::execution(
+                    ExecutionError::Drain,
+                    "execution worker panicked before reporting drain",
+                )),
             },
         };
         control.shutdown = Some(shutdown.clone());

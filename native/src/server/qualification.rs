@@ -16,7 +16,10 @@ pub(super) fn validate_prompt<M: ModelContract>(prompt: &Prompt<M>) -> Result<()
         || !prompt.conditioning.is_empty()
         || !M::text_only(&prompt.data)
     {
-        return Err("token qualification requires text, temperature=0, max_tokens=64, neutral penalties, and no grammar or stops".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "token qualification requires text, temperature=0, max_tokens=64, neutral penalties, and no grammar or stops",
+        ));
     }
     Ok(())
 }
@@ -25,7 +28,10 @@ fn envelope(body: Value, vocabulary: usize) -> Result<(String, Value, Vec<u32>)>
     if body.get("schema_version").and_then(Value::as_u64) != Some(1)
         || body.get("ignore_eos") != Some(&Value::Bool(true))
     {
-        return Err("token qualification requires schema_version=1 and ignore_eos=true".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "token qualification requires schema_version=1 and ignore_eos=true",
+        ));
     }
     let id = body
         .get("id")
@@ -43,9 +49,17 @@ fn envelope(body: Value, vocabulary: usize) -> Result<(String, Value, Vec<u32>)>
             .ok_or("token qualification requires expected_prompt_tokens")?
             .clone(),
     )
-    .map_err(|error| format!("invalid expected_prompt_tokens: {error}"))?;
+    .map_err(|error| {
+        Error::Admission(AdmissionError::Invalid(Failure::caused_by(
+            format!("invalid expected_prompt_tokens: {error}"),
+            error,
+        )))
+    })?;
     if expected.is_empty() || expected.iter().any(|token| *token as usize >= vocabulary) {
-        return Err("expected prompt requires nonempty, valid vocabulary IDs".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "expected prompt requires nonempty, valid vocabulary IDs",
+        ));
     }
     Ok((id, request, expected))
 }
@@ -57,7 +71,9 @@ pub(super) async fn generate<M: ModelContract>(
 ) -> Response {
     let (id, body, expected) = match envelope(body, state.model.config().contract.vocabulary) {
         Ok(value) => value,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        Err(message) => {
+            return super::typed_error(message.admission_context(AdmissionError::Invalid));
+        }
     };
     let permit = match state.frontend_slots.clone().acquire_owned().await {
         Ok(permit) => permit,
@@ -81,18 +97,18 @@ pub(super) async fn generate<M: ModelContract>(
             body,
         )?;
         validate_prepared(&prepared, &expected)?;
-        Ok::<_, String>(prepared)
+        Ok::<_, crate::Error>(prepared)
     })
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(message)) => return error(StatusCode::BAD_REQUEST, message),
+        Ok(Err(message)) => return super::typed_error(message),
         Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message.to_string()),
     };
     let prompt_tokens = prepared.prompt.tokens.clone();
     let mut generation = match state.model.generate_qualification(prepared.prompt) {
         Ok(generation) => generation,
-        Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, message),
+        Err(message) => return super::typed_error(message),
     };
     let _ingress = ingress;
     let mut tokens = Vec::with_capacity(64);
@@ -114,7 +130,7 @@ pub(super) async fn generate<M: ModelContract>(
                 tokens.push(token);
             }
             GenerationEvent::AdmissionRejected(message) => {
-                return error(StatusCode::SERVICE_UNAVAILABLE, message);
+                return super::typed_error(message);
             }
             GenerationEvent::Error(message) => {
                 return error(StatusCode::INTERNAL_SERVER_ERROR, message);
@@ -160,10 +176,16 @@ fn validate_prepared<M: ModelContract>(
     expected: &[u32],
 ) -> Result<()> {
     if prepared.stream {
-        return Err("token qualification requires stream=false".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "token qualification requires stream=false",
+        ));
     }
     if prepared.prompt.tokens != expected {
-        return Err("native rendered prompt token IDs differ from the qualification corpus".into());
+        return Err(Error::admission(
+            AdmissionError::Invalid,
+            "native rendered prompt token IDs differ from the qualification corpus",
+        ));
     }
     validate_prompt(&prepared.prompt)
 }
@@ -209,11 +231,10 @@ mod tests {
     fn prompt_match_and_sampling_contract_are_required_before_enqueue() {
         let mut prepared = prepared();
         assert!(validate_prepared(&prepared, &[760, 6511]).is_ok());
-        assert!(
-            validate_prepared(&prepared, &[760, 6512])
-                .unwrap_err()
-                .contains("token IDs differ")
-        );
+        assert!(matches!(
+            validate_prepared(&prepared, &[760, 6512]).unwrap_err(),
+            Error::Admission(AdmissionError::Invalid(_))
+        ));
         prepared.stream = true;
         assert!(validate_prepared(&prepared, &[760, 6511]).is_err());
         prepared.stream = false;

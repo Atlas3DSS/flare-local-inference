@@ -42,6 +42,10 @@ fn check_hash(
 }
 
 fn main() -> Result<(), String> {
+    run().map_err(|error| error.to_string())
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if !(3..=4).contains(&arguments.len()) {
         return Err(
@@ -218,7 +222,7 @@ fn main() -> Result<(), String> {
         }
     }
     if !errors.is_empty() {
-        return Err(errors.join("\n"));
+        return Err((errors.join("\n")).into());
     }
     println!(
         "Exact image qualification passed: {} pipeline cases and {} geometry cases",

@@ -14,6 +14,10 @@ use sparkgap_native::{
 use std::{fs, path::PathBuf};
 
 fn main() -> Result<(), String> {
+    run().map_err(|error| error.to_string())
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() != 4 {
         return Err(
@@ -85,19 +89,24 @@ fn main() -> Result<(), String> {
                 .as_str()
                 .unwrap_or_else(|| expected["message"].as_str().unwrap());
             match result {
-                Err(error) if error == expected => {}
+                Err(error)
+                    if matches!(&error, sparkgap_native::Error::Admission(_))
+                        && error.to_string() == expected => {}
                 Err(error) => {
-                    return Err(format!(
+                    return Err((format!(
                         "{}: expected {expected:?}, received {error:?}",
                         case["name"]
-                    ));
+                    ))
+                    .into());
                 }
-                Ok(_) => return Err(format!("{}: expected template rejection", case["name"])),
+                Ok(_) => {
+                    return Err((format!("{}: expected template rejection", case["name"])).into());
+                }
             }
         } else {
             let prepared = result.map_err(|error| format!("{}: {error}", case["name"]))?;
             if serde_json::to_value(&prepared.prompt.tokens).unwrap() != case["token_ids"] {
-                return Err(format!("{}: request token IDs differ", case["name"]));
+                return Err((format!("{}: request token IDs differ", case["name"])).into());
             }
             if prepared.prompt.sampling.temperature != 0.
                 || prepared.prompt.sampling.top_k != 50
@@ -122,10 +131,11 @@ fn main() -> Result<(), String> {
                 let roundtrip =
                     prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, wire)?;
                 if roundtrip.prompt.tokens != prepared.prompt.tokens {
-                    return Err(format!(
+                    return Err((format!(
                         "{}: JSON-string tool arguments changed rendered tokens",
                         case["name"]
-                    ));
+                    ))
+                    .into());
                 }
                 tool_string_count += 1;
             }
@@ -203,7 +213,7 @@ fn main() -> Result<(), String> {
             json!({"model":config.model_id,"messages":messages,"add_generation_prompt":true}),
         )?;
         if serde_json::to_value(&prepared.prompt.tokens).unwrap() != case["token_ids"] {
-            return Err(format!("{}: image request token IDs differ", case["name"]));
+            return Err((format!("{}: image request token IDs differ", case["name"])).into());
         }
         let processed = prepared.prompt.images.as_ref().unwrap();
         let bytes: Vec<_> = processed
@@ -218,7 +228,7 @@ fn main() -> Result<(), String> {
             .or_else(|| case["hashes"]["pixel_values"].as_str())
             .ok_or("image fixture lacks pixel hash")?;
         if hash != expected {
-            return Err(format!("{}: image request pixels differ", case["name"]));
+            return Err((format!("{}: image request pixels differ", case["name"])).into());
         }
         image_count += 1;
     }
@@ -271,11 +281,13 @@ fn main() -> Result<(), String> {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."},{"role":"assistant","content":"{"}],"response_format":{"type":"json_object"}});
         match prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone()) {
             Err(error)
-                if error == "structured output cannot continue an existing assistant message" => {}
+                if error.to_string()
+                    == "structured output cannot continue an existing assistant message" => {}
             Err(error) => {
-                return Err(format!(
+                return Err((format!(
                     "configured continuation returned unexpected error: {error}"
-                ));
+                ))
+                .into());
             }
             Ok(_) => {
                 return Err("structured request accepted configured assistant continuation".into());

@@ -8,6 +8,16 @@ use crate::{
 
 impl Qwen4Exp {
     pub fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
+        Self::validate_inner(config, manifest).map_err(|error| match error {
+            crate::Error::Execution(crate::ExecutionError::Manifest(_)) => error,
+            _ => {
+                crate::ExecutionError::Manifest(crate::Failure::caused_by(error.to_string(), error))
+                    .into()
+            }
+        })
+    }
+
+    fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
         manifest.validate()?;
         Self::validate_metadata(&config.contract)?;
         crate::scheduler::speculation::validate_widths(&config.speculative_widths)?;
@@ -48,7 +58,7 @@ impl Qwen4Exp {
             for (name, dtype, shape) in buffers {
                 let buffer = manifest.buffer(name)?;
                 if buffer.dtype != dtype || buffer.shape != shape {
-                    return Err(format!("invalid speculative buffer {name}"));
+                    return Err(format!("invalid speculative buffer {name}").into());
                 }
             }
             for width in &config.speculative_widths {
@@ -95,10 +105,9 @@ impl Qwen4Exp {
                     && !prefill_capacities(config.limits.prefill_chunk_size)
                         .any(|n| n == graph.token_capacity))
             {
-                return Err(format!(
-                    "graph {} has an undeclared Qwen4Exp capacity",
-                    graph.name
-                ));
+                return Err(
+                    format!("graph {} has an undeclared Qwen4Exp capacity", graph.name).into(),
+                );
             }
         }
         if config.model_id.is_empty()
@@ -125,7 +134,8 @@ impl Qwen4Exp {
             if buffer.dtype != dtype || buffer.shape != shape {
                 return Err(format!(
                     "invalid Qwen4Exp semantic buffer {name}: expected {dtype:?}{shape:?}"
-                ));
+                )
+                .into());
             }
         }
         for kind in [
@@ -201,7 +211,8 @@ impl Qwen4Exp {
             return Err(format!(
                 "prepared graph {} lacks required input draft_page_tables",
                 graph.name
-            ));
+            )
+            .into());
         }
         if kind == GraphKind::Speculative && !config.has_draft_cache() {
             for name in ["copy_grammar_mask", "copy_grammar_mask_count"] {
@@ -209,7 +220,8 @@ impl Qwen4Exp {
                     return Err(format!(
                         "prepared graph {} lacks required input {name}",
                         graph.name
-                    ));
+                    )
+                    .into());
                 }
             }
         }
@@ -229,7 +241,8 @@ impl Qwen4Exp {
                     return Err(format!(
                         "prepared graph {} lacks required input {name}",
                         graph.name
-                    ));
+                    )
+                    .into());
                 }
             }
         }
@@ -239,10 +252,9 @@ impl Qwen4Exp {
                 .iter()
                 .any(|binding| binding.buffer_name == *name)
             {
-                return Err(format!(
-                    "prepared graph {} lacks required input {name}",
-                    graph.name
-                ));
+                return Err(
+                    format!("prepared graph {} lacks required input {name}", graph.name).into(),
+                );
             }
         }
         Ok(index)

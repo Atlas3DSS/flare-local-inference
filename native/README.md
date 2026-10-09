@@ -7,6 +7,18 @@ from Rust without Python types. The `server` feature adds HTTP/SSE, native reque
 preparation and direct scheduling of the Qwen4Exp prepared model. Python loads and
 captures the model before handing it to Rust.
 
+Native APIs return `sparkgap_native::Error`, with separate `AdmissionError`,
+`ExecutionError`, and `FrontendError` variants. Validation, capacity exhaustion,
+unsupported features, grammar failures, image decoding, manifest violations,
+worker failure, poison, and drain failures remain distinct through worker channels.
+Errors retain their underlying source and CUDA operation/status code. Cloned
+errors share their underlying cause.
+
+HTTP request validation and unsupported features return 400. Exhausted HTTP
+ingress capacity returns 429; exhausted model admission capacity and unavailable
+workers return 503; execution and presentation failures return 500. SSE terminal failures and Python exceptions serialize the same display
+messages. Failed CUDA drains retain prepared resources. Worker recovery is unsupported.
+
 The server exposes `/health`, `/v1/models`, `/v1/chat/completions`, and `/metrics`.
 HTTP admission reserves at most `queue_capacity + max_active` requests before
 reading JSON bodies. Admitted requests await a bounded CPU preparation worker;

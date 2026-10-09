@@ -1,5 +1,6 @@
 use super::*;
 use crate::cache::Fence;
+use crate::{Error, ExecutionError};
 
 fn manifest() -> ExecutionManifest {
     let buffers = vec![
@@ -76,7 +77,10 @@ fn manifest() -> ExecutionManifest {
 fn execution_abi_and_unsupported_sampling_modes_reject_before_cuda() {
     let mut value = manifest();
     value.abi_version = 1;
-    assert!(value.validate().unwrap_err().contains("ABI version"));
+    assert!(matches!(
+        value.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
     value.abi_version = ABI_VERSION;
     value.validate().unwrap();
     assert!(SamplingMode::try_from("greedy").is_err());
@@ -90,18 +94,22 @@ fn required_completion_and_input_layouts_are_checked_before_cuda() {
     let mut changed = original.clone();
     changed.buffers[2].shape = vec![4, 2, 8];
     changed.buffers[2].strides = vec![16, 8, 1];
-    assert!(
-        changed
-            .validate()
-            .unwrap_err()
-            .contains("required buffer layout")
-    );
+    assert!(matches!(
+        changed.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
     changed = original.clone();
     changed.buffers[3].address = 0x3008;
-    assert!(changed.validate().unwrap_err().contains("overlap"));
+    assert!(matches!(
+        changed.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
     changed = original.clone();
     changed.buffers[3].strides = vec![2];
-    assert!(changed.validate().unwrap_err().contains("contiguous"));
+    assert!(matches!(
+        changed.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
     changed = original.clone();
     changed.buffers[3].address = usize::MAX - 8;
     assert!(changed.validate().is_err());
@@ -109,7 +117,10 @@ fn required_completion_and_input_layouts_are_checked_before_cuda() {
     changed.graphs[0]
         .input_bindings
         .retain(|binding| binding.buffer_name != "frame_index");
-    assert!(changed.validate().unwrap_err().contains("reserved"));
+    assert!(matches!(
+        changed.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
 }
 
 #[test]
@@ -122,15 +133,16 @@ fn graph_variants_share_one_nonoverlapping_input_layout() {
     manifest.graphs.push(graph);
     manifest.validate().unwrap();
     manifest.graphs[1].input_bindings[2].host_offset = 8;
-    assert!(
-        manifest
-            .validate()
-            .unwrap_err()
-            .contains("different host offsets")
-    );
+    assert!(matches!(
+        manifest.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
     manifest.graphs.pop();
     manifest.graphs[0].input_bindings[2].host_offset = 8;
-    assert!(manifest.validate().unwrap_err().contains("overlap"));
+    assert!(matches!(
+        manifest.validate().unwrap_err(),
+        Error::Execution(ExecutionError::Manifest(_))
+    ));
 }
 
 #[test]
@@ -222,6 +234,34 @@ fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn upload_and_completion_failures_keep_distinct_domains() {
+    let manifest = manifest();
+    let mut storage = Vec::new();
+    let uploads = [Upload {
+        buffer: "tokens",
+        offset: 1,
+        bytes: &[1; 8],
+    }];
+    let error = match transport::validate_uploads(&manifest, 0, &uploads, &mut storage) {
+        Err(error) => error,
+        Ok(_) => panic!("misaligned upload was accepted"),
+    };
+    assert!(matches!(error, Error::Execution(ExecutionError::Upload(_))));
+    assert_eq!(
+        error.to_string(),
+        "unaligned or out-of-range upload: tokens"
+    );
+    assert!(storage.is_empty());
+
+    let error = transport::decode_records(&[0; 8], Fence(1)).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Execution(ExecutionError::Completion(_))
+    ));
+    assert_eq!(error.to_string(), "completion extent mismatch");
 }
 
 #[test]

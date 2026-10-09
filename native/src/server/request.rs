@@ -1,6 +1,6 @@
 use super::runtime::Prompt;
 use crate::{
-    Result,
+    AdmissionError, Error, Failure, FrontendError, Result,
     frontend::{Frontend, images::ImageProcessor},
     model::{ModelConfig, ModelContract, SamplingParameters},
 };
@@ -22,6 +22,22 @@ pub fn prepare<M: ModelContract>(
     config: &ModelConfig,
     body: Value,
 ) -> Result<PreparedRequest<M>> {
+    prepare_inner(frontend, processor, compiler, config, body).map_err(|error| match error {
+        Error::Admission(_) => error,
+        Error::Frontend(FrontendError::ImageDecode(_)) => {
+            error.admission_context(AdmissionError::Image)
+        }
+        _ => error.admission_context(AdmissionError::Invalid),
+    })
+}
+
+fn prepare_inner<M: ModelContract>(
+    frontend: &Frontend,
+    processor: &ImageProcessor,
+    compiler: &crate::grammar::GrammarCompiler,
+    config: &ModelConfig,
+    body: Value,
+) -> Result<PreparedRequest<M>> {
     let object = body.as_object().ok_or("request must be a JSON object")?;
     let observation = super::observation::ObservationOptions::parse(object)?;
     let model = object
@@ -29,14 +45,17 @@ pub fn prepare<M: ModelContract>(
         .and_then(Value::as_str)
         .ok_or("model must be a string")?;
     if model != config.model_id {
-        return Err(format!("model {model:?} is not loaded"));
+        return Err(format!("model {model:?} is not loaded").into());
     }
     for name in ["logprobs", "top_logprobs", "logit_bias", "guided_json"] {
         if object
             .get(name)
             .is_some_and(|value| !value.is_null() && value != &Value::Bool(false))
         {
-            return Err(format!("request option {name} is not implemented"));
+            return Err(Error::admission(
+                AdmissionError::Feature,
+                format!("request option {name} is not implemented"),
+            ));
         }
     }
     let tools_disabled = match object.get("tool_choice").filter(|value| !value.is_null()) {
@@ -44,17 +63,20 @@ pub fn prepare<M: ModelContract>(
         Some(Value::String(choice)) if choice == "auto" => false,
         Some(Value::String(choice)) if choice == "none" => true,
         _ => {
-            return Err(
-                "tool_choice supports auto or none; forced tool selection is not implemented"
-                    .into(),
-            );
+            return Err(Error::admission(
+                AdmissionError::Feature,
+                "tool_choice supports auto or none; forced tool selection is not implemented",
+            ));
         }
     };
     if object
         .get("parallel_tool_calls")
         .is_some_and(|value| value != &Value::Bool(true))
     {
-        return Err("parallel_tool_calls=false is not implemented".into());
+        return Err(Error::admission(
+            AdmissionError::Feature,
+            "parallel_tool_calls=false is not implemented",
+        ));
     }
     if object
         .get("n")
@@ -92,26 +114,40 @@ pub fn prepare<M: ModelContract>(
                             .and_then(|value| value.get("url"))
                             .and_then(Value::as_str)
                             .ok_or("image_url.url must be a string")?;
-                        let (data, jpeg) = if let Some(data) =
-                            url.strip_prefix("data:image/png;base64,")
-                        {
-                            (data, false)
-                        } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
-                            (data, true)
-                        } else {
-                            return Err("image input requires a base64 PNG or JPEG data URL".into());
-                        };
+                        let (data, jpeg) =
+                            if let Some(data) = url.strip_prefix("data:image/png;base64,") {
+                                (data, false)
+                            } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
+                                (data, true)
+                            } else {
+                                return Err(Error::admission(
+                                    AdmissionError::Image,
+                                    "image input requires a base64 PNG or JPEG data URL",
+                                ));
+                            };
                         if data.len() > processor.max_encoded_bytes().div_ceil(3).saturating_mul(4)
                         {
-                            return Err("encoded image exceeds the configured byte limit".into());
+                            return Err(Error::admission(
+                                AdmissionError::Image,
+                                "encoded image exceeds the configured byte limit",
+                            ));
                         }
                         let bytes = base64::engine::general_purpose::STANDARD
                             .decode(data)
-                            .map_err(|error| format!("invalid image base64: {error}"))?;
+                            .map_err(|error| {
+                                Error::Admission(AdmissionError::Image(Failure::caused_by(
+                                    format!("invalid image base64: {error}"),
+                                    error,
+                                )))
+                            })?;
                         images.push(if jpeg {
-                            processor.decode_jpeg(&bytes)?
+                            processor
+                                .decode_jpeg(&bytes)
+                                .map_err(|error| error.admission_context(AdmissionError::Image))?
                         } else {
-                            processor.decode_png(&bytes)?
+                            processor
+                                .decode_png(&bytes)
+                                .map_err(|error| error.admission_context(AdmissionError::Image))?
                         });
                         *part = serde_json::json!({"type":"image"});
                     }
@@ -148,10 +184,16 @@ pub fn prepare<M: ModelContract>(
             .and_then(Value::as_array)
             .is_some_and(|tools| !tools.is_empty())
         {
-            return Err("structured output cannot be combined with tool-call generation".into());
+            return Err(Error::admission(
+                AdmissionError::Feature,
+                "structured output cannot be combined with tool-call generation",
+            ));
         }
         if options.get("enable_thinking") == Some(&Value::Bool(true)) {
-            return Err("structured output requires enable_thinking=false".into());
+            return Err(Error::admission(
+                AdmissionError::Feature,
+                "structured output requires enable_thinking=false",
+            ));
         }
         options.insert("enable_thinking".into(), Value::Bool(false));
     }
@@ -179,14 +221,22 @@ pub fn prepare<M: ModelContract>(
     let mut stop_sequences: Vec<Vec<u32>> = object
         .get("stop_token_sequences")
         .map(|value| {
-            serde_json::from_value(value.clone())
-                .map_err(|error| format!("invalid stop_token_sequences: {error}"))
+            serde_json::from_value(value.clone()).map_err(|error| {
+                Error::Admission(AdmissionError::Invalid(Failure::caused_by(
+                    format!("invalid stop_token_sequences: {error}"),
+                    error,
+                )))
+            })
         })
         .transpose()?
         .unwrap_or_default();
     if let Some(value) = object.get("stop_token_ids") {
-        let ids: Vec<u32> = serde_json::from_value(value.clone())
-            .map_err(|error| format!("invalid stop_token_ids: {error}"))?;
+        let ids: Vec<u32> = serde_json::from_value(value.clone()).map_err(|error| {
+            Error::Admission(AdmissionError::Invalid(Failure::caused_by(
+                format!("invalid stop_token_ids: {error}"),
+                error,
+            )))
+        })?;
         stop_sequences.extend(ids.into_iter().map(|id| vec![id]));
     }
     super::stops::TokenStops::new(stop_sequences.clone(), config.contract.vocabulary)?;
@@ -213,7 +263,12 @@ pub fn prepare<M: ModelContract>(
     } else {
         integer(object, "max_tokens", config.max_new_tokens as u64)?
     })
-    .map_err(|_| "output limit exceeds uint32")?;
+    .map_err(|error| {
+        Error::Admission(AdmissionError::Invalid(Failure::caused_by(
+            "output limit exceeds uint32",
+            error,
+        )))
+    })?;
     if max_new_tokens == 0
         || max_new_tokens > i32::MAX as u32
         || tokens
@@ -253,7 +308,7 @@ fn string_stops(value: Option<&Value>) -> Result<Vec<String>> {
                 value
                     .as_str()
                     .map(str::to_owned)
-                    .ok_or_else(|| "stop must be a string or an array of strings".to_owned())
+                    .ok_or_else(|| Error::from("stop must be a string or an array of strings"))
             })
             .collect::<Result<Vec<_>>>()?,
         _ => return Err("stop must be a string or an array of strings".into()),
@@ -287,8 +342,12 @@ fn normalize_tool_arguments(message: &mut Value) -> Result<()> {
             .get_mut("arguments")
             .ok_or("tool call function.arguments is required")?;
         if let Some(encoded) = arguments.as_str() {
-            *arguments = serde_json::from_str(encoded)
-                .map_err(|error| format!("invalid tool call arguments JSON: {error}"))?;
+            *arguments = serde_json::from_str(encoded).map_err(|error| {
+                Error::Admission(AdmissionError::Invalid(Failure::caused_by(
+                    format!("invalid tool call arguments JSON: {error}"),
+                    error,
+                )))
+            })?;
         }
         if !arguments.is_object() {
             return Err("tool call function.arguments must encode a JSON object".into());
@@ -362,15 +421,23 @@ pub(super) fn sampling_parameters(
 fn boolean(object: &Map<String, Value>, name: &str, default: bool) -> Result<bool> {
     object
         .get(name)
-        .map(|v| v.as_bool().ok_or_else(|| format!("{name} must be boolean")))
+        .map(|v| {
+            v.as_bool().ok_or_else(|| {
+                Error::admission(AdmissionError::Invalid, format!("{name} must be boolean"))
+            })
+        })
         .unwrap_or(Ok(default))
 }
 fn integer(object: &Map<String, Value>, name: &str, default: u64) -> Result<u64> {
     object
         .get(name)
         .map(|v| {
-            v.as_u64()
-                .ok_or_else(|| format!("{name} must be a nonnegative integer"))
+            v.as_u64().ok_or_else(|| {
+                Error::admission(
+                    AdmissionError::Invalid,
+                    format!("{name} must be a nonnegative integer"),
+                )
+            })
         })
         .unwrap_or(Ok(default))
 }
@@ -381,7 +448,12 @@ fn number(object: &Map<String, Value>, name: &str, default: f32) -> Result<f32> 
             v.as_f64()
                 .filter(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
                 .map(|v| v as f32)
-                .ok_or_else(|| format!("{name} must be finite float32"))
+                .ok_or_else(|| {
+                    Error::admission(
+                        AdmissionError::Invalid,
+                        format!("{name} must be finite float32"),
+                    )
+                })
         })
         .unwrap_or(Ok(default))
 }

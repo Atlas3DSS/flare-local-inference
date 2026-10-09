@@ -184,11 +184,10 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
                 .position(|graph| graph.kind == kind && graph.sampling_mode == mode)
                 .unwrap();
             let removed = missing.graphs.remove(index);
-            assert!(
-                Qwen4Exp::validate(&config, &missing)
-                    .unwrap_err()
-                    .contains("lacks")
-            );
+            assert!(matches!(
+                Qwen4Exp::validate(&config, &missing).unwrap_err(),
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ));
             let selected = Qwen4Exp::graph(
                 &config,
                 &original,
@@ -204,11 +203,10 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
             extra.name.push_str("-duplicate");
             extra.handle = duplicate.graphs.len() + 1;
             duplicate.graphs.push(extra);
-            assert!(
-                Qwen4Exp::validate(&config, &duplicate)
-                    .unwrap_err()
-                    .contains("ambiguous")
-            );
+            assert!(matches!(
+                Qwen4Exp::validate(&config, &duplicate).unwrap_err(),
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ));
         }
     }
 }
@@ -236,11 +234,10 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
     {
         let mut missing = original.clone();
         missing.graphs.remove(index);
-        assert!(
-            Qwen4Exp::validate(&config, &missing)
-                .unwrap_err()
-                .contains("lacks Speculative")
-        );
+        assert!(matches!(
+            Qwen4Exp::validate(&config, &missing).unwrap_err(),
+            crate::Error::Execution(crate::ExecutionError::Manifest(_))
+        ));
     }
     for kind in [
         GraphKind::Prefill,
@@ -255,11 +252,10 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
             .unwrap()
             .input_bindings
             .retain(|i| i.buffer_name != "draft_page_tables");
-        assert!(
-            Qwen4Exp::validate(&config, &missing)
-                .unwrap_err()
-                .contains("draft_page_tables")
-        );
+        assert!(matches!(
+            Qwen4Exp::validate(&config, &missing).unwrap_err(),
+            crate::Error::Execution(crate::ExecutionError::Manifest(_))
+        ));
     }
     for name in [
         "copy_token_ids",
@@ -278,11 +274,10 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
         assert!(Qwen4Exp::validate(&config, &wrong).is_err());
     }
     config.speculative_fixed_width = Some(9);
-    assert!(
-        Qwen4Exp::validate(&config, &original)
-            .unwrap_err()
-            .contains("speculative_fixed_width")
-    );
+    assert!(matches!(
+        Qwen4Exp::validate(&config, &original).unwrap_err(),
+        crate::Error::Execution(crate::ExecutionError::Manifest(_))
+    ));
     config.speculative_fixed_width = Some(8);
     Qwen4Exp::validate(&config, &original).unwrap();
 }
@@ -306,7 +301,8 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
             assert_eq!(
                 Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
                     .err()
-                    .unwrap(),
+                    .unwrap()
+                    .to_string(),
                 "assets must contain verified frontend descriptors"
             );
         }
@@ -326,7 +322,13 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
         let error = Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
             .err()
             .unwrap();
-        assert!(error.contains("speculative"), "{error}");
+        assert!(
+            matches!(
+                error,
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ),
+            "{error}"
+        );
     }
     config.speculative_proposal_source = crate::scheduler::speculation::ProposalSource::Copy;
     let copy_manifest = self::manifest(&config);
@@ -335,7 +337,8 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     assert_eq!(
         Bootstrap::load::<Qwen4Exp>(&body.to_string(), &copy_manifest)
             .err()
-            .unwrap(),
+            .unwrap()
+            .to_string(),
         "assets must contain verified frontend descriptors"
     );
 }
@@ -504,11 +507,10 @@ fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
     missing
         .graphs
         .retain(|graph| graph.kind != GraphKind::Resume);
-    assert!(
-        Qwen4Exp::validate(&config, &missing)
-            .unwrap_err()
-            .contains("Resume")
-    );
+    assert!(matches!(
+        Qwen4Exp::validate(&config, &missing).unwrap_err(),
+        crate::Error::Execution(crate::ExecutionError::Manifest(_))
+    ));
     let mut missing = manifest.clone();
     let graph = missing
         .graphs
@@ -518,11 +520,10 @@ fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
     graph
         .input_bindings
         .retain(|input| input.buffer_name != "vision_token_indices");
-    assert!(
-        Qwen4Exp::validate(&config, &missing)
-            .unwrap_err()
-            .contains("vision_token_indices")
-    );
+    assert!(matches!(
+        Qwen4Exp::validate(&config, &missing).unwrap_err(),
+        crate::Error::Execution(crate::ExecutionError::Manifest(_))
+    ));
     let mut wrong = manifest;
     wrong
         .buffers
@@ -550,7 +551,16 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
                     && graph.token_capacity == chunk_size)
             });
             let error = Qwen4Exp::validate(&config, &missing).unwrap_err();
-            assert!(error.contains("lacks Prefill") && error.contains(&chunk_size.to_string()));
+            assert!(matches!(
+                error,
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "prepared model lacks Prefill/General graph with batch 1, tokens {chunk_size}"
+                )
+            );
         }
         for name in ["token_ids", "prefill_positions", "vision_token_indices"] {
             let mut short = original.clone();
@@ -569,11 +579,10 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
                     .unwrap()
                     .nbytes /= 2;
             }
-            assert!(
-                Qwen4Exp::validate(&config, &short)
-                    .unwrap_err()
-                    .contains(&format!("semantic buffer {name}"))
-            );
+            assert!(matches!(
+                Qwen4Exp::validate(&config, &short).unwrap_err(),
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ));
         }
     }
 }
@@ -595,14 +604,17 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
             .unwrap()
     };
     assert_eq!(
-        failure(&body, &config),
+        failure(&body, &config).to_string(),
         "assets must contain verified frontend descriptors"
     );
     config.limits.prefill_chunk_size = 512;
-    assert!(failure(&body, &config).contains("semantic buffer token_ids"));
+    assert!(matches!(
+        failure(&body, &config),
+        crate::Error::Execution(crate::ExecutionError::Manifest(_))
+    ));
     body["prefill_chunk_size"] = json!(512);
     assert_eq!(
-        failure(&body, &config),
+        failure(&body, &config).to_string(),
         "assets must contain verified frontend descriptors"
     );
     for invalid in [
@@ -614,7 +626,10 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
         json!(null),
     ] {
         body["prefill_chunk_size"] = invalid;
-        assert!(failure(&body, &config).contains("prefill_chunk_size"));
+        assert!(matches!(
+            failure(&body, &config),
+            crate::Error::Execution(crate::ExecutionError::Manifest(_))
+        ));
     }
 }
 
@@ -908,11 +923,10 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
             .unwrap()
             .input_bindings
             .retain(|b| b.buffer_name != name);
-        assert!(
-            Qwen4Exp::validate(&config, &missing)
-                .unwrap_err()
-                .contains(name)
-        );
+        assert!(matches!(
+            Qwen4Exp::validate(&config, &missing).unwrap_err(),
+            crate::Error::Execution(crate::ExecutionError::Manifest(_))
+        ));
         let mut wrong = original.clone();
         wrong
             .buffers
@@ -923,11 +937,10 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
         assert!(Qwen4Exp::validate(&config, &wrong).is_err());
     }
     config.speculative_widths.clear();
-    assert!(
-        Qwen4Exp::validate(&config, &original)
-            .unwrap_err()
-            .contains("requires speculative")
-    );
+    assert!(matches!(
+        Qwen4Exp::validate(&config, &original).unwrap_err(),
+        crate::Error::Execution(crate::ExecutionError::Manifest(_))
+    ));
     assert!(ProposalSource::parse("auto").is_err());
 }
 
@@ -1142,7 +1155,8 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
     assert_eq!(
         Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
             .err()
-            .unwrap(),
+            .unwrap()
+            .to_string(),
         "assets must contain verified frontend descriptors"
     );
     let mut cases = Vec::new();
@@ -1180,7 +1194,10 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
             .err()
             .unwrap();
         assert!(
-            error.contains("model_contract") || error.contains("graph-input schema"),
+            matches!(
+                error,
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ),
             "{error}: {value}"
         );
     }
@@ -1192,11 +1209,10 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
         .unwrap()
         .token_capacity = 512;
     manifest.validate().unwrap();
-    assert!(
-        Qwen4Exp::validate(&config, &manifest)
-            .unwrap_err()
-            .contains("undeclared Qwen4Exp capacity")
-    );
+    assert!(matches!(
+        Qwen4Exp::validate(&config, &manifest).unwrap_err(),
+        crate::Error::Execution(crate::ExecutionError::Manifest(_))
+    ));
 }
 
 #[test]
@@ -1229,11 +1245,10 @@ fn model_validates_draft_cache_and_completion_vocabulary() {
             GraphKind::Snapshot,
             GraphKind::Vision,
         ] {
-            assert!(
-                Qwen4Exp::validate_completion(&config, kind, &record)
-                    .unwrap_err()
-                    .contains("field 12")
-            );
+            assert!(matches!(
+                Qwen4Exp::validate_completion(&config, kind, &record).unwrap_err(),
+                crate::Error::Execution(crate::ExecutionError::Completion(_))
+            ));
         }
     }
     record.vector.as_mut().unwrap().model_reserved = -1;
@@ -1632,11 +1647,10 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
                     .input_bindings
                     .retain(|b| b.buffer_name != "state_expected_consumed");
             }
-            assert!(
-                Qwen4Exp::validate(&config, &broken)
-                    .unwrap_err()
-                    .contains("state_expected_consumed")
-            );
+            assert!(matches!(
+                Qwen4Exp::validate(&config, &broken).unwrap_err(),
+                crate::Error::Execution(crate::ExecutionError::Manifest(_))
+            ));
         }
         for kind in [GraphKind::Restore, GraphKind::Snapshot] {
             for name in ["page_tables", "draft_page_tables"]
@@ -1647,11 +1661,10 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
                 for graph in broken.graphs.iter_mut().filter(|g| g.kind == kind) {
                     graph.input_bindings.retain(|b| b.buffer_name != name);
                 }
-                assert!(
-                    Qwen4Exp::validate(&config, &broken)
-                        .unwrap_err()
-                        .contains(name)
-                );
+                assert!(matches!(
+                    Qwen4Exp::validate(&config, &broken).unwrap_err(),
+                    crate::Error::Execution(crate::ExecutionError::Manifest(_))
+                ));
             }
         }
         let mut broken = valid;

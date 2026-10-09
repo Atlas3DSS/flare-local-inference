@@ -94,7 +94,10 @@ impl SamplingParameters {
                 .any(|value| *value > 0. && *value < f32::MIN_POSITIVE)
             || self.top_k < -1
         {
-            return Err("invalid sampling parameters".into());
+            return Err(crate::Error::admission(
+                crate::AdmissionError::Invalid,
+                "invalid sampling parameters",
+            ));
         }
         Ok(())
     }

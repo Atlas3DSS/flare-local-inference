@@ -14,7 +14,7 @@ pub use config::Bootstrap;
 pub use runtime::{Generation, GenerationEvent, ModelRuntime, Prompt};
 
 use crate::{
-    Result, Shutdown,
+    AdmissionError, Error, ExecutionError, Failure, Result, Shutdown,
     execution::ExecutionManifest,
     frontend::{Frontend, images::ImageProcessor},
     model::{ModelConfig, ModelContract},
@@ -87,11 +87,11 @@ struct HttpControl {
 }
 
 pub struct StartFailure {
-    pub message: String,
+    pub message: Error,
     pub drained: bool,
 }
-impl From<String> for StartFailure {
-    fn from(message: String) -> Self {
+impl From<Error> for StartFailure {
+    fn from(message: Error) -> Self {
         Self {
             message,
             drained: true,
@@ -100,7 +100,7 @@ impl From<String> for StartFailure {
 }
 impl From<&str> for StartFailure {
     fn from(message: &str) -> Self {
-        message.to_owned().into()
+        Error::from(message).into()
     }
 }
 impl<M: ModelContract> Server<M> {
@@ -166,7 +166,7 @@ impl<M: ModelContract> Server<M> {
                     .worker_threads(2)
                     .enable_all()
                     .build()
-                    .map_err(|error| format!("cannot create HTTP runtime: {error}"))?;
+                    .map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(format!("cannot create HTTP runtime: {error}"), error))))?;
                 runtime.block_on(async move {
                     let shutdown_state = state.clone();
                     let mut router = Router::new()
@@ -184,12 +184,12 @@ impl<M: ModelContract> Server<M> {
                     let listener = match tokio::net::TcpListener::bind(config.bind).await {
                         Ok(listener) => listener,
                         Err(error) => {
-                            let error = format!("cannot bind HTTP listener: {error}");
+                            let error = Error::Execution(ExecutionError::Worker(Failure::caused_by(format!("cannot bind HTTP listener: {error}"), error)));
                             let _ = ready_tx.send(Err(error.clone()));
                             return Err(error);
                         }
                     };
-                    let address = listener.local_addr().map_err(|error| error.to_string())?;
+                    let address = listener.local_addr().map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(error.to_string(), error))))?;
                     let listener = listener::HttpListener::new(listener);
                     let _ = ready_tx.send(Ok(address));
                     let (drain_tx, drain_rx) = oneshot::channel();
@@ -201,7 +201,7 @@ impl<M: ModelContract> Server<M> {
                             .await
                     });
                     tokio::select! {
-                        result=&mut serving=>{runtime_model.request_stop();return result.map_err(|error|error.to_string())?.map_err(|error|error.to_string());},
+                        result=&mut serving=>{runtime_model.request_stop();return result.map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(error.to_string(), error))))?.map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(error.to_string(), error))));},
                         _=shutdown_rx=>{}
                     }
                     shutdown_state.frontend_slots.close();
@@ -209,8 +209,8 @@ impl<M: ModelContract> Server<M> {
                     let _ = drain_tx.send(());
                     match tokio::time::timeout(Duration::from_secs(5), &mut serving).await {
                         Ok(result) => result
-                            .map_err(|error| error.to_string())?
-                            .map_err(|error| error.to_string()),
+                            .map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(error.to_string(), error))))?
+                            .map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(error.to_string(), error)))),
                         Err(_) => {
                             serving.abort();
                             let _ = serving.await;
@@ -223,7 +223,7 @@ impl<M: ModelContract> Server<M> {
             Err(error) => {
                 let shutdown = model.close();
                 return Err(StartFailure {
-                    message: format!("cannot start HTTP thread: {error}"),
+                    message: Error::Execution(ExecutionError::Worker(Failure::caused_by(format!("cannot start HTTP thread: {error}"), error))),
                     drained: shutdown.drained,
                 });
             }
@@ -239,12 +239,17 @@ impl<M: ModelContract> Server<M> {
                 shutdown: Mutex::new(None),
             }),
             result => {
-                let _ = thread.join();
+                let returned = thread.join().ok().and_then(Result::err);
                 let shutdown = model.close();
                 Err(StartFailure {
                     message: match result {
                         Ok(Err(error)) => error,
-                        _ => "HTTP thread exited before readiness".into(),
+                        Err(disconnected) => readiness_failure(
+                            "HTTP thread exited before readiness",
+                            disconnected,
+                            returned,
+                        ),
+                        Ok(Ok(_)) => unreachable!("ready success handled above"),
                     },
                     drained: shutdown.drained,
                 })
@@ -281,7 +286,10 @@ impl<M: ModelContract> Server<M> {
                     shutdown.error.get_or_insert(error);
                 }
                 Err(_) => {
-                    shutdown.error.get_or_insert("HTTP thread panicked".into());
+                    shutdown.error.get_or_insert(Error::execution(
+                        ExecutionError::Worker,
+                        "HTTP thread panicked",
+                    ));
                 }
             }
         }
@@ -340,10 +348,33 @@ async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Re
     )
         .into_response()
 }
-fn error(status: StatusCode, message: impl AsRef<str>) -> Response {
+fn readiness_failure(
+    message: &'static str,
+    disconnected: std::sync::mpsc::RecvError,
+    returned: Option<Error>,
+) -> Error {
+    let cause = match returned {
+        Some(error) => Failure::caused_by(message, error),
+        None => Failure::caused_by(message, disconnected),
+    };
+    ExecutionError::Worker(cause).into()
+}
+
+fn typed_error(failure: Error) -> Response {
+    let status = match &failure {
+        Error::Admission(AdmissionError::Capacity(_) | AdmissionError::Unavailable(_)) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        Error::Admission(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error(status, failure)
+}
+
+fn error(status: StatusCode, message: impl std::fmt::Display) -> Response {
     (
         status,
-        Json(json!({"error":{"message":message.as_ref(),"type":"invalid_request_error"}})),
+        Json(json!({"error":{"message":message.to_string(),"type":"invalid_request_error"}})),
     )
         .into_response()
 }
@@ -404,7 +435,7 @@ async fn chat<M: ModelContract>(
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(message)) => return error(StatusCode::BAD_REQUEST, message),
+        Ok(Err(message)) => return typed_error(message),
         Err(error_value) => {
             return error(StatusCode::INTERNAL_SERVER_ERROR, error_value.to_string());
         }
@@ -423,7 +454,7 @@ async fn chat<M: ModelContract>(
     };
     let generation = match submitted {
         Ok(generation) => generation,
-        Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, message),
+        Err(message) => return typed_error(message),
     };
     let enqueue_ns = generation.enqueue_ns;
     let id = format!("chatcmpl-{}", state.ids.fetch_add(1, Ordering::Relaxed));
@@ -519,7 +550,7 @@ async fn chat<M: ModelContract>(
                 }
                 GenerationEvent::AdmissionRejected(message) => {
                     presentation.abort(crate::output::Termination::ExecutionError);
-                    return error(StatusCode::SERVICE_UNAVAILABLE, message);
+                    return typed_error(message);
                 }
                 GenerationEvent::Finished {
                     prompt_tokens,
@@ -597,6 +628,89 @@ fn observed_chunk(
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+
+    #[test]
+    fn readiness_failure_keeps_worker_cause_with_unchanged_fallback_message() {
+        use std::error::Error as _;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let joined = std::thread::spawn(move || -> Result<()> {
+            drop(tx);
+            Err(ExecutionError::Worker(Failure::caused_by(
+                "cannot create HTTP runtime: denied",
+                std::io::Error::from_raw_os_error(13),
+            ))
+            .into())
+        });
+        let disconnected = rx.recv().unwrap_err();
+        let returned = joined.join().unwrap().err();
+        let error = readiness_failure(
+            "HTTP thread exited before readiness",
+            disconnected,
+            returned,
+        );
+        assert!(matches!(error, Error::Execution(ExecutionError::Worker(_))));
+        assert_eq!(error.to_string(), "HTTP thread exited before readiness");
+        let worker = error.source().unwrap().downcast_ref::<Error>().unwrap();
+        assert_eq!(
+            worker
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(13)
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_status_and_wire_messages_preserve_admission_and_execution_boundaries() {
+        let cases = [
+            (
+                Error::admission(AdmissionError::Invalid, "invalid sampling parameters"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Error::admission(
+                    AdmissionError::Feature,
+                    "parallel_tool_calls=false is not implemented",
+                ),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Error::admission(AdmissionError::Grammar, "invalid grammar"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Error::admission(AdmissionError::Image, "invalid image base64"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Error::admission(AdmissionError::Capacity, "native request queue is full"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Error::admission(
+                    AdmissionError::Unavailable,
+                    "prepared model runtime is unavailable",
+                ),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Error::execution(ExecutionError::Poisoned, "executor failed"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (failure, status) in cases {
+            let message = failure.to_string();
+            let response = typed_error(failure);
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["message"], message);
+        }
+    }
 
     #[test]
     fn raw_metadata_chunks_never_duplicate_text_or_hide_eos() {

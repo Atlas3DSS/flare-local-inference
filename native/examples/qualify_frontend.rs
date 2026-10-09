@@ -5,6 +5,10 @@ use serde_json::{Map, Value};
 use sparkgap_native::frontend::{Asset, Frontend, FrontendAssets};
 
 fn main() -> Result<(), String> {
+    run().map_err(|error| error.to_string())
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if arguments.len() != 3 {
         return Err("usage: qualify_frontend ABSOLUTE_SNAPSHOT FIXTURES_JSON".into());
@@ -51,27 +55,29 @@ fn main() -> Result<(), String> {
                         let error = match rendered {
                             Err(error) => error,
                             Ok(_) => {
-                                return Err(format!(
+                                return Err((format!(
                                     "{name}: expected error {expected:?}, received rendered prompt"
-                                ));
+                                ))
+                                .into());
                             }
                         };
-                        if error != expected {
-                            return Err(format!(
+                        if error.to_string() != expected {
+                            return Err((format!(
                                 "{name}: expected error {expected:?}, received {error:?}"
-                            ));
+                            ))
+                            .into());
                         }
                     } else {
                         let rendered = rendered.map_err(|error| format!("{name}: {error}"))?;
                         let expected = case["rendered"].as_str().unwrap();
                         if rendered.text != expected {
-                            return Err(format!(
+                            return Err((format!(
                                 "{name}: rendered bytes differ\nexpected: {expected:?}\nreceived: {:?}",
                                 rendered.text
-                            ));
+                            )).into());
                         }
                         if serde_json::to_value(&rendered.token_ids).unwrap() != case["token_ids"] {
-                            return Err(format!("{name}: token IDs differ"));
+                            return Err((format!("{name}: token IDs differ")).into());
                         }
                     }
                 }
@@ -81,7 +87,7 @@ fn main() -> Result<(), String> {
                         case["add_special_tokens"].as_bool().unwrap(),
                     )?;
                     if serde_json::to_value(ids).unwrap() != case["token_ids"] {
-                        return Err(format!("{name}: token IDs differ"));
+                        return Err((format!("{name}: token IDs differ")).into());
                     }
                 }
                 "decode_cases" => {
@@ -89,7 +95,7 @@ fn main() -> Result<(), String> {
                     let skip = case["skip_special_tokens"].as_bool().unwrap();
                     let expected = case["text"].as_str().unwrap();
                     if frontend.decode(&ids, skip)? != expected {
-                        return Err(format!("{name}: decoded text differs"));
+                        return Err((format!("{name}: decoded text differs")).into());
                     }
                     let mut decoder = frontend.incremental_decoder(skip);
                     let mut text = String::new();
@@ -100,9 +106,10 @@ fn main() -> Result<(), String> {
                     }
                     text.push_str(&decoder.finish()?);
                     if text != expected {
-                        return Err(format!(
+                        return Err((format!(
                             "{name}: incremental text differs: {text:?} != {expected:?}"
-                        ));
+                        ))
+                        .into());
                     }
                 }
                 _ => unreachable!(),
@@ -145,9 +152,10 @@ fn main() -> Result<(), String> {
         if prompt.text != case["rendered"].as_str().unwrap()
             || serde_json::to_value(prompt.token_ids).unwrap() != case["token_ids"]
         {
-            return Err(format!(
+            return Err((format!(
                 "configured defaults/explicit overrides diverge for {fixture_name}"
-            ));
+            ))
+            .into());
         }
     }
     counts.insert("default_override_cases".into(), Value::from(3));

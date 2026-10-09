@@ -82,7 +82,10 @@ fn queues_replay_commands_in_order_and_completes_after_execution() {
 fn unconsumed_completions_count_against_capacity() {
     let worker = test_worker(1, |_, _| Ok(()), clean_shutdown);
     worker.submit(0, 1).unwrap();
-    assert!(worker.submit(0, 1).unwrap_err().contains("capacity"));
+    assert!(matches!(
+        worker.submit(0, 1).unwrap_err(),
+        Error::Execution(ExecutionError::Capacity(_))
+    ));
     worker.poll(Duration::from_secs(1)).unwrap().unwrap();
     worker.submit(0, 1).unwrap();
     assert!(worker.close().drained);
@@ -110,7 +113,10 @@ fn close_drains_queued_work_and_is_idempotent() {
     }
     assert!(worker.close().drained);
     assert!(worker.close().drained);
-    assert!(worker.submit(0, 1).unwrap_err().contains("closed"));
+    assert!(matches!(
+        worker.submit(0, 1).unwrap_err(),
+        Error::Execution(ExecutionError::Closed(_))
+    ));
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
@@ -122,7 +128,7 @@ fn execution_failure_poisoning_prevents_later_graph_launches() {
         3,
         move |_, _| {
             executed.fetch_add(1, Ordering::SeqCst);
-            Err("CUDA launch failed".into())
+            Err(driver_failure("cuGraphLaunch", 700))
         },
         clean_shutdown,
     );
@@ -130,20 +136,31 @@ fn execution_failure_poisoning_prevents_later_graph_launches() {
         worker.submit(0, 1).unwrap();
     }
     for _ in 0..3 {
+        let error = worker
+            .poll(Duration::from_secs(1))
+            .unwrap()
+            .unwrap()
+            .error
+            .unwrap();
+        assert!(matches!(
+            error,
+            Error::Execution(ExecutionError::Driver(crate::CudaError { code: 700, .. }))
+        ));
         assert_eq!(
-            worker
-                .poll(Duration::from_secs(1))
-                .unwrap()
-                .unwrap()
-                .error
-                .as_deref(),
-            Some("CUDA launch failed")
+            error.to_string(),
+            "cuGraphLaunch failed (700, CUDA_ERROR_ILLEGAL_ADDRESS): an illegal memory access was encountered"
         );
     }
     assert_eq!(count.load(Ordering::SeqCst), 1);
     let shutdown = worker.close();
     assert!(shutdown.drained);
-    assert_eq!(shutdown.error.as_deref(), Some("CUDA launch failed"));
+    assert!(matches!(
+        shutdown.error,
+        Some(Error::Execution(ExecutionError::Driver(crate::CudaError {
+            code: 700,
+            ..
+        })))
+    ));
 }
 
 #[test]
@@ -153,11 +170,20 @@ fn failed_drain_is_preserved_on_repeated_close() {
         |_, _| Ok(()),
         || Shutdown {
             drained: false,
-            error: Some("CUDA synchronization failed".into()),
+            error: Some(driver_failure("cuStreamSynchronize", 700)),
         },
     );
-    assert!(!worker.close().drained);
-    assert!(!worker.close().drained);
+    for _ in 0..2 {
+        let shutdown = worker.close();
+        assert!(!shutdown.drained);
+        assert!(matches!(
+            shutdown.error,
+            Some(Error::Execution(ExecutionError::Driver(crate::CudaError {
+                code: 700,
+                ..
+            })))
+        ));
+    }
 }
 
 #[test]
@@ -189,7 +215,11 @@ fn worker_panic_reports_disconnected_submissions_instead_of_timeout() {
     .unwrap();
     worker.submit(0, 1).unwrap();
     let error = worker.poll(Duration::from_secs(1)).unwrap_err();
-    assert!(error.contains("disconnected with 1 outstanding"), "{error}");
+    assert!(matches!(error, Error::Execution(ExecutionError::Worker(_))));
+    assert_eq!(
+        error.to_string(),
+        "native replay worker disconnected with 1 outstanding submissions; close the worker to confirm stream drain"
+    );
     assert!(!worker.close().drained);
     assert!(worker.poll(Duration::ZERO).is_err());
 }
@@ -201,4 +231,56 @@ fn drained_disconnected_worker_has_no_pending_event() {
     assert!(worker.close().drained);
     assert!(worker.poll(Duration::ZERO).unwrap().is_some());
     assert!(worker.poll(Duration::ZERO).unwrap().is_none());
+}
+
+fn driver_failure(operation: &str, code: i32) -> Error {
+    ExecutionError::Driver(crate::CudaError {
+        operation: operation.to_owned(),
+        code,
+        name: "CUDA_ERROR_ILLEGAL_ADDRESS".into(),
+        description: "an illegal memory access was encountered".into(),
+    })
+    .into()
+}
+
+#[test]
+fn initialization_failure_preserves_typed_driver_error() {
+    let result = ReplayWorker::spawn(1, 1, |_receiver, _sender, ready| {
+        let error = driver_failure("cuStreamCreate", 700);
+        ready.send(Err(error.clone())).unwrap();
+        Shutdown {
+            drained: true,
+            error: Some(error),
+        }
+    });
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("worker unexpectedly initialized"),
+    };
+    assert!(matches!(
+        error,
+        Error::Execution(ExecutionError::Driver(crate::CudaError { code: 700, .. }))
+    ));
+}
+
+#[test]
+fn disconnected_startup_preserves_channel_cause() {
+    let result = ReplayWorker::spawn(1, 1, |_receiver, _sender, ready| {
+        drop(ready);
+        clean_shutdown()
+    });
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("worker unexpectedly initialized"),
+    };
+    assert!(matches!(error, Error::Execution(ExecutionError::Worker(_))));
+    assert_eq!(
+        error.to_string(),
+        "native replay worker exited during initialization"
+    );
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .is::<mpsc::RecvError>()
+    );
 }

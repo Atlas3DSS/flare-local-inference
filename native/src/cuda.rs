@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use libloading::Library;
 
-use crate::Result;
+use crate::{CudaError, Error, ExecutionError, Failure, Result};
 
 type Handle = *mut c_void;
 type GetContext = unsafe extern "C" fn(*mut Handle) -> c_int;
@@ -47,15 +47,23 @@ struct Driver {
 
 impl Driver {
     fn load() -> Result<Arc<Self>> {
-        // CUDA handles belong to the process's existing driver and primary context.
+        // SAFETY: The CUDA driver exports these ABI signatures. The retained
+        // Library keeps every resolved function pointer valid for this Driver.
         unsafe {
-            let library = Library::new("libcuda.so.1")
-                .map_err(|e| format!("cannot load NVIDIA CUDA driver libcuda.so.1: {e}"))?;
+            let library = Library::new("libcuda.so.1").map_err(|e| {
+                ExecutionError::State(Failure::caused_by(
+                    format!("cannot load NVIDIA CUDA driver libcuda.so.1: {e}"),
+                    e,
+                ))
+            })?;
             macro_rules! symbol {
                 ($name:literal) => {
-                    *library
-                        .get(concat!($name, "\0").as_bytes())
-                        .map_err(|e| format!("cannot load CUDA entrypoint {}: {e}", $name))?
+                    *library.get(concat!($name, "\0").as_bytes()).map_err(|e| {
+                        ExecutionError::State(Failure::caused_by(
+                            format!("cannot load CUDA entrypoint {}: {e}", $name),
+                            e,
+                        ))
+                    })?
                 };
             }
             Ok(Arc::new(Self {
@@ -89,6 +97,8 @@ impl Driver {
         }
         let describe = |function: ErrorText| {
             let mut text = std::ptr::null();
+            // SAFETY: Driver retains the CUDA library and its error-text functions.
+            // CUDA owns the returned NUL-terminated string; it is copied immediately.
             unsafe {
                 if function(status, &mut text) == 0 && !text.is_null() {
                     CStr::from_ptr(text).to_string_lossy().into_owned()
@@ -97,24 +107,29 @@ impl Driver {
                 }
             }
         };
-        Err(format!(
-            "{operation} failed ({status}, {}): {}",
-            describe(self.error_name),
-            describe(self.error_string)
-        ))
+        Err(ExecutionError::Driver(CudaError {
+            operation: operation.to_owned(),
+            code: status,
+            name: describe(self.error_name),
+            description: describe(self.error_string),
+        })
+        .into())
     }
 
     fn current(&self) -> Result<(usize, i32)> {
         let mut context = std::ptr::null_mut();
+        // SAFETY: The driver owns the ABI and the output pointer is valid for the call.
         self.check("cuCtxGetCurrent", unsafe {
             (self.get_context)(&mut context)
         })?;
         if context.is_null() {
-            return Err(
-                "no current CUDA context; initialize the model's device before registration".into(),
-            );
+            return Err(Error::execution(
+                ExecutionError::State,
+                "no current CUDA context; initialize the model's device before registration",
+            ));
         }
         let mut device = -1;
+        // SAFETY: A current context was verified and device is a valid output pointer.
         self.check("cuCtxGetDevice", unsafe { (self.get_device)(&mut device) })?;
         Ok((context as usize, device))
     }
@@ -137,8 +152,11 @@ impl Stream {
         })?;
         let (_, device) = driver.current()?;
         if device != expected_device {
-            return Err(format!(
-                "CUDA context belongs to device {device}, expected device {expected_device}"
+            return Err(Error::execution(
+                ExecutionError::State,
+                format!(
+                    "CUDA context belongs to device {device}, expected device {expected_device}"
+                ),
             ));
         }
         let mut handle = std::ptr::null_mut();
@@ -259,7 +277,10 @@ impl Event {
             (self.driver.event_elapsed)(&mut millis, start.handle as Handle, self.handle as Handle)
         })?;
         if !millis.is_finite() || millis <= 0.0 {
-            return Err("invalid speculative CUDA event duration".into());
+            return Err(Error::execution(
+                ExecutionError::Completion,
+                "invalid speculative CUDA event duration",
+            ));
         }
         Ok((f64::from(millis) * 1_000_000.0).round() as u64)
     }

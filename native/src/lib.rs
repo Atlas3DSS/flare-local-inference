@@ -1,5 +1,6 @@
 pub mod cache;
 mod cuda;
+pub mod error;
 pub mod execution;
 #[cfg(feature = "grammar")]
 pub mod grammar;
@@ -23,4 +24,5 @@ mod python;
 pub use cuda::current_context;
 pub use replay::{BufferSpan, Completion, GraphBundle, ReplayWorker, Shutdown};
 
-pub type Result<T> = std::result::Result<T, String>;
+pub use error::{AdmissionError, CudaError, Error, ExecutionError, Failure, FrontendError};
+pub type Result<T> = std::result::Result<T, Error>;

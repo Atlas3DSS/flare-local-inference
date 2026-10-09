@@ -35,9 +35,10 @@ impl SchedulerLimits {
             || !self.prefill_chunk_size.is_multiple_of(64)
             || self.prefill_chunk_size > self.max_sequence_tokens
         {
-            return Err(
-                "prefill_chunk_size must be divisible by 64 and within 64..=context".into(),
-            );
+            return Err(crate::Error::execution(
+                crate::ExecutionError::Manifest,
+                "prefill_chunk_size must be divisible by 64 and within 64..=context",
+            ));
         }
         Ok(())
     }
@@ -463,7 +464,10 @@ impl RequestScheduler {
             self.free_snapshots.extend(reusable.snapshots);
         }
         if self.free_pages.len() < pages || self.free_snapshots.len() < snapshots {
-            return Err("live request resources are exhausted or awaiting GPU retirement".into());
+            return Err(crate::Error::admission(
+                crate::AdmissionError::Capacity,
+                "live request resources are exhausted or awaiting GPU retirement",
+            ));
         }
         Ok(())
     }
@@ -493,7 +497,10 @@ impl RequestScheduler {
                 .checked_add(spec.max_new_tokens as usize)
                 .is_none_or(|count| count > self.limits.max_sequence_tokens)
         {
-            return Err("request requires a nonempty prompt, positive output limit, and bounded total tokens".into());
+            return Err(crate::Error::admission(
+                crate::AdmissionError::Invalid,
+                "request requires a nonempty prompt, positive output limit, and bounded total tokens",
+            ));
         }
         let slot = self
             .slots
@@ -501,7 +508,12 @@ impl RequestScheduler {
             .position(|slot| {
                 slot.request.is_none() && !slot.retiring && slot.generation < i64::MAX as u64
             })
-            .ok_or("all request slots are active, retired, or generation-exhausted")?;
+            .ok_or_else(|| {
+                crate::Error::admission(
+                    crate::AdmissionError::Capacity,
+                    "all request slots are active, retired, or generation-exhausted",
+                )
+            })?;
         let mut history = PrefixHistory::new(self.identity);
         history.append(&spec.prompt, &spec.conditioning)?;
         let prefix = if reuse_prefix {

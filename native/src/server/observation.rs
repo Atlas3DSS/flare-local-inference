@@ -71,7 +71,7 @@ fn flag(value: Option<&Value>, name: &str) -> Result<bool> {
     match value {
         None | Some(Value::Null) => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),
-        _ => Err(format!("{name} must be boolean or null")),
+        _ => Err(format!("{name} must be boolean or null").into()),
     }
 }
 

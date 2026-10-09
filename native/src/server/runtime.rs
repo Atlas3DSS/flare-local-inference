@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::mpsc as async_mpsc;
 
 use crate::{
-    Result, Shutdown,
+    AdmissionError, Error, ExecutionError, Failure, Result, Shutdown,
     cache::ConditioningEvent,
     execution::{ExecutionManifest, GraphExecutor, GraphKind, SamplingMode},
     model::{ModelConfig, ModelContract, SamplingParameters},
@@ -53,24 +53,29 @@ pub enum GenerationEvent {
         reason: &'static str,
         termination: crate::output::Termination,
     },
-    AdmissionRejected(String),
-    Error(String),
+    AdmissionRejected(Error),
+    Error(Error),
 }
 
 pub struct Generation {
     pub events: async_mpsc::Receiver<GenerationEvent>,
     cancelled: Arc<AtomicBool>,
-    failure: Arc<Mutex<Option<String>>>,
+    failure: Arc<Mutex<Option<Error>>>,
     pub(super) enqueue_ns: Option<u64>,
 }
 
 impl Generation {
-    pub fn failure(&self) -> String {
+    pub fn failure(&self) -> Error {
         self.failure
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .unwrap_or_else(|| "model worker closed without a terminal completion".into())
+            .unwrap_or_else(|| {
+                Error::execution(
+                    ExecutionError::Worker,
+                    "model worker closed without a terminal completion",
+                )
+            })
     }
 }
 impl Drop for Generation {
@@ -83,19 +88,19 @@ struct Incoming<M: ModelContract> {
     prompt: Prompt<M>,
     events: async_mpsc::Sender<GenerationEvent>,
     cancelled: Arc<AtomicBool>,
-    failure: Arc<Mutex<Option<String>>>,
+    failure: Arc<Mutex<Option<Error>>>,
     metrics: Arc<super::metrics::Metrics>,
     qualification: bool,
     observation: Option<bool>,
 }
 impl<M: ModelContract> Incoming<M> {
-    fn fail(&self, error: String) {
+    fn fail(&self, error: Error) {
         self.finish_error(error, GenerationEvent::Error);
     }
-    fn reject_admission(&self, error: String) {
+    fn reject_admission(&self, error: Error) {
         self.finish_error(error, GenerationEvent::AdmissionRejected);
     }
-    fn finish_error(&self, error: String, event: fn(String) -> GenerationEvent) {
+    fn finish_error(&self, error: Error, event: fn(Error) -> GenerationEvent) {
         let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
         if failure.is_some() {
             return;
@@ -118,7 +123,10 @@ impl<M: ModelContract> Incoming<M> {
     }
     fn emit(&self, event: GenerationEvent) {
         if self.events.try_send(event).is_err() {
-            self.fail("generation consumer exceeded the bounded output queue".into());
+            self.fail(Error::execution(
+                ExecutionError::Capacity,
+                "generation consumer exceeded the bounded output queue",
+            ));
             self.cancelled.store(true, Ordering::Release);
         }
     }
@@ -260,11 +268,14 @@ impl<M: ModelContract> ModelRuntime<M> {
                 let error = match run {
                     Ok(Ok(())) => None,
                     Ok(Err(error)) => Some(error),
-                    Err(_) => Some("native model worker panicked".into()),
+                    Err(_) => Some(Error::execution(
+                        ExecutionError::Worker,
+                        "native model worker panicked",
+                    )),
                 };
-                let final_error = error
-                    .clone()
-                    .unwrap_or_else(|| "model runtime stopped".into());
+                let final_error = error.clone().unwrap_or_else(|| {
+                    Error::execution(ExecutionError::Closed, "model runtime stopped")
+                });
                 for request in active.iter().flatten() {
                     request.incoming.fail(final_error.clone());
                 }
@@ -287,7 +298,12 @@ impl<M: ModelContract> ModelRuntime<M> {
                 worker_finished.1.notify_all();
                 shutdown
             })
-            .map_err(|error| format!("cannot start native model thread: {error}"))?;
+            .map_err(|error| {
+                Error::Execution(ExecutionError::Worker(Failure::caused_by(
+                    format!("cannot start native model thread: {error}"),
+                    error,
+                )))
+            })?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 sender,
@@ -301,10 +317,15 @@ impl<M: ModelContract> ModelRuntime<M> {
                 metrics,
             }),
             result => {
-                let _ = thread.join();
+                let returned = thread.join().ok().and_then(|shutdown| shutdown.error);
                 Err(match result {
                     Ok(Err(error)) => error,
-                    _ => "model worker exited before readiness".into(),
+                    Err(disconnected) => super::readiness_failure(
+                        "model worker exited before readiness",
+                        disconnected,
+                        returned,
+                    ),
+                    Ok(Ok(())) => unreachable!("ready success handled above"),
                 })
             }
         }
@@ -354,9 +375,15 @@ impl<M: ModelContract> ModelRuntime<M> {
         observation: Option<bool>,
     ) -> Result<Generation> {
         if !self.healthy() {
-            return Err("prepared model runtime is unavailable".into());
+            return Err(Error::admission(
+                AdmissionError::Unavailable,
+                "prepared model runtime is unavailable",
+            ));
         }
-        prompt.sampling.validate()?;
+        prompt
+            .sampling
+            .validate()
+            .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
         super::stops::TokenStops::new(
             prompt.stop_sequences.clone(),
             self.config.contract.vocabulary,
@@ -366,7 +393,8 @@ impl<M: ModelContract> ModelRuntime<M> {
             !prompt.stop_sequences.is_empty(),
             prompt.grammar.is_some(),
         )?;
-        M::validate_prompt(&self.config, &prompt)?;
+        M::validate_prompt(&self.config, &prompt)
+            .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
         let (events, receiver) = async_mpsc::channel(self.event_capacity);
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
@@ -382,13 +410,17 @@ impl<M: ModelContract> ModelRuntime<M> {
         let enqueue_ns = observation
             .filter(|timestamps| *timestamps)
             .map(|_| super::observation::monotonic_ns());
-        self.sender.try_send(incoming).map_err(|error| {
-            match error {
-                mpsc::TrySendError::Full(_) => "native request queue is full",
-                mpsc::TrySendError::Disconnected(_) => "native model worker disconnected",
-            }
-            .to_owned()
-        })?;
+        self.sender
+            .try_send(incoming)
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => {
+                    Error::admission(AdmissionError::Capacity, "native request queue is full")
+                }
+                mpsc::TrySendError::Disconnected(_) => Error::admission(
+                    AdmissionError::Unavailable,
+                    "native model worker disconnected",
+                ),
+            })?;
         Ok(Generation {
             events: receiver,
             cancelled,
@@ -413,12 +445,18 @@ impl<M: ModelContract> ModelRuntime<M> {
             .map(|thread| {
                 thread.join().unwrap_or_else(|_| Shutdown {
                     drained: false,
-                    error: Some("model thread panicked outside its drain boundary".into()),
+                    error: Some(Error::execution(
+                        ExecutionError::Worker,
+                        "model thread panicked outside its drain boundary",
+                    )),
                 })
             })
             .unwrap_or(Shutdown {
                 drained: false,
-                error: Some("missing model worker shutdown state".into()),
+                error: Some(Error::execution(
+                    ExecutionError::Closed,
+                    "missing model worker shutdown state",
+                )),
             });
         *self.shutdown.lock().unwrap_or_else(|e| e.into_inner()) = Some(shutdown.clone());
         shutdown
@@ -581,9 +619,13 @@ fn run_loop<'a, M: ModelContract>(
                     }
                     if let Some(grammar) = &mut request.incoming.prompt.grammar {
                         if let Err(error) = grammar.advance(token.token) {
-                            request
-                                .incoming
-                                .fail(format!("grammar advancement failed: {error}"));
+                            request.incoming.fail(
+                                ExecutionError::Completion(Failure::caused_by(
+                                    format!("grammar advancement failed: {error}"),
+                                    error,
+                                ))
+                                .into(),
+                            );
                             stopped.push(token.request);
                             continue;
                         }
@@ -638,7 +680,7 @@ fn run_loop<'a, M: ModelContract>(
                     if let Some(error) = live.error_code {
                         request
                             .incoming
-                            .fail(format!("prepared model reported device error {error}"));
+                            .fail(ExecutionError::Device { code: error }.into());
                     } else {
                         let user_stop = if let Some(stops) = &mut request.text_stops {
                             let eos = request
@@ -748,9 +790,13 @@ fn run_loop<'a, M: ModelContract>(
                 match proposal {
                     Ok(proposal) => scheduler.set_copy_proposal(request.request, proposal)?,
                     Err(error) => {
-                        request
-                            .incoming
-                            .fail(format!("copy grammar preparation failed: {error}"));
+                        request.incoming.fail(
+                            ExecutionError::State(Failure::caused_by(
+                                format!("copy grammar preparation failed: {error}"),
+                                error,
+                            ))
+                            .into(),
+                        );
                         scheduler.cancel(request.request)?;
                         active[slot] = None;
                         admissions[slot] = None;
@@ -957,11 +1003,10 @@ mod tests {
             step.lanes.reverse();
             validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
             step.lanes[0].request.generation += 1;
-            assert!(
-                validate_sampling_admissions::<Qwen4Exp>(&step, &admissions)
-                    .unwrap_err()
-                    .contains("matching admission")
-            );
+            assert!(matches!(
+                validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap_err(),
+                Error::Execution(ExecutionError::State(_))
+            ));
         }
         let mut step = ScheduledStep {
             kind: GraphKind::Decode,
@@ -1239,7 +1284,7 @@ mod tests {
         assert!(incoming.cancelled.load(Ordering::Acquire));
         assert_eq!(incoming.metrics.failed.load(Ordering::Relaxed), 1);
         assert_eq!(
-            generation.failure(),
+            generation.failure().to_string(),
             "generation consumer exceeded the bounded output queue"
         );
         assert!(matches!(
@@ -1328,7 +1373,10 @@ mod tests {
             assert!(timestamp >= previous);
             previous = timestamp;
         }
-        assert!(generation.failure().contains("bounded output queue"));
+        assert!(matches!(
+            generation.failure(),
+            Error::Execution(ExecutionError::Capacity(_))
+        ));
     }
 
     #[test]
@@ -1339,14 +1387,10 @@ mod tests {
         assert!(incoming.cancelled.load(Ordering::Acquire));
         incoming.emit_token(11);
         assert_eq!(incoming.metrics.failed.load(Ordering::Relaxed), 1);
-        assert!(
-            failure
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .contains("bounded output queue")
-        );
+        assert!(matches!(
+            failure.lock().unwrap().as_ref().unwrap(),
+            Error::Execution(ExecutionError::Capacity(_))
+        ));
     }
 
     #[test]
@@ -1388,13 +1432,17 @@ mod tests {
         incoming.fail("later runtime error".into());
         assert!(matches!(
             generation.events.try_recv(),
-            Ok(GenerationEvent::AdmissionRejected(message)) if message == rejected
+            Ok(GenerationEvent::AdmissionRejected(message)) if matches!(message, Error::Admission(AdmissionError::Capacity(_))) && message.to_string() == rejected.to_string()
         ));
         assert!(matches!(
             generation.events.try_recv(),
             Err(async_mpsc::error::TryRecvError::Empty)
         ));
-        assert_eq!(generation.failure(), rejected);
+        assert!(matches!(
+            generation.failure(),
+            Error::Admission(AdmissionError::Capacity(_))
+        ));
+        assert_eq!(generation.failure().to_string(), rejected.to_string());
         assert_eq!(incoming.metrics.failed.load(Ordering::Relaxed), 1);
         assert_eq!(scheduler.stats().active_requests, 1);
         assert_eq!(scheduler.free_page_count(), 0);
@@ -1404,7 +1452,7 @@ mod tests {
         execution.fail(rejected.clone());
         assert!(matches!(
             generation.events.try_recv(),
-            Ok(GenerationEvent::Error(message)) if message == rejected
+            Ok(GenerationEvent::Error(message)) if matches!(message, Error::Admission(AdmissionError::Capacity(_))) && message.to_string() == rejected.to_string()
         ));
         scheduler.cancel(active).unwrap();
         assert_eq!(scheduler.free_page_count(), 1);

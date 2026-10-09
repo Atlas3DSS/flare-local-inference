@@ -102,8 +102,12 @@ impl Accumulator {
                         .get_mut(index)
                         .filter(|call| !call.ended)
                         .ok_or("tool end requires an open call")?;
-                    let value: Value = serde_json::from_str(&call.arguments)
-                        .map_err(|error| format!("tool arguments are not valid JSON: {error}"))?;
+                    let value: Value = serde_json::from_str(&call.arguments).map_err(|error| {
+                        crate::ExecutionError::State(crate::Failure::caused_by(
+                            format!("tool arguments are not valid JSON: {error}"),
+                            error,
+                        ))
+                    })?;
                     if !value.is_object() {
                         return Err("tool arguments must encode a JSON object".into());
                     }
@@ -706,7 +710,10 @@ pub(crate) mod tests {
         let deltas = presentation.push(98).unwrap();
         assert_eq!(deltas[0]["tool_calls"][0]["function"]["name"], "partial");
         assert_eq!(
-            presentation.finish(Termination::UserStop).unwrap_err(),
+            presentation
+                .finish(Termination::UserStop)
+                .unwrap_err()
+                .to_string(),
             "incomplete emitted tool call"
         );
     }

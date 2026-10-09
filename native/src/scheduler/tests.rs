@@ -293,7 +293,10 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                 draft_pages_per_request: 1,
             },
         );
-        assert!(result.err().unwrap().contains("prefill_chunk_size"));
+        assert!(matches!(
+            result.err().unwrap(),
+            crate::Error::Execution(crate::ExecutionError::Manifest(_))
+        ));
     }
 }
 

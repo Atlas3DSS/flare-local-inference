@@ -65,7 +65,9 @@ impl GraphReplayWorker {
                 .map(|(address, nbytes)| BufferSpan { address, nbytes })
                 .collect(),
         };
-        bundle.validate().map_err(PyValueError::new_err)?;
+        bundle
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let worker = py
             .detach(|| {
                 // SAFETY: Preparation supplies ready handles and retains their
@@ -73,7 +75,7 @@ impl GraphReplayWorker {
                 // startup; OwnerLease retains it afterward until confirmed drain.
                 unsafe { ReplayWorker::new(bundle, queue_capacity) }
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self {
             worker,
             owner: Mutex::new(OwnerLease(Some(owner))),
@@ -84,7 +86,7 @@ impl GraphReplayWorker {
     fn submit(&self, graph_index: usize, repetitions: u32) -> PyResult<u64> {
         self.worker
             .submit(graph_index, repetitions)
-            .map_err(PyRuntimeError::new_err)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
     #[pyo3(signature = (timeout_ms=0))]
@@ -95,10 +97,10 @@ impl GraphReplayWorker {
                     ticket: value.ticket,
                     graph_index: value.graph_index,
                     repetitions: value.repetitions,
-                    error: value.error,
+                    error: value.error.map(|error| error.to_string()),
                 })
             })
-            .map_err(PyRuntimeError::new_err)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
     #[getter]
@@ -117,7 +119,7 @@ impl GraphReplayWorker {
             drop(owner);
         }
         match shutdown.error {
-            Some(error) => Err(PyRuntimeError::new_err(error)),
+            Some(error) => Err(PyRuntimeError::new_err(error.to_string())),
             None => Ok(()),
         }
     }
@@ -140,7 +142,7 @@ impl Drop for GraphReplayWorker {
 
 #[pyfunction]
 fn current_context() -> PyResult<(usize, i32)> {
-    crate::current_context().map_err(PyRuntimeError::new_err)
+    crate::current_context().map_err(|error| PyRuntimeError::new_err(error.to_string()))
 }
 
 fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
@@ -157,7 +159,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
             address: field!(buffer, "address", usize),
             nbytes: field!(buffer, "nbytes", usize),
             dtype: Dtype::try_from(field!(buffer, "dtype", String).as_str())
-                .map_err(PyValueError::new_err)?,
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
             shape: field!(buffer, "shape", Vec<usize>),
             strides: field!(buffer, "strides", Vec<usize>),
         });
@@ -177,9 +179,9 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
         graphs.push(GraphDescriptor {
             name: field!(graph, "name", String),
             kind: GraphKind::try_from(field!(graph, "kind", String).as_str())
-                .map_err(PyValueError::new_err)?,
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
             sampling_mode: SamplingMode::try_from(field!(graph, "sampling_mode", String).as_str())
-                .map_err(PyValueError::new_err)?,
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
             handle: field!(graph, "handle", usize),
             batch_capacity: field!(graph, "batch_capacity", usize),
             token_capacity: field!(graph, "token_capacity", usize),
@@ -226,7 +228,9 @@ impl PreparedGraphExecutor {
             ));
         }
         let manifest = execution_manifest(manifest)?;
-        manifest.validate().map_err(PyValueError::new_err)?;
+        manifest
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let worker = py
             .detach(|| {
                 // SAFETY: Preparation's owner retains the validated buffers,
@@ -235,7 +239,7 @@ impl PreparedGraphExecutor {
                 // close confirms both streams drained, including failed submits.
                 unsafe { ExecutionWorker::new(manifest) }
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self {
             worker,
             owner: Mutex::new(OwnerLease(Some(owner))),
@@ -264,7 +268,7 @@ impl PreparedGraphExecutor {
                 .submit(graph_index, uploads, grammar_constrained)
         })
         .map(|fence| fence.map(|fence| fence.0))
-        .map_err(PyRuntimeError::new_err)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
     fn poll(&self, py: Python<'_>) -> PyResult<Option<ExecutionCompletion>> {
@@ -281,13 +285,13 @@ impl PreparedGraphExecutor {
                         .collect(),
                 })
             })
-            .map_err(PyRuntimeError::new_err)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
     #[getter]
     fn outstanding(&self, py: Python<'_>) -> PyResult<usize> {
         py.detach(|| self.worker.outstanding())
-            .map_err(PyRuntimeError::new_err)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
     #[getter]
     fn drained(&self) -> bool {
@@ -306,7 +310,7 @@ impl PreparedGraphExecutor {
             drop(owner);
         }
         match shutdown.error {
-            Some(error) => Err(PyRuntimeError::new_err(error)),
+            Some(error) => Err(PyRuntimeError::new_err(error.to_string())),
             None => Ok(()),
         }
     }
@@ -394,7 +398,7 @@ impl NativeServer {
                     &manifest,
                 )
             })
-            .map_err(PyValueError::new_err)?;
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let server = match py.detach(|| {
             // SAFETY: The prepared owner retains every captured allocation and
             // handle and relinquishes external mutation during native execution.
@@ -415,7 +419,7 @@ impl NativeServer {
                 if !error.drained {
                     std::mem::forget(owner);
                 }
-                let exception = PyRuntimeError::new_err(error.message);
+                let exception = PyRuntimeError::new_err(error.message.to_string());
                 exception
                     .value(py)
                     .setattr("resources_retained", !error.drained)?;
@@ -463,9 +467,9 @@ impl NativeServer {
                 .take_after_drain();
             drop(owner);
         }
-        shutdown
-            .error
-            .map_or(Ok(()), |error| Err(PyRuntimeError::new_err(error)))
+        shutdown.error.map_or(Ok(()), |error| {
+            Err(PyRuntimeError::new_err(error.to_string()))
+        })
     }
 }
 #[cfg(feature = "server")]

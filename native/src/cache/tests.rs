@@ -213,11 +213,14 @@ fn unaligned_suffix_is_not_part_of_checkpoint() {
     assert_eq!(cache.lookup(&history).unwrap().consumed_tokens, 64);
     let mut invalid = proposal(None, 64, &[1], 1, 0);
     invalid.snapshot.consumed_tokens = 81;
-    assert!(
-        cache
-            .publish(&history, &invalid)
-            .unwrap_err()
-            .contains("exactly equal")
+    let error = cache.publish(&history, &invalid).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::Error::Execution(crate::ExecutionError::State(_))
+    ));
+    assert_eq!(
+        error.to_string(),
+        "snapshot consumed-token length must exactly equal the checkpoint endpoint"
     );
 }
 

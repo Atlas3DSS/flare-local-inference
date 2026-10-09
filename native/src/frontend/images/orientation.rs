@@ -1,16 +1,22 @@
 use super::RgbImage;
-use crate::Result;
+use crate::{Error, Failure, FrontendError, Result};
 
 pub(super) fn exif_orientation(bytes: &[u8]) -> Result<u16> {
     let little = match bytes.get(..2) {
         Some(b"II") => true,
         Some(b"MM") => false,
-        _ => return Err("invalid EXIF byte order".into()),
+        _ => {
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "invalid EXIF byte order",
+            ))));
+        }
     };
     let u16_at = |at: usize| -> Result<u16> {
-        let data = bytes
-            .get(at..at.saturating_add(2))
-            .ok_or("truncated EXIF field")?;
+        let data = bytes.get(at..at.saturating_add(2)).ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "truncated EXIF field",
+            )))
+        })?;
         let array = [data[0], data[1]];
         Ok(if little {
             u16::from_le_bytes(array)
@@ -19,9 +25,11 @@ pub(super) fn exif_orientation(bytes: &[u8]) -> Result<u16> {
         })
     };
     let u32_at = |at: usize| -> Result<u32> {
-        let data = bytes
-            .get(at..at.saturating_add(4))
-            .ok_or("truncated EXIF field")?;
+        let data = bytes.get(at..at.saturating_add(4)).ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "truncated EXIF field",
+            )))
+        })?;
         let array = [data[0], data[1], data[2], data[3]];
         Ok(if little {
             u32::from_le_bytes(array)
@@ -30,20 +38,34 @@ pub(super) fn exif_orientation(bytes: &[u8]) -> Result<u16> {
         })
     };
     if u16_at(2)? != 42 {
-        return Err("invalid EXIF TIFF magic".into());
+        return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+            "invalid EXIF TIFF magic",
+        ))));
     }
     let offset = u32_at(4)? as usize;
     if offset < 8 {
-        return Err("invalid EXIF directory offset".into());
+        return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+            "invalid EXIF directory offset",
+        ))));
     }
     let count = usize::from(u16_at(offset)?);
-    let entries = offset.checked_add(2).ok_or("EXIF directory overflow")?;
+    let entries = offset.checked_add(2).ok_or_else(|| {
+        Error::frontend(FrontendError::ImageDecode(Failure::new(
+            "EXIF directory overflow",
+        )))
+    })?;
     let end = entries
         .checked_add(count * 12)
         .and_then(|n| n.checked_add(4))
-        .ok_or("EXIF directory overflow")?;
+        .ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "EXIF directory overflow",
+            )))
+        })?;
     if end > bytes.len() {
-        return Err("truncated EXIF directory".into());
+        return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+            "truncated EXIF directory",
+        ))));
     }
     let mut orientation = None;
     for entry in (entries..end - 4).step_by(12) {
@@ -51,11 +73,15 @@ pub(super) fn exif_orientation(bytes: &[u8]) -> Result<u16> {
             continue;
         }
         if orientation.is_some() || u16_at(entry + 2)? != 3 || u32_at(entry + 4)? != 1 {
-            return Err("EXIF orientation must be one SHORT value".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "EXIF orientation must be one SHORT value",
+            ))));
         }
         let value = u16_at(entry + 8)?;
         if !(1..=8).contains(&value) {
-            return Err("EXIF orientation must be in 1..=8".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "EXIF orientation must be in 1..=8",
+            ))));
         }
         orientation = Some(value);
     }
@@ -64,18 +90,26 @@ pub(super) fn exif_orientation(bytes: &[u8]) -> Result<u16> {
 
 pub(super) fn jpeg_orientation(bytes: &[u8]) -> Result<u16> {
     if !bytes.starts_with(&[0xff, 0xd8]) {
-        return Err("invalid JPEG signature".into());
+        return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+            "invalid JPEG signature",
+        ))));
     }
     let mut offset = 2;
     let mut orientation = None;
     while offset < bytes.len() {
         if bytes[offset] != 0xff {
-            return Err("invalid JPEG marker".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "invalid JPEG marker",
+            ))));
         }
         while bytes.get(offset) == Some(&0xff) {
             offset += 1;
         }
-        let marker = *bytes.get(offset).ok_or("truncated JPEG marker")?;
+        let marker = *bytes.get(offset).ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "truncated JPEG marker",
+            )))
+        })?;
         offset += 1;
         if marker == 0xd9 {
             break;
@@ -84,21 +118,31 @@ pub(super) fn jpeg_orientation(bytes: &[u8]) -> Result<u16> {
             continue;
         }
         if marker == 0 || marker == 0xd8 {
-            return Err("invalid JPEG marker".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "invalid JPEG marker",
+            ))));
         }
-        let size = bytes
-            .get(offset..offset + 2)
-            .ok_or("truncated JPEG segment")?;
+        let size = bytes.get(offset..offset + 2).ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "truncated JPEG segment",
+            )))
+        })?;
         let length = usize::from(u16::from_be_bytes([size[0], size[1]]));
         if length < 2 {
-            return Err("invalid JPEG segment length".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "invalid JPEG segment length",
+            ))));
         }
-        let payload = bytes
-            .get(offset + 2..offset + length)
-            .ok_or("truncated JPEG segment")?;
+        let payload = bytes.get(offset + 2..offset + length).ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "truncated JPEG segment",
+            )))
+        })?;
         if marker == 0xe1 && payload.starts_with(b"Exif\0\0") {
             if orientation.is_some() {
-                return Err("multiple JPEG EXIF segments are not supported".into());
+                return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                    "multiple JPEG EXIF segments are not supported",
+                ))));
             }
             orientation = Some(exif_orientation(&payload[6..])?);
         }

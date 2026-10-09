@@ -392,7 +392,9 @@ fn parse_tool(body: &str, tools: &[Value]) -> Result<(String, String)> {
     }
     Ok((
         name.into(),
-        serde_json::to_string(&arguments).map_err(|error| error.to_string())?,
+        serde_json::to_string(&arguments).map_err(|error| {
+            crate::FrontendError::Input(crate::Failure::caused_by(error.to_string(), error))
+        })?,
     ))
 }
 

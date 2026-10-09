@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{BufferSpan, GraphBundle, Result};
+use crate::{BufferSpan, Error, ExecutionError, GraphBundle, Result};
 
 pub const ABI_VERSION: u32 = 2;
 pub const SPECULATIVE_ABI_VERSION: u32 = 3;
@@ -33,7 +33,7 @@ impl Dtype {
 }
 
 impl TryFrom<&str> for Dtype {
-    type Error = String;
+    type Error = crate::Error;
     fn try_from(value: &str) -> Result<Self> {
         match value {
             "bool" => Ok(Self::Bool),
@@ -43,7 +43,10 @@ impl TryFrom<&str> for Dtype {
             "float32" => Ok(Self::Float32),
             "float16" => Ok(Self::Float16),
             "bfloat16" => Ok(Self::Bfloat16),
-            _ => Err(format!("unsupported buffer dtype {value:?}")),
+            _ => Err(Error::execution(
+                ExecutionError::Manifest,
+                format!("unsupported buffer dtype {value:?}"),
+            )),
         }
     }
 }
@@ -75,18 +78,21 @@ pub enum SamplingMode {
 }
 
 impl TryFrom<&str> for SamplingMode {
-    type Error = String;
+    type Error = crate::Error;
 
     fn try_from(value: &str) -> Result<Self> {
         match value {
             "general" => Ok(Self::General),
-            _ => Err(format!("unsupported graph sampling mode {value:?}")),
+            _ => Err(Error::execution(
+                ExecutionError::Manifest,
+                format!("unsupported graph sampling mode {value:?}"),
+            )),
         }
     }
 }
 
 impl TryFrom<&str> for GraphKind {
-    type Error = String;
+    type Error = crate::Error;
     fn try_from(value: &str) -> Result<Self> {
         match value {
             "init" => Ok(Self::Init),
@@ -97,7 +103,10 @@ impl TryFrom<&str> for GraphKind {
             "speculative" => Ok(Self::Speculative),
             "resume" => Ok(Self::Resume),
             "vision" => Ok(Self::Vision),
-            _ => Err(format!("unsupported graph kind {value:?}")),
+            _ => Err(Error::execution(
+                ExecutionError::Manifest,
+                format!("unsupported graph kind {value:?}"),
+            )),
         }
     }
 }
@@ -157,23 +166,32 @@ impl ExecutionManifest {
         self.buffers
             .iter()
             .find(|buffer| buffer.name == name)
-            .ok_or_else(|| format!("unknown buffer {name:?}"))
+            .ok_or_else(|| {
+                Error::execution(ExecutionError::Manifest, format!("unknown buffer {name:?}"))
+            })
     }
 
     pub fn validate(&self) -> Result<()> {
         if ![ABI_VERSION, SPECULATIVE_ABI_VERSION].contains(&self.abi_version) {
-            return Err("unsupported execution ABI version".into());
+            return Err(Error::execution(
+                ExecutionError::Manifest,
+                "unsupported execution ABI version",
+            ));
         }
         if !(1..=REQUEST_LANES).contains(&self.max_active) {
-            return Err("max_active must be 1 through 4".into());
+            return Err(Error::execution(
+                ExecutionError::Manifest,
+                "max_active must be 1 through 4",
+            ));
         }
         if self.input_frame_bytes == 0
             || !self.input_frame_bytes.is_multiple_of(8)
             || self.input_frame_bytes > isize::MAX as usize
         {
-            return Err(
-                "input_frame_bytes must be a positive, addressable multiple of eight".into(),
-            );
+            return Err(Error::execution(
+                ExecutionError::Manifest,
+                "input_frame_bytes must be a positive, addressable multiple of eight",
+            ));
         }
         GraphBundle {
             context: self.context,
@@ -192,30 +210,41 @@ impl ExecutionManifest {
         let mut names = HashSet::new();
         for buffer in &self.buffers {
             if buffer.name.is_empty() || !names.insert(&buffer.name) {
-                return Err("buffer names must be nonempty and unique".into());
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    "buffer names must be nonempty and unique",
+                ));
             }
             if buffer.shape.is_empty()
                 || buffer.shape.contains(&0)
                 || buffer.strides.len() != buffer.shape.len()
             {
-                return Err(format!("invalid shape/strides for {}", buffer.name));
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    format!("invalid shape/strides for {}", buffer.name),
+                ));
             }
             let mut stride = 1usize;
             for (extent, actual) in buffer.shape.iter().zip(&buffer.strides).rev() {
                 if *actual != stride {
-                    return Err(format!(
-                        "buffer {} must be contiguous row-major",
-                        buffer.name
+                    return Err(Error::execution(
+                        ExecutionError::Manifest,
+                        format!("buffer {} must be contiguous row-major", buffer.name),
                     ));
                 }
-                stride = stride.checked_mul(*extent).ok_or("buffer shape overflow")?;
+                stride = stride.checked_mul(*extent).ok_or_else(|| {
+                    Error::execution(ExecutionError::Manifest, "buffer shape overflow")
+                })?;
             }
             if stride.checked_mul(buffer.dtype.size()) != Some(buffer.nbytes)
                 || buffer.address % buffer.dtype.size() != 0
             {
-                return Err(format!(
-                    "buffer {} byte extent or alignment does not match dtype/shape",
-                    buffer.name
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    format!(
+                        "buffer {} byte extent or alignment does not match dtype/shape",
+                        buffer.name
+                    ),
                 ));
             }
         }
@@ -226,7 +255,10 @@ impl ExecutionManifest {
             .collect();
         spans.sort_unstable();
         if spans.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-            return Err("registered device buffer spans overlap".into());
+            return Err(Error::execution(
+                ExecutionError::Manifest,
+                "registered device buffer spans overlap",
+            ));
         }
         for (name, dtype, shape) in [
             ("frame_index", Dtype::Int32, vec![1]),
@@ -239,14 +271,20 @@ impl ExecutionManifest {
         ] {
             let buffer = self.buffer(name)?;
             if buffer.dtype != dtype || buffer.shape != shape {
-                return Err(format!("invalid required buffer layout: {name}"));
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    format!("invalid required buffer layout: {name}"),
+                ));
             }
         }
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
             if graph.name.is_empty() || !names.insert(&graph.name) {
-                return Err("graph names must be nonempty and unique".into());
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    "graph names must be nonempty and unique",
+                ));
             }
             let valid = match graph.kind {
                 GraphKind::Speculative => {
@@ -265,50 +303,61 @@ impl ExecutionManifest {
                 _ => [1, 2, 4].contains(&graph.batch_capacity) && graph.token_capacity == 1,
             };
             if !valid {
-                return Err(format!("unsupported graph capacities: {}", graph.name));
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    format!("unsupported graph capacities: {}", graph.name),
+                ));
             }
             let mut bound = HashSet::new();
             for binding in &graph.input_bindings {
                 if !bound.insert(binding.buffer_name.as_str())
                     || binding.buffer_name == "completion_records"
                 {
-                    return Err(format!(
-                        "duplicate or output-only input binding in {}",
-                        graph.name
+                    return Err(Error::execution(
+                        ExecutionError::Manifest,
+                        format!("duplicate or output-only input binding in {}", graph.name),
                     ));
                 }
                 let buffer = self.buffer(&binding.buffer_name)?;
                 let end = binding
                     .host_offset
                     .checked_add(binding.nbytes)
-                    .ok_or("host input span overflow")?;
+                    .ok_or_else(|| {
+                        Error::execution(ExecutionError::Manifest, "host input span overflow")
+                    })?;
                 if binding.nbytes != buffer.nbytes
                     || binding.host_offset % buffer.dtype.size() != 0
                     || end > self.input_frame_bytes
                 {
-                    return Err(format!(
-                        "invalid host input binding: {}",
-                        binding.buffer_name
+                    return Err(Error::execution(
+                        ExecutionError::Manifest,
+                        format!("invalid host input binding: {}", binding.buffer_name),
                     ));
                 }
                 let span = (binding.host_offset, end);
                 if let Some(previous) = host_spans.insert(&binding.buffer_name, span) {
                     if previous != span {
-                        return Err("one buffer has different host offsets across graphs".into());
+                        return Err(Error::execution(
+                            ExecutionError::Manifest,
+                            "one buffer has different host offsets across graphs",
+                        ));
                     }
                 }
             }
             if !bound.contains("frame_index") || !bound.contains("submission_sequence") {
-                return Err(format!(
-                    "graph {} lacks reserved input bindings",
-                    graph.name
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    format!("graph {} lacks reserved input bindings", graph.name),
                 ));
             }
         }
         let mut spans: Vec<_> = host_spans.values().copied().collect();
         spans.sort_unstable();
         if spans.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-            return Err("different input buffers overlap in host frame".into());
+            return Err(Error::execution(
+                ExecutionError::Manifest,
+                "different input buffers overlap in host frame",
+            ));
         }
         Ok(())
     }

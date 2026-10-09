@@ -10,7 +10,7 @@ use std::io::Cursor;
 use serde_json::Value;
 
 use super::{Asset, Frontend};
-use crate::Result;
+use crate::{Error, Failure, FrontendError, Result};
 
 const PATCH: usize = 16;
 const MERGE: usize = 2;
@@ -51,7 +51,9 @@ impl RgbImage {
             .checked_mul(height)
             .and_then(|size| size.checked_mul(3));
         if width == 0 || height == 0 || expected != Some(pixels.len()) {
-            return Err("RGB8 dimensions do not match pixel extent".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "RGB8 dimensions do not match pixel extent",
+            ))));
         }
         Ok(Self {
             width,
@@ -121,19 +123,25 @@ impl ImageProcessor {
         .contains(&0)
             || limits.max_total_patches > i32::MAX as usize
         {
-            return Err("image limits must be positive and total patches must fit int32".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "image limits must be positive and total patches must fit int32",
+            ))));
         }
-        let config: Value =
-            serde_json::from_slice(&preprocessor.read()?).map_err(|e| e.to_string())?;
-        let model: Value =
-            serde_json::from_slice(&model_config.read()?).map_err(|e| e.to_string())?;
+        let config: Value = serde_json::from_slice(&preprocessor.read()?).map_err(|e| {
+            Error::frontend(FrontendError::Asset(Failure::caused_by(e.to_string(), e)))
+        })?;
+        let model: Value = serde_json::from_slice(&model_config.read()?).map_err(|e| {
+            Error::frontend(FrontendError::Asset(Failure::caused_by(e.to_string(), e)))
+        })?;
         for (key, expected) in [
             ("patch_size", 16),
             ("temporal_patch_size", 2),
             ("merge_size", 2),
         ] {
             if config[key].as_u64() != Some(expected) {
-                return Err(format!("unsupported image processor {key}"));
+                return Err(Error::frontend(FrontendError::Asset(Failure::new(
+                    format!("unsupported image processor {key}"),
+                ))));
             }
         }
         if config["processor_class"] != "Qwen3VLProcessor"
@@ -148,7 +156,9 @@ impl ImageProcessor {
                 .iter()
                 .any(|key| config.get(*key).is_some_and(|value| value != true))
         {
-            return Err("unsupported image processor RGB8/bicubic/normalization profile".into());
+            return Err(Error::frontend(FrontendError::Asset(Failure::new(
+                "unsupported image processor RGB8/bicubic/normalization profile",
+            ))));
         }
         let vision = &model["vision_config"];
         if model["model_type"] != "qwen4_exp"
@@ -158,18 +168,26 @@ impl ImageProcessor {
             || vision["in_channels"] != 3
             || vision["num_position_embeddings"] != 2304
         {
-            return Err("unsupported Qwen4Exp vision configuration".into());
+            return Err(Error::frontend(FrontendError::Asset(Failure::new(
+                "unsupported Qwen4Exp vision configuration",
+            ))));
         }
         let min_pixels = config["size"]["shortest_edge"].as_u64();
         let max_pixels = config["size"]["longest_edge"].as_u64();
         if min_pixels != Some(65_536) || max_pixels != Some(16_777_216) {
-            return Err("unsupported Qwen4Exp resize area limits".into());
+            return Err(Error::frontend(FrontendError::Asset(Failure::new(
+                "unsupported Qwen4Exp resize area limits",
+            ))));
         }
         let token = |name: &str| -> Result<u32> {
             model[name]
                 .as_u64()
                 .and_then(|id| u32::try_from(id).ok())
-                .ok_or_else(|| format!("invalid model {name}"))
+                .ok_or_else(|| {
+                    Error::frontend(FrontendError::Asset(Failure::new(format!(
+                        "invalid model {name}"
+                    ))))
+                })
         };
         Ok(Self {
             limits,
@@ -188,7 +206,9 @@ impl ImageProcessor {
                 .checked_mul(height)
                 .is_none_or(|pixels| pixels > self.limits.max_input_pixels)
         {
-            return Err("image exceeds the configured input pixel limit or has zero extent".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "image exceeds the configured input pixel limit or has zero extent",
+            ))));
         }
         Ok(())
     }
@@ -201,29 +221,46 @@ impl ImageProcessor {
     /// Alpha is discarded; animated PNG and 16-bit samples are rejected.
     pub fn decode_png(&self, bytes: &[u8]) -> Result<RgbImage> {
         if bytes.len() > self.limits.max_encoded_bytes {
-            return Err("encoded image exceeds the configured byte limit".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "encoded image exceeds the configured byte limit",
+            ))));
         }
         let mut decoder = png::Decoder::new(Cursor::new(bytes));
         decoder.set_transformations(png::Transformations::EXPAND);
         decoder.set_limits(png::Limits {
             bytes: self.limits.max_input_pixels.saturating_mul(8),
         });
-        let mut reader = decoder
-            .read_info()
-            .map_err(|e| format!("invalid PNG: {e}"))?;
+        let mut reader = decoder.read_info().map_err(|e| {
+            Error::frontend(FrontendError::ImageDecode(Failure::caused_by(
+                format!("invalid PNG: {e}"),
+                e,
+            )))
+        })?;
         let info = reader.info();
         self.check_input_extent(info.width as usize, info.height as usize)?;
         if info.bit_depth == png::BitDepth::Sixteen || info.animation_control.is_some() {
-            return Err("PNG requires non-animated, at most 8-bit samples".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "PNG requires non-animated, at most 8-bit samples",
+            ))));
         }
-        let size = reader
-            .output_buffer_size()
-            .ok_or("PNG decoded extent overflow")?;
+        let size = reader.output_buffer_size().ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "PNG decoded extent overflow",
+            )))
+        })?;
         let mut decoded = vec![0; size];
-        let output = reader
-            .next_frame(&mut decoded)
-            .map_err(|e| format!("invalid PNG: {e}"))?;
-        reader.finish().map_err(|e| format!("invalid PNG: {e}"))?;
+        let output = reader.next_frame(&mut decoded).map_err(|e| {
+            Error::frontend(FrontendError::ImageDecode(Failure::caused_by(
+                format!("invalid PNG: {e}"),
+                e,
+            )))
+        })?;
+        reader.finish().map_err(|e| {
+            Error::frontend(FrontendError::ImageDecode(Failure::caused_by(
+                format!("invalid PNG: {e}"),
+                e,
+            )))
+        })?;
         let orientation = reader
             .info()
             .exif_metadata
@@ -238,7 +275,11 @@ impl ImageProcessor {
                 png::ColorType::Grayscale | png::ColorType::GrayscaleAlpha => {
                     rgb.extend_from_slice(&[pixel[0]; 3])
                 }
-                png::ColorType::Indexed => return Err("PNG palette was not expanded".into()),
+                png::ColorType::Indexed => {
+                    return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                        "PNG palette was not expanded",
+                    ))));
+                }
             }
         }
         Ok(orientation::orient(
@@ -251,17 +292,26 @@ impl ImageProcessor {
     /// Color profiles are not applied, matching Pillow's RGB conversion.
     pub fn decode_jpeg(&self, bytes: &[u8]) -> Result<RgbImage> {
         if bytes.len() > self.limits.max_encoded_bytes {
-            return Err("encoded image exceeds the configured byte limit".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "encoded image exceeds the configured byte limit",
+            ))));
         }
         let orientation = orientation::jpeg_orientation(bytes)?;
-        let error = |e| format!("invalid JPEG: {e}");
+        let error = |e| {
+            Error::frontend(FrontendError::ImageDecode(Failure::caused_by(
+                format!("invalid JPEG: {e}"),
+                e,
+            )))
+        };
         let mut decoder = turbojpeg::Decompressor::new().map_err(error)?;
         decoder.set_scan_limit(100).map_err(error)?;
         decoder.set_fast_upsample(false).map_err(error)?;
         let header = decoder.read_header(bytes).map_err(error)?;
         self.check_input_extent(header.width, header.height)?;
         if header.is_lossless || header.is_arithmetic {
-            return Err("JPEG requires baseline or progressive Huffman coding".into());
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "JPEG requires baseline or progressive Huffman coding",
+            ))));
         }
         let cmyk = matches!(
             header.colorspace,
@@ -272,7 +322,11 @@ impl ImageProcessor {
             .width
             .checked_mul(header.height)
             .and_then(|n| n.checked_mul(channels))
-            .ok_or("JPEG decoded extent overflow")?;
+            .ok_or_else(|| {
+                Error::frontend(FrontendError::ImageDecode(Failure::new(
+                    "JPEG decoded extent overflow",
+                )))
+            })?;
         let mut decoded = turbojpeg::Image {
             pixels: vec![0; length],
             width: header.width,
@@ -310,7 +364,9 @@ impl ImageProcessor {
     pub fn geometry(&self, width: usize, height: usize) -> Result<ImageGeometry> {
         self.check_input_extent(width, height)?;
         if width.max(height) as f64 / width.min(height) as f64 > 200.0 {
-            return Err("image aspect ratio exceeds 200".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "image aspect ratio exceeds 200",
+            ))));
         }
         let factor = (PATCH * MERGE) as f64;
         let (h, w) = (height as f64, width as f64);
@@ -328,10 +384,12 @@ impl ImageProcessor {
         let (height, width) = (target_h as usize, target_w as usize);
         let patches = height / PATCH * (width / PATCH);
         if patches > self.limits.max_patches_per_image {
-            return Err(format!(
-                "processed image has {patches} patches, limit is {}",
-                self.limits.max_patches_per_image
-            ));
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                format!(
+                    "processed image has {patches} patches, limit is {}",
+                    self.limits.max_patches_per_image
+                ),
+            ))));
         }
         Ok(ImageGeometry {
             height,
@@ -352,7 +410,9 @@ impl ImageProcessor {
 
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
         if images.is_empty() || images.len() > self.limits.max_images {
-            return Err("image count is empty or exceeds the configured limit".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "image count is empty or exceeds the configured limit",
+            ))));
         }
         let geometry: Vec<_> = images
             .iter()
@@ -361,16 +421,20 @@ impl ImageProcessor {
         let total: usize = geometry
             .iter()
             .try_fold(0usize, |sum, image| sum.checked_add(image.patches))
-            .ok_or("patch count overflow")?;
+            .ok_or_else(|| {
+                Error::frontend(FrontendError::Input(Failure::new("patch count overflow")))
+            })?;
         if total > self.limits.max_total_patches {
-            return Err("images exceed the configured total patch limit".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "images exceed the configured total patch limit",
+            ))));
         }
         let mut result = ProcessedImages {
-            pixel_values: Vec::with_capacity(
-                total
-                    .checked_mul(FEATURES)
-                    .ok_or("patch buffer extent overflow")?,
-            ),
+            pixel_values: Vec::with_capacity(total.checked_mul(FEATURES).ok_or(
+                Error::frontend(FrontendError::Input(Failure::new(
+                    "patch buffer extent overflow",
+                ))),
+            )?),
             geometry,
             position_ids: Vec::with_capacity(total),
             interpolation_indices: Vec::with_capacity(total),
@@ -438,10 +502,14 @@ impl ImageProcessor {
         images: &ProcessedImages,
     ) -> Result<ImagePrompt> {
         if frontend.encode(IMAGE_TOKEN, false)? != [self.image_token_id] {
-            return Err("image token ID does not match tokenizer".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "image token ID does not match tokenizer",
+            ))));
         }
         if text.matches(IMAGE_TOKEN).count() != images.geometry.len() {
-            return Err("image placeholder count does not match prepared images".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "image placeholder count does not match prepared images",
+            ))));
         }
         let mut expanded = String::with_capacity(text.len());
         let mut parts = text.split(IMAGE_TOKEN);
@@ -454,7 +522,9 @@ impl ImageProcessor {
         }
         let token_ids = frontend.encode(&expanded, false)?;
         if token_ids.contains(&self.video_token_id) {
-            return Err("video inputs are not supported by the image processor".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "video inputs are not supported by the image processor",
+            ))));
         }
         let mm_token_type_ids: Vec<i32> = token_ids
             .iter()
@@ -477,12 +547,15 @@ impl ImageProcessor {
                 }
                 current += (end - offset) as i64;
             } else {
-                let geometry = images
-                    .geometry
-                    .get(image_index)
-                    .ok_or("unexpected image token group")?;
+                let geometry = images.geometry.get(image_index).ok_or_else(|| {
+                    Error::frontend(FrontendError::Input(Failure::new(
+                        "unexpected image token group",
+                    )))
+                })?;
                 if end - offset != geometry.tokens {
-                    return Err("image token group does not match image grid".into());
+                    return Err(Error::frontend(FrontendError::Input(Failure::new(
+                        "image token group does not match image grid",
+                    ))));
                 }
                 let (height, width) = (
                     geometry.grid_thw[1] / MERGE as i64,
@@ -501,7 +574,9 @@ impl ImageProcessor {
             offset = end;
         }
         if image_index != images.geometry.len() {
-            return Err("prepared image was not consumed by prompt".into());
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "prepared image was not consumed by prompt",
+            ))));
         }
         Ok(ImagePrompt {
             text: expanded,
@@ -557,6 +632,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_png_retains_decoder_cause() {
+        use std::error::Error as _;
+
+        let processor = processor(ImageLimits::default());
+        let error = processor.decode_png(b"not a PNG").err().unwrap();
+        assert!(matches!(
+            error,
+            Error::Frontend(FrontendError::ImageDecode(_))
+        ));
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<png::DecodingError>()
+                .is_some()
+        );
+        let input = processor.geometry(0, 1).unwrap_err();
+        assert!(matches!(input, Error::Frontend(FrontendError::Input(_))));
+        assert!(input.source().is_none());
+    }
+
+    #[test]
     fn rgb_extent_rejects_empty_truncated_and_overflow() {
         assert!(RgbImage::new(0, 1, vec![]).is_err());
         assert!(RgbImage::new(2, 2, vec![0; 11]).is_err());
@@ -567,19 +664,15 @@ mod tests {
     fn admission_checks_processed_capacity_without_changing_resize() {
         let processor = processor(ImageLimits::default());
         assert_eq!(processor.geometry(2033, 2033).unwrap().patches, 16_384);
-        assert!(
-            processor
-                .geometry(2080, 2080)
-                .unwrap_err()
-                .contains("16900 patches")
-        );
+        assert!(matches!(
+            processor.geometry(2080, 2080).unwrap_err(),
+            Error::Frontend(FrontendError::Input(_))
+        ));
         assert!(processor.geometry(200, 1).is_ok());
-        assert!(
-            processor
-                .geometry(201, 1)
-                .unwrap_err()
-                .contains("aspect ratio")
-        );
+        assert!(matches!(
+            processor.geometry(201, 1).unwrap_err(),
+            Error::Frontend(FrontendError::Input(_))
+        ));
         assert!(processor.geometry(usize::MAX, 2).is_err());
         assert!(processor.geometry(0, 256).is_err());
     }
@@ -593,20 +686,17 @@ mod tests {
             ..ImageLimits::default()
         });
         assert!(processor.process(&[]).is_err());
-        assert!(
+        assert!(matches!(
             processor
                 .process(&[image(), image(), image()])
                 .err()
-                .unwrap()
-                .contains("image count")
-        );
-        assert!(
-            processor
-                .process(&[image(), image()])
-                .err()
-                .unwrap()
-                .contains("total patch limit")
-        );
+                .unwrap(),
+            Error::Frontend(FrontendError::Input(_))
+        ));
+        assert!(matches!(
+            processor.process(&[image(), image()]).err().unwrap(),
+            Error::Frontend(FrontendError::Input(_))
+        ));
         assert_eq!(
             processor.process(&[image()]).unwrap().pixel_values.len(),
             256 * FEATURES
@@ -620,24 +710,18 @@ mod tests {
             max_input_pixels: 1,
             ..ImageLimits::default()
         });
-        assert!(
-            input_limit
-                .decode_png(&bytes)
-                .err()
-                .unwrap()
-                .contains("input pixel limit")
-        );
+        assert!(matches!(
+            input_limit.decode_png(&bytes).err().unwrap(),
+            Error::Frontend(FrontendError::Input(_))
+        ));
         let byte_limit = processor(ImageLimits {
             max_encoded_bytes: bytes.len() - 1,
             ..ImageLimits::default()
         });
-        assert!(
-            byte_limit
-                .decode_png(&bytes)
-                .err()
-                .unwrap()
-                .contains("byte limit")
-        );
+        assert!(matches!(
+            byte_limit.decode_png(&bytes).err().unwrap(),
+            Error::Frontend(FrontendError::Input(_))
+        ));
     }
 
     #[test]
@@ -662,12 +746,9 @@ mod tests {
             png::ColorType::Grayscale,
             &[1, 2],
         );
-        assert!(
-            processor
-                .decode_png(&sixteen)
-                .err()
-                .unwrap()
-                .contains("8-bit")
-        );
+        assert!(matches!(
+            processor.decode_png(&sixteen).err().unwrap(),
+            Error::Frontend(FrontendError::ImageDecode(_))
+        ));
     }
 }

@@ -20,6 +20,7 @@ grammar = ["frontend", "dep:llguidance"]
 server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64"]
 
 [dependencies]
+thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
 blake2 = "0.10"
 libloading = "0.8.9"
