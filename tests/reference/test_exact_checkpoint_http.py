@@ -26,8 +26,9 @@ def encode(tokenizer, request):
     return tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False, **options)
 
 
-def test_system_workload_uses_exact_short_non_aligned_prefixes_and_tool_identity(tokenizer):
-    requests = system_prefix_requests("test-model", "a1b2")
+@pytest.mark.parametrize("nonce", ["a1b2", "9485", "0000", "1234", "9999", "abcd", "ffff"])
+def test_system_workload_uses_exact_short_non_aligned_prefixes_and_tool_identity(tokenizer, nonce):
+    requests = system_prefix_requests("test-model", nonce)
     seen = []
     for name, request, reuse in requests:
         assert request["temperature"] == 1 and request["top_k"] == 20 and request["top_p"] == .95

@@ -83,7 +83,7 @@ def prefill_launches(prompt_tokens, reused_tokens, chunk_size, system_tokens=0):
 
 
 def system_prefix_requests(model_id, nonce):
-    instruction = f"Brief {nonce[:4]}."
+    instruction = f"Brief {nonce[:3]}."
     base = {"model": model_id, "temperature": 1, "top_k": 20, "top_p": 0.95,
         "seed": 41873, "max_tokens": 32, "enable_thinking": False, "add_generation_prompt": True}
     tool = {"type": "function", "function": {"name": "unused_alpha", "description": "An unused lookup tool.",
@@ -92,7 +92,7 @@ def system_prefix_requests(model_id, nonce):
     for name, instructions, question, tools, expected_reuse in (
         ("short-seed", instruction, "Return only OK for request A.", None, False),
         ("short-branch", instruction, "Return only OK for request B.", None, True),
-        ("instructions-change", f"Terse {nonce[:4]}.", "Return only OK for request C.", None, False),
+        ("instructions-change", f"Terse {nonce[:3]}.", "Return only OK for request C.", None, False),
         ("tools-seed", instruction, "Return only OK for request D. Do not call a tool.", [tool], False),
         ("tools-branch", instruction, "Return only OK for request E. Do not call a tool.", [tool], True),
         ("tools-change", instruction, "Return only OK for request F. Do not call a tool.",
