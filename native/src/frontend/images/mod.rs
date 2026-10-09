@@ -1,5 +1,8 @@
 //! Qwen4Exp RGB8 image preparation and text/vision position metadata.
 
+#[cfg(test)]
+mod decoding_tests;
+mod orientation;
 mod resize;
 
 use std::io::Cursor;
@@ -190,8 +193,12 @@ impl ImageProcessor {
         Ok(())
     }
 
-    /// Decodes lossless PNG inputs. Alpha is discarded, matching PIL RGB conversion.
-    /// Animated PNG, 16-bit samples and EXIF orientation are rejected explicitly.
+    pub fn max_encoded_bytes(&self) -> usize {
+        self.limits.max_encoded_bytes
+    }
+
+    /// Decodes PNG to RGB8 and applies EXIF orientation before resizing.
+    /// Alpha is discarded; animated PNG and 16-bit samples are rejected.
     pub fn decode_png(&self, bytes: &[u8]) -> Result<RgbImage> {
         if bytes.len() > self.limits.max_encoded_bytes {
             return Err("encoded image exceeds the configured byte limit".into());
@@ -206,13 +213,8 @@ impl ImageProcessor {
             .map_err(|e| format!("invalid PNG: {e}"))?;
         let info = reader.info();
         self.check_input_extent(info.width as usize, info.height as usize)?;
-        if info.bit_depth == png::BitDepth::Sixteen
-            || info.animation_control.is_some()
-            || info.exif_metadata.is_some()
-        {
-            return Err(
-                "PNG requires non-animated, at most 8-bit samples without EXIF metadata".into(),
-            );
+        if info.bit_depth == png::BitDepth::Sixteen || info.animation_control.is_some() {
+            return Err("PNG requires non-animated, at most 8-bit samples".into());
         }
         let size = reader
             .output_buffer_size()
@@ -222,9 +224,13 @@ impl ImageProcessor {
             .next_frame(&mut decoded)
             .map_err(|e| format!("invalid PNG: {e}"))?;
         reader.finish().map_err(|e| format!("invalid PNG: {e}"))?;
-        if reader.info().exif_metadata.is_some() {
-            return Err("PNG EXIF metadata is not supported".into());
-        }
+        let orientation = reader
+            .info()
+            .exif_metadata
+            .as_deref()
+            .map(orientation::exif_orientation)
+            .transpose()?
+            .unwrap_or(1);
         let mut rgb = Vec::with_capacity(output.width as usize * output.height as usize * 3);
         for pixel in decoded[..output.buffer_size()].chunks_exact(output.color_type.samples()) {
             match output.color_type {
@@ -235,7 +241,70 @@ impl ImageProcessor {
                 png::ColorType::Indexed => return Err("PNG palette was not expanded".into()),
             }
         }
-        RgbImage::new(output.width as usize, output.height as usize, rgb)
+        Ok(orientation::orient(
+            RgbImage::new(output.width as usize, output.height as usize, rgb)?,
+            orientation,
+        ))
+    }
+
+    /// Decodes JPEG with accurate IDCT and smooth chroma upsampling, then applies EXIF.
+    /// Color profiles are not applied, matching Pillow's RGB conversion.
+    pub fn decode_jpeg(&self, bytes: &[u8]) -> Result<RgbImage> {
+        if bytes.len() > self.limits.max_encoded_bytes {
+            return Err("encoded image exceeds the configured byte limit".into());
+        }
+        let orientation = orientation::jpeg_orientation(bytes)?;
+        let error = |e| format!("invalid JPEG: {e}");
+        let mut decoder = turbojpeg::Decompressor::new().map_err(error)?;
+        decoder.set_scan_limit(100).map_err(error)?;
+        decoder.set_fast_upsample(false).map_err(error)?;
+        let header = decoder.read_header(bytes).map_err(error)?;
+        self.check_input_extent(header.width, header.height)?;
+        if header.is_lossless || header.is_arithmetic {
+            return Err("JPEG requires baseline or progressive Huffman coding".into());
+        }
+        let cmyk = matches!(
+            header.colorspace,
+            turbojpeg::Colorspace::CMYK | turbojpeg::Colorspace::YCCK
+        );
+        let channels = if cmyk { 4 } else { 3 };
+        let length = header
+            .width
+            .checked_mul(header.height)
+            .and_then(|n| n.checked_mul(channels))
+            .ok_or("JPEG decoded extent overflow")?;
+        let mut decoded = turbojpeg::Image {
+            pixels: vec![0; length],
+            width: header.width,
+            height: header.height,
+            pitch: header.width * channels,
+            format: if cmyk {
+                turbojpeg::PixelFormat::CMYK
+            } else {
+                turbojpeg::PixelFormat::RGB
+            },
+        };
+        decoder
+            .decompress(bytes, decoded.as_deref_mut())
+            .map_err(error)?;
+        let rgb = if cmyk {
+            // JPEG CMYK samples are inverted; this matches Pillow's CMYK-to-RGB conversion.
+            decoded
+                .pixels
+                .chunks_exact(4)
+                .flat_map(|pixel| {
+                    pixel[..3].iter().map(|channel| {
+                        ((u32::from(*channel) * u32::from(pixel[3]) + 127) / 255) as u8
+                    })
+                })
+                .collect()
+        } else {
+            decoded.pixels
+        };
+        Ok(orientation::orient(
+            RgbImage::new(header.width, header.height, rgb)?,
+            orientation,
+        ))
     }
 
     pub fn geometry(&self, width: usize, height: usize) -> Result<ImageGeometry> {
@@ -458,7 +527,7 @@ fn interpolation_axis(index: usize, size: usize, side: usize) -> ([usize; 2], [f
 mod tests {
     use super::*;
 
-    fn processor(limits: ImageLimits) -> ImageProcessor {
+    pub(super) fn processor(limits: ImageLimits) -> ImageProcessor {
         ImageProcessor {
             limits,
             min_pixels: 65_536,

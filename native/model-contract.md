@@ -65,9 +65,9 @@ The listener binds only after semantic validation and native model-worker
 readiness. Missing graph variants or required inputs fail startup. `/health`,
 `/v1/models`, `/v1/chat/completions`, and `/metrics` are implemented in Rust. Chat supports
 streaming SSE and complete JSON responses, exact checkpoint templates, native
-tokenization, sampling controls and PNG data-URL images. At most four images
+tokenization, sampling controls and PNG/JPEG data-URL images. At most four images
 are admitted, each at most 16384 patches, with 65536 total patches per request.
-Remote image fetching, JPEG/WebP/video, logprobs, forced tool
+Remote image fetching, WebP/video, logprobs, forced tool
 selection and `parallel_tool_calls=false` are rejected. Tool choices `auto` and
 `none` are supported. The checkpoint's `<think>` output is presented as
 `reasoning_content`; complete Qwen Coder function blocks become `tool_calls`
@@ -76,6 +76,12 @@ remain buffered across token boundaries. Malformed or unknown tool calls are
 errors. Incomplete tool blocks fail at EOS or output limits. A matched user stop
 may discard an incomplete Qwen call that has never been emitted; completed calls
 remain in the response and already-emitted argument fragments cannot be retracted.
+
+Image decoding applies EXIF orientations 1–8 before resize, including mirrored
+and axis-swapped images. Encoded-byte and input-pixel limits bound decoding;
+malformed metadata is rejected. JPEG uses accurate libjpeg-turbo decoding and
+smooth upsampling, with a 100-scan limit. Native preprocessing retains the
+checkpoint's RGB/bicubic/normalization contract.
 
 `output::ReasoningParser` and `output::ToolCallParser` consume presented token
 IDs and stable decoded spans and emit transport-neutral events. The

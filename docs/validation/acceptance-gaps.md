@@ -42,7 +42,8 @@ page match alone is insufficient for restoration.
 
 ## API and architecture gaps
 
-- Images accept PNG. JPEG decoding and EXIF orientation remain unimplemented.
+- Images accept PNG/JPEG with EXIF orientation. Decoder and checkpoint-admission
+  fixtures pass; JPEG/EXIF live HTTP coverage remains open.
 - String stops remain unimplemented in the installed server.
 - Nonempty tools with a final-content schema, required/named tool selection,
   and disabling parallel tool calls remain unsupported.

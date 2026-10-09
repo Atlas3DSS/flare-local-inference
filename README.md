@@ -100,7 +100,8 @@ builds omit raw replay bindings; the model's production handoff uses `Server`.
 decoding, and template errors using the pinned Transformers revision and actual
 checkpoint assets. `generate_image_fixtures.py` records exact pixel preprocessing,
 image-token expansion, and multimodal positions. Native image admission supports
-PNG; other encoded image formats remain unsupported.
+PNG and JPEG with EXIF orientation. JPEG decoding requires libturbojpeg >= 3.0;
+see [native build requirements](native/README.md).
 
 ## Running the server
 

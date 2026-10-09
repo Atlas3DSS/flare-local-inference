@@ -93,14 +93,27 @@ pub fn prepare(
                             .and_then(|value| value.get("url"))
                             .and_then(Value::as_str)
                             .ok_or("image_url.url must be a string")?;
-                        let data = url
-                            .strip_prefix("data:image/png;base64,")
-                            .ok_or("image input requires a base64 PNG data URL")?;
-                        // The HTTP body bound applies before base64 or PNG allocation.
+                        let (data, jpeg) = if let Some(data) =
+                            url.strip_prefix("data:image/png;base64,")
+                        {
+                            (data, false)
+                        } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
+                            (data, true)
+                        } else {
+                            return Err("image input requires a base64 PNG or JPEG data URL".into());
+                        };
+                        if data.len() > processor.max_encoded_bytes().div_ceil(3).saturating_mul(4)
+                        {
+                            return Err("encoded image exceeds the configured byte limit".into());
+                        }
                         let bytes = base64::engine::general_purpose::STANDARD
                             .decode(data)
                             .map_err(|error| format!("invalid image base64: {error}"))?;
-                        images.push(processor.decode_png(&bytes)?);
+                        images.push(if jpeg {
+                            processor.decode_jpeg(&bytes)?
+                        } else {
+                            processor.decode_png(&bytes)?
+                        });
                         *part = serde_json::json!({"type":"image"});
                     }
                     _ => {}

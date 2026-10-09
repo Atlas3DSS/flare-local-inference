@@ -34,6 +34,23 @@ cargo test --manifest-path native/Cargo.toml --offline
 cargo build --manifest-path native/Cargo.toml --features extension-module
 ```
 
+The `images` and `server` features require native **libturbojpeg >= 3.0** and
+`pkg-config` at build time. Install the development package that provides
+`libturbojpeg.pc`; `pkg-config --atleast-version=3.0 libturbojpeg` must succeed.
+The Cargo dependency enables only system `pkg-config` discovery, with no bundled
+codec or decoder fallback. A missing or older library fails the build. Default
+system linking is dynamic, so the matching `libturbojpeg.so.0` must also be
+available to the runtime loader.
+
+Image admission accepts base64 `image/png` and `image/jpeg` data URLs. JPEG uses
+accurate IDCT, smooth chroma upsampling, and at most 100 progressive scans.
+Baseline/progressive Huffman JPEG is supported; lossless and arithmetic JPEG
+are rejected. Encoded byte and decoded pixel limits apply before pixel allocation.
+PNG and JPEG EXIF orientation is applied before resize; orientations 1–8 include
+mirrored and axis-swapped images. Invalid orientation metadata is rejected.
+RGB conversion discards alpha and does not apply embedded color profiles.
+Pillow is used only to generate test fixtures, never by native image admission.
+
 The extension is named `sparkgap_native`. It requires the NVIDIA driver at runtime
 and dynamically loads `libcuda.so.1`; building and running native unit tests does
 not require CUDA libraries. Tests exercise queueing and teardown using explicit

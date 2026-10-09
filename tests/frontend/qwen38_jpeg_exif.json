@@ -1,0 +1,429 @@
+{
+  "pillow": "12.3.0",
+  "pillow_libjpeg_turbo": "3.1.4.1",
+  "assets": {
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    "config.json": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28"
+  },
+  "cases": [
+    {
+      "name": "RGB-0-0",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/RGB-0-0.jpg",
+      "rgb": "jpeg-exif-inputs/RGB-0-0.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "1e4582b712da0df38635ff54854fc156ea06b3bbebe70eb223f50c49a26294aa",
+      "pixel_values_sha256": "924e372812d2ee85ee28eeabf8943f27d3df30fd2d75c3a113dbdd089d46ba59"
+    },
+    {
+      "name": "RGB-0-1",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/RGB-0-1.jpg",
+      "rgb": "jpeg-exif-inputs/RGB-0-1.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "6b88f519cbb734cf6f983b9d99ba2215ab895d68c9069971b2ae661c1487f902",
+      "pixel_values_sha256": "a57afc62f8891f1df76025ea55cf5453bca09dd18ba01ab6f4ff18ad17742cbf"
+    },
+    {
+      "name": "RGB-0-2",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/RGB-0-2.jpg",
+      "rgb": "jpeg-exif-inputs/RGB-0-2.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "16bcc38f5aa51fa0d0543ed1b121ff8529f33a2e4444e5639e84d922bfdef938",
+      "pixel_values_sha256": "5c687124b3d48f2d7cd7d4d1912453b095d0675ec26d940c16d99af56f90a924"
+    },
+    {
+      "name": "RGB-1-0",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/RGB-1-0.jpg",
+      "rgb": "jpeg-exif-inputs/RGB-1-0.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "1e4582b712da0df38635ff54854fc156ea06b3bbebe70eb223f50c49a26294aa",
+      "pixel_values_sha256": "924e372812d2ee85ee28eeabf8943f27d3df30fd2d75c3a113dbdd089d46ba59"
+    },
+    {
+      "name": "RGB-1-1",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/RGB-1-1.jpg",
+      "rgb": "jpeg-exif-inputs/RGB-1-1.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "6b88f519cbb734cf6f983b9d99ba2215ab895d68c9069971b2ae661c1487f902",
+      "pixel_values_sha256": "a57afc62f8891f1df76025ea55cf5453bca09dd18ba01ab6f4ff18ad17742cbf"
+    },
+    {
+      "name": "RGB-1-2",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/RGB-1-2.jpg",
+      "rgb": "jpeg-exif-inputs/RGB-1-2.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "16bcc38f5aa51fa0d0543ed1b121ff8529f33a2e4444e5639e84d922bfdef938",
+      "pixel_values_sha256": "5c687124b3d48f2d7cd7d4d1912453b095d0675ec26d940c16d99af56f90a924"
+    },
+    {
+      "name": "L-0-0",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/L-0-0.jpg",
+      "rgb": "jpeg-exif-inputs/L-0-0.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "e66f9f6e40be7a2972541c1bbeb11f16a26ede5dae0afae4b3c3afc64bdde343",
+      "pixel_values_sha256": "e53336b0fa434aa185c83c661f1160a35053811052f4ae54f04d5f9da30ad348"
+    },
+    {
+      "name": "L-1-0",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/L-1-0.jpg",
+      "rgb": "jpeg-exif-inputs/L-1-0.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "e66f9f6e40be7a2972541c1bbeb11f16a26ede5dae0afae4b3c3afc64bdde343",
+      "pixel_values_sha256": "e53336b0fa434aa185c83c661f1160a35053811052f4ae54f04d5f9da30ad348"
+    },
+    {
+      "name": "CMYK-0-0",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/CMYK-0-0.jpg",
+      "rgb": "jpeg-exif-inputs/CMYK-0-0.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "6115fbb3ef7bdabfdfdf163b40a8c9b6bc51bdd7dd8447e749f31e29f3aa929a",
+      "pixel_values_sha256": "98398ae2d3dbd1f46b22dde7e89eb421fc57a2645f8bc7997bd1815a182f0baf"
+    },
+    {
+      "name": "CMYK-1-0",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/CMYK-1-0.jpg",
+      "rgb": "jpeg-exif-inputs/CMYK-1-0.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "6115fbb3ef7bdabfdfdf163b40a8c9b6bc51bdd7dd8447e749f31e29f3aa929a",
+      "pixel_values_sha256": "98398ae2d3dbd1f46b22dde7e89eb421fc57a2645f8bc7997bd1815a182f0baf"
+    },
+    {
+      "name": "JPEG-orientation-1",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-1.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-1.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "16bcc38f5aa51fa0d0543ed1b121ff8529f33a2e4444e5639e84d922bfdef938",
+      "pixel_values_sha256": "5c687124b3d48f2d7cd7d4d1912453b095d0675ec26d940c16d99af56f90a924"
+    },
+    {
+      "name": "PNG-orientation-1",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-1.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-1.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "05b90c8ef4e96bd679e561351966d7f914e86a4bf96466b492931320c66fc017",
+      "pixel_values_sha256": "c16de588f5e01bdb2f3841f5ebb90ac11d7508a0d3acabc89ae3cf0b7c4c90be"
+    },
+    {
+      "name": "JPEG-orientation-2",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-2.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-2.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "34c09de9d6af8f2baf6a5f17c05cae8dd3c3e67ef2ce8905e52a8da515c6178a",
+      "pixel_values_sha256": "082482c423eba49ee2fde06c1c6d0354454bfe9f35d954533051f176c2c502e9"
+    },
+    {
+      "name": "PNG-orientation-2",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-2.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-2.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "1787b8720f760081bd0c380a858edd431108807c02b6522df308a6832c36aef9",
+      "pixel_values_sha256": "d0dde5813ab50c2f3fd431e32370998c6f65308a174674d9f074d09dba14fcb5"
+    },
+    {
+      "name": "JPEG-orientation-3",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-3.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-3.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "5f83c77c258d60cf80cd618c6dc4fcb4dcdc7134ac425d636ebea50c41ac2e94",
+      "pixel_values_sha256": "7e596c71eaa1934b0e037237e5ce0671697a84a3b2164295a11b9d0cbfd0a042"
+    },
+    {
+      "name": "PNG-orientation-3",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-3.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-3.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "69a6b8488493eb966ecf58da30c84b52a4004608edc4e134e55c8488c4b5c823",
+      "pixel_values_sha256": "f5e42c3e58b27faaf7df244e48a83e6845b2ae578e68462d0470f69815f13e4b"
+    },
+    {
+      "name": "JPEG-orientation-4",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-4.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-4.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "e8bfd42879440738bb1d795216c36ea415977b812fcb56f6a2f6ff74c400082c",
+      "pixel_values_sha256": "6e3ce8a46682f7b263e876737f7ebfc250adf0e30ae3c305476fda12d1bb12be"
+    },
+    {
+      "name": "PNG-orientation-4",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-4.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-4.rgb",
+      "width": 37,
+      "height": 29,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        16,
+        20
+      ],
+      "resized_rgb_sha256": "0b3ba5b14af4d824814e4e35f9a581fbb2c3ce697cb11478211fae9a0968bdd6",
+      "pixel_values_sha256": "73059995aa649a13cc5d6169afdc0f33f28273863f46b147d696f9eb2d42d282"
+    },
+    {
+      "name": "JPEG-orientation-5",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-5.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-5.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "a85b2d7129e203ede4177f78a584bfe87912d0d6458da1d427e00793d463fbc4",
+      "pixel_values_sha256": "2c0cb93f7af64969642e89d15a05618ce1da086ea2bb5fd7cf5493da3ac10476"
+    },
+    {
+      "name": "PNG-orientation-5",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-5.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-5.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "be630bf3e082dcc02cda10abb31f62e872326d21a524ed1da08ce9d654f7422c",
+      "pixel_values_sha256": "88d1833adbcbdaa7024ecc88ef96f690920ad81043e9f5260061e2456e6ee2f1"
+    },
+    {
+      "name": "JPEG-orientation-6",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-6.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-6.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "002c9e905b0ab2c52a56ca07e34bf942ef48eb5dad9ea57dcd90c0595669b5c4",
+      "pixel_values_sha256": "6d58dfa9ec71bf49d88086e096db5f2ef2f7225b5dd11121983e172c42df5c33"
+    },
+    {
+      "name": "PNG-orientation-6",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-6.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-6.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "3bd02a143f932e1f4b39b3cb308d32d7b6f6f4fe4f0d3776e7a628a872122f8b",
+      "pixel_values_sha256": "8214640f63f91e2a33249785228d0c49f6ba1de240aa75820c51a5736a4c2e24"
+    },
+    {
+      "name": "JPEG-orientation-7",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-7.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-7.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "33e914ec60b3833e35773e1910b1aa6240475bcaaf466adc3598008a71f2daad",
+      "pixel_values_sha256": "50e4a489766753b64af607ba15eb4fa591415303796e77d3c5d4717ae1e8df08"
+    },
+    {
+      "name": "PNG-orientation-7",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-7.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-7.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "6d08ba362d4bba94d5dbc22d72e36ee2841658a20932abc230000c318242e738",
+      "pixel_values_sha256": "567c3ac24d47b892a332ad649de844af3185fabf912b78b7fd90736707fab92a"
+    },
+    {
+      "name": "JPEG-orientation-8",
+      "format": "JPEG",
+      "encoded": "jpeg-exif-inputs/JPEG-orientation-8.jpg",
+      "rgb": "jpeg-exif-inputs/JPEG-orientation-8.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 2,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "9ef62ee7ed8fdfb86efcf3bb86c6144fefefa62581e7fce68adbe14b5c950f9d",
+      "pixel_values_sha256": "9fd7ee31dff3816219b6d014e29922fb4cd08012067d08fe53973f81f761eae7"
+    },
+    {
+      "name": "PNG-orientation-8",
+      "format": "PNG",
+      "encoded": "jpeg-exif-inputs/PNG-orientation-8.png",
+      "rgb": "jpeg-exif-inputs/PNG-orientation-8.rgb",
+      "width": 29,
+      "height": 37,
+      "max_channel_error": 0,
+      "grid_thw": [
+        1,
+        20,
+        16
+      ],
+      "resized_rgb_sha256": "aeefbead4083651fea6fb63105093851ad6c1dcdb7f657be5fc5190e9b7e83f7",
+      "pixel_values_sha256": "bfe9dab67ac37693a0b8072e8e85234eecb7a049619239b9b9730178016052a9"
+    }
+  ]
+}

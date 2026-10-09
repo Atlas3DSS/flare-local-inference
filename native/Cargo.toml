@@ -15,7 +15,7 @@ python = ["dep:pyo3"]
 qualification = ["python"]
 extension-module = ["python", "pyo3/extension-module"]
 frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
-images = ["frontend", "dep:png"]
+images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
 server = ["images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64"]
 
@@ -30,6 +30,7 @@ serde_json = { version = "1.0", features = ["preserve_order", "float_roundtrip"]
 sha2 = { version = "0.10.9", optional = true }
 ryu = { version = "1.0", optional = true }
 png = { version = "0.18.1", optional = true }
+turbojpeg = { version = "=1.5.1", default-features = false, features = ["pkg-config"], optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"], optional = true }
 tokio = { version = "1.53.1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "macros"], optional = true }
 async-stream = { version = "0.3.6", optional = true }
