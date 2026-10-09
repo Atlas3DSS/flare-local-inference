@@ -32,12 +32,12 @@ supports exactly one kernel library and has no backend abstraction.
 - **Admission decides capacity.** A request that does not fit the prepared
   capacities fails at admission with a concrete error. The steady state never
   allocates, compiles, or recaptures.
-- **Per-model cost is one recipe.** A model family costs a Python recipe:
-  checkpoint tensor mapping, replaced forwards over b12x operators, and the
-  state semantics of its mechanisms. The recipe also declares the native
-  tokenizer, template, processor, and output-parser configuration. The runtime
-  contract is model-independent; unsupported input or output semantics require
-  native support before the recipe can serve those requests.
+- **Model families own their semantics.** A Python recipe supplies checkpoint
+  tensor mapping, replaced forwards over b12x operators, state layout, and native
+  asset configuration. A statically selected Rust model contract supplies input
+  packing, prompt interpretation, and output parsing. CUDA transport remains
+  shared; unsupported model semantics require an explicit implementation before
+  serving those requests.
 
 ### Scope relative to production servers
 
@@ -480,6 +480,15 @@ numerical or performance acceptance.
 Start with a Python process containing a PyO3 Rust extension and a dedicated
 native GPU worker. Python completes bootstrap and invokes native server startup;
 Rust binds the listening sockets and owns the server lifetime and request paths.
+
+`Server<M>` and `ModelRuntime<M>` statically select the
+[`ModelContract`](../native/src/model.rs). The contract validates preparation
+metadata and graph geometry, constructs admissions, packs model inputs, and
+interprets completion records. Its associated output protocol composes separate
+reasoning and tool parsers. The Python entrypoint selects
+[`Qwen4Exp`](../native/src/model/qwen4exp.rs); there is no runtime backend registry
+or dynamic model dispatch per token. Unknown schema versions, fields, or
+capabilities fail before asset loading and CUDA worker construction.
 
 Captured operators use deterministic reductions. Identical graph inputs,
 persistent state, and explicit RNG state must produce bitwise-identical logits
