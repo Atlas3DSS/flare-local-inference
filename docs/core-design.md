@@ -352,10 +352,16 @@ recurrence change reduction association and are excluded from this recipe's
 search space. The policy is part of the prepared query and selection-cache
 identity; b12x rejects incompatible explicit configurations.
 
-Allowing other recurrence schedules requires calibrated cross-capacity state
-and operator comparisons. Identical graph inputs and same-capacity restores
-must remain bitwise equal. Complete-model logit distance is diagnostic and
-does not select the recurrence policy.
+The BF16 recurrence processes 16-token chunks relative to each prefill invocation.
+An arbitrary consumed endpoint is a legal final-state boundary, but restarting
+from that state can change chunk arithmetic. Sequential single-key-split policy
+does not make computation invariant to splitting inside a chunk. Exact
+snapshot transfer preserves the split execution's state and continuation.
+
+Allowing other recurrence schedules requires calibrated state and operator
+comparisons on identical operands. Identical graph inputs and restores of the
+same execution partition must remain bitwise equal. Complete-model logit
+distance is diagnostic and does not select the recurrence policy.
 
 ### Preparation lifecycle
 
@@ -856,9 +862,10 @@ follow the immutable range. Metadata validation checks the exact source count,
 epoch, transfer direction, needed page mappings, and cross-row aliases before
 any state mutation.
 
-Captured GPU transfer and native maintenance checks pass for short endpoints,
-page residues, accepted columns, immutable source protection, and replay allocation
-stability. Full-model restored continuation and HTTP retention remain pending.
+Snapshot and restore preserve committed state exactly, protect immutable sources,
+and allocate no storage during replay. Restored continuation must match direct
+continuation with the same token partition and graph geometry. Comparing
+uninterrupted prefill with split prefill also measures GDN partition sensitivity.
 
 ### Full prompt hits
 

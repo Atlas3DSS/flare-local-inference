@@ -340,14 +340,29 @@ private boundary pages. Rejected raw tags are excluded. Pool row 0 is null, rows
 are live, and immutable snapshots begin at row 5; no rolling candidate rows or
 aligned checkpoint exports remain.
 
-Native scheduling tests pass 169 checks, and actual-checkpoint frontend tests pass
-7 checks. The targeted transfer, maintenance, metadata, and completion suite passes
-59 checks with CUDA enabled, including captured replay allocation stability and
-source protection. Full-model restored continuation and HTTP retention are pending.
-Required cases include endpoints below 16 and residues 0/1/2/3/63, exact retries,
-changed user/tool suffixes, duplicate publication, pressure, cancellation, failed
-freeze, and appended conversations. Terminal retention must preserve reuse of
-consumed generated tokens alongside instruction/prompt reuse.
+Native scheduling and checkpoint frontend tests pass; 59 CUDA transfer,
+maintenance, metadata, and completion checks pass, including allocation stability
+and immutable source protection. Full-model native replay of a fixed 4,043-token
+prompt preserves exact transfer and restored/direct-split continuation at
+endpoints [4,032](/data/sparkgap-artifacts/mtp-implementation/exact-checkpoints/prefix4032.json)
+and [10](/data/sparkgap-artifacts/mtp-implementation/exact-checkpoints/prefix10.json).
+The aligned split also matches monolithic execution across both tail capacities.
+The 10-token split does not: complete-logit relative L2 is 0.167491, with the split
+result as denominator; argmax remains unchanged.
+
+The [layer-0 trace](/data/sparkgap-artifacts/mtp-implementation/exact-checkpoints/gdn-prefix10/analysis.json) reproduces baseline
+state and logits exactly. Projection inputs, QKV/Z/A/B projections, convolution
+outputs, and carried convolution/recurrent state are exact. The first differing
+stage is recurrence, beginning at the first resumed token; output relative L2 is
+0.00185507 against the monolithic output and maximum absolute error is 0.001953125.
+Splitting inside a 16-token BF16 recurrence chunk changes its arithmetic partition.
+Calibrated operator acceptance for arbitrary partitions remains open.
+
+Actual-model selected-column snapshot/continuation and HTTP retention checks remain
+open. Required HTTP cases include endpoints below 16 and residues 0/1/2/3/63, exact
+retries, changed user/tool suffixes, duplicate publication, pressure, cancellation,
+failed freeze, and appended conversations. Terminal retention must preserve reuse
+of consumed generated tokens alongside instruction/prompt reuse.
 
 The malformed diff, literal-tag omission, contradictory retry recommendation,
 and four explicit-budget truncations remain failed outputs. Ordinary and pinned
