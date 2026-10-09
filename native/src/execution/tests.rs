@@ -277,7 +277,7 @@ fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
         offered_drafts: 7,
         accepted_drafts: 3,
         copy_offered_mask: 3,
-        candidate_consumed: 64,
+        model_reserved: 65,
         draft_cache_consumed: 66,
         verification_width: 8,
         ..Default::default()
@@ -316,7 +316,7 @@ fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
             2 => v.accepted_drafts = 1,
             3 => v.offered_drafts = 8,
             4 => v.copy_offered_mask = 128,
-            5 => v.candidate_consumed = 65,
+            5 => v.draft_cache_consumed = -2,
             6 => row.token_id = 40,
             _ => row.submission_sequence = 8,
         }

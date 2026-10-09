@@ -28,6 +28,8 @@ pub struct PrefixHistory {
     boundaries: Vec<PrefixKey>,
     tail: Vec<u32>,
     tail_events: Vec<ConditioningEvent>,
+    tokens: Vec<u32>,
+    events: Vec<ConditioningEvent>,
 }
 
 impl PrefixHistory {
@@ -43,6 +45,8 @@ impl PrefixHistory {
             }],
             tail: Vec::with_capacity(PAGE_SIZE),
             tail_events: Vec::new(),
+            tokens: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -55,11 +59,37 @@ impl PrefixHistory {
     }
 
     pub fn key_at(&self, consumed_tokens: u64) -> Option<PrefixKey> {
-        if !consumed_tokens.is_multiple_of(PAGE_SIZE as u64) {
+        let end = usize::try_from(consumed_tokens).ok()?;
+        if end > self.tokens.len() {
             return None;
         }
-        let index = usize::try_from(consumed_tokens / PAGE_SIZE as u64).ok()?;
-        self.boundaries.get(index).copied()
+        let index = end / PAGE_SIZE;
+        let parent = *self.boundaries.get(index)?;
+        if end.is_multiple_of(PAGE_SIZE) {
+            return Some(parent);
+        }
+        let start = index * PAGE_SIZE;
+        let mut hash = Blake2b::<U16>::new();
+        hash.update(b"sparkgap-prefix-tail-v1\0");
+        hash.update(self.identity);
+        hash.update(parent.digest);
+        hash.update(consumed_tokens.to_le_bytes());
+        for token in &self.tokens[start..end] {
+            hash.update(token.to_le_bytes());
+        }
+        let first = self.events.partition_point(|e| e.position < start as u64);
+        let last = self
+            .events
+            .partition_point(|e| e.position < consumed_tokens);
+        hash.update(((last - first) as u64).to_le_bytes());
+        for event in &self.events[first..last] {
+            hash.update(event.position.to_le_bytes());
+            hash.update(event.identity);
+        }
+        Some(PrefixKey {
+            consumed_tokens,
+            digest: hash.finalize().into(),
+        })
     }
 
     pub fn aligned_boundaries(&self) -> &[PrefixKey] {
@@ -80,6 +110,8 @@ impl PrefixHistory {
             }
             last_position = event.position;
         }
+        self.tokens.extend_from_slice(tokens);
+        self.events.extend_from_slice(events);
         let mut event_index = 0;
         for (index, token) in tokens.iter().enumerate() {
             let position = start + index as u64;

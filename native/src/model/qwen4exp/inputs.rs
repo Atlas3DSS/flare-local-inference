@@ -163,14 +163,22 @@ impl Inputs {
         }
         if matches!(
             step.kind,
-            GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative | GraphKind::Resume
+            GraphKind::Prefill
+                | GraphKind::Decode
+                | GraphKind::Speculative
+                | GraphKind::Resume
+                | GraphKind::Restore
+                | GraphKind::Snapshot
         ) {
-            self.i32("sample_enabled", 0, samples);
+            if !matches!(step.kind, GraphKind::Restore | GraphKind::Snapshot) {
+                self.i32("sample_enabled", 0, samples);
+            }
             for lane in &step.lanes {
-                if let Some(mask) = &admissions[lane.request.slot as usize]
-                    .as_ref()
-                    .unwrap()
-                    .grammar_mask
+                if !matches!(step.kind, GraphKind::Restore | GraphKind::Snapshot)
+                    && let Some(mask) = &admissions[lane.request.slot as usize]
+                        .as_ref()
+                        .unwrap()
+                        .grammar_mask
                 {
                     self.i32(
                         "sampling_grammar_mask",
@@ -271,14 +279,13 @@ impl Inputs {
         if step.kind == GraphKind::Prefill {
             let lane = &step.lanes[0];
             if step.lanes.len() != 1
-                || !lane.start_position.is_multiple_of(64)
                 || lane.tokens == 0
                 || lane.tokens > config.limits.prefill_chunk_size
                 || lane.tokens > step.token_capacity
                 || step.token_capacity > config.limits.prefill_chunk_size
             {
                 return Err(
-                    "prefill requires one aligned, nonempty prompt chunk within its graph and configured capacities"
+                    "prefill requires one nonempty prompt chunk within its graph and configured capacities"
                         .into(),
                 );
             }
@@ -312,22 +319,26 @@ impl Inputs {
             let mut destination = [0; 4];
             let mut operation = [0; 4];
             let mut qsa = [-1; 4];
+            let mut expected = [-1; 4];
             for (row, lane) in step.lanes.iter().enumerate() {
                 let request = scheduler.request(lane.request)?;
                 if step.kind == GraphKind::Snapshot {
-                    source[row] = request.candidate_state_slot.0 as i64;
-                    destination[row] = 9 + request.candidate_snapshot.0 as i64;
+                    source[row] = request.state_slot.0 as i64;
+                    destination[row] = 5 + request.snapshot_destination().0 as i64;
+                    expected[row] = request.snapshot_consumed() as i64;
                 } else {
                     source[row] = if let Some(snapshot) = request.prefix_snapshot() {
-                        9 + snapshot.0 as i64
+                        5 + snapshot.0 as i64
                     } else {
                         request.state_slot.0 as i64
                     };
                     destination[row] = request.state_slot.0 as i64;
                     operation[row] = i32::from(step.kind == GraphKind::Init);
                     qsa[row] = request.state_slot.0 as i64;
+                    expected[row] = request.consumed_tokens as i64;
                 }
             }
+            self.i64("state_expected_consumed", 0, expected);
             self.i64("state_source_slots", 0, source);
             self.i64("state_destination_slots", 0, destination);
             self.i32("state_operation", 0, operation);

@@ -23,7 +23,7 @@ pub struct TokenVector {
     pub offered_drafts: i64,
     pub accepted_drafts: i64,
     pub copy_offered_mask: i64,
-    pub candidate_consumed: i64,
+    pub model_reserved: i64,
     pub draft_cache_consumed: i64,
     pub verification_width: i64,
     pub tokens: [i64; MAX_OUTPUT_TOKENS],
@@ -35,7 +35,7 @@ impl Default for TokenVector {
             offered_drafts: 0,
             accepted_drafts: 0,
             copy_offered_mask: 0,
-            candidate_consumed: -1,
+            model_reserved: -1,
             draft_cache_consumed: 0,
             verification_width: 1,
             tokens: [-1; MAX_OUTPUT_TOKENS],
@@ -68,10 +68,6 @@ impl CompletionRecord {
                     || v.copy_offered_mask < 0
                     || v.copy_offered_mask >= (1 << v.offered_drafts)
                     || v.draft_cache_consumed < -1
-                    || (v.candidate_consumed != -1
-                        && (v.candidate_consumed <= 0
-                            || v.candidate_consumed % 64 != 0
-                            || v.candidate_consumed > self.consumed_tokens))
                     || v.tokens[..v.emitted_count as usize]
                         .iter()
                         .any(|id| u32::try_from(*id).is_err())
@@ -110,7 +106,7 @@ impl CompletionRecord {
                 v.offered_drafts,
                 v.accepted_drafts,
                 v.copy_offered_mask,
-                v.candidate_consumed,
+                v.model_reserved,
                 v.draft_cache_consumed,
                 0,
                 v.verification_width,
@@ -571,7 +567,7 @@ pub(super) fn decode_records(
                 offered_drafts: fields[9],
                 accepted_drafts: fields[10],
                 copy_offered_mask: fields[11],
-                candidate_consumed: fields[12],
+                model_reserved: fields[12],
                 draft_cache_consumed: fields[13],
                 verification_width: fields[15],
                 tokens: fields[16..24].try_into().unwrap(),

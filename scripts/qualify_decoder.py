@@ -81,7 +81,7 @@ def main():
     from sparkgap.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
     from sparkgap.recipes.qwen38.ple import MappedPLETable
     from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from sparkgap.recipes.qwen38.state import HybridStateLayout, HybridStatePool
+    from sparkgap.recipes.qwen38.state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool
 
     source_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py"))}
@@ -107,11 +107,10 @@ def main():
     table = MappedPLETable.load(manifest, device)
     progress("loaded complete mapped-host PLE table")
     context, pages = 262144, 4096
-    state_pool = HybridStatePool.allocate(9 + HybridStateLayout.build().snapshot_capacity(), device)
+    state_pool = HybridStatePool.allocate(SNAPSHOT_BASE + HybridStateLayout.build().snapshot_capacity(), device)
     qsa_states = {layer: QSAState.allocate(pages=pages, slots=5, device=device) for layer in range(3, 48, 4)}
     requests = DeviceRequestState.allocate(device,
-        consumed_tokens=state_pool.consumed_tokens[1:5, 0], ple_history=state_pool.ple_history[1:5],
-        boundary_consumed_tokens=state_pool.consumed_tokens[5:9, 0], boundary_history=state_pool.ple_history[5:9])
+        consumed_tokens=state_pool.consumed_tokens[1:5, 0], ple_history=state_pool.ple_history[1:5])
     inputs = DecoderInputs.allocate(device, context=context)
     scratch = DecoderScratch.allocate(args.prefill_capacity, device)
     workspace = ScratchArena(device)

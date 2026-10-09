@@ -15,9 +15,9 @@ import triton.language as tl
 from .gdn import GDNState
 
 GDN_LAYERS = tuple(layer for layer in range(48) if layer % 4 != 3)
+QSA_LAYERS = tuple(range(3, 48, 4))
 LIVE_BASE = 1
-CANDIDATE_BASE = 5
-SNAPSHOT_BASE = 9
+SNAPSHOT_BASE = 5
 EOS_TOKEN_ID = 248044
 COPY = 0
 RESET = 1
@@ -66,12 +66,20 @@ class HybridStateLayout:
         add("consumed_tokens", (1,), torch.int64)
         add("ple_history", (2,), torch.int64)
         add("rope_delta", (1,), torch.int64)
+        from b12x.attention import qsa
+
+        geometry = qsa.cache_requirements(main_page_size=64, position_axes=3,
+                                         max_speculative_tokens=speculative_tokens)
+        for layer in QSA_LAYERS:
+            add(f"qsa.{layer}.raw_keys", geometry.raw_k_ring_shape, torch.bfloat16)
+            add(f"qsa.{layer}.raw_positions", geometry.raw_logical_positions_shape, torch.int64)
+            add(f"qsa.{layer}.raw_rope", geometry.raw_rope_positions_shape, torch.int64)
+            add(f"qsa.{layer}.raw_anchor", (1,), torch.int64)
+            add(f"qsa.{layer}.boundary_key", geometry.main_k_page_shape, torch.bfloat16)
+            add(f"qsa.{layer}.boundary_value", geometry.main_v_page_shape, torch.bfloat16)
+            add(f"qsa.{layer}.boundary_selector", geometry.compressed_page_shape, torch.bfloat16)
         ring = 0
         if speculative_tokens:
-            from b12x.attention import qsa
-
-            geometry = qsa.cache_requirements(main_page_size=64, position_axes=3,
-                                             max_speculative_tokens=speculative_tokens)
             ring = geometry.raw_ring_capacity
             add("target_residual", (10240,), torch.bfloat16)
             add("target_residual_position", (3,), torch.int64)
@@ -82,6 +90,9 @@ class HybridStateLayout:
             add("draft_boundary_key", geometry.main_k_page_shape, torch.bfloat16)
             add("draft_boundary_value", geometry.main_v_page_shape, torch.bfloat16)
             add("draft_boundary_selector", geometry.compressed_page_shape, torch.bfloat16)
+            add("draft_boundary_key_extra", geometry.main_k_page_shape, torch.bfloat16)
+            add("draft_boundary_value_extra", geometry.main_v_page_shape, torch.bfloat16)
+            add("draft_boundary_selector_extra", geometry.compressed_page_shape, torch.bfloat16)
         return cls(tuple(regions), (offset + 255) // 256 * 256, speculative_tokens, ring)
 
     def region(self, name: str) -> StateRegion:
@@ -100,16 +111,12 @@ class HybridStateLayout:
 class HybridStatePool:
     """Typed disjoint views into one persistent byte row per state slot.
 
-    Slot zero is a permanently zero null row. Native request slots 0..3 use
-    model slots 1..4; their aligned candidates use slots 5..8. Published snapshot
-    IDs map to slots ``SNAPSHOT_BASE + id``. A 4 GiB snapshot budget holds 37 rows,
-    excluding null, live, and candidate storage.
-
-    Candidate rows must contain the actual state at their consumed-token label.
-    For a chunk crossing a 64-token boundary, recurrent export and convolution,
-    history, and hidden-vector gathering target that boundary before publication.
-    Copying the final chunk state while rounding its label down is invalid.
-    Sampling RNG, penalties, pending tokens, and QSA raw rings are separate.
+    Slot zero is permanently zero. Native request slots 0..3 use model slots
+    1..4. Immutable IDs map to ``SNAPSHOT_BASE + id``, starting at row 5.
+    Snapshots carry the exact consumed endpoint, normalized recurrent/history
+    state, target raw selector state and partial pages. Speculative snapshots
+    also carry independently aligned draft state for one fewer consumed token.
+    Sampling RNG, penalties and pending tokens remain request-local.
     """
 
     backing: torch.Tensor
@@ -172,19 +179,13 @@ class HybridStatePool:
 
 @dataclass(frozen=True)
 class StateTransferMetadata:
-    """Device commands for complete-state copy/reset and aligned QSA restore.
+    """Device commands for complete-state copy/reset and exact cache restoration.
 
-    Negative source/destination slots and null slot zero are inactive. Operation
-    codes are COPY=0 and RESET=1. ``qsa_slots`` maps a transfer to its separate raw
-    selector slot; -1 omits invalidation. A QSA restore requires a nonnegative
-    64-aligned consumed count and positive accepted-token count. The interval
-    anchor becomes consumed minus accepted; empty initialization uses -1.
-
-    ``errors`` contains 0=success/inactive, 1=operation, 2=slot bounds,
-    3=raw-slot bounds, 4=unaligned restore, 5=accepted count, 6=batch alias conflict,
-    7=command count outside capacity.
-    The runtime must inspect errors before treating a transfer as successful.
-    Batch destinations must be unique and cannot be another operation's source.
+    Active exact commands require expected_consumed=0 for RESET and the saved
+    positive consumed count for COPY. Inactive commands use -1. Error codes are
+    1=operation, 2=slot bounds, 3=raw-slot bounds, 4=endpoint, 5=accepted count,
+    6=batch alias conflict, 7=command count and 8=page mapping. Destinations must
+    be unique and cannot alias another operation's source.
     """
 
     source_slots: torch.Tensor
@@ -192,6 +193,7 @@ class StateTransferMetadata:
     operation: torch.Tensor
     qsa_slots: torch.Tensor
     accepted_tokens: torch.Tensor
+    expected_consumed: torch.Tensor
     num_ops: torch.Tensor
     errors: torch.Tensor
 
@@ -205,6 +207,7 @@ class StateTransferMetadata:
             torch.zeros(capacity, dtype=torch.int32, device=device),
             torch.full((capacity,), -1, dtype=torch.int64, device=device),
             torch.ones(capacity, dtype=torch.int32, device=device),
+            torch.full((capacity,), -1, dtype=torch.int64, device=device),
             torch.zeros(1, dtype=torch.int32, device=device),
             torch.zeros(capacity, dtype=torch.int32, device=device),
         )
@@ -221,6 +224,17 @@ def _transfer(
     Accepted,
     Count,
     Errors,
+    Expected,
+    PreviousAccepted,
+    CopyLayout,
+    Tables,
+    DraftTables,
+    EXACT: tl.constexpr,
+    SPECULATIVE: tl.constexpr,
+    HAS_DRAFT: tl.constexpr,
+    EXTRA_BASE: tl.constexpr,
+    PAGE_COUNT: tl.constexpr,
+    TABLE_WIDTH: tl.constexpr,
     ROW_BYTES: tl.constexpr,
     SLOTS: tl.constexpr,
     CAPACITY: tl.constexpr,
@@ -252,7 +266,34 @@ def _transfer(
         other=0,
     )
     restoring = live & (raw_slot >= 0)
-    error = tl.where(restoring & ((consumed < 0) | (consumed % 64 != 0)), 4, error)
+    if EXACT:
+        expected = tl.load(Expected + command)
+        error = tl.where(live & ((expected < 0) | ((operation == 1) & (expected != 0))
+                         | ((operation == 0) & ((expected <= 0) | (consumed != expected)))), 4, error)
+        physical_slot = tl.where(source < 5, source - 1, destination - 1)
+        endpoint = expected // 64
+        physical_valid = (physical_slot >= 0) & (physical_slot < 4)
+        tail = live & (operation == 0) & (expected > 0) & (expected % 64 != 0)
+        error = tl.where(live & ~physical_valid, 2, error)
+        page = tl.load(Tables + physical_slot * TABLE_WIDTH + endpoint,
+                       tail & physical_valid & (endpoint < TABLE_WIDTH), other=-1)
+        error = tl.where(tail & ((endpoint >= TABLE_WIDTH) | (page < 0) | (page >= PAGE_COUNT)), 8, error)
+        if HAS_DRAFT:
+            for part in tl.static_range(2):
+                logical = endpoint - 1 + part
+                needed = live & (operation == 0) & (expected > 1) & (logical >= 0)
+                if part == 1:
+                    needed &= expected % 64 >= 2
+                page = tl.load(DraftTables + physical_slot * TABLE_WIDTH + logical,
+                               needed & physical_valid & (logical < TABLE_WIDTH), other=-1)
+                error = tl.where(needed & ((logical >= TABLE_WIDTH) | (page < 0) | (page >= PAGE_COUNT)), 8, error)
+        selected = tl.full((), 1, tl.int32)
+        if SPECULATIVE:
+            selected = tl.load(PreviousAccepted + physical_slot,
+                               live & physical_valid & (source > 0) & (source < 5) & (operation == 0), other=1)
+            error = tl.where(live & ((selected < 1) | (selected > 8)), 5, error)
+    else:
+        error = tl.where(restoring & ((consumed < 0) | (consumed % 64 != 0)), 4, error)
     error = tl.where(restoring & (accepted <= 0), 5, error)
     others = tl.arange(0, OP_BLOCK)
     other_destination = tl.load(Destinations + others, others < CAPACITY, other=-1)
@@ -287,7 +328,23 @@ def _transfer(
         value = tl.where(history, eos_byte, 0).to(tl.uint8)
         tl.store(Backing + destination * ROW_BYTES + offsets, value, mask)
     elif source != destination:
-        value = tl.load(Backing + source * ROW_BYTES + offsets, mask, other=0)
+        read_slot = source
+        read_offsets = offsets
+        keep = tl.full((BLOCK,), True, tl.int1)
+        if EXACT and SPECULATIVE:
+            snapshot = (source >= 1) & (source < 5) & (destination >= 5)
+            kind = tl.load(CopyLayout + tile * 4)
+            region_start = tl.load(CopyLayout + tile * 4 + 1)
+            history = tl.load(CopyLayout + tile * 4 + 2)
+            state_history = tl.load(CopyLayout + tile * 4 + 3)
+            if snapshot & (kind == 1):
+                read_slot = tl.where(selected == 1, source, EXTRA_BASE + (source - 1) * 7 + selected - 2)
+            if snapshot & (kind == 2):
+                relative = offsets - region_start
+                column = (relative // 2) % state_history
+                keep = column < history
+                read_offsets = offsets + (selected - 1) * 2
+        value = tl.load(Backing + read_slot * ROW_BYTES + read_offsets, mask & keep, other=0)
         tl.store(Backing + destination * ROW_BYTES + offsets, value, mask)
 
 
@@ -342,7 +399,7 @@ class PreparedStateTransfers:
     """
 
     def __init__(
-        self, pool: HybridStatePool, metadata: StateTransferMetadata, *, qsa_states=()
+        self, pool: HybridStatePool, metadata: StateTransferMetadata, *, qsa_states=(), exact=None
     ):
         device = pool.backing.device
         if device.type != "cuda":
@@ -354,6 +411,7 @@ class PreparedStateTransfers:
             ("operation", torch.int32),
             ("qsa_slots", torch.int64),
             ("accepted_tokens", torch.int32),
+            ("expected_consumed", torch.int64),
             ("num_ops", torch.int32),
             ("errors", torch.int32),
         ):
@@ -371,6 +429,9 @@ class PreparedStateTransfers:
         if capacity <= 0:
             raise ValueError("state transfer needs positive command capacity")
         self.pool, self.metadata, self.qsa_states = pool, metadata, tuple(qsa_states)
+        self.exact = exact
+        if exact is not None and exact.pool is not pool:
+            raise ValueError("exact checkpoint storage must belong to the transferred pool")
         raw_slots, ring, axes = 0, 0, 0
         pointers = []
         for state in self.qsa_states:
@@ -416,6 +477,17 @@ class PreparedStateTransfers:
             metadata.accepted_tokens,
             metadata.num_ops,
             metadata.errors,
+            metadata.expected_consumed,
+            exact.previous_accepted if exact is not None else None,
+            exact.copy_layout if exact is not None else None,
+            exact.tables if exact is not None else None,
+            exact.draft_tables if exact is not None else None,
+            exact is not None,
+            bool(pool.layout.speculative_tokens),
+            exact is not None and exact.draft is not None,
+            exact.extra_base if exact is not None else 0,
+            exact.page_count if exact is not None else 0,
+            exact.tables.shape[1] if exact is not None else 0,
             pool.layout.row_bytes,
             pool.backing.shape[0],
             capacity,
@@ -451,7 +523,7 @@ class PreparedStateTransfers:
         compiled = _transfer.warmup(*self._transfer_args, grid=self._grid, num_warps=4)
         self._transfer = partial(compiled[self._grid], *self._transfer_args)
         self._qsa = None
-        if self.qsa_states:
+        if self.qsa_states and self.exact is None:
             compiled = _invalidate_qsa.warmup(
                 *self._qsa_args, grid=self._qsa_grid, num_warps=4
             )
@@ -463,12 +535,191 @@ class PreparedStateTransfers:
         if not self._prepared:
             raise RuntimeError("state transfer prepare() must complete before capture")
         self._transfer()
-        if self._qsa is not None:
+        if self.exact is not None:
+            self.exact()
+        elif self._qsa is not None:
             self._qsa()
+
+@triton.jit
+def _checkpoint_raw(Pointers, Backing, Sources, Destinations, Operations, Expected, Count, Errors,
+                    ROW_BYTES: tl.constexpr, ELEMENTS: tl.constexpr, RING: tl.constexpr,
+                    FIELD: tl.constexpr, DRAFT: tl.constexpr, BLOCK: tl.constexpr):
+    command, layer = tl.program_id(0), tl.program_id(1)
+    source, destination = tl.load(Sources + command), tl.load(Destinations + command)
+    operation = tl.load(Operations + command)
+    active = (command < tl.load(Count)) & (destination > 0) & (tl.load(Errors + command) == 0)
+    snapshot = (operation == 0) & (source > 0) & (source < 1 + 4) & (destination >= 5)
+    restore = (operation == 0) & (source >= 5) & (destination >= 1) & (destination < 1 + 4)
+    reset = operation == 1
+    slot = tl.where(snapshot, source, destination)
+    active &= snapshot | restore | reset
+    dtype = tl.bfloat16 if FIELD == 0 else tl.int64
+    pointer = tl.load(Pointers + layer * 3).to(tl.pointer_type(dtype))
+    offset = tl.load(Pointers + layer * 3 + 1)
+    tags = tl.load(Pointers + layer * 3 + 2).to(tl.pointer_type(tl.int64))
+    index = tl.arange(0, BLOCK)
+    mask = active & (index < ELEMENTS)
+    endpoint = tl.load(Expected + command) - (1 if DRAFT else 0)
+    endpoint = tl.maximum(endpoint, 0)
+    if snapshot:
+        if FIELD == 3:
+            value = tl.full((BLOCK,), 0, tl.int64) + endpoint - 1
+        else:
+            ring_index = index // 128 if FIELD == 0 else (index // 3 if FIELD == 2 else index)
+            tag = tl.load(tags + slot * RING + ring_index, mask, other=-1)
+            valid = (tag >= 0) & (tag < endpoint)
+            value = tl.load(pointer + slot * ELEMENTS + index, mask & valid, other=0 if FIELD == 0 else -1)
+        saved = (Backing + destination * ROW_BYTES + offset).to(tl.pointer_type(dtype))
+        tl.store(saved + index, value, mask)
+    elif restore:
+        saved = (Backing + source * ROW_BYTES + offset).to(tl.pointer_type(dtype))
+        value = tl.load(saved + index, mask, other=0)
+        tl.store(pointer + slot * ELEMENTS + index, value, mask)
+    elif reset:
+        tl.store(pointer + slot * ELEMENTS + index, 0 if FIELD == 0 else -1, mask)
+
+
+@triton.jit
+def _checkpoint_pages(Pointers, Backing, Tables, Sources, Destinations, Operations, Expected, Count, Errors,
+                      ROW_BYTES: tl.constexpr, ELEMENTS: tl.constexpr, TABLE_WIDTH: tl.constexpr,
+                      DRAFT_PART: tl.constexpr, BLOCK: tl.constexpr):
+    command, layer, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    source, destination = tl.load(Sources + command), tl.load(Destinations + command)
+    endpoint = tl.load(Expected + command)
+    snapshot = (source >= 1) & (source < 1 + 4) & (destination >= 5)
+    restore = (source >= 5) & (destination >= 1) & (destination < 1 + 4)
+    active = (command < tl.load(Count)) & (tl.load(Errors + command) == 0)
+    active &= (tl.load(Operations + command) == 0) & (snapshot | restore) & (endpoint > 0)
+    logical = endpoint // 64
+    if DRAFT_PART < 0:
+        active &= endpoint % 64 != 0
+    else:
+        logical += DRAFT_PART - 1
+        active &= (endpoint > 1) & (logical >= 0)
+        if DRAFT_PART == 1:
+            active &= endpoint % 64 >= 2
+    slot = tl.where(snapshot, source, destination) - 1
+    page = tl.load(Tables + slot * TABLE_WIDTH + logical, active, other=-1)
+    active &= page >= 0
+    pointer = tl.load(Pointers + layer * 2).to(tl.pointer_type(tl.bfloat16))
+    offset = tl.load(Pointers + layer * 2 + 1)
+    index = tile * BLOCK + tl.arange(0, BLOCK)
+    mask = active & (index < ELEMENTS)
+    if snapshot:
+        value = tl.load(pointer + page * ELEMENTS + index, mask, other=0)
+        saved = (Backing + destination * ROW_BYTES + offset).to(tl.pointer_type(tl.bfloat16))
+        tl.store(saved + index, value, mask)
+    elif restore:
+        saved = (Backing + source * ROW_BYTES + offset).to(tl.pointer_type(tl.bfloat16))
+        value = tl.load(saved + index, mask, other=0)
+        tl.store(pointer + page * ELEMENTS + index, value, mask)
+
+
+def checkpoint_copy_layout(layout, block=4096):
+    """Classify whole transfer tiles for selected recurrence/history normalization."""
+    result = torch.zeros((triton.cdiv(layout.row_bytes, block), 4), dtype=torch.int64)
+    for region in layout.regions:
+        if region.name.endswith(".recurrent"):
+            kind, history, capacity = 1, 0, 0
+        elif region.name.endswith(".convolution") or region.name == "ple_convolution":
+            kind, history, capacity = 2, region.shape[1] - layout.speculative_tokens, region.shape[1]
+        else:
+            continue
+        if region.offset % block or region.nbytes % block:
+            raise ValueError("state normalization regions must cover whole transfer tiles")
+        result[region.offset // block:(region.offset + region.nbytes) // block] = torch.tensor(
+            [kind, region.offset, history, capacity])
+    return result
+
+
+class PreparedCheckpointCaches:
+    """Exact target/draft cache tails plus normalized recurrent snapshot storage."""
+
+    def __init__(self, pool, metadata, qsa_states, tables, *, speculation=None):
+        from .decoder_state import compile_kernel
+
+        self.pool, self.metadata = pool, metadata
+        self.states, self.tables = tuple(qsa_states), tables
+        self.draft = speculation.cache[48] if speculation is not None and speculation.draft_tables is not None else None
+        self.draft_tables = speculation.draft_tables if self.draft is not None else None
+        self.previous_accepted = speculation.previous_accepted if speculation is not None else None
+        self.extra_base = speculation.extra_base if speculation is not None else 0
+        self.copy_layout = checkpoint_copy_layout(pool.layout).to(pool.backing.device)
+        if len(self.states) != len(QSA_LAYERS):
+            raise ValueError("exact checkpoints require all twelve target QSA states")
+        if pool.layout.speculative_tokens and speculation is None:
+            raise ValueError("speculative exact checkpoints require accepted-state ownership")
+        if tables.ndim != 2 or tables.shape[0] != 4 or tables.shape[1] == 0 or tables.dtype != torch.int32 or not tables.is_contiguous():
+            raise ValueError("checkpoint page tables must be contiguous int32[4,pages]")
+        if tables.device != pool.backing.device:
+            raise ValueError("checkpoint page tables must share the state device")
+        self.page_count = self.states[0].main_k_cache.shape[0]
+        if self.draft_tables is not None and (self.draft_tables.shape != tables.shape
+                or self.draft_tables.dtype != torch.int32 or not self.draft_tables.is_contiguous()
+                or self.draft_tables.device != tables.device):
+            raise ValueError("draft checkpoint tables must match target table geometry")
+        if pool.layout.speculative_tokens:
+            previous = self.previous_accepted
+            if (previous.shape != (4,) or previous.dtype != torch.int32
+                    or previous.device != pool.backing.device or not previous.is_contiguous()
+                    or self.extra_base < SNAPSHOT_BASE + 1 or self.extra_base + 28 > pool.backing.shape[0]):
+                raise ValueError("speculative checkpoints require eight accepted columns per live slot")
+        self.operations, self.pointers = [], []
+        groups = [(self.states, tuple(f"qsa.{layer}." for layer in QSA_LAYERS), False)]
+        if self.draft is not None:
+            groups.append(((self.draft,), ("draft_",), True))
+        for states, prefixes, draft in groups:
+            ring = states[0].raw_k_ring.shape[1]
+            for state in states:
+                if state.raw_k_ring.shape[0] < 5 or state.raw_k_ring.shape[1] != ring:
+                    raise ValueError("checkpoint raw-state geometry differs across layers")
+                for name in ("main_k_cache", "main_v_cache", "compressed_k_cache"):
+                    value = getattr(state, name)
+                    if value.shape[0] != self.page_count or value.device != pool.backing.device or not value.is_contiguous():
+                        raise ValueError("checkpoint page pools must share capacity and contiguous device layout")
+            for field, (name, suffix) in enumerate((("raw_k_ring", "raw_keys"),
+                    ("raw_logical_positions", "raw_positions"), ("raw_rope_positions", "raw_rope"),
+                    ("raw_interval_start_positions", "raw_anchor"))):
+                pointers = []
+                for state, prefix in zip(states, prefixes, strict=True):
+                    value, region = getattr(state, name), pool.layout.region(prefix + suffix)
+                    if value.dtype != region.dtype or value.shape[1:] != region.shape and not (field == 3 and value.ndim == 1):
+                        raise ValueError("checkpoint raw field shape or dtype differs from its storage")
+                    if not value.is_contiguous() or value.device != pool.backing.device:
+                        raise ValueError("checkpoint raw fields must be contiguous on the state device")
+                    pointers.append((value.data_ptr(), region.offset, state.raw_logical_positions.data_ptr()))
+                pointer = torch.tensor(pointers, device=pool.backing.device, dtype=torch.int64)
+                self.pointers.append(pointer)
+                size = pool.layout.region(prefixes[0] + suffix).nbytes // value.element_size()
+                self.operations.append(compile_kernel(_checkpoint_raw,
+                    (pointer, pool.backing, metadata.source_slots, metadata.destination_slots, metadata.operation,
+                     metadata.expected_consumed, metadata.num_ops, metadata.errors, pool.layout.row_bytes,
+                     size, ring, field, draft, triton.next_power_of_2(size)), (metadata.source_slots.numel(), len(states), 1)))
+            for part in ((0, 1) if draft else (-1,)):
+                for name, suffix in (("main_k_cache", "boundary_key"), ("main_v_cache", "boundary_value"),
+                                      ("compressed_k_cache", "boundary_selector")):
+                    pointers = []
+                    for state, prefix in zip(states, prefixes, strict=True):
+                        region = pool.layout.region(prefix + suffix + ("_extra" if part == 1 else ""))
+                        value = getattr(state, name)
+                        if value.shape[1:] != region.shape or value.dtype != region.dtype:
+                            raise ValueError("checkpoint page field differs from its storage")
+                        pointers.append((value.data_ptr(), region.offset))
+                    pointer = torch.tensor(pointers, device=pool.backing.device, dtype=torch.int64)
+                    self.pointers.append(pointer)
+                    size = value[0].numel()
+                    self.operations.append(compile_kernel(_checkpoint_pages,
+                        (pointer, pool.backing, self.draft_tables if draft else tables, metadata.source_slots,
+                         metadata.destination_slots, metadata.operation, metadata.expected_consumed,
+                         metadata.num_ops, metadata.errors, pool.layout.row_bytes, size, tables.shape[1], part, 1024),
+                        (metadata.source_slots.numel(), len(states), triton.cdiv(size, 1024))))
+
+    def __call__(self):
+        for operation in self.operations:
+            operation()
 
 
 __all__ = [
-    "CANDIDATE_BASE",
     "COPY",
     "EOS_TOKEN_ID",
     "GDN_LAYERS",
@@ -478,6 +729,8 @@ __all__ = [
     "HybridStateLayout",
     "HybridStatePool",
     "PreparedStateTransfers",
+    "PreparedCheckpointCaches",
+    "QSA_LAYERS",
     "StateRegion",
     "StateTransferMetadata",
 ]

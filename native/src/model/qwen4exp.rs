@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub struct Qwen4Exp;
-pub const INPUT_SCHEMA: &str = "qwen4exp.graph-inputs.v1";
+pub const INPUT_SCHEMA: &str = "qwen4exp.graph-inputs.v2";
 pub const VOCABULARY: usize = 248320;
 
 #[cfg(feature = "server")]
@@ -63,7 +63,6 @@ impl ModelContract for Qwen4Exp {
             vocabulary: config.contract.vocabulary,
             vision: config.contract.vision.clone(),
             live_state_base: 1,
-            candidate_state_base: 5,
             draft_pages_per_request: 1,
         }
     }
@@ -123,6 +122,9 @@ impl ModelContract for Qwen4Exp {
             return Err("completion token exceeds prepared vocabulary".into());
         }
         if let Some(vector) = record.vector {
+            if vector.model_reserved != -1 {
+                return Err("Qwen4Exp v2 completion field 12 must be -1".into());
+            }
             if vector
                 .tokens
                 .iter()
@@ -132,15 +134,6 @@ impl ModelContract for Qwen4Exp {
             }
         }
         Ok(())
-    }
-    fn candidate_boundary(record: &CompletionRecord) -> u64 {
-        match record.vector {
-            Some(vector) => vector.candidate_consumed.max(0) as u64,
-            None => {
-                (record.consumed_tokens as u64 / crate::cache::PAGE_SIZE as u64)
-                    * crate::cache::PAGE_SIZE as u64
-            }
-        }
     }
     #[cfg(feature = "images")]
     fn pack_vision(

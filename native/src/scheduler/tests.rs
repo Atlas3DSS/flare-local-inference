@@ -19,7 +19,6 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             live_state_base: 1,
-            candidate_state_base: 5,
             draft_pages_per_request: 1,
         },
     )
@@ -27,6 +26,7 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
 }
 fn spec(tokens: usize, max_new: u32) -> RequestSpec {
     RequestSpec {
+        system_boundary: None,
         prompt: (0..tokens as u32).collect(),
         conditioning: vec![],
         max_new_tokens: max_new,
@@ -155,7 +155,6 @@ fn inactive_state_completion_never_initializes_or_publishes_a_checkpoint() {
         .unwrap();
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
-    scheduler.record_candidate(handle, 64, Fence(2)).unwrap();
     scheduler
         .complete(Fence(2), &records(handle, 2, 64, 1, 88, 2))
         .unwrap();
@@ -166,7 +165,7 @@ fn inactive_state_completion_never_initializes_or_publishes_a_checkpoint() {
             .complete(Fence(3), &[CompletionRecord::default(); 4])
             .is_err()
     );
-    assert!(!scheduler.request(handle).unwrap().candidate_frozen);
+    assert!(!scheduler.request(handle).unwrap().terminal_snapshot_ready);
     assert!(scheduler.finish(handle).is_err());
     scheduler
         .complete(Fence(3), &state_records(&scheduler, &step, 3))
@@ -186,8 +185,6 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
     );
     scheduler.record_submission(&step, Fence(2)).unwrap();
     assert_eq!(scheduler.free_page_count(), 23);
-    scheduler.record_candidate(handle, 512, Fence(2)).unwrap();
-    assert!(scheduler.record_candidate(handle, 529, Fence(2)).is_err());
     scheduler
         .complete(Fence(2), &records(handle, 2, 512, 0, -1, 1))
         .unwrap();
@@ -198,6 +195,7 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
     scheduler
         .complete(Fence(3), &records(handle, 3, 529, 1, 77, 1))
         .unwrap();
+    retain_prompt(&mut scheduler, 4);
     assert_eq!(
         scheduler.request(handle).unwrap().phase,
         RequestPhase::Decode
@@ -226,7 +224,6 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 live_state_base: 1,
-                candidate_state_base: 5,
                 draft_pages_per_request: 1,
             },
         )
@@ -244,9 +241,6 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
             scheduler.request(handle).unwrap().pages().count(),
             chunk_size / 64
         );
-        scheduler
-            .record_candidate(handle, chunk_size as u64, Fence(2))
-            .unwrap();
         scheduler
             .complete(Fence(2), &records(handle, 2, chunk_size as i64, 0, -1, 1))
             .unwrap();
@@ -267,6 +261,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                 &records(handle, 3, (chunk_size + tail) as i64, 1, 77, 1),
             )
             .unwrap();
+        retain_prompt(&mut scheduler, 5);
         assert_eq!(
             scheduler.request(handle).unwrap().phase,
             RequestPhase::Decode
@@ -295,7 +290,6 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 live_state_base: 1,
-                candidate_state_base: 5,
                 draft_pages_per_request: 1,
             },
         );
@@ -305,7 +299,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
 
 #[test]
 fn cancellation_delays_slot_page_and_snapshot_reuse_until_gpu_fence() {
-    let mut scheduler = scheduler(1, 2, 1);
+    let mut scheduler = scheduler(1, 2, 2);
     let handle = scheduler.admit(spec(64, 3)).unwrap();
     init(&mut scheduler, 1);
     let step = scheduler.next_step().unwrap();
@@ -319,7 +313,7 @@ fn cancellation_delays_slot_page_and_snapshot_reuse_until_gpu_fence() {
         .unwrap();
     assert_eq!(
         (scheduler.free_page_count(), scheduler.free_snapshot_count()),
-        (2, 1)
+        (2, 2)
     );
     let reused = scheduler.admit(spec(64, 3)).unwrap();
     assert_eq!(reused.slot, handle.slot);
@@ -329,7 +323,7 @@ fn cancellation_delays_slot_page_and_snapshot_reuse_until_gpu_fence() {
 
 #[test]
 fn cancellation_waits_for_both_submissions_and_reused_slot_rejects_old_epoch() {
-    let mut scheduler = scheduler(1, 4, 1);
+    let mut scheduler = scheduler(1, 4, 2);
     let old = scheduler.admit(spec(4, 8)).unwrap();
     init(&mut scheduler, 1);
     let step = scheduler.next_step().unwrap();
@@ -337,7 +331,8 @@ fn cancellation_waits_for_both_submissions_and_reused_slot_rejects_old_epoch() {
     scheduler
         .complete(Fence(2), &records(old, 2, 4, 1, 77, 1))
         .unwrap();
-    for fence in [3, 4] {
+    retain_prompt(&mut scheduler, 3);
+    for fence in [4, 5] {
         let step = scheduler.next_step().unwrap();
         scheduler.record_submission(&step, Fence(fence)).unwrap();
     }
@@ -350,13 +345,13 @@ fn cancellation_waits_for_both_submissions_and_reused_slot_rejects_old_epoch() {
         (0, 1)
     );
     scheduler
-        .complete(Fence(3), &records(old, 3, 5, 2, 78, 1))
+        .complete(Fence(4), &records(old, 4, 5, 2, 78, 1))
         .unwrap();
     assert_eq!(scheduler.stats().free_slots, 0);
     assert_eq!(scheduler.free_snapshot_count(), 0);
     assert!(scheduler.admit(spec(4, 8)).is_err());
     scheduler
-        .complete(Fence(4), &records(old, 4, 6, 3, 79, 1))
+        .complete(Fence(5), &records(old, 5, 6, 3, 79, 1))
         .unwrap();
     assert_eq!(
         (
@@ -370,18 +365,18 @@ fn cancellation_waits_for_both_submissions_and_reused_slot_rejects_old_epoch() {
     assert_eq!(reused.slot, old.slot);
     assert!(reused.generation > old.generation);
     let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(5)).unwrap();
+    scheduler.record_submission(&step, Fence(6)).unwrap();
     assert!(
         scheduler
-            .complete(Fence(5), &records(old, 5, 0, 0, -1, 1))
+            .complete(Fence(6), &records(old, 6, 0, 0, -1, 1))
             .is_err()
     );
     assert_eq!(
         scheduler.request(reused).unwrap().phase,
-        RequestPhase::Initialize
+        RequestPhase::Restore
     );
     scheduler
-        .complete(Fence(5), &records(reused, 5, 0, 0, -1, 1))
+        .complete(Fence(6), &records(reused, 6, 4, 0, -1, 1))
         .unwrap();
     scheduler.cancel(reused).unwrap();
 }
@@ -398,7 +393,6 @@ fn snapshot_pressure_waits_for_cancelled_restore_before_reusing_storage() {
     init(&mut scheduler, 1);
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
-    scheduler.record_candidate(seed, 64, Fence(2)).unwrap();
     scheduler
         .complete(Fence(2), &records(seed, 2, 64, 1, 88, 2))
         .unwrap();
@@ -448,7 +442,6 @@ fn terminal_checkpoint_full_prompt_hit_restores_and_resumes_without_prefill() {
     init(&mut scheduler, 1);
     let prefill = scheduler.next_step().unwrap();
     scheduler.record_submission(&prefill, Fence(2)).unwrap();
-    scheduler.record_candidate(handle, 64, Fence(2)).unwrap();
     assert_eq!(scheduler.stats().snapshot_publications, 0);
     assert!(scheduler.finish(handle).is_err());
     scheduler
@@ -523,7 +516,6 @@ fn cold_admission_skips_matching_checkpoint_but_retains_capacity_eviction() {
     init(&mut scheduler, 1);
     let prefill = scheduler.next_step().unwrap();
     scheduler.record_submission(&prefill, Fence(2)).unwrap();
-    scheduler.record_candidate(handle, 64, Fence(2)).unwrap();
     scheduler
         .complete(Fence(2), &records(handle, 2, 64, 1, 99, 2))
         .unwrap();
@@ -576,9 +568,6 @@ fn appended_conversation_outlives_snapshot_capacity_without_losing_prefix_pages(
             .record_submission(&step, Fence(fence + 1))
             .unwrap();
         scheduler
-            .record_candidate(handle, tokens as u64, Fence(fence + 1))
-            .unwrap();
-        scheduler
             .complete(
                 Fence(fence + 1),
                 &records(handle, fence + 1, tokens as i64, 1, 77, 2),
@@ -598,13 +587,12 @@ fn appended_conversation_outlives_snapshot_capacity_without_losing_prefix_pages(
 }
 
 #[test]
-fn branching_requests_own_distinct_tail_pages_and_candidate_snapshots() {
-    let mut scheduler = scheduler(2, 8, 4);
+fn branching_requests_own_distinct_tail_pages_and_terminal_snapshots() {
+    let mut scheduler = scheduler(2, 8, 5);
     let seed = scheduler.admit(spec(64, 1)).unwrap();
     init(&mut scheduler, 1);
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
-    scheduler.record_candidate(seed, 64, Fence(2)).unwrap();
     scheduler
         .complete(Fence(2), &records(seed, 2, 64, 1, 77, 2))
         .unwrap();
@@ -618,23 +606,24 @@ fn branching_requests_own_distinct_tail_pages_and_candidate_snapshots() {
     scheduler
         .complete(Fence(5), &records(first, 5, 65, 1, 88, 1))
         .unwrap();
+    retain_prompt(&mut scheduler, 6);
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.kind, GraphKind::Decode);
-    scheduler.record_submission(&step, Fence(6)).unwrap();
+    scheduler.record_submission(&step, Fence(7)).unwrap();
     scheduler
-        .complete(Fence(6), &records(first, 6, 66, 2, 89, 1))
+        .complete(Fence(7), &records(first, 7, 66, 2, 89, 1))
         .unwrap();
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.lanes[0].request, second);
-    scheduler.record_submission(&step, Fence(7)).unwrap();
+    scheduler.record_submission(&step, Fence(8)).unwrap();
     scheduler
-        .complete(Fence(7), &records(second, 7, 65, 1, 90, 1))
+        .complete(Fence(8), &records(second, 8, 65, 1, 90, 1))
         .unwrap();
     let first = scheduler.request(first).unwrap();
     let second = scheduler.request(second).unwrap();
     assert_eq!(first.shared_pages, second.shared_pages);
     assert_ne!(first.private_pages, second.private_pages);
-    assert_ne!(first.candidate_snapshot, second.candidate_snapshot);
+    assert_ne!(first.terminal_snapshot, second.terminal_snapshot);
 }
 
 #[test]
@@ -647,21 +636,23 @@ fn decode_allows_two_steps_and_duplicate_finished_record_emits_once() {
     scheduler
         .complete(Fence(2), &records(handle, 2, 63, 1, 88, 1))
         .unwrap();
-    for fence in [3, 4] {
+    retain_prompt(&mut scheduler, 3);
+    for fence in [4, 5] {
         let step = scheduler.next_step().unwrap();
         scheduler.record_submission(&step, Fence(fence)).unwrap();
     }
     assert!(scheduler.next_step().is_none());
     let generated = scheduler
-        .complete(Fence(3), &records(handle, 3, 64, 2, 89, 2))
+        .complete(Fence(4), &records(handle, 4, 64, 2, 89, 2))
         .unwrap();
     assert_eq!(generated.len(), 1);
     assert!(scheduler.finish(handle).is_err());
     let generated = scheduler
-        .complete(Fence(4), &records(handle, 4, 64, 2, 89, 2))
+        .complete(Fence(5), &records(handle, 5, 64, 2, 89, 2))
         .unwrap();
     assert!(generated.is_empty());
     assert_eq!(scheduler.request(handle).unwrap().tokens().len(), 65);
+    freeze(&mut scheduler, handle, 6);
     scheduler.finish(handle).unwrap();
 }
 
@@ -680,20 +671,21 @@ fn grammar_barrier_and_bad_completion_do_not_advance_request_state() {
     scheduler
         .complete(Fence(2), &records(handle, 2, 65, 1, 88, 1))
         .unwrap();
+    retain_prompt(&mut scheduler, 3);
     let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(3)).unwrap();
+    scheduler.record_submission(&step, Fence(4)).unwrap();
     assert!(scheduler.next_step().is_none());
     scheduler
-        .complete(Fence(3), &records(handle, 3, 66, 2, 89, 1))
+        .complete(Fence(4), &records(handle, 4, 66, 2, 89, 1))
         .unwrap();
 }
 
 #[test]
 fn resource_exhaustion_rolls_back_admission_and_page_reservation() {
-    let mut scheduler = scheduler(2, 1, 1);
+    let mut scheduler = scheduler(2, 1, 2);
     assert!(scheduler.admit(spec(65, 3)).is_err());
     assert_eq!(scheduler.free_page_count(), 1);
-    assert_eq!(scheduler.free_snapshot_count(), 1);
+    assert_eq!(scheduler.free_snapshot_count(), 2);
     let handle = scheduler.admit(spec(60, 3)).unwrap();
     assert!(scheduler.admit(spec(10, 3)).is_err());
     init(&mut scheduler, 1);
@@ -705,7 +697,7 @@ fn resource_exhaustion_rolls_back_admission_and_page_reservation() {
     scheduler
         .complete(Fence(2), &records(handle, 2, 60, 1, 8, 1))
         .unwrap();
-    assert_eq!(scheduler.free_snapshot_count(), 1);
+    assert_eq!(scheduler.free_snapshot_count(), 2);
 }
 
 #[test]
@@ -751,9 +743,6 @@ fn concurrent_identical_terminal_publications_release_duplicate_resources() {
         assert_eq!(step.lanes[0].request, handle);
         scheduler.record_submission(&step, Fence(fence)).unwrap();
         scheduler
-            .record_candidate(handle, 64, Fence(fence))
-            .unwrap();
-        scheduler
             .complete(Fence(fence), &records(handle, fence, 64, 1, 88, 2))
             .unwrap();
         freeze(&mut scheduler, handle, fence + 1);
@@ -778,22 +767,21 @@ fn concurrent_identical_terminal_publications_release_duplicate_resources() {
 }
 
 #[test]
-fn failed_candidate_freeze_never_publishes_uninitialized_snapshot_storage() {
+fn failed_terminal_snapshot_never_publishes_uninitialized_storage() {
     let mut scheduler = scheduler(1, 8, 2);
     let handle = scheduler.admit(spec(64, 1)).unwrap();
     init(&mut scheduler, 1);
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
-    scheduler.record_candidate(handle, 64, Fence(2)).unwrap();
     scheduler
         .complete(Fence(2), &records(handle, 2, 64, 1, 88, 2))
         .unwrap();
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.kind, GraphKind::Snapshot);
-    scheduler.record_submission(&step, Fence(3)).unwrap();
-    let mut error = records(handle, 3, 64, 1, -1, 3);
+    scheduler.record_submission(&step, Fence(4)).unwrap();
+    let mut error = records(handle, 4, 64, 1, -1, 3);
     error[handle.slot as usize].error_code = 6;
-    scheduler.complete(Fence(3), &error).unwrap();
+    scheduler.complete(Fence(4), &error).unwrap();
     assert_eq!(scheduler.request(handle).unwrap().error_code, Some(6));
     assert_eq!(scheduler.finish(handle).unwrap(), None);
     assert_eq!(
@@ -811,6 +799,7 @@ fn speculative_scheduler(prompt: usize, budget: u32) -> (RequestScheduler, Reque
     s.record_submission(&step, Fence(2)).unwrap();
     s.complete(Fence(2), &records(h, 2, prompt as i64, 1, 900, 1))
         .unwrap();
+    retain_prompt(&mut s, 3);
     for (width, nanos) in [(1, 100), (2, 150), (4, 200)] {
         s.controller
             .observe(1, prompt as u64, width, nanos, width)
@@ -818,6 +807,39 @@ fn speculative_scheduler(prompt: usize, budget: u32) -> (RequestScheduler, Reque
     }
     (s, h)
 }
+fn retain_prompt(s: &mut RequestScheduler, fence: u64) {
+    let step = s.next_step().unwrap();
+    assert_eq!(step.kind, GraphKind::Snapshot);
+    assert!(
+        step.lanes
+            .iter()
+            .all(|l| s.request(l.request).unwrap().boundary_capture.is_some())
+    );
+    let pages = step
+        .lanes
+        .iter()
+        .map(|l| s.request(l.request).unwrap().pages().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let reuse = step
+        .lanes
+        .iter()
+        .map(|l| s.request(l.request).unwrap().reused_prompt_tokens())
+        .collect::<Vec<_>>();
+    s.record_submission(&step, Fence(fence)).unwrap();
+    s.complete(Fence(fence), &state_records(s, &step, fence))
+        .unwrap();
+    for (i, l) in step.lanes.iter().enumerate() {
+        assert_eq!(
+            s.request(l.request).unwrap().pages().collect::<Vec<_>>(),
+            pages[i]
+        );
+        assert_eq!(
+            s.request(l.request).unwrap().reused_prompt_tokens(),
+            reuse[i]
+        );
+    }
+}
+
 fn vector_records(
     h: RequestHandle,
     fence: u64,
@@ -854,12 +876,12 @@ fn speculative_every_committed_prefix_updates_counts_and_tokens_once() {
         let step = s.next_step().unwrap();
         assert_eq!(step.kind, GraphKind::Speculative);
         assert_eq!(step.token_capacity, 8);
-        s.record_submission(&step, Fence(3)).unwrap();
+        s.record_submission(&step, Fence(4)).unwrap();
         let ids = (10..10 + count as i64).collect::<Vec<_>>();
         let events = s
             .complete(
-                Fence(3),
-                &vector_records(h, 3, 65 + count as i64, 1 + count as i64, &ids, 8, 1),
+                Fence(4),
+                &vector_records(h, 4, 65 + count as i64, 1 + count as i64, &ids, 8, 1),
             )
             .unwrap();
         assert_eq!(
@@ -876,10 +898,10 @@ fn speculative_rounds_wait_for_feedback_and_use_actual_counts() {
     let (mut s, h) = speculative_scheduler(65, 32);
     let first = s.next_step().unwrap();
     assert!(first.grammar_constrained);
-    s.record_submission(&first, Fence(3)).unwrap();
+    s.record_submission(&first, Fence(4)).unwrap();
     assert!(s.next_step().is_none());
-    assert!(s.record_submission(&first, Fence(4)).is_err());
-    s.complete(Fence(3), &vector_records(h, 3, 67, 3, &[10, 11], 8, 1))
+    assert!(s.record_submission(&first, Fence(5)).is_err());
+    s.complete(Fence(4), &vector_records(h, 4, 67, 3, &[10, 11], 8, 1))
         .unwrap();
     s.controller = Default::default();
     for (w, ns) in [(1, 1), (2, 1000), (4, 1000), (8, 1000)] {
@@ -888,8 +910,8 @@ fn speculative_rounds_wait_for_feedback_and_use_actual_counts() {
     let second = s.next_step().unwrap();
     assert_eq!(second.token_capacity, 1);
     assert_eq!(second.lanes[0].start_position, 67);
-    s.record_submission(&second, Fence(4)).unwrap();
-    s.complete(Fence(4), &vector_records(h, 4, 68, 4, &[12], 1, 1))
+    s.record_submission(&second, Fence(5)).unwrap();
+    s.complete(Fence(5), &vector_records(h, 5, 68, 4, &[12], 1, 1))
         .unwrap();
     assert_eq!(s.request(h).unwrap().scheduled_consumed, 68);
     assert_eq!(s.request(h).unwrap().tokens().last(), Some(&12));
@@ -899,15 +921,16 @@ fn speculative_budget_clipping_reserves_verification_rows_without_queueing_termi
     let (mut s, h) = speculative_scheduler(60, 2);
     let first = s.next_step().unwrap();
     assert_eq!(first.token_capacity, 8);
-    s.record_submission(&first, Fence(3)).unwrap();
+    s.record_submission(&first, Fence(4)).unwrap();
     assert_eq!(s.request(h).unwrap().pages().count(), 3);
     assert!(s.next_step().is_none());
     let out = s
-        .complete(Fence(3), &vector_records(h, 3, 61, 2, &[7], 8, 2))
+        .complete(Fence(4), &vector_records(h, 4, 61, 2, &[7], 8, 2))
         .unwrap();
     assert_eq!(out.len(), 1);
     assert!(out[0].finished);
-    assert!(s.next_step().is_none());
+    assert_eq!(s.next_step().unwrap().kind, GraphKind::Snapshot);
+    freeze(&mut s, h, 5);
     s.finish(h).unwrap();
     assert_eq!(
         (
@@ -915,20 +938,20 @@ fn speculative_budget_clipping_reserves_verification_rows_without_queueing_termi
             s.stats().free_snapshots,
             s.stats().free_slots
         ),
-        (64, 4, 1)
+        (64, 2, 1)
     );
 }
 #[test]
 fn speculative_bad_vector_is_transactional_and_cancel_waits_for_round_fence() {
     let (mut s, h) = speculative_scheduler(65, 32);
     let first = s.next_step().unwrap();
-    s.record_submission(&first, Fence(3)).unwrap();
-    let bad = vector_records(h, 3, 68, 3, &[10, 11], 8, 1);
-    assert!(s.complete(Fence(3), &bad).is_err());
+    s.record_submission(&first, Fence(4)).unwrap();
+    let bad = vector_records(h, 4, 68, 3, &[10, 11], 8, 1);
+    assert!(s.complete(Fence(4), &bad).is_err());
     assert_eq!(s.request(h).unwrap().generated_tokens, 1);
     s.cancel(h).unwrap();
     assert!(s.admit(spec(3, 2)).is_err());
-    s.complete(Fence(3), &vector_records(h, 3, 67, 3, &[10, 11], 8, 1))
+    s.complete(Fence(4), &vector_records(h, 4, 67, 3, &[10, 11], 8, 1))
         .unwrap();
     let next = s.admit(spec(3, 2)).unwrap();
     assert_eq!(next.slot, h.slot);
@@ -943,9 +966,9 @@ fn grammar_and_host_stops_force_one_token_and_one_outstanding_round() {
         let step = s.next_step().unwrap();
         assert_eq!(step.token_capacity, 1);
         assert!(step.grammar_constrained);
-        s.record_submission(&step, Fence(3)).unwrap();
+        s.record_submission(&step, Fence(4)).unwrap();
         assert!(s.next_step().is_none());
-        s.complete(Fence(3), &vector_records(h, 3, 66, 2, &[10], 1, 1))
+        s.complete(Fence(4), &vector_records(h, 4, 66, 2, &[10], 1, 1))
             .unwrap();
         assert!(s.next_step().is_some());
     }
@@ -980,7 +1003,6 @@ fn draft_boundary_page_remains_private_across_published_prefix_branches() {
     scheduler.record_submission(&step, Fence(2)).unwrap();
     let initial = scheduler.request(seed).unwrap().pages().collect::<Vec<_>>();
     assert_eq!(initial.len(), 2);
-    scheduler.record_candidate(seed, 64, Fence(2)).unwrap();
     scheduler
         .complete(Fence(2), &records(seed, 2, 64, 1, 77, 2))
         .unwrap();
@@ -1026,31 +1048,32 @@ fn fixed_width_shrinks_at_context_end_and_never_at_remaining_output_budget() {
     scheduler
         .complete(Fence(2), &records(h, 2, 125, 1, 9, 1))
         .unwrap();
+    retain_prompt(&mut scheduler, 3);
     let first = scheduler.next_step().unwrap();
     assert_eq!(first.token_capacity, 2);
-    scheduler.record_submission(&first, Fence(3)).unwrap();
+    scheduler.record_submission(&first, Fence(4)).unwrap();
     assert_eq!(scheduler.request(h).unwrap().pages().count(), 3);
     assert!(scheduler.next_step().is_none());
     scheduler
-        .complete(Fence(3), &vector_records(h, 3, 127, 3, &[10, 11], 2, 2))
+        .complete(Fence(4), &vector_records(h, 4, 127, 3, &[10, 11], 2, 2))
         .unwrap();
-    assert!(scheduler.next_step().is_none());
+    freeze(&mut scheduler, h, 5);
     scheduler.finish(h).unwrap();
-    assert_eq!(scheduler.free_page_count(), 16);
+    assert_eq!(scheduler.free_page_count(), 15);
 }
 
 #[test]
 fn bad_intermediate_vector_token_does_not_partially_commit() {
     let (mut s, h) = speculative_scheduler(65, 32);
     let step = s.next_step().unwrap();
-    s.record_submission(&step, Fence(3)).unwrap();
-    let mut bad = vector_records(h, 3, 67, 3, &[10, 11], 8, 1);
+    s.record_submission(&step, Fence(4)).unwrap();
+    let mut bad = vector_records(h, 4, 67, 3, &[10, 11], 8, 1);
     bad[0].vector.as_mut().unwrap().tokens[0] = -2;
-    assert!(s.complete(Fence(3), &bad).is_err());
+    assert!(s.complete(Fence(4), &bad).is_err());
     assert_eq!(s.request(h).unwrap().consumed_tokens, 65);
     assert_eq!(s.request(h).unwrap().generated_tokens, 1);
     assert_eq!(s.request(h).unwrap().tokens().len(), 66);
-    s.complete(Fence(3), &vector_records(h, 3, 67, 3, &[10, 11], 8, 1))
+    s.complete(Fence(4), &vector_records(h, 4, 67, 3, &[10, 11], 8, 1))
         .unwrap();
 }
 
@@ -1069,10 +1092,11 @@ fn speculative_fixed_and_adaptive_catalogs_stay_within_eight_total_rows() {
             s.prefer_prefill = true;
             let step = s.next_step().unwrap();
             assert_eq!(step.kind, GraphKind::Prefill);
-            let fence = 2 + index as u64;
+            let fence = 2 + 2 * index as u64;
             s.record_submission(&step, Fence(fence)).unwrap();
             s.complete(Fence(fence), &records(*h, fence, 65, 1, 9, 1))
                 .unwrap();
+            retain_prompt(&mut s, fence + 1);
         }
         let step = s.next_step().unwrap();
         let batch = active.next_power_of_two();
@@ -1131,9 +1155,13 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
         for (i, h) in [a, b].into_iter().enumerate() {
             s.prefer_prefill = true;
             let step = s.next_step().unwrap();
-            s.record_submission(&step, Fence(2 + i as u64)).unwrap();
-            s.complete(Fence(2 + i as u64), &records(h, 2 + i as u64, 65, 1, 9, 1))
-                .unwrap();
+            s.record_submission(&step, Fence(2 + 2 * i as u64)).unwrap();
+            s.complete(
+                Fence(2 + 2 * i as u64),
+                &records(h, 2 + 2 * i as u64, 65, 1, 9, 1),
+            )
+            .unwrap();
+            retain_prompt(&mut s, 3 + 2 * i as u64);
         }
         s.set_copy_proposal(a, copied(65, available, grammar))
             .unwrap();
@@ -1141,10 +1169,10 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
         let step = s.next_step().unwrap();
         assert_eq!((step.batch_capacity, step.token_capacity), (2, expected));
         assert!(step.grammar_constrained);
-        s.record_submission(&step, Fence(4)).unwrap();
+        s.record_submission(&step, Fence(6)).unwrap();
         assert!(s.next_step().is_none());
-        let mut complete = vector_records(a, 4, 66, 2, &[40], expected as i64, 1);
-        let other = vector_records(b, 4, 66, 2, &[41], expected as i64, 1);
+        let mut complete = vector_records(a, 6, 66, 2, &[40], expected as i64, 1);
+        let other = vector_records(b, 6, 66, 2, &[41], expected as i64, 1);
         complete[b.slot as usize] = other[b.slot as usize];
         for h in [a, b] {
             complete[h.slot as usize]
@@ -1153,14 +1181,14 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
                 .unwrap()
                 .draft_cache_consumed = -1;
         }
-        let events = s.complete(Fence(4), &complete).unwrap();
+        let events = s.complete(Fence(6), &complete).unwrap();
         assert_eq!(events.len(), 2);
         assert!(s.request(a).unwrap().copy_proposal().is_none());
         assert_eq!(s.next_step().unwrap().token_capacity, 1);
         assert!(s.set_copy_proposal(a, copied(65, 7, grammar)).is_err());
         s.cancel(a).unwrap();
         s.cancel(b).unwrap();
-        assert_eq!((s.free_page_count(), s.free_snapshot_count()), (32, 4));
+        assert_eq!((s.free_page_count(), s.free_snapshot_count()), (31, 3));
     }
 }
 
@@ -1179,12 +1207,13 @@ fn copy_source_uses_no_draft_page_and_host_stops_stay_width_one() {
     let prefill = s.next_step().unwrap();
     s.record_submission(&prefill, Fence(2)).unwrap();
     s.complete(Fence(2), &records(h, 2, 64, 1, 9, 1)).unwrap();
+    retain_prompt(&mut s, 3);
     assert_eq!(s.request(h).unwrap().pages().count(), 1);
     assert!(s.set_copy_proposal(h, copied(64, 1, false)).is_err());
     s.set_copy_proposal(h, copied(64, 0, false)).unwrap();
     assert_eq!(s.next_step().unwrap().token_capacity, 1);
     s.cancel(h).unwrap();
-    assert_eq!(s.free_page_count(), 2);
+    assert_eq!(s.free_page_count(), 1);
     // MTP requires a private draft page in addition to these two target pages.
     let mut mtp = scheduler(1, 2, 2);
     mtp.limits.max_sequence_tokens = 128;
@@ -1203,7 +1232,6 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             patch_capacities: vec![8, 32],
         },
         live_state_base: 11,
-        candidate_state_base: 21,
         draft_pages_per_request: 1,
     };
     let limits = SchedulerLimits {
@@ -1217,6 +1245,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
     s.enable_speculation(&[1, 2]).unwrap();
     let handle = s
         .admit(RequestSpec {
+            system_boundary: None,
             prompt: vec![7; 4],
             conditioning: vec![],
             max_new_tokens: 8,
@@ -1225,10 +1254,6 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         })
         .unwrap();
     assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(11));
-    assert_eq!(
-        s.request(handle).unwrap().candidate_state_slot,
-        StateSlotId(21)
-    );
     assert!(s.set_vision_images(handle, &[4, 4, 4]).is_err());
     assert!(s.set_vision_images(handle, &[3]).is_err());
     s.set_vision_images(handle, &[4]).unwrap();
@@ -1242,6 +1267,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
     s.record_submission(&step, Fence(3)).unwrap();
     s.complete(Fence(3), &records(handle, 3, 4, 1, 7, 1))
         .unwrap();
+    retain_prompt(&mut s, 4);
     let mut proposal = speculation::CopyProposal {
         consumed: 4,
         tokens: [32, -1, -1, -1, -1, -1, -1],
@@ -1254,10 +1280,6 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
     for bad in [
         SchedulerCapabilities {
             vocabulary: 0,
-            ..capabilities.clone()
-        },
-        SchedulerCapabilities {
-            candidate_state_base: 12,
             ..capabilities.clone()
         },
         SchedulerCapabilities {

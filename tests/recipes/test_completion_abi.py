@@ -53,14 +53,11 @@ def _kernel_cases(fields, device="cpu"):
     def tensor(values, dtype=torch.int64):
         return torch.tensor(values, dtype=dtype, device=device)
 
-    # Strided live/candidate counts exercise the hybrid-state view contract.
+    # Strided live counts exercise the hybrid-state view contract.
     backing = torch.zeros((8, 19), dtype=torch.int64, device=device)
-    state = DeviceRequestState.allocate(device, vocab_size=32, consumed_tokens=backing[:4, 0],
-        boundary_consumed_tokens=backing[4:, 0])
+    state = DeviceRequestState.allocate(device, vocab_size=32, consumed_tokens=backing[:4, 0])
     state.admit(2, RequestAdmission(7, 11, temperature=0., max_new_tokens=2, eos_token_ids=()), [3] * 64 + [4],
         consumed_tokens=65, ple_history=(3, 4))
-    state.boundary_consumed_tokens[2] = 64
-    state.boundary_generation[2] = 7
     records = torch.full((2, 4, fields), -99, dtype=torch.int64, device=device)
     frame, sequence = tensor([1], torch.int32), tensor([91])
     slots, epochs, live = tensor([2], torch.int32), tensor([7]), tensor([1], torch.int32)
@@ -71,20 +68,19 @@ def _kernel_cases(fields, device="cpu"):
         state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
         state.error_code, state.rng_counter, state.histogram, state.max_new_tokens,
         state.eos_token_ids, state.eos_count, records, frame, sequence,
-        state.boundary_consumed_tokens, state.boundary_generation, 32, 1,
-        state.consumed_tokens.stride(0), state.boundary_consumed_tokens.stride(0), fields, True)
+        32, 1, state.consumed_tokens.stride(0), fields, True)
 
-    def check(slot, base, *, candidate=-1):
+    def check(slot, base):
         row = records[1, slot].cpu().tolist()
         assert row[:8] == base, row
         if fields == 24:
             token = base[4]
-            assert row[8:] == [int(token >= 0), 0, 0, 0, candidate,
+            assert row[8:] == [int(token >= 0), 0, 0, 0, -1,
                 max(base[2] - 1, 0), 0, 1, token, -1, -1, -1, -1, -1, -1, -1], row
         assert records[0].eq(-99).all(), "other completion frame was overwritten"
 
     _complete[(4,)](*args)
-    check(2, [7, 91, 65, 1, 5, 1, 0, 0], candidate=64)
+    check(2, [7, 91, 65, 1, 5, 1, 0, 0])
     check(0, [0, 0, 0, 0, -1, 0, 0, 0])
     assert state.histogram[2, 5] == 1 and state.rng_counter[2] == 1
     # A queued second sample fails rather than duplicating the pending token.
@@ -93,8 +89,7 @@ def _kernel_cases(fields, device="cpu"):
     state.status[2], state.error_code[2] = 1, 0
     # Consumption-only records contain no token, even with pending state.
     _complete[(4,)](*args[:-1], False)
-    check(2, [7, 91, 65, 1, -1, 1, 0, 0], candidate=64)
-    state.boundary_generation[2] = 6
+    check(2, [7, 91, 65, 1, -1, 1, 0, 0])
     _complete[(4,)](*args[:-1], False)
     check(2, [7, 91, 65, 1, -1, 1, 0, 0])
     epochs.fill_(6)
@@ -111,7 +106,7 @@ def _kernel_cases(fields, device="cpu"):
         a.admission_eos_count, a.admission_grammar_enabled, errors, state.generation, state.seed, state.rng_counter,
         state.parameters, state.top_k, state.max_new_tokens, state.eos_token_ids, state.eos_count, state.grammar_enabled,
         state.generated_tokens, state.pending_token, state.status, state.error_code, state.consumed_tokens,
-        records, frame, sequence, state.boundary_generation, 4, state.consumed_tokens.stride(0), fields)
+        records, frame, sequence, 4, state.consumed_tokens.stride(0), fields)
     _admission_finish[(4,)](*finish_args)
     check(2, [8, 91, 65, 0, -1, 1, 0, 0])
     errors[0] = 2

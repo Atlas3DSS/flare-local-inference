@@ -39,3 +39,26 @@ def test_mutable_reset_retains_complete_arena_once(registered_view):
                for _, storage, _ in reset.storage.values()) == 1
     assert state.backing.untyped_storage().data_ptr() not in reset.storage
     assert features.arena.untyped_storage().data_ptr() not in reset.storage
+
+
+def test_mutable_reset_retains_single_sampler_storage_for_decoder_and_resume():
+    features = VisionFeatureState(torch.empty(4, 2, 3), torch.zeros(4, dtype=torch.int64),
+                                  torch.zeros(4, dtype=torch.int32))
+    model = SimpleNamespace(_resources=[features], buffers={})
+    state = SimpleNamespace(backing=torch.empty((2, 16), dtype=torch.uint8))
+    request = RequestFixture(torch.zeros(4, dtype=torch.int64))
+    logits = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    scratch = SimpleNamespace(scratch_tensors={'probabilities': logits})
+    tokens = SimpleNamespace(**{name: torch.zeros(4, dtype=torch.int64)
+                               for name in ('pending_tokens', 'positions', 'ple_history', 'active')})
+    decoder = SimpleNamespace(state=SimpleNamespace(gdn={}, qsa={}, token_state=tokens),
+                              sampler=scratch, embedding_injection=None, layers=[])
+    resume = SimpleNamespace(sampler=scratch)
+    before = torch.cuda.is_initialized()
+    reset = graph_execution.MutableReset(model, state, request, [decoder], [resume], {})
+    key = logits.untyped_storage().data_ptr()
+    name, raw, pristine = reset.storage[key]
+    assert name == 'decoder.0.sampler.probabilities'
+    assert torch.equal(raw.view(torch.float32).reshape_as(logits), logits)
+    assert pristine.view(torch.float32).reshape(3, 4).tolist() == [[0., 1., 2., 3.], [4., 5., 6., 7.], [8., 9., 10., 11.]]
+    assert torch.cuda.is_initialized() == before

@@ -25,7 +25,7 @@ from .gdn import register_gdn_benchmark_state
 from .maintenance import PreparedMaintenance
 from .ple import MappedPLETable
 from .sampling import AdmissionBuffers, DeviceRequestState
-from .state import HybridStateLayout, HybridStatePool, StateTransferMetadata
+from .state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool, StateTransferMetadata
 from .vision import PreparedVision, VisionScratch
 
 
@@ -75,12 +75,13 @@ class PreparationConfig:
             raise ValueError("device must be nonnegative and context must be 64-aligned in [64,262144]")
         if not 64 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
-        if self.snapshot_budget_bytes < HybridStateLayout.build().row_bytes or self.headroom_bytes < 0:
-            raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
         if type(self.mtp) is not bool or type(self.speculative_copy) is not bool:
             raise TypeError("MTP and copy proposal switches must be booleans")
+        minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0).row_bytes
+        if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
+            raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
         if self.speculative_proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
         widths = self.speculative_widths
@@ -229,13 +230,12 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         speculative_tokens = 7 if config.mtp else 0
         layout = HybridStateLayout.build(speculative_tokens=speculative_tokens)
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
-        extra_base = 9 + snapshots
+        extra_base = SNAPSHOT_BASE + snapshots
         state = HybridStatePool.allocate(extra_base + (28 if config.mtp else 0), device,
                                          speculative_tokens=speculative_tokens)
         register_gdn_benchmark_state(session, state)
         requests = DeviceRequestState.allocate(device,
-            consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5],
-            boundary_consumed_tokens=state.consumed_tokens[5:9, 0], boundary_history=state.ple_history[5:9])
+            consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5])
         inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size)
         scratch = DecoderScratch.allocate(config.prefill_chunk_size, device, sample_rows=8 if config.mtp else 4)
         workspaces = ScratchArena(device)
@@ -341,9 +341,12 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
             for mode in ("init", "restore", "snapshot"):
                 maintenance = PreparedMaintenance(mode, requests, state, transfer, completion, frame, sequence,
                     admission_buffers=admission, forward_inputs=inputs,
-                    qsa_states=tuple(value for index, value in cache.items() if index < 48), capacity=capacity)
+                    qsa_states=tuple(value for index, value in cache.items() if index < 48), capacity=capacity,
+                    speculation=speculation)
                 maintenance.prepare()
                 fields = state_fields + (forward_fields if mode == "snapshot" else admission_fields)
+                if mode == "restore":
+                    fields += ("page_tables", *(("draft_page_tables",) if has_mtp else ()))
                 add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
                 owners.append(maintenance)
         session.register_scratch(workspaces)
@@ -395,6 +398,9 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
             decoder.qsa_states = final_cache
         if speculation is not None:
             speculation.rebind_pages_for_preparation(final_cache)
+        for owner in owners:
+            if isinstance(owner, PreparedMaintenance):
+                owner.rebind_pages_for_preparation(final_cache)
         for graph in graphs.values():
             graph.reset()
         graphs.clear()
@@ -430,7 +436,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "snapshots": snapshots,
             "eos_token_ids": [248046, 248044],
-            "model_contract": {"schema": "qwen4exp.graph-inputs.v1", "vocabulary": 248320,
+            "model_contract": {"schema": "qwen4exp.graph-inputs.v2", "vocabulary": 248320,
                 "vision": {"features_per_request": 16384, "max_images": 4,
                     "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}

@@ -395,8 +395,8 @@ class MutableReset:
             add(prefix + ".qsa", decoder.state.qsa)
             for name in ("pending_tokens", "positions", "ple_history", "active"):
                 add(prefix + ".token_state." + name, getattr(decoder.state.token_state, name))
-            for mode, value in decoder.samplers.items():
-                sampler(prefix + ".sampler." + mode, value)
+            if decoder.sampler is not None:
+                sampler(prefix + ".sampler", decoder.sampler)
             if decoder.embedding_injection is not None:
                 add(prefix + ".injection_errors", decoder.embedding_injection.errors)
             for layer, (_, attention, _, _) in enumerate(decoder.layers):
@@ -412,9 +412,8 @@ class MutableReset:
                     add(prefix + "." + name, getattr(owner, name))
             elif isinstance(owner, PreparedVision):
                 add(prefix + ".attention_workspace", owner.attention_workspace)
-            elif hasattr(owner, "samplers"):
-                for mode, value in owner.samplers.items():
-                    sampler(prefix + ".sampler." + mode, value)
+            elif hasattr(owner, "sampler"):
+                sampler(prefix + ".sampler", owner.sampler)
         self.pristine_request = {field.name: getattr(requests, field.name).cpu().clone() for field in fields(requests)}
 
     def reset(self):
@@ -459,7 +458,6 @@ class Request:
     max_new: int = 32
     consumed: int = 0
     generated: int = 0
-    boundary: int = 0
     temperature: float = 0.7
 
 
@@ -499,13 +497,11 @@ class Scenario:
             token = -1 if signature.kind == "decode" and request.generated >= request.max_new else None
             if signature.kind == "prefill":
                 request.consumed += length
-                request.boundary = request.consumed // 64 * 64
                 if sample:
                     request.generated += 1
             elif signature.kind == "decode" and request.generated < request.max_new:
                 request.consumed += 1
                 request.generated += 1
-                request.boundary = request.consumed // 64 * 64
             elif signature.kind == "resume":
                 request.generated += 1
             if signature.kind in ("init", "restore", "snapshot", "vision") or (signature.kind == "prefill" and not sample):
@@ -531,7 +527,9 @@ class Scenario:
         if signature.kind in ("init", "restore", "snapshot"):
             command["transfers"] = [{"source": int(self.host["state_source_slots"][row]),
                 "destination": int(self.host["state_destination_slots"][row]),
-                "operation": int(self.host["state_operation"][row]), "slot": slot}
+                "operation": int(self.host["state_operation"][row]), "slot": slot,
+                "consumed": int(self.host["state_expected_consumed"][row]),
+                "pages": list(self.requests[slot].pages)}
                 for row, slot in enumerate(slots)]
         if pair:
             if len(self.groups[-1]) != 1:
@@ -552,11 +550,14 @@ class Scenario:
         h["state_qsa_slots"].fill_(-1)
         h["state_operation"].zero_()
         h["state_accepted_tokens"].zero_()
+        h["state_expected_consumed"].fill_(-1)
         for row, (slot, prompt, generation, seed, source, max_new) in enumerate(specifications):
             previous = self.snapshots[source] if source is not None else None
             if previous is not None and any(token is None for token in previous[0]):
                 raise ValueError("restore prompt requires explicit known snapshot token IDs")
             consumed = len(previous[0]) if previous else 0
+            if previous is not None and prompt[:consumed] != previous[0]:
+                raise ValueError("restore prompt must extend the exact checkpoint token prefix")
             temperature = 0.7 if temperatures is None else temperatures[slot]
             request = Request(prompt, self.pages(previous[1] if previous else (), tokens=len(prompt) + max_new), generation, seed,
                 max_new, consumed, temperature=temperature)
@@ -564,11 +565,14 @@ class Scenario:
             self.admission.stage(row, slot, RequestAdmission(generation, seed, max_new_tokens=max_new,
                 temperature=temperature, top_k=20, top_p=0.9, repetition_penalty=1.05,
                 presence_penalty=0.05, frequency_penalty=0.02, eos_token_ids=()), prompt)
-            for name, value in (("source_slots", 9 + source if source is not None else slot + 1),
+            for name, value in (("source_slots", 5 + source if source is not None else slot + 1),
                     ("destination_slots", slot + 1), ("operation", 0 if source is not None else 1),
-                    ("qsa_slots", slot + 1), ("accepted_tokens", 1)):
+                    ("qsa_slots", slot + 1), ("accepted_tokens", 1),
+                    ("expected_consumed", consumed)):
                 h["state_" + name][row] = value
-        self.emit(f"{kind}{capacity}", [spec[0] for spec in specifications], note="reset/restore and fresh seeded admission")
+        slots = [spec[0] for spec in specifications]
+        self.rows(slots)
+        self.emit(f"{kind}{capacity}", slots, note="exact reset/restore and fresh seeded admission")
 
     def rows(self, slots):
         import torch
@@ -594,8 +598,8 @@ class Scenario:
         request, h = self.requests[slot], self.host
         begin = request.consumed
         length = end - begin
-        if begin % 64 or not 0 < length <= capacity:
-            raise ValueError("prefill sequence violates the prepared aligned-start contract")
+        if not 0 < length <= capacity or end > len(request.prompt):
+            raise ValueError("prefill sequence must consume a nonempty in-prompt span within capacity")
         h["query_lengths"][0] = length
         h["sample_enabled"].fill_(int(sample))
         h["token_ids"].fill_(248044)
@@ -623,13 +627,15 @@ class Scenario:
         h["state_qsa_slots"].fill_(-1)
         h["state_operation"].zero_()
         h["state_accepted_tokens"].zero_()
+        h["state_expected_consumed"].fill_(-1)
         for row, (slot, identifier) in enumerate(zip(slots, snapshot_ids, strict=True)):
             request = self.requests[slot]
-            prefix = request.prompt[:request.boundary] + [None] * max(0, request.boundary - len(request.prompt))
-            self.snapshots[identifier] = (prefix, request.pages[:request.boundary // 64])
-            h["state_source_slots"][row] = slot + 5
-            h["state_destination_slots"][row] = 9 + identifier
-        self.emit(f"snapshot{capacity}", slots, note="freeze aligned candidate into an immutable snapshot row")
+            prefix = request.prompt[:request.consumed] + [None] * max(0, request.consumed - len(request.prompt))
+            self.snapshots[identifier] = (prefix, request.pages[:request.consumed // 64])
+            h["state_expected_consumed"][row] = request.consumed
+            h["state_source_slots"][row] = slot + 1
+            h["state_destination_slots"][row] = 5 + identifier
+        self.emit(f"snapshot{capacity}", slots, note="copy exact live state and private cache tails into an immutable snapshot")
 
     def build(self):
         if not {1, 16, 64, 128, 256, 512} <= set(self.prefill_capacities):
@@ -651,7 +657,11 @@ class Scenario:
         self.forward("decode", 4, [3, 2, 1])
         self.forward("decode", 1, [0])
         branch = prompts[2][:64] + self.tokens(13, "branch")
-        self.admit("restore", 2, [(1, prompts[3], 12, 2345, 3, 32), (0, branch, 12, 3456, 2, 32)])
+        # The branch changes tokens after 64; produce its exact prefix independently.
+        self.admit("init", 1, [(0, prompts[2], 12, 3456, None, 32)])
+        self.prefill(0, 64, 64, sample=False)
+        self.snapshot(1, [0], [4])
+        self.admit("restore", 2, [(1, prompts[3], 12, 2345, 3, 32), (0, branch, 13, 3456, 4, 32)])
         self.forward("resume", 2, [1])
         self.prefill(0, 77, 16)
         self.forward("decode", 2, [1, 0])
@@ -662,14 +672,14 @@ class Scenario:
         self.prefill(2, 255, 256)
         self.prefill(3, 128, 128, sample=False)
         self.snapshot(2, [2, 3], [6, 7])
-        self.admit("restore", 1, [(0, sixth, 13, 6789, 7, 32)])
+        self.admit("restore", 1, [(0, sixth, 14, 6789, 7, 32)])
         self.forward("resume", 4, [0])
         self.admit("init", 1, [(1, self.tokens(63, "page-boundary"), 13, 7890, None, 2)])
         self.prefill(1, 63, 64)
         self.forward("decode", 1, [1])
         self.forward("decode", 1, [1], pair=True)
         self.snapshot(1, [1], [8])
-        self.admit("restore", 4, [(slot, list(self.snapshots[source][0]), 14, 8901 + slot, source, 32)
+        self.admit("restore", 4, [(slot, list(self.snapshots[source][0]), 15 if slot == 0 else 14, 8901 + slot, source, 32)
             for slot, source in ((3, 3), (2, 1), (1, 2), (0, 0))])
         self.forward("resume", 4, [2, 0, 3, 1])
         self.forward("decode", 4, [3, 1, 0, 2])
@@ -759,10 +769,10 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
     import torch
 
     graph_indices = {name: index for index, name in enumerate(model.graphs)}
-    tracked_rows = [*range(18), state.backing.shape[0] - 1]
+    tracked_rows = [*range(14), state.backing.shape[0] - 1]
     tracked_pages = scenario.next_page + 1
-    if len(state.layout.regions) != 77 or state.backing.shape[0] <= 18:
-        raise ValueError("qualification requires all77 hybrid regions and untouched snapshot canaries")
+    if len(state.layout.regions) < 77 or state.backing.shape[0] <= 14:
+        raise ValueError("qualification requires every hybrid region and untouched snapshot canaries")
     readback_bytes = len(tracked_rows) * state.layout.row_bytes
     for layer in cache.values():
         for field in fields(layer):
@@ -773,7 +783,7 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
     readback_bytes += reset.features.generation.nbytes + 2 * reset.features.count.nbytes
     feature_rows = max(1, int(scenario.image["vision_inputs"]["vision_num_patches"].item()) // 4)
     readback_bytes += 4 * (feature_rows + 1) * reset.features.arena[0, 0].nbytes
-    evidence.value["readback_contract"] = {"hybrid_rows": tracked_rows, "regions_per_row": 77,
+    evidence.value["readback_contract"] = {"hybrid_rows": tracked_rows, "regions_per_row": len(state.layout.regions),
         "hybrid_padding": "Every tracked row is compared bytewise, including alignment padding.",
         "qsa_pages": [0, tracked_pages], "qsa_far_canary_page": model.memory_report["pages"] - 1,
         "qsa_raw": "All seven QSA fields are covered; full selected pages and all raw slots include invalid payload bytes.",
@@ -845,7 +855,10 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
     def verify_unrelated_state(side, previous, stage, group):
         active = {slot for command in group for slot in command["slots"]}
         destinations = {transfer["destination"] for command in group for transfer in command.get("transfers", [])}
-        allowed_rows = destinations | {row for slot in active for row in (slot + 1, slot + 5)}
+        snapshots_only = all(model.signatures[command["graph"]].kind == "snapshot" for command in group)
+        mutated_slots = {slot for command in group if model.signatures[command["graph"]].kind != "snapshot"
+                         for slot in command["slots"]}
+        allowed_rows = destinations | {slot + 1 for slot in mutated_slots}
         observations = evidence.value["observations"]
         unchanged = []
         for name, values in observations[stage].items():
@@ -853,7 +866,7 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
                 unchanged.append(name)
             elif name.startswith("request.") and ".slot" in name and int(name.rsplit("slot", 1)[1]) not in active:
                 unchanged.append(name)
-            elif name.startswith("qsa.") and (name.endswith((".far_canary", ".unused_page")) or
+            elif name.startswith("qsa.") and (snapshots_only or name.endswith((".far_canary", ".unused_page")) or
                     ".raw_slot" in name and int(name.rsplit("raw_slot", 1)[1]) not in {slot + 1 for slot in active}):
                 unchanged.append(name)
             elif name.startswith("vision.slot") and (name.endswith(".far_canary") or int(name.split(".")[1][4:]) not in active):
@@ -965,10 +978,18 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
                     evidence.check(f"{side}.{stage}.finite_active_logits", bool(torch.isfinite(logits[:len(last["slots"])]).all()))
                 for transfer in last.get("transfers", []):
                     if transfer["operation"] == 0:
-                        observed = evidence.value["observations"][stage]
-                        left = observed[f"hybrid.row{transfer['source']}"][side]["sha256"]
-                        right = observed[f"hybrid.row{transfer['destination']}"][side]["sha256"]
-                        evidence.check(f"{side}.{stage}.state-copy-{transfer['source']}-{transfer['destination']}", left == right)
+                        from qualify.checkpoint_state import checkpoint_transfer_checks
+
+                        snapshot_row = (transfer["destination"] if model.signatures[last["graph"]].kind == "snapshot"
+                                        else transfer["source"])
+                        checks = checkpoint_transfer_checks(state, cache, slot=transfer["slot"],
+                            snapshot=snapshot_row - 5, pages=transfer["pages"], consumed=transfer["consumed"])
+                        if model.signatures[last["graph"]].kind == "restore":
+                            checks.update({f"qsa.{layer}.restored_anchor":
+                                int(value.raw_interval_start_positions[transfer["slot"] + 1].cpu().item())
+                                == transfer["consumed"] - 1 for layer, value in cache.items()})
+                        evidence.check(f"{side}.{stage}.state-copy-{transfer['source']}-{transfer['destination']}",
+                            bool(checks) and all(checks.values()), checks=checks)
                 evidence.save()
                 progress(f"{side} {group_index + 1}/{len(scenario.groups)} {stage}; baseline bytes {evidence.bytes / (1 << 30):.2f} GiB")
         evidence.check("all_observations_bitwise_equal", not evidence.value["mismatches"], mismatches=len(evidence.value["mismatches"]))
@@ -1054,6 +1075,7 @@ def main():
     from sparkgap.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
     from sparkgap.recipes.qwen38.sampling import DeviceRequestState
     from sparkgap.recipes.qwen38.state import HybridStatePool
+    from sparkgap.recipes.qwen38.maintenance import PreparedMaintenance
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
@@ -1068,7 +1090,8 @@ def main():
         "data/include/flashinfer/sampling.cuh", "data/include/flashinfer/topk.cuh",
         "data/include/flashinfer/topk_common.cuh", "data/include/flashinfer/air_top_p.cuh",
     )]
-    source_paths = [*sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py")), *sorted((ROOT / "sparkgap/preparation").glob("*.py")),
+    source_paths = [Path(__file__).with_name("checkpoint_state.py"),
+        *sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py")), *sorted((ROOT / "sparkgap/preparation").glob("*.py")),
         *sorted((ROOT / "native/src").rglob("*.rs")), *sorted(b12x_root.rglob("*.py")), *sampling_sources]
     provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot)},
         "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),
@@ -1089,7 +1112,8 @@ def main():
             requests = next(item for item in model._resources if isinstance(item, DeviceRequestState))
             scratch = next(item for item in model._resources if isinstance(item, DecoderScratch))
             decoders = next(item for item in model._resources if isinstance(item, list) and item and isinstance(item[0], PreparedDecoder))
-            owners = model._resources[-3]
+            owners = next(item for item in model._resources if isinstance(item, list)
+                          and any(isinstance(owner, PreparedMaintenance) for owner in item))
             cache = decoders[0].qsa_states
             verify_prepared_scratch_arena(model, decoders, owners, evidence)
             verify_prepared_hybrid_state(state, evidence)

@@ -64,7 +64,7 @@ def command_plan(prompt, token, alternative):
     round_(1, 8, [3], tag="before_epoch_reuse")
     add("init", slots=[3], generation=12, lengths=[64], budget=512)
     add("prefill", slots=[3], length=64)
-    round_(1, 1, [3], tag="epoch_reuse", require_previous=8, require_gdn_previous=1)
+    round_(1, 1, [3], tag="epoch_reuse", require_previous=1, require_gdn_previous=1)
     add("init", slots=[2], generation=12, lengths=[63], budget=4)
     add("prefill", slots=[2], length=63)
     round_(1, 8, [2], tag="budget_clip_inside_drafts")
@@ -148,7 +148,7 @@ class Commands:
                     "tokens": list(prompt) if snapshot else [], "pages": pages,
                     "consumed": len(prompt) if snapshot else 0, "generated": 0,
                     "budget": operation["budget"], "histogram": dict(Counter(prompt)),
-                    "boundary": 0, "pending": -1}
+                    "pending": -1}
                 admission = RequestAdmission(generation, seed, max_new_tokens=operation["budget"],
                     temperature=1, top_k=-1, top_p=1)
                 self.admission.stage(row, slot, admission, prompt)
@@ -162,13 +162,15 @@ class Commands:
             for name in ("source_slots", "destination_slots", "operation", "accepted_tokens"):
                 h["state_" + name].zero_()
             h["state_qsa_slots"].fill_(-1)
+            h["state_expected_consumed"].fill_(-1)
             for row, slot in enumerate(slots):
-                source = slot + 1 if kind == "init" else (9 + operation["snapshot"] if kind == "restore" else slot + 5)
-                destination = 9 + operation["snapshot"] if kind == "snapshot" else slot + 1
+                source = 5 + operation["snapshot"] if kind == "restore" else slot + 1
+                destination = 5 + operation["snapshot"] if kind == "snapshot" else slot + 1
                 h["state_source_slots"][row] = source
                 h["state_destination_slots"][row] = destination
                 h["state_operation"][row] = int(kind == "init")
-                h["state_accepted_tokens"][row] = 1
+                h["state_accepted_tokens"][row] = int(kind != "snapshot")
+                h["state_expected_consumed"][row] = self.requests[slot]["consumed"]
                 if kind != "snapshot":
                     h["state_qsa_slots"][row] = slot + 1
             graph = f"{kind}{capacity}"
@@ -255,8 +257,6 @@ class Commands:
                         self.target_offset[slot] = 0
                     self.target_generation[slot] = request["generation"]
                     self.target_offset[slot] += 4 * ((width + 4) // 4)
-                crossed = request["consumed"] // 64 * 64 > before
-                checks[f"slot{slot}.candidate"] = r[12] == (request["consumed"] // 64 * 64 if crossed else -1)
             elif kind in ("prefill", "resume"):
                 checks[f"slot{slot}.sample"] = count == 1 and r[16] == self.token
                 if kind == "prefill":
@@ -264,14 +264,16 @@ class Commands:
                     request["consumed"] += command["length"]
             else:
                 checks[f"slot{slot}.no_sample"] = count == 0
+                if kind in ("init", "restore"):
+                    self.previous[slot] = 1
+                    self.accepted_generation[slot] = request["generation"]
             ids = r[16:16 + count]
             request["generated"] += count
             for token in ids:
                 request["histogram"][token] = request["histogram"].get(token, 0) + 1
             if count:
                 request["pending"] = ids[-1]
-            if kind in ("prefill", "speculative") and request["consumed"] // 64 * 64 > before:
-                request["boundary"] = request["consumed"] // 64 * 64
+            checks[f"slot{slot}.model_reserved"] = r[12] == -1
             checks[f"slot{slot}.record"] = (r[:4] == [request["generation"], command["sequence"], request["consumed"], request["generated"]]
                 and r[4] == (ids[-1] if ids else -1)
                 and r[5:8] == [2 if request["generated"] == request["budget"] else 1, 0, 0]
@@ -279,7 +281,7 @@ class Commands:
             emitted_by_slot[slot] = count
         if kind == "snapshot":
             request = self.requests[slots[0]]
-            length = request["boundary"]
+            length = request["consumed"]
             self.snapshots[command["snapshot"]] = {"tokens": request["tokens"][:length], "pages": request["pages"][:length // 64]}
         return checks, emitted_by_slot
 
@@ -480,7 +482,7 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
         "all_hybrid_rows": owner.pool.backing.shape[0], "extra_base": owner.extra_base,
         "row_bytes": owner.pool.layout.row_bytes, "qsa_layers": list(owner.cache),
         "readback_limit_bytes": 32 << 30, "executor_overlap": False,
-        "snapshot_slot": 9, "draft_model_exercised": False}
+        "snapshot_slot": 5, "draft_model_exercised": False}
     evidence.value["readback_contract"] = {
         "hybrid_bytes_per_observation": owner.pool.backing.nbytes,
         "hybrid_bytes_all_observations": 2 * (len(fixture["commands"]) + 1) * owner.pool.backing.nbytes,
@@ -553,13 +555,20 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                 stage = f"{index:02d}.{command['graph']}"
                 request = observe(evidence, side, stage, model, owner, observed_pages, operation)
                 prior, current = evidence.value["observations"][previous_stage], evidence.value["observations"][stage]
-                mutating = [slot for slot in active if spec["kind"] != "speculative" or emitted.get(slot, 0)]
-                writable_rows = {row for slot in mutating for row in (slot + 1, slot + 5, *range(owner.extra_base + slot * 7, owner.extra_base + (slot + 1) * 7))}
+                mutating = [slot for slot in active if spec["kind"] != "snapshot"
+                            and (spec["kind"] != "speculative" or emitted.get(slot, 0))]
+                writable_rows = {slot + 1 for slot in mutating}
+                if spec["kind"] == "speculative":
+                    writable_rows.update(row for slot in mutating
+                        for row in range(owner.extra_base + slot * 7, owner.extra_base + (slot + 1) * 7))
                 if spec["kind"] == "snapshot":
-                    writable_rows.add(9 + spec["snapshot"])
+                    writable_rows.add(5 + spec["snapshot"])
                 unchanged = [name for name in current if name.startswith("hybrid.") and int(name.split(".")[1]) not in writable_rows]
-                unchanged += [name for name in current if name.startswith("request.") and int(name.rsplit("slot", 1)[1]) not in active]
+                unchanged += [name for name in current if name.startswith("request.") and int(name.rsplit("slot", 1)[1]) not in mutating]
                 writable_pages = {page for slot in mutating for page in builder.requests[slot]["pages"]} if spec["kind"] in ("prefill", "speculative") else set()
+                if spec["kind"] == "restore":
+                    writable_pages.update(builder.requests[slot]["pages"][builder.requests[slot]["consumed"] // 64]
+                        for slot in active if builder.requests[slot]["consumed"] % 64)
                 unchanged += [name for name in current if name.startswith("qsa.") and (
                     (".page" in name and int(name.rsplit("page", 1)[1]) not in writable_pages)
                     or (".slot" in name and int(name.rsplit("slot", 1)[1]) not in {slot + 1 for slot in mutating}))]
@@ -575,15 +584,6 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                     _require(evidence, f"{side}.{index}.histogram{slot}", actual_histogram == expected["histogram"])
                     _require(evidence, f"{side}.{index}.rng{slot}", request["rng_counter"][slot].item() == expected["generated"] and request["seed"][slot].item() == expected["seed"])
                     _require(evidence, f"{side}.{index}.history{slot}", request["ple_history"][slot].tolist() == ([248044, 248044] + expected["tokens"])[-2:])
-                    if expected["boundary"]:
-                        boundary = expected["boundary"]
-                        expected_history = ([248044, 248044] + expected["tokens"][:boundary])[-2:]
-                        _require(evidence, f"{side}.{index}.boundary{slot}",
-                            request["boundary_generation"][slot].item() == expected["generation"]
-                            and request["boundary_consumed_tokens"][slot].item() == boundary
-                            and request["boundary_history"][slot].tolist() == expected_history)
-                    else:
-                        _require(evidence, f"{side}.{index}.no_candidate_epoch{slot}", request["boundary_generation"][slot].item() == 0)
                 _require(evidence, f"{side}.{index}.previous_accepted", owner.previous_accepted.cpu().tolist() == builder.previous)
                 _require(evidence, f"{side}.{index}.accepted_generation", owner.accepted_generation.cpu().tolist() == builder.accepted_generation)
                 _require(evidence, f"{side}.{index}.target_rng", owner.rng.generation.cpu().tolist() == builder.target_generation and owner.rng.target_offset.cpu().tolist() == builder.target_offset)
@@ -600,10 +600,15 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                             _require(evidence, f"{side}.{index}.gdn_input_column{row}", accepted[row] == previous, actual=accepted[row], expected=previous)
                     _require(evidence, f"{side}.{index}.finite_logits", all(bool(torch.isfinite(operation.decoder.scratch.logits[row * spec['width']:(row + 1) * spec['width']].cpu()).all()) for row, slot in enumerate(spec["slots"]) if emitted.get(slot, 0)))
                 if spec["kind"] in ("snapshot", "restore"):
-                    source = spec["slots"][0] + 5 if spec["kind"] == "snapshot" else 9 + spec["snapshot"]
-                    destination = 9 + spec["snapshot"] if spec["kind"] == "snapshot" else spec["slots"][0] + 1
-                    equal = all(current[f"hybrid.{source}.{r.name}"][side]["sha256"] == current[f"hybrid.{destination}.{r.name}"][side]["sha256"] for r in owner.pool.layout.regions)
-                    _require(evidence, f"{side}.{index}.copied_regions", equal)
+                    from qualify.checkpoint_state import checkpoint_transfer_checks
+
+                    slot = spec["slots"][0]
+                    request_state = builder.requests[slot]
+                    for key, passed in checkpoint_transfer_checks(owner.pool, owner.cache,
+                            slot=slot, snapshot=spec["snapshot"], pages=request_state["pages"],
+                            consumed=request_state["consumed"], accepted=builder.previous[slot],
+                            extra_base=owner.extra_base).items():
+                        _require(evidence, f"{side}.{index}.checkpoint.{key}", passed)
                 previous_stage = stage
                 evidence.value["commands"] = commands
                 evidence.save()

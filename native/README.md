@@ -178,7 +178,7 @@ finalizers and destructor draining. They use real PyTorch-captured executables.
 ## Live requests
 
 `scheduler::RequestScheduler` owns at most four live request slots and allocates
-private page tails and candidate state snapshots from prepared capacities.
+private page tails and exact checkpoint snapshots from prepared capacities.
 Request handles contain a physical slot and a positive int64-safe generation.
 Live recurrent-state slots are physical slot plus one, leaving state slot zero
 for padding. Cached pages remain immutable and shared through pinned ancestors.
@@ -204,17 +204,19 @@ completion does not emit its sampled token twice. A CUDA submission failure
 requires confirmed stream drain before `release_after_shutdown` releases
 resources associated with the attempted submission.
 
-The model recipe explicitly reports a candidate snapshot's exact aligned
-consumed length and producing fence through `record_candidate`. The scheduler
-never relabels an unaligned live-state snapshot by rounding its length. Once
-generation finishes, a snapshot graph copies fixed candidate row `5 + slot`
-to immutable row `9 + SnapshotId`. Failed copies prevent publication. `finish`
-publishes the immutable terminal candidate after that copy and every submitted
-write have completed, transfers its aligned tail pages into the prefix cache, and
-releases any unaligned tail. Duplicate publication releases the unused private
-pages and snapshot. `cancel` stops scheduling immediately, drops logical pins,
-and retains slot/page/snapshot ownership through final GPU use; cancelled
-private candidates are discarded. Generation reuse waits for that retirement.
+Admission reserves checkpoints for unreused system, prompt and terminal endpoints.
+Prefill stops at the exact rendered system boundary and prompt end. Snapshot graphs
+copy live state and partial cache tails to immutable row `5 + SnapshotId` after
+model submissions drain. System and prompt publication retain the live physical
+page sequence while transferring complete pages to the cache. Admission reuse
+counts stay fixed. Duplicate publication never remaps the live request.
+
+`finish` publishes exact terminal consumed state after its successful snapshot
+copy, excluding the final pending sampled token. A child at T after parent S owns
+`floor(T/64)-floor(S/64)` complete pages. Partial payloads restore from the snapshot
+into private pages. Failed copies prevent publication. `cancel` stops scheduling
+immediately and retains slot/page/snapshot ownership through final GPU use.
+Generation reuse waits for that retirement.
 
 This scheduler operates on logical IDs and completion records. `model::ModelContract`
 selects model-owned admission, input storage, completion interpretation, and output
@@ -267,17 +269,19 @@ reference; this crate does not copy its implementation or depend on vLLM.
 
 ## Prefix checkpoint policy
 
-`cache::PrefixHistory` incrementally hashes 64-token boundaries with BLAKE2b-128.
+`cache::PrefixHistory` incrementally hashes 64-token blocks with BLAKE2b-128.
+Exact partial endpoints hash the aligned parent plus the remaining tokens and
+conditioning, preserving the existing complete-block identity.
 The root and each block include a 32-byte model/recipe identity. Conditioning
 events carry absolute token positions and 32-byte identities, retaining their
 order even at the same position. An event at position N first affects prefixes
 that consume that position; appending a later image preserves earlier keys.
-An incomplete token block and its conditioning remain buffered until complete.
+Exact endpoint keys remain stable when later tokens or conditioning are appended.
 
-`cache::PrefixCheckpointCache` owns metadata for immutable terminal checkpoints.
+`cache::PrefixCheckpointCache` owns metadata for immutable exact checkpoints.
 A checkpoint privately owns its tail pages and one complete state snapshot;
 ancestor pages are shared through parent links. Snapshot consumed length must
-equal the aligned endpoint exactly. The parent must match the supplied history,
+equal the endpoint exactly. The parent must match the supplied history,
 and pages and snapshot IDs must fit prepared capacities without overlapping
 existing or retired ownership.
 

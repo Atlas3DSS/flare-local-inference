@@ -59,7 +59,6 @@ pub struct SchedulerCapabilities {
     pub vocabulary: usize,
     pub vision: crate::model::VisionCapabilities,
     pub live_state_base: u32,
-    pub candidate_state_base: u32,
     pub draft_pages_per_request: usize,
 }
 
@@ -70,6 +69,8 @@ pub struct SchedulerStats {
     pub reused_tokens: u64,
     pub snapshot_publications: u64,
     pub snapshot_evictions: u64,
+    pub system_checkpoints: u64,
+    pub prompt_checkpoints: u64,
     pub active_requests: usize,
     pub free_slots: usize,
     pub retiring_slots: usize,
@@ -79,8 +80,10 @@ pub struct SchedulerStats {
     pub cached_pages: usize,
 }
 
+#[derive(Clone)]
 pub struct RequestSpec {
     pub prompt: Vec<u32>,
+    pub system_boundary: Option<usize>,
     pub conditioning: Vec<ConditioningEvent>,
     pub max_new_tokens: u32,
     pub grammar_constrained: bool,
@@ -99,11 +102,23 @@ pub enum RequestPhase {
     Finishing,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum BoundaryKind {
+    System,
+    Prompt,
+}
+#[derive(Clone, Copy, Debug)]
+struct BoundaryCapture {
+    kind: BoundaryKind,
+    snapshot: SnapshotId,
+    consumed_tokens: u64,
+    resume: RequestPhase,
+}
+
 pub struct LiveRequest {
     pub handle: RequestHandle,
     pub state_slot: StateSlotId,
-    pub candidate_state_slot: StateSlotId,
-    pub candidate_snapshot: SnapshotId,
+    pub terminal_snapshot: SnapshotId,
     pub phase: RequestPhase,
     pub consumed_tokens: u64,
     pub generated_tokens: u32,
@@ -116,6 +131,11 @@ pub struct LiveRequest {
     tokens: Vec<u32>,
     prefix: Option<CheckpointId>,
     prefix_tokens: u64,
+    admission_reused_tokens: u64,
+    system_boundary: Option<usize>,
+    system_snapshot: Option<SnapshotId>,
+    prompt_snapshot: Option<SnapshotId>,
+    boundary_capture: Option<BoundaryCapture>,
     prefix_snapshot: Option<SnapshotId>,
     shared_pages: Vec<PageId>,
     private_pages: Vec<PageId>,
@@ -124,9 +144,7 @@ pub struct LiveRequest {
     scheduled_consumed: u64,
     last_use: Fence,
     pending: usize,
-    candidate: Option<StateSnapshot>,
-    candidate_after: Fence,
-    candidate_frozen: bool,
+    terminal_snapshot_ready: bool,
     vision_patches: VecDeque<usize>,
     copy_proposal: Option<speculation::CopyProposal>,
 }
@@ -139,7 +157,15 @@ impl LiveRequest {
         self.prefix_snapshot
     }
     pub fn reused_prompt_tokens(&self) -> u64 {
-        self.prefix_tokens
+        self.admission_reused_tokens
+    }
+    pub fn snapshot_destination(&self) -> SnapshotId {
+        self.boundary_capture
+            .map_or(self.terminal_snapshot, |c| c.snapshot)
+    }
+    pub fn snapshot_consumed(&self) -> u64 {
+        self.boundary_capture
+            .map_or(self.consumed_tokens, |c| c.consumed_tokens)
     }
     pub fn last_use(&self) -> Fence {
         self.last_use
@@ -188,7 +214,7 @@ pub struct GeneratedToken {
 
 struct RetiredRequest {
     pages: Vec<PageId>,
-    snapshot: Option<SnapshotId>,
+    snapshots: [Option<SnapshotId>; 3],
     slot: usize,
     through: Fence,
 }
@@ -233,18 +259,6 @@ impl RequestScheduler {
                 .live_state_base
                 .checked_add(REQUEST_LANES as u32)
                 .is_none()
-            || capabilities
-                .candidate_state_base
-                .checked_add(REQUEST_LANES as u32)
-                .is_none()
-            || capabilities.live_state_base
-                < capabilities
-                    .candidate_state_base
-                    .saturating_add(REQUEST_LANES as u32)
-                && capabilities.candidate_state_base
-                    < capabilities
-                        .live_state_base
-                        .saturating_add(REQUEST_LANES as u32)
             || vision.patches_per_feature == 0
             || vision.max_images == 0
             || vision.features_per_request == 0
@@ -469,6 +483,9 @@ impl RequestScheduler {
         reuse_prefix: bool,
     ) -> Result<RequestHandle> {
         if spec.prompt.is_empty()
+            || spec
+                .system_boundary
+                .is_some_and(|n| n == 0 || n > spec.prompt.len())
             || spec.max_new_tokens == 0
             || spec
                 .prompt
@@ -515,15 +532,27 @@ impl RequestScheduler {
         } else {
             0
         };
-        let reserved_count =
-            (execution_limit - prefix.consumed_tokens as usize).div_ceil(PAGE_SIZE) + draft_page;
-        if let Err(error) = self.ensure_resources(reserved_count, 1) {
+        let reserved_count = execution_limit.div_ceil(PAGE_SIZE)
+            - prefix.consumed_tokens as usize / PAGE_SIZE
+            + draft_page;
+        let need_system = spec
+            .system_boundary
+            .is_some_and(|n| n as u64 > prefix.consumed_tokens);
+        let need_prompt = spec.prompt.len() as u64 > prefix.consumed_tokens
+            && spec.system_boundary != Some(spec.prompt.len())
+            && spec.max_new_tokens > 1;
+        if let Err(error) = self.ensure_resources(
+            reserved_count,
+            1 + usize::from(need_system) + usize::from(need_prompt),
+        ) {
             if let Some(id) = prefix.checkpoint {
                 self.cache.unpin(id)?;
             }
             return Err(error);
         }
-        let candidate_snapshot = self.free_snapshots.pop_first().unwrap();
+        let terminal_snapshot = self.free_snapshots.pop_first().unwrap();
+        let system_snapshot = need_system.then(|| self.free_snapshots.pop_first().unwrap());
+        let prompt_snapshot = need_prompt.then(|| self.free_snapshots.pop_first().unwrap());
         let reserved_pages = (0..reserved_count)
             .map(|_| self.free_pages.pop_first().unwrap())
             .rev()
@@ -537,8 +566,7 @@ impl RequestScheduler {
         self.slots[slot].request = Some(LiveRequest {
             handle,
             state_slot: StateSlotId(slot as u32 + self.capabilities.live_state_base),
-            candidate_state_slot: StateSlotId(slot as u32 + self.capabilities.candidate_state_base),
-            candidate_snapshot,
+            terminal_snapshot,
             phase: if prefix.checkpoint.is_some() {
                 RequestPhase::Restore
             } else {
@@ -556,6 +584,11 @@ impl RequestScheduler {
             tokens: spec.prompt,
             prefix: prefix.checkpoint,
             prefix_tokens: prefix.consumed_tokens,
+            admission_reused_tokens: prefix.consumed_tokens,
+            system_boundary: spec.system_boundary,
+            system_snapshot,
+            prompt_snapshot,
+            boundary_capture: None,
             prefix_snapshot: prefix.snapshot,
             shared_pages: prefix.pages,
             private_pages: Vec::new(),
@@ -564,9 +597,7 @@ impl RequestScheduler {
             scheduled_consumed: prefix.consumed_tokens,
             last_use: Fence(0),
             pending: 0,
-            candidate: None,
-            candidate_after: Fence(0),
-            candidate_frozen: false,
+            terminal_snapshot_ready: false,
             vision_patches: VecDeque::new(),
         });
         Ok(handle)
@@ -705,7 +736,10 @@ impl RequestScheduler {
                 request: request.handle,
                 start_position: request.scheduled_consumed,
                 tokens: match kind {
-                    GraphKind::Prefill => (request.prompt_tokens
+                    GraphKind::Prefill => (request
+                        .system_boundary
+                        .filter(|n| *n as u64 > request.consumed_tokens)
+                        .unwrap_or(request.prompt_tokens)
                         - request.consumed_tokens as usize)
                         .min(self.limits.prefill_chunk_size),
                     GraphKind::Decode => 1,
@@ -770,9 +804,6 @@ impl RequestScheduler {
             0
         };
         for lane in &step.lanes {
-            if step.kind == GraphKind::Prefill && lane.start_position % PAGE_SIZE as u64 != 0 {
-                return Err("prefill must start at a 64-token state boundary".into());
-            }
             let request = self.request(lane.request)?;
             let through = lane
                 .start_position
@@ -781,10 +812,9 @@ impl RequestScheduler {
             if through > self.limits.max_sequence_tokens as u64 {
                 return Err("scheduled request exceeds sequence capacity".into());
             }
-            let pages = (through
-                .min(request.execution_limit)
-                .saturating_sub(request.prefix_tokens) as usize)
+            let pages = (through.min(request.execution_limit) as usize)
                 .div_ceil(PAGE_SIZE)
+                .saturating_sub(request.prefix_tokens as usize / PAGE_SIZE)
                 .saturating_add(draft_page)
                 .saturating_sub(request.private_pages.len());
             if pages > request.reserved_pages.len() {
@@ -806,41 +836,13 @@ impl RequestScheduler {
             }
         }
         self.submitted = fence;
-        self.prefer_prefill = step.kind != GraphKind::Prefill;
+        if matches!(
+            step.kind,
+            GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative
+        ) {
+            self.prefer_prefill = step.kind != GraphKind::Prefill;
+        }
         self.submissions.insert(fence, step.clone());
-        Ok(())
-    }
-
-    /// Records the exact aligned state written into the request's candidate slot.
-    /// The recipe must report the snapshot's own length, not a rounded live-state length.
-    pub fn record_candidate(
-        &mut self,
-        handle: RequestHandle,
-        consumed_tokens: u64,
-        ready_after: Fence,
-    ) -> Result<()> {
-        let request = self.request_mut(handle)?;
-        if consumed_tokens <= request.prefix_tokens
-            || !consumed_tokens.is_multiple_of(PAGE_SIZE as u64)
-            || consumed_tokens > request.scheduled_consumed
-            || ready_after > request.last_use
-            || ready_after < request.candidate_after
-            || ready_after == Fence(0)
-            || request
-                .candidate
-                .is_some_and(|candidate| consumed_tokens < candidate.consumed_tokens)
-        {
-            return Err("candidate snapshot must report a monotonic, exact aligned consumed length and submitted fence".into());
-        }
-        request.candidate = Some(StateSnapshot {
-            id: request.candidate_snapshot,
-            consumed_tokens,
-        });
-        request.candidate_after = ready_after;
-        request.candidate_frozen = false;
-        if request.phase == RequestPhase::Finishing && request.error_code.is_none() {
-            request.phase = RequestPhase::Snapshot;
-        }
         Ok(())
     }
 
@@ -940,6 +942,7 @@ impl RequestScheduler {
         }
         let step = self.submissions.remove(&fence).unwrap();
         let mut generated = Vec::new();
+        let mut boundaries = Vec::new();
         for lane in step.lanes {
             let Ok(request) = self.request_mut(lane.request) else {
                 continue;
@@ -952,12 +955,15 @@ impl RequestScheduler {
                 let record = records[lane.request.slot as usize];
                 if record.status == 3 {
                     request.error_code = Some(record.error_code);
-                    request.candidate_frozen = false;
+                    request.terminal_snapshot_ready = false;
                     request.phase = RequestPhase::Finishing;
                 } else if step.kind == GraphKind::Snapshot {
-                    request.candidate_frozen = true;
-                    request.candidate_after = fence;
-                    request.phase = RequestPhase::Finishing;
+                    if request.boundary_capture.is_some() {
+                        boundaries.push(lane.request);
+                    } else {
+                        request.terminal_snapshot_ready = true;
+                        request.phase = RequestPhase::Finishing;
+                    }
                 } else {
                     if step.kind == GraphKind::Vision {
                         request.vision_patches.pop_front();
@@ -994,11 +1000,7 @@ impl RequestScheduler {
                 }
             }
             request.phase = if finished {
-                if request
-                    .candidate
-                    .is_some_and(|candidate| candidate.consumed_tokens <= request.consumed_tokens)
-                    && request.error_code.is_none()
-                {
+                if request.consumed_tokens > request.prefix_tokens && request.error_code.is_none() {
                     RequestPhase::Snapshot
                 } else {
                     RequestPhase::Finishing
@@ -1010,12 +1012,96 @@ impl RequestScheduler {
             } else {
                 RequestPhase::Decode
             };
+            if step.kind == GraphKind::Prefill && request.error_code.is_none() {
+                let endpoint = request.consumed_tokens;
+                let capture = if request.system_boundary == Some(endpoint as usize) {
+                    request
+                        .system_snapshot
+                        .map(|snapshot| (BoundaryKind::System, snapshot))
+                } else {
+                    None
+                }
+                .or_else(|| {
+                    (endpoint == request.prompt_tokens as u64)
+                        .then_some(request.prompt_snapshot)
+                        .flatten()
+                        .map(|snapshot| (BoundaryKind::Prompt, snapshot))
+                });
+                if let Some((kind, snapshot)) = capture {
+                    request.boundary_capture = Some(BoundaryCapture {
+                        kind,
+                        snapshot,
+                        consumed_tokens: endpoint,
+                        resume: request.phase,
+                    });
+                    request.phase = RequestPhase::Snapshot;
+                }
+            }
             if request.pending == 0 {
                 request.scheduled_consumed = request.consumed_tokens;
             }
         }
         self.advance_retirement(fence)?;
+        for handle in boundaries {
+            self.publish_boundary(handle)?;
+        }
         Ok(generated)
+    }
+
+    fn publish_boundary(&mut self, handle: RequestHandle) -> Result<()> {
+        let request = self.request(handle)?;
+        let capture = request.boundary_capture.ok_or("missing boundary capture")?;
+        let pages = capture.consumed_tokens as usize / PAGE_SIZE
+            - request.prefix_tokens as usize / PAGE_SIZE;
+        let proposal = Publication {
+            parent: request.prefix,
+            consumed_tokens: capture.consumed_tokens,
+            tail_pages: request.private_pages[..pages].to_vec(),
+            snapshot: StateSnapshot {
+                id: capture.snapshot,
+                consumed_tokens: capture.consumed_tokens,
+            },
+            ready_after: request.last_use,
+        };
+        let history = request.history.clone();
+        let result = self.cache.publish(&history, &proposal)?;
+        if let PublishResult::Created { id, ready } = result {
+            if !ready {
+                return Err("completed boundary copy was not GPU-ready".into());
+            }
+            self.cache.pin(id)?;
+            if let Some(parent) = self.request(handle)?.prefix {
+                self.cache.unpin(parent)?;
+            }
+            let request = self.request_mut(handle)?;
+            request
+                .shared_pages
+                .extend(request.private_pages.drain(..pages));
+            request.prefix = Some(id);
+            request.prefix_tokens = capture.consumed_tokens;
+            request.prefix_snapshot = Some(capture.snapshot);
+            self.stats.snapshot_publications += 1;
+        } else {
+            self.free_snapshots.insert(capture.snapshot);
+        }
+        match capture.kind {
+            BoundaryKind::System => self.stats.system_checkpoints += 1,
+            BoundaryKind::Prompt => self.stats.prompt_checkpoints += 1,
+        }
+        let request = self.request_mut(handle)?;
+        match capture.kind {
+            BoundaryKind::System => request.system_snapshot = None,
+            BoundaryKind::Prompt => request.prompt_snapshot = None,
+        }
+        request.boundary_capture = None;
+        request.phase = if capture.resume == RequestPhase::Snapshot
+            && request.prefix_tokens == request.consumed_tokens
+        {
+            RequestPhase::Finishing
+        } else {
+            capture.resume
+        };
+        Ok(())
     }
 
     fn advance_retirement(&mut self, fence: Fence) -> Result<()> {
@@ -1029,7 +1115,8 @@ impl RequestScheduler {
         for retired in self.retired.drain(..) {
             if retired.through <= fence {
                 self.free_pages.extend(retired.pages);
-                self.free_snapshots.extend(retired.snapshot);
+                self.free_snapshots
+                    .extend(retired.snapshots.into_iter().flatten());
                 self.slots[retired.slot].retiring = false;
             } else {
                 waiting.push(retired);
@@ -1044,7 +1131,7 @@ impl RequestScheduler {
         self.retire(handle, false).map(|_| ())
     }
 
-    /// Publishes an immutable terminal candidate after all writes have completed.
+    /// Publishes an immutable terminal snapshot after all writes have completed.
     pub fn finish(&mut self, handle: RequestHandle) -> Result<Option<CheckpointId>> {
         let request = self.request(handle)?;
         if request.phase != RequestPhase::Finishing || request.last_use > self.completed {
@@ -1073,22 +1160,18 @@ impl RequestScheduler {
 
     fn retire(&mut self, handle: RequestHandle, publish: bool) -> Result<Option<CheckpointId>> {
         let request = self.request(handle)?;
-        let candidate = request.candidate.filter(|candidate| {
-            request.candidate_frozen && candidate.consumed_tokens <= request.consumed_tokens
+        let publication = (publish && request.terminal_snapshot_ready).then(|| Publication {
+            parent: request.prefix,
+            consumed_tokens: request.consumed_tokens,
+            tail_pages: request.private_pages[..(request.consumed_tokens as usize / PAGE_SIZE
+                - request.prefix_tokens as usize / PAGE_SIZE)]
+                .to_vec(),
+            snapshot: StateSnapshot {
+                id: request.terminal_snapshot,
+                consumed_tokens: request.consumed_tokens,
+            },
+            ready_after: request.last_use,
         });
-        let publication = if publish {
-            candidate.map(|snapshot| Publication {
-                parent: request.prefix,
-                consumed_tokens: snapshot.consumed_tokens,
-                tail_pages: request.private_pages
-                    [..((snapshot.consumed_tokens - request.prefix_tokens) as usize / PAGE_SIZE)]
-                    .to_vec(),
-                snapshot,
-                ready_after: request.last_use.max(request.candidate_after),
-            })
-        } else {
-            None
-        };
         let result = match &publication {
             Some(proposal) => {
                 let history = request.history.clone();
@@ -1097,7 +1180,7 @@ impl RequestScheduler {
             None => None,
         };
         let mut request = self.slots[handle.slot as usize].request.take().unwrap();
-        let mut snapshot = Some(request.candidate_snapshot);
+        let mut snapshot = Some(request.terminal_snapshot);
         if matches!(result, Some(PublishResult::Created { .. })) {
             if matches!(result, Some(PublishResult::Created { ready: true, .. })) {
                 self.stats.snapshot_publications += 1;
@@ -1114,7 +1197,7 @@ impl RequestScheduler {
         request.private_pages.extend(request.reserved_pages);
         self.retired.push(RetiredRequest {
             pages: request.private_pages,
-            snapshot,
+            snapshots: [snapshot, request.system_snapshot, request.prompt_snapshot],
             slot: handle.slot as usize,
             through: request.last_use,
         });
@@ -1123,5 +1206,7 @@ impl RequestScheduler {
     }
 }
 
+#[cfg(test)]
+mod boundary_tests;
 #[cfg(test)]
 mod tests;

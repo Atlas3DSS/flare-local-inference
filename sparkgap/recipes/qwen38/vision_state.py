@@ -260,7 +260,7 @@ def _vision_finish(
     consumed = tl.load(Consumed + slot * CS, current, other=0)
     generated = tl.load(Generated + slot, current, other=0)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
-                      -1, status, code, active, -1, RECORD_FIELDS)
+                      -1, status, code, active, RECORD_FIELDS)
 
 
 class PreparedVisionHandoff:

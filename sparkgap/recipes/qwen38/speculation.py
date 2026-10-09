@@ -354,8 +354,8 @@ class PreparedSpeculativeCommit:
     """Commit a verified chain prefix and emit physical-slot ABI3 records.
 
     A round emitting t tokens commits verification input t-1, leaving emitted
-    token t-1 pending. Model checkpoint publication must use candidate_consumed
-    and the saved before-state, never the unaccepted verification endpoint.
+    token t-1 pending. Exact snapshot maintenance selects the committed state
+    column after the request's model submissions have drained.
     """
 
     def __init__(self, requests: DeviceRequestState, acceptance: SpeculativeAcceptance,
@@ -393,7 +393,6 @@ class PreparedSpeculativeCommit:
         self.consumed_before = torch.zeros(batch, dtype=torch.int64, device=device)
         self.generated_before = torch.zeros_like(self.consumed_before)
         self.history_before = torch.zeros((batch, 2), dtype=torch.int64, device=device)
-        self.candidate_consumed = torch.full_like(self.consumed_before, -1)
         self._records = torch.zeros((4, 24), dtype=torch.int64, device=device)
 
     def __call__(self):
@@ -410,7 +409,6 @@ class PreparedSpeculativeCommit:
         self.accepted_count.zero_()
         self.accepted_drafts.zero_()
         self.commit_column.fill_(-1)
-        self.candidate_consumed.fill_(-1)
         self._records.zero_()
         self._records[:, 4].fill_(-1)
         self._records[:, 12].fill_(-1)
@@ -452,11 +450,6 @@ class PreparedSpeculativeCommit:
             generated = state.generated_tokens[slot] + emitted
             history = torch.cat((state.ple_history[slot], inputs))
             tail = history.gather(0, emitted + self.history_columns)
-            boundary = (consumed // 64) * 64
-            crossed = (emitted > 0) & (boundary > state.consumed_tokens[slot])
-            boundary_offset = (boundary - state.consumed_tokens[slot]).clamp(0, columns.numel())
-            boundary_history = history.gather(0, boundary_offset + self.history_columns)
-            candidate = torch.where(crossed, boundary, -1)
             terminal = (generated >= state.max_new_tokens[slot]) | (eos & take).any()
             failed = enabled & ~valid
             duplicate = count > 1
@@ -471,9 +464,6 @@ class PreparedSpeculativeCommit:
             state.pending_token[slot].copy_(torch.where(emitted > 0, pending, state.pending_token[slot]))
             state.rng_counter.view(torch.int64)[slot].add_(emitted)
             state.ple_history[slot].copy_(torch.where(emitted > 0, tail, state.ple_history[slot]))
-            state.boundary_history[slot].copy_(torch.where(crossed, boundary_history, state.boundary_history[slot]))
-            state.boundary_consumed_tokens[slot].copy_(torch.where(crossed, boundary, state.boundary_consumed_tokens[slot]))
-            state.boundary_generation[slot].copy_(torch.where(crossed, state.generation[slot], state.boundary_generation[slot]))
             state.status[slot].copy_(status)
             state.error_code[slot].copy_(error)
             if self.rng is not None:
@@ -484,8 +474,7 @@ class PreparedSpeculativeCommit:
             self.emitted_ids.copy_(torch.where(matches[:, None] & take[None, :], ids, self.emitted_ids))
             self.committed_input_ids.copy_(torch.where(matches[:, None] & take[None, :], inputs, self.committed_input_ids))
             for output, value in ((self.emitted_count, emitted), (self.accepted_count, emitted),
-                    (self.accepted_drafts, emitted_drafts), (self.commit_column, emitted - 1),
-                    (self.candidate_consumed, candidate)):
+                    (self.accepted_drafts, emitted_drafts), (self.commit_column, emitted - 1)):
                 output.copy_(torch.where(matches, value, output))
             record = self._records[slot]
             participating = count > 0
@@ -500,7 +489,6 @@ class PreparedSpeculativeCommit:
             record[9].copy_(torch.where(enabled & valid, offered, 0))
             record[10].copy_(emitted_drafts)
             record[11].copy_(torch.where(enabled & valid, self.copy_offered_mask.index_select(0, row)[0], 0))
-            record[12].copy_(candidate)
             if self.draft_cache_available:
                 record[13].copy_(torch.where(participating & (consumed > 0), consumed - 1, 0))
             else:

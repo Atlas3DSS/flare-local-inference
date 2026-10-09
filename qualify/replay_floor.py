@@ -140,6 +140,7 @@ class ReplayCase:
         for name in ('source_slots', 'destination_slots', 'operation', 'accepted_tokens'):
             h['state_' + name].zero_()
         h['state_qsa_slots'].fill_(-1)
+        h['state_expected_consumed'].fill_(-1)
         for slot, case in enumerate(cases):
             request = case['request']
             admission = RequestAdmission(generation=1, seed=request.get('seed', 0),
@@ -155,6 +156,7 @@ class ReplayCase:
             h['state_operation'][slot] = 1
             h['state_qsa_slots'][slot] = slot + 1
             h['state_accepted_tokens'][slot] = 1
+            h['state_expected_consumed'][slot] = 0
         self.execute(f'init{self.batch}')
         initial = [[] for _ in cases]
         chunk = self.model.memory_report['prefill_chunk_size']
@@ -188,7 +190,6 @@ class ReplayCase:
         result = {}
         for slot in range(self.batch):
             result[f'hybrid.live.{slot}'] = self.state.backing[slot + 1].cpu()
-            result[f'hybrid.candidate.{slot}'] = self.state.backing[slot + 5].cpu()
         for field in fields(self.requests):
             result['request.' + field.name] = getattr(self.requests, field.name)[:self.batch].cpu()
         for index, cache in self.cache.items():

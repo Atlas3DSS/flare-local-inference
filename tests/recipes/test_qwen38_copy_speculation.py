@@ -151,7 +151,6 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     monkeypatch.setattr(module, "PreparedVerificationState", VerificationState)
     monkeypatch.setattr(module, "PreparedDecoder", Decoder)
     monkeypatch.setattr(module, "DraftMetadata", forbidden)
-    monkeypatch.setattr(module, "PreparedDraftCache", forbidden)
     monkeypatch.setattr(module, "MTPScratch", SimpleNamespace(allocate=forbidden))
 
     class OneHotLibrary:
@@ -184,7 +183,7 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     assert owner.prefill(scratch, "test") is scratch and owner.resume(scratch) is scratch
     owner.rebind_pages_for_preparation({})
     assert "draft_page_tables" not in owner.buffers() and len(owner.buffers()) == 6
-    assert owner.mtp_scratch is None and owner.draft_cache is None
+    assert owner.mtp_scratch is None and owner.draft_tables is None
     owner.copy_ids[3, :2] = torch.tensor([4, 5])
     owner.copy_count[3], owner.copy_generation[3], owner.copy_expected[3] = 2, 13, 2
     state.grammar_enabled[3] = 1

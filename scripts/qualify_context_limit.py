@@ -149,7 +149,7 @@ def prepare(args):
         "expected_consumed_tokens": PROMPT_TOKENS + OUTPUT_TOKENS - 1,
         "expected_prefill_launches": (PROMPT_TOKENS + PREFILL_CAPACITY - 1) // PREFILL_CAPACITY,
         "expected_decode_launches": OUTPUT_TOKENS - 1, "reserved_pages": CONTEXT // PAGE_TOKENS,
-        "candidate_boundary_tokens": (PROMPT_TOKENS + OUTPUT_TOKENS - 1) // PAGE_TOKENS * PAGE_TOKENS,
+        "terminal_checkpoint_tokens": PROMPT_TOKENS + OUTPUT_TOKENS - 1,
         "grammar": {"literal": LITERAL, **grammar}, "provenance": provenance,
         "token_ids_semantics": "Pinned canonical chat-template rendering; HTTP usage independently checks the prompt length.",
         "artifacts_sha256": {name: digest(args.artifacts / name) for name in names}}

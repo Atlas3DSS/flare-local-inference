@@ -150,7 +150,7 @@ single-GPU core.
 | Main KV precision | BF16 |
 | GDN recurrent state | FP32 |
 | PLE table placement | CUDA-mapped host memory |
-| Checkpoint boundaries | Multiples of 64 consumed tokens |
+| Checkpoint boundaries | Exact rendered instruction, final prompt, and terminal consumed endpoints |
 | Structured output | Host grammar engine; one submission in flight, with per-candidate masks during copy speculation |
 | Vision acceptance | Images; video qualification deferred |
 | Speculative decoding | Optional copy or learned-MTP preparation; one round in flight; qualification requirements in the MTP design |
@@ -266,7 +266,7 @@ These are stored tensor sizes. Prepared layouts, scratch, activations, graphs,
 and caches require additional memory.
 
 Preparation produces a memory report covering persistent weights, mapped host
-storage, operator workspaces, the shared graph memory pool, live and candidate
+storage, operator workspaces, the shared graph memory pool, live and speculative verification
 state slots, checkpoint snapshots, and page capacity.
 Reserve 4 GiB of GPU headroom and a 4 GiB checkpoint-state budget by default;
 allocate the remaining planned capacity to pages. Fail preparation if the
@@ -615,19 +615,20 @@ Prepare these operations:
 
 - **Prefill:** metadata preparation, embedding, model forward, cache writes,
   state updates, and optional final-token sampling. Prompt penalty counts are
-  initialized once at admission. GDN prefill writes the recurrent state at the
-  chunk's last aligned boundary into the candidate slot through its checkpoint
-  slot indices.
+  initialized once at admission. The scheduler clips a chunk at a required
+  instruction or prompt endpoint. GDN writes its final live recurrent state at
+  that exact length; internal aligned checkpoint export is disabled.
 - **Decode:** gather pending token from device request state, forward, sample,
   update request state including the penalty histogram and PLE n-gram history,
-  refresh the candidate snapshot at aligned boundaries, and write completion
-  records.
+  retain the final hidden vector, and write completion records.
 - **Resume sampling:** vocabulary projection and sampling from a checkpoint's
   saved final hidden vector.
 - **Vision:** encode preprocessed patches and write fixed-capacity embedding
   storage.
-- **State maintenance:** initialize, restore, checkpoint, and reset persistent
-  state.
+- **State maintenance:** initialize or restore a live slot, or freeze its exact
+  consumed state into an immutable snapshot. The model input schema
+  `qwen4exp.graph-inputs.v2` carries the expected consumed count and physical-slot
+  target/draft page tables for snapshot and restore.
 
 Padding changes capacity, never logical sequence length. Every padded row must
 be excluded from KV writes, convolution updates, recurrent updates, selector
@@ -748,10 +749,12 @@ trimming must not mutate cached model history.
 
 ## 4. Prefix checkpoints and complete model state
 
-### Immutable terminal prefix cache
+### Immutable instruction, prompt, and terminal cache
 
-Retain immutable, content-addressed, terminal prefix checkpoints, parent-linked
-page chains, ancestor pinning, and leaf eviction.
+The cache retains immutable, content-addressed checkpoints at the rendered
+instruction boundary, final prompt boundary, and terminal consumed boundary.
+Equal endpoints share one checkpoint. Parent-linked complete-page chains,
+ancestor pinning, and eviction preserve ownership across active branches.
 
 The [Rust prefix cache](../native/src/cache.rs) manages ownership, readiness,
 pinning, and eviction. Python allocates backing storage during preparation;
@@ -765,8 +768,9 @@ sparse-attention layers:
 - Main V pages.
 - Compressed selector-key pages.
 
-For 64 original tokens, QSA's compression ratio gives 16 selector rows. Keep
-mutable raw selector rings in separate request-state storage.
+For 64 original tokens, QSA's compression ratio gives 16 selector rows. Live
+raw selector rings are request-local; snapshots preserve the committed ring
+entries needed to continue an incomplete four-token selector group.
 
 ### A checkpoint represents one exact consumed prefix
 
@@ -776,24 +780,39 @@ A Qwen checkpoint includes:
 |---|---|
 | Immutable main KV pages | Attention history |
 | Compressed selector-key pages | Sparse-attention selection history |
+| Private partial main KV and selector pages | Exact endpoints within a page |
+| Raw selector keys, logical tags, RoPE tags, and interval anchor | Open selector-group continuation |
 | GDN recurrent matrices | Recurrent attention continuation |
 | GDN convolution histories | Causal projection continuation |
 | PLE convolution history | Dilated lexical-state continuation |
 | PLE n-gram token history | Correct subsequent embedding lookup |
 | Position continuation metadata | Text and multimodal RoPE continuity |
 | Final hidden vector | Sampling after a complete prompt cache hit |
+| Pre-mixer residual and its position, when speculation is prepared | Target feedback for learned MTP |
+| Shifted draft pages and raw selector state, when learned MTP is prepared | Continuation at independently tracked draft length |
 
 The PLE table and model weights are shared immutable model resources, not copied
 into checkpoints.
 
-QSA raw selector state is not part of a checkpoint. At a 64-token boundary the
-open selector group is empty, so restore writes the invalid tag sentinel into
-every ring entry of the live slot and sets the interval anchor to the checkpoint
-length minus one for ordinary decode with one accepted token. More generally,
-the first decode at logical position `N` requires anchor
-`N - num_accepted_tokens`. Empty initialization uses `N = 0`, one accepted
-token, and anchor `-1`. The first decode steps after an aligned restore
-repopulate the ring.
+For target consumed count `S`, snapshot filtering keeps raw entries with logical
+positions in `[0,S)` and sets the restored interval anchor to `S−1`. Initialization
+has zero consumed tokens, no valid raw entries, and anchor `−1`. Restore starts
+with one accepted input; rejected speculative entries cannot become visible
+through raw-ring tags.
+
+A speculative target round writes eight recurrent checkpoint columns per request.
+Snapshot selects column `previous_accepted−1`, copies the corresponding three-token
+GDN and nine-token PLE convolution windows, and zeroes the unused speculative
+history tails. Restore installs this normalized state in the live column and
+sets its accepted count to one. PLE token history and hidden/residual vectors
+already describe the committed target endpoint.
+
+Learned MTP has consumed `max(S−1,0)` feedback pairs. Its restored raw anchor is
+`max(S−1,0)−1`; its validity mask uses the draft count, independently of target
+raw state. Draft logical page `j` uses physical allocation `j+1`. Write
+`S=64N+r`: save draft page `N−1` when `N>0`, and page `N` when `r≥2`. Thus up to
+two draft pages need private restoration even though the target saves at most
+one partial page. `S=1` has no valid draft page or raw entry.
 
 Distinguish:
 
@@ -803,27 +822,43 @@ Distinguish:
 
 Only consumed history can define a checkpoint.
 
-### Correct aligned snapshots
+### Exact endpoint capture
 
-Retain 64-token alignment and accept replay of the uncached suffix on a later
-request.
+The model-owned Qwen boundary helper renders leading system/developer instructions
+with an empty user continuation, then requires the resulting token IDs to be an
+exact prefix of the admitted prompt. Tools and reasoning defaults can synthesize
+instructions without an explicit system-role message. Shared template framing is
+part of the endpoint; a user header alone is not an instruction checkpoint. The
+boundary is not rounded to a token group or KV page.
 
-Each live request owns a rolling candidate snapshot. At an eligible aligned
-boundary, a captured operation copies the complete model state into that
-candidate. The copy happens while the state actually represents that boundary.
+Admission reserves destinations for all distinct required instruction, prompt,
+and terminal roles before model work. Completed cache hits satisfy already-covered
+roles. Resource pressure triggers normal cache eviction or admission rejection;
+it cannot silently omit a required checkpoint.
 
-Prefill scheduling splits the terminal partial block from its preceding aligned
-segment. Decode refreshes the candidate when it crosses an aligned boundary.
+At each required prefill endpoint, the scheduler drains submitted work, snapshots
+the exact live state, and publishes only after the copy fence completes. A newly
+published endpoint pins the request's shared parent and transfers its completed
+private pages into that chain without changing physical page order. Further
+prefill or generation resumes afterward. Terminal capture uses the final consumed
+count and excludes a sampled pending token. No rolling aligned candidate rows,
+internal GDN checkpoint exports, or boundary-label fields participate in this path.
 
-At request completion:
+Complete target pages are immutable and shared. When `S % 64 != 0`, snapshot
+storage owns the whole physical tail page and restore copies it into a private
+allocation; at an aligned endpoint, maintenance never writes a shared full page.
+The copied unused KV rows and incomplete selector-group values do not define
+committed state. Valid token ranges, completed selector groups, and raw tags do.
 
-1. Select the most recent completed aligned candidate.
-2. Associate its immutable pages and digest.
-3. Publish the checkpoint after its GPU writes complete.
-4. Release the uncached suffix and live resources after their last use.
+The model state pool uses row zero for the null state, rows1–4 for live requests,
+and row `5 + snapshot_id` for immutable snapshots. Speculative recurrent columns
+follow the immutable range. Metadata validation checks the exact source count,
+epoch, transfer direction, needed page mappings, and cross-row aliases before
+any state mutation.
 
-The implementation must never copy state at token `N` and label it as state at
-`floor(N / 64) * 64`.
+Captured GPU transfer and native maintenance checks pass for short endpoints,
+page residues, accepted columns, immutable source protection, and replay allocation
+stability. Full-model restored continuation and HTTP retention remain pending.
 
 ### Full prompt hits
 
@@ -842,7 +877,11 @@ Prefix reuse does not inherit the previous request's RNG stream.
 ### Branching and lifetime
 
 A branch pins its ancestor checkpoint, shares immutable pages, restores state
-into a private live slot, and allocates private suffix pages.
+into a private live slot, and allocates private suffix pages including all
+required target/draft boundary pages. A duplicate publication releases only its
+unused snapshot reservation; it does not replace computed live pages with another
+request's physical page chain. Admission reuse counts remain fixed even as the
+request publishes additional shared ancestors.
 
 Track logical references separately from outstanding GPU use. A page or slot
 becomes reusable only after both have ended.
@@ -881,10 +920,15 @@ Per-slot state for this model:
 | GDN convolution histories, 36 layers × 10,240 channels × 3 | 2.1 MiB |
 | PLE convolution history, 10,240 channels × 9 | 0.2 MiB |
 | PLE n-gram history, position metadata, hidden vector | under 8 KiB |
-| **Snapshot total** | **about 110 MiB** |
+| Target raw selector state and partial pages | about 1.6 MiB |
+| **Ordinary snapshot row** | **117,291,776 bytes (111.86 MiB)** |
+| **Seven-draft state row** | **122,932,224 bytes (117.24 MiB)** |
 
-The default 4 GiB checkpoint-state budget therefore holds about 37 snapshots
-beyond the live and candidate slots of active requests.
+The default 4 GiB checkpoint-state budget holds 36 ordinary or 34 seven-draft
+snapshot rows, beyond the null/live rows and speculative recurrent-column
+storage. The speculative layout includes extended convolution histories, target
+feedback, and two shifted draft boundary pages. Preparation validates that the
+configured snapshot budget can hold at least one row of the selected layout.
 
 BF16 main KV across the 12 attention layers consumes **24 KiB per cached token**,
 with compressed selector keys adding **0.75 KiB per token**. Main KV stays BF16

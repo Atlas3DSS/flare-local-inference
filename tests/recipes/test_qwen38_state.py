@@ -26,10 +26,10 @@ CUDA = pytest.mark.skipif(
 
 def test_exact_hybrid_state_layout_and_snapshot_budget():
     layout = HybridStateLayout.build()
-    assert layout.row_bytes == 115648256
+    assert layout.row_bytes == 117291776
     assert layout.row_bytes % 256 == 0
-    assert layout.snapshot_capacity(4 << 30) == 37
-    assert len(layout.regions) == 77
+    assert layout.snapshot_capacity(4 << 30) == 36
+    assert len(layout.regions) == 161
     assert GDN_LAYERS == tuple(i for i in range(48) if i % 4 != 3)
     for index, region in enumerate(layout.regions):
         assert region.offset % 256 == 0
@@ -48,7 +48,7 @@ def test_exact_hybrid_state_layout_and_snapshot_budget():
 
 def test_typed_views_share_exact_real_geometry_backing():
     pool = HybridStatePool.allocate(2, "cpu")
-    assert pool.backing.shape == (2, 115648256)
+    assert pool.backing.shape == (2, 117291776)
     assert pool.consumed_tokens.shape == (2, 1)
     assert pool.ple_history.shape == (2, 2)
     assert torch.count_nonzero(pool.backing[0]) == 0
@@ -209,7 +209,7 @@ def test_native_full_state_copy_reset_restore_and_metadata_replay():
             assert torch.all(state.raw_k_ring == 9)
             assert torch.all(state.raw_logical_positions[[0, 2]] == -1)
             assert torch.all(state.raw_rope_positions[[0, 2]] == -1)
-            assert torch.all(state.raw_logical_positions[[1, 3]] == 777)
+            assert torch.all(state.raw_logical_positions[[1, 3]] == 1617)
             assert torch.equal(
                 state.raw_interval_start_positions.cpu(),
                 torch.tensor([63, 999, -1, 999]),

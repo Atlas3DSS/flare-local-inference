@@ -136,7 +136,6 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         kind: GraphKind,
         record: &CompletionRecord,
     ) -> Result<()>;
-    fn candidate_boundary(record: &CompletionRecord) -> u64;
     #[cfg(feature = "images")]
     fn pack_vision(
         inputs: &mut Self::Inputs,

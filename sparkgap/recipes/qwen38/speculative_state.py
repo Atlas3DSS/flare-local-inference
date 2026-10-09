@@ -80,43 +80,11 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
 
 
 @triton.jit
-def _copy_boundary_recurrence(State, Slots, Count, Before, Indices,
-                              STATE_STRIDE: tl.constexpr, BLOCK: tl.constexpr):
-    row, tile = tl.program_id(0), tl.program_id(1)
-    count, before = tl.load(Count + row), tl.load(Before + row)
-    slot = tl.load(Slots + row)
-    boundary = (before + count) // 64 * 64
-    active = (count > 0) & (slot >= 0) & (slot < 4) & (boundary > before)
-    column = boundary - before - 1
-    source = tl.load(Indices + row * 8 + column, active, other=0)
-    index = tile * BLOCK + tl.arange(0, BLOCK)
-    value = tl.load(State + source * STATE_STRIDE + index, active & (index < 48 * 128 * 128), other=0)
-    tl.store(State + (slot + 5) * STATE_STRIDE + index, value, active & (index < 48 * 128 * 128))
-
-
-@triton.jit
-def _copy_boundary_convolution(State, Slots, Count, Before,
-                               STATE_STRIDE: tl.constexpr, HISTORY: tl.constexpr,
-                               CAPACITY: tl.constexpr, BLOCK: tl.constexpr):
-    row, tile = tl.program_id(0), tl.program_id(1)
-    count, before = tl.load(Count + row), tl.load(Before + row)
-    slot = tl.load(Slots + row)
-    boundary = (before + count) // 64 * 64
-    active = (count > 0) & (slot >= 0) & (slot < 4) & (boundary > before)
-    index = tile * BLOCK + tl.arange(0, BLOCK)
-    channel, offset = index // HISTORY, index % HISTORY
-    source = (slot + 1) * STATE_STRIDE + channel * CAPACITY + offset + boundary - before - 1
-    value = tl.load(State + source, active & (channel < 10240), other=0)
-    tl.store(State + (slot + 5) * STATE_STRIDE + channel * CAPACITY + offset,
-             value, active & (channel < 10240))
-
-
-@triton.jit
-def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope, Delta, Slots, Count, Before,
+def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope, Slots, Count,
                    PreviousAccepted, WIDTH: tl.constexpr, HS: tl.constexpr, RS: tl.constexpr,
-                   DS: tl.constexpr, RPS: tl.constexpr, BLOCK: tl.constexpr):
+                   RPS: tl.constexpr, BLOCK: tl.constexpr):
     row, tile = tl.program_id(0), tl.program_id(1)
-    slot, count, before = tl.load(Slots + row), tl.load(Count + row), tl.load(Before + row)
+    slot, count = tl.load(Slots + row), tl.load(Count + row)
     active = (count > 0) & (slot >= 0) & (slot < 4)
     channel = tile * BLOCK + tl.arange(0, BLOCK)
     offset = row * WIDTH + count - 1
@@ -124,22 +92,12 @@ def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope
     tl.store(SavedResidual + (slot + 1) * RS + channel, residual, active & (channel < 10240))
     hidden = tl.load(Hidden + offset * 2560 + channel, active & (channel < 2560), other=0)
     tl.store(SavedHidden + (slot + 1) * HS + channel, hidden, active & (channel < 2560))
-    boundary = (before + count) // 64 * 64
-    candidate = active & (boundary > before)
-    offset = row * WIDTH + boundary - before - 1
-    residual = tl.load(Residual + offset * 10240 + channel, candidate & (channel < 10240), other=0)
-    tl.store(SavedResidual + (slot + 5) * RS + channel, residual, candidate & (channel < 10240))
-    hidden = tl.load(Hidden + offset * 2560 + channel, candidate & (channel < 2560), other=0)
-    tl.store(SavedHidden + (slot + 5) * HS + channel, hidden, candidate & (channel < 2560))
     if tile == 0:
         tl.store(PreviousAccepted + slot, count, active)
-        delta = tl.load(Delta + (slot + 1) * DS, candidate, other=0)
-        tl.store(Delta + (slot + 5) * DS, delta, candidate)
         axes = tl.arange(0, 4)
         rope = tl.load(Rope + (row * WIDTH + count - 1) * 3 + axes, active & (axes < 3), other=-1)
         tl.store(SavedRope + (slot + 1) * RPS + axes, rope, active & (axes < 3))
-        rope = tl.load(Rope + offset * 3 + axes, candidate & (axes < 3), other=-1)
-        tl.store(SavedRope + (slot + 5) * RPS + axes, rope, candidate & (axes < 3))
+
 
 
 class PreparedVerificationState:
@@ -153,7 +111,7 @@ class PreparedVerificationState:
                  *, width: int, rows: int, extra_base: int):
         if type(width) is not int or not 1 <= width <= 8 or rows not in (1, 2, 4):
             raise ValueError("verification requires width 1 through 8 and batch 1/2/4")
-        if pool.layout.speculative_tokens != 7 or extra_base < 10 or extra_base + 28 > pool.backing.shape[0]:
+        if pool.layout.speculative_tokens != 7 or extra_base < 6 or extra_base + 28 > pool.backing.shape[0]:
             raise ValueError("verification requires a seven-draft pool and 28 private state rows")
         if candidates.dtype != torch.int64 or candidates.shape != (4, 8):
             raise ValueError("verification candidates require int64 [4,8]")
@@ -196,12 +154,6 @@ class PreparedVerificationState:
     def prepare_residual(self, residual):
         self.residual = residual
 
-    def prepare_convolution(self, name, source, state):
-        pass
-
-    def checkpoint_convolution(self, name):
-        pass
-
     def begin(self):
         self._validate()
         self.token_state.gather()
@@ -213,22 +165,12 @@ class PreparedVerificationState:
     def prepare_commit(self, emitted_count, consumed_before, residual, hidden):
         pool, slots = self.pool, self.inputs.row_slot_ids
         self._commit = []
-        for layer in pool.gdn.values():
-            recurrent = layer.recurrent
-            self._commit.append(compile_kernel(_copy_boundary_recurrence,
-                (recurrent, slots, emitted_count, consumed_before, self.gdn.state_indices,
-                 recurrent.stride(0), 4096), (self.rows, triton.cdiv(48 * 128 * 128, 4096), 1)))
-        for convolution, history in (
-                *((layer.convolution, 3) for layer in pool.gdn.values()), (pool.ple_convolution, 9)):
-            self._commit.append(compile_kernel(_copy_boundary_convolution,
-                (convolution, slots, emitted_count, consumed_before, convolution.stride(0),
-                 history, convolution.shape[2], 1024), (self.rows, triton.cdiv(10240 * history, 1024), 1)))
         saved_residual = pool.region("target_residual")
         saved_rope = pool.region("target_residual_position")
         self._commit.append(compile_kernel(_commit_hidden,
-            (hidden, residual, pool.last_hidden, saved_residual, self.qsa.rope_positions, saved_rope, pool.rope_delta, slots,
-             emitted_count, consumed_before, self.previous_accepted, self.width,
-             pool.last_hidden.stride(0), saved_residual.stride(0), pool.rope_delta.stride(0), saved_rope.stride(0), 1024),
+            (hidden, residual, pool.last_hidden, saved_residual, self.qsa.rope_positions, saved_rope, slots,
+             emitted_count, self.previous_accepted, self.width,
+             pool.last_hidden.stride(0), saved_residual.stride(0), saved_rope.stride(0), 1024),
             (self.rows, 10, 1)))
 
     def commit(self):

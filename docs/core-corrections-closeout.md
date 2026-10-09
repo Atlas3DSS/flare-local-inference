@@ -98,8 +98,8 @@ closed, subject to their original measurement scopes.
    speculative packing, output parsing, and interpretation into the Qwen implementation before
    adding further MTP behavior. Preserve upload bytes and transaction ordering.
 4. **Complete local serving contracts and copy qualification.** Finish string stops,
-   JPEG/EXIF, and tool-plus-schema grammars. Resolve the prompt-checkpoint retention
-   requirement described below. Qualify copied drafts against independent W1
+   JPEG/EXIF, and tool-plus-schema grammars. Qualify the exact checkpoint-retention
+   implementation described below. Qualify copied drafts against independent W1
    execution, including actual prefix restores, every accepted count, and failures.
 5. **Qualify learned MTP.** Use the qualified transaction with the checkpoint's MTP
    weights, feedback, attention/cache, experts, and head. Complete full startup,
@@ -216,7 +216,7 @@ options, forced/named selections, and subsequent tool-result turns.
 |---|---|---|
 | 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust/Python tests and six installed HTTP parsing/stop checks pass. All image fixtures are admitted, with the structured-output limitation described above. | Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
 | 6.2 Typed errors | Open: [lib.rs](../native/src/lib.rs) aliases Result to String. Admission-rejection events already differ structurally; the correction's substring count is stale. | Introduce typed admission, execution, and frontend errors, preserving underlying causes and numeric driver codes. Map HTTP/SSE behavior by variants and use variant assertions. Preserve first failure and owner retention after failed drain. Eliminate error-text classification, without confusing ordinary token/metrics string checks with error dispatch. |
-| 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | After contract/error extraction, introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve candidate-record-before-complete, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
+| 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | After contract/error extraction, introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve exact endpoint capture before continued model work, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
 | 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
 | 6.5 Qualification package | Partial: HTTP and graph-execution implementations live in `qualify.server` and `qualify.graph_execution`; script entrypoints and dependent callers preserve their CLI and request contracts. CPU regression suites pass. | Move remaining diagnosis/trace/qualification scripts and the test-tree qualifier. Share existing HTTP/SSE and fixture helpers where duplication remains; preserve request bytes, assertions, and result semantics. |
 | 6.6 Unsafe safety proofs | Closed: unsafe calls outside cuda.rs state allocation, context/thread, and drain/lifetime obligations locally; ownership/failure tests pass. | Preserve the proofs when changing native ownership. |
@@ -318,39 +318,36 @@ Explicit user stops may discard only a buffered, never-emitted incomplete tool
 call. Ordinary malformed-tool termination remains an error. Qualify cross-token
 and subtoken matches, overlapping prefixes, EOS/budget races, and resource release.
 
-**Prompt checkpoint retention.** The cache publishes only the latest rolling
-boundary at request termination. A 6,459-token prompt followed by 144 emitted
-tokens has 6,602 consumed tokens and publishes boundary 6,592. An identical
-6,459-token retry cannot restore that checkpoint; the common 6,400 boundary has
-already been overwritten. The observed misses occur with no evictions and free
-snapshot capacity. This is a retention-policy limitation.
+**Exact checkpoint retention.** The implementation retains rendered instruction,
+final prompt, and terminal consumed endpoints independently, coalescing equal
+endpoints. The Qwen model contract derives the instruction boundary from the
+actual template and exact token-prefix verification. Tools and reasoning defaults
+can synthesize instructions. Prefill stops at each required endpoint without
+16-token or 64-token rounding; the scheduler drains work before freezing live state.
 
-Retain the exact rendered system prefix, final prompt, and terminal consumed
-prefix independently. The Qwen model contract renders leading instructions with
-an empty user continuation and verifies exact token-prefix equality against the
-admitted prompt. Tools and reasoning defaults may synthesize system instructions.
-The boundary includes shared template framing and is not rounded to a KV page.
-Prefill must stop there before freezing live recurrent state.
+Admission reserves each required destination from the preallocated snapshot pool.
+After the copy fence, publication pins the shared ancestor and transfers completed
+page ownership without changing physical page order. A duplicate publication
+releases its unused reservation while retaining the request's computed pages.
+Reuse accounting records only the original admission hit. Cancellation, errors,
+and cache eviction remain fence-protected.
 
-Freeze each endpoint before continuing, publish/pin it, transfer complete-page
-ownership into the live request's shared parent chain, and rotate to another
-preallocated snapshot. Snapshot storage owns partial attention pages and raw QSA
-state; restoration copies mutable tails into private pages.
-Keep physical page order unchanged. Separate original admission reuse accounting
-from the evolving page-ownership boundary so newly computed tokens are not
-reported as reused. Qualify duplicate publication, pressure, cancellation, failed
-freeze, exact retries, divergent tails, and appended conversations. Do not replace
-the terminal checkpoint, which preserves generated-state reuse for agentic turns.
+Snapshots contain normalized accepted GDN state and convolution windows, PLE
+history, hidden/residual/position state, target raw selector state, and any partial
+target attention page. Aligned target endpoints leave shared full pages untouched.
+Learned MTP retains `max(S−1,0)` pairs and its own raw anchor, plus up to two shifted
+private boundary pages. Rejected raw tags are excluded. Pool row 0 is null, rows 1–4
+are live, and immutable snapshots begin at row 5; no rolling candidate rows or
+aligned checkpoint exports remain.
 
-Reserve all distinct required endpoints at admission; a live request must not
-wait for the only terminal destination it already occupies. Capacity pressure
-must not silently skip the system checkpoint. An existing
-duplicate checkpoint does not justify replacing live computed KV pages with another
-request's pages. Leave that request's physical chain unchanged and release only
-unused reservations after their fences. For learned MTP, separately qualify the
-P−1 draft length, open raw-selector history, and up to two shifted private
-boundary pages. Qualify endpoints shorter than 16 tokens and residues 0, 1, 2,
-3, and 63 modulo the 64-token page size.
+Native scheduling tests pass 169 checks, and actual-checkpoint frontend tests pass
+7 checks. The targeted transfer, maintenance, metadata, and completion suite passes
+59 checks with CUDA enabled, including captured replay allocation stability and
+source protection. Full-model restored continuation and HTTP retention are pending.
+Required cases include endpoints below 16 and residues 0/1/2/3/63, exact retries,
+changed user/tool suffixes, duplicate publication, pressure, cancellation, failed
+freeze, and appended conversations. Terminal retention must preserve reuse of
+consumed generated tokens alongside instruction/prompt reuse.
 
 The malformed diff, literal-tag omission, contradictory retry recommendation,
 and four explicit-budget truncations remain failed outputs. Ordinary and pinned
@@ -370,7 +367,7 @@ path. The final source freeze receives the complete acceptance run:
    caller-owned scratch, b12x tuning/warmup, final binding refresh, graph capture,
    memory headroom, and zero-allocation replay after handoff.
 4. Same-graph Python/Rust and same-capacity restore byte equality; calibrated
-   cross-capacity checks; copy and learned-MTP state/candidate/cache transactions.
+   cross-capacity checks; copy and learned-MTP accepted-state/cache transactions.
 5. Frozen 82-prompt agreement and reference repeatability, complete identical-input
    operator coverage, and retained diagnostic eager comparisons.
 6. Actual Rust HTTP/SSE text, image, tools/schema, stop, cancellation, cache-pressure,

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.draft_state import DraftMetadata, PreparedDraftCache
+from sparkgap.recipes.qwen38.draft_state import DraftMetadata
 from sparkgap.recipes.qwen38.state import HybridStatePool
 
 
@@ -49,21 +49,20 @@ CUDA = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
 
 @CUDA
 @torch.no_grad()
-def test_eight_column_state_survives_width_one_and_exports_exact_boundary():
+def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
     from sparkgap.recipes.qwen38.decoder_state import DecoderInputs
     from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
     from sparkgap.recipes.qwen38.speculative_state import PreparedVerificationState
 
     device = torch.device("cuda", 0)
-    pool = HybridStatePool.allocate(38, device, speculative_tokens=7)
+    pool = HybridStatePool.allocate(34, device, speculative_tokens=7)
     requests = DeviceRequestState.allocate(device, consumed_tokens=pool.consumed_tokens[1:5, 0],
-        ple_history=pool.ple_history[1:5], boundary_consumed_tokens=pool.consumed_tokens[5:9, 0],
-        boundary_history=pool.ple_history[5:9])
+        ple_history=pool.ple_history[1:5])
     inputs = DecoderInputs.allocate(device, context=256, tokens=64)
     candidates = torch.arange(32, device=device, dtype=torch.int64).reshape(4, 8) + 901
     accepted = torch.ones(4, dtype=torch.int32, device=device)
     states = {width: PreparedVerificationState(inputs, requests, pool, candidates, accepted,
-        width=width, rows=1, extra_base=10) for width in range(1, 9)}
+        width=width, rows=1, extra_base=6) for width in range(1, 9)}
     counts = torch.tensor([5], dtype=torch.int32, device=device)
     before = torch.tensor([61], dtype=torch.int64, device=device)
     residual = torch.arange(8, device=device, dtype=torch.bfloat16)[:, None].expand(8, 10240).contiguous()
@@ -78,7 +77,7 @@ def test_eight_column_state_survives_width_one_and_exports_exact_boundary():
     accepted[2] = 8
     states[1].begin()
     assert states[1].gdn.accepted_tokens.tolist() == [8]
-    assert states[1].gdn.state_indices.tolist() == [[3, 24, 25, 26, 27, 28, 29, 30]]
+    assert states[1].gdn.state_indices.tolist() == [[3, 20, 21, 22, 23, 24, 25, 26]]
     assert states[1].token_ids.tolist() == [901]
     for width in range(2, 8):
         states[width].begin()
@@ -94,14 +93,8 @@ def test_eight_column_state_survives_width_one_and_exports_exact_boundary():
     pool.ple_convolution[3].copy_(torch.arange(100, 116, device=device, dtype=torch.bfloat16))
     states[8].commit()
     assert accepted[2].item() == 5
-    assert pool.gdn[0].recurrent[7, 0, 0, 0].item() == 2 / 16
-    assert pool.gdn[46].recurrent[7, -1, -1, -1].item() == 2 / 16
-    assert pool.gdn[0].convolution[7, 0, :3].tolist() == [102, 103, 104]
-    assert pool.ple_convolution[7, 0, :9].tolist() == list(range(102, 111))
     assert pool.last_hidden[3, 0].item() == 4
-    assert pool.last_hidden[7, 0].item() == 2
     assert pool.region("target_residual")[3, 0].item() == 4
-    assert pool.region("target_residual_position")[7].tolist() == [63, 63, 63]
     graph = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -114,90 +107,6 @@ def test_eight_column_state_survives_width_one_and_exports_exact_boundary():
     assert states[1].gdn.accepted_tokens.tolist() == [5]
     assert states[1].gdn.state_indices.shape == (1, 8)
     graph.reset()
-
-
-@CUDA
-@torch.no_grad()
-def test_partial_draft_page_and_open_selector_group_survive_prefix_branch():
-    from sparkgap.recipes.qwen38.attention import QSAState
-    from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-
-    device = torch.device("cuda", 0)
-    pool = HybridStatePool.allocate(10, device, speculative_tokens=7)
-    requests = DeviceRequestState.allocate(device, consumed_tokens=pool.consumed_tokens[1:5, 0])
-    cache = QSAState.allocate(pages=4, slots=5, device=device, draft_tokens=7)
-    tables = torch.full((4, 4), -1, dtype=torch.int32, device=device)
-    tables[0].copy_(torch.tensor([1, 2, 3, 0], dtype=torch.int32, device=device))
-    previous = torch.ones(4, dtype=torch.int32, device=device)
-    owner = PreparedDraftCache(pool, requests, cache, tables, previous)
-    m = DraftMetadata(tokens=127, rows=1, context=256, device=device)
-    positions = torch.arange(127, device=device)
-    m.set(torch.tensor([0], dtype=torch.int32, device=device), torch.tensor([127], device=device),
-        torch.tensor([0], device=device), positions, torch.zeros((127, 10240), dtype=torch.bfloat16, device=device),
-        positions[:, None].expand(-1, 3), tables, capacity=127)
-    keys = positions.to(torch.bfloat16)[:, None].expand(127, 128).contiguous()
-    mtp = SimpleNamespace(metadata=m.qsa, attention=SimpleNamespace(index_key=keys))
-    snapshot = owner.snapshot(mtp, torch.tensor([0], dtype=torch.int32, device=device),
-                              torch.tensor([64], dtype=torch.int64, device=device))
-    cache.main_k_cache[1].fill_(3)
-    cache.main_v_cache[1].fill_(5)
-    cache.compressed_k_cache[1].fill_(7)
-    cache.raw_logical_positions[1].fill_(999)
-    snapshot()
-    assert pool.region("draft_raw_positions")[5, 12:15].tolist() == [60, 61, 62]
-    assert pool.region("draft_raw_keys")[5, 12:15, 0].tolist() == [60, 61, 62]
-    assert pool.region("draft_raw_anchor")[5].item() == 62
-    pool.backing[2].copy_(pool.backing[5])
-    requests.admit(1, RequestAdmission(19, 42), list(range(64)), consumed_tokens=64)
-    tables[1, 0] = 3
-    cache.main_k_cache[3].fill_(99)
-    owner.ensure(torch.tensor([1], dtype=torch.int32, device=device),
-                 torch.tensor([19], dtype=torch.int64, device=device),
-                 torch.tensor([1], dtype=torch.int32, device=device))
-    assert cache.main_k_cache[3, 0, 0, 0].item() == 3
-    assert cache.main_v_cache[3, 0, 0, 0].item() == 5
-    assert cache.compressed_k_cache[3, 0, 0].item() == 7
-    assert cache.raw_logical_positions[2, 12:15].tolist() == [60, 61, 62]
-    assert cache.raw_interval_start_positions[2].item() == 62
-    cache.main_k_cache[3, 63].fill_(17)
-    assert cache.main_k_cache[1, 63, 0, 0].item() == 3
-    assert pool.region("draft_boundary_key")[5, 63, 0, 0].item() == 3
-
-
-def test_draft_restore_only_marks_selected_live_generations():
-    from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-
-    requests = DeviceRequestState.allocate("cpu", vocab_size=128)
-    for slot, epoch in ((1, 11), (3, 13)):
-        requests.admit(slot, RequestAdmission(epoch, 42, eos_token_ids=()), list(range(64)), consumed_tokens=64)
-    owner = PreparedDraftCache.__new__(PreparedDraftCache)
-    owner.requests = requests
-    owner.slots = torch.arange(4)
-    owner.generation = torch.zeros(4, dtype=torch.int64)
-    owner.changed = torch.zeros(4, dtype=torch.bool)
-    owner.previous_accepted = torch.full((4,), 8, dtype=torch.int32)
-    owner.raw_fields = (("raw_k_ring", "keys"), ("raw_logical_positions", "positions"))
-    saved = {"keys": torch.arange(5, dtype=torch.bfloat16)[:, None, None].expand(5, 4, 2).contiguous(),
-             "positions": torch.arange(5)[:, None].expand(5, 4).contiguous()}
-    owner.pool = SimpleNamespace(region=lambda name: saved[name])
-    owner.cache = SimpleNamespace(raw_k_ring=torch.full((5, 4, 2), -7, dtype=torch.bfloat16),
-                                  raw_logical_positions=torch.full((5, 4), -7, dtype=torch.int64))
-    restored = []
-    owner._restore_pages = (lambda: restored.append(owner.changed.clone()),)
-    owner.ensure(torch.tensor([1], dtype=torch.int32), torch.tensor([11]), torch.tensor([1], dtype=torch.int32))
-    assert owner.generation.tolist() == [0, 11, 0, 0]
-    assert restored[-1].tolist() == [False, True, False, False]
-    assert owner.previous_accepted.tolist() == [8, 1, 8, 8]
-    assert owner.cache.raw_k_ring[2].eq(2).all() and owner.cache.raw_k_ring[4].eq(-7).all()
-    # A later B1 graph installs the second restored request's own page table.
-    owner.ensure(torch.tensor([3], dtype=torch.int32), torch.tensor([13]), torch.tensor([1], dtype=torch.int32))
-    assert owner.generation.tolist() == [0, 11, 0, 13]
-    assert restored[-1].tolist() == [False, False, False, True]
-    assert owner.cache.raw_k_ring[4].eq(4).all()
-    owner.generation.zero_()
-    for slots, epochs, count in (([3], [12], 1), ([3, 3], [13, 13], 2), ([3], [13], 2), ([3], [13], 0)):
-        owner.ensure(torch.tensor(slots, dtype=torch.int32), torch.tensor(epochs), torch.tensor([count], dtype=torch.int32))
-        assert not owner.changed.any() and not owner.generation.any()
 
 
 @pytest.mark.parametrize("temperature", [0., 1.])
@@ -219,7 +128,7 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     owner = SimpleNamespace(requests=requests, pool=pool,
         copy_generation=torch.tensor([0, 0, 0, copy_epoch]),
         inputs=SimpleNamespace(row_slot_ids=slots, row_generations=epochs, live_rows=torch.tensor([2], dtype=torch.int32)),
-        draft_cache=SimpleNamespace(ensure=lambda *_: None), cache={48: SimpleNamespace()},
+        cache={48: SimpleNamespace()},
         draft_rng_generation=torch.zeros(4, dtype=torch.int64), draft_rng_offset=torch.zeros(4, dtype=torch.int64),
         copy_expected=torch.tensor([-1, -1, -1, 64]), copy_count=torch.tensor([0, 0, 0, 1]),
         copy_ids=torch.full((4, 7), -1, dtype=torch.int64), candidates=torch.zeros((4, 8), dtype=torch.int64),
@@ -265,7 +174,6 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
 
     class Commit:
         emitted_count = torch.tensor([0, 1], dtype=torch.int32)
-        candidate_consumed = torch.full((batch,), -1, dtype=torch.int64)
 
         def __call__(self):
             pass
@@ -273,7 +181,7 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     operation.draft = Draft()
     operation.decoder = lambda: operation.state.token_ids.copy_(owner.candidates[:batch, :width].reshape(-1))
     operation.absorb = lambda: None
-    operation.operations = (Proposal(), (Proposal(),) * 3, lambda: None, Commit(), (), lambda: None)
+    operation.operations = (Proposal(), (Proposal(),) * 3, lambda: None, Commit(), ())
     operation._draw = lambda probabilities: operation.sampled.copy_(probabilities.argmax(-1))
     operation()
     chosen = 27 if copy_epoch == 13 else 21

@@ -54,18 +54,16 @@ def test_admission_full_prompt_counts_prefix_hit_explicit_eos_and_uint64_seed():
     assert state.generated_tokens[2] == 0 and state.pending_token[2] == -1
     assert state.status[2] == FINISHED and state.eos_count[2] == 0
     assert state.ple_history[2].tolist() == [3, 4]
-    assert state.boundary_consumed_tokens[2] == -1
 
 
 def test_admission_uses_external_strided_snapshot_metadata():
     backing = torch.zeros((9, 128), dtype=torch.int64)
     state = DeviceRequestState.allocate("cpu", vocab_size=32,
-        consumed_tokens=backing[1:5, 0], ple_history=backing[1:5, 1:3],
-        boundary_consumed_tokens=backing[5:9, 0], boundary_history=backing[5:9, 1:3])
+        consumed_tokens=backing[1:5, 0], ple_history=backing[1:5, 1:3])
     state.admit(1, RequestAdmission(1, 13, eos_token_ids=()), [3] * 64,
                 consumed_tokens=64, ple_history=(3, 3))
     assert backing[2, :3].tolist() == [64, 3, 3]
-    assert backing[6, :3].tolist() == [64, 3, 3]
+    assert backing[6].count_nonzero() == 0
     assert backing[0].sum() == 0
 
 
@@ -356,11 +354,10 @@ def test_terminal_grammar_errors_stale_epochs_and_inactive_lanes():
 
 
 @CUDA
-def test_consumption_strided_snapshot_history_boundary_and_pending_guard():
+def test_consumption_strided_live_history_and_pending_guard():
     backing = torch.full((9, 128), -22, dtype=torch.int64, device="cuda")
     state = DeviceRequestState.allocate("cuda", vocab_size=128,
-        consumed_tokens=backing[1:5, 0], ple_history=backing[1:5, 1:3],
-        boundary_consumed_tokens=backing[5:9, 0], boundary_history=backing[5:9, 1:3])
+        consumed_tokens=backing[1:5, 0], ple_history=backing[1:5, 1:3])
     for slot in range(4):
         state.admit(slot, RequestAdmission(3, 123, eos_token_ids=()), list(range(90)),
                     consumed_tokens=63, ple_history=(61, 62))
@@ -385,9 +382,6 @@ def test_consumption_strided_snapshot_history_boundary_and_pending_guard():
         assert operation.ple_history.cpu().tolist() == [[61, 62]] * 4
         assert state.consumed_tokens.cpu().tolist() == [63, 63, 67, 66]
         assert state.ple_history[2].cpu().tolist() == [65, 66]
-        assert state.boundary_history[2].cpu().tolist() == [62, 63]
-        assert state.boundary_history[3].cpu().tolist() == [62, 70]
-        assert state.boundary_consumed_tokens.cpu().tolist() == [-1, -1, 64, 64]
         assert state.status[1] == ERROR and state.pending_token[1] == 91
         assert state.status[0] == 1 and state.pending_token[0] == 88
         assert torch.equal(state.histogram, histogram)
@@ -431,10 +425,8 @@ def test_native_admission_scatter_preserves_restored_state_and_gates_final_sampl
     worker = _worker({"init": init_graph, "sample": sample_graph}, {"records": records}, (admission, sampler, buffers, state))
     try:
         old_history = state.ple_history.clone()
-        old_boundary = state.boundary_history.clone()
         _replay(worker)
         assert torch.equal(state.ple_history, old_history)
-        assert torch.equal(state.boundary_history, old_boundary)
         assert state.consumed_tokens.cpu().tolist() == [3] * 4
         for slot in order[:capacity]:
             assert records[0, slot].cpu().tolist() == [17 + slot, 1, 3, 0, -1, 1, 0, 0]

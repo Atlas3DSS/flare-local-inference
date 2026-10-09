@@ -75,15 +75,11 @@ class DeviceRequestState:
     grammar_mask: torch.Tensor
     grammar_enabled: torch.Tensor
     ple_history: torch.Tensor
-    boundary_history: torch.Tensor
-    boundary_consumed_tokens: torch.Tensor
-    boundary_generation: torch.Tensor
 
     @classmethod
     def allocate(cls, device, *, vocab_size: int = VOCAB_SIZE,
-                 consumed_tokens: torch.Tensor | None = None, ple_history: torch.Tensor | None = None,
-                 boundary_history: torch.Tensor | None = None,
-                 boundary_consumed_tokens: torch.Tensor | None = None) -> DeviceRequestState:
+                 consumed_tokens: torch.Tensor | None = None,
+                 ple_history: torch.Tensor | None = None) -> DeviceRequestState:
         """Allocate four physical slots; smaller vocabularies are component tests.
 
         ``parameters`` columns are temperature, top-p, min-p, repetition,
@@ -97,11 +93,8 @@ class DeviceRequestState:
             return torch.zeros(shape, dtype=dtype, device=device)
         history = torch.full((SLOTS, 2), 248044, dtype=torch.int64, device=device) if ple_history is None else ple_history
         consumed = zeros(SLOTS) if consumed_tokens is None else consumed_tokens
-        boundary = history.clone() if boundary_history is None else boundary_history
-        boundary_consumed = zeros(SLOTS) if boundary_consumed_tokens is None else boundary_consumed_tokens
         actual_device = torch.empty(0, device=device).device
-        for tensor, shape, name in ((consumed, (SLOTS,), "consumed_tokens"), (history, (SLOTS, 2), "ple_history"),
-                (boundary, (SLOTS, 2), "boundary_history"), (boundary_consumed, (SLOTS,), "boundary_consumed_tokens")):
+        for tensor, shape, name in ((consumed, (SLOTS,), "consumed_tokens"), (history, (SLOTS, 2), "ple_history")):
             _check_tensor(tensor, shape, torch.int64, actual_device, name, contiguous=False)
             if any(stride <= 0 for stride in tensor.stride()) or (tensor.ndim == 2 and tensor.stride(1) != 1):
                 raise ValueError(f"{name} requires positive row stride and contiguous history columns")
@@ -114,7 +107,7 @@ class DeviceRequestState:
             torch.full((SLOTS, EOS_CAPACITY), -1, dtype=torch.int64, device=device),
             zeros(SLOTS, torch.int32),
             torch.full((SLOTS, triton.cdiv(vocab_size, 32)), -1, dtype=torch.int32, device=device),
-            zeros(SLOTS, torch.int32), history, boundary, boundary_consumed, zeros(SLOTS))
+            zeros(SLOTS, torch.int32), history)
 
     @property
     def vocab_size(self) -> int:
@@ -158,9 +151,6 @@ class DeviceRequestState:
         self.grammar_mask[slot].fill_(-1)
         self.grammar_enabled[slot] = 0
         self.ple_history[slot].copy_(torch.tensor(ple_history))
-        self.boundary_history[slot].copy_(torch.tensor(ple_history))
-        self.boundary_consumed_tokens[slot] = consumed_tokens if consumed_tokens % 64 == 0 else -1
-        self.boundary_generation[slot] = 0
 
 
 @dataclass(frozen=True)
@@ -322,7 +312,7 @@ def _normalize_probs(Probability, Mass, V: tl.constexpr, BLOCK: tl.constexpr):
 
 @triton.jit
 def _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
-                      token, status, error, active, candidate,
+                      token, status, error, active,
                       RECORD_FIELDS: tl.constexpr):
     fields = tl.arange(0, triton.next_power_of_2(RECORD_FIELDS))
     value = tl.full((triton.next_power_of_2(RECORD_FIELDS),), 0, tl.int64)
@@ -335,7 +325,7 @@ def _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated
     value = tl.where(fields == 6, tl.where(active, error, 0), value)
     if RECORD_FIELDS == 24:
         value = tl.where(fields == 8, (active & (token >= 0)).to(tl.int64), value)
-        value = tl.where(fields == 12, tl.where(active, candidate, -1), value)
+        value = tl.where(fields == 12, -1, value)
         value = tl.where(fields == 13, tl.where(active, tl.maximum(consumed - 1, 0), 0), value)
         value = tl.where(fields == 15, 1, value)
         value = tl.where(fields >= 16, -1, value)
@@ -347,8 +337,7 @@ def _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated
 @triton.jit
 def _complete(Maximum, Sampled, SampleValid, Mass, Slots, Epochs, Live, SampleEnabled, Generation, Consumed, Generated, Pending, Status, Error,
               Counter, Counts, Budget, Eos, EosCount, Records, Frame, Sequence,
-              BoundaryConsumed, BoundaryGeneration, V: tl.constexpr, ROWS: tl.constexpr,
-              CS: tl.constexpr, BCS: tl.constexpr,
+              V: tl.constexpr, ROWS: tl.constexpr, CS: tl.constexpr,
               RECORD_FIELDS: tl.constexpr, SAMPLE: tl.constexpr):
     slot = tl.program_id(0)
     rows = tl.arange(0, 4)
@@ -398,14 +387,8 @@ def _complete(Maximum, Sampled, SampleValid, Mass, Slots, Epochs, Live, SampleEn
         tl.store(Status + slot, state)
         tl.store(Error + slot, code)
     consumed = tl.load(Consumed + slot * CS)
-    candidate = tl.full((), -1, tl.int64)
-    if RECORD_FIELDS == 24:
-        boundary = tl.load(BoundaryConsumed + slot * BCS)
-        valid_boundary = (tl.load(BoundaryGeneration + slot) == epoch)
-        valid_boundary &= (boundary > 0) & (boundary % 64 == 0) & (boundary <= consumed)
-        candidate = tl.where(valid_boundary & (state != 3), boundary, -1)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
-                      token, state, code, matches_count > 0, candidate, RECORD_FIELDS)
+                      token, state, code, matches_count > 0, RECORD_FIELDS)
 
 
 def _check_tensor(tensor, shape, dtype, device, name, *, contiguous=True):
@@ -489,9 +472,7 @@ class PreparedSampling:
             state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
             state.error_code, state.rng_counter, state.histogram, state.max_new_tokens,
             state.eos_token_ids, state.eos_count, completion_records, frame_index, submission_sequence,
-            state.boundary_consumed_tokens, state.boundary_generation,
-            vocab, rows, state.consumed_tokens.stride(0),
-            state.boundary_consumed_tokens.stride(0), record_fields, True)
+            vocab, rows, state.consumed_tokens.stride(0), record_fields, True)
         self._prepared = False
 
     def prepare(self) -> None:
@@ -571,8 +552,7 @@ def _gather(Slots, Epochs, Live, Generation, Status, Pending, Consumed, History,
 
 @triton.jit
 def _consume(Tokens, CuSeq, Slots, Epochs, Live, Generation, Status, Error, Pending, Consumed,
-             History, BoundaryHistory, BoundaryConsumed, BoundaryGeneration, ROWS: tl.constexpr, CAPACITY: tl.constexpr,
-             CS: tl.constexpr, HS: tl.constexpr, BHS: tl.constexpr, BCS: tl.constexpr):
+             History, ROWS: tl.constexpr, CAPACITY: tl.constexpr, CS: tl.constexpr, HS: tl.constexpr):
     slot = tl.program_id(0)
     rows = tl.arange(0, 4)
     matches = (rows < ROWS) & (rows < tl.load(Live))
@@ -601,17 +581,6 @@ def _consume(Tokens, CuSeq, Slots, Epochs, Live, Generation, Status, Error, Pend
                 previous = tl.load(Tokens + end - 2, length >= 2, other=0)
                 previous = tl.where(length >= 2, previous, old_last)
                 final = consumed + length
-                boundary = (final // 64) * 64
-                if boundary > consumed:
-                    boundary_length = boundary - consumed
-                    boundary_end = start + boundary_length
-                    boundary_last = tl.load(Tokens + boundary_end - 1)
-                    boundary_previous = tl.load(Tokens + boundary_end - 2, boundary_length >= 2, other=0)
-                    boundary_previous = tl.where(boundary_length >= 2, boundary_previous, old_last)
-                    tl.store(BoundaryHistory + slot * BHS, boundary_previous)
-                    tl.store(BoundaryHistory + slot * BHS + 1, boundary_last)
-                    tl.store(BoundaryConsumed + slot * BCS, boundary)
-                    tl.store(BoundaryGeneration + slot, tl.load(Generation + slot))
                 tl.store(History + slot * HS, previous)
                 tl.store(History + slot * HS + 1, last)
                 tl.store(Consumed + slot * CS, final)
@@ -626,10 +595,6 @@ class PreparedTokenState:
     slot and its epoch. A pending sample can only be consumed as a one-token
     span containing that sample. Zero-token spans do not change state. Neither
     operation changes penalty counts or RNG state.
-
-    The boundary history names the greatest 64-token boundary crossed by the
-    span, not the final span tail. The model's KV/recurrent checkpoint must use
-    that same boundary before publishing it to the prefix cache.
     """
 
     def __init__(self, state: DeviceRequestState, token_ids, cu_seqlens, row_slot_ids, row_generations, live_rows):
@@ -652,10 +617,8 @@ class PreparedTokenState:
             state.consumed_tokens.stride(0), state.ple_history.stride(0))
         self._consume_args = (token_ids, cu_seqlens, row_slot_ids, row_generations, live_rows, state.generation,
             state.status, state.error_code, state.pending_token, state.consumed_tokens,
-            state.ple_history, state.boundary_history, state.boundary_consumed_tokens, state.boundary_generation,
-            rows, token_ids.numel(),
-            state.consumed_tokens.stride(0), state.ple_history.stride(0),
-            state.boundary_history.stride(0), state.boundary_consumed_tokens.stride(0))
+            state.ple_history, rows, token_ids.numel(),
+            state.consumed_tokens.stride(0), state.ple_history.stride(0))
         self._rows = rows
         self._prepared = False
 
@@ -730,7 +693,7 @@ def _admission_copy(Count, Slots, Errors, InputHistogram, InputGrammar, Histogra
 def _admission_finish(Count, Slots, Epochs, InputSeed, InputParams, InputTopK, InputBudget, InputEos, InputEosCount,
                       InputGrammarEnabled, Errors, Generation, Seed, Counter, Params, TopK, Budget, Eos, EosCount,
                       GrammarEnabled, Generated, Pending, Status, Error, Consumed, Records, Frame, Sequence,
-                      BoundaryGeneration, CAPACITY: tl.constexpr, CS: tl.constexpr, RECORD_FIELDS: tl.constexpr):
+                      CAPACITY: tl.constexpr, CS: tl.constexpr, RECORD_FIELDS: tl.constexpr):
     slot = tl.program_id(0)
     rows = tl.arange(0, 4)
     matches = (rows < tl.load(Count)) & (rows < CAPACITY) & (tl.load(Slots + rows) == slot)
@@ -757,7 +720,6 @@ def _admission_finish(Count, Slots, Epochs, InputSeed, InputParams, InputTopK, I
             tl.store(GrammarEnabled + slot, tl.load(InputGrammarEnabled + row))
             tl.store(Generated + slot, 0)
             tl.store(Pending + slot, -1)
-            tl.store(BoundaryGeneration + slot, 0)
             status = tl.where(budget > 0, 1, 2)
             tl.store(Status + slot, status)
             tl.store(Error + slot, 0)
@@ -766,7 +728,7 @@ def _admission_finish(Count, Slots, Epochs, InputSeed, InputParams, InputTopK, I
             code = tl.where(errors & 2 != 0, 4, 5)
             code = tl.where(errors >> 8 != 0, 64 + (errors >> 8), code)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, 0,
-                      -1, status, code, active, -1, RECORD_FIELDS)
+                      -1, status, code, active, RECORD_FIELDS)
 
 
 class PreparedAdmission:
@@ -775,7 +737,7 @@ class PreparedAdmission:
     Validation precedes mutation. Invalid rows and duplicate physical slots
     leave resident session state unchanged and emit error completion records.
     Epochs must increase on slot reuse. Consumed counts, PLE histories, and
-    model-state boundary candidates are owned by reset/restore and are untouched.
+    model state are owned by reset/restore and are untouched.
     """
 
     def __init__(self, state: DeviceRequestState, buffers: AdmissionBuffers,
@@ -807,7 +769,7 @@ class PreparedAdmission:
             b.admission_eos_count, b.admission_grammar_enabled, self.errors, state.generation, state.seed, state.rng_counter,
             state.parameters, state.top_k, state.max_new_tokens, state.eos_token_ids, state.eos_count, state.grammar_enabled,
             state.generated_tokens, state.pending_token, state.status, state.error_code, state.consumed_tokens,
-            completion_records, frame_index, submission_sequence, state.boundary_generation, capacity, state.consumed_tokens.stride(0), record_fields)
+            completion_records, frame_index, submission_sequence, capacity, state.consumed_tokens.stride(0), record_fields)
         self._grid = (capacity, triton.cdiv(vocab, 1024), 1)
         self._prepared = False
 

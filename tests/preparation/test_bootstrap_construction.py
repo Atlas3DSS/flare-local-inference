@@ -586,6 +586,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         assert args["completion_records"].dtype == torch.int64
         pool = args["state"].pool
         assert pool.backing.dtype == torch.uint8
+        assert pool.backing.shape[0] == 5 + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else 28)
         assert decoder.scratch.residual.dtype == torch.bfloat16
         assert decoder.scratch.logits.dtype == torch.bfloat16
         assert pool.layout.speculative_tokens == (0 if proposal == "ordinary" else 7)
@@ -600,7 +601,11 @@ def test_prepare_model_constructs_real_catalog_on_meta(
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
     assert len(constructors["PreparedMTP"]) == (34 if proposal == "mtp" else 0)
-    assert len(constructors["PreparedDraftCache"]) == (1 if proposal == "mtp" else 0)
+    assert len(constructors["PreparedCheckpointCaches"]) == 9
+    for owner, _ in constructors["PreparedMaintenance"]:
+        assert owner.transfers.exact.pool is owner.pool
+        assert owner.transfers.exact.tables is owner.forward_inputs.page_tables
+        assert (owner.transfers.exact.draft is not None) == (proposal == "mtp")
     assert len(constructors["PreparedStochasticVerification"]) == (
         0 if proposal == "ordinary" else 14
     )

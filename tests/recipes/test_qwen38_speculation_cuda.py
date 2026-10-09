@@ -190,8 +190,6 @@ def test_native_flashinfer_one_hot_all_prefix_lengths_and_clipping(width):
             assert commit.commit_column.cpu().tolist() == [accepted] * 4
             assert state.pending_token.cpu().tolist() == [100] * 4
             assert state.consumed_tokens.cpu().tolist() == [64 + accepted] * 4
-            assert state.boundary_history.cpu().tolist() == [[2, 3]] * 4
-            assert state.boundary_consumed_tokens.cpu().tolist() == [64] * 4
         restore()
         reset_probabilities()
         state.max_new_tokens.fill_(2)

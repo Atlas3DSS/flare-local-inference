@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from .decoder import PreparedDecoder
-from .draft_state import DraftMetadata, PreparedDraftCache
+from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
 from .mtp import MTPScratch, PreparedMTP
 from .speculation import (
     DRAFT_RNG_DOMAIN, PreparedCopyProposals, PreparedSpeculativeCommit,
@@ -43,8 +43,6 @@ class SpeculativePreparation:
         self.rng = SpeculativeRngState.allocate(device)
         self.draft_rng_generation = torch.zeros(4, dtype=torch.int64, device=device)
         self.draft_rng_offset = torch.zeros(4, dtype=torch.int64, device=device)
-        self.draft_cache = (PreparedDraftCache(pool, requests, cache[48], self.draft_tables, self.previous_accepted)
-                            if proposal_source == "mtp" else None)
         self.mtp_scratch = MTPScratch.allocate(prefill_capacity, 4, device) if proposal_source == "mtp" else None
         self.owners, self.decoders, self.mtp_modules = [], [], []
 
@@ -75,20 +73,7 @@ class SpeculativePreparation:
         return operation
 
     def resume(self, resume):
-        if self.proposal_source == "copy":
-            return resume
-        owner = self
-
-        class Resume:
-            def __call__(self):
-                rows = resume.sample_hidden.shape[0]
-                owner.draft_cache.ensure(owner.inputs.row_slot_ids[:rows],
-                    owner.inputs.row_generations[:rows], owner.inputs.live_rows)
-                resume()
-
-        operation = Resume()
-        self.owners.append(operation)
-        return operation
+        return resume
 
     def round(self, batch, width, name):
         operation = PreparedSpeculativeRound(self, batch, width, name)
@@ -99,8 +84,6 @@ class SpeculativePreparation:
         self.cache = cache
         for module in self.mtp_modules:
             module.rebind_pages_for_preparation(cache[48])
-        if self.draft_cache is not None:
-            self.draft_cache.rebind_pages_for_preparation(cache[48])
 
 
 class PreparedPrefillAbsorption:
@@ -116,14 +99,11 @@ class PreparedPrefillAbsorption:
         self.previous = torch.zeros((1, 10240), dtype=torch.bfloat16, device=device)
         self.previous_rope = torch.zeros((1, 3), dtype=torch.int64, device=device)
         self.before = torch.zeros(1, dtype=torch.int64, device=device)
-        self.boundary = torch.full((1,), -1, dtype=torch.int64, device=device)
         self.indices = torch.arange(tokens, device=device)
-        self.snapshot = owner.draft_cache.snapshot(self.mtp, owner.inputs.row_slot_ids[:1], self.boundary)
 
     def __call__(self):
         o, state, m = self.owner, self.decoder.state, self.metadata
         slots = o.inputs.row_slot_ids[:1]
-        o.draft_cache.ensure(slots, o.inputs.row_generations[:1], o.inputs.live_rows)
         safe = slots.long().clamp(0, 3)
         self.before.copy_(o.requests.consumed_tokens[safe])
         self.previous.copy_(o.pool.region("target_residual")[safe + 1])
@@ -142,10 +122,7 @@ class PreparedPrefillAbsorption:
         m.set(slots, lengths, (self.before - 1).clamp_min(0), state.ple.token_ids[indices],
               hidden, rope, o.draft_tables, capacity=self.indices.numel())
         self.mtp()
-        final = self.before + length
-        boundary = final // 64 * 64
-        self.boundary.copy_(torch.where(active & (boundary > self.before), boundary, -1))
-        self.snapshot()
+
 
 
 class PreparedSpeculativeRound:
@@ -181,7 +158,7 @@ class PreparedSpeculativeRound:
         self.offered = torch.full((batch,), width - 1, dtype=torch.int32, device=device)
         self.copy_mask = torch.zeros(batch, dtype=torch.int64, device=device)
         self.raw_backup = ({} if self.copy_only else
-            {name: torch.empty_like(getattr(owner.cache[48], name)) for name, _ in owner.draft_cache.raw_fields})
+            {name: torch.empty_like(getattr(owner.cache[48], name)) for name in DRAFT_RAW_FIELDS})
         self.rows = torch.arange(batch, device=device)
         self.columns = torch.arange(width, device=device)
         self.seed = torch.zeros(batch, dtype=torch.int64, device=device)
@@ -227,8 +204,7 @@ class PreparedSpeculativeRound:
         self.state.prepare_commit(commit.emitted_count, commit.consumed_before,
                                   self.target_residual, self.decoder.scratch.sample_hidden)
         model_commit = tuple(self.state._commit)
-        snapshot = None if self.copy_only else o.draft_cache.snapshot(self.absorb, slots, commit.candidate_consumed)
-        self.operations = (target, proposals, verify, commit, model_commit, snapshot)
+        self.operations = (target, proposals, verify, commit, model_commit)
 
     def _draw(self, probabilities=None):
         if probabilities is None:
@@ -245,10 +221,8 @@ class PreparedSpeculativeRound:
         o, b, w = self.owner, self.batch, self.width
         if self.operations is None:
             raise RuntimeError("speculative round prepare() must complete before capture")
-        target, proposals, verify, commit, model_commit, snapshot = self.operations
+        target, proposals, verify, commit, model_commit = self.operations
         slots = o.inputs.row_slot_ids[:b]
-        if not self.copy_only:
-            o.draft_cache.ensure(slots, o.inputs.row_generations[:b], o.inputs.live_rows)
         self.state._validate()
         if self.copy_only:
             self.copy_proposals()
@@ -313,4 +287,3 @@ class PreparedSpeculativeRound:
         self.absorb_metadata.set(slots, commit.emitted_count.long(), self.before - 1,
             self.state.token_ids, hidden, rope, o.draft_tables, capacity=w)
         self.absorb()
-        snapshot()

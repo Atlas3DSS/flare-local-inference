@@ -132,10 +132,6 @@ def cpu_case(artifact, rows, block_steps, policy, *, one_sample=False):
             previous = int(expected["ple_history"][slot, 1])
             expected["ple_history"][slot] = torch.tensor([previous, token])
             expected["consumed_tokens"][slot] = consumed + 1
-            if (consumed + 1) % 64 == 0:
-                expected["boundary_history"][slot] = expected["ple_history"][slot]
-                expected["boundary_consumed_tokens"][slot] = consumed + 1
-                expected["boundary_generation"][slot] = parameters[row].generation
     expected = {"state." + name: value for name, value in expected.items()}
     expected.update(sampled_ids=trace, completion_records=records)
     return {"name": f"{policy}-b{rows}-n{block_steps}" + ("-one-sample" if one_sample else ""),

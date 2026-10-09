@@ -360,6 +360,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
     let prompt = vec![7; 65];
     let handle = scheduler
         .admit(RequestSpec {
+            system_boundary: None,
             prompt: prompt.clone(),
             conditioning: vec![],
             max_new_tokens: 16,
@@ -411,8 +412,9 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         };
         scheduler.complete(Fence(fence), &records).unwrap();
     }
-    for fence in [3, 4] {
-        admissions[0].as_mut().unwrap().sampling.temperature = if fence == 3 { 0. } else { 1. };
+    retain_prompt(&mut scheduler, 3);
+    for fence in [4, 5] {
+        admissions[0].as_mut().unwrap().sampling.temperature = if fence == 4 { 0. } else { 1. };
         let step = scheduler.next_step().unwrap();
         assert_eq!(step.token_capacity, 8);
         scheduler.record_submission(&step, Fence(fence)).unwrap();
@@ -428,7 +430,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
             .unwrap();
         assert_eq!(
             i64::from_le_bytes(expected.bytes[..8].try_into().unwrap()),
-            65 + fence as i64 - 3
+            65 + fence as i64 - 4
         );
         let count = uploads
             .iter()
@@ -474,7 +476,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
             emitted_count: 1,
             offered_drafts: 7,
             accepted_drafts: 0,
-            draft_cache_consumed: 65 + fence as i64 - 3,
+            draft_cache_consumed: 65 + fence as i64 - 4,
             verification_width: 8,
             ..Default::default()
         };
@@ -482,8 +484,8 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         records[0] = CompletionRecord {
             generation: handle.generation as i64,
             submission_sequence: fence as i64,
-            consumed_tokens: 66 + fence as i64 - 3,
-            generated_tokens: fence as i64 - 1,
+            consumed_tokens: 66 + fence as i64 - 4,
+            generated_tokens: fence as i64 - 2,
             token_id: 7,
             status: 1,
             vector: Some(vector),
@@ -630,6 +632,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
+            system_boundary: None,
             prompt: vec![7; 65],
             conditioning: vec![],
             max_new_tokens: 4,
@@ -735,8 +738,9 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         ..Default::default()
     };
     scheduler.complete(Fence(2), &records).unwrap();
+    retain_prompt(&mut scheduler, 3);
     let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(3)).unwrap();
+    scheduler.record_submission(&step, Fence(4)).unwrap();
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
@@ -768,6 +772,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
     let prompt: Vec<u32> = (0..4113).collect();
     let handle = scheduler
         .admit(RequestSpec {
+            system_boundary: None,
             prompt: prompt.clone(),
             conditioning: vec![],
             max_new_tokens: 4,
@@ -949,6 +954,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         .map(|slot| {
             scheduler
                 .admit(RequestSpec {
+                    system_boundary: None,
                     prompt: vec![7; 65],
                     conditioning: vec![],
                     max_new_tokens: 16,
@@ -1012,6 +1018,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         ..Default::default()
     };
     scheduler.complete(Fence(2), &completed).unwrap();
+    retain_prompt(&mut scheduler, 3);
     let masks = [vec![1; words], vec![2; words], vec![4; words]].concat();
     scheduler
         .set_copy_proposal(
@@ -1026,7 +1033,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         .unwrap();
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.token_capacity, 3);
-    scheduler.record_submission(&step, Fence(3)).unwrap();
+    scheduler.record_submission(&step, Fence(4)).unwrap();
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
@@ -1062,7 +1069,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     assert!(!uploads.iter().any(|u| u.buffer == "draft_page_tables"));
     completed[2] = CompletionRecord {
         generation: handle.generation as i64,
-        submission_sequence: 3,
+        submission_sequence: 4,
         consumed_tokens: 66,
         generated_tokens: 2,
         token_id: 10,
@@ -1079,7 +1086,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         }),
         ..Default::default()
     };
-    scheduler.complete(Fence(3), &completed).unwrap();
+    scheduler.complete(Fence(4), &completed).unwrap();
     scheduler
         .set_copy_proposal(
             handle,
@@ -1093,7 +1100,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         .unwrap();
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.token_capacity, 1);
-    scheduler.record_submission(&step, Fence(4)).unwrap();
+    scheduler.record_submission(&step, Fence(5)).unwrap();
     inputs
         .pack(&config, &scheduler, &step, &admissions)
         .unwrap();
@@ -1142,13 +1149,13 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
     let mut value = body.clone();
     value.as_object_mut().unwrap().remove("model_contract");
     cases.push(value);
-    for invalid in [json!(null), json!({}), json!("qwen4exp.graph-inputs.v1")] {
+    for invalid in [json!(null), json!({}), json!("qwen4exp.graph-inputs.v2")] {
         let mut value = body.clone();
         value["model_contract"] = invalid;
         cases.push(value);
     }
     for (key, invalid) in [
-        ("schema", json!("qwen4exp.graph-inputs.v2")),
+        ("schema", json!("qwen4exp.graph-inputs.v1")),
         ("vocabulary", json!(248319)),
         ("vocabulary", json!(true)),
         ("extra", json!(0)),
@@ -1193,7 +1200,7 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
 }
 
 #[test]
-fn model_interprets_draft_cache_and_exported_boundary_without_inferring_abi3_candidate() {
+fn model_validates_draft_cache_and_completion_vocabulary() {
     use crate::execution::TokenVector;
     let mut config = config();
     config.speculative_widths = vec![1, 2, 4, 8];
@@ -1203,17 +1210,33 @@ fn model_interprets_draft_cache_and_exported_boundary_without_inferring_abi3_can
         status: 1,
         ..Default::default()
     };
-    assert_eq!(Qwen4Exp::candidate_boundary(&record), 64);
     record.vector = Some(TokenVector {
         emitted_count: 1,
         tokens: [7, -1, -1, -1, -1, -1, -1, -1],
         draft_cache_consumed: 64,
         ..Default::default()
     });
-    assert_eq!(Qwen4Exp::candidate_boundary(&record), 0);
     Qwen4Exp::validate_completion(&config, GraphKind::Speculative, &record).unwrap();
-    record.vector.as_mut().unwrap().candidate_consumed = 64;
-    assert_eq!(Qwen4Exp::candidate_boundary(&record), 64);
+    for value in [0, 64, 65, -2] {
+        record.vector.as_mut().unwrap().model_reserved = value;
+        for kind in [
+            GraphKind::Prefill,
+            GraphKind::Decode,
+            GraphKind::Speculative,
+            GraphKind::Resume,
+            GraphKind::Init,
+            GraphKind::Restore,
+            GraphKind::Snapshot,
+            GraphKind::Vision,
+        ] {
+            assert!(
+                Qwen4Exp::validate_completion(&config, kind, &record)
+                    .unwrap_err()
+                    .contains("field 12")
+            );
+        }
+    }
+    record.vector.as_mut().unwrap().model_reserved = -1;
     config.speculative_proposal_source = crate::scheduler::speculation::ProposalSource::Copy;
     assert!(Qwen4Exp::validate_completion(&config, GraphKind::Speculative, &record).is_err());
     record.vector.as_mut().unwrap().draft_cache_consumed = -1;
@@ -1240,6 +1263,7 @@ fn state_transfer_and_resume_upload_fixture() {
         let prompt = vec![7; 64];
         let handle = scheduler
             .admit(RequestSpec {
+                system_boundary: None,
                 prompt: prompt.clone(),
                 conditioning: vec![],
                 max_new_tokens: 2,
@@ -1262,17 +1286,19 @@ fn state_transfer_and_resume_upload_fixture() {
             vec![
                 (1, GraphKind::Init, 0, 0, -1, 1),
                 (2, GraphKind::Prefill, 64, 1, 7, 1),
-                (3, GraphKind::Decode, 65, 2, 8, 2),
-                (4, GraphKind::Snapshot, 65, 2, -1, 1),
+                (3, GraphKind::Snapshot, 64, 1, -1, 1),
+                (4, GraphKind::Decode, 65, 2, 8, 2),
+                (5, GraphKind::Snapshot, 65, 2, -1, 1),
             ]
         } else {
             vec![
                 (1, GraphKind::Restore, 64, 0, -1, 1),
                 (2, GraphKind::Resume, 64, 1, 7, 1),
                 (3, GraphKind::Decode, 65, 2, 8, 2),
+                (4, GraphKind::Snapshot, 65, 2, -1, 1),
             ]
         } {
-            let fence = Fence(cycle * 4 + offset);
+            let fence = Fence(cycle * 5 + offset);
             let step = scheduler.next_step().unwrap();
             assert_eq!(step.kind, kind);
             scheduler.record_submission(&step, fence).unwrap();
@@ -1281,6 +1307,30 @@ fn state_transfer_and_resume_upload_fixture() {
                 .unwrap();
             wire_fixture.observe(&inputs.uploads());
             assert!(!inputs.uploads().is_empty());
+            if matches!(
+                kind,
+                GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot
+            ) {
+                let uploads = inputs.uploads();
+                let values = |name| {
+                    uploads
+                        .iter()
+                        .find(|u| u.buffer == name)
+                        .unwrap()
+                        .bytes
+                        .chunks_exact(8)
+                        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(values("state_expected_consumed"), [consumed, -1, -1, -1]);
+                if kind == GraphKind::Snapshot {
+                    assert_eq!(values("state_source_slots"), [1, 0, 0, 0]);
+                    assert_eq!(
+                        values("state_destination_slots")[0],
+                        5 + scheduler.request(handle).unwrap().snapshot_destination().0 as i64
+                    );
+                }
+            }
             let mut records = [CompletionRecord::default(); 4];
             records[handle.slot as usize] = CompletionRecord {
                 generation: handle.generation as i64,
@@ -1291,9 +1341,6 @@ fn state_transfer_and_resume_upload_fixture() {
                 status,
                 ..Default::default()
             };
-            if cycle == 0 && kind == GraphKind::Prefill {
-                scheduler.record_candidate(handle, 64, fence).unwrap();
-            }
             scheduler.complete(fence, &records).unwrap();
         }
         scheduler.finish(handle).unwrap();
@@ -1360,7 +1407,10 @@ impl WireFixture {
     fn observe(&mut self, uploads: &[crate::execution::Upload<'_>]) {
         use blake2::{Blake2b512, Digest};
         let mut hash = Blake2b512::new();
-        for upload in uploads {
+        for upload in uploads.iter().filter(|u| {
+            self.name == "state_transfer_and_resume_upload_fixture"
+                || u.buffer != "state_expected_consumed"
+        }) {
             hash.update((upload.buffer.len() as u64).to_le_bytes());
             hash.update(upload.buffer.as_bytes());
             hash.update((upload.offset as u64).to_le_bytes());
@@ -1396,5 +1446,221 @@ impl Drop for WireFixture {
                 .count();
             assert_eq!(self.index, count, "{} packing fixture coverage", self.name);
         }
+    }
+}
+
+fn retain_prompt(s: &mut RequestScheduler, fence: u64) {
+    let step = s.next_step().unwrap();
+    assert_eq!(step.kind, GraphKind::Snapshot);
+    s.record_submission(&step, Fence(fence)).unwrap();
+    let mut records = [CompletionRecord::default(); 4];
+    for lane in &step.lanes {
+        let request = s.request(lane.request).unwrap();
+        records[lane.request.slot as usize] = CompletionRecord {
+            generation: lane.request.generation as i64,
+            submission_sequence: fence as i64,
+            consumed_tokens: request.consumed_tokens as i64,
+            generated_tokens: request.generated_tokens as i64,
+            token_id: -1,
+            status: 1,
+            ..Default::default()
+        };
+    }
+    s.complete(Fence(fence), &records).unwrap();
+}
+
+#[test]
+fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
+    for end in [1usize, 2, 3, 15, 63, 64, 65, 66, 67] {
+        for mtp in [false, true] {
+            let mut config = config();
+            if mtp {
+                config.speculative_widths = vec![1, 2, 4, 8];
+            }
+            let mut scheduler = RequestScheduler::new(
+                config.identity,
+                config.limits,
+                Qwen4Exp::scheduler_capabilities(&config),
+            )
+            .unwrap();
+            if mtp {
+                scheduler
+                    .enable_speculation(&config.speculative_widths)
+                    .unwrap();
+            }
+            let spec = |token| RequestSpec {
+                prompt: vec![token; end],
+                system_boundary: None,
+                conditioning: vec![],
+                max_new_tokens: 1,
+                grammar_constrained: false,
+                host_stops: false,
+            };
+            let seed = scheduler.admit(spec(7)).unwrap();
+            let mut fence = 0;
+            for kind in [GraphKind::Init, GraphKind::Prefill, GraphKind::Snapshot] {
+                fence += 1;
+                let step = scheduler.next_step().unwrap();
+                assert_eq!(step.kind, kind);
+                scheduler.record_submission(&step, Fence(fence)).unwrap();
+                let generated = i64::from(kind != GraphKind::Init);
+                let mut records = [CompletionRecord::default(); 4];
+                records[0] = CompletionRecord {
+                    generation: seed.generation as i64,
+                    submission_sequence: fence as i64,
+                    consumed_tokens: if kind == GraphKind::Init {
+                        0
+                    } else {
+                        end as i64
+                    },
+                    generated_tokens: generated,
+                    token_id: if kind == GraphKind::Prefill { 8 } else { -1 },
+                    status: if kind == GraphKind::Prefill { 2 } else { 1 },
+                    ..Default::default()
+                };
+                scheduler.complete(Fence(fence), &records).unwrap();
+            }
+            let checkpoint = scheduler.finish(seed).unwrap().unwrap();
+            let blocked = scheduler.admit(spec(9)).unwrap();
+            let restored = scheduler.admit(spec(7)).unwrap();
+            assert_eq!(restored.slot, 1);
+            fence += 1;
+            let init = scheduler.next_step().unwrap();
+            assert_eq!(init.kind, GraphKind::Init);
+            scheduler.record_submission(&init, Fence(fence)).unwrap();
+            let mut records = [CompletionRecord::default(); 4];
+            records[blocked.slot as usize] = CompletionRecord {
+                generation: blocked.generation as i64,
+                submission_sequence: fence as i64,
+                token_id: -1,
+                status: 1,
+                ..Default::default()
+            };
+            scheduler.complete(Fence(fence), &records).unwrap();
+            fence += 1;
+            let step = scheduler.next_step().unwrap();
+            assert_eq!(step.kind, GraphKind::Restore);
+            scheduler.record_submission(&step, Fence(fence)).unwrap();
+            let mut admissions = std::array::from_fn(|_| None);
+            admissions[1] = Some(Admission {
+                handle: restored,
+                sampling: SamplingParameters::default(),
+                max_new_tokens: 1,
+                prompt: vec![7; end],
+                positions: (0..end).map(|i| [i as i64; 3]).collect(),
+                vision_token_indices: vec![-1; end],
+                grammar_mask: None,
+                ignore_eos: false,
+            });
+            let mut inputs = Inputs::new();
+            inputs
+                .pack(&config, &scheduler, &step, &admissions)
+                .unwrap();
+            let uploads = inputs.uploads();
+            let i64s = |name| {
+                uploads
+                    .iter()
+                    .find(|u| u.buffer == name)
+                    .unwrap()
+                    .bytes
+                    .chunks_exact(8)
+                    .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(i64s("state_expected_consumed"), [end as i64, -1, -1, -1]);
+            assert_eq!(
+                i64s("state_source_slots"),
+                [
+                    5 + scheduler
+                        .cache()
+                        .checkpoint(checkpoint)
+                        .unwrap()
+                        .snapshot()
+                        .0 as i64,
+                    0,
+                    0,
+                    0
+                ]
+            );
+            assert_eq!(i64s("state_destination_slots"), [2, 0, 0, 0]);
+            let pages = scheduler
+                .request(restored)
+                .unwrap()
+                .pages()
+                .collect::<Vec<_>>();
+            assert_eq!(pages.len(), end.div_ceil(64) + usize::from(mtp));
+            let table = uploads.iter().find(|u| u.buffer == "page_tables").unwrap();
+            assert_eq!(table.offset, config.limits.max_sequence_tokens / 64 * 4);
+            assert_eq!(
+                table.bytes,
+                pages
+                    .iter()
+                    .flat_map(|p| (p.0 as i32).to_le_bytes())
+                    .collect::<Vec<_>>()
+            );
+            if mtp {
+                let table = uploads
+                    .iter()
+                    .find(|u| u.buffer == "draft_page_tables")
+                    .unwrap();
+                assert_eq!(table.offset, config.limits.max_sequence_tokens / 64 * 4);
+                assert_eq!(
+                    table.bytes,
+                    pages[1..]
+                        .iter()
+                        .flat_map(|p| (p.0 as i32).to_le_bytes())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
+    for mtp in [false, true] {
+        let mut config = config();
+        if mtp {
+            config.speculative_widths = vec![1, 2, 4, 8];
+        }
+        let valid = manifest(&config);
+        Qwen4Exp::validate(&config, &valid).unwrap();
+        for kind in [GraphKind::Init, GraphKind::Restore, GraphKind::Snapshot] {
+            let mut broken = valid.clone();
+            for graph in broken.graphs.iter_mut().filter(|g| g.kind == kind) {
+                graph
+                    .input_bindings
+                    .retain(|b| b.buffer_name != "state_expected_consumed");
+            }
+            assert!(
+                Qwen4Exp::validate(&config, &broken)
+                    .unwrap_err()
+                    .contains("state_expected_consumed")
+            );
+        }
+        for kind in [GraphKind::Restore, GraphKind::Snapshot] {
+            for name in ["page_tables", "draft_page_tables"]
+                .into_iter()
+                .take(if mtp { 2 } else { 1 })
+            {
+                let mut broken = valid.clone();
+                for graph in broken.graphs.iter_mut().filter(|g| g.kind == kind) {
+                    graph.input_bindings.retain(|b| b.buffer_name != name);
+                }
+                assert!(
+                    Qwen4Exp::validate(&config, &broken)
+                        .unwrap_err()
+                        .contains(name)
+                );
+            }
+        }
+        let mut broken = valid;
+        broken
+            .buffers
+            .iter_mut()
+            .find(|b| b.name == "state_expected_consumed")
+            .unwrap()
+            .shape = vec![2, 2];
+        assert!(Qwen4Exp::validate(&config, &broken).is_err());
     }
 }

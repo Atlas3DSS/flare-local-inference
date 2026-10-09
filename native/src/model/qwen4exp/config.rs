@@ -108,7 +108,7 @@ impl Qwen4Exp {
             || config.limits.pages == 0
             || config.limits.pages > i32::MAX as u32
             || config.limits.snapshots == 0
-            || config.limits.snapshots > i32::MAX as u32 - 9
+            || config.limits.snapshots > i32::MAX as u32 - 5
             || config.contract.vision.features_per_request == 0
             || config.max_new_tokens == 0
             || config.max_new_tokens > i32::MAX as u32
@@ -213,6 +213,26 @@ impl Qwen4Exp {
                 }
             }
         }
+        if matches!(kind, GraphKind::Restore | GraphKind::Snapshot) {
+            for name in [
+                Some("page_tables"),
+                config.has_draft_cache().then_some("draft_page_tables"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !graph
+                    .input_bindings
+                    .iter()
+                    .any(|input| input.buffer_name == name)
+                {
+                    return Err(format!(
+                        "prepared graph {} lacks required input {name}",
+                        graph.name
+                    ));
+                }
+            }
+        }
         for name in required_inputs(kind) {
             if !graph
                 .input_bindings
@@ -277,6 +297,7 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
             vec![4, config.contract.vocabulary.div_ceil(32)],
         ),
         ("admission_grammar_enabled", I32, vec![4]),
+        ("state_expected_consumed", I64, vec![4]),
         ("state_source_slots", I64, vec![4]),
         ("state_destination_slots", I64, vec![4]),
         ("state_operation", I32, vec![4]),
@@ -301,6 +322,7 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "admission_histogram",
             "admission_grammar_mask",
             "admission_grammar_enabled",
+            "state_expected_consumed",
             "state_source_slots",
             "state_destination_slots",
             "state_operation",
@@ -309,6 +331,7 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "state_num_ops",
         ],
         GraphKind::Snapshot => &[
+            "state_expected_consumed",
             "state_source_slots",
             "state_destination_slots",
             "state_operation",

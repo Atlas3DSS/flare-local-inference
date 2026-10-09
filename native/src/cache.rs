@@ -224,9 +224,11 @@ impl PrefixCheckpointCache {
     ) -> Result<PublishResult> {
         self.history_matches(history)?;
         let prefix = history.key_at(proposal.consumed_tokens).ok_or(
-            "checkpoint endpoint must be a complete 64-token boundary in the supplied history",
+            "checkpoint endpoint must be an existing nonempty prefix in the supplied history",
         )?;
-        if proposal.snapshot.consumed_tokens != proposal.consumed_tokens {
+        if proposal.consumed_tokens == 0
+            || proposal.snapshot.consumed_tokens != proposal.consumed_tokens
+        {
             return Err(
                 "snapshot consumed-token length must exactly equal the checkpoint endpoint".into(),
             );
@@ -251,9 +253,12 @@ impl PrefixCheckpointCache {
             .consumed_tokens
             .checked_sub(parent_len)
             .ok_or("checkpoint endpoint precedes its parent")?;
-        if tail_tokens == 0 || tail_tokens / PAGE_SIZE as u64 != proposal.tail_pages.len() as u64 {
+        if tail_tokens == 0
+            || proposal.consumed_tokens / PAGE_SIZE as u64 - parent_len / PAGE_SIZE as u64
+                != proposal.tail_pages.len() as u64
+        {
             return Err(
-                "checkpoint must extend its parent with exactly one private page per 64 tokens"
+                "checkpoint must extend its parent and transfer exactly the additional complete pages"
                     .into(),
             );
         }
@@ -327,18 +332,20 @@ impl PrefixCheckpointCache {
 
     pub fn lookup(&mut self, history: &PrefixHistory) -> Result<Lookup> {
         self.history_matches(history)?;
-        let mut selected = None;
-        for prefix in history.aligned_boundaries() {
-            if let Some(id) = self.prefixes.get(prefix).copied() {
-                if self.nodes[&id].ready {
-                    self.clock = self
-                        .clock
-                        .checked_add(1)
-                        .ok_or("cache access clock exhausted")?;
-                    self.nodes.get_mut(&id).unwrap().accessed = self.clock;
-                    selected = Some(id);
-                }
-            }
+        let selected = self
+            .nodes
+            .values()
+            .filter(|node| {
+                node.ready && history.key_at(node.prefix.consumed_tokens) == Some(node.prefix)
+            })
+            .max_by_key(|node| node.prefix.consumed_tokens)
+            .map(|node| node.id);
+        if let Some(id) = selected {
+            self.clock = self
+                .clock
+                .checked_add(1)
+                .ok_or("cache access clock exhausted")?;
+            self.nodes.get_mut(&id).unwrap().accessed = self.clock;
         }
         match selected {
             None => Ok(Lookup {

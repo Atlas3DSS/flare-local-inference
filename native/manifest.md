@@ -107,7 +107,7 @@ ABI3 appends these fields at zero-based indices:
 | 9 | Offered draft count, 0 through width minus one |
 | 10 | Accepted drafts within the emitted prefix |
 | 11 | Bitmask of offered drafts supplied by copying; bit zero is the first draft |
-| 12 | Exact exported candidate consumed count, positive and 64-aligned, or `-1` when none was exported |
+| 12 | Model-reserved field; the `qwen4exp.graph-inputs.v2` contract requires `-1` |
 | 13 | Committed draft-cache length, `max(consumed_tokens-1,0)`; `-1` for a copy-only speculative round with no draft cache |
 | 14 | Reserved, `0` |
 | 15 | Verification width, an integer from 1 through 8 |
@@ -119,8 +119,9 @@ the latter occurs when EOS or the output budget clips inside the accepted draft
 prefix. It never exceeds the offered count. Ordinary sampling emits at most
 one token and reports width one. Maintenance and non-sampling prefill emit
 zero tokens. Every graph in an ABI3 catalog writes the 24-field layout.
-The executor validates vector bounds, padding, epochs and reserved fields
-before delivering records to the scheduler.
+The executor validates vector bounds, padding, epochs and transport-reserved
+fields before delivering records. The model contract validates field 12 before
+request state advances.
 
 The lane index is the physical request slot 0–3. A captured finalizer scatters
 packed model rows through the request-slot mapping. Every launch writes the

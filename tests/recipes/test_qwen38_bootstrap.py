@@ -268,3 +268,19 @@ def test_drained_owner_can_retry_incomplete_resource_cleanup(monkeypatch):
     assert not model.resources and not model.graphs and not model.buffers
     gc.collect()
     assert weights() is None
+
+
+@pytest.mark.parametrize("proposal", ["mtp", "copy"])
+def test_snapshot_budget_covers_the_selected_speculative_layout(proposal):
+    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig
+    from sparkgap.recipes.qwen38.state import HybridStateLayout
+
+    ordinary = HybridStateLayout.build().row_bytes
+    speculative = HybridStateLayout.build(speculative_tokens=7).row_bytes
+    assert speculative > ordinary
+    PreparationConfig(snapshot_budget_bytes=ordinary)
+    with pytest.raises(ValueError, match="at least one state row"):
+        PreparationConfig(mtp=True, speculative_proposal_source=proposal, snapshot_budget_bytes=ordinary)
+    config = PreparationConfig(mtp=True, speculative_proposal_source=proposal,
+                               snapshot_budget_bytes=speculative)
+    assert config.snapshot_budget_bytes == speculative

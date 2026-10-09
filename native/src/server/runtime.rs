@@ -485,6 +485,7 @@ fn run_loop<'a, M: ModelContract>(
                 continue;
             }
             let spec = RequestSpec {
+                system_boundary: incoming.prompt.system_boundary,
                 prompt: incoming.prompt.tokens.clone(),
                 conditioning: incoming.prompt.conditioning.clone(),
                 max_new_tokens: incoming.prompt.max_new_tokens,
@@ -550,37 +551,6 @@ fn run_loop<'a, M: ModelContract>(
             for record in &completion.records {
                 if record.status != 0 {
                     M::validate_completion(config, kind, record)?;
-                }
-            }
-            if matches!(
-                kind,
-                GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative
-            ) {
-                for request in active.iter().flatten() {
-                    let record = completion.records[request.request.slot as usize];
-                    if (record.status == 1 || record.status == 2)
-                        && record.generation == request.request.generation as i64
-                    {
-                        let boundary = M::candidate_boundary(&record);
-                        let prefix = scheduler
-                            .request(request.request)?
-                            .prefix()
-                            .map(|id| {
-                                scheduler
-                                    .cache()
-                                    .checkpoint(id)
-                                    .map(|entry| entry.prefix().consumed_tokens)
-                            })
-                            .transpose()?
-                            .unwrap_or(0);
-                        if boundary > prefix {
-                            scheduler.record_candidate(
-                                request.request,
-                                boundary,
-                                completion.fence,
-                            )?;
-                        }
-                    }
                 }
             }
             let measured_step = completion
@@ -1039,7 +1009,7 @@ mod tests {
             outstanding: usize,
         ) -> ScheduledStep {
             let step = scheduler.next_step().unwrap();
-            let fence = Fence(sequence);
+            let fence = Fence(sequence * 2);
             scheduler.record_submission(&step, fence).unwrap();
             observe_submission(metrics, scheduler, &step, outstanding).unwrap();
             let mut records = [CompletionRecord::default(); 4];
@@ -1048,7 +1018,7 @@ mod tests {
                 let samples = matches!(step.kind, GraphKind::Prefill | GraphKind::Decode);
                 records[lane.request.slot as usize] = CompletionRecord {
                     generation: lane.request.generation as i64,
-                    submission_sequence: sequence as i64,
+                    submission_sequence: fence.0 as i64,
                     consumed_tokens: (lane.start_position + lane.tokens as u64) as i64,
                     generated_tokens: live.generated_tokens as i64 + i64::from(samples),
                     token_id: if samples { 17 } else { -1 },
@@ -1057,6 +1027,26 @@ mod tests {
                 };
             }
             scheduler.complete(fence, &records).unwrap();
+            if step.kind == GraphKind::Prefill {
+                let capture = scheduler.next_step().unwrap();
+                assert_eq!(capture.kind, GraphKind::Snapshot);
+                let copy_fence = Fence(fence.0 + 1);
+                scheduler.record_submission(&capture, copy_fence).unwrap();
+                let mut copies = [CompletionRecord::default(); 4];
+                for lane in &capture.lanes {
+                    let live = scheduler.request(lane.request).unwrap();
+                    copies[lane.request.slot as usize] = CompletionRecord {
+                        generation: lane.request.generation as i64,
+                        submission_sequence: copy_fence.0 as i64,
+                        consumed_tokens: live.consumed_tokens as i64,
+                        generated_tokens: live.generated_tokens as i64,
+                        token_id: -1,
+                        status: 1,
+                        ..Default::default()
+                    };
+                }
+                scheduler.complete(copy_fence, &copies).unwrap();
+            }
             step
         }
 
@@ -1068,7 +1058,7 @@ mod tests {
                 max_sequence_tokens: 64,
                 prefill_chunk_size: 64,
                 pages: 4,
-                snapshots: 4,
+                snapshots: 8,
             },
             SchedulerCapabilities {
                 vocabulary: 248320,
@@ -1079,7 +1069,6 @@ mod tests {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 live_state_base: 1,
-                candidate_state_base: 5,
                 draft_pages_per_request: 1,
             },
         )
@@ -1088,6 +1077,7 @@ mod tests {
         for grammar_constrained in [true, false, false] {
             let handle = scheduler
                 .admit(RequestSpec {
+                    system_boundary: None,
                     prompt: vec![7],
                     conditioning: vec![],
                     max_new_tokens: 20,
@@ -1379,12 +1369,12 @@ mod tests {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 live_state_base: 1,
-                candidate_state_base: 5,
                 draft_pages_per_request: 1,
             },
         )
         .unwrap();
         let spec = || RequestSpec {
+            system_boundary: None,
             prompt: vec![7],
             conditioning: vec![],
             max_new_tokens: 10,
@@ -1408,7 +1398,7 @@ mod tests {
         assert_eq!(incoming.metrics.failed.load(Ordering::Relaxed), 1);
         assert_eq!(scheduler.stats().active_requests, 1);
         assert_eq!(scheduler.free_page_count(), 0);
-        assert_eq!(scheduler.free_snapshot_count(), 1);
+        assert_eq!(scheduler.free_snapshot_count(), 0);
 
         let (execution, mut generation) = stream(2);
         execution.fail(rejected.clone());

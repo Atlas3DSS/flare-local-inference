@@ -225,9 +225,8 @@ class PreparedDecoder:
             else:
                 attention = PreparedGDN(module.linear_attn, layer_weights.attention, source,
                     scratch.gdn, state.pool.gdn[index], state.gdn, mode=state.mode,
-                    session=session, name=f"{prefix}.gdn", checkpoint_export=state.mode == "prefill",
+                    session=session, name=f"{prefix}.gdn", checkpoint_export=False,
                     workspace=workspaces, projection_workspace=workspaces)
-                state.prepare_convolution(index, scratch.gdn.projected_qkv, state.pool.gdn[index].convolution)
             moe = PreparedQwenMoe(source, layer_weights.moe, session=session, name=f"{prefix}.moe",
                 scratch=scratch.moe, workspace=workspaces,
                 projection_workspace=workspaces)
@@ -239,7 +238,6 @@ class PreparedDecoder:
             {key: getattr(module, key).weight for key in ("key_proj", "value_proj")},
             scratch.residual, scratch.ple, state.pool.ple_convolution, state.ple, ple_table,
             mode=state.mode, session=session, name=f"{name}.ple", workspace=workspaces)
-        state.prepare_convolution("ple", scratch.ple.normalized, state.pool.ple_convolution)
         self.final_mixer = PreparedHyperconnection(language.hyper_connection_mixer,
             scratch.hyperconnection, priming_state=scratch.residual,
             session=session, name=f"{name}.final_mixer")
@@ -279,7 +277,6 @@ class PreparedDecoder:
         for index, (attn_hc, attention, mlp_hc, moe) in enumerate(self.layers):
             if index == 1:
                 s.residual.add_(self.ple(s.residual))
-                self.state.checkpoint_convolution("ple")
             mixed = attn_hc.mix(s.residual)
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["attn_mix"].copy_(mixed)
@@ -290,8 +287,6 @@ class PreparedDecoder:
                 self.stage_outputs["attn_output"].copy_(block)
                 for field in ("projected_qkv", "convolved_qkv", "recurrence", "gated"):
                     self.stage_outputs[f"gdn_{field}"].copy_(getattr(s.gdn, field))
-            if index % 4 != 3:
-                self.state.checkpoint_convolution(index)
             s.residual.copy_(attn_hc.combine(s.residual, block))
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["attn_residual"].copy_(s.residual)

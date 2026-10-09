@@ -1,4 +1,4 @@
-"""Device metadata and exact aligned candidate exports through native replay."""
+"""Device metadata and exact consumed endpoints through native replay."""
 
 import os
 
@@ -23,28 +23,23 @@ def test_input_contract():
 
 @pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
-def test_native_metadata_candidates_and_terminal_guards():
+def test_native_metadata_exact_endpoints_and_terminal_guards():
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     device = torch.device("cuda", 0)
-    pool = HybridStatePool.allocate(9, device)
+    pool = HybridStatePool.allocate(5, device)
     requests = DeviceRequestState.allocate(device,
-        consumed_tokens=pool.consumed_tokens[1:5, 0], ple_history=pool.ple_history[1:5],
-        boundary_consumed_tokens=pool.consumed_tokens[5:9, 0], boundary_history=pool.ple_history[5:9])
+        consumed_tokens=pool.consumed_tokens[1:5, 0], ple_history=pool.ple_history[1:5])
     inputs = DecoderInputs.allocate(device, context=256)
     metadata = PreparedDecoderState(inputs, requests, pool, tokens=128, rows=1, mode="prefill")
     decode = PreparedDecoderState(inputs, requests, pool, tokens=4, rows=4, mode="decode")
     source = torch.arange(128, device=device, dtype=torch.float32).bfloat16()[:, None].expand(128, 10240).contiguous()
     hidden = source[:, :2560].contiguous()
     sample = torch.zeros((4, 2560), dtype=torch.bfloat16, device=device)
-    metadata.prepare_convolution("gdn", source, pool.gdn[0].convolution)
-    metadata.prepare_convolution("ple", source, pool.ple_convolution)
     metadata.prepare_hidden(hidden, sample[:1])
     decode.prepare_hidden(hidden[:4], sample)
 
     def prefill():
         metadata.begin()
-        metadata.checkpoint_convolution("gdn")
-        metadata.checkpoint_convolution("ple")
         metadata.finish()
 
     def step():
@@ -86,29 +81,22 @@ def test_native_metadata_candidates_and_terminal_guards():
         inputs.page_tables[2].copy_(torch.tensor([5, 3, 1, 7], dtype=torch.int32, device=device))
         pool.rope_delta[3] = 17
         replay(0)
-        assert metadata.gdn.checkpoint_offsets.tolist() == [64]
+        assert metadata.gdn.checkpoint_offsets.tolist() == [0]
         assert metadata.gdn.initial_state_indices.tolist() == [0]
         assert metadata.gdn.final_state_indices.tolist() == [3]
         assert pool.consumed_tokens[3].item() == 65
-        assert pool.consumed_tokens[7].item() == 64
         assert pool.ple_history[3].tolist() == [63, 64]
-        assert pool.ple_history[7].tolist() == [62, 63]
         assert pool.last_hidden[3, 0].item() == 64
-        assert pool.last_hidden[7, 0].item() == 63
-        assert pool.rope_delta[7].item() == 17
-        assert pool.gdn[0].convolution[7, 0].tolist() == [61, 62, 63]
-        assert pool.ple_convolution[7, 0].tolist() == list(range(55, 64))
         assert metadata.qsa.slot_mapping[:65].tolist() == list(range(320, 384)) + [192]
         assert (metadata.qsa.request_ids[65:] == -1).all()
 
-        # Consume the pending token at a boundary, copying the complete hybrid row.
+        # Consume the pending token at its exact position.
         requests.consumed_tokens[2] = 63
         requests.pending_token[2] = 901
         pool.gdn[0].recurrent[3].fill_(.25)
         replay(1)
         assert inputs.token_ids[0].item() == 901
         assert decode.qsa.rope_positions[0].tolist() == [80, 80, 80]
-        assert torch.equal(pool.backing[3], pool.backing[7])
         assert requests.consumed_tokens[2].item() == 64
 
         # Replaying decode without a new sample rejects before any model write.
@@ -121,10 +109,13 @@ def test_native_metadata_candidates_and_terminal_guards():
 
         requests.admit(2, RequestAdmission(12, 9), list(range(65)), consumed_tokens=65)
         inputs.row_generations[0] = 12
+        inputs.prefill_positions[:65].copy_((torch.arange(65, 130, device=device) + 17)[:, None].expand(65, 3))
         before_state.copy_(pool.backing)
         replay(0)
-        assert requests.error_code[2].item() == 32
-        assert torch.equal(before_state, pool.backing)
+        assert requests.error_code[2].item() == 0
+        assert requests.consumed_tokens[2].item() == 130
+        assert metadata.gdn.initial_state_indices.tolist() == [3]
+        assert metadata.gdn.checkpoint_offsets.tolist() == [0]
     finally:
         worker.close()
         for graph in graphs.values():

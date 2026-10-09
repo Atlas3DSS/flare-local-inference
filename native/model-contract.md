@@ -63,7 +63,7 @@ must prohibit explicit graph, session and mapped-allocation teardown in that cas
 The preparation recipe declares this metadata alongside its graph catalog:
 
 ```json
-{"schema":"qwen4exp.graph-inputs.v1","vocabulary":248320,"vision":{"features_per_request":16384,"max_images":4,"patches_per_feature":4,"patch_capacities":[256,1024,4096,16384]}}
+{"schema":"qwen4exp.graph-inputs.v2","vocabulary":248320,"vision":{"features_per_request":16384,"max_images":4,"patches_per_feature":4,"patch_capacities":[256,1024,4096,16384]}}
 ```
 
 Missing or unknown fields, unsupported schema versions, different model
@@ -232,7 +232,7 @@ token_capacity, sampling_mode)`:
 |---|---|---|
 | `init` | Batch 1, 2, 4; token 1 | Validate, reset live hybrid/QSA state, initialize request sampler, finalize |
 | `restore` | Batch 1, 2, 4; token 1 | Validate, copy immutable state, invalidate QSA raw history, initialize sampler, finalize |
-| `snapshot` | Batch 1, 2, 4; token 1 | Copy valid terminal candidate to immutable state, finalize |
+| `snapshot` | Batch 1, 2, 4; token 1 | Copy exact live state and private cache tails into immutable state, finalize |
 | `prefill` | Batch 1; tokens 1, 16, powers of two from 64 through `prefill_chunk_size`, and `prefill_chunk_size` itself | Consume prompt chunk; sample only on its final chunk |
 | `decode` | Batch 1, 2, 4; token 1 | Consume GPU-resident pending token and sample its successor |
 | `speculative` | Batch 1, 2, 4; configured widths with batch times width at most eight | Verify pending input and proposals; commit and emit the accepted prefix |
@@ -353,9 +353,10 @@ after initialization/restoration and before prefill or resume.
 | `sample_enabled` | int32[4] | Per-packed-row sampling gate |
 | `sampling_grammar_mask` | int32[4,7760] | Physical-slot persistent sampling masks |
 
-Prefill starts at consumed position 0 or a 64-token boundary. Full chunks
-consume `prefill_chunk_size` tokens. The final tail uses the smallest captured
-capacity that fits its logical length and transitions directly to decode.
+Prefill starts at any exact restored endpoint. Chunks consume at most
+`prefill_chunk_size` tokens and stop at the next system or final prompt boundary.
+Each chunk uses the smallest captured capacity that fits its logical length.
+A required snapshot completes before model computation continues.
 Only logical token, position and image-index spans are uploaded; graph padding
 is masked. Configured buffer extents and every required graph variant are
 validated before worker startup. Decode
@@ -384,15 +385,24 @@ The admission field prefix is `admission_`:
 | `grammar_mask` | int32[4,7760] |
 | `grammar_enabled` | int32[4] |
 
-State staging names are `state_source_slots` int64[4],
-`state_destination_slots` int64[4], `state_operation` int32[4],
-`state_qsa_slots` int64[4], `state_accepted_tokens` int32[4], and
-`state_num_ops` int32[1]. COPY is 0 and RESET is 1. Null state row 0 is padding;
-live rows are `1 + physical_slot`, fixed candidate rows `5 + physical_slot`,
-and immutable rows `9 + SnapshotId`. Initialization/restoration uses QSA row
-`1 + physical_slot` and accepted count 1, giving anchor `consumed - 1`.
-Snapshot copies omit QSA invalidation with row -1 and accepted count 0.
-Inactive transfer rows have source/destination 0.
+State staging names are `state_expected_consumed` int64[4],
+`state_source_slots` int64[4], `state_destination_slots` int64[4],
+`state_operation` int32[4], `state_qsa_slots` int64[4],
+`state_accepted_tokens` int32[4], and `state_num_ops` int32[1]. These arrays
+are packed by transfer row; the page tables are indexed by physical request slot.
+COPY is 0 and RESET is 1. Null state row 0 is padding, live rows are
+`1 + physical_slot`, and immutable rows are `5 + SnapshotId`.
+
+Initialization supplies expected consumed count 0. Snapshot and restore supply
+the exact positive endpoint; an active operation cannot use a negative sentinel.
+Inactive rows have expected count -1 and source/destination 0. Snapshot copies
+the selected accepted live recurrent state, convolution histories, final hidden
+state, and QSA raw and partial-page payloads into the immutable row. Restore
+copies those payloads to caller-private pages and normalizes accepted count to 1.
+Target and draft endpoints are S and S−1 respectively; draft pages use the shifted
+physical page table and can require two private boundary pages. Both snapshot
+and restore graphs bind `page_tables` and, when MTP is enabled,
+`draft_page_tables`. Snapshot operations leave the live state unchanged.
 
 ## Vision inputs
 
@@ -413,23 +423,32 @@ Each graph writes `num_patches/4` BF16[2560] features into persistent arena
 Vision completion preserves consumed/generated counters and emits no token.
 Prefill validates feature ownership and bounds before any model mutation.
 
-## Candidate and completion invariants
+## Checkpoint and completion invariants
 
-The decoder exports the actual hybrid state at every crossed 64-token boundary,
-including boundaries inside a prefill chunk. The fixed candidate therefore
-contains the greatest completed boundary strictly beyond the restored prefix.
-Its exact state includes recurrent values, convolution windows, hidden state,
-history, consumed count and boundary-correct mRoPE delta. Rust records the
-corresponding producing fence; it never labels a live unaligned state as a
-rounded checkpoint. A request with no newly crossed boundary reuses its pinned
-prefix and publishes no candidate.
+Admission reserves immutable storage for every unreused rendered system endpoint,
+for the final prompt endpoint when it differs from the terminal endpoint, and for
+terminal consumed state. Resource pressure rejects admission instead of silently
+skipping required boundaries. Prefill stops at the exact system and prompt token
+counts; neither endpoint is rounded to a page or recurrence tile boundary.
 
-After terminal generation and all in-flight writes, a snapshot graph copies
-the fixed candidate into a privately reserved immutable row. Publication waits
-for its successful completion. Cancellation drops scheduling immediately but
-retains all referenced slots, pages, snapshots and generations through their
-last GPU fence. Completion status 3 carries device validation failures; it
-cannot produce a successful checkpoint or response.
+After preceding model submissions drain, a snapshot graph copies live state at
+the declared exact endpoint. Successful system and prompt copies publish during
+the request. Publication transfers only complete pages, retains the live physical
+page sequence, and rebases ownership onto the published prefix. A child at T of a
+parent at S owns `floor(T/64)-floor(S/64)` additional pages, including zero for an
+extension inside a page. Partial-page payloads belong to the immutable snapshot,
+not to cache-tree page ownership. A duplicate checkpoint never remaps live pages.
+Admission reuse counters remain fixed even after publication rebases ownership.
+
+Terminal state consumes every generated input except the final pending sample.
+After all in-flight model writes and its exact snapshot copy complete, `finish`
+publishes that endpoint. Cancellation drops scheduling immediately but retains
+slots, pages, snapshots and generations through their last GPU fence. Completion
+status 3 cannot produce a successful checkpoint. Rolling aligned candidate
+exports are not part of the v2 model-input contract. ABI3 completion column 12
+is reserved and must contain -1 for every active completion, including maintenance
+and error records; model validation rejects other values. The transport retains
+its 24-column layout.
 
 Cache eviction reclaims unpinned leaves first. If snapshot pressure remains and
 all leaves are pinned, an ancestor with one child and no direct request pin may

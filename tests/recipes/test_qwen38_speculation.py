@@ -109,14 +109,11 @@ def test_clip_inside_drafts_keeps_final_draft_pending(eos, budget):
     assert records[1, 2, 8] == 0
 
 
-def test_boundary_history_uses_accepted_input_not_verification_endpoint():
+def test_live_history_uses_accepted_input_not_verification_endpoint():
     state, acceptance, commit, records = example(consumed=63)
     commit()
-    assert commit.candidate_consumed.tolist() == [64]
-    assert state.boundary_history[2].tolist() == [2, 3]
-    assert state.boundary_consumed_tokens[2] == 64
-    assert state.boundary_generation[2] == 7
-    assert records[1, 2, 12] == 64
+    assert state.ple_history[2].tolist() == [4, 5]
+    assert records[1, 2, 12] == -1
     assert state.consumed_tokens[2] == 66
 
 

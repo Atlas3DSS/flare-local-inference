@@ -1,4 +1,4 @@
-"""Captured admission, immutable-prefix restore, and candidate publication."""
+"""Captured admission, immutable-prefix restore, and exact-prefix publication."""
 
 from __future__ import annotations
 
@@ -7,19 +7,19 @@ import triton
 import triton.language as tl
 
 from .sampling import AdmissionBuffers, DeviceRequestState, PreparedAdmission, _check_tensor, _compile, _completion_fields, _write_completion
-from .state import HybridStatePool, PreparedStateTransfers, StateTransferMetadata
+from .state import HybridStatePool, PreparedStateTransfers, PreparedCheckpointCaches, StateTransferMetadata
 
 TRANSFER_ERROR_BASE = 64
 INVALID_COMMAND = 8
-STALE_CANDIDATE = 9
+INVALID_ENDPOINT = 9
 
 
 @triton.jit
-def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, RawSlots, Accepted, StateCount,
-           Generation, Status, Consumed, CandidateConsumed, CandidateGeneration, AdmissionErrors,
-           FilteredSources, FilteredDestinations, FilteredOperations, FilteredRawSlots, FilteredAccepted,
+def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, RawSlots, Accepted, Expected, StateCount,
+           Generation, Status, Consumed, AdmissionErrors,
+           FilteredSources, FilteredDestinations, FilteredOperations, FilteredRawSlots, FilteredAccepted, FilteredExpected,
            FilteredCount, Errors, MODE: tl.constexpr, CAPACITY: tl.constexpr, POOL_SLOTS: tl.constexpr,
-           CS: tl.constexpr, BCS: tl.constexpr):
+           CS: tl.constexpr):
     row = tl.program_id(0)
     count, state_count = tl.load(Count), tl.load(StateCount)
     if row == 0:
@@ -27,18 +27,19 @@ def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, RawSlots, Ac
     slot, epoch = tl.load(Slots + row), tl.load(Epochs + row)
     source, destination = tl.load(Sources + row), tl.load(Destinations + row)
     operation, raw_slot, accepted = tl.load(Operations + row), tl.load(RawSlots + row), tl.load(Accepted + row)
+    expected = tl.load(Expected + row)
     active = row < count
     slot_valid = (slot >= 0) & (slot < 4)
     valid = (count >= 0) & (count <= CAPACITY) & (state_count == count) & slot_valid & (epoch > 0)
     if MODE == 0:
         valid &= (operation == 1) & (source == slot + 1) & (destination == slot + 1)
-        valid &= (raw_slot == slot + 1) & (accepted > 0)
+        valid &= (raw_slot == slot + 1) & (accepted == 1) & (expected == 0)
     elif MODE == 1:
-        valid &= (operation == 0) & (source >= 9) & (source < POOL_SLOTS) & (destination == slot + 1)
-        valid &= (raw_slot == slot + 1) & (accepted > 0)
+        valid &= (operation == 0) & (source >= 5) & (source < POOL_SLOTS) & (destination == slot + 1)
+        valid &= (raw_slot == slot + 1) & (accepted == 1) & (expected > 0)
     else:
-        valid &= (operation == 0) & (source == slot + 5) & (destination >= 9) & (destination < POOL_SLOTS)
-        valid &= raw_slot == -1
+        valid &= (operation == 0) & (source == slot + 1) & (destination >= 5) & (destination < POOL_SLOTS)
+        valid &= (raw_slot == -1) & (accepted == 0) & (expected > 0)
         valid &= epoch == tl.load(Generation + slot, slot_valid, other=0)
         status = tl.load(Status + slot, slot_valid, other=0)
         valid &= (status == 1) | (status == 2)
@@ -47,12 +48,10 @@ def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, RawSlots, Ac
         valid &= tl.sum(duplicates.to(tl.int32), 0) == 1
     error = tl.where(active & ~valid, 8, 0)
     if MODE == 2:
-        candidate = tl.load(CandidateConsumed + slot * BCS, slot_valid, other=-1)
         consumed = tl.load(Consumed + slot * CS, slot_valid, other=-1)
-        candidate_epoch = tl.load(CandidateGeneration + slot, slot_valid, other=0)
-        candidate_valid = (candidate_epoch == epoch) & (candidate > 0) & (candidate % 64 == 0) & (candidate <= consumed)
-        error = tl.where(active & valid & ~candidate_valid, 9, error)
-        valid &= candidate_valid
+        valid_endpoint = expected == consumed
+        error = tl.where(active & valid & ~valid_endpoint, 9, error)
+        valid &= valid_endpoint
     else:
         admission_error = tl.load(AdmissionErrors + row)
         valid &= admission_error == 0
@@ -63,6 +62,7 @@ def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, RawSlots, Ac
     tl.store(FilteredOperations + row, operation)
     tl.store(FilteredRawSlots + row, tl.where(enabled, raw_slot, -1))
     tl.store(FilteredAccepted + row, tl.where(enabled, accepted, 0))
+    tl.store(FilteredExpected + row, tl.where(enabled, expected, -1))
 
 
 @triton.jit
@@ -98,14 +98,14 @@ def _snapshot_complete(Slots, Epochs, Count, Errors, Generation, Consumed, Gener
         if error != 0:
             status, code = 3, 64 + error
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
-                      -1, status, code, active, -1, RECORD_FIELDS)
+                      -1, status, code, active, RECORD_FIELDS)
 
 
 class PreparedMaintenance:
     """Compose validated slot transitions with the completion-frame ABI.
 
     Modes are ``init`` (reset live hybrid state), ``restore`` (copy immutable
-    state to live), and ``snapshot`` (publish a consumed boundary candidate).
+    state to live), and ``snapshot`` (publish the exact consumed live state).
     Admission and transfer rows use identical packed order. Native request
     allocation reserves the live slot before init/restore and the immutable
     destination before publication; published immutable destinations must not
@@ -119,23 +119,21 @@ class PreparedMaintenance:
     def __init__(self, mode: str, requests: DeviceRequestState, pool: HybridStatePool,
                  metadata: StateTransferMetadata, completion_records, frame_index, submission_sequence,
                  *, admission_buffers: AdmissionBuffers | None = None, forward_inputs=None,
-                 qsa_states=(), capacity: int = 4):
+                 qsa_states=(), capacity: int = 4, speculation=None):
         if mode not in ("init", "restore", "snapshot") or capacity not in (1, 2, 4):
             raise ValueError("maintenance requires init/restore/snapshot and capacity1,2 or4")
-        if pool.backing.shape[0] < 10:
-            raise ValueError("maintenance requires null/live/candidate slots and an immutable snapshot slot")
+        if pool.backing.shape[0] < 6:
+            raise ValueError("maintenance requires null/live slots and an immutable snapshot slot")
         device = pool.backing.device
         if device.type != "cuda" or requests.generation.device != device:
             raise ValueError("maintenance pool and request state must share a CUDA device")
         for tensor, expected in ((requests.consumed_tokens, pool.consumed_tokens[1:5, 0]),
-                (requests.ple_history, pool.ple_history[1:5]),
-                (requests.boundary_consumed_tokens, pool.consumed_tokens[5:9, 0]),
-                (requests.boundary_history, pool.ple_history[5:9])):
+                (requests.ple_history, pool.ple_history[1:5])):
             if tensor.data_ptr() != expected.data_ptr() or tensor.stride() != expected.stride():
-                raise ValueError("maintenance request history/counts must alias the hybrid pool live/candidate rows")
+                raise ValueError("maintenance request history/counts must alias the hybrid pool live rows")
         for name, dtype in (("source_slots", torch.int64), ("destination_slots", torch.int64),
                 ("operation", torch.int32), ("qsa_slots", torch.int64), ("accepted_tokens", torch.int32),
-                ("num_ops", torch.int32), ("errors", torch.int32)):
+                ("expected_consumed", torch.int64), ("num_ops", torch.int32), ("errors", torch.int32)):
             _check_tensor(getattr(metadata, name), (1,) if name == "num_ops" else (4,), dtype, device, name)
         record_fields = _completion_fields(completion_records, device)
         for tensor, shape, dtype, name in ((frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
@@ -160,18 +158,32 @@ class PreparedMaintenance:
             self.admission_errors = self.admission.errors
         self.stage_errors = torch.zeros(4, dtype=torch.int32, device=device)
         self.filtered = StateTransferMetadata.allocate(4, device)
-        self.transfers = PreparedStateTransfers(pool, self.filtered, qsa_states=qsa_states)
+        if forward_inputs is None or not hasattr(forward_inputs, "page_tables"):
+            raise ValueError("exact maintenance requires physical-slot page tables")
+        self.qsa_states, self.forward_inputs, self.speculation = tuple(qsa_states), forward_inputs, speculation
+        self._bind_transfers()
+        self._rows = torch.arange(4, device=device)
         m, f, r = metadata, self.filtered, requests
         self._stage_args = (slots, epochs, count, m.source_slots, m.destination_slots, m.operation, m.qsa_slots,
-            m.accepted_tokens, m.num_ops, r.generation, r.status, r.consumed_tokens, r.boundary_consumed_tokens,
-            r.boundary_generation, self.admission_errors, f.source_slots, f.destination_slots, f.operation,
-            f.qsa_slots, f.accepted_tokens, f.num_ops, self.stage_errors,
+            m.accepted_tokens, m.expected_consumed, m.num_ops, r.generation, r.status, r.consumed_tokens, self.admission_errors, f.source_slots, f.destination_slots, f.operation,
+            f.qsa_slots, f.accepted_tokens, f.expected_consumed, f.num_ops, self.stage_errors,
             ("init", "restore", "snapshot").index(mode), capacity, pool.backing.shape[0],
-            r.consumed_tokens.stride(0), r.boundary_consumed_tokens.stride(0))
+            r.consumed_tokens.stride(0))
         self._merge_args = (count, self.stage_errors, f.errors, self.admission_errors, m.errors, capacity, mode != "snapshot")
         self._complete_args = (slots, epochs, count, m.errors, r.generation, r.consumed_tokens, r.generated_tokens,
             r.status, r.error_code, completion_records, frame_index, submission_sequence, capacity, r.consumed_tokens.stride(0), record_fields)
         self._prepared = False
+
+    def _bind_transfers(self):
+        exact = PreparedCheckpointCaches(self.pool, self.filtered, self.qsa_states,
+            self.forward_inputs.page_tables, speculation=self.speculation)
+        self.transfers = PreparedStateTransfers(self.pool, self.filtered,
+            qsa_states=self.qsa_states, exact=exact)
+
+    def rebind_pages_for_preparation(self, cache):
+        self.qsa_states = tuple(cache[index] for index in range(3, 48, 4))
+        self._bind_transfers()
+        self.transfers.prepare()
 
     def staging_buffers(self) -> dict[str, torch.Tensor]:
         """Exact names registered by the native manifest for state commands."""
@@ -197,5 +209,13 @@ class PreparedMaintenance:
         self._merge()
         if self.admission is not None:
             self.admission.apply()
+            if self.speculation is not None:
+                for slot in range(4):
+                    selected = ((self._rows < self.metadata.num_ops[0])
+                        & (self.filtered.destination_slots == slot + 1) & (self.metadata.errors == 0)).any()
+                    self.speculation.previous_accepted[slot].copy_(torch.where(selected, 1,
+                        self.speculation.previous_accepted[slot]))
+                    self.speculation.accepted_generation[slot].copy_(torch.where(selected,
+                        self.requests.generation[slot], self.speculation.accepted_generation[slot]))
         else:
             self._complete()

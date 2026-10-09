@@ -38,7 +38,7 @@ def _validate(Slots, Epochs, Live, Lengths, Generation, Status, Error, Pending, 
         valid = (count == 1) & (tl.load(Live) <= ROWS) & (length > 0) & (length <= TOKENS)
         valid &= (consumed >= 0) & (consumed + length <= CONTEXT)
         if PREFILL:
-            valid &= (consumed % 64 == 0) & (tl.load(Pending + slot) < 0)
+            valid &= tl.load(Pending + slot) < 0
         else:
             valid &= tl.load(Pending + slot) >= 0
         if not valid:
@@ -100,8 +100,6 @@ def _metadata(Slots, Live, Lengths, Pending, Positions, Active, Delta, Tokens, I
     position = tl.load(Positions + row)
     model_slot = tl.where(valid, slot + 1, -1)
     end = position + length
-    boundary = end // 64 * 64
-    checkpoint = valid & (boundary > position)
     tl.store(Cu + row, begin)
     if row == 0:
         tl.store(Cu + ROWS, total)
@@ -112,8 +110,8 @@ def _metadata(Slots, Live, Lengths, Pending, Positions, Active, Delta, Tokens, I
     tl.store(StateIndices + row, tl.where(valid, model_slot, 0))
     tl.store(Initial + row, tl.where(valid & (position > 0), model_slot, 0))
     tl.store(Final + row, tl.where(valid, model_slot, 0))
-    tl.store(Checkpoint + row, tl.where(checkpoint, slot + 5, 0))
-    tl.store(Offset + row, tl.where(checkpoint, boundary - position, 0))
+    tl.store(Checkpoint + row, 0)
+    tl.store(Offset + row, 0)
     tl.store(SequenceLengths + row, tl.where(valid, end, 0))
     tl.store(IsPrefilling + row, PREFILL & valid)
     if not PREFILL:
@@ -138,22 +136,7 @@ def _metadata(Slots, Live, Lengths, Pending, Positions, Active, Delta, Tokens, I
 
 
 @triton.jit
-def _convolution_checkpoint(Source, State, Cu, Checkpoint, Offset,
-                            CHANNELS: tl.constexpr, HISTORY: tl.constexpr,
-                            STATE_STRIDE: tl.constexpr, STATE_HISTORY: tl.constexpr, BLOCK: tl.constexpr):
-    row, tile = tl.program_id(0), tl.program_id(1)
-    slot, offset = tl.load(Checkpoint + row), tl.load(Offset + row)
-    if (slot > 0) & (offset >= HISTORY):
-        end = tl.load(Cu + row) + offset
-        index = tile * BLOCK + tl.arange(0, BLOCK)
-        channel, history = index // HISTORY, index % HISTORY
-        value = tl.load(Source + (end - HISTORY + history) * CHANNELS + channel,
-                        channel < CHANNELS, other=0)
-        tl.store(State + slot * STATE_STRIDE + channel * STATE_HISTORY + history, value, channel < CHANNELS)
-
-
-@triton.jit
-def _residual_checkpoint(Source, Saved, Rope, SavedRope, Slots, Active, Cu, Checkpoint, Offset,
+def _residual_checkpoint(Source, Saved, Rope, SavedRope, Slots, Active, Cu,
                          SAVED_STRIDE: tl.constexpr, ROPE_STRIDE: tl.constexpr, BLOCK: tl.constexpr):
     row, tile = tl.program_id(0), tl.program_id(1)
     channel = tile * BLOCK + tl.arange(0, BLOCK)
@@ -162,21 +145,15 @@ def _residual_checkpoint(Source, Saved, Rope, SavedRope, Slots, Active, Cu, Chec
     active = (tl.load(Active + row) != 0) & (slot >= 0) & (slot < 4) & (end > begin)
     value = tl.load(Source + (end - 1) * 10240 + channel, active & (channel < 10240), other=0)
     tl.store(Saved + (slot + 1) * SAVED_STRIDE + channel, value, active & (channel < 10240))
-    destination, offset = tl.load(Checkpoint + row), tl.load(Offset + row)
-    boundary = active & (destination > 0) & (offset > 0)
-    value = tl.load(Source + (begin + offset - 1) * 10240 + channel,
-                    boundary & (channel < 10240), other=0)
-    tl.store(Saved + destination * SAVED_STRIDE + channel, value, boundary & (channel < 10240))
     if tile == 0:
         axes = tl.arange(0, 4)
         rope = tl.load(Rope + (end - 1) * 3 + axes, active & (axes < 3), other=-1)
         tl.store(SavedRope + (slot + 1) * ROPE_STRIDE + axes, rope, active & (axes < 3))
-        rope = tl.load(Rope + (begin + offset - 1) * 3 + axes, boundary & (axes < 3), other=-1)
-        tl.store(SavedRope + destination * ROPE_STRIDE + axes, rope, boundary & (axes < 3))
+
 
 
 @triton.jit
-def _hidden_checkpoint(Hidden, Saved, Delta, Sample, Slots, Active, Cu, Checkpoint, Offset, Positions, Rope,
+def _hidden_checkpoint(Hidden, Saved, Delta, Sample, Slots, Active, Cu, Positions, Rope,
                        SAVED_STRIDE: tl.constexpr, DELTA_STRIDE: tl.constexpr,
                        PREFILL: tl.constexpr, POSITION_BLOCK: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
@@ -196,23 +173,6 @@ def _hidden_checkpoint(Hidden, Saved, Delta, Sample, Slots, Active, Cu, Checkpoi
         rope = tl.load(Rope + indices, valid & (indices // 3 >= begin) & (indices // 3 < end), other=-1)
         next_position = tl.maximum(old_next, tl.max(rope, 0) + 1)
         tl.store(Delta + (slot + 1) * DELTA_STRIDE, next_position - (position + end - begin), valid)
-        destination, offset = tl.load(Checkpoint + row), tl.load(Offset + row)
-        if valid & (destination > 0):
-            candidate = tl.load(Hidden + (begin + offset - 1) * 2560 + channel, channel < 2560, other=0)
-            tl.store(Saved + destination * SAVED_STRIDE + channel, candidate, channel < 2560)
-            boundary_rope = tl.where(indices // 3 < begin + offset, rope, -1)
-            boundary_next = tl.maximum(old_next, tl.max(boundary_rope, 0) + 1)
-            tl.store(Delta + destination * DELTA_STRIDE, boundary_next - (position + offset))
-
-
-@triton.jit
-def _decode_checkpoint(Backing, Slots, Active, Checkpoint, ROW_BYTES: tl.constexpr, BLOCK: tl.constexpr):
-    row, tile = tl.program_id(0), tl.program_id(1)
-    slot, destination = tl.load(Slots + row), tl.load(Checkpoint + row)
-    if (tl.load(Active + row) != 0) & (slot >= 0) & (slot < 4) & (destination > 0):
-        offset = tile * BLOCK + tl.arange(0, BLOCK)
-        value = tl.load(Backing + (slot + 1) * ROW_BYTES + offset, offset < ROW_BYTES, other=0)
-        tl.store(Backing + destination * ROW_BYTES + offset, value, offset < ROW_BYTES)
 
 
 @triton.jit
@@ -226,7 +186,7 @@ def _resume_hidden(Saved, Sample, Slots, Epochs, Live, Generation, Status, Error
     valid &= tl.load(Status + slot, valid, other=0) == 1
     consumed = tl.load(Consumed + slot * CONSUMED_STRIDE, valid, other=0)
     pending = tl.load(Pending + slot, valid, other=-1)
-    ready = (consumed > 0) & (consumed % 64 == 0) & (pending < 0)
+    ready = (consumed > 0) & (pending < 0)
     if valid & ~ready:
         tl.store(Status + slot, 3)
         tl.store(Error + slot, 33)
@@ -284,29 +244,14 @@ class PreparedDecoderState:
             inputs.page_tables, q.main_block_table, q.is_prefilling,
             rows, tokens, inputs.page_tables.shape[1], pool.rope_delta.stride(0), mode == "prefill", 128)
         self._metadata = compile_kernel(_metadata, args, (rows, 1, 1))
-        self._convolutions = {}
         self._residual = None
-        if mode == "decode":
-            self._decode_checkpoint = compile_kernel(_decode_checkpoint,
-                (pool.backing, inputs.row_slot_ids, t.active, g.checkpoint_state_indices,
-                 pool.layout.row_bytes, 16384), (rows, triton.cdiv(pool.layout.row_bytes, 16384), 1))
 
     def prepare_hidden(self, hidden, sample):
         self._hidden = compile_kernel(_hidden_checkpoint,
             (hidden, self.pool.last_hidden, self.pool.rope_delta, sample, self.inputs.row_slot_ids,
-             self.token_state.active, self.gdn.query_start_loc, self.gdn.checkpoint_state_indices,
-             self.gdn.checkpoint_offsets, self.token_state.positions, self.qsa.rope_positions,
+             self.token_state.active, self.gdn.query_start_loc, self.token_state.positions, self.qsa.rope_positions,
              self.pool.last_hidden.stride(0), self.pool.rope_delta.stride(0),
              self.mode == "prefill", triton.next_power_of_2(self.tokens * 3), 4096), (self.rows, 1, 1))
-
-    def prepare_convolution(self, name, source, state):
-        if self.mode == "prefill":
-            channels, state_history = state.shape[1:]
-            history = state_history - self.pool.layout.speculative_tokens
-            self._convolutions[name] = compile_kernel(_convolution_checkpoint,
-                (source, state, self.gdn.query_start_loc, self.gdn.checkpoint_state_indices,
-                 self.gdn.checkpoint_offsets, channels, history, state.stride(0), state_history, 1024),
-                (self.rows, triton.cdiv(channels * history, 1024), 1))
 
     def prepare_residual(self, residual):
         if self.pool.layout.speculative_tokens:
@@ -314,8 +259,7 @@ class PreparedDecoderState:
             rope = self.pool.region("target_residual_position")
             self._residual = compile_kernel(_residual_checkpoint,
                 (residual, saved, self.qsa.rope_positions, rope, self.inputs.row_slot_ids, self.token_state.active,
-                 self.gdn.query_start_loc, self.gdn.checkpoint_state_indices,
-                 self.gdn.checkpoint_offsets, saved.stride(0), rope.stride(0), 1024), (self.rows, 10, 1))
+                 self.gdn.query_start_loc, saved.stride(0), rope.stride(0), 1024), (self.rows, 10, 1))
 
     def begin(self):
         self._validate()
@@ -326,21 +270,15 @@ class PreparedDecoderState:
         self.qsa.slot_mapping.fill_(-1)
         self._metadata()
 
-    def checkpoint_convolution(self, name):
-        if self.mode == "prefill":
-            self._convolutions[name]()
-
     def finish(self):
         self._hidden()
         if self._residual is not None:
             self._residual()
         self.token_state.consume()
-        if self.mode == "decode":
-            self._decode_checkpoint()
 
 
 class PreparedResume:
-    """Sample directly from an aligned restored prefix's final hidden vector."""
+    """Sample directly from an exact restored prefix's final hidden vector."""
 
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
                  completion_records, frame_index, submission_sequence, *, session, name):

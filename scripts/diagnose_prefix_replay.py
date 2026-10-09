@@ -49,6 +49,50 @@ def write_equality_receipt(receipt, output, *, require_bitwise=False):
     return int(require_bitwise and not summary["passed"])
 
 
+def prefix_replay_sequence(admission, prefill, snapshot, observe, *, tokens, boundary, full_capacity, tail_capacity):
+    """Keep monolithic execution separate from the independently computed checkpoint prefix."""
+    if not 0 < boundary < tokens <= full_capacity or tokens - boundary > tail_capacity:
+        raise ValueError("prefix replay lengths must fit both captured capacities")
+    admission(1)
+    prefill(0, tokens, full_capacity)
+    observe("cold")
+    admission(2)
+    prefill(0, boundary, full_capacity)
+    observe("checkpoint_prefix")
+    snapshot(boundary)
+    observe("immutable", 5, logits=False)
+    admission(3, restore=True)
+    observe("restored_before_tail", logits=False)
+    prefill(boundary, tokens, tail_capacity)
+    observe("restored_small_tail")
+    admission(4, restore=True)
+    prefill(boundary, tokens, full_capacity)
+    observe("restored_full_capacity_tail")
+    admission(5)
+    prefill(0, tokens, full_capacity)
+    observe("cold_repeat")
+    admission(6)
+    prefill(0, boundary, full_capacity)
+    observe("split_prefix")
+    prefill(boundary, tokens, tail_capacity)
+    observe("split_small_tail")
+
+
+def stage_state_transfer(host, *, source, destination, consumed, reset=False):
+    """Stage one exact maintenance operation; page tables must already be populated."""
+    if type(consumed) is not int or consumed < 0 or (reset != (consumed == 0)):
+        raise ValueError("reset requires endpoint0; copy requires a positive exact endpoint")
+    host["state_num_ops"].fill_(1)
+    for name in ("source_slots", "destination_slots", "operation", "accepted_tokens"):
+        host["state_" + name].zero_()
+    host["state_qsa_slots"].fill_(-1)
+    host["state_expected_consumed"].fill_(-1)
+    for name, value in (("source_slots", source), ("destination_slots", destination),
+            ("operation", int(reset)), ("qsa_slots", destination if destination < 5 else -1),
+            ("accepted_tokens", int(destination < 5)), ("expected_consumed", consumed)):
+        host["state_" + name][0] = value
+
+
 class Layer3QSARecorder:
     """Retain attention operands outside the shared graph pool for fenced readback."""
 
@@ -156,11 +200,21 @@ class Layer3QSARecorder:
         return record
 
 
+def checkpoint_endpoint(tokens, requested=None):
+    """Select a positive consumed prefix strictly inside the complete prompt."""
+    endpoint = tokens // 64 * 64 if requested is None else requested
+    if type(endpoint) is not int or not 0 < endpoint < tokens:
+        raise ValueError("checkpoint endpoint must be a positive token count below the prompt length")
+    return endpoint
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request-json", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--prefill-chunk-size", type=int, default=4096)
+    parser.add_argument("--checkpoint-tokens", type=int,
+                        help="exact prefix endpoint; defaults to the last complete 64-token block")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--tensor-output", type=Path, required=True)
     parser.add_argument("--record-qsa", action="store_true",
@@ -209,9 +263,12 @@ def main():
                 if not isinstance(function["arguments"], dict):
                     parser.error("tool-call arguments must decode to a JSON object")
     prompt = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False, **options)
-    boundary = len(prompt) // 64 * 64
-    if not 64 < len(prompt) <= config.prefill_chunk_size or boundary == len(prompt):
-        parser.error(f"rendered prompt must have 65..{config.prefill_chunk_size} tokens and an unaligned tail")
+    if not 64 < len(prompt) <= config.prefill_chunk_size:
+        parser.error(f"rendered prompt must have 65..{config.prefill_chunk_size} tokens")
+    try:
+        boundary = checkpoint_endpoint(len(prompt), args.checkpoint_tokens)
+    except ValueError as error:
+        parser.error(str(error))
     bucket = lambda tokens: next(size for size in config.prefill_capacities if size >= tokens)
     full_capacity, tail_capacity = bucket(len(prompt)), bucket(len(prompt) - boundary)
     extensions = list(Path(sparkgap_native.__file__).parent.glob("*.so"))
@@ -226,6 +283,7 @@ def main():
         "prefill_chunk_size": config.prefill_chunk_size,
         "tail_capacity": tail_capacity, "submissions": [], "comparisons": {},
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "checkpoint_helper_sha256": hashlib.sha256((ROOT / "qualify/checkpoint_state.py").read_bytes()).hexdigest(),
         "torch_version": torch.__version__, "flashinfer_version": importlib.metadata.version("flashinfer-python"),
         "gdn_implementation_sha256": hashlib.sha256(Path(gdn_implementation.__file__).read_bytes()).hexdigest(),
         "b12x_sources": {str(Path(module.__file__).resolve()): hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
@@ -237,7 +295,10 @@ def main():
         "native_extension_sha256": hashlib.sha256(extensions[0].read_bytes()).hexdigest(),
         "source_sha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py"))},
-        "diagnostic": "All model mutations use native graph submissions. CPU state readbacks occur after completed fences."}
+        "diagnostic": "All model mutations use native graph submissions. CPU state readbacks occur after completed fences.",
+        "checkpoint_source": "An independent execution of tokens [0, B) at the monolithic graph capacity supplies the live checkpoint at B. The monolithic [0, P) comparison remains separate.",
+        "state_comparison": "All 77 continuation regions are compared; checkpoint-only qsa.* storage is retained raw and checked against logical live caches during snapshot/restore.",
+        "checkpoint_transfers": []}
     observations = {}
     started = time.monotonic()
     def progress(message):
@@ -265,7 +326,17 @@ def main():
         if len(qsa_contracts) != len(config.prefill_capacities) + 3:
             raise RuntimeError("QSA provenance requires every configured prefill and decode capacity")
         receipt["math_modes"]["qsa"] = qsa_contracts
+        from qualify.checkpoint_state import checkpoint_transfer_checks
+
         state = next(value for value in model._resources if isinstance(value, HybridStatePool))
+        decoders = next(value for value in model._resources if isinstance(value, list) and value
+                        and isinstance(value[0], PreparedDecoder))
+        cache = decoders[0].qsa_states
+        continuation_regions = [region for region in state.layout.regions if not region.name.startswith("qsa.")]
+        if len(continuation_regions) != 77:
+            raise RuntimeError("ordinary prefix diagnostic requires all 77 continuation regions")
+        receipt["continuation_regions"] = [region.name for region in continuation_regions]
+        receipt["checkpoint_storage_regions"] = [region.name for region in state.layout.regions if region.name.startswith("qsa.")]
         scratch = next(value for value in model._resources if isinstance(value, DecoderScratch))
         host = {name: tensor.detach().cpu().clone() for name, tensor in model.buffers.items()}
         staging = AdmissionBuffers(**{name: host[name] for name in AdmissionBuffers.__dataclass_fields__})
@@ -294,22 +365,43 @@ def main():
                 raise RuntimeError(f"{name} replay allocated CUDA memory")
             receipt["submissions"].append({"graph": name, "fence": fence, "record": result.records[0]})
 
+        def transfer_check(label, consumed):
+            checks = checkpoint_transfer_checks(state, cache, slot=0, snapshot=0,
+                pages=host["page_tables"][0].tolist(), consumed=consumed)
+            if label.startswith("restore_"):
+                checks.update({f"qsa.{layer}.restored_anchor":
+                    int(value.raw_interval_start_positions[1].cpu().item()) == consumed - 1
+                    for layer, value in cache.items()})
+            receipt["checkpoint_transfers"].append({"operation": label, "consumed": consumed, "checks": checks})
+            receipt["comparisons"][label] = {name: {"equal": value} for name, value in checks.items()}
+
         def admission(epoch, *, restore=False):
             staging.stage(0, 0, RequestAdmission(epoch, 1234, max_new_tokens=96, temperature=0), prompt)
             staging.admission_count.fill_(1)
-            host["state_num_ops"].fill_(1)
-            for field, value in (("source_slots", 9 if restore else 1), ("destination_slots", 1),
-                    ("operation", 0 if restore else 1), ("qsa_slots", 1), ("accepted_tokens", 1)):
-                host["state_" + field][0] = value
+            # Every maintenance replay receives its physical page mapping before launch.
+            host["page_tables"].fill_(-1)
+            host["page_tables"][0] = torch.arange(host["page_tables"].shape[1], dtype=torch.int32)
+            stage_state_transfer(host, source=5 if restore else 1, destination=1,
+                                 consumed=boundary if restore else 0, reset=not restore)
             name = "restore1" if restore else "init1"
             execute(name, model.signatures[name].inputs, boundary if restore else 0)
+            if restore:
+                transfer_check(f"restore_epoch{epoch}", boundary)
             host["row_slot_ids"].fill_(-1)
             host["row_slot_ids"][0] = 0
+            host["row_generations"].zero_()
             host["row_generations"][0] = epoch
             host["live_rows"].fill_(1)
-            host["page_tables"][0] = torch.arange(host["page_tables"].shape[1], dtype=torch.int32)
             host["sample_enabled"].zero_()
             host["vision_token_indices"].fill_(-1)
+
+        def snapshot_prefix(consumed):
+            before = state.backing[1].cpu()
+            stage_state_transfer(host, source=1, destination=5, consumed=consumed)
+            execute("snapshot1", model.signatures["snapshot1"].inputs, consumed)
+            after = state.backing[1].cpu()
+            receipt["comparisons"]["snapshot_live_source_unchanged"] = {"state": {"equal": torch.equal(before, after)}}
+            transfer_check("snapshot_prefix", consumed)
 
         last_forward_graph = None
 
@@ -337,30 +429,8 @@ def main():
                 progress(f"{name}: saved state row{row}")
 
         try:
-            admission(1)
-            prefill(0, len(prompt), full_capacity)
-            observe("cold")
-            observe("cold_candidate", 5, logits=False)
-            for field, value in (("source_slots", 5), ("destination_slots", 9),
-                    ("operation", 0), ("qsa_slots", -1), ("accepted_tokens", 0)):
-                host["state_" + field][0] = value
-            execute("snapshot1", model.signatures["snapshot1"].inputs, len(prompt))
-            observe("immutable", 9, logits=False)
-            admission(2, restore=True)
-            observe("restored_before_tail", logits=False)
-            prefill(boundary, len(prompt), tail_capacity)
-            observe("restored_small_tail")
-            admission(3, restore=True)
-            prefill(boundary, len(prompt), full_capacity)
-            observe("restored_full_capacity_tail")
-            admission(4)
-            prefill(0, len(prompt), full_capacity)
-            observe("cold_repeat")
-            admission(5)
-            prefill(0, boundary, full_capacity)
-            observe("split_prefix")
-            prefill(boundary, len(prompt), tail_capacity)
-            observe("split_small_tail")
+            prefix_replay_sequence(admission, prefill, snapshot_prefix, observe,
+                tokens=len(prompt), boundary=boundary, full_capacity=full_capacity, tail_capacity=tail_capacity)
         finally:
             executor.close()
             if not executor.drained:
@@ -369,7 +439,7 @@ def main():
         def compare(left_name, right_name):
             left, right = observations[left_name], observations[right_name]
             result = {}
-            for region in state.layout.regions:
+            for region in continuation_regions:
                 def view(value):
                     return value["state"][region.offset:region.offset + region.nbytes].view(region.dtype).reshape(region.shape)
                 a, b = view(left), view(right)
@@ -404,8 +474,8 @@ def main():
                         "max_absolute": float(error.abs().max()), "different_elements": int((a != b).sum())}
                 result["qsa"] = qsa_result
             return result
-        for left, right in (("cold", "cold_repeat"), ("cold_candidate", "immutable"),
-                ("immutable", "restored_before_tail"), ("cold_candidate", "split_prefix"),
+        for left, right in (("cold", "cold_repeat"), ("checkpoint_prefix", "immutable"),
+                ("immutable", "restored_before_tail"), ("checkpoint_prefix", "split_prefix"),
                 ("cold", "restored_small_tail"), ("cold", "restored_full_capacity_tail"),
                 ("restored_small_tail", "split_small_tail")):
             receipt["comparisons"][left + "_vs_" + right] = compare(left, right)
@@ -418,6 +488,8 @@ def main():
     if any(hashlib.sha256((b12x_root / name).read_bytes()).hexdigest() != digest
            for name, digest in b12x_sources.items()):
         raise RuntimeError("b12x source changed during prefix replay qualification")
+    if hashlib.sha256((ROOT / "qualify/checkpoint_state.py").read_bytes()).hexdigest() != receipt["checkpoint_helper_sha256"]:
+        raise RuntimeError("checkpoint transfer oracle changed during qualification")
     torch.save(observations, args.tensor_output)
     receipt.update(tensor_output=str(args.tensor_output), tensor_sha256=hashlib.sha256(args.tensor_output.read_bytes()).hexdigest(),
         elapsed_seconds=time.monotonic()-started)

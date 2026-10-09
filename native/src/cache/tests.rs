@@ -110,7 +110,7 @@ fn chunking_retains_partial_tokens_and_conditioning_until_complete() {
         .unwrap();
     assert_eq!(chunks.aligned_boundaries().len(), 1);
     assert_eq!(chunks.key_at(64), whole.key_at(64));
-    assert!(chunks.key_at(83).is_none());
+    assert_eq!(chunks.key_at(83), whole.key_at(83));
     chunks.append(&(83..128).collect::<Vec<_>>(), &[]).unwrap();
     assert_eq!(chunks.aligned_boundaries(), whole.aligned_boundaries());
 }
@@ -640,7 +640,7 @@ fn invalid_publications_leave_resources_and_ids_unchanged() {
     let parent = created(&mut cache, &history, &proposal(None, 64, &[0], 0, 0));
     let baseline = cache.stats();
     let mut candidates = vec![
-        proposal(None, 65, &[1], 1, 0),
+        proposal(None, 65, &[], 1, 0),
         proposal(None, 128, &[1], 1, 0),
         proposal(None, 128, &[1, 1], 1, 0),
         proposal(None, 64, &[0], 1, 0),
@@ -662,4 +662,159 @@ fn invalid_publications_leave_resources_and_ids_unchanged() {
     assert_eq!(cache.stats(), baseline);
     let child = created(&mut cache, &history, &valid_child);
     assert_eq!(child.value(), parent.value() + 1);
+}
+
+#[test]
+fn exact_tail_keys_preserve_conditioning_order_and_append_boundaries() {
+    let tokens: Vec<_> = (0..130).collect();
+    let events = [
+        ConditioningEvent {
+            position: 2,
+            identity: [1; 32],
+        },
+        ConditioningEvent {
+            position: 63,
+            identity: [2; 32],
+        },
+        ConditioningEvent {
+            position: 64,
+            identity: [3; 32],
+        },
+    ];
+    let mut whole = PrefixHistory::new([7; 32]);
+    whole.append(&tokens, &events).unwrap();
+    for end in [1, 2, 3, 10, 15, 63, 64, 65, 66, 67, 127, 128, 129, 130] {
+        let mut chunks = PrefixHistory::new([7; 32]);
+        for start in 0..end {
+            let local: Vec<_> = events
+                .iter()
+                .filter(|e| e.position == start as u64)
+                .copied()
+                .collect();
+            chunks.append(&tokens[start..start + 1], &local).unwrap();
+        }
+        let key = chunks.key_at(end as u64).unwrap();
+        assert_eq!(Some(key), whole.key_at(end as u64));
+        chunks
+            .append(
+                &[999],
+                &[ConditioningEvent {
+                    position: end as u64,
+                    identity: [9; 32],
+                }],
+            )
+            .unwrap();
+        assert_eq!(chunks.key_at(end as u64), Some(key));
+    }
+    let mut changed = events;
+    changed[0].identity = [5; 32];
+    let mut other = PrefixHistory::new([7; 32]);
+    other.append(&tokens, &changed).unwrap();
+    assert_eq!(whole.key_at(2), other.key_at(2));
+    assert_ne!(whole.key_at(3), other.key_at(3));
+    assert_ne!(whole.key_at(65), other.key_at(65));
+}
+
+#[test]
+fn exact_zero_page_children_compact_without_losing_pages_or_read_fences() {
+    let history = history(3, 0);
+    let mut cache = cache();
+    let first = created(&mut cache, &history, &proposal(None, 3, &[], 0, 0));
+    let second = created(&mut cache, &history, &proposal(Some(first), 63, &[], 1, 0));
+    let third = created(
+        &mut cache,
+        &history,
+        &proposal(Some(second), 65, &[4], 2, 0),
+    );
+    cache.pin(third).unwrap();
+    cache.mark_used(third, Fence(7)).unwrap();
+    let evicted = cache.evict(EvictionTarget {
+        pages: 0,
+        snapshots: 2,
+    });
+    assert_eq!(evicted.snapshots_scheduled, 2);
+    assert_eq!(evicted.pages_scheduled, 0);
+    assert_eq!(cache.page_chain(third).unwrap(), vec![PageId(4)]);
+    assert!(cache.checkpoint(first).is_err());
+    assert!(cache.checkpoint(second).is_err());
+    assert!(
+        cache
+            .advance_completed(Fence(6))
+            .unwrap()
+            .reusable
+            .snapshots
+            .is_empty()
+    );
+    let retired = cache.advance_completed(Fence(7)).unwrap().reusable;
+    assert_eq!(retired.snapshots.len(), 2);
+    assert!(retired.pages.is_empty());
+    cache.unpin(third).unwrap();
+    let evicted = cache.evict(EvictionTarget {
+        pages: 1,
+        snapshots: 1,
+    });
+    assert_eq!(evicted.pages_scheduled, 1);
+    assert_eq!(
+        cache.advance_completed(Fence(7)).unwrap().reusable.pages,
+        vec![PageId(4)]
+    );
+}
+
+#[test]
+fn exact_pending_and_duplicate_checkpoints_keep_external_tail_ownership() {
+    let history = history(2, 0);
+    let mut cache = cache();
+    let parent = created(&mut cache, &history, &proposal(None, 63, &[], 0, 0));
+    let child = created(
+        &mut cache,
+        &history,
+        &proposal(Some(parent), 65, &[4], 1, 7),
+    );
+    assert_eq!(cache.lookup(&history).unwrap().checkpoint, Some(parent));
+    let duplicate = cache
+        .publish(&history, &proposal(Some(parent), 65, &[5], 2, 9))
+        .unwrap();
+    assert_eq!(
+        duplicate,
+        PublishResult::Existing {
+            id: child,
+            ready: false
+        }
+    );
+    assert!(!cache.owned_pages.contains(&PageId(5)));
+    assert!(!cache.owned_snapshots.contains(&SnapshotId(2)));
+    cache.cancel_publication(child).unwrap();
+    assert!(
+        cache
+            .advance_completed(Fence(6))
+            .unwrap()
+            .reusable
+            .pages
+            .is_empty()
+    );
+    assert_eq!(
+        cache.advance_completed(Fence(7)).unwrap().reusable.pages,
+        vec![PageId(4)]
+    );
+    let retired = cache.evict(EvictionTarget {
+        pages: 0,
+        snapshots: 1,
+    });
+    assert_eq!(retired.retired[0].retire_after, Fence(9));
+    assert!(
+        cache
+            .advance_completed(Fence(8))
+            .unwrap()
+            .reusable
+            .snapshots
+            .is_empty()
+    );
+    assert_eq!(
+        cache
+            .advance_completed(Fence(9))
+            .unwrap()
+            .reusable
+            .snapshots,
+        vec![SnapshotId(0)]
+    );
 }

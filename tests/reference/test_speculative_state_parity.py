@@ -38,7 +38,8 @@ def model():
     signatures = {f"speculative{b}x{w}": GraphSignature("speculative", b, w, (*forward, *copy)) for b, w in LEGAL_SHAPES}
     for capacity in (1, 2, 4):
         for kind in ("init", "restore", "snapshot"):
-            signatures[f"{kind}{capacity}"] = GraphSignature(kind, capacity, 1, state + (forward if kind == "snapshot" else admit))
+            extras = forward if kind == "snapshot" else admit + (("page_tables",) if kind == "restore" else ())
+            signatures[f"{kind}{capacity}"] = GraphSignature(kind, capacity, 1, state + extras)
         signatures[f"resume{capacity}"] = GraphSignature("resume", capacity, 1, forward)
     for capacity in (64, 128):
         signatures[f"prefill{capacity}"] = GraphSignature("prefill", 1, capacity, forward)
@@ -191,15 +192,48 @@ def test_snapshot_restore_shares_full_pages_and_allocates_private_continuation(t
     command = builder.prepare({"kind": "restore", "slots": [3], "generation": 70, "snapshot": 0, "budget": 32})
     assert command["graph"] == "restore1"
     assert builder.requests[3]["pages"] == [44, *range(45, 56)]
-    assert builder.host["state_source_slots"][0] == 9
+    assert builder.host["state_source_slots"][0] == 5
     assert builder.host["state_destination_slots"][0] == 4
     assert builder.host["state_qsa_slots"][0] == 4
+    assert builder.host["state_expected_consumed"].tolist() == [64, -1, -1, -1]
 
 
 def test_mask_word_31_preserves_uint32_bits():
     value = torch.zeros(2, dtype=torch.int32)
     _mask(value, [0, 31, 32, 63])
     assert value.tolist() == [-2147483647, -2147483647]
+
+
+@pytest.mark.parametrize("endpoint", [1, 10, 15, 63, 64, 65, 66, 67, 127])
+def test_exact_checkpoint_staging_preserves_endpoint_and_private_tail(tmp_path, endpoint):
+    builder = make_builder(tmp_path)
+    builder.prepare({"kind": "init", "slots": [2], "generation": 11,
+                     "lengths": [63], "budget": 512})
+    request = builder.requests[2]
+    request["consumed"] = endpoint
+    request["tokens"] = [620] * endpoint
+    command = builder.prepare({"kind": "snapshot", "slots": [2], "snapshot": 3})
+    h = builder.host
+    assert command["graph"] == "snapshot1"
+    assert h["state_expected_consumed"].tolist() == [endpoint, -1, -1, -1]
+    assert h["state_source_slots"].tolist() == [3, 0, 0, 0]
+    assert h["state_destination_slots"].tolist() == [8, 0, 0, 0]
+    assert h["state_accepted_tokens"].eq(0).all()
+    assert h["page_tables"][2, :12].tolist() == request["pages"]
+    shared = request["pages"][:endpoint // 64]
+    builder.snapshots[3] = {"tokens": request["tokens"].copy(), "pages": shared}
+    command = builder.prepare({"kind": "restore", "slots": [0], "generation": 12,
+                               "snapshot": 3, "budget": 512})
+    restored = builder.requests[0]
+    assert command["graph"] == "restore1"
+    assert h["state_source_slots"].tolist() == [8, 0, 0, 0]
+    assert h["state_expected_consumed"].tolist() == [endpoint, -1, -1, -1]
+    assert h["state_accepted_tokens"].tolist() == [1, 0, 0, 0]
+    assert restored["pages"][:endpoint // 64] == shared
+    assert not set(restored["pages"][endpoint // 64:]) & set(request["pages"])
+    uploads = dict(command["uploads"])
+    assert "page_tables" in uploads
+    assert builder.payloads[uploads["page_tables"]] == bytes(h["page_tables"].view(torch.uint8).numpy())
 
 
 def test_complete_command_contract_preserves_wide_state_across_reuse(tmp_path):
@@ -226,7 +260,6 @@ def test_complete_command_contract_preserves_wide_state_across_reuse(tmp_path):
                 r[9] = width - 1 if enabled else 0
                 r[10] = min(proposed - 1, emitted)
                 r[11] = (1 << (width - 1)) - 1 if enabled else 0
-                r[12] = consumed // 64 * 64 if consumed // 64 * 64 > before else -1
                 r[13] = -1
             else:
                 emitted = int(operation["kind"] in ("prefill", "resume"))
@@ -242,13 +275,13 @@ def test_complete_command_contract_preserves_wide_state_across_reuse(tmp_path):
         assert all(checks.values()), (command, [key for key, value in checks.items() if not value])
         commands.append(command)
     assert builder.next_page == 71
-    assert builder.snapshots[0]["tokens"] == fixture()["prompt"][:63] + [620]
+    assert builder.snapshots[0]["tokens"] == fixture()["prompt"][:63] + [620] * 9
     assert builder.previous[2] == 3  # Clipped inside an accepted seven-draft prefix.
     assert builder.requests[2]["generated"] == 4
     assert builder.requests[2]["consumed"] == 66
     reuse = next(c for c in commands if c.get("tag") == "epoch_reuse")
-    assert reuse["previous_accepted_before"][3] == 8
-    assert reuse["accepted_generation_before"][3] == 11
+    assert reuse["previous_accepted_before"][3] == 1
+    assert reuse["accepted_generation_before"][3] == 12
     assert builder.accepted_generation[3] == 12
 
 
