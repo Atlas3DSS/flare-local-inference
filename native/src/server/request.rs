@@ -174,6 +174,7 @@ pub fn prepare<M: ModelContract>(
         conditioning,
         images,
     } = M::prepare_input(frontend, processor, &rendered, images)?;
+    let system_boundary = M::system_boundary(frontend, &tokens, &normalized, &options);
     let sampling = sampling_parameters(object, &config.sampling_defaults)?;
     let mut stop_sequences: Vec<Vec<u32>> = object
         .get("stop_token_sequences")
@@ -225,6 +226,7 @@ pub fn prepare<M: ModelContract>(
     Ok(PreparedRequest {
         prompt: Prompt {
             tokens,
+            system_boundary,
             data,
             images,
             conditioning,

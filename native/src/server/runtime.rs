@@ -20,6 +20,8 @@ use crate::{
 
 pub struct Prompt<M: ModelContract> {
     pub tokens: Vec<u32>,
+    /// Exact token count of a verified instruction prefix, including its user header.
+    pub system_boundary: Option<usize>,
     pub data: M::PromptData,
     pub images: Option<crate::frontend::images::ProcessedImages>,
     pub conditioning: Vec<ConditioningEvent>,
@@ -1146,6 +1148,7 @@ mod tests {
         let incoming = Incoming {
             prompt: Prompt {
                 tokens: vec![7],
+                system_boundary: None,
                 data: PromptData {
                     positions: vec![[0; 3]],
                     vision_token_indices: vec![-1],

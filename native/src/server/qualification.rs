@@ -178,6 +178,7 @@ mod tests {
         PreparedRequest {
             prompt: Prompt {
                 tokens: vec![760, 6511],
+                system_boundary: None,
                 data: PromptData {
                     positions: vec![[0; 3], [1; 3]],
                     vision_token_indices: vec![-1; 2],

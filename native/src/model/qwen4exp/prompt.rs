@@ -98,3 +98,37 @@ pub(super) fn prepare_input(
         images,
     })
 }
+
+/// Exact token prefix through the instruction segment and empty user header.
+pub(super) fn system_boundary(
+    frontend: &Frontend,
+    prompt_tokens: &[u32],
+    messages: &[serde_json::Value],
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> Option<usize> {
+    use serde_json::{Value, json};
+    let count = messages
+        .iter()
+        .take_while(|message| {
+            matches!(
+                message.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            )
+        })
+        .count();
+    let mut prefix_messages = messages[..count].to_vec();
+    prefix_messages.push(json!({"role": "user", "content": ""}));
+    let mut prefix_options = options.clone();
+    prefix_options.insert("add_generation_prompt".into(), Value::Bool(false));
+    prefix_options.insert("continue_final_message".into(), Value::Bool(true));
+    let prefix = frontend
+        .render_chat(&prefix_messages, &prefix_options)
+        .ok()?;
+    // Qwen can synthesize instructions from tools or reasoning defaults.
+    if !prefix.text.starts_with("<|im_start|>system\n") || !prefix.text.contains("<|im_end|>") {
+        return None;
+    }
+    let boundary = prefix.token_ids.len();
+    (0 < boundary && boundary < prompt_tokens.len() && prompt_tokens.starts_with(&prefix.token_ids))
+        .then_some(boundary)
+}

@@ -168,6 +168,15 @@ impl ModelContract for Qwen4Exp {
         prompt::prepare_input(frontend, processor, rendered, images)
     }
     #[cfg(feature = "server")]
+    fn system_boundary(
+        frontend: &crate::frontend::Frontend,
+        prompt_tokens: &[u32],
+        messages: &[serde_json::Value],
+        options: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<usize> {
+        prompt::system_boundary(frontend, prompt_tokens, messages, options)
+    }
+    #[cfg(feature = "server")]
     fn prepare_output(
         frontend: &crate::frontend::Frontend,
         rendered: &crate::frontend::RenderedPrompt,
@@ -181,6 +190,9 @@ impl ModelContract for Qwen4Exp {
     fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()> {
         prompt.sampling.validate()?;
         if prompt.tokens.is_empty()
+            || prompt
+                .system_boundary
+                .is_some_and(|boundary| boundary == 0 || boundary >= prompt.tokens.len())
             || prompt.tokens.len() != prompt.data.positions.len()
             || prompt.tokens.len() != prompt.data.vision_token_indices.len()
             || prompt

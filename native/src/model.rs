@@ -159,6 +159,13 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         images: Vec<crate::frontend::images::RgbImage>,
     ) -> Result<PreparedInput<Self::PromptData>>;
     #[cfg(feature = "server")]
+    fn system_boundary(
+        frontend: &crate::frontend::Frontend,
+        prompt_tokens: &[u32],
+        messages: &[serde_json::Value],
+        options: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<usize>;
+    #[cfg(feature = "server")]
     fn prepare_output(
         frontend: &crate::frontend::Frontend,
         rendered: &crate::frontend::RenderedPrompt,
