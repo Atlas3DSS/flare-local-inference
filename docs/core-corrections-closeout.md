@@ -97,9 +97,9 @@ closed, subject to their original measurement scopes.
    graph execution and same-capacity restore comparisons bitwise. Capture the
    unchanged ordinary common-sampler B1/B4 kernel baseline alongside this work;
    that measurement does not depend on learned MTP qualification.
-3. **Complete the native model boundary.** Preserve the implemented static model
-   contract, typed errors, and Qwen-owned packing/output semantics while extracting
-   worker phases. Preserve upload bytes and transaction ordering.
+3. **Preserve the native model boundary.** Keep the static model contract, typed
+   errors, private worker phases, and Qwen-owned packing/output semantics aligned.
+   Preserve upload bytes and transaction ordering.
 4. **Complete local serving contracts and copy qualification.** Implement
    tool-plus-schema grammars and rerun the agentic workload with native string stops.
    Preserve JPEG/EXIF admission coverage and its unresolved output failures.
@@ -114,8 +114,8 @@ closed, subject to their original measurement scopes.
    speculative replay floor. Remove
    production tuning pins one at a time under the numerical gates. Measure fixed
    depths before calibrating adaptive width; compare the complete workload arms.
-7. **Complete extraction and documentation.** Move tuning fixtures and qualification
-   logic without changing their contracts, remove receipt narrative from the
+7. **Complete extraction and documentation.** Move remaining qualification
+   logic without changing its contracts, remove receipt narrative from the
    specifications, and run the final installed-entrypoint acceptance on pinned
    sources. Commit each coherent change as it is validated.
 
@@ -183,7 +183,7 @@ work remains stopped.
 | 4.1 Commit working tree | Implemented: legacy removal, native runtime, Python preparation, qualification, and documentation use separate commits. | Commit each coherent validated change as it lands. FlashInfer pinning remains item 4.3. |
 | 4.2 Externalize archives | Closed: bulk files live under `/data/sparkgap-artifacts/validation-receipts`; repository links and compact locators resolve there. | Keep generated archives out of Git using the archive ignore rules. Retain debugging data only while it remains useful. |
 | 4.3 FlashInfer commits and pin | Main checkout is clean at `c691c681ebcbda066faf5bd80fef0d257b256fbc`, with seven commits separating operator contracts, diagnostics, and sampler changes. Source validation and locked dependency checks pass. | Submit the AIR normalization change (`f1cd7bb29`) upstream separately with its correctness and performance tests. |
-| 4.4 Specification cleanup | Receipt narratives are removed from core design; sampling, determinism, acceptance, and the static native model-packing contract are specified. | Keep section-7 mappings aligned with the remaining worker-phase and tuning-fixture extractions. |
+| 4.4 Specification cleanup | Receipt narratives are removed from core design; sampling, determinism, acceptance, native model packing, worker phases, and preparation fixtures are specified. | Keep section-7 mappings aligned with remaining qualification-tool extraction. |
 | 4.5 CPU bootstrap | Closed: [constructor tests](../tests/preparation/test_bootstrap_construction.py) invoke actual `prepare_model`, weight-tree assembly, Prepared constructors, and public b12x plans for ordinary/copy/MTP catalogs (28/39/39 graphs). Five tests pass with CUDA initialization forbidden. | Preserve graph/operator declarations, capacities, dtypes, scratch ownership, and malformed-weight rejection. These tests stop at tuning; compilation, capture, and numerics require GPU checks. |
 | 4.6 Receipt prose | Closed: validation index and acceptance coverage state behavior, limitations, and remaining gates; historical measurements stay in their individual reports. | Keep acceptance summaries aligned with implementation and actual test results. |
 
@@ -222,7 +222,7 @@ options, forced/named selections, and subsequent tool-result turns.
 | 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust/Python tests and six installed HTTP parsing/stop checks pass. All image fixtures are admitted, with the structured-output limitation described above. | Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
 | 6.2 Typed errors | Implemented in [error.rs](../native/src/error.rs): admission, execution, and frontend variants preserve source chains and numeric CUDA codes. CPU cause/status tests, installed startup rejection, all 22 [fatal-completion HTTP/SSE checks](validation/native-worker-failure.md), and full-model JSON/SSE capacity rejection pass. | Preserve variant-based status dispatch, first failure, terminal error events, and owner retention after failed drain. |
 | 6.3 Worker phases | Implemented in [runtime.rs](../native/src/server/runtime.rs) as private admit/plan/submit/complete/publish/retire methods. Exact instruction/prompt publication remains atomic in scheduler completion; stopped requests retire before another completion. Five CPU phase tests, installed fatal-completion checks, and [full-model HTTP checks](validation/exact-checkpoint-http.md) pass. | Preserve observation-before-presentation, stop-before-next-submit, reserve-before-pack ordering, and fence-protected release. Raw graph replay passes its unchanged executor path. |
-| 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
+| 6.4 Tuning fixtures | Implemented in [preparation/fixtures](../sparkgap/preparation/fixtures/), with six operator families. CPU comparison preserves complete ordinary/copy/MTP constructor contracts, graph signatures, scratch requirements, and 250 benchmark tensors across 38 producer/reset observations. All 501 CPU tests pass; 103 CUDA tests are skipped. Actual fixture-owner release and failed-finalizer cleanup are covered. | Preserve checkpoint operands, plan keys, scratch envelopes, serialized tuning identity, and cleanup. GPU capture/numerical tests were not rerun for this source move. |
 | 6.5 Qualification package | Partial: HTTP and graph-execution implementations live in `qualify.server` and `qualify.graph_execution`; script entrypoints and dependent callers preserve their CLI and request contracts. CPU regression suites pass. | Move remaining diagnosis/trace/qualification scripts and the test-tree qualifier. Share existing HTTP/SSE and fixture helpers where duplication remains; preserve request bytes, assertions, and result semantics. |
 | 6.6 Unsafe safety proofs | Closed: unsafe calls outside cuda.rs state allocation, context/thread, and drain/lifetime obligations locally; ownership/failure tests pass. | Preserve the proofs when changing native ownership. |
 | 6.6 Resolved upload bindings | Closed: validate_uploads returns reusable resolved descriptors consumed directly by staging and enqueue. CPU range/alias/reuse tests and four real-CUDA transport tests pass. | Preserve exact ranges and pending-frame ownership during model-contract extraction. |

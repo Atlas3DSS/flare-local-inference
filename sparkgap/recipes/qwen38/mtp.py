@@ -8,8 +8,9 @@ import torch
 from b12x.preparation import PreparedCall
 from b12x.sequence import embedding, mtp_feedback
 
+from sparkgap.preparation.fixtures import mtp_feedback as feedback_fixtures
 from sparkgap.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from sparkgap.preparation.tuning import benchmark_resource, register_finalizer
+from sparkgap.preparation.tuning import register_finalizer
 
 from .attention import PreparedAttention, QSAScratch
 from .hyperconnection import HyperconnectionScratch, PreparedHyperconnection
@@ -65,21 +66,6 @@ class MTPOutput:
     logits: torch.Tensor
 
 
-class _FeedbackInputs:
-    def __init__(self, token_embedding, multi_state, output):
-        self.token_embedding = torch.full_like(token_embedding, 0.125)
-        self.multi_state = torch.full_like(multi_state, 0.25)
-        self.output = torch.empty_like(output)
-
-    @property
-    def nbytes(self):
-        return sum(x.nbytes for x in (self.token_embedding, self.multi_state, self.output))
-
-    def produce(self):
-        self.token_embedding.fill_(0.125)
-        self.multi_state.fill_(0.25)
-
-
 class PreparedMTPFeedback:
     """Qwen's flattened-state normalization and shared-stream BF16 projection."""
 
@@ -106,14 +92,10 @@ class PreparedMTPFeedback:
                                 owners=prime_owners(workspace, scratch, binding))
 
         def benchmark(state):
-            operands = benchmark_resource(session, ("qwen_mtp_feedback", name),
-                lambda: _FeedbackInputs(self.kwargs["token_embedding"], self.kwargs["multi_state"], self.kwargs["output"]))
-            scratch = planned_scratch(state.layout.scratch_specs(), workspace)
-            kwargs = {**self.kwargs, "token_embedding": operands.token_embedding,
-                      "multi_state": operands.multi_state, "output": operands.output}
-            binding = state.bind(scratch=scratch, **kwargs)
-            return PreparedCall(run=lambda: state.run(binding, eps=self.eps),
-                produce=operands.produce, output=operands.output, owners=(operands, scratch, binding))
+            return feedback_fixtures.benchmark_call(
+                state, arguments=self.kwargs, session=session, name=name,
+                workspace=workspace, eps=self.eps,
+            )
 
         session.prepare((self.plan.request(name=name, prepare_call=prepare, benchmark_call=benchmark),))
 

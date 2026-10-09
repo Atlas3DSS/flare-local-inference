@@ -8,6 +8,7 @@ from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
 
 from sparkgap.recipes.qwen38 import moe
 from sparkgap.preparation.scratch import ScratchArena
+from sparkgap.preparation.fixtures import fused_moe as moe_fixtures
 
 
 @pytest.mark.parametrize("tokens", [4, 17])
@@ -51,7 +52,7 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
             resources[key] = factory()
         return resources[key]
 
-    monkeypatch.setattr(moe, "benchmark_resource", resource)
+    monkeypatch.setattr(moe_fixtures, "benchmark_resource", resource)
     operator = moe.PreparedRoutedExperts(source, experts, ids, weights, output,
         session=session, name="prefill.layer0.experts", workspace=workspace,
         router_weight=router_weight, router_plan=router_plan)
@@ -74,7 +75,8 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
     calls = [requests[0].benchmark_call(candidate(index, size))
              for index, size in enumerate((32, 128, 256))]
     fixture = resources[("qwen_moe_inputs", "prefill.layer0.experts")]
-    reference = moe._ExpertBenchmarkInputs(source, experts=512, top_k=10,
+    reference = moe_fixtures.ExpertBenchmarkInputs(source, experts=512, top_k=10,
+        allocate_router=moe.RouterScratch.allocate,
         router_weight=router_weight, router_plan=router_plan)
     assert len(resources) == 1
     assert all(call.owners[0] is fixture and call.owners[1].data_ptr() == arena.tensor.data_ptr() for call in calls)

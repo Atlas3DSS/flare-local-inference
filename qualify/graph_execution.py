@@ -1091,7 +1091,7 @@ def main():
         "data/include/flashinfer/topk_common.cuh", "data/include/flashinfer/air_top_p.cuh",
     )]
     source_paths = [Path(__file__).with_name("checkpoint_state.py"),
-        *sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py")), *sorted((ROOT / "sparkgap/preparation").glob("*.py")),
+        *sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py")), *sorted((ROOT / "sparkgap/preparation").rglob("*.py")),
         *sorted((ROOT / "native/src").rglob("*.rs")), *sorted(b12x_root.rglob("*.py")), *sampling_sources]
     provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot)},
         "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),

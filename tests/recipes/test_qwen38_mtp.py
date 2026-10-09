@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sparkgap.preparation.fixtures import mtp_feedback as feedback_fixtures
 from sparkgap.preparation.scratch import ScratchArena
 from sparkgap.recipes.qwen38 import mtp, moe
 
@@ -46,7 +47,7 @@ def test_feedback_refresh_and_private_benchmark_preserve_input_state(monkeypatch
             resources[key] = factory()
         return resources[key]
 
-    monkeypatch.setattr(mtp, "benchmark_resource", resource)
+    monkeypatch.setattr(feedback_fixtures, "benchmark_resource", resource)
     token = torch.full((2, 2560), 8, dtype=torch.bfloat16)
     hidden = torch.full((2, 10240), 4, dtype=torch.bfloat16)
     output = torch.full_like(hidden, -1)

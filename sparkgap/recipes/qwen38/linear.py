@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 
 import torch
 from b12x.gemm import bf16_gemv
@@ -11,6 +12,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 
 from sparkgap.preparation.scratch import ScratchArena, scratch_storage, prime_owners
 from sparkgap.preparation.tuning import register_finalizer
+from sparkgap.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 
 
 class BF16Projection:
@@ -83,29 +85,12 @@ class QuantizedProjection:
                                                        out=output, workspace=storage),
                                 owners=prime_owners(workspace, storage) if storage is not None else ())
 
-        def benchmark(state):
-            trial_source = torch.empty_strided(source.shape, source.stride(),
-                                              dtype=source.dtype, device=source.device)
-            trial_output = torch.empty_strided(output.shape, output.stride(),
-                                              dtype=output.dtype, device=output.device)
-            generator = torch.Generator(device=source.device).manual_seed(0xB12)
-            seed = torch.randn(source.shape, device=source.device, dtype=source.dtype,
-                               generator=generator).mul_(0.125)
-            storage = selected_workspace(state.required_workspace)
-
-            def run():
-                state.run(trial_source, values, scales, gain, out=trial_output, workspace=storage)
-                if bias is not None:
-                    trial_output.add_(bias)
-                return trial_output
-
-            return PreparedCall(run=run, produce=lambda: trial_source.copy_(seed),
-                                output=trial_output, owners=(seed, trial_source, trial_output, storage, weight))
-
         session.prepare((self.plan.request(
             name=name,
             prepare_call=prepare,
-            benchmark_call=benchmark,
+            benchmark_call=partial(gemm_fixtures.benchmark_call, source=source, output=output,
+                values=values, scales=scales, gain=gain, bias=bias, weight=weight,
+                selected_workspace=selected_workspace),
         ),))
         self.workspace = selected_workspace()
         register_finalizer(session, lambda: setattr(self, "workspace", selected_workspace()), workspace=workspace)

@@ -3,7 +3,9 @@
 import importlib
 import inspect
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import fields, is_dataclass
 from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,6 +101,104 @@ class RecordingSession:
 
     def close(self):
         self.closed = True
+
+
+def construction_contract(session, signatures):
+    """Export declarations without process-local plan or allocation identities."""
+    from b12x.preparation import device
+
+    owners = {}
+
+    def encode(value):
+        if value is None or type(value) in (str, int, float, bool):
+            return value
+        if isinstance(value, (torch.dtype, torch.device)):
+            return str(value)
+        if isinstance(value, Mapping):
+            return {str(key): encode(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [encode(item) for item in value]
+        if is_dataclass(value):
+            return {field.name: encode(getattr(value, field.name)) for field in fields(value)}
+        raise TypeError(f"unsupported construction metadata: {type(value).__name__}")
+
+    def allocation_key(value):
+        if isinstance(value, tuple):
+            return [allocation_key(item) for item in value]
+        if type(value) is object or hasattr(value, "component_id"):
+            return {"owner": owners.setdefault(value, len(owners))}
+        return encode(value)
+
+    def memory(requirements):
+        return {
+            "scratch": encode(requirements.scratch),
+            "scratch_nbytes": requirements.scratch_nbytes,
+            "persistent": [
+                {"key": allocation_key(item.key),
+                 "required_nbytes": item.required_nbytes,
+                 "resident_nbytes": item.resident_nbytes}
+                for item in requirements.persistent
+            ],
+            "pending_persistent_nbytes": requirements.pending_persistent_nbytes,
+        }
+
+    def plan_contract(plan):
+        result = {
+            "component_id": plan.component_id,
+            "dependencies": encode(plan.dependencies),
+            "shared": plan.shared,
+            "memory": memory(plan.memory_requirements()),
+        }
+        if hasattr(plan, "variants"):
+            result.update(
+                composite_semantic_version=plan.composite_semantic_version,
+                capacity_metadata=encode(plan.capacity_metadata),
+                variants={str(count): plan_contract(child)
+                          for count, child in plan.variants.items()},
+            )
+            return result
+        contract = plan.contract
+        detected = device.detect_device(
+            plan._device if plan._device is not None else getattr(plan.query, "device", None)
+        )
+        configuration = contract.configure(
+            plan.query, device=detected.identity, override=plan.override, search=False
+        )
+        result.update(
+            versions={name: getattr(contract, name) for name in (
+                "query_schema_version", "config_schema_version", "semantic_version",
+                "candidate_contract_version")},
+            query=encode(contract.encode_query(plan.query)),
+            invocation=encode(plan.invocation),
+            default_config=encode(contract.config_payload(configuration.default)),
+            override=None if plan.override is None else encode(contract.config_payload(plan.override)),
+            requested_device=encode(plan._device),
+            detected_device=encode(detected),
+        )
+        return result
+
+    def factories(value):
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            assert all(callable(callback) for callback in value.values())
+            return list(value)
+        assert callable(value)
+        return "scalar"
+
+    return {
+        "requests": [{
+            "name": request.name,
+            "plan": plan_contract(request.plan),
+            "dependencies": encode(request.dependencies),
+            "collective": encode(request.collective),
+            "retain_benchmark_call": request.retain_benchmark_call,
+            "prepare_call": factories(request.prepare_call),
+            "benchmark_call": factories(request.benchmark_call),
+        } for request in session.requests.values()],
+        "graph_signatures": encode(signatures),
+        "scratch_arena_nbytes": session.arena.nbytes,
+    }
 
 
 class CompiledKernel:
@@ -632,6 +732,9 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         families
     )
     assert all(memory.scratch_nbytes >= 0 for memory in session.memory.values())
+    contract = construction_contract(session, signatures)
+    assert [request["name"] for request in contract["requests"]] == list(session.requests)
+    assert len(contract["graph_signatures"]) == len(signatures)
     assert not torch.cuda.is_initialized()
 
 

@@ -262,7 +262,7 @@ def inputs(args):
 
 
 def source_records():
-    paths = sorted((ROOT / 'sparkgap/preparation').glob('*.py'))
+    paths = sorted((ROOT / 'sparkgap/preparation').rglob('*.py'))
     paths += sorted((ROOT / 'sparkgap/recipes/qwen38').glob('*.py'))
     return [file_record(path) for path in [Path(__file__), Path(__file__).with_name('mtp_operators.py'), *paths]]
 

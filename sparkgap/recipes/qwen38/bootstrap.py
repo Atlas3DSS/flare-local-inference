@@ -14,6 +14,7 @@ import torch
 
 from sparkgap.preparation import inspect_qwen38_checkpoint
 from sparkgap.preparation.execution import GraphSignature, PreparedExecution
+from sparkgap.preparation.fixtures.gdn import register_benchmark_state
 from sparkgap.preparation.tuning import RecordedPreparationSession
 from sparkgap.preparation.scratch import ScratchArena
 from sparkgap.preparation.qwen38 import CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, HEADERS_SHA256, MODEL_ID, REVISION
@@ -21,7 +22,6 @@ from sparkgap.preparation.qwen38 import CONFIG_SHA256, FRONTEND_SHA256, GENERATI
 from .attention import QSAState, RotaryTables
 from .decoder import ModelWeights, DecoderScratch, PreparedDecoder
 from .decoder_state import DecoderInputs, PreparedDecoderState, PreparedResume
-from .gdn import register_gdn_benchmark_state
 from .maintenance import PreparedMaintenance
 from .ple import MappedPLETable
 from .sampling import AdmissionBuffers, DeviceRequestState
@@ -233,7 +233,10 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         extra_base = SNAPSHOT_BASE + snapshots
         state = HybridStatePool.allocate(extra_base + (28 if config.mtp else 0), device,
                                          speculative_tokens=speculative_tokens)
-        register_gdn_benchmark_state(session, state)
+        register_benchmark_state(
+            session, next(iter(state.gdn.values())).recurrent,
+            storage=state.backing, restore=state.reset_for_preparation,
+        )
         requests = DeviceRequestState.allocate(device,
             consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5])
         inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size)

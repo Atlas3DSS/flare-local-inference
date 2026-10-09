@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sparkgap.preparation.fixtures import varlen_attention as attention_fixtures
 from sparkgap.recipes.qwen38 import attention, ple, vision
 from sparkgap.preparation.scratch import ScratchArena
 
@@ -89,7 +90,7 @@ def session(monkeypatch):
             session.benchmark_resources[key] = factory()
         return session.benchmark_resources[key]
 
-    monkeypatch.setattr(vision, "benchmark_resource", resource)
+    monkeypatch.setattr(attention_fixtures, "benchmark_resource", resource)
     return value
 
 
@@ -272,7 +273,7 @@ def test_vision_private_producer_preserves_padded_operand_strides():
         for name in ("q", "k", "v")
     }
     arguments["cu_seqlens_q"] = torch.zeros(2, dtype=torch.int32)
-    inputs = vision._attention_benchmark_inputs(arguments)
+    inputs = attention_fixtures.attention_benchmark_inputs(arguments)
     seeds = {name: getattr(inputs, "seed_" + name).clone() for name in ("q", "k", "v")}
     for name in seeds:
         getattr(inputs, name).zero_()

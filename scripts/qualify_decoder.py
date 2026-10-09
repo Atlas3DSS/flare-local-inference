@@ -86,7 +86,7 @@ def main():
     source_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py"))}
     preparation_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted((ROOT / "sparkgap/preparation").glob("*.py"))}
+        for path in sorted((ROOT / "sparkgap/preparation").rglob("*.py"))}
 
     start = time.monotonic()
     def progress(message):

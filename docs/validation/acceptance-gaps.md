@@ -66,6 +66,9 @@ BF16 recurrence does not guarantee equality between arbitrary prefill partitions
   descriptors; CPU and real-CUDA transport checks pass.
 - CPU bootstrap tests invoke real preparation constructors, public plans, and
   scratch declarations. They stop before tuning, compilation, and capture.
+  Operator benchmark fixtures live under `preparation/fixtures`. CPU coverage
+  includes complete ordinary/copy/learned-MTP constructor contracts, scratch
+  requirements, producer bytes/layouts, and trial-resource release.
 
 Explicit request budgets remain authoritative. Increasing a fixture's budget
 or removing constraints does not resolve its failed output requirement.

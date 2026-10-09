@@ -8,7 +8,38 @@ import pytest
 import torch
 
 from sparkgap.recipes.qwen38 import hyperconnection
-from sparkgap.recipes.qwen38.hyperconnection import HyperconnectionScratch, _HyperconnectionBenchmarkInputs
+from sparkgap.recipes.qwen38.hyperconnection import HyperconnectionScratch
+from sparkgap.preparation.fixtures.hyperconnection import HyperconnectionBenchmarkInputs, benchmark_call
+
+
+def test_benchmark_call_retains_private_operands_gain_and_launch_options():
+    source = torch.zeros((3, 16), dtype=torch.bfloat16)[:, ::2]
+    gain = torch.linspace(.5, 1.5, 8)
+    output = torch.zeros_like(source)
+    launches = []
+
+    def launch(actual_source, actual_gain, actual_output, **options):
+        launches.append((actual_source, actual_gain, actual_output, options))
+        actual_output.copy_(actual_source)
+
+    call = benchmark_call(SimpleNamespace(launch=launch), "grouped_rmsnorm",
+                          (source, gain, output), {"eps": 1e-6})
+    operands, = call.owners
+    assert call.output is operands.arguments[-1]
+    assert call.reset is None and call.restore is None
+    assert launches == []
+    call.produce()
+    expected = operands.arguments[0].clone()
+    call.run()
+    assert launches[0][0] is operands.arguments[0]
+    assert launches[0][1] is gain and launches[0][2] is call.output
+    assert launches[0][3] == {"eps": 1e-6}
+    assert operands.arguments[0].stride() == source.stride()
+    assert torch.equal(call.output, expected)
+    operands.arguments[0].fill_(float("nan"))
+    call.produce()
+    assert torch.equal(operands.arguments[0], expected)
+    assert not source.count_nonzero() and not output.count_nonzero()
 
 
 @pytest.mark.parametrize("operation", ["grouped_rmsnorm", "scaled_silu", "gate_mean", "combine"])
@@ -28,7 +59,7 @@ def test_benchmark_inputs_are_finite_private_and_repeatable(operation):
         arguments = tuple(torch.zeros(tokens, width, dtype=torch.bfloat16)
                           for width in (10240, 2560, 4, 10240))
     original = tuple(tensor.clone() for tensor in arguments)
-    fixture = _HyperconnectionBenchmarkInputs(operation, arguments)
+    fixture = HyperconnectionBenchmarkInputs(operation, arguments)
     fixture.produce()
     for index, (actual, source) in enumerate(zip(fixture.arguments, arguments)):
         assert actual.shape == source.shape and actual.stride() == source.stride()
@@ -80,8 +111,8 @@ def test_borrowed_priming_keeps_exact_private_benchmark_fixture(operation):
     arguments = scratch.priming_arguments(source, gain)[operation]
     previous_arguments = ((torch.zeros_like(source), gain, scratch.normalized)
                           if operation == "grouped_rmsnorm" else arguments)
-    previous = _HyperconnectionBenchmarkInputs(operation, previous_arguments)
-    borrowed = _HyperconnectionBenchmarkInputs(operation, arguments)
+    previous = HyperconnectionBenchmarkInputs(operation, previous_arguments)
+    borrowed = HyperconnectionBenchmarkInputs(operation, arguments)
     previous.produce()
     borrowed.produce()
     for before, after in zip(previous.arguments, borrowed.arguments, strict=True):

@@ -5,8 +5,10 @@ import pytest
 import torch
 from types import SimpleNamespace
 
-from sparkgap.recipes.qwen38.gdn import _BenchmarkStateArena, _GDNBenchmarkInputs
-from sparkgap.recipes.qwen38.moe import _ExpertBenchmarkInputs
+from sparkgap.preparation.fixtures import gdn as gdn_fixtures
+from sparkgap.preparation.fixtures.gdn import BenchmarkStateArena, GDNBenchmarkInputs
+from sparkgap.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
+from sparkgap.recipes.qwen38.moe import RouterScratch
 
 
 def _recurrent_args(mode, tokens, sequences):
@@ -37,8 +39,8 @@ def _recurrent_args(mode, tokens, sequences):
 @pytest.mark.parametrize('tokens,boundary', [(16, 0), (64, 64), (65, 64)])
 def test_prefill_benchmark_has_live_fresh_and_continued_checkpoint_cases(tokens, boundary):
     original = _recurrent_args('prefill', tokens, 1)
-    arena = _BenchmarkStateArena(original['recurrent_state'])
-    fixture = _GDNBenchmarkInputs(original, mode='prefill', arena=arena)
+    arena = BenchmarkStateArena(original['recurrent_state'])
+    fixture = GDNBenchmarkInputs(original, mode='prefill', arena=arena)
     fixture.reset()
     fixture.producers[0]()
     assert fixture.args['num_tokens'].item() == tokens
@@ -79,7 +81,7 @@ def test_prefill_benchmark_has_live_fresh_and_continued_checkpoint_cases(tokens,
 
 def test_decode_benchmark_distinct_live_slots_and_repeatable_state():
     original = _recurrent_args('decode', 4, 4)
-    fixture = _GDNBenchmarkInputs(original, mode='decode', arena=_BenchmarkStateArena(original['recurrent_state']))
+    fixture = GDNBenchmarkInputs(original, mode='decode', arena=BenchmarkStateArena(original['recurrent_state']))
     fixture.reset()
     fixture.producers[0]()
     assert fixture.args['query_start_loc'].tolist() == [0, 1, 2, 3, 4]
@@ -97,14 +99,14 @@ def test_convolution_and_recurrence_share_benchmark_arena_with_exact_byte_stride
     recurrent = _recurrent_args('decode', 1, 1)['recurrent_state']
     slot_bytes = recurrent.stride(0) * recurrent.element_size()
     template = torch.empty_strided((6, 10240, 3), (slot_bytes // 2, 3, 1), dtype=torch.bfloat16).fill_(9)
-    arena = _BenchmarkStateArena(recurrent)
+    arena = BenchmarkStateArena(recurrent)
     args = dict(x=torch.zeros(16, 10240, dtype=torch.bfloat16),
         out=torch.zeros(16, 10240, dtype=torch.bfloat16),
         conv_weight=torch.zeros(10240, 4, dtype=torch.bfloat16), conv_state=template,
         query_start_loc=torch.zeros(2, dtype=torch.int32), state_slot_ids=torch.full((1,), -1, dtype=torch.int64),
         state_is_fresh=torch.zeros(1, dtype=torch.bool), num_accepted_tokens=torch.ones(1, dtype=torch.int32),
         num_seqs=torch.zeros(1, dtype=torch.int32), num_tokens=torch.zeros(1, dtype=torch.int32))
-    fixture = _GDNBenchmarkInputs(args, mode='prefill', arena=arena)
+    fixture = GDNBenchmarkInputs(args, mode='prefill', arena=arena)
     assert fixture.state.data_ptr() == arena.view(recurrent).data_ptr()
     assert fixture.state.stride() == template.stride()
     assert arena.nbytes == 6 * slot_bytes
@@ -116,8 +118,8 @@ def test_convolution_and_recurrence_share_benchmark_arena_with_exact_byte_stride
     assert fixture.args['state_is_fresh'].tolist() == [True]
     assert torch.all(template == 9)
     storage = torch.empty(arena.nbytes, dtype=torch.uint8)
-    borrowed = _GDNBenchmarkInputs(args, mode='prefill',
-        arena=_BenchmarkStateArena(template, storage=storage))
+    borrowed = GDNBenchmarkInputs(args, mode='prefill',
+        arena=BenchmarkStateArena(template, storage=storage))
     for left_producer, right_producer in zip(fixture.producers, borrowed.producers, strict=True):
         fixture.reset()
         borrowed.reset()
@@ -135,14 +137,14 @@ def test_convolution_and_recurrence_share_benchmark_arena_with_exact_byte_stride
 def test_borrowed_arena_preserves_exact_benchmark_operands_and_reset(mode, tokens, sequences):
     original = _recurrent_args(mode, tokens, sequences)
     template = original['recurrent_state']
-    private = _BenchmarkStateArena(template)
+    private = BenchmarkStateArena(template)
     storage = torch.full((private.nbytes,), 123, dtype=torch.uint8)
-    borrowed = _BenchmarkStateArena(template, storage=storage)
+    borrowed = BenchmarkStateArena(template, storage=storage)
     assert borrowed.allocated_nbytes == 0 and borrowed.borrowed_nbytes == private.nbytes
     assert private.allocated_nbytes == private.nbytes and private.borrowed_nbytes == 0
     assert borrowed.view(template).data_ptr() == storage.data_ptr()
-    left = _GDNBenchmarkInputs(original, mode=mode, arena=private)
-    right = _GDNBenchmarkInputs(original, mode=mode, arena=borrowed)
+    left = GDNBenchmarkInputs(original, mode=mode, arena=private)
+    right = GDNBenchmarkInputs(original, mode=mode, arena=borrowed)
     assert torch.equal(left.initial_state, right.initial_state)
     for left_producer, right_producer in zip(left.producers, right.producers, strict=True):
         left.reset()
@@ -168,7 +170,7 @@ def test_borrowed_arena_rejects_storage_contract_mismatch(kind):
         'stride': lambda: torch.empty(size * 2, dtype=torch.uint8)[::2],
         'device': lambda: torch.empty(size, dtype=torch.uint8, device='meta')}[kind]()
     with pytest.raises(ValueError, match='exact extent and device'):
-        _BenchmarkStateArena(template, storage=storage)
+        BenchmarkStateArena(template, storage=storage)
 
 
 def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial_reset(monkeypatch):
@@ -186,7 +188,7 @@ def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial
             resource_cache[key] = factory()
         return resource_cache[key]
 
-    monkeypatch.setattr(gdn, 'benchmark_resource', resource)
+    monkeypatch.setattr(gdn_fixtures, 'benchmark_resource', resource)
     specs = lambda size: (SimpleNamespace(name='scratch', shape=(size,), nbytes=size, dtype=torch.uint8,
                                           device=torch.device('cpu')),)
     plan = SimpleNamespace(scratch_specs=lambda: specs(16))
@@ -239,7 +241,7 @@ def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial
 
 def test_moe_benchmark_covers_shared_routes_without_mutating_serving_operands():
     source = torch.zeros(4, 32, dtype=torch.bfloat16)
-    fixture = _ExpertBenchmarkInputs(source, experts=512, top_k=10)
+    fixture = ExpertBenchmarkInputs(source, experts=512, top_k=10, allocate_router=RouterScratch.allocate)
     assert len(fixture.producers) == 5
     distinct_counts = []
     for produce in fixture.producers:
@@ -272,8 +274,8 @@ def test_prefill_benchmark_reuses_prepared_router_without_nested_preparation(mon
 
     monkeypatch.setattr(moe.fused_moe, "route_topk", route)
     with pytest.raises(ValueError, match="already-prepared"):
-        _ExpertBenchmarkInputs(source, experts=512, top_k=10, router_weight=weight)
-    fixture = _ExpertBenchmarkInputs(source, experts=512, top_k=10, router_weight=weight, router_plan=plan)
+        ExpertBenchmarkInputs(source, experts=512, top_k=10, allocate_router=RouterScratch.allocate, router_weight=weight)
+    fixture = ExpertBenchmarkInputs(source, experts=512, top_k=10, allocate_router=RouterScratch.allocate, router_weight=weight, router_plan=plan)
     assert len(fixture.producers) == 3
     fixture.producers[1]()
     independent = fixture.router.ids.clone()

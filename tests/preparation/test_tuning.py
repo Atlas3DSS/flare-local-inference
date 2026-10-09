@@ -34,9 +34,12 @@ def backend(monkeypatch):
 
     def prepare(self, requests, *, autotune, **kwargs):
         events.append(("prepare", autotune, tuple(item.name for item in requests)))
+        retained_trials = []
         for request in requests:
             if autotune and request.benchmark_call is not None:
-                request.benchmark_call(request.plan)
+                trial = request.benchmark_call(request.plan)
+                if getattr(controls, "retain_trials", False):
+                    retained_trials.append(trial)
             request.plan.selection = SimpleNamespace(
                 source=request.plan.source if autotune else "default", config={"tile": 32})
             if request.name not in controls.skip_prime:
@@ -52,6 +55,9 @@ def backend(monkeypatch):
             events.append(("result_close", autotune))
             if controls.close_error:
                 raise RuntimeError("result close failed")
+            if autotune and getattr(controls, "retain_trials", False):
+                controls.before_trial_close()
+                retained_trials.clear()
 
         return SimpleNamespace(coverage={}, cache_hits=2 if autotune else 0,
             benchmarked_candidates=7 if autotune else 0, elapsed_seconds=1.25,
@@ -348,7 +354,7 @@ def test_borrowed_registration_is_unique_collecting_only_and_restores_on_close(b
 
 
 def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(backend):
-    from sparkgap.recipes.qwen38.gdn import register_gdn_benchmark_state
+    from sparkgap.preparation.fixtures.gdn import register_benchmark_state
 
     session = RecordedPreparationSession(device=0, checkpoint="revision")
     storage = torch.full((2, 32), 7, dtype=torch.uint8)
@@ -359,9 +365,7 @@ def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(
         assert references[0]() is None
         storage.zero_()
 
-    pool = SimpleNamespace(backing=storage,
-        gdn={0: SimpleNamespace(recurrent=template)}, reset_for_preparation=restore)
-    register_gdn_benchmark_state(session, pool)
+    register_benchmark_state(session, template, storage=storage, restore=restore)
     key = ("qwen_gdn_state", "cpu", 2, 32)
     references.append(weakref.ref(session._benchmark_resources[key]))
 
@@ -770,3 +774,73 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
     assert not session._published_owners
     assert references["tuned"]() is None
     assert all(owner.binding.scratch is arena.tensor for owner in owners)
+
+
+@pytest.mark.parametrize("operator", ["gdn", "fused_moe", "hyperconnection", "varlen_attention", "blockscaled_gemm", "mtp_feedback"])
+def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
+    from sparkgap.preparation.fixtures import (
+        blockscaled_gemm, fused_moe, gdn, hyperconnection, varlen_attention, mtp_feedback,
+    )
+    from sparkgap.recipes.qwen38.moe import RouterScratch
+
+    events, controls = backend
+    controls.retain_trials = True
+    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    source = torch.zeros(4, 32, dtype=torch.bfloat16)
+    output = torch.zeros_like(source)
+    references = []
+    trial_alive_at_close = []
+    controls.before_trial_close = lambda: trial_alive_at_close.append(all(ref() is not None for ref in references))
+    specs = lambda: (ScratchBufferSpec(name="workspace", shape=(0,),
+        dtype=torch.uint8, device=torch.device("cpu")),)
+    state = SimpleNamespace(scratch=SimpleNamespace(scratch_specs=specs),
+        scratch_plan=SimpleNamespace(scratch_specs=specs),
+        layout=SimpleNamespace(scratch_specs=specs), required_workspace=0,
+        bind=lambda **kwargs: SimpleNamespace(**kwargs), run=lambda *args, **kwargs: None,
+        launch=lambda *args, **kwargs: None)
+
+    def benchmark(_):
+        if operator == "gdn":
+            arguments = dict(x=source, out=output, conv_state=torch.zeros(3, 32, 3),
+                conv_weight=torch.ones(32, 4), query_start_loc=torch.zeros(2, dtype=torch.int32),
+                state_slot_ids=torch.full((1,), -1, dtype=torch.int64),
+                state_is_fresh=torch.zeros(1, dtype=torch.bool),
+                num_accepted_tokens=torch.ones(1, dtype=torch.int32),
+                num_seqs=torch.zeros(1, dtype=torch.int32), num_tokens=torch.zeros(1, dtype=torch.int32))
+            call = gdn.benchmark_call(state, arguments=arguments, session=session, name="op",
+                mode="prefill", scratch_specs=lambda _: specs(), workspace=None,
+                run_options={}, binding_plan=object())
+        elif operator == "fused_moe":
+            call = fused_moe.benchmark_call(state, source=source,
+                experts=SimpleNamespace(num_experts=512), top_k=10, session=session, name="op",
+                workspace=None, allocate_router=RouterScratch.allocate, router_weight=None, router_plan=None)
+        elif operator == "hyperconnection":
+            call = hyperconnection.benchmark_call(state, "scaled_silu", (source, output), {})
+        elif operator == "varlen_attention":
+            arguments = dict(q=source.view(4, 2, 16), k=source.view(4, 2, 16),
+                v=source.view(4, 2, 16), cu_seqlens_q=torch.zeros(3, dtype=torch.int32))
+            call = varlen_attention.benchmark_call(state, arguments=arguments,
+                session=session, workspace=None)
+        elif operator == "mtp_feedback":
+            call = mtp_feedback.benchmark_call(state,
+                arguments=dict(token_embedding=source, multi_state=source, output=output),
+                session=session, name="op", workspace=None, eps=1e-6)
+        else:
+            call = blockscaled_gemm.benchmark_call(state, source=source, output=output,
+                values=torch.ones(32, 32), scales=None, gain=None, bias=None,
+                weight=object(), selected_workspace=lambda _: None)
+        if call.reset is not None:
+            call.reset()
+        call.produce()
+        call.invoke()
+        references.append(weakref.ref(call.owners[0]))
+        return call
+
+    session.prepare((declaration("op", benchmark=benchmark),))
+    session.tune()
+    assert trial_alive_at_close == [True]
+    assert references and all(ref() is None for ref in references)
+    assert not session._benchmark_resources
+    assert not source.count_nonzero() and not output.count_nonzero()
+    with session.capture():
+        pass

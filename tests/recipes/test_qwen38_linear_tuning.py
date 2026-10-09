@@ -55,9 +55,18 @@ def test_dense_benchmark_uses_finite_private_strided_inputs_and_planned_workspac
     linear.QuantizedProjection(source, weight, output, session=session, name="projection",
                                workspace=workspace, bias=bias, activation_mode="a16")
     trial = requests[0].benchmark_call(state)
+    seed, owned_source, owned_output, owned_workspace, owned_weight = trial.owners
+    assert owned_weight is weight
+    expected_seed = torch.randn(source.shape, dtype=source.dtype,
+        generator=torch.Generator(device=source.device).manual_seed(0xB12)).mul_(0.125)
+    assert torch.equal(seed, expected_seed)
+    assert trial.output is owned_output
+    assert trial.reset is None and trial.restore is None
     trial.produce()
     actual = trial.invoke()
     trial_source, trial_output, trial_workspace = calls[-1]
+    assert trial_source is owned_source and trial_output is owned_output
+    assert trial_workspace is owned_workspace
     assert trial_source.stride() == source.stride()
     assert trial_output.stride() == output.stride()
     assert trial_source.data_ptr() != source.data_ptr()

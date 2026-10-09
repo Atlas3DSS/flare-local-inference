@@ -420,6 +420,14 @@ their supplied storage owners. Replacing `arena.tensor` is insufficient to
 release memory if another owner still references its previous storage; ownership
 qualification checks those references as well as the reported arena extent.
 
+Operator benchmark operands and trial-state arenas live in
+[`preparation/fixtures`](../sparkgap/preparation/fixtures/). GDN, fused MoE,
+hyperconnection, variable-length attention, blockscaled GEMM, and MTP feedback
+each provide a concrete fixture factory. Recipes retain plan declarations,
+priming, selected bindings, and finalizers. Fixture factories preserve checkpoint
+weight identity, tensor layouts and aliases, producer order, candidate scratch
+requirements, and cleanup before capture; they do not own serving execution.
+
 Scratch contents are volatile across operator calls. Kernels may not depend on
 bytes left by a previous call. Model state, cache pages, request metadata,
 weights, CSF expansion storage, and outputs that remain live while another

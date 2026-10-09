@@ -11,8 +11,9 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpVisionRotaryEmbedding, apply_rotary_pos_emb_vision,
 )
 
+from sparkgap.preparation.fixtures import varlen_attention as attention_fixtures
 from sparkgap.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from sparkgap.preparation.tuning import benchmark_resource, register_finalizer
+from sparkgap.preparation.tuning import register_finalizer
 
 from .linear import BF16Projection, QuantizedProjection
 
@@ -100,43 +101,6 @@ class _Linear(torch.nn.Module):
         return output
 
 
-@dataclass(frozen=True)
-class _AttentionBenchmarkInputs:
-    q: torch.Tensor
-    k: torch.Tensor
-    v: torch.Tensor
-    seed_q: torch.Tensor
-    seed_k: torch.Tensor
-    seed_v: torch.Tensor
-    cu_seqlens_q: torch.Tensor
-
-    @property
-    def nbytes(self):
-        return sum(value.untyped_storage().nbytes() for value in vars(self).values())
-
-    def produce(self):
-        self.q.copy_(self.seed_q)
-        self.k.copy_(self.seed_k)
-        self.v.copy_(self.seed_v)
-
-
-def _attention_benchmark_inputs(arguments):
-    """Private finite QKV and one full-capacity image for attention tuning."""
-    query = arguments["q"]
-    generator = torch.Generator(device=query.device).manual_seed(89017)
-    result = {}
-    for name in ("q", "k", "v"):
-        source = arguments[name]
-        seed = torch.empty_strided(source.shape, source.stride(), dtype=source.dtype,
-                                   device=source.device).normal_(generator=generator)
-        result[f"seed_{name}"] = seed
-        result[name] = torch.empty_strided(source.shape, source.stride(),
-                                           dtype=source.dtype, device=source.device).copy_(seed)
-    lengths = torch.full_like(arguments["cu_seqlens_q"], query.shape[0])
-    lengths[0] = 0
-    return _AttentionBenchmarkInputs(**result, cu_seqlens_q=lengths)
-
-
 class _Attention(torch.nn.Module):
     def __init__(self, module, scratch, metadata, weights, *, session, name, shared=None,
                  projection_workspace=None, attention_workspace=None, attention_math_mode="flash"):
@@ -169,16 +133,9 @@ class _Attention(torch.nn.Module):
             return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(attention_workspace, workspace, binding))
 
         def benchmark(state):
-            identity = tuple((name, tuple(kwargs[name].shape), kwargs[name].stride(), kwargs[name].dtype,
-                              kwargs[name].device) for name in ("q", "k", "v", "cu_seqlens_q"))
-            inputs = benchmark_resource(session, ("vision_attention_inputs", identity),
-                                        lambda: _attention_benchmark_inputs(kwargs))
-            arguments = {**kwargs, **{key: getattr(inputs, key)
-                                      for key in ("q", "k", "v", "cu_seqlens_q")}}
-            workspace = planned_scratch(state.scratch_plan.scratch_specs(), attention_workspace)
-            binding = state.bind(scratch=workspace, **arguments)
-            return PreparedCall(run=lambda: state.run(binding), produce=inputs.produce,
-                                owners=(inputs, workspace, binding))
+            return attention_fixtures.benchmark_call(
+                state, arguments=kwargs, session=session, workspace=attention_workspace,
+            )
 
         session.prepare((declaration.request(name=name, prepare_call=prepare,
                                              benchmark_call=benchmark),))

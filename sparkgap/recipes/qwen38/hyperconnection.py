@@ -3,48 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 from b12x.norm import hyperconnection as hc
 from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
 from sparkgap.preparation.tuning import register_finalizer
+from sparkgap.preparation.fixtures import hyperconnection as hc_fixtures
 
 from .linear import BF16Projection
-
-
-class _HyperconnectionBenchmarkInputs:
-    """Private finite activations with the canonical RMS normalization gain."""
-
-    def __init__(self, operation, arguments):
-        weight_index = 1 if operation == "grouped_rmsnorm" else None
-        self.arguments = tuple(
-            value if index == weight_index else torch.empty_strided(
-                value.shape, value.stride(), dtype=value.dtype, device=value.device)
-            for index, value in enumerate(arguments)
-        )
-        generator = torch.Generator(device="cpu").manual_seed(65537)
-        self.inputs = []
-        for index, target in enumerate(self.arguments[:-1]):
-            if index == weight_index:
-                continue
-            fixture = torch.randn(target.shape, generator=generator)
-            self.inputs.append((target, fixture.to(device=target.device, dtype=target.dtype)))
-        self.arguments[-1].zero_()
-
-    def produce(self):
-        for target, fixture in self.inputs:
-            target.copy_(fixture)
-
-
-def _benchmark_call(state, operation, arguments, kwargs):
-    operands = _HyperconnectionBenchmarkInputs(operation, arguments)
-    return PreparedCall(
-        run=lambda: state.launch(*operands.arguments, **kwargs),
-        output=operands.arguments[-1],
-        produce=operands.produce,
-        owners=(operands,),
-    )
 
 
 @dataclass(frozen=True)
@@ -132,7 +100,8 @@ class PreparedHyperconnection:
             session.prepare((plan.request(
                 name=f"{name}.{operation}",
                 prepare_call=lambda state, args=arguments, kw=kwargs: PreparedCall(run=lambda: state.launch(*args, **kw)),
-                benchmark_call=lambda state, op=operation, args=arguments, kw=kwargs: _benchmark_call(state, op, args, kw),
+                benchmark_call=partial(hc_fixtures.benchmark_call, operation=operation,
+                                       arguments=arguments, kwargs=kwargs),
             ),))
             self.plans[operation] = plan
             if operation == "combine":
