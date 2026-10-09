@@ -569,6 +569,16 @@ bounded preparation workers so they cannot block socket service, health, or
 cancellation. Streaming disconnects cancel the associated request; an event
 channel closing without a terminal event reports an error.
 
+Native [`Error`](../native/src/error.rs) distinguishes admission, execution,
+and frontend failures. Cloneable failures retain their underlying source chain;
+CUDA failures retain the operation, numeric code, name, and description. Dispatch
+and error assertions use variants rather than message substrings. Request
+validation maps to HTTP 400, model admission capacity or worker unavailability
+to 503, and
+execution failure to 500. After SSE headers are sent, failure terminates the
+stream with an error event. Workers retain the first failure, and a failed CUDA
+drain retains the graph and buffer owners.
+
 ### Frontend implementation references
 
 The vLLM Rust frontend at revision

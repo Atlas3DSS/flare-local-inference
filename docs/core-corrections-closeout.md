@@ -74,10 +74,11 @@ serving implementation.
 The static native model contract owns Qwen input packing, schema validation,
 prompt interpretation, and completion semantics. JPEG/EXIF decoding passes
 checkpoint admission and all 26 valid-image HTTP admissions; two constrained
-outputs reach their explicit budget in whitespace loops. Typed errors,
-worker-loop decomposition, tool-plus-schema grammar, and the upstream AIR
-submission remain open. Preparation, recipes, the native runtime, and qualification tooling have
-separate source commits. The completed items in correction section 0 remain
+outputs reach their explicit budget in whitespace loops. Typed native errors
+preserve source chains, driver codes, and status mapping; installed HTTP/SSE
+verification remains open. Worker-loop decomposition, tool-plus-schema grammar,
+and the upstream AIR submission remain open. Preparation, recipes, the native
+runtime, and qualification tooling have separate source commits. The completed items in correction section 0 remain
 closed, subject to their original measurement scopes.
 
 ## Execution order
@@ -94,8 +95,8 @@ closed, subject to their original measurement scopes.
    unchanged ordinary common-sampler B1/B4 kernel baseline alongside this work;
    that measurement does not depend on learned MTP qualification.
 3. **Complete the native model boundary.** Preserve the implemented static model
-   contract and Qwen-owned packing/output semantics while introducing typed errors
-   and worker phases. Preserve upload bytes and transaction ordering.
+   contract, typed errors, and Qwen-owned packing/output semantics while extracting
+   worker phases. Preserve upload bytes and transaction ordering.
 4. **Complete local serving contracts and copy qualification.** Implement
    tool-plus-schema grammars and rerun the agentic workload with native string stops.
    Preserve JPEG/EXIF admission coverage and its unresolved output failures.
@@ -115,7 +116,7 @@ closed, subject to their original measurement scopes.
    specifications, and run the final installed-entrypoint acceptance on pinned
    sources. Commit each coherent change as it is validated.
 
-CPU work on documentation, image fixtures, error types, and constructor coverage
+CPU work on documentation, image fixtures, failure tests, and constructor coverage
 can proceed in parallel. GPU qualification uses the assigned device exclusively.
 Source files recorded by an active run remain frozen until that run completes;
 parallel implementations use isolated source copies until integration.
@@ -179,7 +180,7 @@ work remains stopped.
 | 4.1 Commit working tree | Implemented: legacy removal, native runtime, Python preparation, qualification, and documentation use separate commits. | Commit each coherent validated change as it lands. FlashInfer pinning remains item 4.3. |
 | 4.2 Externalize archives | Closed: bulk files live under `/data/sparkgap-artifacts/validation-receipts`; repository links and compact locators resolve there. | Keep generated archives out of Git using the archive ignore rules. Retain debugging data only while it remains useful. |
 | 4.3 FlashInfer commits and pin | Main checkout is clean at `c691c681ebcbda066faf5bd80fef0d257b256fbc`, with seven commits separating operator contracts, diagnostics, and sampler changes. Source validation and locked dependency checks pass. | Submit the AIR normalization change (`f1cd7bb29`) upstream separately with its correctness and performance tests. |
-| 4.4 Specification cleanup | Receipt narratives are removed from core design; sampling, determinism, acceptance, and the static native model-packing contract are specified. | Keep section-7 mappings aligned with the remaining typed-error, worker-phase, and tuning-fixture extractions. |
+| 4.4 Specification cleanup | Receipt narratives are removed from core design; sampling, determinism, acceptance, and the static native model-packing contract are specified. | Keep section-7 mappings aligned with the remaining worker-phase and tuning-fixture extractions. |
 | 4.5 CPU bootstrap | Closed: [constructor tests](../tests/preparation/test_bootstrap_construction.py) invoke actual `prepare_model`, weight-tree assembly, Prepared constructors, and public b12x plans for ordinary/copy/MTP catalogs (28/39/39 graphs). Five tests pass with CUDA initialization forbidden. | Preserve graph/operator declarations, capacities, dtypes, scratch ownership, and malformed-weight rejection. These tests stop at tuning; compilation, capture, and numerics require GPU checks. |
 | 4.6 Receipt prose | Closed: validation index and acceptance coverage state behavior, limitations, and remaining gates; historical measurements stay in their individual reports. | Keep acceptance summaries aligned with implementation and actual test results. |
 
@@ -216,8 +217,8 @@ options, forced/named selections, and subsequent tool-result turns.
 | Item | Status and evidence | Work required to close |
 |---|---|---|
 | 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust/Python tests and six installed HTTP parsing/stop checks pass. All image fixtures are admitted, with the structured-output limitation described above. | Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
-| 6.2 Typed errors | Open: [lib.rs](../native/src/lib.rs) aliases Result to String. Admission-rejection events already differ structurally; the correction's substring count is stale. | Introduce typed admission, execution, and frontend errors, preserving underlying causes and numeric driver codes. Map HTTP/SSE behavior by variants and use variant assertions. Preserve first failure and owner retention after failed drain. Eliminate error-text classification, without confusing ordinary token/metrics string checks with error dispatch. |
-| 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | After contract/error extraction, introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve exact endpoint capture before continued model work, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
+| 6.2 Typed errors | Implemented in [error.rs](../native/src/error.rs): admission, execution, and frontend variants preserve source chains and numeric CUDA codes. Status dispatch and error assertions use variants. CPU cause/status tests and installed startup rejection pass. | Verify installed HTTP/SSE status mapping and failure handling. Preserve first failure, terminal error events, and owner retention after failed drain. |
+| 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | Introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve exact endpoint capture before continued model work, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
 | 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
 | 6.5 Qualification package | Partial: HTTP and graph-execution implementations live in `qualify.server` and `qualify.graph_execution`; script entrypoints and dependent callers preserve their CLI and request contracts. CPU regression suites pass. | Move remaining diagnosis/trace/qualification scripts and the test-tree qualifier. Share existing HTTP/SSE and fixture helpers where duplication remains; preserve request bytes, assertions, and result semantics. |
 | 6.6 Unsafe safety proofs | Closed: unsafe calls outside cuda.rs state allocation, context/thread, and drain/lifetime obligations locally; ownership/failure tests pass. | Preserve the proofs when changing native ownership. |
