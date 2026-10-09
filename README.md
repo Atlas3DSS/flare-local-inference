@@ -65,8 +65,9 @@ Tensor transfer belongs to `b12x.loader.DirectWeightSession`; the manifest's
 
 `sparkgap.preparation.graphs.PreparedGraphBundle` retains named instantiated graphs,
 persistent CUDA buffers, and additional owners such as modules, mapped memory,
-and streams. `start_worker()` synchronizes preparation and consumes the bundle
-once. The Rust worker retains its owner until confirmed CUDA drain.
+and streams. Its raw `start_worker()` helper is restricted to native builds with
+the `qualification` Cargo feature. Production hands the prepared model to
+`Server`; Rust retains its owner until confirmed CUDA drain.
 
 Raw graph replay bypasses PyTorch RNG bookkeeping. Capture must use explicit
 device RNG state. After handoff, graph re-instantiation, storage resizing, and

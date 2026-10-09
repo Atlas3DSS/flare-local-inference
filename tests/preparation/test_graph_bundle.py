@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +49,19 @@ def test_registration_metadata_is_copied_and_read_only():
     assert dict(prepared.graph_indices) == {"decode": 0, "prefill": 1}
     with pytest.raises(TypeError):
         prepared.graph_indices["decode"] = 3
+
+
+def test_raw_replay_requires_qualification_binding_before_cuda(monkeypatch):
+    prepared = bundle()
+    monkeypatch.setitem(sys.modules, "sparkgap_native", SimpleNamespace())
+
+    def forbidden():
+        pytest.fail("qualification feature rejection must precede CUDA validation")
+
+    monkeypatch.setattr(prepared, "_validate_resources", forbidden)
+    with pytest.raises(RuntimeError, match="native qualification Cargo feature"):
+        prepared.start_worker()
+    assert not prepared.consumed
 
 
 def test_failed_registration_allows_retry_but_success_is_one_shot(monkeypatch):

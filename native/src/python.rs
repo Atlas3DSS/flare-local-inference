@@ -8,8 +8,11 @@ use crate::execution::{
     BufferDescriptor, Dtype, ExecutionManifest, ExecutionWorker, GraphDescriptor, GraphKind,
     InputBinding, OwnedUpload, SamplingMode,
 };
-use crate::{BufferSpan, GraphBundle, ReplayWorker, lifetime::OwnerLease};
+use crate::lifetime::OwnerLease;
+#[cfg(feature = "qualification")]
+use crate::{BufferSpan, GraphBundle, ReplayWorker};
 
+#[cfg(feature = "qualification")]
 #[pyclass(module = "sparkgap_native")]
 struct ReplayCompletion {
     #[pyo3(get)]
@@ -27,12 +30,14 @@ struct ReplayCompletion {
 /// The owner must retain every captured allocation, executable, and CUDA context.
 /// Graph handles must not be reinstantiated and tensor storage must not be resized
 /// or mutated concurrently. Captured PyTorch generator-backed RNG is unsupported.
+#[cfg(feature = "qualification")]
 #[pyclass(module = "sparkgap_native")]
 struct GraphReplayWorker {
     worker: ReplayWorker,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
 }
 
+#[cfg(feature = "qualification")]
 #[pymethods]
 impl GraphReplayWorker {
     #[new]
@@ -113,6 +118,7 @@ impl GraphReplayWorker {
     }
 }
 
+#[cfg(feature = "qualification")]
 impl Drop for GraphReplayWorker {
     fn drop(&mut self) {
         let shutdown = self.worker.close();
@@ -311,14 +317,40 @@ impl Drop for PreparedGraphExecutor {
 
 #[pymodule]
 fn sparkgap_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<GraphReplayWorker>()?;
-    module.add_class::<ReplayCompletion>()?;
+    #[cfg(feature = "qualification")]
+    {
+        module.add_class::<GraphReplayWorker>()?;
+        module.add_class::<ReplayCompletion>()?;
+    }
     module.add_class::<PreparedGraphExecutor>()?;
     module.add_class::<ExecutionCompletion>()?;
     #[cfg(feature = "server")]
     module.add_class::<NativeServer>()?;
     module.add_function(wrap_pyfunction!(current_context, module)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn raw_replay_exports_require_qualification_feature() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "sparkgap_native").unwrap();
+            sparkgap_native(&module).unwrap();
+            for name in ["GraphReplayWorker", "ReplayCompletion"] {
+                assert_eq!(
+                    module.hasattr(name).unwrap(),
+                    cfg!(feature = "qualification")
+                );
+            }
+            assert!(module.hasattr("GraphExecutor").unwrap());
+            assert!(module.hasattr("current_context").unwrap());
+            assert_eq!(module.hasattr("Server").unwrap(), cfg!(feature = "server"));
+        });
+    }
 }
 
 #[cfg(feature = "server")]

@@ -84,8 +84,9 @@ class PreparedGraphBundle:
             return self._consumed
 
     def start_worker(self, *, queue_capacity: int = 8) -> Any:
-        """Synchronize preparation and consume this bundle into one native worker.
+        """Consume this bundle into a qualification-only raw replay worker.
 
+        Requires a native extension built with the ``qualification`` feature.
         Validation or native initialization failure leaves the bundle retryable.
         Successful registration consumes it permanently, including after close.
         The caller must close the worker before interpreter finalization.
@@ -100,8 +101,11 @@ class PreparedGraphBundle:
             return worker
 
     def _register(self, queue_capacity: int) -> Any:
-        import torch
         import sparkgap_native
+
+        if not hasattr(sparkgap_native, "GraphReplayWorker"):
+            raise RuntimeError("raw replay requires the native qualification Cargo feature")
+        import torch
 
         context, handles, spans = self._validate_resources()
         torch.cuda.synchronize(self._device)

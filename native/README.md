@@ -39,7 +39,11 @@ and dynamically loads `libcuda.so.1`; building and running native unit tests doe
 not require CUDA libraries. Tests exercise queueing and teardown using explicit
 Rust test functions. Production always calls the CUDA driver.
 
-Python entrypoints:
+The `GraphReplayWorker` and `ReplayCompletion` Python bindings require the
+`qualification` Cargo feature. Production package builds omit them. The server
+uses its native execution transport directly.
+
+Raw replay qualification entrypoints:
 
 ```text
 current_context() -> (context_handle, device_ordinal)
@@ -87,7 +91,7 @@ created or destroyed by this crate.
 Qualify real PyTorch-to-Rust graph replay on an explicitly assigned idle GPU:
 
 ```sh
-PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml --features extension-module
+PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml --features extension-module,qualification
 CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python native/tests/test_cuda_graph_replay.py \
   --extension native/target/debug/libsparkgap_native.so
 ```
