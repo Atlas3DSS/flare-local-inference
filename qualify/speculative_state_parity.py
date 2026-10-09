@@ -447,7 +447,7 @@ def observe(evidence, side, stage, model, owner, pages, operation=None):
             evidence.tensor(side, stage, f"target.gdn.{name}", getattr(operation.state.gdn, name).cpu())
         for name in ("request_ids", "query_positions", "sequence_lengths", "slot_mapping"):
             evidence.tensor(side, stage, f"target.qsa.{name}", getattr(operation.state.qsa, name).cpu())
-        target, _, verify, commit, _, _ = operation.operations
+        target, _, verify, commit, _ = operation.operations
         for name, tensor in (("target_valid", target.valid), ("acceptance_ids", verify.output.token_ids),
                 ("accepted_drafts", verify.output.accepted_drafts), ("emitted_count", commit.emitted_count)):
             evidence.tensor(side, stage, name, tensor.cpu())
