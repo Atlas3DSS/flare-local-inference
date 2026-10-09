@@ -73,7 +73,8 @@ serving implementation.
 
 The static native model contract owns Qwen input packing, schema validation,
 prompt interpretation, and completion semantics. JPEG/EXIF decoding passes
-checkpoint admission tests; installed HTTP validation remains open. Typed errors,
+checkpoint admission and all 26 valid-image HTTP admissions; two constrained
+outputs reach their explicit budget in whitespace loops. Typed errors,
 worker-loop decomposition, tool-plus-schema grammar, and the upstream AIR
 submission remain open. Preparation, recipes, the native runtime, and qualification tooling have
 separate source commits. The completed items in correction section 0 remain
@@ -213,7 +214,7 @@ options, forced/named selections, and subsequent tool-result turns.
 
 | Item | Status and evidence | Work required to close |
 |---|---|---|
-| 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust and Python preparation tests pass. | Qualify the rebuilt extension through the actual HTTP service. Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
+| 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust/Python tests and six installed HTTP parsing/stop checks pass. All image fixtures are admitted, with the structured-output limitation described above. | Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
 | 6.2 Typed errors | Open: [lib.rs](../native/src/lib.rs) aliases Result to String. Admission-rejection events already differ structurally; the correction's substring count is stale. | Introduce typed admission, execution, and frontend errors, preserving underlying causes and numeric driver codes. Map HTTP/SSE behavior by variants and use variant assertions. Preserve first failure and owner retention after failed drain. Eliminate error-text classification, without confusing ordinary token/metrics string checks with error dispatch. |
 | 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | After contract/error extraction, introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve candidate-record-before-complete, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
 | 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
