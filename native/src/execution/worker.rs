@@ -43,6 +43,9 @@ impl ExecutionWorker {
         let thread = thread::Builder::new()
             .name("sparkgap-execution".into())
             .spawn(move || {
+                // SAFETY: The caller retains the manifest's graphs and allocations
+                // until this worker reports drain. The executor binds its streams
+                // to the declared context on this thread and has exclusive access.
                 let mut executor = match unsafe { GraphExecutor::new(manifest) } {
                     Ok(executor) => executor,
                     Err(error) => {

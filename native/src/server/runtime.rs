@@ -196,6 +196,9 @@ impl ModelRuntime {
         let thread = thread::Builder::new()
             .name("sparkgap-model".into())
             .spawn(move || {
+                // SAFETY: start's caller retains all prepared resources through
+                // confirmed drain. This thread exclusively owns the executor;
+                // construction binds both streams to the manifest's context.
                 let mut executor = match unsafe { GraphExecutor::new(manifest) } {
                     Ok(executor) => executor,
                     Err(error) => {

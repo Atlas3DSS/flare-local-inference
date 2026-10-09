@@ -134,6 +134,9 @@ impl Server {
             .checked_add(model.limits.max_active)
             .ok_or("HTTP request capacity overflows")?;
         let frontend = Arc::new(frontend);
+        // SAFETY: The caller grants exclusive graph/storage access and retains
+        // their owners until drain. This server propagates that obligation to the
+        // model worker and reports uncertain drain through StartFailure or close.
         let model = Arc::new(unsafe {
             ModelRuntime::start(
                 manifest,

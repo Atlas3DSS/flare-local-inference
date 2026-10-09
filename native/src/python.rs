@@ -67,7 +67,12 @@ impl GraphReplayWorker {
         };
         bundle.validate().map_err(PyValueError::new_err)?;
         let worker = py
-            .detach(|| unsafe { ReplayWorker::new(bundle, queue_capacity) })
+            .detach(|| {
+                // SAFETY: Preparation supplies ready handles and retains their
+                // captured allocations in owner. This reference stays live during
+                // startup; OwnerLease retains it afterward until confirmed drain.
+                unsafe { ReplayWorker::new(bundle, queue_capacity) }
+            })
             .map_err(PyRuntimeError::new_err)?;
         Ok(Self {
             worker,
@@ -223,7 +228,13 @@ impl PreparedGraphExecutor {
         let manifest = execution_manifest(manifest)?;
         manifest.validate().map_err(PyValueError::new_err)?;
         let worker = py
-            .detach(|| unsafe { ExecutionWorker::new(manifest) })
+            .detach(|| {
+                // SAFETY: Preparation's owner retains the validated buffers,
+                // executable graphs, and context with exclusive native access.
+                // Startup holds owner locally; OwnerLease releases it only after
+                // close confirms both streams drained, including failed submits.
+                unsafe { ExecutionWorker::new(manifest) }
+            })
             .map_err(PyRuntimeError::new_err)?;
         Ok(Self {
             worker,
@@ -379,14 +390,20 @@ impl NativeServer {
         let bootstrap = py
             .detach(|| crate::server::Bootstrap::load(config_json, &manifest))
             .map_err(PyValueError::new_err)?;
-        let server = match py.detach(|| unsafe {
-            crate::server::Server::start(
-                manifest,
-                bootstrap.model,
-                bootstrap.frontend,
-                bootstrap.images,
-                bootstrap.server,
-            )
+        let server = match py.detach(|| {
+            // SAFETY: The prepared owner retains every captured allocation and
+            // handle and relinquishes external mutation during native execution.
+            // It stays live across startup, is retained on an undrained failure,
+            // and is otherwise transferred into OwnerLease until confirmed drain.
+            unsafe {
+                crate::server::Server::start(
+                    manifest,
+                    bootstrap.model,
+                    bootstrap.frontend,
+                    bootstrap.images,
+                    bootstrap.server,
+                )
+            }
         }) {
             Ok(server) => server,
             Err(error) => {
