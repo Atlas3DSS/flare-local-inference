@@ -1,18 +1,16 @@
 """The replay qualifier observes borrowed-state restoration before resetting it."""
 
-from pathlib import Path
-import runpy
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from qualify import graph_execution
 from sparkgap.recipes.qwen38.state import EOS_TOKEN_ID
 
 
 @pytest.mark.parametrize("corruption", [None, "state", "null_history", "history"])
 def test_pristine_state_counts_all_bytes_and_checks_eos_history(corruption):
-    harness = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/qualify_graph_execution.py"))
     backing = torch.zeros((3, 32), dtype=torch.uint8)
     history = backing[:, 8:24].view(torch.int64)
     history[1:].fill_(EOS_TOKEN_ID)
@@ -25,7 +23,7 @@ def test_pristine_state_counts_all_bytes_and_checks_eos_history(corruption):
     before = backing.clone()
     checks = []
     evidence = SimpleNamespace(check=lambda name, passed, **details: checks.append((name, passed, details)))
-    harness["verify_prepared_hybrid_state"](SimpleNamespace(backing=backing, ple_history=history), evidence)
+    graph_execution.verify_prepared_hybrid_state(SimpleNamespace(backing=backing, ple_history=history), evidence)
     assert len(checks) == 1
     name, passed, details = checks[0]
     assert name == "prepared_hybrid_state_pristine"
@@ -36,9 +34,8 @@ def test_pristine_state_counts_all_bytes_and_checks_eos_history(corruption):
 
 @pytest.mark.parametrize("corruption", [False, True])
 def test_pristine_state_inspects_late_padding_with_bounded_reductions(monkeypatch, corruption):
-    harness = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/qualify_graph_execution.py"))
-    verify = harness["verify_prepared_hybrid_state"]
-    monkeypatch.setitem(verify.__globals__, "_PRISTINE_COUNT_CHUNK_BYTES", 64)
+    verify = graph_execution.verify_prepared_hybrid_state
+    monkeypatch.setattr(graph_execution, "_PRISTINE_COUNT_CHUNK_BYTES", 64)
     backing = torch.zeros((3, 80), dtype=torch.uint8)
     history = backing[:, 64:80].view(torch.int64)
     history[1:].fill_(EOS_TOKEN_ID)

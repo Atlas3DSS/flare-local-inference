@@ -16,10 +16,12 @@ import time
 import traceback
 import uuid
 
-from qualify_server import Run, digest, metric_delta, resource_totals, write_json
-
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from qualify.server import Run, digest, metric_delta, resource_totals, write_json
+
+
 MODEL = "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD"
 REVISION = "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
 NATIVE_SHA256 = "735bf767999b26affeacc5ae574b6e52c6a5e1dc18f42cc208ee8b9f0b2a18ab"
@@ -260,7 +262,7 @@ def execute(args, tokenizer, plan, body):
     sources = {str(path.relative_to(ROOT)): digest(path) for root in (ROOT / "native/src", ROOT / "sparkgap")
         for path in sorted(root.rglob("*")) if path.suffix in (".rs", ".py")}
     sources["scripts/qualify_context_limit.py"] = digest(Path(__file__))
-    sources["scripts/qualify_server.py"] = digest(ROOT / "scripts/qualify_server.py")
+    sources["qualify/server.py"] = digest(ROOT / "qualify/server.py")
     args.require_metrics, args.cases = True, None
     args.timeout = 5.0
     provenance = {"model": MODEL, "revision": REVISION, "snapshot": str(args.snapshot),

@@ -378,7 +378,7 @@ class MutableState:
         torch.cuda.synchronize(self.model.device)
 
     def hashes(self):
-        from scripts.qualify_graph_execution import byte_view, sha256
+        from qualify.graph_execution import byte_view, sha256
 
         result = {name: sha256(byte_view(raw.cpu())) for name, raw, _ in self.storage.values()}
         for row in range(self.owner.pool.backing.shape[0]):
@@ -461,7 +461,7 @@ def _require(evidence, name, passed, **details):
 
 def compare(model, owner, fixture, evidence, artifacts, progress):
     import torch
-    from scripts.qualify_graph_execution import verify_prepared_hybrid_state
+    from qualify.graph_execution import verify_prepared_hybrid_state
 
     verify_prepared_hybrid_state(owner.pool, evidence)
     _require(evidence, "prepared_hybrid_state_pristine_gate", evidence.value["checks"][-1]["passed"])
@@ -652,11 +652,11 @@ def main(argv=None):
     import flashinfer
     import b12x
     import sparkgap_native
-    from scripts.qualify_graph_execution import Evidence
+    from qualify.graph_execution import Evidence
     from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from sparkgap.recipes.qwen38.speculative_model import SpeculativePreparation
 
-    source_paths = {Path(__file__), ROOT / "scripts/qualify_graph_execution.py", ROOT / "qualify/provenance.py"}
+    source_paths = {Path(__file__), ROOT / "qualify/graph_execution.py", ROOT / "qualify/provenance.py"}
     for directory, suffix in ((ROOT / "sparkgap", "*.py"), (ROOT / "native/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):
         source_paths.update(directory.rglob(suffix))
     fi = Path(flashinfer.__file__).resolve().parent

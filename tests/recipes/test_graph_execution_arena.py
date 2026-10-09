@@ -1,23 +1,21 @@
 """The graph qualifier rejects stale scratch pointers and escaping arena outputs."""
 
-from pathlib import Path
-import runpy
 from types import SimpleNamespace
 
 import pytest
 import torch
-
-from b12x.moe import fused_moe
 from b12x._lib.scratch import ScratchBufferSpec
+from b12x.moe import fused_moe
 from b12x.preparation import MemoryRequirements, Plan
 from b12x.preparation.types import _CompositePlan, _Prepared
+
+from qualify import graph_execution
 from sparkgap.preparation.scratch import ScratchArena
 
 
 @pytest.fixture
 def audit_type():
-    path = Path(__file__).resolve().parents[2] / "scripts/qualify_graph_execution.py"
-    return runpy.run_path(str(path))["_ScratchArenaAudit"]
+    return graph_execution._ScratchArenaAudit
 
 
 def prepared_plan(arena, *, owners=None):
@@ -121,8 +119,8 @@ def test_arena_audit_rejects_projection_with_owned_scratch(audit_type):
 
 @pytest.mark.parametrize("stale", [False, True])
 def test_arena_audit_unwraps_public_varlen_binding(audit_type, stale):
-    from b12x.attention.varlen import VarlenBinding
     from b12x.attention._shared.contiguous.api import VarlenAttentionBinding
+    from b12x.attention.varlen import VarlenBinding
 
     arena = ScratchArena("cpu")
     old = arena.reserve(256)

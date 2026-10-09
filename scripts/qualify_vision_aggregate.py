@@ -14,10 +14,12 @@ import signal
 import sys
 from types import MethodType, SimpleNamespace
 
-from qualify_server import Run, comparable_message, digest, metric_delta, write_json
-
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from qualify.server import Run, comparable_message, digest, metric_delta, write_json
+
+
 SEEDS = (13, 29, 47, 71)
 SIDE = 2048
 PATCH = 16
@@ -211,7 +213,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.artifacts.mkdir(parents=True, exist_ok=True)
     (args.artifacts / Path(__file__).name).write_bytes(Path(__file__).read_bytes())
-    (args.artifacts / "qualify_server.py").write_bytes((ROOT / "scripts/qualify_server.py").read_bytes())
+    (args.artifacts / "qualify_server.py").write_bytes((ROOT / "qualify/server.py").read_bytes())
     identity = process_identity(args)
     request, fixture = prepare_fixture(args)
     provenance = {"model_id": fixture["model_id"], "revision": fixture["revision"], "snapshot": str(args.snapshot.resolve()),
@@ -219,7 +221,7 @@ def main():
             "sha256": digest(args.memory_report), "content": json.loads(args.memory_report.read_text())},
         "fixture": {"path": str((args.artifacts / "canonical-fixture.json").resolve()),
             "sha256": digest(args.artifacts / "canonical-fixture.json"), "content": fixture},
-        "script_sha256": digest(Path(__file__)), "http_helper_sha256": digest(ROOT / "scripts/qualify_server.py"),
+        "script_sha256": digest(Path(__file__)), "http_helper_sha256": digest(ROOT / "qualify/server.py"),
         "native_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "native/src").rglob("*.rs"))},
         "recipe_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "sparkgap").rglob("*.py"))},
         "absolute_http_deadline_seconds": args.timeout, "command": sys.argv}

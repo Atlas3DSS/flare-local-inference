@@ -1,13 +1,12 @@
 """The parity reset records shared scratch storage once, including padding."""
 
 from dataclasses import dataclass
-from pathlib import Path
-import runpy
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from qualify import graph_execution
 from sparkgap.preparation.scratch import ScratchArena
 from sparkgap.recipes.qwen38.vision_state import VisionFeatureState
 
@@ -19,7 +18,6 @@ class RequestFixture:
 
 @pytest.mark.parametrize("registered_view", [False, True])
 def test_mutable_reset_retains_complete_arena_once(registered_view):
-    harness = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/qualify_graph_execution.py"))
     arena = ScratchArena("cpu")
     arena.reserve(513)
     arena.tensor.copy_(torch.arange(arena.nbytes, dtype=torch.int64).to(torch.uint8))
@@ -30,7 +28,7 @@ def test_mutable_reset_retains_complete_arena_once(registered_view):
     model = SimpleNamespace(_resources=[features, arena], buffers=buffers)
     state = SimpleNamespace(backing=torch.empty((2, 16), dtype=torch.uint8))
     request = RequestFixture(torch.zeros(4, dtype=torch.int64))
-    reset = harness["MutableReset"](model, state, request, [], [], {})
+    reset = graph_execution.MutableReset(model, state, request, [], [], {})
     key = arena.tensor.untyped_storage().data_ptr()
     name, raw, saved = reset.storage[key]
     assert name == ("input.scratch_alias" if registered_view else "workspace.arena")

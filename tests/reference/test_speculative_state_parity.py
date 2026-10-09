@@ -52,7 +52,7 @@ def make_builder(tmp_path):
 
 def test_compare_clones_native_upload_defaults_after_reset_before_handoff(tmp_path, monkeypatch):
     import qualify.speculative_state_parity as parity
-    import scripts.qualify_graph_execution as graph_qualification
+    import qualify.graph_execution as graph_qualification
 
     runtime = model()
     runtime.device, runtime.graphs = "cpu", {}

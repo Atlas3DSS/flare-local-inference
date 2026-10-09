@@ -8,10 +8,10 @@ import json
 from pathlib import Path
 import sys
 
-from qualify_server import Run, comparable_message, digest, metric_delta
-
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from qualify.server import Run, comparable_message, digest, metric_delta
 
 
 def main():
@@ -52,7 +52,7 @@ def main():
         for directory in (ROOT / "native/src", ROOT / "sparkgap/preparation", ROOT / "sparkgap/recipes")
         for path in sorted(directory.rglob("*")) if path.suffix in (".rs", ".py")}
     sources.update({name: digest(ROOT / name) for name in (
-        "sparkgap/__main__.py", "scripts/qualify_prefill_capacity.py", "scripts/qualify_server.py")})
+        "sparkgap/__main__.py", "scripts/qualify_prefill_capacity.py", "qualify/server.py")})
     args.artifacts.mkdir(parents=True, exist_ok=True)
     (args.artifacts / "server-maps.txt").write_text(maps)
     args.require_metrics, args.cases = True, None

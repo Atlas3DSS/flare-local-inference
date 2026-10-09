@@ -339,7 +339,7 @@ def main(argv=None):
     from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from sparkgap.recipes.qwen38.speculative_model import SpeculativePreparation
 
-    paths = {Path(__file__), ROOT / "qualify/speculative_state_parity.py", ROOT / "qualify/provenance.py", ROOT / "scripts/qualify_graph_execution.py"}
+    paths = {Path(__file__), ROOT / "qualify/speculative_state_parity.py", ROOT / "qualify/provenance.py", ROOT / "qualify/graph_execution.py"}
     for directory, pattern in ((ROOT / "sparkgap", "*.py"), (Path(b12x.__file__).resolve().parent, "*.py")):
         paths.update(directory.rglob(pattern))
     fi = Path(flashinfer.__file__).resolve().parent
