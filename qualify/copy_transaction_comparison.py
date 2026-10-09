@@ -55,8 +55,21 @@ def case_plan(batch, width):
     restore = [{"kind": "restore", "slots": [slot], "generation": 12,
                 "snapshot": index, "budget": 512} for index, slot in enumerate(slots)]
     restore += [{"kind": "resume", "slots": slots, "observe": "boundary64"}]
+    restored_slots = [0, 2, 1, 3][:batch]
+    selected_restore = {
+        "slots": restored_slots,
+        "snapshot_ids": list(range(batch, 2 * batch)),
+        "prepare": common + [wide[0]],
+        "snapshots": [{"kind": "snapshot", "slots": [slot], "snapshot": batch + index}
+                      for index, slot in enumerate(slots)],
+        "restore": [{"kind": "restore", "slots": [slot], "generation": 13,
+                     "snapshot": batch + index, "budget": 512}
+                    for index, slot in enumerate(restored_slots)],
+        "continuation": [{"kind": "resume", "slots": restored_slots, "observe": "transaction"},
+                         {**round_(1, observe="following_w1"), "slots": restored_slots}],
+    }
     return {"batch": batch, "width": width, "slots": slots, "common": common,
-            "w1": baseline, "wide": wide, "restore": restore,
+            "w1": baseline, "wide": wide, "restore": restore, "selected_restore": selected_restore,
             "positions": {"boundary64": 64, "transaction": 64 + width, "following_w1": 65 + width},
             "accepted_drafts_per_lane": width - 1,
             "unexercised_rejection_prefixes": list(range(width - 1)),
@@ -171,6 +184,52 @@ def committed_state(owner, builder, slots):
     return result, metadata, checks
 
 
+def remap_state_slots(tensors, actual_slots, reference_slots):
+    """Compare corresponding requests independently of physical slot placement."""
+    if (len(actual_slots) != len(reference_slots) or len(set(actual_slots)) != len(actual_slots)
+            or len(set(reference_slots)) != len(reference_slots)):
+        raise ValueError("state comparison requires a bijective physical-slot mapping")
+    mapping = {f"slot{actual}.": f"slot{reference}."
+               for actual, reference in zip(actual_slots, reference_slots)}
+    result = {}
+    for name, tensor in tensors.items():
+        prefix, suffix = name.split(".", 1)
+        if prefix + "." not in mapping:
+            raise ValueError("state region is outside the declared request mapping")
+        result[mapping[prefix + "."] + suffix] = tensor
+    return result
+
+
+def storage_fingerprints(owner, *, rows=(), pages=(), raw_slots=()):
+    """Read exact source bytes on CPU; no retained GPU clones or replay allocations."""
+    values = {}
+    for row in sorted(set(rows)):
+        values[f"hybrid.{row}"] = tensor_digest(owner.pool.backing[row].detach().cpu())
+    for layer, cache in owner.cache.items():
+        for name in ("main_k_cache", "main_v_cache", "compressed_k_cache"):
+            for page in sorted(set(pages)):
+                values[f"qsa.{layer}.{name}.page{page}"] = tensor_digest(getattr(cache, name)[page].detach().cpu())
+        for name in ("raw_k_ring", "raw_logical_positions", "raw_rope_positions", "raw_interval_start_positions"):
+            for slot in sorted(set(raw_slots)):
+                values[f"qsa.{layer}.{name}.slot{slot}"] = tensor_digest(getattr(cache, name)[slot].detach().cpu())
+    return values
+
+
+def private_restore_checks(source_pages, restored_pages, consumed):
+    """A restored request shares complete pages and owns every continuation page."""
+    if len(source_pages) != len(restored_pages) or not source_pages:
+        raise ValueError("restore page checks require corresponding nonempty request lists")
+    full = consumed // 64
+    source_storage = {page for pages in source_pages for page in pages}
+    private = [page for pages in restored_pages for page in pages[full:]]
+    return {
+        "full_pages_shared": all(a[:full] == b[:full] for a, b in zip(source_pages, restored_pages)),
+        "private_tail_present": all(len(pages) > full for pages in restored_pages),
+        "private_pages_distinct_from_sources": not source_storage.intersection(private),
+        "private_pages_distinct_between_requests": len(private) == len(set(private)),
+    }
+
+
 def request_checks(owner, builder):
     import torch
 
@@ -185,11 +244,6 @@ def request_checks(owner, builder):
         histogram = state["histogram"][slot]
         checks[key + "histogram"] = {i: int(histogram[i]) for i in histogram.nonzero().flatten().tolist()} == request["histogram"]
         checks[key + "ple_history"] = state["ple_history"][slot].tolist() == ([248044] * 2 + request["tokens"])[-2:]
-        boundary = request["boundary"]
-        checks[key + "boundary_epoch"] = state["boundary_generation"][slot].item() == (request["generation"] if boundary else 0)
-        if boundary:
-            checks[key + "boundary_history"] = state["boundary_history"][slot].tolist() == ([248044] * 2 + request["tokens"][:boundary])[-2:]
-            checks[key + "boundary_consumed"] = state["boundary_consumed_tokens"][slot].item() == boundary
     checks["previous_accepted"] = owner.previous_accepted.cpu().tolist() == builder.previous
     checks["accepted_generation"] = owner.accepted_generation.cpu().tolist() == builder.accepted_generation
     checks["target_rng_generation"] = owner.rng.generation.cpu().tolist() == builder.target_generation
@@ -228,12 +282,15 @@ class Replay:
         checks["replay_noalloc"] = before == after
         checks.update(request_checks(self.owner, self.builder))
         if operation["kind"] in ("snapshot", "restore"):
+            from qualify.checkpoint_state import checkpoint_transfer_checks
+
             slot = operation["slots"][0]
-            source = slot + 5 if operation["kind"] == "snapshot" else 9 + operation["snapshot"]
-            destination = 9 + operation["snapshot"] if operation["kind"] == "snapshot" else slot + 1
-            pool = self.owner.pool
-            for region in pool.layout.regions:
-                checks["transfer." + region.name] = byte_equal(pool.region(region.name)[source].cpu(), pool.region(region.name)[destination].cpu())
+            request = self.builder.requests[slot]
+            checks.update({"transfer." + key: value for key, value in
+                checkpoint_transfer_checks(self.owner.pool, self.owner.cache, slot=slot,
+                    snapshot=operation["snapshot"], pages=request["pages"],
+                    consumed=request["consumed"], accepted=self.builder.previous[slot],
+                    extra_base=self.owner.extra_base).items()})
         self.commands.append({**command, "records": records, "checks": checks,
                               "allocations_before": before, "allocations_after": after})
         self.checks.update({f"command{len(self.commands) - 1}.{key}": value for key, value in checks.items()})
@@ -282,8 +339,84 @@ def run_case(model, owner, reset, fixture, plan, artifacts, result):
                         result["comparisons"][("shared_prefix." if shared_prefix else "cross_width.") + stage] = comparison
                 if not all(checks.values()):
                     raise AssertionError(f"invalid committed state: {label}.{stage}")
+    run_selected_restore(model, owner, reset, fixture, plan, artifacts, result, observations)
     result["passed"] = (all(all(a["checks"].values()) for a in result["arms"].values())
                         and all(c["passed"] for c in result["comparisons"].values()))
+
+
+def run_selected_restore(model, owner, reset, fixture, plan, artifacts, result, observations):
+    """Snapshot a Wn-selected column before any W1 normalizes the live state."""
+    import torch
+
+    reset.reset()
+    selected = plan["selected_restore"]
+    directory = artifacts / "selected_restore"
+    (directory / "uploads").mkdir(parents=True)
+    builder = Commands(model, fixture, directory)
+    arm = result["arms"]["selected_restore"] = {"checks": {}, "commands": [], "observations": {}}
+    replay = Replay(model, owner, builder, arm["checks"])
+    arm["commands"] = replay.commands
+    for operation in selected["prepare"]:
+        replay.run(operation)
+    consumed = plan["positions"]["transaction"]
+    source_pages = [list(builder.requests[slot]["pages"]) for slot in plan["slots"]]
+    used_pages = sorted({page for pages in source_pages for page in pages[:(consumed + 63) // 64]})
+    source_rows = [row for slot in plan["slots"] for row in
+                   (slot + 1, state_column(slot, plan["width"], owner.extra_base))]
+
+    def observe(stage, slots, *, label, anchor):
+        tensors, metadata, checks = committed_state(owner, builder, slots)
+        checks["expected_positions"] = all(x["consumed"] == plan["positions"][stage] for x in metadata.values())
+        checks["accepted_column"] = all(x["accepted_column"] == (plan["width"] if label == "source" else 1)
+                                        for x in metadata.values())
+        checks["raw_interval_anchor"] = all(value == anchor for state in metadata.values()
+                                            for value in state["raw_anchors"].values())
+        arm["checks"].update({f"{label}.{stage}.{key}": value for key, value in checks.items()})
+        path = artifacts / f"selected_restore-{label}-{stage}.pt"
+        torch.save(tensors, path)
+        arm["observations"][f"{label}.{stage}"] = {"artifact": file_record(path), "metadata": metadata, "checks": checks}
+        normalized = remap_state_slots(tensors, slots, plan["slots"])
+        result["comparisons"][f"selected_restore.{label}.{stage}"] = compare_states(observations["wide", stage], normalized, exact=True)
+        result["comparisons"][f"selected_restore.cross_width.{label}.{stage}"] = compare_states(observations["w1", stage], normalized, exact=False)
+        if not all(checks.values()):
+            raise AssertionError(f"invalid selected-column state: {label}.{stage}")
+
+    observe("transaction", plan["slots"], label="source", anchor=64)
+    source_guard = {"rows": source_rows + list(range(5, 5 + plan["batch"])), "pages": used_pages,
+                    "raw_slots": [slot + 1 for slot in plan["slots"]]}
+    source_before = storage_fingerprints(owner, **source_guard)
+
+    def protected_run(operation, guard, expected):
+        replay.run(operation)
+        actual = storage_fingerprints(owner, **guard)
+        checks = {"same_guard_regions": actual.keys() == expected.keys(),
+                  **{name: actual.get(name) == sha for name, sha in expected.items()}}
+        replay.commands[-1]["immutable_storage"] = {"before": expected, "after": actual, "checks": checks}
+        arm["checks"].update({f"command{len(replay.commands) - 1}.immutable.{key}": value for key, value in checks.items()})
+        if not all(checks.values()):
+            raise AssertionError("selected-column transfer modified protected source storage")
+
+    for operation in selected["snapshots"]:
+        protected_run(operation, source_guard, source_before)
+    immutable_guard = {"rows": list(range(5, 5 + 2 * plan["batch"])), "pages": used_pages}
+    immutable_before = storage_fingerprints(owner, **immutable_guard)
+    arm["snapshot_endpoints"] = [{"source_slot": source, "destination_slot": destination,
+        "snapshot": index, "consumed": consumed, "selected_column": plan["width"]}
+        for source, destination, index in zip(plan["slots"], selected["slots"], selected["snapshot_ids"])]
+    for operation in selected["restore"]:
+        protected_run(operation, immutable_guard, immutable_before)
+    restored_pages = [list(builder.requests[slot]["pages"]) for slot in selected["slots"]]
+    page_checks = private_restore_checks(source_pages, restored_pages, consumed)
+    arm["page_ownership"] = {"source_pages": source_pages, "restored_pages": restored_pages,
+                             "consumed": consumed, "checks": page_checks}
+    arm["checks"].update({"pages." + key: value for key, value in page_checks.items()})
+    if not all(page_checks.values()):
+        raise AssertionError("selected-column restore violated shared/private page ownership")
+    for operation in selected["continuation"]:
+        protected_run(operation, immutable_guard, immutable_before)
+        stage = operation["observe"]
+        anchor = consumed - 1 if operation["kind"] == "resume" else consumed
+        observe(stage, selected["slots"], label="restored", anchor=anchor)
 
 
 def main(argv=None):
@@ -323,6 +456,7 @@ def main(argv=None):
                    "cross_width_floating_numerical_qualification": "pending independent component calibration",
                    "rejection_prefixes": "pending; only the all-accepted prefix is exercised",
                    "budget_and_eos_clipping": "pending", "inactive_packed_lanes": "not exercised",
+                   "selected_column_snapshot": "Wn at S=64+W; immutable snapshot, different physical slot and private tail, Resume and following W1",
                    "sampler": "temperature 1, singleton legal grammar, public FlashInfer chain verification",
                    "qsa_state": "logical main KV, completed compressed groups and unfinished raw group; physical pages and raw anchors recorded separately",
                    "hybrid_state": "selected recurrent column, convolution history windows, hidden/residual/position/PLE state; all regions bitwise for transfers"}}
@@ -339,7 +473,7 @@ def main(argv=None):
     from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from sparkgap.recipes.qwen38.speculative_model import SpeculativePreparation
 
-    paths = {Path(__file__), ROOT / "qualify/speculative_state_parity.py", ROOT / "qualify/provenance.py", ROOT / "qualify/graph_execution.py"}
+    paths = {Path(__file__), ROOT / "qualify/speculative_state_parity.py", ROOT / "qualify/provenance.py", ROOT / "qualify/graph_execution.py", ROOT / "qualify/checkpoint_state.py"}
     for directory, pattern in ((ROOT / "sparkgap", "*.py"), (Path(b12x.__file__).resolve().parent, "*.py")):
         paths.update(directory.rglob(pattern))
     fi = Path(flashinfer.__file__).resolve().parent

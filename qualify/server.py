@@ -38,6 +38,73 @@ def common_prefix(left: list[int], right: list[int]) -> int:
     return next((i for i, pair in enumerate(zip(left, right)) if pair[0] != pair[1]), min(len(left), len(right)))
 
 
+def template_input(request):
+    options = {**request.get("chat_template_kwargs", {}), "enable_thinking": request.get("enable_thinking", False),
+        "add_generation_prompt": request.get("add_generation_prompt", True)}
+    for key in ("tools", "reasoning_effort", "continue_final_message"):
+        if key in request:
+            options[key] = request[key]
+    messages = copy.deepcopy(request["messages"])
+    for message in messages:
+        for call in message.get("tool_calls", []):
+            function = call.get("function", {})
+            if isinstance(function.get("arguments"), str):
+                function["arguments"] = json.loads(function["arguments"])
+    return messages, options
+
+
+def system_prefix_ids(tokenizer, request, prompt_tokens):
+    """Render Qwen's instruction endpoint through the empty user header."""
+    messages, options = template_input(request)
+    leading = []
+    for message in messages:
+        if message.get("role") not in ("system", "developer"):
+            break
+        leading.append(message)
+    leading.append({"role": "user", "content": ""})
+    options.update(add_generation_prompt=False, continue_final_message=True)
+    text = tokenizer.apply_chat_template(leading, tokenize=False, **options)
+    ids = tokenizer.apply_chat_template(leading, tokenize=True, return_dict=False, **options)
+    if (not text.startswith("<|im_start|>system\n") or "<|im_end|>" not in text
+            or not 0 < len(ids) < len(prompt_tokens) or prompt_tokens[:len(ids)] != ids):
+        return []
+    return ids
+
+
+def prefill_launches(prompt_tokens, reused_tokens, chunk_size, system_tokens=0):
+    if not 0 <= reused_tokens <= prompt_tokens or chunk_size <= 0:
+        raise ValueError("invalid exact checkpoint prefill geometry")
+    boundaries = ([system_tokens] if reused_tokens < system_tokens < prompt_tokens else []) + [prompt_tokens]
+    launches, position = 0, reused_tokens
+    for boundary in boundaries:
+        launches += (boundary - position + chunk_size - 1) // chunk_size
+        position = boundary
+    return launches
+
+
+def system_prefix_requests(model_id, nonce):
+    instruction = f"Brief {nonce[:4]}."
+    base = {"model": model_id, "temperature": 1, "top_k": 20, "top_p": 0.95,
+        "seed": 41873, "max_tokens": 32, "enable_thinking": False, "add_generation_prompt": True}
+    tool = {"type": "function", "function": {"name": "unused_alpha", "description": "An unused lookup tool.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}}
+    result = []
+    for name, instructions, question, tools, expected_reuse in (
+        ("short-seed", instruction, "Return only OK for request A.", None, False),
+        ("short-branch", instruction, "Return only OK for request B.", None, True),
+        ("instructions-change", f"Terse {nonce[:4]}.", "Return only OK for request C.", None, False),
+        ("tools-seed", instruction, "Return only OK for request D. Do not call a tool.", [tool], False),
+        ("tools-branch", instruction, "Return only OK for request E. Do not call a tool.", [tool], True),
+        ("tools-change", instruction, "Return only OK for request F. Do not call a tool.",
+            [{**tool, "function": {**tool["function"], "name": "unused_beta"}}], False),
+    ):
+        request = {**base, "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": question}]}
+        if tools is not None:
+            request["tools"] = copy.deepcopy(tools)
+        result.append((name, request, expected_reuse))
+    return result
+
+
 def metric_delta(before: dict, after: dict) -> dict:
     return {name: after[name] - before[name] for name in before.keys() & after.keys() if "_total" in name}
 
@@ -59,15 +126,17 @@ def kv_pressure_geometry(memory: dict, metrics: dict, context: int) -> dict:
         raise ValueError("KV pressure requires the reported snapshot capacity and four idle request slots")
     if context <= 0 or context % 64:
         raise ValueError("prepared context must be positive and 64-token aligned")
-    reservation = context // 64
+    draft_pages = int(memory.get("speculative_proposal_source") == "mtp")
+    reservation = context // 64 + draft_pages
     holders = pages // reservation
     if not 1 <= holders < totals["slots"]:
         raise ValueError("KV exhaustion cannot be isolated before the slot limit using context-sized reservations")
-    if totals["snapshots"] < holders + 1:
+    if totals["snapshots"] < 2 * (holders + 1):
         raise ValueError("snapshot capacity cannot isolate KV exhaustion")
     return {"page_tokens": 64, "pages": pages, "context_tokens": context,
         "pages_per_request": reservation, "holding_requests": holders,
-        "unreserved_pages": pages - holders * reservation, "max_active": totals["slots"]}
+        "unreserved_pages": pages - holders * reservation, "max_active": totals["slots"],
+        "draft_pages_per_request": draft_pages, "snapshots_per_request": 2}
 
 
 class StreamProgress:
@@ -367,7 +436,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--max-response-bytes", type=int, default=64 << 20)
     parser.add_argument("--cases", nargs="+", choices=("initial_health", "models", "greedy_text", "canonical_chat", "concurrent_four",
-        "thinking_output", "tool_call_and_result", "prefix_full_aligned_branch", "structured_literal_tags", "png_image", "png_full_capacity", "image_cache_identity",
+        "thinking_output", "tool_call_and_result", "prefix_full_aligned_branch", "system_prefix", "structured_literal_tags", "png_image", "png_full_capacity", "image_cache_identity",
         "cancellation_and_slot_reuse", "mixed_grammar", "cache_pressure", "conversation_pressure", "kv_pressure", "slow_consumer", "final_health"), help="Run only these named qualification cases.")
     parser.add_argument("--image-repetitions", type=int, default=1)
     parser.add_argument("--full-vision-png", type=Path, help="PNG encoding of the pinned bucket_16384 RGB fixture; exercise all 16384 image patches.")
@@ -375,7 +444,7 @@ def main() -> int:
     parser.add_argument("--image-cache-identity", action="store_true", help="Check cache separation and reuse for identical text with different pinned images.")
     parser.add_argument("--require-metrics", action="store_true", help="Require native Prometheus metrics and record idle counter deltas.")
     parser.add_argument("--cache-pressure", action="store_true", help="Publish enough unique prefixes to exceed the exposed snapshot capacity.")
-    parser.add_argument("--conversation-pressure", action="store_true", help="Grow one shared prefix beyond the exposed snapshot capacity.")
+    parser.add_argument("--conversation-pressure", action="store_true", help="Exercise edited conversation prompts beyond the exact-checkpoint capacity.")
     parser.add_argument("--kv-pressure", action="store_true", help="Reserve context-sized KV extents and observe excess admission rejection.")
     parser.add_argument("--prepared-context-tokens", type=int, help="Actual server --context value, required for KV pressure and verified against HTTP admission.")
     parser.add_argument("--slow-consumer-seconds", type=float, default=0, help="Pause one real SSE reader for this duration while checking unrelated progress.")
@@ -388,6 +457,12 @@ def main() -> int:
         parser.error("slow-consumer duration must be nonnegative and shorter than the request timeout")
     if (args.cache_pressure or args.conversation_pressure or args.kv_pressure or args.slow_consumer_seconds or args.full_vision_png or args.mixed_grammar or args.image_cache_identity) and not args.require_metrics:
         parser.error("pressure, slow-consumer, full-vision and mixed-grammar qualification require --require-metrics")
+    if args.cases and "system_prefix" in args.cases and not args.require_metrics:
+        parser.error("system-prefix qualification requires --require-metrics")
+    exact_cache_cases = {"prefix_full_aligned_branch", "system_prefix", "conversation_pressure"}
+    if (args.require_metrics and args.memory_report is None
+            and (args.cases is None or exact_cache_cases.intersection(args.cases))):
+        parser.error("exact-checkpoint graph assertions require --memory-report for prefill geometry")
     if args.kv_pressure and (args.memory_report is None or args.prepared_context_tokens is None):
         parser.error("KV pressure requires --memory-report and --prepared-context-tokens from the server launch")
     if args.cases and (("cache_pressure" in args.cases and not args.cache_pressure)
@@ -437,18 +512,27 @@ def main() -> int:
             "enable_thinking": False, "add_generation_prompt": True, **extra}
 
     def prompt_ids(request):
-        options = {**request.get("chat_template_kwargs", {}), "enable_thinking": request.get("enable_thinking", False),
-            "add_generation_prompt": request.get("add_generation_prompt", True)}
-        for key in ("tools", "reasoning_effort", "continue_final_message"):
-            if key in request:
-                options[key] = request[key]
-        messages = copy.deepcopy(request["messages"])
-        for message in messages:
-            for call in message.get("tool_calls", []):
-                function = call.get("function", {})
-                if isinstance(function.get("arguments"), str):
-                    function["arguments"] = json.loads(function["arguments"])
+        messages, options = template_input(request)
         return tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False, **options)
+
+    chunk_size = provenance.get("memory_report", {}).get("content", {}).get("prefill_chunk_size")
+    if chunk_size is not None and (type(chunk_size) is not int or chunk_size < 64 or chunk_size % 64):
+        raise ValueError("memory report requires a positive 64-aligned prefill chunk size")
+
+    def check_cache(name, delta, request, ids, reused):
+        if delta is None:
+            return
+        system = len(system_prefix_ids(tokenizer, request, ids))
+        launches = prefill_launches(len(ids), reused, chunk_size, system)
+        run.check(name + ".exact_cache_admission", delta["sparkgap_cache_hits_total"] == int(reused > 0)
+            and delta["sparkgap_cache_misses_total"] == int(reused == 0)
+            and delta["sparkgap_cache_reused_tokens_total"] == reused
+            and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(reused > 0)
+            and delta['sparkgap_graph_launches_total{kind="init"}'] == int(reused == 0),
+            reused_tokens=reused, system_tokens=system, prompt_tokens=len(ids), delta=delta)
+        run.check(name + ".exact_suffix_graph", delta['sparkgap_graph_launches_total{kind="prefill"}'] == launches
+            and delta['sparkgap_graph_launches_total{kind="resume"}'] == int(reused == len(ids)),
+            expected_prefill_launches=launches, delta=delta)
 
     def health(name):
         result = run.request(name, path="/health")
@@ -536,40 +620,63 @@ def main() -> int:
                 run.save()
             return completion, delta
 
-        def restored(name, delta, *, full=False):
-            if delta is not None:
-                expected_kind, absent_kind = ("resume", "prefill") if full else ("prefill", "resume")
-                run.check(name + ".cache_restore_observed", delta["sparkgap_cache_hits_total"] == 1
-                    and delta["sparkgap_cache_reused_tokens_total"] == 128
-                    and delta['sparkgap_graph_launches_total{kind="restore"}'] == 1
-                    and delta['sparkgap_graph_launches_total{kind="init"}'] == 0, delta=delta)
-                run.check(name + ".suffix_graph_observed", delta[f'sparkgap_graph_launches_total{{kind="{expected_kind}"}}'] == 1
-                    and delta[f'sparkgap_graph_launches_total{{kind="{absent_kind}"}}'] == 0, delta=delta)
-
         full, full_ids = aligned_request("full", 128)
         seed, _ = measured("prefix-full-seed", full, full_ids)
         replay, delta = measured("prefix-full-reuse", full, full_ids)
-        restored("prefix-full-reuse", delta, full=True)
+        check_cache("prefix-full-reuse", delta, full, full_ids, len(full_ids))
         run.check("full_prompt_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=128,
-            terminal_candidate_tokens=128, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
+            checkpoint_tokens=128, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
         partial, partial_ids = aligned_request("branch", 160)
         seed, _ = measured("prefix-aligned-seed", partial, partial_ids)
         replay, delta = measured("prefix-aligned-reuse", partial, partial_ids)
-        restored("prefix-aligned-reuse", delta)
-        run.check("aligned_prefix_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=160,
-            terminal_candidate_tokens=128, tail_tokens=32, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
+        check_cache("prefix-aligned-reuse", delta, partial, partial_ids, len(partial_ids))
+        run.check("exact_partial_page_prompt_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=160,
+            checkpoint_tokens=160, tail_tokens=0, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
         for name in ("A", "B"):
             branch = copy.deepcopy(partial)
             branch["messages"][0]["content"] += f"\nBranch {name}: return {name}."
             ids = prompt_ids(branch)
             shared = common_prefix(partial_ids, ids)
-            run.check(f"branch-{name}.aligned_shared_prefix", shared >= 128 and ids != partial_ids, common_prefix_tokens=shared, reusable_boundary_tokens=128,
+            run.check(f"branch-{name}.edit_precedes_exact_prompt_endpoint", 128 <= shared < len(partial_ids) and ids != partial_ids, common_prefix_tokens=shared, seed_checkpoint_tokens=len(partial_ids),
                 seed_token_ids=partial_ids, branch_token_ids=ids)
             first, delta = measured(f"prefix-branch-{name}", branch, ids)
-            restored(f"prefix-branch-{name}", delta)
-            repeated, _ = measured(f"prefix-branch-{name}-repeat", branch, ids)
+            system = system_prefix_ids(tokenizer, branch, ids)
+            reused = len(system) if partial_ids[:len(system)] == system else 0
+            check_cache(f"prefix-branch-{name}", delta, branch, ids, reused)
+            repeated, repeat_delta = measured(f"prefix-branch-{name}-repeat", branch, ids)
+            check_cache(f"prefix-branch-{name}-repeat", repeat_delta, branch, ids, len(ids))
             run.check(f"branch-{name}.repeat_equivalence", comparable_message(first["message"]) == comparable_message(repeated["message"]), first=first, repeated=repeated)
     run.case("prefix_full_aligned_branch", prefixes)
+
+    def system_prefix():
+        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:4]
+        seen = []
+        for name, request, expected_reuse in system_prefix_requests(model_id, nonce):
+            ids = prompt_ids(request)
+            prefix = system_prefix_ids(tokenizer, request, ids)
+            if not prefix or len(prefix) % 64 == 0:
+                raise ValueError("system-prefix fixture requires a nonaligned exact instruction endpoint")
+            if name.startswith("short-") and len(prefix) >= 16:
+                raise ValueError("short system-prefix fixture must contain fewer than 16 tokens")
+            reusable = max((len(old) for old in seen if ids[:len(old)] == old), default=0)
+            if bool(reusable) != expected_reuse or reusable not in (0, len(prefix)):
+                raise ValueError("system-prefix fixture does not isolate instruction/tool identity")
+            before = run.metrics("system-" + name + "-before")
+            response = run.request("system-" + name, request)
+            run.complete(response, len(ids))
+            after = run.metrics("system-" + name + "-after")
+            delta = metric_delta(before, after)
+            check_cache("system-" + name, delta, request, ids, reusable)
+            generated = response["body"]["usage"]["completion_tokens"]
+            run.check("system-" + name + ".retained_endpoints",
+                delta["sparkgap_system_checkpoints_total"] == int(not expected_reuse)
+                and delta["sparkgap_prompt_checkpoints_total"] == 1
+                and delta["sparkgap_snapshot_publications_total"] == int(not expected_reuse) + 1 + int(generated > 1),
+                system_token_ids=prefix, prompt_tokens=len(ids), generated_tokens=generated, delta=delta)
+            run.reclaimed("system-" + name, before, after)
+            seen.append(prefix)
+    if args.require_metrics:
+        run.case("system_prefix", system_prefix)
 
     def structured():
         literal = "<think>analysis</think><tool_call><function=lookup></function></tool_call>"
@@ -670,9 +777,6 @@ def main() -> int:
             raise ValueError("image identity requests require different decoded pixels")
         grid = fixtures[0]["grid_thw"][0]
         tokens = len(first) + grid[0] * grid[1] * grid[2] // 4 - 1
-        boundary = tokens // 64 * 64
-        if not boundary:
-            raise ValueError("image identity requests must publish a complete cache block")
         run.receipt["provenance"]["image_identity_fixtures"] = [
             {"name": fixture["name"], "inputs": fixture["inputs"], "grid_thw": fixture["grid_thw"],
                 "input_rgb_sha256": fixture["input_rgb_sha256"], "canonical_processor_hashes": fixture["hashes"]}
@@ -683,16 +787,18 @@ def main() -> int:
         for repeated in (False, True):
             for index, request in enumerate(requests):
                 name = f"image-identity-{index}-{'repeat' if repeated else 'cold'}"
-                choice = run.complete(run.request(name, request), tokens)
+                response = run.request(name, request)
+                choice = run.complete(response, tokens)
                 after = run.metrics(name + "-after")
                 delta = metric_delta(last, after)
                 run.check(name + ".conditioned_prefix", delta["sparkgap_cache_hits_total"] == int(repeated)
                     and delta["sparkgap_cache_misses_total"] == int(not repeated)
-                    and delta["sparkgap_cache_reused_tokens_total"] == (boundary if repeated else 0)
+                    and delta["sparkgap_cache_reused_tokens_total"] == (tokens if repeated else 0)
                     and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(repeated)
                     and delta['sparkgap_graph_launches_total{kind="vision"}'] == 1
-                    and delta["sparkgap_snapshot_publications_total"] == int(not repeated),
-                    delta=delta, checkpoint_tokens=boundary)
+                    and delta["sparkgap_prompt_checkpoints_total"] == int(not repeated)
+                    and delta["sparkgap_snapshot_publications_total"] == (0 if repeated else 1 + int(response["body"]["usage"]["completion_tokens"] > 1)),
+                    delta=delta, checkpoint_tokens=tokens)
                 if repeated:
                     run.check(name + ".greedy_cache_equivalence",
                         comparable_message(choice["message"]) == comparable_message(cold[index]["message"])
@@ -788,6 +894,8 @@ def main() -> int:
             raise ValueError("KV capacity cannot isolate snapshot pressure with 128-token prefixes")
         nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
         inputs = [aligned_request(f"pressure-{nonce}-{index}", 128) for index in range(capacity + 1)]
+        if any(system_prefix_ids(tokenizer, request, ids) for request, ids in inputs):
+            raise ValueError("snapshot-pressure fixtures require no synthesized instruction checkpoint")
         if len({tuple(ids[:64]) for _, ids in inputs}) != len(inputs):
             raise ValueError("snapshot pressure inputs share a complete cache block")
         first = None
@@ -831,11 +939,17 @@ def main() -> int:
         if not 2 <= capacity <= 256:
             raise ValueError(f"conversation snapshot pressure requires 2..256 slots; server exposes {capacity}")
         turns = capacity + 3
-        if resource_totals(before)["pages"] < turns + 3:
-            raise ValueError("KV capacity cannot isolate conversation snapshot pressure")
+        chunk = provenance["memory_report"]["content"]["prefill_chunk_size"]
+        if type(chunk) is not int or chunk <= 0:
+            raise ValueError("conversation pressure requires the reported prefill chunk size")
+        # Edits before each prompt endpoint do not reuse complete page ownership.
+        max_pages = sum((160 + 64 * turn) // 64 for turn in range(turns - capacity, turns))
+        max_pages += (160 + 64 * (turns - 1) + 1 + 63) // 64
+        if resource_totals(before)["pages"] < max_pages:
+            raise ValueError("KV capacity cannot isolate independent exact-prompt snapshot pressure")
         nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
         request, ids = aligned_request(f"conversation-{nonce}", 160)
-        previous_boundary = 0
+        retained_lengths = []
         last = before
         for turn in range(turns):
             if turn:
@@ -845,41 +959,40 @@ def main() -> int:
                     raise ValueError("conversation fixture has no append boundary")
                 request["messages"][0]["content"] = content[:-len("\nAnswer:")] + " apple" * 64 + "\nAnswer:"
                 ids = prompt_ids(request)
-                if len(ids) != len(previous) + 64 or common_prefix(previous, ids) < previous_boundary:
-                    raise ValueError("appended conversation did not preserve its entire cached prefix")
+                if len(ids) != len(previous) + 64 or not 128 <= common_prefix(previous, ids) < len(previous):
+                    raise ValueError("conversation edit must precede the previous exact prompt endpoint")
+            if system_prefix_ids(tokenizer, request, ids):
+                raise ValueError("conversation-pressure fixtures require no synthesized instruction checkpoint")
             run.complete(run.request(f"conversation-turn-{turn}", request), len(ids))
             after = run.metrics(f"conversation-turn-{turn}-after")
             delta = metric_delta(last, after)
-            run.check(f"conversation-turn-{turn}.prefix_and_publication",
-                delta["sparkgap_cache_hits_total"] == int(turn > 0)
-                and delta["sparkgap_cache_misses_total"] == int(turn == 0)
-                and delta["sparkgap_cache_reused_tokens_total"] == previous_boundary
-                and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(turn > 0)
-                and delta['sparkgap_graph_launches_total{kind="prefill"}'] == 1
-                and delta["sparkgap_snapshot_publications_total"] == 1,
-                prompt_tokens=len(ids), restored_tokens=previous_boundary, delta=delta)
+            check_cache(f"conversation-turn-{turn}", delta, request, ids, 0)
+            run.check(f"conversation-turn-{turn}.exact_prompt_publication",
+                delta["sparkgap_snapshot_publications_total"] == 1
+                and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 1
+                and delta["sparkgap_system_checkpoints_total"] == delta["sparkgap_prompt_checkpoints_total"] == 0,
+                prompt_tokens=len(ids), terminal_checkpoint_tokens=len(ids), delta=delta)
             run.reclaimed(f"conversation-turn-{turn}", before, after)
-            previous_boundary = len(ids) // 64 * 64
+            retained_lengths.append(len(ids))
             last = after
         delta = metric_delta(before, last)
+        retained_pages = sum(length // 64 for length in retained_lengths[-capacity:])
         run.check("conversation_exceeds_snapshot_capacity",
             delta["sparkgap_requests_admitted_total"] == turns
             and delta["sparkgap_requests_completed_total"] == turns
             and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0
             and delta["sparkgap_snapshot_evictions_total"] >= turns - capacity
             and last["sparkgap_cached_checkpoints"] == capacity
-            and last["sparkgap_cached_kv_pages"] == previous_boundary // 64,
-            turns=turns, snapshot_capacity=capacity, final_cached_tokens=previous_boundary, delta=delta)
+            and last["sparkgap_cached_kv_pages"] == retained_pages,
+            turns=turns, snapshot_capacity=capacity, independent_checkpoint_pages=retained_pages, delta=delta)
         run.complete(run.request("conversation-repeat", request), len(ids))
         after = run.metrics("conversation-repeat-after")
         delta = metric_delta(last, after)
+        check_cache("conversation-repeat", delta, request, ids, len(ids))
         run.check("conversation_repeat_restores_newest_checkpoint",
-            delta["sparkgap_cache_hits_total"] == 1
-            and delta["sparkgap_cache_reused_tokens_total"] == previous_boundary
-            and delta['sparkgap_graph_launches_total{kind="restore"}'] == 1
-            and delta['sparkgap_graph_launches_total{kind="prefill"}'] == 1
-            and delta["sparkgap_snapshot_publications_total"] == 0,
-            restored_tokens=previous_boundary, delta=delta)
+            delta["sparkgap_snapshot_publications_total"] == 0
+            and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 0,
+            restored_tokens=len(ids), delta=delta)
         run.reclaimed("conversation-repeat", before, after)
     if args.conversation_pressure:
         run.case("conversation_pressure", conversation_pressure)
@@ -899,6 +1012,8 @@ def main() -> int:
             tokens = len(prompt_ids(request))
             if tokens >= 64 or tokens >= geometry["context_tokens"]:
                 raise ValueError("KV pressure requires a prompt shorter than one cache block and the context limit")
+            if system_prefix_ids(tokenizer, request, prompt_ids(request)):
+                raise ValueError("KV pressure fixtures require no synthesized instruction checkpoint")
             request["max_tokens"] = geometry["context_tokens"] - tokens
             return request
 
@@ -938,7 +1053,8 @@ def main() -> int:
                     if not progress[index].wait_after(0, min(args.timeout, 30)):
                         raise ValueError(f"KV holder {index} did not produce visible output")
                 held = observed("kv-held", lambda metrics: metrics["sparkgap_active_requests"] == count
-                    and resource_totals(metrics)["pages"] == geometry["unreserved_pages"])
+                    and resource_totals(metrics)["pages"] == geometry["unreserved_pages"]
+                    and metrics["sparkgap_prompt_checkpoints_total"] == before["sparkgap_prompt_checkpoints_total"] + count)
                 run.check("kv.context_reservations_observed", held["sparkgap_free_request_slots"] == 4 - count
                     and resource_totals(held)["snapshots"] == resource_totals(before)["snapshots"] - count,
                     geometry=geometry, held=held)
@@ -959,7 +1075,10 @@ def main() -> int:
                     and rejected_state["sparkgap_retiring_request_slots"] == rejected_state["sparkgap_pending_requests"] == 0
                     and rejected_state["sparkgap_free_kv_pages"] == geometry["unreserved_pages"]
                     and rejected_state["sparkgap_cached_kv_pages"] == 0
-                    and rejected_state["sparkgap_free_snapshots"] == resource_totals(before)["snapshots"] - count
+                    and rejected_state["sparkgap_cached_checkpoints"] == count
+                    and rejected_state["sparkgap_free_snapshots"] == resource_totals(before)["snapshots"] - 2 * count
+                    and delta["sparkgap_prompt_checkpoints_total"] == count
+                    and delta["sparkgap_system_checkpoints_total"] == 0
                     and delta["sparkgap_requests_admitted_total"] == count and delta["sparkgap_requests_failed_total"] == 2
                     and delta["sparkgap_requests_completed_total"] == delta["sparkgap_requests_cancelled_total"] == 0
                     and delta["sparkgap_cache_hits_total"] == delta["sparkgap_cache_reused_tokens_total"] == 0,
@@ -984,7 +1103,9 @@ def main() -> int:
         delta = metric_delta(before, after)
         run.check("kv.all_holders_retired_after_cancellation", delta["sparkgap_requests_admitted_total"] == count
             and delta["sparkgap_requests_cancelled_total"] == count and delta["sparkgap_requests_failed_total"] == 2
-            and delta["sparkgap_requests_completed_total"] == delta["sparkgap_snapshot_publications_total"] == 0, delta=delta)
+            and delta["sparkgap_requests_completed_total"] == 0
+            and delta["sparkgap_snapshot_publications_total"] == delta["sparkgap_prompt_checkpoints_total"] == count
+            and delta["sparkgap_system_checkpoints_total"] == 0, delta=delta)
         answer = run.complete(run.request("kv-followup", capital), len(prompt_ids(capital)))
         run.check("kv.healthy_followup_answer", "paris" in answer["message"].get("content", "").casefold(), choice=answer)
         final = run.metrics("kv-followup-after")
