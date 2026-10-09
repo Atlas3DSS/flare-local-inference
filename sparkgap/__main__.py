@@ -1,0 +1,78 @@
+"""Load, prepare and capture Qwen, then start the native HTTP server."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import signal
+import sys
+
+
+def main(argv=None):
+    from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--snapshot", type=Path, default=Path.home() / ".cache/huggingface/hub" /
+        f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION)
+    parser.add_argument("--bind", default="127.0.0.1:8000")
+    parser.add_argument("--device", type=int, default=0, help="process-local CUDA ordinal")
+    parser.add_argument("--context", type=int, default=262144)
+    parser.add_argument("--prefill-chunk-size", type=int, default=4096,
+        help="maximum tokens per captured prefill graph; 64-aligned and no larger than context (default: 4096)")
+    parser.add_argument("--pages", type=int, help="explicit KV page capacity; default uses remaining GPU budget")
+    parser.add_argument("--mtp", action="store_true", help="prepare native multi-token prediction graphs")
+    parser.add_argument("--mtp-proposal-source", choices=("mtp", "copy"), default="mtp",
+        help="proposal source for speculative graphs; copy loads no MTP weights")
+    parser.add_argument("--mtp-widths", type=int, nargs="+", default=list(range(1, 9)),
+        help="verification widths including the pending input; batch times width is at most eight (default: 1 through 8)")
+    parser.add_argument("--mtp-fixed-width", type=int, choices=range(1, 9),
+        help="select a fixed prepared width instead of adaptive verification")
+    parser.add_argument("--mtp-copy", action=argparse.BooleanOptionalAction, default=True,
+        help="offer continuations copied from request history during speculation")
+    parser.add_argument("--snapshot-budget-gib", type=float, default=4)
+    parser.add_argument("--headroom-gib", type=float, default=4)
+    parser.add_argument("--template-defaults", type=Path, help="JSON object of default chat template arguments")
+    parser.add_argument("--memory-report", type=Path)
+    parser.add_argument("--prepare-only", action="store_true", help="validate the graph catalog and release it without binding HTTP")
+    args = parser.parse_args(argv)
+    defaults = {}
+    if args.template_defaults is not None:
+        defaults = json.loads(args.template_defaults.read_text())
+        if not isinstance(defaults, dict):
+            parser.error("template defaults must be a JSON object")
+    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+
+    config = PreparationConfig(device=args.device, context=args.context, pages=args.pages,
+        prefill_chunk_size=args.prefill_chunk_size,
+        mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
+        speculative_proposal_source=args.mtp_proposal_source,
+        speculative_fixed_width=args.mtp_fixed_width, speculative_copy=args.mtp_copy,
+        snapshot_budget_bytes=int(args.snapshot_budget_gib * (1 << 30)),
+        headroom_bytes=int(args.headroom_gib * (1 << 30)))
+    model = prepare_model(args.snapshot, config, progress=lambda text: print(text, file=sys.stderr, flush=True))
+    with model:
+        report = json.dumps(model.memory_report, indent=2) + "\n"
+        if args.memory_report is not None:
+            args.memory_report.write_text(report)
+        print(report, file=sys.stderr, end="", flush=True)
+        if args.prepare_only:
+            model.manifest()
+            return 0
+        server = model.start_server(bind=args.bind, template_defaults=defaults)
+        print(f"Listening on {server.address}", file=sys.stderr, flush=True)
+        def stop(signum, frame):
+            raise KeyboardInterrupt
+        previous = signal.signal(signal.SIGTERM, stop)
+        try:
+            while server.wait(1000):
+                pass
+            raise RuntimeError("native server stopped unexpectedly")
+        except KeyboardInterrupt:
+            return 0
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

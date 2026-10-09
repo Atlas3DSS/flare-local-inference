@@ -1,0 +1,295 @@
+"""CPU ownership and address-stability contracts for serialized operator scratch."""
+
+import weakref
+from types import SimpleNamespace
+
+import pytest
+import torch
+from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
+from b12x.preparation import PreparationSession
+
+from sparkgap.preparation.scratch import ScratchArena, planned_scratch, scratch_storage
+from sparkgap.preparation.tuning import register_finalizer
+
+
+def spec(nbytes, *, dtype=torch.uint8, shape=None, device="cpu"):
+    return ScratchBufferSpec(name="workspace", shape=(nbytes,) if shape is None else shape,
+                             dtype=dtype, device=torch.device(device))
+
+
+def test_arena_owns_one_aligned_highwater_storage_across_operator_specs():
+    arena = ScratchArena("cpu")
+    assert arena.nbytes == 0 and arena.device == torch.device("cpu")
+    assert arena.reserve(0) is arena.tensor
+    first = planned_scratch((spec(1),), arena)
+    original = arena.tensor
+    reference = weakref.ref(original)
+    assert arena.nbytes == 256 and first.shape == (1,)
+    for requirement in (255, 0):
+        view = planned_scratch((spec(requirement),), arena)
+        assert view.untyped_storage().data_ptr() == original.untyped_storage().data_ptr()
+        assert arena.tensor is original
+    del view
+    second = planned_scratch((spec(257),), arena)
+    assert arena.nbytes == 512 and arena.tensor is not original
+    assert second.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+    assert original.nbytes == 256
+    del first, original
+    assert reference() is None
+    for requirement in (1, 257, 128, 512):
+        view = planned_scratch((spec(requirement),), arena)
+        assert view.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
+        assert view.shape == (requirement,)
+        assert scratch_tensor(view, (spec(requirement),), owner="test").data_ptr() == second.data_ptr()
+    assert arena.nbytes == 512
+
+
+@pytest.mark.parametrize("nbytes", [-1, True, False, 1.5, "256", None])
+def test_invalid_sizes_reject_before_allocating_or_replacing_owner(nbytes):
+    arena = ScratchArena("cpu")
+    initial = arena.tensor
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        arena.reserve(nbytes)
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        scratch_storage(arena, nbytes=nbytes, device="cpu")
+    assert arena.tensor is initial and arena.nbytes == 0
+
+
+def test_frozen_arena_reuses_capacity_and_rejects_growth_without_mutation():
+    arena = ScratchArena("cpu")
+    tensor = arena.reserve(257)
+    tensor.fill_(19)
+    arena.freeze()
+    arena.freeze()
+    for size in (0, 1, 257, 512):
+        assert arena.reserve(size) is tensor
+    with pytest.raises(RuntimeError, match="frozen scratch arena"):
+        planned_scratch((spec(513),), arena)
+    assert arena.tensor is tensor and arena.nbytes == 512
+    assert torch.all(tensor == 19)
+
+
+def test_explicit_raw_storage_keeps_owner_view_and_rejects_undersizing():
+    backing = torch.empty(64, dtype=torch.uint8)
+    raw = backing[16:48]
+    assert scratch_storage(raw, nbytes=32, device="cpu") is raw
+    assert planned_scratch((spec(17),), raw) is raw
+    assert raw.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
+    assert raw.storage_offset() == 16
+    with pytest.raises(ValueError, match="requires 33"):
+        scratch_storage(raw, nbytes=33, device="cpu")
+    assert raw.shape == (32,)
+
+
+@pytest.mark.parametrize("workspace,kind", [
+    (torch.empty(8, dtype=torch.float32), TypeError),
+    (torch.empty((2, 4), dtype=torch.uint8), ValueError),
+    (torch.empty(16, dtype=torch.uint8)[::2], ValueError),
+    (object(), TypeError),
+])
+def test_raw_storage_validates_dtype_shape_and_contiguity(workspace, kind):
+    with pytest.raises(kind):
+        scratch_storage(workspace, nbytes=8, device="cpu")
+
+
+@pytest.mark.parametrize("workspace", [ScratchArena("cpu"), torch.empty(8, dtype=torch.uint8)])
+def test_storage_device_mismatch_rejects_without_cuda_initialization(workspace):
+    with pytest.raises(ValueError):
+        scratch_storage(workspace, nbytes=8, device="meta")
+
+
+def test_standalone_fallback_allocates_exact_required_byte_capacity():
+    first = planned_scratch((spec(19),))
+    second = planned_scratch((spec(19),))
+    assert first.shape == second.shape == (19,)
+    assert first.dtype == second.dtype == torch.uint8
+    assert first.device == second.device == torch.device("cpu")
+    assert first.data_ptr() != second.data_ptr()
+    assert scratch_storage(None, nbytes=0, device="cpu").shape == (0,)
+
+
+@pytest.mark.parametrize("specs", [(), (spec(8), spec(16)), (spec(8, dtype=torch.float32),),
+                                  (spec(8, shape=(2, 4)),)])
+def test_explicit_raw_workspace_rejects_unsupported_layouts(specs):
+    raw = torch.empty(1024, dtype=torch.uint8)
+    with pytest.raises(ValueError):
+        planned_scratch(specs, raw)
+    assert raw.shape == (1024,)
+
+
+def test_plain_session_arena_finalizers_rebind_every_alias_and_release_old_storage():
+    ordinary = object.__new__(PreparationSession)
+    arena = ScratchArena("cpu")
+    original = arena.reserve(8)
+    reference = weakref.ref(original)
+    owners = [SimpleNamespace(scratch=original) for _ in range(2)]
+    order = []
+    for index, owner in enumerate(owners):
+        def finalize(index=index, owner=owner, prior=original):
+            order.append(index)
+            assert prior.nbytes == 256
+            owner.scratch = arena.tensor
+        register_finalizer(ordinary, finalize, workspace=arena)
+    del finalize, original
+    arena.reserve(300)
+    assert reference() is not None
+    arena.finalize()
+    assert order == [0, 1]
+    assert all(owner.scratch is arena.tensor for owner in owners)
+    assert reference() is None
+    arena.finalize()
+    assert order == [0, 1]
+    arena.freeze()
+    with pytest.raises(RuntimeError):
+        arena.register_finalizer(lambda: None)
+
+
+def test_arena_finalizer_failure_keeps_callbacks_and_owners_for_retry():
+    arena = ScratchArena("cpu")
+    callbacks = []
+
+    class Owner:
+        def finalize(self):
+            callbacks.append("owner")
+
+    owner = Owner()
+    reference = weakref.ref(owner)
+    arena.register_finalizer(owner.finalize)
+    del owner
+    attempts = []
+
+    def fail_once():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("binding refresh failed")
+
+    arena.register_finalizer(fail_once)
+    arena.freeze()
+    with pytest.raises(RuntimeError, match="binding refresh failed"):
+        arena.finalize()
+    assert reference() is not None
+    arena.finalize()
+    assert reference() is None
+    assert callbacks == ["owner", "owner"] and len(attempts) == 2
+
+
+def test_simultaneous_views_have_aligned_offsets_disjoint_contents_and_shared_owner():
+    arena = ScratchArena("cpu")
+    byte, bf16, fp32 = arena.views(((3,), torch.uint8), ((2, 3), torch.bfloat16),
+                                  ((5,), torch.float32))
+    assert arena.nbytes == 768
+    for value, offset, dtype, shape in ((byte, 0, torch.uint8, (3,)),
+            (bf16, 256, torch.bfloat16, (2, 3)), (fp32, 512, torch.float32, (5,))):
+        assert value.untyped_storage().data_ptr() == arena.tensor.untyped_storage().data_ptr()
+        assert value.storage_offset() * value.element_size() == offset
+        assert value.dtype == dtype and value.shape == shape and value.is_contiguous()
+    byte.fill_(7)
+    bf16.fill_(2)
+    fp32.fill_(9)
+    assert byte.eq(7).all() and bf16.eq(2).all() and fp32.eq(9).all()
+    original = arena.tensor
+    another, = arena.views(((129,), torch.float32))
+    assert arena.tensor is original and arena.nbytes == 768
+    assert another.storage_offset() == 0 and another.shape == (129,)
+    another.zero_()
+    assert byte.eq(0).all() and bf16.eq(0).all() and fp32[0].item() == 0
+    assert fp32[1:].eq(9).all()
+
+
+def test_empty_simultaneous_views_share_storage_without_reserving_extra_blocks():
+    arena = ScratchArena("cpu")
+    zero, value, trailing = arena.views(((0,), torch.float64), ((1,), torch.uint8),
+                                       ((2, 0, 3), torch.int32))
+    assert arena.nbytes == 256 and zero.shape == (0,) and trailing.shape == (2, 0, 3)
+    assert zero.storage_offset() == 0 and value.storage_offset() == 0
+    assert trailing.storage_offset() * trailing.element_size() == 256
+    for tensor in (zero, value, trailing):
+        assert tensor.untyped_storage().data_ptr() == arena.tensor.untyped_storage().data_ptr()
+
+
+def test_planned_simultaneous_typed_specs_use_one_arena_and_reject_mixed_devices():
+    arena = ScratchArena("cpu")
+    specs = (spec(3), spec(6, shape=(2, 3), dtype=torch.bfloat16),
+             spec(5, dtype=torch.float32))
+    views = planned_scratch(specs, arena)
+    assert isinstance(views, tuple) and len(views) == 3 and arena.nbytes == 768
+    assert tuple(view.shape for view in views) == ((3,), (2, 3), (5,))
+    original = arena.tensor
+    with pytest.raises(ValueError):
+        planned_scratch((spec(8), spec(4, device="meta")), arena)
+    assert arena.tensor is original
+    with pytest.raises(ValueError):
+        planned_scratch((), arena)
+    assert arena.tensor is original
+
+
+@pytest.mark.parametrize("shape,dtype", [((-1,), torch.uint8), ((True,), torch.uint8),
+    ((1.5,), torch.uint8), (("2",), torch.uint8), ((2,), "float32"), ((2,), None)])
+def test_invalid_simultaneous_view_metadata_rejects_before_growth(shape, dtype):
+    arena = ScratchArena("cpu")
+    original = arena.tensor
+    with pytest.raises((TypeError, ValueError)):
+        arena.views(((4096,), torch.uint8), (shape, dtype))
+    assert arena.tensor is original
+
+
+def test_frozen_simultaneous_views_reuse_capacity_and_reject_excess_total():
+    arena = ScratchArena("cpu")
+    arena.reserve(512)
+    arena.freeze()
+    one, two = arena.views(((128,), torch.uint8), ((64,), torch.float32))
+    assert one.storage_offset() == 0 and two.storage_offset() * two.element_size() == 256
+    with pytest.raises(RuntimeError):
+        arena.views(((257,), torch.uint8), ((1,), torch.uint8))
+    assert arena.nbytes == 512
+
+
+def test_trim_replaces_volatile_storage_with_aligned_selected_capacity():
+    arena = ScratchArena("cpu")
+    original = arena.reserve(1024)
+    original.fill_(19)
+    reference = weakref.ref(original)
+    arena.trim(257)
+    assert arena.nbytes == 512 and arena.tensor is not original
+    assert arena.tensor.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+    assert original.eq(19).all()
+    del original
+    assert reference() is None
+    selected = arena.tensor
+    arena.trim(511)
+    assert arena.tensor is selected
+    arena.freeze()
+    with pytest.raises(RuntimeError):
+        arena.trim(1)
+    assert arena.tensor is selected and arena.nbytes == 512
+
+
+def test_trim_to_zero_releases_arena_owner_without_invalidating_existing_views():
+    arena = ScratchArena("cpu")
+    view, = arena.views(((3,), torch.int64))
+    view.fill_(11)
+    pointer = view.data_ptr()
+    arena.trim(0)
+    assert arena.nbytes == 0 and view.eq(11).all()
+    assert view.data_ptr() == pointer and view.untyped_storage().nbytes() == 256
+
+
+@pytest.mark.parametrize("nbytes", [-1, True, False, 1.5, "256", None, 257])
+def test_trim_rejects_invalid_or_larger_requirements_without_mutation(nbytes):
+    arena = ScratchArena("cpu")
+    original = arena.reserve(256)
+    with pytest.raises(ValueError):
+        arena.trim(nbytes)
+    assert arena.tensor is original and arena.nbytes == 256
+
+
+def test_priming_owners_retain_arena_instead_of_transient_views():
+    from sparkgap.preparation.scratch import prime_owners
+
+    arena = ScratchArena("cpu")
+    scratch = arena.reserve(1024)
+    binding = SimpleNamespace(scratch=scratch)
+    assert prime_owners(arena, scratch, binding) == (arena,)
+    assert prime_owners(scratch, scratch, binding) == (scratch, binding)
+    assert prime_owners(None, scratch, binding) == (scratch, binding)
+    assert prime_owners(None) == ()

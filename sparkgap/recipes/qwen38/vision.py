@@ -1,0 +1,278 @@
+"""Captured Qwen vision encoder using canonical blocks and prepared attention."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+from b12x.attention import varlen
+from b12x.preparation import PreparationSession, PreparedCall
+from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    Qwen4ExpVisionRotaryEmbedding, apply_rotary_pos_emb_vision,
+)
+
+from sparkgap.preparation.scratch import ScratchArena, planned_scratch, prime_owners
+from sparkgap.preparation.tuning import benchmark_resource, register_finalizer
+
+from .linear import BF16Projection, QuantizedProjection
+
+
+@dataclass(frozen=True)
+class VisionMetadata:
+    interpolation_indices: torch.Tensor
+    interpolation_weights: torch.Tensor
+    position_ids: torch.Tensor
+    cu_seqlens: torch.Tensor
+    num_patches: torch.Tensor
+
+    @classmethod
+    def allocate(cls, patches: int, images: int, device: torch.device) -> VisionMetadata:
+        if patches <= 0 or patches % 4 or images <= 0:
+            raise ValueError("vision requires positive image capacity and a patch capacity divisible by four")
+        return cls(torch.zeros((patches, 4), dtype=torch.int64, device=device),
+                   torch.zeros((patches, 4), dtype=torch.float32, device=device),
+                   torch.zeros((patches, 2), dtype=torch.int64, device=device),
+                   torch.zeros(images + 1, dtype=torch.int32, device=device),
+                   torch.zeros((1,), dtype=torch.int32, device=device))
+
+
+@dataclass(frozen=True)
+class VisionScratch:
+    patches: torch.Tensor
+    hidden: torch.Tensor
+    qkv: torch.Tensor
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    attention: torch.Tensor
+    projected: torch.Tensor
+    intermediate: torch.Tensor
+    merger_intermediate: torch.Tensor
+    output: torch.Tensor
+
+    @classmethod
+    def allocate(cls, patches: int, device: torch.device) -> VisionScratch:
+        if patches <= 0 or patches % 4:
+            raise ValueError("vision patch capacity must be positive and divisible by four")
+        def zeros(*shape):
+            return torch.zeros(shape, device=device, dtype=torch.bfloat16)
+        return cls(zeros(patches, 1536), zeros(patches, 1152), zeros(patches, 3456),
+                   zeros(patches, 16, 72), zeros(patches, 16, 72), zeros(patches, 16, 72),
+                   zeros(patches, 1152), zeros(patches, 1152), zeros(patches, 4304),
+                   zeros(patches // 4, 4608), zeros(patches // 4, 2560))
+
+    def rows(self, patches: int) -> VisionScratch:
+        if patches <= 0 or patches % 4 or patches > self.patches.shape[0]:
+            raise ValueError("vision view exceeds its patch capacity")
+        return type(self)(*(getattr(self, name)[:patches // 4 if name in ("merger_intermediate", "output") else patches]
+                            for name in self.__dataclass_fields__))
+
+
+@dataclass(frozen=True)
+class VisionWeights:
+    parameters: dict[str, torch.Tensor]
+    projections: dict[str, object]
+
+    @classmethod
+    def load(cls, module, loader) -> VisionWeights:
+        parameters, projections = {}, {}
+        for path, _ in module.named_parameters():
+            projection = path.removesuffix(".weight")
+            quantized = (path.endswith(".weight") and not path.startswith("patch_embed.")
+                         and path.split(".")[-2] in ("qkv", "proj", "linear_fc1", "linear_fc2"))
+            if quantized:
+                projections[projection] = loader.load_linear(f"model.visual.{projection}")
+            else:
+                parameters[path] = loader.load_tensor(f"model.visual.{path}")
+        return cls(parameters, projections)
+
+
+class _Linear(torch.nn.Module):
+    def __init__(self, projection, bias=None):
+        super().__init__()
+        self.projection = projection
+        self.bias = bias
+
+    def forward(self, source):
+        output = self.projection(source)
+        if self.bias is not None:
+            output.add_(self.bias)
+        return output
+
+
+@dataclass(frozen=True)
+class _AttentionBenchmarkInputs:
+    q: torch.Tensor
+    k: torch.Tensor
+    v: torch.Tensor
+    seed_q: torch.Tensor
+    seed_k: torch.Tensor
+    seed_v: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+
+    @property
+    def nbytes(self):
+        return sum(value.untyped_storage().nbytes() for value in vars(self).values())
+
+    def produce(self):
+        self.q.copy_(self.seed_q)
+        self.k.copy_(self.seed_k)
+        self.v.copy_(self.seed_v)
+
+
+def _attention_benchmark_inputs(arguments):
+    """Private finite QKV and one full-capacity image for attention tuning."""
+    query = arguments["q"]
+    generator = torch.Generator(device=query.device).manual_seed(89017)
+    result = {}
+    for name in ("q", "k", "v"):
+        source = arguments[name]
+        seed = torch.empty_strided(source.shape, source.stride(), dtype=source.dtype,
+                                   device=source.device).normal_(generator=generator)
+        result[f"seed_{name}"] = seed
+        result[name] = torch.empty_strided(source.shape, source.stride(),
+                                           dtype=source.dtype, device=source.device).copy_(seed)
+    lengths = torch.full_like(arguments["cu_seqlens_q"], query.shape[0])
+    lengths[0] = 0
+    return _AttentionBenchmarkInputs(**result, cu_seqlens_q=lengths)
+
+
+class _Attention(torch.nn.Module):
+    def __init__(self, module, scratch, metadata, weights, *, session, name, shared=None,
+                 projection_workspace=None, attention_workspace=None, attention_math_mode="flash"):
+        super().__init__()
+        self.scratch = scratch
+        self.qkv = QuantizedProjection(scratch.hidden, weights["qkv"], scratch.qkv,
+            session=session, name=f"{name}.qkv", bias=module.qkv.bias, workspace=projection_workspace)
+        self.proj = QuantizedProjection(scratch.attention, weights["proj"], scratch.projected,
+            session=session, name=f"{name}.proj", bias=module.proj.bias, workspace=projection_workspace)
+        if shared is not None:
+            def refresh_alias():
+                self.workspace, self.binding = shared.workspace, shared.binding
+            refresh_alias()
+            register_finalizer(session, refresh_alias, workspace=attention_workspace)
+            return
+        capacity = scratch.hidden.shape[0]
+        arithmetic = {} if attention_math_mode == "flash" else {"math_mode": attention_math_mode}
+        declaration = varlen.plan(scratch.query, scratch.key, scratch.value, metadata.cu_seqlens,
+                                 max_seqlen_q=capacity, max_seqlen_k=capacity, causal=False,
+                                 **arithmetic)
+        kwargs = dict(q=scratch.query, k=scratch.key, v=scratch.value,
+                      cu_seqlens_q=metadata.cu_seqlens, max_seqlen_q=capacity, max_seqlen_k=capacity,
+                      softmax_scale=module.scaling, causal=False)
+        self.workspace = attention_workspace
+
+        def prepare(state):
+            workspace = planned_scratch(state.scratch_plan.scratch_specs(), attention_workspace)
+            binding = state.bind(scratch=workspace, **kwargs)
+            self.workspace = workspace
+            return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(attention_workspace, workspace, binding))
+
+        def benchmark(state):
+            identity = tuple((name, tuple(kwargs[name].shape), kwargs[name].stride(), kwargs[name].dtype,
+                              kwargs[name].device) for name in ("q", "k", "v", "cu_seqlens_q"))
+            inputs = benchmark_resource(session, ("vision_attention_inputs", identity),
+                                        lambda: _attention_benchmark_inputs(kwargs))
+            arguments = {**kwargs, **{key: getattr(inputs, key)
+                                      for key in ("q", "k", "v", "cu_seqlens_q")}}
+            workspace = planned_scratch(state.scratch_plan.scratch_specs(), attention_workspace)
+            binding = state.bind(scratch=workspace, **arguments)
+            return PreparedCall(run=lambda: state.run(binding), produce=inputs.produce,
+                                owners=(inputs, workspace, binding))
+
+        session.prepare((declaration.request(name=name, prepare_call=prepare,
+                                             benchmark_call=benchmark),))
+
+        def refresh():
+            self.workspace = planned_scratch(declaration.scratch_specs(), attention_workspace)
+            self.binding = varlen.bind(declaration, scratch=self.workspace, **kwargs)
+
+        refresh()
+        register_finalizer(session, refresh, workspace=attention_workspace)
+
+    def forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):
+        s = self.scratch
+        projected = self.qkv(hidden_states).view(-1, 3, 16, 72)
+        query, key = apply_rotary_pos_emb_vision(projected[:, 0], projected[:, 1], *position_embeddings)
+        s.query.copy_(query)
+        s.key.copy_(key)
+        s.value.copy_(projected[:, 2])
+        output, _ = varlen.run(self.binding)
+        s.attention.copy_(output.flatten(1))
+        return self.proj(s.attention)
+
+
+class PreparedVision:
+    """Patch one canonical vision tree for a fixed patch-capacity graph.
+
+    Geometry is computed by the native processor and copied into metadata.
+    Padding is excluded from attention by cumulative lengths. Canonical block,
+    layer normalization, activation, residual, and merger methods run only
+    during graph construction. The returned embedding buffer is persistent.
+    Each capacity requires its own canonical module tree because methods are
+    bound to capacity-specific prepared objects.
+    """
+
+    def __init__(self, module, scratch: VisionScratch, metadata: VisionMetadata,
+                 weights: VisionWeights, *, session: PreparationSession, name: str = "vision",
+                 projection_workspace: ScratchArena | torch.Tensor | None = None,
+                 attention_workspace: ScratchArena | torch.Tensor | None = None,
+                 attention_math_mode: str = "flash"):
+        if attention_math_mode not in ("flash", "eager_bf16"):
+            raise ValueError("vision attention math mode must be flash or eager_bf16")
+        config = module.config
+        if (config.hidden_size, config.num_heads, config.intermediate_size, config.depth) != (1152, 16, 4304, 27):
+            raise ValueError("vision geometry differs from the checkpoint contract")
+        self.module, self.scratch, self.metadata = module, scratch, metadata
+        capacity, device = scratch.hidden.shape[0], scratch.hidden.device
+        if metadata.interpolation_indices.shape[0] != capacity:
+            raise ValueError("vision metadata and scratch capacities differ")
+        if metadata.num_patches.item() != 0 or bool(metadata.cu_seqlens.any().item()):
+            raise ValueError("vision preparation requires inactive metadata")
+        for path, tensor in weights.parameters.items():
+            parent, _, attribute = path.rpartition(".")
+            setattr(module.get_submodule(parent), attribute, torch.nn.Parameter(tensor, requires_grad=False))
+        # Conv3d rounds the projection before adding the BF16 bias.
+        self.patch_embed = _Linear(BF16Projection(scratch.patches,
+            module.patch_embed.proj.weight.flatten(1), scratch.hidden,
+            session=session, name=f"{name}.patch_embed"), module.patch_embed.proj.bias)
+        module.rotary_pos_emb = Qwen4ExpVisionRotaryEmbedding(config).to(device)
+        for i, block in enumerate(module.blocks):
+            prefix = f"blocks.{i}"
+            block.attn = _Attention(block.attn, scratch, metadata,
+                {key: weights.projections[f"{prefix}.attn.{key}"] for key in ("qkv", "proj")},
+                session=session, name=f"{name}.blocks.{i}.attn",
+                shared=module.blocks[0].attn if i else None, projection_workspace=projection_workspace,
+                attention_workspace=attention_workspace, attention_math_mode=attention_math_mode)
+            for key, source, destination in (("linear_fc1", scratch.hidden, scratch.intermediate),
+                                              ("linear_fc2", scratch.intermediate, scratch.projected)):
+                original = getattr(block.mlp, key)
+                setattr(block.mlp, key, _Linear(QuantizedProjection(source,
+                    weights.projections[f"{prefix}.mlp.{key}"], destination, session=session,
+                    name=f"{name}.blocks.{i}.mlp.{key}", activation_mode="a16", bias=original.bias,
+                    workspace=projection_workspace)))
+        for key, source, destination in (("linear_fc1", scratch.hidden.view(capacity // 4, 4608), scratch.merger_intermediate),
+                                         ("linear_fc2", scratch.merger_intermediate, scratch.output)):
+            original = getattr(module.merger, key)
+            setattr(module.merger, key, _Linear(QuantizedProjection(source,
+                weights.projections[f"merger.{key}"], destination, session=session,
+                name=f"{name}.merger.{key}", activation_mode="a16", bias=original.bias,
+                workspace=projection_workspace)))
+        def refresh_attention_workspace():
+            self.attention_workspace = module.blocks[0].attn.workspace
+        refresh_attention_workspace()
+        register_finalizer(session, refresh_attention_workspace, workspace=attention_workspace)
+        self.output_rows = torch.arange(capacity // 4, device=device)
+
+    def __call__(self, pixels: torch.Tensor) -> torch.Tensor:
+        s, metadata, module = self.scratch, self.metadata, self.module
+        s.patches.copy_(pixels)
+        hidden = self.patch_embed(s.patches)
+        positions = (module.pos_embed(metadata.interpolation_indices) * metadata.interpolation_weights[:, :, None]).sum(1)
+        hidden = hidden + positions.to(hidden.dtype)
+        rope = module.rotary_pos_emb(hidden, metadata.position_ids)
+        for block in module.blocks:
+            hidden = block(hidden, cu_seqlens=metadata.cu_seqlens, position_embeddings=rope)
+        result = module.merger(hidden)
+        result.masked_fill_((self.output_rows >= metadata.num_patches // 4)[:, None], 0)
+        return result

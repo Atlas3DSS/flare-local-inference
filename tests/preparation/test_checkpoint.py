@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import builtins
+import json
+import os
+from collections import ChainMap
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from sparkgap.preparation import CheckpointError, inspect_qwen38_checkpoint
+from sparkgap.preparation import qwen38
+from sparkgap.preparation.__main__ import main
+from sparkgap.preparation.checkpoint import (
+    _inspect_frontend_assets, _parse_json, _read_header, _validate_config, _validate_tensors,
+)
+
+
+def _write_header(path, header, payload=b"\0\0\0\0"):
+    encoded = json.dumps(header).encode()
+    path.write_bytes(len(encoded).to_bytes(8, "little") + encoded + payload)
+    return len(encoded) + 8
+
+
+def test_header_inspection_never_reads_payload(tmp_path, monkeypatch):
+    path = tmp_path / "tensor.safetensors"
+    data_start = _write_header(path, {"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}})
+    original_open = Path.open
+    reads = []
+
+    class HeaderOnlyFile:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, length):
+            assert self.handle.tell() + length <= data_start
+            reads.append(length)
+            return self.handle.read(length)
+
+    monkeypatch.setattr(Path, "open", lambda self, *args, **kwargs: HeaderOnlyFile(original_open(self, *args, **kwargs)))
+    shard, tensors = _read_header(path, path.name)
+    assert sum(reads) == data_start
+    assert shard.file_size == data_start + 4
+    assert tensors["weight"].offset == data_start
+    assert tensors["weight"].nbytes == 4
+
+
+@pytest.mark.parametrize("dtype,shape,offsets", [
+    ("F32", [2], [0, 4]),
+    ("F32", [1], [0, 8]),
+    ("BF16", [-1], [0, 4]),
+    ("BF16", [True], [0, 2]),
+    ("F32", [1], [True, 4]),
+    ("FP4", [8], [0, 4]),
+    (["U8"], [4], [0, 4]),
+])
+def test_invalid_tensor_ranges(tmp_path, dtype, shape, offsets):
+    path = tmp_path / "bad.safetensors"
+    _write_header(path, {"weight": {"dtype": dtype, "shape": shape, "data_offsets": offsets}})
+    with pytest.raises(CheckpointError, match="weight"):
+        _read_header(path, path.name)
+
+
+@pytest.mark.parametrize("offsets,payload", [([1, 5], b"\0" * 5), ([0, 4], b"\0" * 5)])
+def test_holes_and_trailing_payload_rejected(tmp_path, offsets, payload):
+    path = tmp_path / "bad.safetensors"
+    _write_header(path, {"weight": {"dtype": "U8", "shape": [4], "data_offsets": offsets}}, payload)
+    with pytest.raises(CheckpointError, match="hole|cover"):
+        _read_header(path, path.name)
+
+
+def test_overlap_rejected(tmp_path):
+    path = tmp_path / "bad.safetensors"
+    _write_header(path, {name: {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]} for name in ("a", "b")})
+    with pytest.raises(CheckpointError, match="overlap"):
+        _read_header(path, path.name)
+
+
+@pytest.mark.parametrize("raw", [b"", b"\xff" * 8, (100 << 20 | 1).to_bytes(8, "little")])
+def test_invalid_header_length(tmp_path, raw):
+    path = tmp_path / "bad.safetensors"
+    path.write_bytes(raw)
+    with pytest.raises(CheckpointError, match="length"):
+        _read_header(path, path.name)
+
+
+def test_duplicate_json_keys_rejected():
+    with pytest.raises(CheckpointError, match="duplicate JSON key: weight"):
+        _parse_json(b'{"weight": {}, "weight": {}}', "shard")
+
+
+@pytest.fixture(scope="module")
+def snapshot():
+    default = Path.home() / ".cache/huggingface/hub" / ("models--" + qwen38.MODEL_ID.replace("/", "--")) / "snapshots" / qwen38.REVISION
+    configured = os.environ.get("SPARKGAP_QWEN38_SNAPSHOT")
+    path = Path(configured) if configured else default
+    if not path.is_dir():
+        if configured:
+            pytest.fail(f"SPARKGAP_QWEN38_SNAPSHOT does not exist: {path}")
+        pytest.skip("exact Qwen3.8 checkpoint is not cached; set SPARKGAP_QWEN38_SNAPSHOT")
+    return path
+
+
+@pytest.fixture(scope="module")
+def manifest(snapshot):
+    return inspect_qwen38_checkpoint(snapshot)
+
+
+def test_actual_checkpoint_accounting(manifest):
+    report = manifest.to_dict()
+    assert report["tensor_count"] == 375487
+    assert report["shard_count"] == 21
+    assert report["payload_bytes"] == 102138950916
+    assert report["gpu_stored_bytes"] == 71742092032
+    assert report["mapped_host_stored_bytes"] == 28800138244
+    assert report["excluded_stored_bytes"] == 1596720640
+    assert sum(report[key] for key in ("gpu_stored_bytes", "mapped_host_stored_bytes", "excluded_stored_bytes")) == report["payload_bytes"]
+    assert report["quantization"]["excluded_mtp_aliases"] == ["mtp.layers.48.mlp.experts"]
+    assert report["validation"]["tensor_payloads_verified"] is False
+    assert {name: asset["sha256"] for name, asset in report["frontend_assets"].items()} == qwen38.FRONTEND_SHA256
+
+
+@pytest.mark.parametrize("changed", qwen38.FRONTEND_SHA256)
+def test_modified_frontend_artifact_rejected(snapshot, tmp_path, changed):
+    for name in qwen38.FRONTEND_SHA256:
+        if name == changed:
+            (tmp_path / name).write_bytes((snapshot / name).read_bytes() + b"\n")
+        else:
+            (tmp_path / name).symlink_to(snapshot / name)
+    with pytest.raises(CheckpointError, match=changed):
+        _inspect_frontend_assets(tmp_path)
+
+
+@pytest.mark.parametrize("name,dtype,shape", [
+    ("model.language_model.layers.0.linear_attn.in_proj_qkv.weight", "F8_E4M3", (10240, 1280)),
+    ("model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale.nvfp4_csf_fixed", "U8", (40, 1280)),
+    ("model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale.nvfp4_csf_exceptions", "I64", (200,)),
+    ("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_127.weight_scale", "U8", (2500012, 10)),
+    ("model.visual.blocks.26.mlp.linear_fc2.weight", "U8", (1152, 4304)),
+])
+def test_actual_recipe_rejects_wrong_layouts(manifest, name, dtype, shape):
+    modified = replace(manifest.tensors[name], dtype=dtype, shape=shape)
+    with pytest.raises(CheckpointError, match="expected") as error:
+        _validate_tensors(ChainMap({name: modified}, manifest.tensors))
+    assert name in str(error.value)
+
+
+def test_missing_expert_scale_rejected(manifest):
+    name = "model.language_model.layers.0.mlp.experts.511.down_proj.input_scale"
+    modified = dict(manifest.tensors)
+    del modified[name]
+    with pytest.raises(CheckpointError, match="missing required tensor") as error:
+        _validate_tensors(modified)
+    assert name in str(error.value)
+
+
+def test_unmapped_tensor_rejected(manifest):
+    extra = replace(manifest.tensors["lm_head.weight"], name="model.unexpected.weight")
+    with pytest.raises(CheckpointError, match="unmapped tensor: model.unexpected.weight"):
+        _validate_tensors(ChainMap({extra.name: extra}, manifest.tensors))
+
+
+@pytest.mark.parametrize("field,value", [("hc_count", 2), ("ple_layer_ids", [1]), ("head_dim", 128)])
+def test_changed_geometry_rejected(snapshot, field, value):
+    config = json.loads((snapshot / "config.json").read_text())
+    config["text_config"][field] = value
+    with pytest.raises(CheckpointError, match=field):
+        _validate_config(config)
+
+
+def test_missing_quantization_recipe_rejected(snapshot):
+    config = json.loads((snapshot / "config.json").read_text())
+    name = "model.language_model.layers.0.mlp.experts"
+    del config["quantization_config"]["quantized_layers"][name]
+    with pytest.raises(CheckpointError, match="quantized_layers") as error:
+        _validate_config(config)
+    assert name in str(error.value)
+
+
+def test_cpu_only_cli(snapshot, capsys, monkeypatch):
+    original_import = builtins.__import__
+
+    def import_without_torch(name, *args, **kwargs):
+        if name == "torch" or name.startswith("torch."):
+            pytest.fail("checkpoint inspection imported torch")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_torch)
+    assert main([str(snapshot)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["reference_revision"] == qwen38.REVISION
+    assert report["validation"]["tensor_payloads_read"] is False
+
+
+def test_cli_missing_snapshot_is_error(tmp_path, capsys):
+    assert main([str(tmp_path / "absent")]) == 1
+    assert "checkpoint inspection failed" in capsys.readouterr().err

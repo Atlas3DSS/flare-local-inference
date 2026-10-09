@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparkgap"
+version = "0.1.0"
+description = "Python model preparation for a native CUDA graph serving core"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+sparkgap = "sparkgap.__main__:main"
+sparkgap-inspect = "sparkgap.preparation.__main__:main"
+
+[project.optional-dependencies]
+test = ["pytest>=9,<10"]
+prepare = [
+    "torch==2.13.0+cu130",
+    "torchvision==0.28.0+cu130",
+    "transformers[torch,vision,chat_template] @ git+https://github.com/huggingface/transformers.git@4cc2aa84301c9aa210b5513dab9fefae03981f6e",
+    "flashinfer-python[b12x]",
+    "cuda-python==13.3.1",
+    "safetensors==0.8.0",
+    "tokenizers==0.23.2",
+    "huggingface-hub==1.33.0",
+    "accelerate==1.14.0",
+    "Pillow==12.3.0",
+    "sparkgap-native",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+flashinfer-python = { path = "../flashinfer", editable = true }
+sparkgap-native = { path = "native" }
+
+[tool.sparkgap.source-revisions]
+flashinfer = "98fb87a461183f98d6a7049ca947fb136cc6fb59"
+
+[tool.setuptools.packages.find]
+include = ["sparkgap*"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["."]

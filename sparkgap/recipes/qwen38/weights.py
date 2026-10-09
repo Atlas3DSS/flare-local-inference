@@ -1,0 +1,333 @@
+"""Prepare the pinned Qwen checkpoint for b12x without dequantizing weights."""
+
+from __future__ import annotations
+
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Mapping, Sequence
+
+from sparkgap.preparation.checkpoint import CheckpointManifest
+from sparkgap.preparation.qwen38 import TEXT_PREFIX, expected_quantization
+
+if TYPE_CHECKING:
+    import torch
+    from b12x.gemm.blockscaled import Weight
+    from b12x.moe.fused_moe import PreparedExperts
+
+
+def _expert_ids(layer: int, expert_ids: Sequence[int] | None) -> tuple[int, ...]:
+    if type(layer) is not int or not 0 <= layer < 48:
+        raise ValueError("decoder layer must be an integer in [0, 48)")
+    ids = tuple(range(512)) if expert_ids is None else tuple(expert_ids)
+    if not ids or any(type(i) is not int or not 0 <= i < 512 for i in ids):
+        raise ValueError("expert IDs must be a nonempty sequence of integers in [0, 512)")
+    if len(set(ids)) != len(ids):
+        raise ValueError("expert IDs must be unique")
+    return ids
+
+
+@dataclass(frozen=True, slots=True)
+class ExpertMemoryPlan:
+    """Exact source sizes and shared scratch; excludes b12x derived metadata."""
+
+    expert_ids: tuple[int, ...]
+    packed_bytes: int
+    csf_bytes: int
+    scalar_bytes: int
+    scale_scratch_bytes: int
+
+
+def expert_memory_plan(
+    manifest: CheckpointManifest, layer: int, expert_ids: Sequence[int] | None = None
+) -> ExpertMemoryPlan:
+    ids = _expert_ids(layer, expert_ids)
+    sizes = {"packed": 0, "csf": 0, "scalar": 0}
+    for expert in ids:
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}.{projection}"
+            for suffix, kind in (
+                ("weight", "packed"), ("weight_scale_2", "scalar"),
+                ("input_scale", "scalar"),
+                ("weight_scale.nvfp4_csf_fixed", "csf"),
+                ("weight_scale.nvfp4_csf_exceptions", "csf"),
+            ):
+                sizes[kind] += manifest.tensors[f"{prefix}.{suffix}"].nbytes
+    return ExpertMemoryPlan(ids, sizes["packed"], sizes["csf"], sizes["scalar"], len(ids) * 307200)
+
+
+def allocate_expert_scale_scratch(
+    device: torch.device | str, expert_count: int = 512
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Allocate scale expansion storage shared by serial decoder layer calls."""
+    import torch
+
+    if type(expert_count) is not int or not 1 <= expert_count <= 512:
+        raise ValueError("expert_count must be an integer in [1, 512]")
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise ValueError("expert scale scratch requires a CUDA device")
+    return (
+        torch.empty((expert_count, 1280, 160), dtype=torch.float8_e4m3fn, device=device),
+        torch.empty((expert_count, 2560, 40), dtype=torch.float8_e4m3fn, device=device),
+    )
+
+
+def _join_csf(up_fixed, up_exceptions, gate_fixed, gate_exceptions, *, rows=640, columns=160):
+    import torch
+
+    expected_shape = (rows // 16, 16 * (1 + columns // 2))
+    for fixed, exceptions in ((up_fixed, up_exceptions), (gate_fixed, gate_exceptions)):
+        if fixed.device.type != "cpu" or fixed.dtype != torch.uint8 or tuple(fixed.shape) != expected_shape:
+            raise ValueError("CSF fixed plane has the wrong shape, dtype, or device")
+        if exceptions.device.type != "cpu" or exceptions.dtype != torch.uint32 or exceptions.ndim != 1:
+            raise ValueError("CSF exceptions must be a CPU uint32 vector")
+        positions = exceptions.to(torch.int64) & 0xFFFFFF
+        if positions.numel() and (positions[-1] >= rows * columns or (positions[1:] <= positions[:-1]).any()):
+            raise ValueError("CSF exceptions must have unique, sorted, in-range positions")
+    gate_words = gate_exceptions.to(torch.int64)
+    gate_words = (gate_words & 0xFF000000) | ((gate_words & 0xFFFFFF) + rows * columns)
+    return (
+        torch.cat((up_fixed, gate_fixed)),
+        torch.cat((up_exceptions.to(torch.int64), gate_words)).to(torch.uint32),
+    )
+
+
+def _expert_scale_vectors(sources: Mapping[str, torch.Tensor], layer: int, ids: tuple[int, ...]):
+    import torch
+
+    w13, w2, a1, a2 = [], [], [], []
+    for expert in ids:
+        prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}"
+        values = {}
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            for suffix in ("weight_scale_2", "input_scale"):
+                name = f"{prefix}.{projection}.{suffix}"
+                value = sources[name]
+                if value.device.type != "cpu" or value.dtype != torch.float32 or value.numel() != 1:
+                    raise ValueError(f"{name} requires a CPU float32 scalar")
+                if not bool(torch.isfinite(value).all() & (value > 0).all()):
+                    raise ValueError(f"{name} must be finite and positive")
+                values[projection, suffix] = value.item()
+        for suffix in ("weight_scale_2", "input_scale"):
+            if values["gate_proj", suffix] != values["up_proj", suffix]:
+                raise ValueError(f"{prefix}: gate/up {suffix} differ; fused NVFP4 requires equal scales")
+        w13.append(values["up_proj", "weight_scale_2"])
+        w2.append(values["down_proj", "weight_scale_2"])
+        a1.append(values["up_proj", "input_scale"])
+        a2.append(values["down_proj", "input_scale"])
+    vectors = (
+        torch.tensor(w13, dtype=torch.float32), torch.tensor(w2, dtype=torch.float32),
+        torch.tensor(a1, dtype=torch.float32).reciprocal(),
+        torch.tensor(a2, dtype=torch.float32).reciprocal(),
+    )
+    if any(not bool(torch.isfinite(vector).all()) for vector in vectors):
+        raise ValueError("expert activation reciprocal scales must remain finite in float32")
+    return vectors
+
+
+class QwenWeightLoader:
+    """Direct checkpoint transfers and explicit, bounded b12x weight preparation.
+
+    ``prefixes`` bounds component qualification; omit it for a complete recipe.
+    MTP and PLE table payloads are excluded. Returned tensors own GPU storage
+    beyond this context's lifetime. Compressed expert scales use at most one
+    layer of CPU staging; no full model or expert weight is decoded on the CPU.
+    """
+
+    def __init__(
+        self, manifest: CheckpointManifest, device: torch.device | str,
+        *, prefixes: Sequence[str] | None = None, csf_byte_budget: int = 128 << 20,
+    ):
+        if csf_byte_budget <= 0:
+            raise ValueError("csf_byte_budget must be positive")
+        self.manifest = manifest
+        self.device = device
+        self.prefixes = None if prefixes is None else tuple(prefixes)
+        if self.prefixes is not None and not self.prefixes:
+            raise ValueError("prefixes must be nonempty when supplied")
+        self.csf_byte_budget = csf_byte_budget
+        self._session = None
+        self._sources = {}
+        self._stack = None
+        self._csf_files = {}
+
+    def _selected_names(self):
+        return {
+            name for name, tensor in self.manifest.tensors.items()
+            if tensor.component not in ("mtp", "ple_tables")
+            and "nvfp4_csf_" not in name
+            and (self.prefixes is None or name.startswith(self.prefixes))
+        }
+
+    def __enter__(self):
+        import torch
+        from b12x.loader import DirectWeightSession
+
+        if self._stack is not None:
+            raise RuntimeError("weight loader context is already open")
+        device = torch.device(self.device)
+        if device.type != "cuda":
+            raise ValueError("QwenWeightLoader requires a CUDA device")
+        self.device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
+        stack = ExitStack()
+        try:
+            self._session = stack.enter_context(DirectWeightSession(device=self.device.index))
+            selected = self._selected_names()
+            shards = {self.manifest.tensors[name].shard for name in selected}
+            # b12x validates source view mutations through tensor version counters.
+            with torch.inference_mode(False):
+                self._sources = dict(self._session.weights(
+                    tuple(self.manifest.snapshot / shard for shard in sorted(shards)),
+                    index_path=self.manifest.index_path,
+                    skip=lambda name: name not in selected,
+                    needs_values=lambda entry: entry.name.endswith((".weight_scale_2", ".input_scale")),
+                ))
+            if self._sources.keys() != selected:
+                raise ValueError("direct loader tensor coverage differs from the inspected checkpoint")
+            self._stack = stack
+            return self
+        except BaseException:
+            stack.close()
+            self._session = None
+            self._sources.clear()
+            raise
+
+    def __exit__(self, *exc):
+        try:
+            return self._stack.__exit__(*exc)
+        finally:
+            self._stack = None
+            self._session = None
+            self._sources.clear()
+            self._csf_files.clear()
+
+    def _require_open(self):
+        if self._session is None:
+            raise RuntimeError("weight loading requires an open QwenWeightLoader context")
+
+    def _copy(self, destination, source):
+        if not self._session(destination, source):
+            raise RuntimeError("b12x rejected the direct weight transfer")
+
+    def load_tensor(self, name: str, *, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Transfer a selected resident weight or declared scalar to the GPU."""
+        import torch
+
+        self._require_open()
+        source = self._sources[name]
+        target = torch.empty(source.shape, dtype=source.dtype if dtype is None else dtype, device=self.device)
+        self._copy(target, source)
+        self._session.flush()
+        return target
+
+    def load_linear(self, prefix: str) -> Weight:
+        from b12x.gemm.blockscaled import pack_weight
+
+        self._require_open()
+        recipe = expected_quantization().get(prefix, {}).get("quant_algo")
+        if recipe not in ("MXFP8", "W4A16_NVFP4") or prefix.startswith("mtp."):
+            raise ValueError(f"{prefix} is not a supported dense quantized projection")
+        if recipe == "MXFP8":
+            return pack_weight(
+                self.load_tensor(f"{prefix}.weight"),
+                self.load_tensor(f"{prefix}.weight_scale"), recipe="mxfp8",
+            )
+        import torch
+        from b12x._lib.intrinsics import swizzle_block_scale
+
+        scalar = self._sources[f"{prefix}.weight_scale_2"]
+        if not bool(torch.isfinite(scalar).all() & (scalar > 0).all()):
+            raise ValueError(f"{prefix}.weight_scale_2 must be finite and positive")
+        source = self._sources[f"{prefix}.weight"]
+        rows, packed_columns = source.shape
+        logical_columns = packed_columns * 2
+        stored_columns = ((logical_columns + 127) // 128) * 128
+        values = torch.zeros((rows, stored_columns // 2), dtype=source.dtype, device=self.device)
+        self._copy(values[:, :packed_columns], source)
+        scales = self.load_tensor(f"{prefix}.weight_scale")
+        global_scale = self.load_tensor(f"{prefix}.weight_scale_2")
+        packed = pack_weight(
+            values, swizzle_block_scale(scales), recipe="nvfp4",
+            global_scale=global_scale, global_scale_kind="multiplier",
+        )
+        return replace(packed, in_features=logical_columns)
+
+    def _cpu_csf(self, name):
+        from safetensors import safe_open
+
+        metadata = self.manifest.tensors[name]
+        if "nvfp4_csf_" not in name:
+            raise ValueError("CPU payload reads are restricted to compressed scale planes")
+        if metadata.shard not in self._csf_files:
+            self._csf_files[metadata.shard] = self._stack.enter_context(safe_open(
+                str(self.manifest.snapshot / metadata.shard), framework="pt", device="cpu",
+            ))
+        return self._csf_files[metadata.shard].get_tensor(name).clone()
+
+    def load_experts(
+        self, layer: int, *, expert_ids: Sequence[int] | None = None,
+        scale_scratch: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> PreparedExperts:
+        """Prepare A4 routed experts; subset IDs define local ordering in tests.
+
+        Complete model layers require all 512 experts. Reusing ``scale_scratch``
+        across layers requires serialized execution on one CUDA stream.
+        """
+        import torch
+        from b12x.moe import fused_moe as moe
+
+        self._require_open()
+        memory = expert_memory_plan(self.manifest, layer, expert_ids)
+        if memory.csf_bytes > self.csf_byte_budget:
+            raise ValueError(f"layer CSF planes require {memory.csf_bytes} bytes, exceeding the CPU staging budget")
+        ids = memory.expert_ids
+        scales = _expert_scale_vectors(self._sources, layer, ids)
+        count = len(ids)
+        if scale_scratch is None:
+            scale_scratch = allocate_expert_scale_scratch(self.device, count)
+        for scratch, shape in zip(scale_scratch, ((count, 1280, 160), (count, 2560, 40)), strict=True):
+            if scratch.device != self.device or scratch.dtype != torch.float8_e4m3fn or tuple(scratch.shape) != shape or not scratch.is_contiguous():
+                raise ValueError("expert scale scratch shape, dtype, device, or layout mismatch")
+        w13 = torch.empty((count, 1280, 1280), dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((count, 2560, 320), dtype=torch.uint8, device=self.device)
+        fixed13, exceptions13, fixed2, exceptions2 = [], [], [], []
+        for local, expert in enumerate(ids):
+            prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}"
+            planes = {}
+            for projection, destination in (
+                ("up_proj", w13[local, :640]),
+                ("gate_proj", w13[local, 640:]),
+                ("down_proj", w2[local]),
+            ):
+                self._copy(destination, self._sources[f"{prefix}.{projection}.weight"])
+                planes[projection] = tuple(self._cpu_csf(
+                    f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"
+                ) for suffix in ("fixed", "exceptions"))
+            fixed, exceptions = _join_csf(*planes["up_proj"], *planes["gate_proj"])
+            fixed13.append(fixed)
+            exceptions13.append(exceptions)
+            fixed2.append(planes["down_proj"][0])
+            exceptions2.append(planes["down_proj"][1])
+        device_scales = []
+        for scale in scales:
+            target = torch.empty_like(scale, device=self.device)
+            self._copy(target, scale)
+            device_scales.append(target)
+        self._session.flush()
+        plan = moe.plan_weights(
+            source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
+            activation=moe.ActivationSpec(mode="a4", nonlinearity="silu", io_dtype=torch.bfloat16),
+            geometry=moe.MoEGeometry(num_experts=count, hidden_size=2560, intermediate_size=640),
+        )
+        packed = moe.PackedWeights(
+            w13=w13, w2=w2,
+            w13_block_scales=scale_scratch[0], w2_block_scales=scale_scratch[1],
+            w13_global_scales=device_scales[0], w2_global_scales=device_scales[1],
+            input_scale=device_scales[2], intermediate_scale=device_scales[3],
+            immutable_input_scales=True,
+        )
+        return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
+            packed=packed,
+            w13_scales=moe.CsfScalePlanes(tuple(fixed13), tuple(exceptions13)),
+            w2_scales=moe.CsfScalePlanes(tuple(fixed2), tuple(exceptions2)),
+        ))

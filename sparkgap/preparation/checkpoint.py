@@ -1,0 +1,368 @@
+"""Validate checkpoint metadata without importing torch or reading tensor payloads.
+
+Tensor transfer belongs to b12x.loader.DirectWeightSession. Its manifest reader
+requires a CUDA session; this preflight runs before CUDA initialization.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from types import MappingProxyType
+from typing import Mapping
+
+from . import qwen38
+
+
+class CheckpointError(ValueError):
+    """Checkpoint metadata does not satisfy the prepared model's contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class TensorMetadata:
+    name: str
+    shard: str
+    offset: int
+    nbytes: int
+    shape: tuple[int, ...]
+    dtype: str
+
+    @property
+    def component(self) -> str:
+        if self.name.startswith("mtp."):
+            return "mtp"
+        if ".ngram_embedding." in self.name:
+            return "ple_tables"
+        if self.name.startswith("model.visual."):
+            return "vision"
+        if ".mlp.experts." in self.name:
+            return "decoder_experts"
+        return "decoder_other"
+
+
+@dataclass(frozen=True, slots=True)
+class ShardMetadata:
+    path: str
+    file_size: int
+    header_size: int
+    header_sha256: str
+    tensor_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointManifest:
+    snapshot: Path
+    tensors: Mapping[str, TensorMetadata]
+    shards: tuple[ShardMetadata, ...]
+    metadata_sha256: Mapping[str, str]
+    headers_sha256: str
+    generation_config: Mapping
+
+    @property
+    def shard_paths(self) -> tuple[Path, ...]:
+        return tuple(self.snapshot / shard.path for shard in self.shards)
+
+    @property
+    def index_path(self) -> Path:
+        return self.snapshot / "model.safetensors.index.json"
+
+    def to_dict(self) -> dict:
+        sizes = Counter()
+        counts = Counter()
+        csf_bytes = Counter()
+        for tensor in self.tensors.values():
+            sizes[tensor.component] += tensor.nbytes
+            counts[tensor.component] += 1
+            if "nvfp4_csf_" in tensor.name:
+                csf_bytes[tensor.name.rsplit(".", 1)[1]] += tensor.nbytes
+        gpu_bytes = sum(sizes[key] for key in ("decoder_experts", "decoder_other", "vision"))
+        return {
+            "model_id": qwen38.MODEL_ID,
+            "reference_revision": qwen38.REVISION,
+            "architecture": qwen38.ARCHITECTURE,
+            "snapshot": str(self.snapshot),
+            "validation": {
+                "metadata_matches_reference": True,
+                "tensor_payloads_read": False,
+                "tensor_payloads_verified": False,
+                "checks": [
+                    "config", "generation_config", "quantization_map", "tensor_names",
+                    "shapes", "dtypes", "file_ranges", "index_coverage", "header_fingerprints",
+                    "frontend_asset_fingerprints",
+                ],
+                "unverified": [
+                    "tensor_values", "scale_values", "csf_exception_contents",
+                    "ple_hash_constants", "inference_correctness",
+                ],
+            },
+            "metadata_sha256": dict(self.metadata_sha256),
+            "frontend_assets": {
+                name: {"path": str(self.snapshot / name), "sha256": self.metadata_sha256[name]}
+                for name in qwen38.FRONTEND_SHA256
+            },
+            "headers_sha256": self.headers_sha256,
+            "tensor_count": len(self.tensors),
+            "shard_count": len(self.shards),
+            "payload_bytes": sum(sizes.values()),
+            "gpu_stored_bytes": gpu_bytes,
+            "mapped_host_stored_bytes": sizes["ple_tables"],
+            "excluded_stored_bytes": sizes["mtp"],
+            "components": {
+                key: {"tensor_count": counts[key], "stored_bytes": sizes[key]}
+                for key in sorted(sizes)
+            },
+            "geometry": {
+                "text": dict(qwen38.TEXT_GEOMETRY),
+                "vision": dict(qwen38.VISION_GEOMETRY),
+                "gdn_layers": [i for i in range(48) if i % 4 != 3],
+                "sparse_attention_layers": list(range(3, 48, 4)),
+            },
+            "quantization": {
+                "module_counts": dict(Counter(
+                    entry["quant_algo"] for entry in qwen38.expected_quantization().values()
+                )),
+                "excluded_mtp_aliases": [qwen38.EXCLUDED_QUANTIZATION_ALIAS],
+                "csf_stored_bytes": dict(csf_bytes),
+            },
+            "ple": {
+                "prefix": qwen38.PLE_PREFIX,
+                "table_planes": 128,
+                "rows_per_plane": 2500012,
+                "packed_width": 80,
+                "scale_width": 10,
+                "logical_embedding_width": 160,
+            },
+            "generation_config": dict(self.generation_config),
+            "shards": [
+                {
+                    "path": shard.path, "file_size": shard.file_size,
+                    "header_size": shard.header_size, "header_sha256": shard.header_sha256,
+                    "tensor_count": shard.tensor_count,
+                }
+                for shard in self.shards
+            ],
+        }
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise CheckpointError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _parse_json(raw: bytes, source: str) -> dict:
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+    except (ValueError, UnicodeError) as exc:
+        raise CheckpointError(f"{source}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise CheckpointError(f"{source}: expected a JSON object")
+    return value
+
+
+_DTYPE_BYTES = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "U8": 1, "U32": 4, "I64": 8}
+
+
+def _read_header(path: Path, shard: str) -> tuple[ShardMetadata, dict[str, TensorMetadata]]:
+    with path.open("rb", buffering=0) as source:
+        size = os.fstat(source.fileno()).st_size
+        prefix = source.read(8)
+        if len(prefix) != 8:
+            raise CheckpointError(f"{shard}: truncated safetensors length")
+        length = int.from_bytes(prefix, "little")
+        if length == 0 or length > 100 << 20 or length > size - 8:
+            raise CheckpointError(f"{shard}: invalid safetensors header length {length}")
+        raw = source.read(length)
+        if len(raw) != length:
+            raise CheckpointError(f"{shard}: truncated safetensors header")
+    header = _parse_json(raw, shard)
+    tensors = {}
+    data_start = 8 + length
+    for name, entry in header.items():
+        if name == "__metadata__":
+            if not isinstance(entry, dict) or any(not isinstance(v, str) for v in entry.values()):
+                raise CheckpointError(f"{shard}: invalid safetensors metadata")
+            continue
+        if not name or not isinstance(entry, dict):
+            raise CheckpointError(f"{shard}: invalid tensor entry {name!r}")
+        shape = entry.get("shape")
+        offsets = entry.get("data_offsets")
+        dtype = entry.get("dtype")
+        if (
+            not isinstance(shape, list) or any(type(v) is not int or v < 0 for v in shape)
+            or not isinstance(offsets, list) or len(offsets) != 2
+            or any(type(v) is not int or v < 0 for v in offsets)
+            or not isinstance(dtype, str) or dtype not in _DTYPE_BYTES
+        ):
+            raise CheckpointError(f"{shard}: invalid shape, dtype, or offsets for {name}")
+        start, end = offsets
+        nbytes = math.prod(shape) * _DTYPE_BYTES[dtype]
+        if end - start != nbytes or end > size - data_start:
+            raise CheckpointError(f"{shard}: invalid byte range for {name}")
+        tensors[name] = TensorMetadata(
+            name, shard, data_start + start, nbytes, tuple(shape), dtype
+        )
+    end = data_start
+    for tensor in sorted(tensors.values(), key=lambda value: (value.offset, value.nbytes)):
+        if tensor.offset != end:
+            raise CheckpointError(f"{shard}: overlap or hole at {tensor.name}")
+        end += tensor.nbytes
+    if end != size:
+        raise CheckpointError(f"{shard}: tensor ranges do not cover the file")
+    metadata = ShardMetadata(shard, size, length, hashlib.sha256(raw).hexdigest(), len(tensors))
+    return metadata, tensors
+
+
+def _validate_config(config: dict) -> None:
+    if (
+        config.get("architectures") != [qwen38.ARCHITECTURE]
+        or config.get("model_type") != "qwen4_exp"
+    ):
+        raise CheckpointError(f"expected architecture {qwen38.ARCHITECTURE}")
+    for section, expected in (
+        ("text_config", qwen38.TEXT_GEOMETRY), ("vision_config", qwen38.VISION_GEOMETRY)
+    ):
+        actual = config.get(section)
+        if not isinstance(actual, dict):
+            raise CheckpointError(f"missing {section}")
+        for field, value in expected.items():
+            if actual.get(field) != value:
+                raise CheckpointError(
+                    f"{section}.{field}: expected {value!r}, got {actual.get(field)!r}"
+                )
+    expected_layers = ["full_attention" if i % 4 == 3 else "linear_attention" for i in range(48)]
+    if config["text_config"].get("layer_types") != expected_layers:
+        raise CheckpointError(
+            "text_config.layer_types: expected 36 GDN and 12 interleaved sparse-attention layers"
+        )
+    quant = config.get("quantization_config")
+    if (
+        not isinstance(quant, dict) or quant.get("quant_method") != "modelopt"
+        or quant.get("quant_algo") != "MIXED_PRECISION"
+        or quant.get("kv_cache_quant_algo") is not None
+    ):
+        raise CheckpointError("expected modelopt MIXED_PRECISION with unquantized KV")
+    expected = qwen38.expected_quantization()
+    actual = quant.get("quantized_layers")
+    if not isinstance(actual, dict):
+        raise CheckpointError("missing quantized_layers mapping")
+    for name, recipe in expected.items():
+        if actual.get(name) != recipe:
+            raise CheckpointError(
+                f"quantized_layers.{name}: expected {recipe!r}, got {actual.get(name)!r}"
+            )
+    extra = actual.keys() - expected.keys()
+    if extra:
+        raise CheckpointError(f"unmapped quantization entry: {min(extra)}")
+
+
+def _validate_tensors(tensors: Mapping[str, TensorMetadata]) -> None:
+    unmatched = set(tensors)
+    for name, dtype, shape in qwen38.expected_tensors():
+        tensor = tensors.get(name)
+        if tensor is None:
+            raise CheckpointError(f"missing required tensor: {name}")
+        if (
+            tensor.dtype != dtype or len(tensor.shape) != len(shape)
+            or any(expected is not None and actual != expected
+                   for actual, expected in zip(tensor.shape, shape))
+        ):
+            raise CheckpointError(
+                f"{name}: expected {dtype} {shape}, got {tensor.dtype} {tensor.shape}"
+            )
+        if shape == (None,) and tensor.shape[0] > 102400:
+            raise CheckpointError(f"{name}: CSF exception count exceeds the scale element count")
+        unmatched.remove(name)
+    if unmatched:
+        raise CheckpointError(f"unmapped tensor: {min(unmatched)}")
+
+
+def _inspect_frontend_assets(snapshot: Path) -> dict[str, str]:
+    fingerprints = {}
+    for name, expected in qwen38.FRONTEND_SHA256.items():
+        with (snapshot / name).open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        if digest != expected:
+            raise CheckpointError(
+                f"{name}: SHA256 does not match reference revision {qwen38.REVISION}"
+            )
+        fingerprints[name] = digest
+    return fingerprints
+
+
+def inspect_qwen38_checkpoint(snapshot: str | Path) -> CheckpointManifest:
+    """Validate the pinned model's metadata; payload integrity is not verified.
+
+    The returned shard_paths and index_path can be passed to b12x's weight
+    session. Exclude mtp.* while routing the remaining tensors into the recipe.
+    File paths remain caller-owned and must not change between inspection and
+    loading. The loader must perform its own range and source-lifetime checks.
+    """
+    snapshot = Path(snapshot).expanduser().absolute()
+    metadata = _inspect_frontend_assets(snapshot)
+
+    def read_json(name):
+        raw = (snapshot / name).read_bytes()
+        metadata[name] = hashlib.sha256(raw).hexdigest()
+        return _parse_json(raw, name)
+
+    config = read_json("config.json")
+    _validate_config(config)
+    index = read_json("model.safetensors.index.json")
+    generation = read_json("generation_config.json")
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise CheckpointError("model.safetensors.index.json: missing weight_map")
+    for name, shard in weight_map.items():
+        if (
+            not name or not isinstance(shard, str) or PurePosixPath(shard).is_absolute()
+            or ".." in PurePosixPath(shard).parts or not shard.endswith(".safetensors")
+        ):
+            raise CheckpointError(f"invalid indexed shard for {name}: {shard!r}")
+    tensors, shards = {}, []
+    header_digest = hashlib.sha256()
+    for shard in sorted(set(weight_map.values())):
+        record, entries = _read_header(snapshot / shard, shard)
+        for name in entries:
+            if name in tensors:
+                raise CheckpointError(f"duplicate tensor across shards: {name}")
+            if weight_map.get(name) != shard:
+                raise CheckpointError(f"index/shard mismatch for {name}: found in {shard}")
+        tensors.update(entries)
+        shards.append(record)
+        header_digest.update(shard.encode() + b"\0" + bytes.fromhex(record.header_sha256))
+    missing = weight_map.keys() - tensors.keys()
+    if missing:
+        raise CheckpointError(f"indexed tensor missing from shards: {min(missing)}")
+    _validate_tensors(tensors)
+    total = sum(tensor.nbytes for tensor in tensors.values())
+    if (
+        not isinstance(index.get("metadata"), dict)
+        or index["metadata"].get("total_size") != total
+    ):
+        raise CheckpointError(f"index total_size does not match tensor payload bytes: {total}")
+    for name, expected in (
+        ("config.json", qwen38.CONFIG_SHA256),
+        ("model.safetensors.index.json", qwen38.INDEX_SHA256),
+        ("generation_config.json", qwen38.GENERATION_SHA256),
+    ):
+        if metadata[name] != expected:
+            raise CheckpointError(
+                f"{name}: SHA256 does not match reference revision {qwen38.REVISION}"
+            )
+    if header_digest.hexdigest() != qwen38.HEADERS_SHA256:
+        raise CheckpointError(
+            f"safetensors headers: SHA256 does not match reference revision {qwen38.REVISION}"
+        )
+    return CheckpointManifest(
+        snapshot, MappingProxyType(tensors), tuple(shards), MappingProxyType(metadata),
+        header_digest.hexdigest(), MappingProxyType(generation),
+    )

@@ -1,0 +1,236 @@
+"""Fixed-width target verification metadata and accepted hybrid checkpoints."""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+from .attention import QSAMetadata
+from .decoder_state import compile_kernel
+from .gdn import GDNMetadata
+from .ple import PLEMetadata
+from .sampling import PreparedTokenState
+
+
+@triton.jit
+def _validate_round(Slots, Epochs, Live, Generation, Status, Error, Pending, Consumed,
+                    ROWS: tl.constexpr, WIDTH: tl.constexpr, CONTEXT: tl.constexpr,
+                    CONSUMED_STRIDE: tl.constexpr):
+    slot = tl.program_id(0)
+    rows = tl.arange(0, 4)
+    match = (rows < ROWS) & (rows < tl.load(Live))
+    match &= tl.load(Slots + rows, rows < ROWS, other=-1) == slot
+    match &= tl.load(Epochs + rows, rows < ROWS, other=-1) == tl.load(Generation + slot)
+    count = tl.sum(match.to(tl.int32), 0)
+    if (count > 0) & (tl.load(Status + slot) == 1):
+        position = tl.load(Consumed + slot * CONSUMED_STRIDE)
+        valid = (count == 1) & (tl.load(Live) <= ROWS)
+        valid &= (position >= 0) & (position + WIDTH <= CONTEXT) & (tl.load(Pending + slot) >= 0)
+        if not valid:
+            tl.store(Status + slot, 3)
+            tl.store(Error + slot, 34)
+
+
+@triton.jit
+def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, PreviousAccepted,
+                           Delta, Tokens, Cu, ConvSlots, Fresh, StateIndices, Accepted,
+                           NumSeqs, NumTokens, RequestIds, QueryPositions, Rope, SequenceLengths,
+                           SlotMapping, PhysicalPages, PackedPages,
+                           ROWS: tl.constexpr, WIDTH: tl.constexpr, CANDIDATE_STRIDE: tl.constexpr,
+                           PAGES: tl.constexpr, DELTA_STRIDE: tl.constexpr, EXTRA_BASE: tl.constexpr,
+                           BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    slot = tl.load(Slots + row)
+    live = tl.minimum(tl.load(Live), ROWS)
+    active = (row < live) & (tl.load(Active + row) != 0) & (slot >= 0) & (slot < 4)
+    start = row * WIDTH
+    position = tl.load(Positions + row)
+    model_slot = tl.where(active, slot + 1, -1)
+    tl.store(Cu + row, tl.minimum(row, live) * WIDTH)
+    if row == 0:
+        tl.store(Cu + ROWS, live * WIDTH)
+        tl.store(NumSeqs, live)
+        tl.store(NumTokens, live * WIDTH)
+    tl.store(ConvSlots + row, model_slot)
+    tl.store(Fresh + row, False)
+    previous = tl.load(PreviousAccepted + slot, active, other=1)
+    tl.store(Accepted + row, previous)
+    columns = tl.arange(0, 8)
+    indices = tl.where(columns == 0, slot + 1, EXTRA_BASE + slot * 7 + columns - 1)
+    tl.store(StateIndices + row * 8 + columns, tl.where(active, indices, 0))
+    tl.store(SequenceLengths + row, tl.where(active, position + WIDTH, 0))
+    offsets = tl.arange(0, triton.next_power_of_2(WIDTH))
+    valid = offsets < WIDTH
+    token = tl.load(Candidates + row * CANDIDATE_STRIDE + offsets, active & valid, other=248044)
+    token = tl.where(offsets == 0, tl.load(Pending + row), token)
+    tl.store(Tokens + start + offsets, tl.where(active, token, 248044), valid)
+    logical = position + offsets
+    page = tl.load(PhysicalPages + slot * PAGES + logical // 64, active & valid, other=-1)
+    tl.store(RequestIds + start + offsets, tl.where(active, row, -1), valid)
+    tl.store(QueryPositions + start + offsets, tl.where(active, logical, -1), valid)
+    tl.store(SlotMapping + start + offsets, tl.where(active, page * 64 + logical % 64, -1), valid)
+    delta = tl.load(Delta + (slot + 1) * DELTA_STRIDE, active, other=0)
+    for axis in tl.static_range(3):
+        tl.store(Rope + (start + offsets) * 3 + axis, tl.where(active, logical + delta, -1), valid)
+    for block in range(tl.cdiv(PAGES, BLOCK)):
+        page_indices = block * BLOCK + tl.arange(0, BLOCK)
+        pages = tl.load(PhysicalPages + slot * PAGES + page_indices, active & (page_indices < PAGES), other=-1)
+        tl.store(PackedPages + row * PAGES + page_indices, pages, page_indices < PAGES)
+
+
+@triton.jit
+def _copy_boundary_recurrence(State, Slots, Count, Before, Indices,
+                              STATE_STRIDE: tl.constexpr, BLOCK: tl.constexpr):
+    row, tile = tl.program_id(0), tl.program_id(1)
+    count, before = tl.load(Count + row), tl.load(Before + row)
+    slot = tl.load(Slots + row)
+    boundary = (before + count) // 64 * 64
+    active = (count > 0) & (slot >= 0) & (slot < 4) & (boundary > before)
+    column = boundary - before - 1
+    source = tl.load(Indices + row * 8 + column, active, other=0)
+    index = tile * BLOCK + tl.arange(0, BLOCK)
+    value = tl.load(State + source * STATE_STRIDE + index, active & (index < 48 * 128 * 128), other=0)
+    tl.store(State + (slot + 5) * STATE_STRIDE + index, value, active & (index < 48 * 128 * 128))
+
+
+@triton.jit
+def _copy_boundary_convolution(State, Slots, Count, Before,
+                               STATE_STRIDE: tl.constexpr, HISTORY: tl.constexpr,
+                               CAPACITY: tl.constexpr, BLOCK: tl.constexpr):
+    row, tile = tl.program_id(0), tl.program_id(1)
+    count, before = tl.load(Count + row), tl.load(Before + row)
+    slot = tl.load(Slots + row)
+    boundary = (before + count) // 64 * 64
+    active = (count > 0) & (slot >= 0) & (slot < 4) & (boundary > before)
+    index = tile * BLOCK + tl.arange(0, BLOCK)
+    channel, offset = index // HISTORY, index % HISTORY
+    source = (slot + 1) * STATE_STRIDE + channel * CAPACITY + offset + boundary - before - 1
+    value = tl.load(State + source, active & (channel < 10240), other=0)
+    tl.store(State + (slot + 5) * STATE_STRIDE + channel * CAPACITY + offset,
+             value, active & (channel < 10240))
+
+
+@triton.jit
+def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope, Delta, Slots, Count, Before,
+                   PreviousAccepted, WIDTH: tl.constexpr, HS: tl.constexpr, RS: tl.constexpr,
+                   DS: tl.constexpr, RPS: tl.constexpr, BLOCK: tl.constexpr):
+    row, tile = tl.program_id(0), tl.program_id(1)
+    slot, count, before = tl.load(Slots + row), tl.load(Count + row), tl.load(Before + row)
+    active = (count > 0) & (slot >= 0) & (slot < 4)
+    channel = tile * BLOCK + tl.arange(0, BLOCK)
+    offset = row * WIDTH + count - 1
+    residual = tl.load(Residual + offset * 10240 + channel, active & (channel < 10240), other=0)
+    tl.store(SavedResidual + (slot + 1) * RS + channel, residual, active & (channel < 10240))
+    hidden = tl.load(Hidden + offset * 2560 + channel, active & (channel < 2560), other=0)
+    tl.store(SavedHidden + (slot + 1) * HS + channel, hidden, active & (channel < 2560))
+    boundary = (before + count) // 64 * 64
+    candidate = active & (boundary > before)
+    offset = row * WIDTH + boundary - before - 1
+    residual = tl.load(Residual + offset * 10240 + channel, candidate & (channel < 10240), other=0)
+    tl.store(SavedResidual + (slot + 5) * RS + channel, residual, candidate & (channel < 10240))
+    hidden = tl.load(Hidden + offset * 2560 + channel, candidate & (channel < 2560), other=0)
+    tl.store(SavedHidden + (slot + 5) * HS + channel, hidden, candidate & (channel < 2560))
+    if tile == 0:
+        tl.store(PreviousAccepted + slot, count, active)
+        delta = tl.load(Delta + (slot + 1) * DS, candidate, other=0)
+        tl.store(Delta + (slot + 5) * DS, delta, candidate)
+        axes = tl.arange(0, 4)
+        rope = tl.load(Rope + (row * WIDTH + count - 1) * 3 + axes, active & (axes < 3), other=-1)
+        tl.store(SavedRope + (slot + 1) * RPS + axes, rope, active & (axes < 3))
+        rope = tl.load(Rope + offset * 3 + axes, candidate & (axes < 3), other=-1)
+        tl.store(SavedRope + (slot + 5) * RPS + axes, rope, candidate & (axes < 3))
+
+
+class PreparedVerificationState:
+    """Bind all widths to eight persistent recurrent checkpoint columns.
+
+    Model evaluation leaves counters, PLE history and prefix publication private.
+    The acceptance operation supplies clipped consumed counts before commit.
+    """
+
+    def __init__(self, inputs, requests, pool, candidates, previous_accepted,
+                 *, width: int, rows: int, extra_base: int):
+        if type(width) is not int or not 1 <= width <= 8 or rows not in (1, 2, 4):
+            raise ValueError("verification requires width 1 through 8 and batch 1/2/4")
+        if pool.layout.speculative_tokens != 7 or extra_base < 10 or extra_base + 28 > pool.backing.shape[0]:
+            raise ValueError("verification requires a seven-draft pool and 28 private state rows")
+        if candidates.dtype != torch.int64 or candidates.shape != (4, 8):
+            raise ValueError("verification candidates require int64 [4,8]")
+        self.inputs, self.requests, self.pool = inputs, requests, pool
+        self.tokens, self.rows, self.mode, self.width = rows * width, rows, "decode", width
+        self.previous_accepted = previous_accepted
+        device = inputs.token_ids.device
+        self.token_ids = torch.full((self.tokens,), 248044, dtype=torch.int64, device=device)
+        self.gdn = GDNMetadata.allocate(rows, device, verification_columns=8)
+        self.qsa = QSAMetadata.allocate(tokens=self.tokens, batch=rows,
+            context=inputs.page_tables.shape[1] * 64, device=device)
+        self.qsa = QSAMetadata(self.qsa.main_block_table, self.qsa.main_block_table,
+            self.gdn.convolution_slots, self.qsa.request_ids, self.qsa.query_positions,
+            self.qsa.rope_positions, self.qsa.sequence_lengths, self.gdn.query_start_loc,
+            self.gdn.accepted_tokens, self.qsa.is_prefilling, self.qsa.slot_mapping)
+        self.token_state = PreparedTokenState(requests, self.token_ids, self.gdn.query_start_loc,
+            inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows)
+        self.token_state.prepare()
+        self.ple = PLEMetadata(self.token_ids, self.gdn.query_start_loc, self.token_state.ple_history,
+            self.gdn.convolution_slots, self.gdn.fresh, self.gdn.accepted_tokens,
+            self.gdn.num_seqs, self.gdn.num_tokens)
+        self._validate = compile_kernel(_validate_round,
+            (inputs.row_slot_ids, inputs.row_generations, inputs.live_rows, requests.generation,
+             requests.status, requests.error_code, requests.pending_token, requests.consumed_tokens,
+             rows, width, inputs.page_tables.shape[1] * 64, requests.consumed_tokens.stride(0)), (4, 1, 1))
+        g, q, t = self.gdn, self.qsa, self.token_state
+        self._metadata = compile_kernel(_verification_metadata,
+            (inputs.row_slot_ids, inputs.live_rows, t.active, t.positions, t.pending_tokens,
+             candidates, previous_accepted, pool.rope_delta, self.token_ids, g.query_start_loc,
+             g.convolution_slots, g.fresh, g.state_indices, g.accepted_tokens, g.num_seqs, g.num_tokens,
+             q.request_ids, q.query_positions, q.rope_positions, q.sequence_lengths, q.slot_mapping,
+             inputs.page_tables, q.main_block_table, rows, width, candidates.stride(0),
+             inputs.page_tables.shape[1], pool.rope_delta.stride(0), extra_base, 128), (rows, 1, 1))
+
+    def prepare_hidden(self, hidden, sample):
+        if hidden.shape != sample.shape:
+            raise ValueError("verification must retain every target row for the vocabulary projection")
+        self.hidden, self.sample = hidden, sample
+
+    def prepare_residual(self, residual):
+        self.residual = residual
+
+    def prepare_convolution(self, name, source, state):
+        pass
+
+    def checkpoint_convolution(self, name):
+        pass
+
+    def begin(self):
+        self._validate()
+        self.token_state.gather()
+        self._metadata()
+
+    def finish(self):
+        self.sample.copy_(self.hidden)
+
+    def prepare_commit(self, emitted_count, consumed_before, residual, hidden):
+        pool, slots = self.pool, self.inputs.row_slot_ids
+        self._commit = []
+        for layer in pool.gdn.values():
+            recurrent = layer.recurrent
+            self._commit.append(compile_kernel(_copy_boundary_recurrence,
+                (recurrent, slots, emitted_count, consumed_before, self.gdn.state_indices,
+                 recurrent.stride(0), 4096), (self.rows, triton.cdiv(48 * 128 * 128, 4096), 1)))
+        for convolution, history in (
+                *((layer.convolution, 3) for layer in pool.gdn.values()), (pool.ple_convolution, 9)):
+            self._commit.append(compile_kernel(_copy_boundary_convolution,
+                (convolution, slots, emitted_count, consumed_before, convolution.stride(0),
+                 history, convolution.shape[2], 1024), (self.rows, triton.cdiv(10240 * history, 1024), 1)))
+        saved_residual = pool.region("target_residual")
+        saved_rope = pool.region("target_residual_position")
+        self._commit.append(compile_kernel(_commit_hidden,
+            (hidden, residual, pool.last_hidden, saved_residual, self.qsa.rope_positions, saved_rope, pool.rope_delta, slots,
+             emitted_count, consumed_before, self.previous_accepted, self.width,
+             pool.last_hidden.stride(0), saved_residual.stride(0), pool.rope_delta.stride(0), saved_rope.stride(0), 1024),
+            (self.rows, 10, 1)))
+
+    def commit(self):
+        for operation in self._commit:
+            operation()
