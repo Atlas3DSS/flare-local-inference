@@ -33,7 +33,7 @@ qualification.
 | Grammar speculation | Host-side cloned grammar state produces per-candidate masks; independent W1/Wn singleton-language comparisons accept copied drafts and preserve exact output/state. | Cover rejection, mixed requests, empty masks, EOS/cancellation, and grammar-state commits beyond singleton-language cases. |
 | Learned MTP | [Identical-input operator checks](mtp-operators.md) isolate projection differences and verify normalization on common operands. | Full startup, prefill absorption, drafting, acceptance/rejection, draft-cache restore, and actual HTTP workloads. |
 | Image and context capacity | [Aggregate images](server-http-vision-aggregate.md) and [context-limit execution](server-http-context-limit.json) exercise their recorded capacities and resource accounting. | Capacity execution does not establish image arithmetic or long-context model accuracy. |
-| Failure lifecycle | [Typed native errors](../../native/src/error.rs) preserve causes, numeric CUDA codes, and variant-based status mapping. CPU tests and installed startup rejection pass; [worker failure](native-worker-failure.md) covers its documented drain cases. | Verify installed HTTP/SSE behavior after error-type integration; preserve first failure and ownership retention during worker refactoring. |
+| Failure lifecycle | [Typed native errors](../../native/src/error.rs) preserve causes, numeric CUDA codes, and variant-based status mapping. CPU tests, installed startup rejection, and all 22 [fatal-completion HTTP/SSE checks](native-worker-failure.md) pass with private worker phases. | Complete full-model HTTP qualification; preserve first failure and ownership retention. Multiple waiting-request HTTP fanout and failed CUDA drain remain outside the installed failure test's scope. |
 
 A request may consume at most `context_limit - 1` tokens because its final
 sampled token remains pending. Prefix snapshots represent complete model state
@@ -60,8 +60,9 @@ BF16 recurrence does not guarantee equality between arbitrary prefill partitions
   packs Qwen inputs, and interprets completions. Its output protocol supplies
   separate reasoning/tool-call parsers and common incremental JSON/SSE presentation.
 - Native errors distinguish admission, execution, and frontend failures without
-  error-text dispatch. Installed HTTP/SSE checks remain pending. Worker-loop
-  decomposition remains open. Upload ranges are resolved once into reusable
+  error-text dispatch. Installed fatal-completion HTTP/SSE checks pass. Private
+  worker phases preserve transactional ordering; full-model HTTP checks remain
+  pending. Upload ranges are resolved once into reusable
   descriptors; CPU and real-CUDA transport checks pass.
 - CPU bootstrap tests invoke real preparation constructors, public plans, and
   scratch declarations. They stop before tuning, compilation, and capture.

@@ -6,13 +6,15 @@ prefill catalog and copy proposals. The catalog contains 39 graphs, including
 all 14 legal speculative batch/width combinations.
 
 The [state qualifier](../../qualify/speculative_state_parity.py) executes 30
-commands through each executor. All 2,252 checks pass: completion records,
+commands through each executor with `qwen4exp.graph-inputs.v2` and typed native
+errors. All 2,852 checks pass: completion records,
 persistent state, untouched lanes/pages, request epochs, and explicit RNG state
-match; replay allocations remain unchanged. Covered transitions include W8→W1,
-inactive/permuted lanes, a 64-token snapshot and restore, slot reuse, output-budget
+match; all 60 replay-allocation checks pass. Covered transitions include W8→W1,
+inactive/permuted lanes, an exact 72-token snapshot restored into another slot
+with private partial pages and raw selector state, slot reuse, output-budget
 clipping, terminal replay, and two-token stochastic grammar verification.
 
-The [run result](/data/sparkgap-artifacts/mtp-implementation/speculative-state-parity-reset/receipt.json)
+The [run result](/data/sparkgap-artifacts/mtp-implementation/exact-checkpoints/native-copy-parity-typed.json)
 records zero state mismatches. Python replay exists only in qualification tooling.
 The native service owns production execution.
 

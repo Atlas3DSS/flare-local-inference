@@ -1,23 +1,22 @@
 # Fatal completion validation through the native HTTP runtime
 
 All 22 checks pass across two fresh native server instances on GPU
-`GPU-afd4b1ad-8a64-7057-4bde-241822724c7f`, using ABI-2 library SHA256
-`6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f`.
-The [receipt](native-worker-failure.json) records checks, metrics, library/source
-hashes and GPU release. The [compressed artifacts](/data/sparkgap-artifacts/validation-receipts/native-worker-failure-artifacts.tar.gz)
-contain exact graph manifests/configuration, HTTP requests/responses, raw SSE,
-and the qualified scripts.
+`GPU-afd4b1ad-8a64-7057-4bde-241822724c7f` with typed native errors and the
+`qwen4exp.graph-inputs.v2` input schema and private worker phases. The
+[run result](/data/sparkgap-artifacts/mtp-implementation/exact-checkpoints/worker-failure-phases/receipt.json)
+records the installed extension, checks, and metrics. Its directory contains
+graph manifests, configuration, HTTP requests/responses, and raw SSE.
 
 ## Input and failure path
 
-Each server receives a complete 37-variant catalog with real CUDA graph handles
+Each server receives a complete 25-variant ABI-2 catalog with real CUDA graph handles
 and transport-compatible storage. Graphs contain one deliberate ABI violation:
 they write `1` to `completion_records[:, :, 7]`, whose reserved field must be
 zero. A real HTTP chat request admits one physical request and launches one
 initialization graph through the unmodified installed native API.
 
 `GraphExecutor::poll` reads the device completion and rejects it with
-`invalid or stale device completion record`. The resulting `run_loop` error
+`invalid or stale device completion record`. The resulting execution error
 terminates the model worker, clears health, fails the waiting response, and
 drains the model and completion-copy streams. The HTTP listener remains available
 to report the unhealthy worker.
@@ -36,9 +35,8 @@ to report the unhealthy worker.
 | Borrowed owner | retained before close; released afterward | retained before close; released afterward |
 
 Weak references verify owner retention through handoff and release only after
-native close confirms drain. Both instances finish without a GPU process; the
-assigned GPU reports 2 MiB after process exit. Native sources and the installed
-library remain unchanged during execution.
+native close confirms drain. Both instances finish without a GPU process.
+Native sources and the installed library remain unchanged during execution.
 
 The graph catalog performs no checkpoint inference and contains no model
 weights. Exact checkpoint frontend assets are loaded and verified by native
@@ -58,7 +56,3 @@ CUDA_HOME=/opt/cuda timeout 120s .venv/bin/python \
   --device-uuid GPU-afd4b1ad-8a64-7057-4bde-241822724c7f \
   --artifacts /tmp/sparkgap-worker-failure-reproduction
 ```
-
-The archive also preserves a launcher failure before catalog creation or HTTP:
-PyTorch reported the assigned UUID without the optional `GPU-` prefix. The
-qualified identity check normalizes only that prefix and records both values.
