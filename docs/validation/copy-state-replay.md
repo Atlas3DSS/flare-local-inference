@@ -16,9 +16,15 @@ The [run result](/data/sparkgap-artifacts/mtp-implementation/speculative-state-p
 records zero state mismatches. Python replay exists only in qualification tooling.
 The native service owns production execution.
 
-Both executors replay identical graph handles and inputs. This establishes
-executor parity; it does not establish equivalence between verification widths,
-ordinary decoding, or learned MTP. Those comparisons require independent target
-execution and calibrated component checks. The
-[transaction comparison](../../qualify/copy_transaction_comparison.py) implements
-independent W1/Wn and restored-continuation arms; its GPU run remains pending.
+The [transaction comparison](../../qualify/copy_transaction_comparison.py)
+separately executes W1 continuations and wider copy-verification graphs across
+all 14 shapes. Its 309 commands pass 80,736 checks. All 22,320 compared state
+tensors are bitwise equal, including cross-width execution, a shared 64-token
+prefix, and continuations after restoring into private pages. Replay allocation
+counters and immutable source snapshots remain unchanged. The run uses forced
+literal grammar continuations with all copied tokens accepted.
+
+These comparisons do not cover the ordinary decoder, every rejection prefix,
+or learned MTP. Bitwise agreement on these inputs does not establish a general
+cross-capacity numerical tolerance. Ordinary-decoder comparisons, rejection and
+termination clipping, and the complete agentic workload remain required.

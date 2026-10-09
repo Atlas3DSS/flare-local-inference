@@ -49,8 +49,10 @@ paired speculative speedup are unqualified.
 
 The [copy-state replay comparison](validation/copy-state-replay.md) passes all
 30 commands through Python and Rust with zero state mismatches and unchanged
-replay allocations. All 14 speculative shapes are covered. Independent W1/Wn
-numerics, the ordinary-decoder arm, and complete accepted-prefix coverage remain open.
+replay allocations. Independent W1/Wn execution and restored continuations cover
+all 14 shapes and produce 22,320 bitwise-equal state comparisons for all-accepted
+literal copies. The ordinary-decoder arm, complete accepted-prefix coverage,
+and calibrated cross-capacity numerics remain open.
 
 The [native output-protocol HTTP checks](validation/output-protocol-http.md)
 pass JSON/SSE literal-marker preservation and string stops. The unchanged
@@ -69,9 +71,11 @@ GPU graph timing, but no named per-kernel GPU breakdown. Those measurements do
 not establish the overhead of the speculative sequence or the unified stochastic
 serving implementation.
 
-The native model-contract extraction, typed errors, worker-loop decomposition,
-JPEG/EXIF support, tool-plus-schema grammar, and the upstream AIR submission remain
-open. Preparation, recipes, the native runtime, and qualification tooling have
+The static native model contract owns Qwen input packing, schema validation,
+prompt interpretation, and completion semantics. JPEG/EXIF decoding passes
+checkpoint admission tests; installed HTTP validation remains open. Typed errors,
+worker-loop decomposition, tool-plus-schema grammar, and the upstream AIR
+submission remain open. Preparation, recipes, the native runtime, and qualification tooling have
 separate source commits. The completed items in correction section 0 remain
 closed, subject to their original measurement scopes.
 
@@ -209,7 +213,7 @@ options, forced/named selections, and subsequent tool-result turns.
 
 | Item | Status and evidence | Work required to close |
 |---|---|---|
-| 6.1 Per-model Rust contract | Open. [model.rs](../native/src/model.rs) and [inputs.rs](../native/src/model/inputs.rs) contain Qwen vocabulary, vision, position, and speculative-buffer assumptions. | Define a statically dispatched model contract for admission, prefill/decode/speculative packing, state/vision packing, and completion interpretation. Move Qwen details into `qwen4exp`; declare vocabulary/capacities/schema through preparation metadata. Keep transport ABI/fence validation generic. Compare exact packed bytes before/after and reject bad schemas before CUDA. No backend registry or dynamic per-token dispatch. |
+| 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust and Python preparation tests pass. | Qualify the rebuilt extension through the actual HTTP service. Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
 | 6.2 Typed errors | Open: [lib.rs](../native/src/lib.rs) aliases Result to String. Admission-rejection events already differ structurally; the correction's substring count is stale. | Introduce typed admission, execution, and frontend errors, preserving underlying causes and numeric driver codes. Map HTTP/SSE behavior by variants and use variant assertions. Preserve first failure and owner retention after failed drain. Eliminate error-text classification, without confusing ordinary token/metrics string checks with error dispatch. |
 | 6.3 Worker phases | Open. [runtime.rs](../native/src/server/runtime.rs) still combines admission, planning, completion, grammar, stops, copy proposals, and retirement in run_loop. | After contract/error extraction, introduce a worker struct with admit/plan/submit/complete/publish/retire methods. Preserve candidate-record-before-complete, observation-before-presentation, stop-before-next-submit, and fence-protected release. Test phases against scheduler/executor state, then qualify the actual HTTP path and graph replay. |
 | 6.4 Tuning fixtures | Open. GDN, MoE, vision, and hyperconnection benchmark-input classes remain inside recipes. | Move declaration-time benchmark fixtures/arena helpers into operator-keyed preparation modules. Preserve real checkpoint inputs, plan keys, scratch envelope, serialized tuning identity, and cleanup. Verify the same declaration/catalog and no escaping trial storage. |
@@ -320,23 +324,32 @@ tokens has 6,602 consumed tokens and publishes boundary 6,592. An identical
 already been overwritten. The observed misses occur with no evictions and free
 snapshot capacity. This is a retention-policy limitation.
 
-Retain the final-prefill boundary alongside the terminal checkpoint: freeze it
-before decode, publish/pin it, transfer complete-page ownership into the live
-request's shared parent chain, and rotate to another preallocated snapshot.
+Retain the exact rendered system prefix, final prompt, and terminal consumed
+prefix independently. The Qwen model contract renders leading instructions with
+an empty user continuation and verifies exact token-prefix equality against the
+admitted prompt. Tools and reasoning defaults may synthesize system instructions.
+The boundary includes shared template framing and is not rounded to a KV page.
+Prefill must stop there before freezing live recurrent state.
+
+Freeze each endpoint before continuing, publish/pin it, transfer complete-page
+ownership into the live request's shared parent chain, and rotate to another
+preallocated snapshot. Snapshot storage owns partial attention pages and raw QSA
+state; restoration copies mutable tails into private pages.
 Keep physical page order unchanged. Separate original admission reuse accounting
 from the evolving page-ownership boundary so newly computed tokens are not
 reported as reused. Qualify duplicate publication, pressure, cancellation, failed
 freeze, exact retries, divergent tails, and appended conversations. Do not replace
 the terminal checkpoint, which preserves generated-state reuse for agentic turns.
 
-Reserve the additional snapshot before entering the prompt freeze; a live request
-must not wait for the only terminal destination it already occupies. Treat prompt
-retention as auxiliary under snapshot pressure: preserve mandatory terminal
-capacity and record a retention skip if no auxiliary slot is available. An existing
+Reserve all distinct required endpoints at admission; a live request must not
+wait for the only terminal destination it already occupies. Capacity pressure
+must not silently skip the system checkpoint. An existing
 duplicate checkpoint does not justify replacing live computed KV pages with another
 request's pages. Leave that request's physical chain unchanged and release only
 unused reservations after their fences. For learned MTP, separately qualify the
-P−1 draft length, open raw-selector history, and shifted private boundary page.
+P−1 draft length, open raw-selector history, and up to two shifted private
+boundary pages. Qualify endpoints shorter than 16 tokens and residues 0, 1, 2,
+3, and 63 modulo the 64-token page size.
 
 The malformed diff, literal-tag omission, contradictory retry recommendation,
 and four explicit-budget truncations remain failed outputs. Ordinary and pinned
