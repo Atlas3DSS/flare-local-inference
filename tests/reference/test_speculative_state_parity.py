@@ -1,6 +1,7 @@
 """CPU command contracts for actual-checkpoint speculative replay qualification."""
 
 from dataclasses import fields
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -47,6 +48,77 @@ def model():
 def make_builder(tmp_path):
     (tmp_path / "uploads").mkdir()
     return Commands(model(), fixture(), tmp_path)
+
+
+def test_compare_clones_native_upload_defaults_after_reset_before_handoff(tmp_path, monkeypatch):
+    import qualify.speculative_state_parity as parity
+    import scripts.qualify_graph_execution as graph_qualification
+
+    runtime = model()
+    runtime.device, runtime.graphs = "cpu", {}
+    runtime.manifest = lambda: {"graphs": []}
+    grammar = runtime.buffers["sampling_grammar_mask"]
+    grammar.fill_(-1)
+    initial = grammar.clone()
+    owner = SimpleNamespace(owners=[], cache={}, extra_base=9,
+        pool=SimpleNamespace(backing=torch.empty((1, 0), dtype=torch.uint8),
+                             layout=SimpleNamespace(regions=[], row_bytes=0)))
+    builders, handoffs = [], []
+    executor = SimpleNamespace(drained=False)
+
+    class Reset:
+        storage = {}
+
+        def __init__(self, model, state):
+            assert model is runtime and state is owner
+
+        def reset(self):
+            grammar.copy_(initial)
+
+        def hashes(self):
+            return {"grammar": hashlib.sha256(grammar.numpy().tobytes()).hexdigest()}
+
+    def commands(*args):
+        result = Commands(*args)
+        builders.append(result)
+        return result
+
+    def observe(evidence, side, stage, *args):
+        assert stage == "initial"
+        if side == "python":
+            # Model execution leaves a request mask that the first init does not overwrite.
+            _mask(grammar[1], [fixture()["token"]])
+        else:
+            assert torch.equal(grammar, initial)
+
+    def start_executor():
+        assert len(builders) == 2
+        assert torch.equal(grammar, initial)
+        handoffs.append(True)
+        return executor
+
+    executor.close = lambda: setattr(executor, "drained", True)
+    runtime.start_executor = start_executor
+    monkeypatch.setattr(parity, "MutableState", Reset)
+    monkeypatch.setattr(parity, "Commands", commands)
+    monkeypatch.setattr(parity, "observe", observe)
+    monkeypatch.setattr(torch.cuda, "Stream", lambda **kwargs: object())
+    monkeypatch.setattr(graph_qualification, "verify_prepared_hybrid_state",
+                        lambda pool, evidence: evidence.check("pristine", True))
+    (tmp_path / "uploads").mkdir()
+    evidence = graph_qualification.Evidence(tmp_path / "receipt.json", tmp_path, {})
+    before_cuda = torch.cuda.is_initialized()
+    parity.compare(runtime, owner, {**fixture(), "commands": []}, evidence, tmp_path, lambda _: None)
+
+    assert handoffs == [True] and executor.drained
+    assert evidence.value["reset"]["python"] == evidence.value["reset"]["native"]
+    for operation in fixture()["commands"][:2]:
+        expected, actual = (builder.prepare(operation) for builder in builders)
+        assert actual == expected
+        for name, sha in expected["uploads"]:
+            assert builders[0].payloads[sha] == builders[1].payloads[sha], name
+    assert builders[1].host["sampling_grammar_mask"][1].eq(-1).all()
+    assert torch.cuda.is_initialized() == before_cuda
 
 
 def test_all_shapes_and_state_transition_contracts():

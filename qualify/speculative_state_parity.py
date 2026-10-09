@@ -494,12 +494,13 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
     python_stream = torch.cuda.Stream(device=model.device)
     try:
         for side in ("python", "native"):
-            builder = Commands(model, fixture, artifacts)
             if side == "native":
                 reset.reset()
                 evidence.value["reset"]["native"] = reset.hashes()
                 _require(evidence, "identical_initial_storage", initial == evidence.value["reset"]["native"])
                 _require(evidence, "identical_graphs_and_buffers", model.manifest() == manifest)
+            builder = Commands(model, fixture, artifacts)
+            if side == "native":
                 executor = model.start_executor()
                 model.runtime = executor
             # All future fixture pages and a far canary are observed from the start.
