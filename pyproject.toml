@@ -41,7 +41,7 @@ flashinfer-python = { path = "../flashinfer", editable = true }
 sparkgap-native = { path = "native" }
 
 [tool.sparkgap.source-revisions]
-flashinfer = "98fb87a461183f98d6a7049ca947fb136cc6fb59"
+flashinfer = "c691c681ebcbda066faf5bd80fef0d257b256fbc"
 
 [tool.setuptools.packages.find]
 include = ["sparkgap*"]

@@ -37,8 +37,7 @@ it never clones, checks out, or applies patches to FlashInfer.
 `uv.lock` pins the remaining dependencies, including Transformers, CUDA 13 Torch,
 and Cutlass DSL. FlashInfer's optional expert-parallel builds are disabled; its
 required dependencies remain installed. The development environment uses the
-editable main checkout with uncommitted kernel work; reproducible setup remains
-blocked until those changes are committed and the revision pin is updated.
+editable main checkout at the committed revision pinned in `pyproject.toml`.
 Historical patch and staged-source evidence is preserved in the
 [source migration archive](/data/sparkgap-artifacts/flashinfer-source-migration/clone-and-patches-98fb87a/manifest.json).
 

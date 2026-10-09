@@ -103,10 +103,9 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `98fb87a461183f98d6a7049ca947fb136cc6fb59`, including the CuTe DSL operators
+  `c691c681ebcbda066faf5bd80fef0d257b256fbc`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
-- Serving source baseline: Sparkgap `9d70e7f25310df4957a953f6000b089c7a4c60c2`.
 
 The checkpoint combines 36 Gated DeltaNet layers, 12 sparse-attention layers,
 512 routed experts per decoder layer, four hyperconnection streams, PLE n-gram
