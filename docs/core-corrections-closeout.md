@@ -52,6 +52,11 @@ The [copy-state replay comparison](validation/copy-state-replay.md) passes all
 replay allocations. All 14 speculative shapes are covered. Independent W1/Wn
 numerics, the ordinary-decoder arm, and complete accepted-prefix coverage remain open.
 
+The [native output-protocol HTTP checks](validation/output-protocol-http.md)
+pass JSON/SSE literal-marker preservation and string stops. The unchanged
+`code-docstrings-stop` workload completes within its original budget with all
+eight function bodies preserved. The complete agentic workload rerun remains open.
+
 The [FlashInfer chain acceptance correction](validation/flashinfer-chain-endpoint.md)
 passes its endpoint and sampler regressions. The
 [identical-input MTP operator measurements](validation/mtp-operators.md) isolate
