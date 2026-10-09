@@ -1,0 +1,38 @@
+{
+  "status": "failed_canonical_encoder_parity",
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+  },
+  "reference": "Pinned Transformers 4cc2aa84301c9aa210b5513dab9fefae03981f6e eager vision with independent checkpoint activation-QDQ and weight decoding; original encoder test unchanged",
+  "runtime": "Working FlashInfer source with explicit prepared varlen eager_bf16 two-pass math; native GraphReplayWorker",
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "result": {
+    "variant": 0,
+    "relative_l2": 0.09332147240638733,
+    "limit": 0.03,
+    "max_absolute": 0.052734375,
+    "allocator_stable": true,
+    "cases_completed": 1,
+    "cases_required": 2
+  },
+  "kernel_validation": {
+    "eager_bf16_tests_passed": 10,
+    "eager_bf16_seconds": 5.81,
+    "existing_flash_tests_passed": 12,
+    "existing_flash_seconds": 23.09
+  },
+  "source_sha256": {
+    "sparkgap/serve/recipes/qwen38/vision.py": "6ec2d3543d1a76ce84a04a9859a7cc5e3b247e95fa8d01f2a7f6a583d464377e",
+    "sparkgap/serve/recipes/qwen38/linear.py": "11644e6731336523c82724c05c347741a4b580650da301a38d71017d1435589a",
+    "sparkgap/tests/recipes/test_qwen38_vision.py": "ebeb7ed6dbeceb15e39df91ec8876f008ec66cafb0c020d60d27bb18d9944fe5",
+    "sparkgap/serve/reference/qwen38_quant.py": "7fa893735d5efb94190f34d7945af3fdd9624716876e0e5af772249beb99f176",
+    "flashinfer/flashinfer/experimental/b12x/attention/varlen/_eager_bf16.py": "24653071b7b668a59da1eefc9f216e658888e67fc882fa8c8d42ff1f15fc02ff",
+    "flashinfer/flashinfer/experimental/b12x/attention/varlen/_preparation.py": "c1f8363b1a95066d4f5373880efdacdb4c905ca4d41e0540633cb6afb9721973",
+    "flashinfer/flashinfer/experimental/b12x/attention/varlen/_tuning.py": "e4ce211b4058fedab330ff8e72073ee386b40ca45733f514c3042073a4775c35",
+    "flashinfer/flashinfer/experimental/b12x/attention/_shared/contiguous/forward.py": "115d74e772c5501d4195c73265865912fa72ad0d2a0974c6b0c7334af288a7f0",
+    "flashinfer/flashinfer/experimental/b12x/attention/_shared/contiguous/softmax.py": "fbd04e2333c14f1c468ada4f4f75591cd2d611a1048a49d70c55d17a7ab9d24e",
+    "flashinfer/tests/experimental/b12x/attention/test_varlen_eager_bf16.py": "5473e58b3d6c8e79a6c9eda6162860359a3393c344c21d23dff30ca6ee9d5af3"
+  },
+  "command": "CUDA_HOME=/opt/cuda CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f SPARKGAP_RUN_CUDA_TESTS=1 PYTHONPATH=/home/luke/projects/flashinfer/flashinfer/experimental:/home/luke/projects/flashinfer:. OMP_NUM_THREADS=4 .venv/bin/python -m pytest tests/recipes/test_qwen38_vision.py -xq --tb=short --junitxml=docs/validation/vision-eager-bf16.xml -o junit_family=xunit1"
+}

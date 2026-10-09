@@ -1,0 +1,735 @@
+{
+  "schema_version": 1,
+  "artifact_type": "mtp-identical-input-operator-diagnostic",
+  "model_id": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+  "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+  "evidence_integrity_passed": true,
+  "checks": {
+    "backends_completed": true,
+    "sparkgap_sources_unchanged_during_forward": true,
+    "all_own_forward_operators_exact": true,
+    "all_same_shape_operator_repeats_exact": true,
+    "reference_five_vs_eight_rows_exact": true,
+    "shared_projection_weights_exact": true,
+    "sparkgap_operator_graphs_allocate_zero": true,
+    "sparkgap_module_graphs_allocate_zero": true,
+    "cpu_dot_cuda_uninitialized": true,
+    "sources_match_execution_records": true
+  },
+  "acceptance_threshold": null,
+  "fixture": {
+    "path": "/tmp/sparkgap-mtp-qsa-operands/fixture.pt",
+    "bytes": 147145,
+    "sha256": "63b48403a3d81094169b94dc3effa8f2e52e94ad0074ee4873fa7896228b2a33"
+  },
+  "conditions": {
+    "rows": [
+      5,
+      1,
+      1
+    ],
+    "sparkgap_capacities": [
+      8,
+      1,
+      1
+    ],
+    "reference_capacities": [
+      5,
+      1,
+      1
+    ],
+    "reference_additional_prefill_capacity": 8,
+    "reference_additional_rows": "zero padding; first five rows measured",
+    "operand_sources": [
+      "recorded Sparkgap",
+      "recorded pinned vLLM"
+    ],
+    "identical_live_input_records": true,
+    "sparkgap_execution": "prepared CUDA graph replay",
+    "reference_execution": "actual eager serving operators",
+    "vllm_commit": "64fc1eec593397cbd765cc082e9ec90fbeb5ea66",
+    "vllm_flashinfer_commit": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+    "device": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f"
+  },
+  "coverage": {
+    "operators": 15,
+    "sparkgap_cases": 6,
+    "reference_cases": 8,
+    "same_input_comparisons": 120,
+    "own_forward_reproductions": 66,
+    "exact_operator_repeats": 210,
+    "reference_capacity_comparisons": 30,
+    "shared_projection_weight_views": 7,
+    "source_files_verified": 84,
+    "cpu_tests_passed": 26
+  },
+  "prefill_operator_relative_l2": [
+    {
+      "operator": "hc_norm",
+      "prefill_relative_l2_min": 2.4027551717153983e-06,
+      "prefill_relative_l2_max": 2.4027551717153983e-06,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "operator": "hc_down",
+      "prefill_relative_l2_min": 0.0017232961254194379,
+      "prefill_relative_l2_max": 0.0017266599461436272,
+      "max_absolute_error": 0.25
+    },
+    {
+      "operator": "hc_silu",
+      "prefill_relative_l2_min": 0.0,
+      "prefill_relative_l2_max": 0.0,
+      "max_absolute_error": 0.0
+    },
+    {
+      "operator": "hc_up",
+      "prefill_relative_l2_min": 2.3386532120639458e-05,
+      "prefill_relative_l2_max": 2.6802386855706573e-05,
+      "max_absolute_error": 0.03125
+    },
+    {
+      "operator": "hc_gate",
+      "prefill_relative_l2_min": 0.0,
+      "prefill_relative_l2_max": 0.0,
+      "max_absolute_error": 0.0
+    },
+    {
+      "operator": "q_projection",
+      "prefill_relative_l2_min": 0.0021330444142222404,
+      "prefill_relative_l2_max": 0.0021437457762658596,
+      "max_absolute_error": 0.125
+    },
+    {
+      "operator": "k_projection",
+      "prefill_relative_l2_min": 0.003688202006742358,
+      "prefill_relative_l2_max": 0.0037791922222822905,
+      "max_absolute_error": 0.5
+    },
+    {
+      "operator": "v_projection",
+      "prefill_relative_l2_min": 0.002095205243676901,
+      "prefill_relative_l2_max": 0.0021047780755907297,
+      "max_absolute_error": 0.0625
+    },
+    {
+      "operator": "q_norm",
+      "prefill_relative_l2_min": 0.0,
+      "prefill_relative_l2_max": 0.0,
+      "max_absolute_error": 0.0
+    },
+    {
+      "operator": "k_norm",
+      "prefill_relative_l2_min": 0.0,
+      "prefill_relative_l2_max": 0.0,
+      "max_absolute_error": 0.0
+    },
+    {
+      "operator": "q_norm_rope",
+      "prefill_relative_l2_min": 0.00021003338042646646,
+      "prefill_relative_l2_max": 0.00021492099040187895,
+      "max_absolute_error": 0.0625
+    },
+    {
+      "operator": "k_norm_rope",
+      "prefill_relative_l2_min": 6.176783062983304e-05,
+      "prefill_relative_l2_max": 6.190352723933756e-05,
+      "max_absolute_error": 0.015625
+    },
+    {
+      "operator": "q_rope",
+      "prefill_relative_l2_min": 0.00021003338042646646,
+      "prefill_relative_l2_max": 0.00021492099040187895,
+      "max_absolute_error": 0.0625
+    },
+    {
+      "operator": "k_rope",
+      "prefill_relative_l2_min": 6.176783062983304e-05,
+      "prefill_relative_l2_max": 6.190352723933756e-05,
+      "max_absolute_error": 0.015625
+    },
+    {
+      "operator": "o_projection",
+      "prefill_relative_l2_min": 1.460157477595203e-06,
+      "prefill_relative_l2_max": 7.372900290647522e-05,
+      "max_absolute_error": 0.001953125
+    }
+  ],
+  "prefill_cpu_dot_diagnostic": [
+    {
+      "operator": "hc_down",
+      "backend": "sparkgap",
+      "capacity": 8,
+      "bf16_values_different": 0,
+      "elements": 1600,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.0
+    },
+    {
+      "operator": "hc_down",
+      "backend": "vllm",
+      "capacity": 5,
+      "bf16_values_different": 452,
+      "elements": 1600,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.0017266626236960292
+    },
+    {
+      "operator": "hc_up",
+      "backend": "sparkgap",
+      "capacity": 8,
+      "bf16_values_different": 1,
+      "elements": 51200,
+      "relative_l2_to_fp64_dot_rounded_bf16": 7.307538112399925e-07
+    },
+    {
+      "operator": "hc_up",
+      "backend": "vllm",
+      "capacity": 5,
+      "bf16_values_different": 8,
+      "elements": 51200,
+      "relative_l2_to_fp64_dot_rounded_bf16": 2.679241879377514e-05
+    },
+    {
+      "operator": "q_projection",
+      "backend": "sparkgap",
+      "capacity": 8,
+      "bf16_values_different": 2,
+      "elements": 61440,
+      "relative_l2_to_fp64_dot_rounded_bf16": 3.932765139325056e-06
+    },
+    {
+      "operator": "q_projection",
+      "backend": "vllm",
+      "capacity": 5,
+      "bf16_values_different": 11994,
+      "elements": 61440,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.0021437008399516344
+    },
+    {
+      "operator": "k_projection",
+      "backend": "sparkgap",
+      "capacity": 8,
+      "bf16_values_different": 0,
+      "elements": 2560,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.0
+    },
+    {
+      "operator": "k_projection",
+      "backend": "vllm",
+      "capacity": 5,
+      "bf16_values_different": 577,
+      "elements": 2560,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.0037840427830815315
+    },
+    {
+      "operator": "v_projection",
+      "backend": "sparkgap",
+      "capacity": 8,
+      "bf16_values_different": 0,
+      "elements": 2560,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.0
+    },
+    {
+      "operator": "v_projection",
+      "backend": "vllm",
+      "capacity": 5,
+      "bf16_values_different": 510,
+      "elements": 2560,
+      "relative_l2_to_fp64_dot_rounded_bf16": 0.002104782499372959
+    },
+    {
+      "operator": "o_projection",
+      "backend": "sparkgap",
+      "capacity": 8,
+      "bf16_values_different": 3,
+      "elements": 12800,
+      "relative_l2_to_fp64_dot_rounded_bf16": 1.54400225937934e-08
+    },
+    {
+      "operator": "o_projection",
+      "backend": "vllm",
+      "capacity": 5,
+      "bf16_values_different": 6,
+      "elements": 12800,
+      "relative_l2_to_fp64_dot_rounded_bf16": 1.460075850445719e-06
+    }
+  ],
+  "first_observed_boundary": [
+    {
+      "step": 0,
+      "unequal_bf16_elements": 1,
+      "elements": 51200,
+      "maxabs": 0.0009765625
+    },
+    {
+      "step": 1,
+      "unequal_bf16_elements": 0,
+      "elements": 10240,
+      "maxabs": 0.0
+    },
+    {
+      "step": 2,
+      "unequal_bf16_elements": 0,
+      "elements": 10240,
+      "maxabs": 0.0
+    }
+  ],
+  "reference_dispatch": {
+    "VLLM_B12X_BF16_GEMV_inherited": null,
+    "VLLM_B12X_BF16_GEMV_resolved": false,
+    "observed": "torch.nn.functional.linear for BF16 projections; fused HC down/injection and fused QKV",
+    "internal_GEMM_algorithm_profiled": false
+  },
+  "sparkgap_dispatch": "public b12x BF16 SIMT projections at capacities 8 and 1; separate HC-down/injection and Q/K/V",
+  "interpretation": [
+    "The first recorded difference is one prefill HC normalization element; decode HC normalization matches exactly.",
+    "HC down and Q/K/V projections differ on identical input bytes and identical checkpoint weight values, independently of preceding HC normalization drift.",
+    "QK normalization is exact on identical raw projections. RoPE differs separately at smaller magnitude.",
+    "Reference five-row and zero-padded eight-row execution are exact over live rows for every measured operator.",
+    "For the measured prefill operands, Sparkgap HC-down/K/V outputs exactly equal the FP64 mathematical dot rounded to BF16; the reference differs. This is a precision diagnostic, not a substituted serving oracle.",
+    "The internal reference GEMM algorithm and accumulation precision were not profiled.",
+    "The separate module receipt records amplification of stored prefill key differences by attention. Whole-module logit relative L2 remains diagnostic."
+  ],
+  "limitations": [
+    "One fixed teacher-forced MTP fixture; no general model-accuracy bound.",
+    "Expert operators, speculative acceptance/state transactions and full serving performance are outside this operator probe.",
+    "No numerical acceptance tolerance is inferred from whole-module logits or fitted to these measurements.",
+    "Reference eager operator repetition is not a whole-model reference repeatability study."
+  ],
+  "artifact_store": "/data/sparkgap-artifacts/mtp-implementation/operator-oracle",
+  "archive": {
+    "path": "/data/sparkgap-artifacts/mtp-implementation/operator-oracle/operator-oracle.tar.gz",
+    "bytes": 17808397,
+    "sha256": "a3c2fabdf9adb21ba2aa9802f129d4962f6171d2eafaaf9d3042c2f3b5f0c616"
+  },
+  "manifest": {
+    "path": "/data/sparkgap-artifacts/mtp-implementation/operator-oracle/manifest.json",
+    "bytes": 34502,
+    "sha256": "fbec7551e2ba5e233b733bfef79ac9ff6feb8400fb3ff1060abe19233e033395"
+  },
+  "archive_payloads_verified": 117,
+  "source_checks": [
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/__init__.py",
+      "sha256": "b5c6b7d59729a687cac8f98e818d2023094cba456a4072ef3ce5575113374023",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/_kernel.py",
+      "sha256": "f6c2d136305cae79800dc9bad2ec0658741bd83449b0181985a04aea8ac6acf6",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/_prefill.py",
+      "sha256": "03b271903275ae3d05d6bf6e19bc150ecdc668cb9172607bd35ee5830ca6ada4",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/_preparation.py",
+      "sha256": "1c56e455cacfaf84924f70b55de4c43aa32205be31219f0e33fb2cbb13b3b6b5",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/_tensor_core.py",
+      "sha256": "86f07272519463019ae80f9bd1a32fef33776c9d211bee2a00e0a07efb040d8a",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/_tuning.py",
+      "sha256": "e579500de7e21b2fb7105563f0af6ba3584a8a333502578f128b69224e6782b6",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/gemm/bf16_gemv/api.py",
+      "sha256": "251ae55535092cd9e7fd45ef0842cd8220f0e1eebc796fd28264592b4f708b78",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/__init__.py",
+      "sha256": "1ff84764496aa1d4406570f212e09c1996443a0b815ee0a5af8008fafa6cf923",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/_cute.py",
+      "sha256": "8152a8dbec2c48383270931ce1f7d77e55f3975b0b50a373d2e2d409c3134357",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/_cute_config.py",
+      "sha256": "9f92464ef6d2ba1cdced2d24fb13be35c6110c47405e525e0245d5620045eb28",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/_impl.py",
+      "sha256": "f4ab31fe61863a119cbe4f711fc3400e89cefd8ce3f28bee0d30db45294cfded",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/_kernels.py",
+      "sha256": "12d6b2cd3ceb7386d5933f8b25fb01d6aeedef7302b422da0b8e55ea9f29a225",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/_preparation.py",
+      "sha256": "f68c3b6558d69edc6df6615e557beb40fbc5d5d5f5415c3a3bcf688e2249ab71",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/_tuning.py",
+      "sha256": "1fdae0d1de94744020e0c927a673f3ad5a16546c5238c27263f1e889c7a81d2c",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/api.py",
+      "sha256": "dd31e58b56b4fe7c53f097984c4f81e3fa3f1e59c86e0345fb512b09472147b1",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/flashinfer/flashinfer/experimental/b12x/norm/hyperconnection/reference.py",
+      "sha256": "bce230140019e2a737060a0da31b7b34b57caf3c11bbdd73eeeffa8515f57192",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/qualify/mtp.py",
+      "sha256": "9d402c2e7b324787b039d8c83052570101eb6681dad116b6c492beef484de929",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/qualify/mtp_operators.py",
+      "sha256": "a75d864093e38f7a805159339980ecf04c00d2bb9fc093b823e06a896d477fa8",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/__init__.py",
+      "sha256": "e2a460375de081a5f554c1ee822bb30e5aa1bb14c7d908f6244d08eef3b45ec2",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/__main__.py",
+      "sha256": "c57785460746f149651250e140cc306cdba536c633d4ee8e163dbbfc448e63f2",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/checkpoint.py",
+      "sha256": "0577809f1f60e28816f10838597e82aed9eba3de24c08da1ebaf738c1e2cdb99",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/execution.py",
+      "sha256": "cfab4ff7a4d10658e405a0e418a2f0eae976781a955590459d41ad5089a35ba0",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/graphs.py",
+      "sha256": "fd0e65bf4577dd4c1ae0f2e7f3fcd727a7a37f47791872027f503ee4df927cee",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/qwen38.py",
+      "sha256": "b1bf70b14cdac4148b25d3054b5b3903f7f41dc9b261790970019f953e774d48",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/scratch.py",
+      "sha256": "b3e0bfc8f3af7320b320864931e5c78da01f9d042e70df140385f1551c12f322",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/preparation/tuning.py",
+      "sha256": "35d34ea248e22f7d919c5446b4046d7d301fcf2ab78a3426278fc10ef71202f8",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/__init__.py",
+      "sha256": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/attention.py",
+      "sha256": "cf73e70733ed9ede7b14d41ebe7edddfa27392be593bc9891d8d35d2cd37b80f",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/bootstrap.py",
+      "sha256": "0db808ef4d8ca91d79255ab9b3710516a3ffe0fc825b07e3952095b2822dab90",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/decoder.py",
+      "sha256": "199034fb9713872feb80b0dc209ed0bcd89f1b5ebd74f312ac137a9fff50834b",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/decoder_state.py",
+      "sha256": "afdcd64001e566ce7bfd19f38b29a5414c9771dcd37c1413c2feb23b25d337da",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/draft_state.py",
+      "sha256": "30cf2f6f4decf9e5b9e5081953019134521b5c555a6349b2565a317b698158ab",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/gdn.py",
+      "sha256": "c6570d110a925e5a22be26fb3ce3910b58f2bfcaae70b505bf4e90491291659f",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/hyperconnection.py",
+      "sha256": "17f8da66b187dab1bbf568b808eaf314a1a5e44926120870df940b2d5905d9be",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/linear.py",
+      "sha256": "6af9afc08d6c9fe8b6132b5314c6188597fba8e59d4b41759eea94aece6bcd2c",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/maintenance.py",
+      "sha256": "2b49a6a59fa21e3704d6c48bf1ca2e617225686209ebcd4d2f12d7dd4188508a",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/model.py",
+      "sha256": "8ae605e25066f4551e1ce7bb04f9fe5e067eecdf208377ebbf6c1d9633f1dd84",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/moe.py",
+      "sha256": "35cf2397cc4592990f2b4e75b027ad03ac0de8b6e18a4e7c5997011b65b89898",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/mtp.py",
+      "sha256": "1140dcc9a6c63c6835ca361a148d4a4eb067ef1c154f9dd6c5727db8bbd9f597",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/mtp_weights.py",
+      "sha256": "9956a5d44791d28cef5b58b277ff166b2752c4c8e6cf419271f9deab9209195d",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/ple.py",
+      "sha256": "d2d5d4ef49bbe15996a6d36c4a95437dfd129a411ca943d4690728b5d77aba43",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/sampling.py",
+      "sha256": "e7bbf54e101491b5449e1b9bd51fcbe2d1169cca2d382ebf1b088afffd731ae4",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/speculation.py",
+      "sha256": "fb176d91a78e8d13cfd579f5656c57e2c59452c6d1bbd974be91ba80624f472d",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/speculative_model.py",
+      "sha256": "f1d00c367f7c7e902ea4316370e7d8f452692727aa5b314337094a8217f718e7",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/speculative_state.py",
+      "sha256": "126e01a9bcc7a040bfbf0f98a25d798f69b9a2a5b7673b5a7234176bb8dead39",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/state.py",
+      "sha256": "ec53e7e3e43264a21faf5b80809e8c352908283e86723f9639563ba4f3d8406d",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/vision.py",
+      "sha256": "9f61eaa101b46d21fc232fdd9a1f34a8b40aed4ced64596cb1d408fdc7364ff0",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/vision_state.py",
+      "sha256": "423a9ebd18f9a3518a9ef02b6484fec43e73ae9f44d7b75de9e2495f04898214",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/sparkgap/recipes/qwen38/weights.py",
+      "sha256": "e65c0cc8c6171ac4ecc837c7b983d34200614545910fc11e932679d532f96385",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/tests/reference/test_mtp.py",
+      "sha256": "a85b5575650073c651a828817809fcb2197016e44bccf2d198a61766adda3589",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/tests/reference/test_mtp_operators.py",
+      "sha256": "4448edf001a8d7532ba36f2327b69964f06105976913f107ae54e1db36c09ff7",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/__init__.py",
+      "sha256": "e3c55cbb0d7a8bd47df6f3378835644645f5d3bc89b45793b5d5a02d013e5c58",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/b12x_indexer_qsa.py",
+      "sha256": "286b54d9db61261ccfdbd9d629eb3c1849c8d06015c3b14a8dc988b65c81e29f",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/b12x_ple.py",
+      "sha256": "5b25bc8d98a8ca191425ba5f44366fe78d2911b659b35c900920f22540c88a40",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/b12x_qsa.py",
+      "sha256": "43a95289e011ce8ff92d3232d0e53baf5aeff9e0a61ca695c63c2f3db1f3393c",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/backend.py",
+      "sha256": "4984f08c4e7e3d23218b78d3e94098055f31fb474b2d41e6b2e634a5f44d7b5c",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/hyperconnection.py",
+      "sha256": "fc05332d9491c201a71d6784aa966a4a74983643568c5a58f60b3da6232a14ec",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/indexer_qsa.py",
+      "sha256": "5ec55e6f17cc8f8b5bae9cb1b1032fed2d214eb7428252938ada00fc1aee0832",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/low_latency_gemm.py",
+      "sha256": "85aab901be27f0cacd48e33055cddc692075ac2cb26edbb357138b86647b5835",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/model.py",
+      "sha256": "308c2012cd939885b0b8aa67f6e05b2d2da612f06135c402184e44e6f20f82aa",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/model_state.py",
+      "sha256": "fdb64e39ae72ee5aabe5d378538e49b76373a22eda7212b1ca0a736db1617c07",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/mtp.py",
+      "sha256": "c97095fc35d6d6004c03ba5f84972ae89d7c1061da7cb30ecc0444599d3ea73b",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/ngram_embedding.py",
+      "sha256": "2813b121c82ada4ff681cb107443890aa2af72ca2afc37fa02f6ef2753bc538d",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/ple_attn.py",
+      "sha256": "206b9b3c009f59f69e9d0828e3eac66783550b9f3ac87add8362a2d6fa33aaff",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/ple_layer.py",
+      "sha256": "fc1f44e871ed0d055eeaa94fdb271933a3f444c1bb5ad09af89efeb7ddb37a0a",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/ple_shared_table.py",
+      "sha256": "47078c8b7b16877970e9dc08b57e62fc7359dd1e17adbbe25f618b8af1150ec1",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/vllm-lunar-leviathan/vllm/models/qwen4_exp/nvidia/qsa.py",
+      "sha256": "b35dc5c3638afe5405c5ec3d76d88a2dd4ad341296dc3eac5418671a041b54de",
+      "equal": true
+    },
+    {
+      "path": "/tmp/collect-mtp-operators.py",
+      "sha256": "b335dc5bbe748bc3eaa026cebf20fb9c6031865744fdafa2dd1f5b3870b7e237",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/__init__.py",
+      "sha256": "b5c6b7d59729a687cac8f98e818d2023094cba456a4072ef3ce5575113374023",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/_kernel.py",
+      "sha256": "f6c2d136305cae79800dc9bad2ec0658741bd83449b0181985a04aea8ac6acf6",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/_prefill.py",
+      "sha256": "03b271903275ae3d05d6bf6e19bc150ecdc668cb9172607bd35ee5830ca6ada4",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/_preparation.py",
+      "sha256": "1c56e455cacfaf84924f70b55de4c43aa32205be31219f0e33fb2cbb13b3b6b5",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/_tensor_core.py",
+      "sha256": "86f07272519463019ae80f9bd1a32fef33776c9d211bee2a00e0a07efb040d8a",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/_tuning.py",
+      "sha256": "e579500de7e21b2fb7105563f0af6ba3584a8a333502578f128b69224e6782b6",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/gemm/bf16_gemv/api.py",
+      "sha256": "251ae55535092cd9e7fd45ef0842cd8220f0e1eebc796fd28264592b4f708b78",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/__init__.py",
+      "sha256": "1ff84764496aa1d4406570f212e09c1996443a0b815ee0a5af8008fafa6cf923",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/_cute.py",
+      "sha256": "8152a8dbec2c48383270931ce1f7d77e55f3975b0b50a373d2e2d409c3134357",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/_cute_config.py",
+      "sha256": "9f92464ef6d2ba1cdced2d24fb13be35c6110c47405e525e0245d5620045eb28",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/_impl.py",
+      "sha256": "f4ab31fe61863a119cbe4f711fc3400e89cefd8ce3f28bee0d30db45294cfded",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/_kernels.py",
+      "sha256": "12d6b2cd3ceb7386d5933f8b25fb01d6aeedef7302b422da0b8e55ea9f29a225",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/_preparation.py",
+      "sha256": "f68c3b6558d69edc6df6615e557beb40fbc5d5d5f5415c3a3bcf688e2249ab71",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/_tuning.py",
+      "sha256": "1fdae0d1de94744020e0c927a673f3ad5a16546c5238c27263f1e889c7a81d2c",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/api.py",
+      "sha256": "dd31e58b56b4fe7c53f097984c4f81e3fa3f1e59c86e0345fb512b09472147b1",
+      "equal": true
+    },
+    {
+      "path": "/tmp/lunar-rebase-20261008/flashinfer-pinned/flashinfer/experimental/b12x/norm/hyperconnection/reference.py",
+      "sha256": "bce230140019e2a737060a0da31b7b34b57caf3c11bbdd73eeeffa8515f57192",
+      "equal": true
+    }
+  ],
+  "full_measurements": "/data/sparkgap-artifacts/mtp-implementation/operator-oracle/raw/probe/operator-comparison.json",
+  "cpu_dot_measurements": "/data/sparkgap-artifacts/mtp-implementation/operator-oracle/raw/probe/cpu-linear-diagnostic.json",
+  "module_receipt": "docs/validation/mtp-module.md"
+}

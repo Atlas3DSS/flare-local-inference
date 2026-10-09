@@ -1,0 +1,343 @@
+{
+  "schema": "sparkgap-native-worker-failure-v1",
+  "plan": {
+    "scope": "Real native ModelRuntime and HTTP failure propagation over a deliberately malformed tiny CUDA graph catalog; no checkpoint inference.",
+    "abi_version": 2,
+    "cases": [
+      "waiting-json",
+      "waiting-sse"
+    ],
+    "trigger": "Initialization graph writes 1 into completion_records[:, :, 7] (reserved ABI field).",
+    "path": [
+      "GraphExecutor::poll/decode_records",
+      "run_loop returns Err",
+      "ModelRuntime marks unhealthy and fails active/pending/queued requests",
+      "executor drains model/copy streams",
+      "HTTP health returns 503"
+    ],
+    "checks": [
+      "health 200 before submission",
+      "one real initialization graph submitted",
+      "waiting JSON returns 500 with exact fatal error",
+      "waiting SSE returns 200 with one terminal error, no [DONE] or successful finish",
+      "health 503 after fatal worker exit",
+      "subsequent chat returns 503",
+      "Server.healthy and wait are false",
+      "close retains error and confirms drain",
+      "owner retained until close then released",
+      "CPU scheduler resources fully returned"
+    ],
+    "http_timeout_seconds": 30,
+    "gpu_policy": "One explicitly assigned UUID; no model weights, no existing endpoint contacted.",
+    "limitations": [
+      "Does not force a Rust panic or a CUDA execution fault.",
+      "Does not validate checkpoint outputs, multi-request error fanout, or failed CUDA drain."
+    ]
+  },
+  "checks": [
+    {
+      "case": "waiting-json",
+      "name": "owner-retained-after-handoff",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "ready-before-submission",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "waiting-json-fails",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "worker-exit-visible",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "health-unavailable",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "subsequent-request-rejected",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "one-fatal-initialization",
+      "passed": true,
+      "counters": {
+        "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"general\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"greedy\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"greedy\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"general\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"greedy\"}": 0,
+        "sparkgap_requests_admitted_total": 1,
+        "sparkgap_requests_completed_total": 0,
+        "sparkgap_requests_cancelled_total": 0,
+        "sparkgap_requests_failed_total": 1,
+        "sparkgap_mixed_grammar_decode_steps_total": 0,
+        "sparkgap_cache_lookups_total": 1,
+        "sparkgap_cache_hits_total": 0,
+        "sparkgap_cache_reused_tokens_total": 0,
+        "sparkgap_snapshot_publications_total": 0,
+        "sparkgap_snapshot_evictions_total": 0,
+        "sparkgap_cache_misses_total": 1,
+        "sparkgap_graph_launches_total{kind=\"init\"}": 1,
+        "sparkgap_graph_launches_total{kind=\"restore\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"resume\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"prefill\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"decode\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"vision\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"snapshot\"}": 0,
+        "sparkgap_constrained_max_inflight": 0,
+        "sparkgap_active_requests": 0,
+        "sparkgap_free_request_slots": 4,
+        "sparkgap_retiring_request_slots": 0,
+        "sparkgap_free_kv_pages": 4096,
+        "sparkgap_free_snapshots": 4,
+        "sparkgap_cached_checkpoints": 0,
+        "sparkgap_cached_kv_pages": 0,
+        "sparkgap_pending_requests": 0,
+        "sparkgap_http_inflight_requests": 0,
+        "sparkgap_http_request_capacity": 20,
+        "sparkgap_frontend_active_workers": 0,
+        "sparkgap_frontend_worker_capacity": 2
+      }
+    },
+    {
+      "case": "waiting-json",
+      "name": "resources-returned-after-drain",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "owner-held-before-close",
+      "passed": true
+    },
+    {
+      "case": "waiting-json",
+      "name": "close-confirms-drain-and-error",
+      "passed": true,
+      "drained": true,
+      "error": "invalid or stale device completion record"
+    },
+    {
+      "case": "waiting-json",
+      "name": "owner-released-after-drain",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "owner-retained-after-handoff",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "ready-before-submission",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "waiting-sse-fails-once",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "worker-exit-visible",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "health-unavailable",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "subsequent-request-rejected",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "one-fatal-initialization",
+      "passed": true,
+      "counters": {
+        "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"general\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"greedy\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"greedy\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"general\"}": 0,
+        "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"greedy\"}": 0,
+        "sparkgap_requests_admitted_total": 1,
+        "sparkgap_requests_completed_total": 0,
+        "sparkgap_requests_cancelled_total": 0,
+        "sparkgap_requests_failed_total": 1,
+        "sparkgap_mixed_grammar_decode_steps_total": 0,
+        "sparkgap_cache_lookups_total": 1,
+        "sparkgap_cache_hits_total": 0,
+        "sparkgap_cache_reused_tokens_total": 0,
+        "sparkgap_snapshot_publications_total": 0,
+        "sparkgap_snapshot_evictions_total": 0,
+        "sparkgap_cache_misses_total": 1,
+        "sparkgap_graph_launches_total{kind=\"init\"}": 1,
+        "sparkgap_graph_launches_total{kind=\"restore\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"resume\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"prefill\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"decode\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"vision\"}": 0,
+        "sparkgap_graph_launches_total{kind=\"snapshot\"}": 0,
+        "sparkgap_constrained_max_inflight": 0,
+        "sparkgap_active_requests": 0,
+        "sparkgap_free_request_slots": 4,
+        "sparkgap_retiring_request_slots": 0,
+        "sparkgap_free_kv_pages": 4096,
+        "sparkgap_free_snapshots": 4,
+        "sparkgap_cached_checkpoints": 0,
+        "sparkgap_cached_kv_pages": 0,
+        "sparkgap_pending_requests": 0,
+        "sparkgap_http_inflight_requests": 0,
+        "sparkgap_http_request_capacity": 20,
+        "sparkgap_frontend_active_workers": 0,
+        "sparkgap_frontend_worker_capacity": 2
+      }
+    },
+    {
+      "case": "waiting-sse",
+      "name": "resources-returned-after-drain",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "owner-held-before-close",
+      "passed": true
+    },
+    {
+      "case": "waiting-sse",
+      "name": "close-confirms-drain-and-error",
+      "passed": true,
+      "drained": true,
+      "error": "invalid or stale device completion record"
+    },
+    {
+      "case": "waiting-sse",
+      "name": "owner-released-after-drain",
+      "passed": true
+    }
+  ],
+  "extension": {
+    "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/sparkgap_native/sparkgap_native.cpython-312-x86_64-linux-gnu.so",
+    "sha256": "6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f"
+  },
+  "device_uuid": "afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "assigned_device_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "sources_before": {
+    "/home/luke/projects/sparkgap/scripts/qualify_worker_failure.py": "9aa8c8dc5c903cbaf4a4a4d46a40fc5efaa9b9c3b417e4c3101e9e3832d1bf6d",
+    "/home/luke/projects/sparkgap/scripts/qualify_startup_validation.py": "497fd1b1a1d429bb16b02eec58dba9be189d8087e8f474a79983f7ed4843b582",
+    "/home/luke/projects/sparkgap/native/src/cache/hash.rs": "795b5b3bde4c7ff73559d8fc116f624f3ac5bc69481e3145b9036ea82a8e5ad6",
+    "/home/luke/projects/sparkgap/native/src/cache/tests.rs": "a7544d06de422e510c5d456e42a3bf6111c28b5b5195edda1fa49cbf3be699a6",
+    "/home/luke/projects/sparkgap/native/src/cache.rs": "dd904f83ff06ad6947530f7c266fcf8032ab0b5220ec1e7f970dbf1f0d45cf51",
+    "/home/luke/projects/sparkgap/native/src/cuda.rs": "684435c7c574ac67a04a037f9c8fbfd3fa1865b5db6dec2e7f4211f0074c9888",
+    "/home/luke/projects/sparkgap/native/src/execution/manifest.rs": "99bcebba87ae7dd170b9681569920c19939e3645fccea31b965ee025ef3d85ef",
+    "/home/luke/projects/sparkgap/native/src/execution/tests.rs": "2ed99442ab322f72238dd5aed23d89ec4c602052c6260ba3edfffcc9c18d8481",
+    "/home/luke/projects/sparkgap/native/src/execution/transport.rs": "28582bb72f7f4e6fd0dcf8b150be76fd8dc8c362ac85ee6319dfbc0244866b16",
+    "/home/luke/projects/sparkgap/native/src/execution/worker.rs": "009dc891c23be63179bddb29ec0dc653bb9b9b3d150f9deb361155a139928254",
+    "/home/luke/projects/sparkgap/native/src/execution.rs": "7757ea216dbf6ebf7ca7aaf4df5c13c78fe9009b4620ed39c6ff8c047df87cfb",
+    "/home/luke/projects/sparkgap/native/src/frontend/images/mod.rs": "ffa1ef341d39805f0b3ec3a59f9b6e1bb85041b643b56a6c43aadfd152cffa25",
+    "/home/luke/projects/sparkgap/native/src/frontend/images/resize.rs": "cffce1937ea0705051e9e03700218f127364de9978db20913d26567b194a16de",
+    "/home/luke/projects/sparkgap/native/src/frontend/json.rs": "d6c79e20e03fe9538f7ff41efdca9dc9f7e789d6a813fdcf7c31becb9e0addf4",
+    "/home/luke/projects/sparkgap/native/src/frontend/mod.rs": "63432fec5a44824ed7cbf85751f1f363e1a6c54af1dfc37b4e4562d0d3e14907",
+    "/home/luke/projects/sparkgap/native/src/grammar.rs": "eb24ce9441b0939eecc0955563b675f7948d210f81313605eb24b377c9ee9e4b",
+    "/home/luke/projects/sparkgap/native/src/lib.rs": "2f7cd1fd659e06ef35d95f04d461f9b89d1bd47adbeade65f0ad658020054f5b",
+    "/home/luke/projects/sparkgap/native/src/lifetime.rs": "950cfbef583f405e46ec1c1da301107a93c6a5451756e94a3cbeed6b210a05bf",
+    "/home/luke/projects/sparkgap/native/src/model/inputs.rs": "fa9a69f898cc0d19dc25b87ead20c86d57506e5c27edfaf14803c1a93e008308",
+    "/home/luke/projects/sparkgap/native/src/model/tests.rs": "6806a803ad71dfea20a93280f505b4dbbae9c9bdabd93765f9602a39ebcabd6b",
+    "/home/luke/projects/sparkgap/native/src/model.rs": "1c7fe23f500910166bdbdaee786a7e15d5b983f0366ed3c8d4ebfa16333275c2",
+    "/home/luke/projects/sparkgap/native/src/python.rs": "4c47ef0f05ddd51ff67df4f089196888f0703a0f8d91424eceb73e5873703905",
+    "/home/luke/projects/sparkgap/native/src/replay/tests.rs": "f121bd874648e6c6e72ee04f87e8387e5ca2a0db38206626ddbf5a44222ca7b4",
+    "/home/luke/projects/sparkgap/native/src/replay.rs": "e6d45e6ed6455cc7b548483c3868e396f8899b6d31b93f395f3c8ceaf4cd6e01",
+    "/home/luke/projects/sparkgap/native/src/scheduler/tests.rs": "fed59c29a2530546dca793e13f6312c0fb7696cadd6254b5e8aa2f9b46ac0410",
+    "/home/luke/projects/sparkgap/native/src/scheduler.rs": "acd76f07b18903f26fc1f8dbbbf30363ac12e66d25cab6860528b6dee0e7cd10",
+    "/home/luke/projects/sparkgap/native/src/server/config.rs": "d78ca4850ad308e6b25e9e447a5fad09ece6e2e69515732798a68a992520d122",
+    "/home/luke/projects/sparkgap/native/src/server/metrics.rs": "53de38384ad5a7043be94990b94781da95c5137bee0755dd3abefb8135a41373",
+    "/home/luke/projects/sparkgap/native/src/server/output.rs": "b9ba2e83b4997fa59705eb66daddc759979c54c84577149a9e7357c38195c480",
+    "/home/luke/projects/sparkgap/native/src/server/request.rs": "7d187c5b38d51062aecd8a7853116b1c17a2e7af5f5cf0ad933c82882cd23ae9",
+    "/home/luke/projects/sparkgap/native/src/server/runtime.rs": "220d15b981d39be908f75fe8b5473e0ce8f8bf140093f4f65994ddca2bd84042",
+    "/home/luke/projects/sparkgap/native/src/server/stops.rs": "336fa9d0e242691ab0812f93fc3221aaa49601673b1a63e34b49dfaa5684b724",
+    "/home/luke/projects/sparkgap/native/src/server.rs": "3e533cd22dfdebf16a4fe5aaf25e5789d9b40ae5bb853b70338055e43e537f18",
+    "/home/luke/projects/sparkgap/native/Cargo.toml": "acf1a3b9682b3a2cc50b6518afbbaff5366fafe66da4a70be96b0ed2b399ad00",
+    "/home/luke/projects/sparkgap/native/Cargo.lock": "4e3adf21ed6479ba6a1794ec0aba507782f382f43fabcf0b17532adaba2bc48c"
+  },
+  "sources_after": {
+    "/home/luke/projects/sparkgap/scripts/qualify_worker_failure.py": "9aa8c8dc5c903cbaf4a4a4d46a40fc5efaa9b9c3b417e4c3101e9e3832d1bf6d",
+    "/home/luke/projects/sparkgap/scripts/qualify_startup_validation.py": "497fd1b1a1d429bb16b02eec58dba9be189d8087e8f474a79983f7ed4843b582",
+    "/home/luke/projects/sparkgap/native/src/cache/hash.rs": "795b5b3bde4c7ff73559d8fc116f624f3ac5bc69481e3145b9036ea82a8e5ad6",
+    "/home/luke/projects/sparkgap/native/src/cache/tests.rs": "a7544d06de422e510c5d456e42a3bf6111c28b5b5195edda1fa49cbf3be699a6",
+    "/home/luke/projects/sparkgap/native/src/cache.rs": "dd904f83ff06ad6947530f7c266fcf8032ab0b5220ec1e7f970dbf1f0d45cf51",
+    "/home/luke/projects/sparkgap/native/src/cuda.rs": "684435c7c574ac67a04a037f9c8fbfd3fa1865b5db6dec2e7f4211f0074c9888",
+    "/home/luke/projects/sparkgap/native/src/execution/manifest.rs": "99bcebba87ae7dd170b9681569920c19939e3645fccea31b965ee025ef3d85ef",
+    "/home/luke/projects/sparkgap/native/src/execution/tests.rs": "2ed99442ab322f72238dd5aed23d89ec4c602052c6260ba3edfffcc9c18d8481",
+    "/home/luke/projects/sparkgap/native/src/execution/transport.rs": "28582bb72f7f4e6fd0dcf8b150be76fd8dc8c362ac85ee6319dfbc0244866b16",
+    "/home/luke/projects/sparkgap/native/src/execution/worker.rs": "009dc891c23be63179bddb29ec0dc653bb9b9b3d150f9deb361155a139928254",
+    "/home/luke/projects/sparkgap/native/src/execution.rs": "7757ea216dbf6ebf7ca7aaf4df5c13c78fe9009b4620ed39c6ff8c047df87cfb",
+    "/home/luke/projects/sparkgap/native/src/frontend/images/mod.rs": "ffa1ef341d39805f0b3ec3a59f9b6e1bb85041b643b56a6c43aadfd152cffa25",
+    "/home/luke/projects/sparkgap/native/src/frontend/images/resize.rs": "cffce1937ea0705051e9e03700218f127364de9978db20913d26567b194a16de",
+    "/home/luke/projects/sparkgap/native/src/frontend/json.rs": "d6c79e20e03fe9538f7ff41efdca9dc9f7e789d6a813fdcf7c31becb9e0addf4",
+    "/home/luke/projects/sparkgap/native/src/frontend/mod.rs": "63432fec5a44824ed7cbf85751f1f363e1a6c54af1dfc37b4e4562d0d3e14907",
+    "/home/luke/projects/sparkgap/native/src/grammar.rs": "eb24ce9441b0939eecc0955563b675f7948d210f81313605eb24b377c9ee9e4b",
+    "/home/luke/projects/sparkgap/native/src/lib.rs": "2f7cd1fd659e06ef35d95f04d461f9b89d1bd47adbeade65f0ad658020054f5b",
+    "/home/luke/projects/sparkgap/native/src/lifetime.rs": "950cfbef583f405e46ec1c1da301107a93c6a5451756e94a3cbeed6b210a05bf",
+    "/home/luke/projects/sparkgap/native/src/model/inputs.rs": "fa9a69f898cc0d19dc25b87ead20c86d57506e5c27edfaf14803c1a93e008308",
+    "/home/luke/projects/sparkgap/native/src/model/tests.rs": "6806a803ad71dfea20a93280f505b4dbbae9c9bdabd93765f9602a39ebcabd6b",
+    "/home/luke/projects/sparkgap/native/src/model.rs": "1c7fe23f500910166bdbdaee786a7e15d5b983f0366ed3c8d4ebfa16333275c2",
+    "/home/luke/projects/sparkgap/native/src/python.rs": "4c47ef0f05ddd51ff67df4f089196888f0703a0f8d91424eceb73e5873703905",
+    "/home/luke/projects/sparkgap/native/src/replay/tests.rs": "f121bd874648e6c6e72ee04f87e8387e5ca2a0db38206626ddbf5a44222ca7b4",
+    "/home/luke/projects/sparkgap/native/src/replay.rs": "e6d45e6ed6455cc7b548483c3868e396f8899b6d31b93f395f3c8ceaf4cd6e01",
+    "/home/luke/projects/sparkgap/native/src/scheduler/tests.rs": "fed59c29a2530546dca793e13f6312c0fb7696cadd6254b5e8aa2f9b46ac0410",
+    "/home/luke/projects/sparkgap/native/src/scheduler.rs": "acd76f07b18903f26fc1f8dbbbf30363ac12e66d25cab6860528b6dee0e7cd10",
+    "/home/luke/projects/sparkgap/native/src/server/config.rs": "d78ca4850ad308e6b25e9e447a5fad09ece6e2e69515732798a68a992520d122",
+    "/home/luke/projects/sparkgap/native/src/server/metrics.rs": "53de38384ad5a7043be94990b94781da95c5137bee0755dd3abefb8135a41373",
+    "/home/luke/projects/sparkgap/native/src/server/output.rs": "b9ba2e83b4997fa59705eb66daddc759979c54c84577149a9e7357c38195c480",
+    "/home/luke/projects/sparkgap/native/src/server/request.rs": "7d187c5b38d51062aecd8a7853116b1c17a2e7af5f5cf0ad933c82882cd23ae9",
+    "/home/luke/projects/sparkgap/native/src/server/runtime.rs": "220d15b981d39be908f75fe8b5473e0ce8f8bf140093f4f65994ddca2bd84042",
+    "/home/luke/projects/sparkgap/native/src/server/stops.rs": "336fa9d0e242691ab0812f93fc3221aaa49601673b1a63e34b49dfaa5684b724",
+    "/home/luke/projects/sparkgap/native/src/server.rs": "3e533cd22dfdebf16a4fe5aaf25e5789d9b40ae5bb853b70338055e43e537f18",
+    "/home/luke/projects/sparkgap/native/Cargo.toml": "acf1a3b9682b3a2cc50b6518afbbaff5366fafe66da4a70be96b0ed2b399ad00",
+    "/home/luke/projects/sparkgap/native/Cargo.lock": "4e3adf21ed6479ba6a1794ec0aba507782f382f43fabcf0b17532adaba2bc48c"
+  },
+  "sources_unchanged": true,
+  "extension_unchanged": true,
+  "passed": true,
+  "artifacts": {
+    "path": "docs/validation/native-worker-failure-artifacts.tar.gz",
+    "sha256": "8b16f56f98cb23d22f389c064e70004593a4ccc8253b628323f4800a4719f89b",
+    "nbytes": 28633
+  },
+  "gpu_release": {
+    "device_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+    "memory_used_mib": 2,
+    "compute_processes": [],
+    "observation": "nvidia-smi after qualifier exited with status 0, before GPU was released to full-model parity"
+  },
+  "harness_diagnostics": [
+    {
+      "stage": "identity check before catalog or HTTP",
+      "error": "PyTorch returned UUID without the GPU- prefix; raw string comparison rejected the assigned device. The passed harness compares the UUID after removing only that optional prefix and preserves both representations.",
+      "artifact": "sparkgap-worker-failure-uuid-check/failure.json"
+    }
+  ],
+  "summary": {
+    "checks": 22,
+    "passed_checks": 22,
+    "http_requests": 10,
+    "native_workers": 2,
+    "model_graph_launches_each": 1,
+    "bound_address": "127.0.0.1:0 requests ephemeral listener per case; harness uses Server.address directly",
+    "checkpoint_inference": false
+  }
+}

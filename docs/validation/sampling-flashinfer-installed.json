@@ -1,0 +1,104 @@
+{
+  "schema": "sparkgap-flashinfer-installed-sampling-v1",
+  "passed": true,
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "patch": "patches/flashinfer-serving.patch",
+  "patch_sha256": "b9ea72148ed6c0c05a5deacc6d88610627cd83b1d1b40b4dac73a9365ea988cd",
+  "patch_manifest": "patches/flashinfer-serving.json",
+  "patch_manifest_sha256": "2a1d7da3bcbf00861af10afacced4701388994cf2a4fe031fdd89b694002fd5c",
+  "declared_files": 18,
+  "base_revision": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+  "stage_before": {
+    "head": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+    "files_sha256": {
+      "flashinfer/experimental/b12x/_api.py": "513bd1a1cb9699ca6a5be0ddb52e950962d65099e0c6c9499ca456b1290dac4d",
+      "flashinfer/experimental/b12x/attention/__init__.py": "1e7b63da60f56da4ec60fccd470879292ff75e5693e6fa40e29170e43d36972d",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/README.md": "0ef6cc9cec8d1bfe41ed592c8220e53dd175482a01115d30e64c5a5e412a7e3e",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/__init__.py": "96eeb9f1b070e9140960f493a4e71440362d927b8a373e94aedfe99078bbc1bc",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/_preparation.py": "a252c9bce7e099f91946667d188557ed7f695898ac61f7534298b22522ecc489",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/_tuning.py": "cd8fec5e6d839aa9d42bf87e6d709cd6d4ece8d6149bb02ee9e999c4b64b5b97",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/api.py": "7bc74706f7f5dee532632915faa1f988b1b247f6d36a3dad4187607d87758f80",
+      "flashinfer/experimental/b12x/sequence/__init__.py": "c7628072c36c3260c3e6b856c6fa8556eaf5beeba69e529b6f69f1b9397672bf",
+      "flashinfer/experimental/b12x/sequence/_short_conv.py": "cbd919aeb8309911f19ff7ffdc3f0d09dd0f4e2c0d5a5f1fe557190f01495bbd",
+      "flashinfer/experimental/b12x/sequence/ple/_kernels.py": "42656e4b6d5740cea0d3c0897a13c5a6e23557b51dea6478349f934a6cfa79fb",
+      "flashinfer/experimental/b12x/sequence/short_conv/README.md": "aded0bea110c49f7a138d6454a63f5cfe5b9c3a2db4fd3b12196ea4db25bf970",
+      "flashinfer/experimental/b12x/sequence/short_conv/__init__.py": "d56f81d0d87b2b17df1d39da643c2772700e7871db13d0d181057b49a1b85653",
+      "flashinfer/experimental/b12x/sequence/short_conv/_preparation.py": "8a527b013d0c3e705f704b60aa41824be695c6b12ab331e6024755b985dcbc90",
+      "flashinfer/experimental/b12x/sequence/short_conv/_tuning.py": "4d8970268901fe2342cad873a76be0676c65a81cd639cbf9df685c9c13bade69",
+      "flashinfer/experimental/b12x/sequence/short_conv/api.py": "ae024a3839adb28476ce9f439fc7b3b2c6aac152102d69fe0a79f12f6a145ec2",
+      "tests/experimental/b12x/attention/test_paged_kv_write.py": "b891aa791da86905df99493461e86f31b8686b4279bc0114248da2902c6a4da7",
+      "tests/experimental/b12x/sequence/test_short_conv.py": "44689de4490293e51c379e9f81a0aa92cffb4bdcd355268e2306baf6c47ceeb7"
+    },
+    "generated_identical_licenses": {
+      "LICENSE.cutlass.txt": "6fc6ad419e4d26571a14c7c4d26b65345865c20dd8686ddcf5e8673f54d3d233",
+      "LICENSE.flashattention3.txt": "8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73",
+      "LICENSE.fmt.txt": "825c9324e70f8c839c8ba910543dd4a7daee243b86ef960594c11381a19980b8",
+      "LICENSE.spdlog.txt": "c703fb8266409f5660523b307bbefd2bc8d7b92c848d0b973e6dd8640a5389f7"
+    },
+    "source_changes_exact": true,
+    "installed_air_header_sha256": "e41572fbb55a214fc0b4dfb077f8e8e127fe61bf69b4d4b53ac092f6b80e22bc",
+    "native_extension_sha256": {
+      "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/sparkgap_native/sparkgap_native.cpython-312-x86_64-linux-gnu.so": "6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f"
+    }
+  },
+  "fresh_checkout_patch_check": {
+    "path": "/tmp/sparkgap-air-top-p-candidate/fresh-checkout",
+    "command": "git apply --check /home/luke/projects/sparkgap/patches/flashinfer-serving.patch",
+    "passed": true
+  },
+  "setup_validator": "scripts.setup_preparation.stage_flashinfer accepted18 exactfilehashes",
+  "install_command": "BUILD_NVEP=0 FLASHINFER_BUILD_NO_PIP=1 uv sync --locked --extra prepare --extra test --reinstall-package flashinfer-python",
+  "install_log": "/tmp/sparkgap-air-top-p-candidate/reinstall.log",
+  "install_log_sha256": "afb40eaa81439f3d980399a4411209ac5a0150e2402b3d790992d3750e01325f",
+  "installed_header_sha256": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b",
+  "native_extension_sha256": "6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f",
+  "native_extension_unchanged": true,
+  "jit": {
+    "path": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+    "sha256_before": "cd08129ac2eafdd7eb5df6a2d56114c6d4bb5c48435893137bae57c332bbe3d6",
+    "sha256_after": "88017d41217c4428528fb6b198279603d021790152e818a0ccec6f593a1f77ed",
+    "ninja_path": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/build.ninja",
+    "ninja_sha256": "50e14c6f503a5b18afd14f2e2bf2617776c88c2403c07fa8365e5d717e20f4ee",
+    "aot": false
+  },
+  "jit_log": "/tmp/sparkgap-air-top-p-candidate/installed-jit.log",
+  "jit_log_sha256": "3c6b7ab38671eee7879c7a4f46d7df3f3d1bc8e6c88c10fab28cb237a9766593",
+  "tests": {
+    "command": "CUDA_HOME=/opt/cuda CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f SPARKGAP_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest -q tests/recipes/test_qwen38_sampling.py tests/recipes/test_qwen38_sampling_flashinfer.py",
+    "passed": 37,
+    "failed": 0,
+    "warnings": 1,
+    "log": "/tmp/sparkgap-sampling-fi-installed-tests.log",
+    "log_sha256": "d17d1c46bf63136d669f2bce11c2ba79d59fdd3122c14ae25cdb98802cfadb31"
+  },
+  "measurement_receipt": "sampling-paths-flashinfer-installed.json",
+  "measurement_sha256": "4964a770658262be35be3d641313973a53aa81ecc21932db7cbc788987d3c1c8",
+  "native_checked_blocks": 552,
+  "active_batch_step_medians_us": {
+    "temperature_zero-b1-n32-general": 121.28299847245216,
+    "temperature_zero-b1-n32-greedy": 18.31750012934208,
+    "temperature_zero-b1-n64-general": 120.92174962162971,
+    "temperature_zero-b1-n64-greedy": 17.990250140428543,
+    "temperature_zero-b2-n32-general": 143.25449615716934,
+    "temperature_zero-b2-n32-greedy": 18.593499436974525,
+    "temperature_zero-b2-n64-general": 144.79725062847137,
+    "temperature_zero-b2-n64-greedy": 18.528500571846962,
+    "temperature_zero-b4-n32-general": 164.97649997472763,
+    "temperature_zero-b4-n32-greedy": 19.58450023084879,
+    "temperature_zero-b4-n64-general": 165.694497525692,
+    "temperature_zero-b4-n64-greedy": 19.959249533712864,
+    "checkpoint_defaults-b1-n32-one-sample-general": 130.15999644994736,
+    "checkpoint_defaults-b1-n64-one-sample-general": 128.67199629545212,
+    "checkpoint_defaults-b2-n32-one-sample-general": 150.68800002336502,
+    "checkpoint_defaults-b2-n64-one-sample-general": 150.43200552463531,
+    "checkpoint_defaults-b4-n32-one-sample-general": 169.5839986205101,
+    "checkpoint_defaults-b4-n64-one-sample-general": 169.6000024676323
+  },
+  "source_policy": "flashinfer_top_k_top_p_min_p_philox_v1",
+  "candidate_operator_evidence": "sampling-air-parallel-qualification.json",
+  "limitations": [
+    "Component operator/state timing excludes model forward and nativeHTTP scheduling.",
+    "uv rebuilt root sparkgap package metadata after pyproject patchpath updates; native extension was not rebuilt.",
+    "Full-model37graph andHTTP qualification are subsequent gates."
+  ]
+}

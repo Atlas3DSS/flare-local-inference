@@ -1,0 +1,95 @@
+{
+  "schema": "sparkgap-air-top-p-parallel-qualification-v1",
+  "passed": true,
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "native_extension_sha256": "6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f",
+  "source": {
+    "installed_header": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/include/flashinfer/air_top_p.cuh",
+    "installed_sha256": "e41572fbb55a214fc0b4dfb077f8e8e127fe61bf69b4d4b53ac092f6b80e22bc",
+    "candidate_sha256": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b"
+  },
+  "jit_identity": "ade3a489445fad02",
+  "source_folder": "/tmp/sparkgap-air-top-p-candidate",
+  "source_sha256": {
+    "air-top-p.patch": "29ab57a25399309126ae1ebf773ca10eb2a7c609c34d244766887e375f0677de",
+    "air_top_p.cuh": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b",
+    "air_top_p_isolated.cuh": "23362eae5486ed21af5f7ed41cfda29d9b59dfb6f7d438d302283127e67aa1d1",
+    "renorm.cu": "b7535fe1e3cafaa6f54d8a1d1dfbca12a72c3bd381996c7ebb56467407e97e60",
+    "module.py": "9a6c45d18c53fd801818e258cc2c47ce1a4b7cb8af4471c2baf16ecae0bc88d3",
+    "qualify_deterministic.py": "86029d2818445f1d4008f373d1d95b51a88481e5f31cabc45e4d15b65919ecf4",
+    "isolate.py": "018d19c578866dc11b119e1e53e455cde4f63865d310ff42f24d56988df75c7a",
+    "measure.py": "2d76e7777b6116e98a570def8cfdf912011efd183be110781ab4876af6f2f090"
+  },
+  "operator_gates": {
+    "deterministic_public_api": {
+      "passed": true,
+      "checks": 375,
+      "receipt": "/tmp/sparkgap-air-top-p-candidate/qualification-deterministic.json",
+      "sha256": "3c552dd53775943ee4a4b2488565f524f1d6eb1338b73e8ad5ec1a3d711d9d8f",
+      "comparisons": "Bitwise exact full output versus installed FlashInfer; vocab2048/2049/8192/248320/248321, B1/2/4, dense/sparse/ties/one-hot/zero, dynamic p1e-6/.01/.5/.95/1, native replay and zero CUDA allocation growth."
+    },
+    "same_threshold_apply": {
+      "passed": true,
+      "checks": 300,
+      "receipt": "/tmp/sparkgap-air-top-p-candidate/isolation.json",
+      "sha256": "76d789e4a615a6a6acac56798719dd8e415c8edeb353c3efa06cb40fd0eed282",
+      "comparisons": "Bitwise exact output with identical input thresholds/counters, original and parallel apply; additionally covers tiny mass and zero rows."
+    }
+  },
+  "nondeterministic_public_api": {
+    "exact_comparison_passed": false,
+    "failed_receipt": "/tmp/sparkgap-air-top-p-candidate/qualification-nondeterministic-mismatch.json",
+    "sha256": "e2fb632893b364f6471e3852a2a32593fe019a9828529ca9ccf7ca3498b99be8",
+    "mismatch": "/tmp/sparkgap-air-top-p-candidate/mismatch.pt",
+    "mismatch_sha256": "eefdd848ce7256008a88efdfaf9ec67a3bc165ac94cbabdc36b20d5caf807f9c",
+    "condition": {
+      "vocab": 8192,
+      "rows": 2,
+      "distribution": "dense",
+      "p": [
+        0.01,
+        1.0
+      ]
+    },
+    "original_repeat_divergent_pairs": 5,
+    "original_repeat_pairs": 20,
+    "original_distinct_output_hashes": 2,
+    "observation": "The unchanged nondeterministic radix path itself changes support on this p=1 row. Exactness of the modified apply is established separately under common thresholds; no tolerance was relaxed."
+  },
+  "sampler_measurement": "sampling-paths-flashinfer-air-parallel.json",
+  "sampler_checked_blocks": 552,
+  "sampler_exact_state": true,
+  "profile": {
+    "artifact": "/tmp/sparkgap-sampling-fi-air-profile.json",
+    "sha256": "43a4f270a29bbbe017a5275516b41f170acfbffcb28ea3aa4920756126a9ad4c",
+    "trace": "/tmp/sparkgap-sampling-fi-air-profile-trace.json",
+    "sha256_trace": "ae9c1faa2115473f3e15a55b0f9d7014b395c2b2e7deca689b34da41232713e6",
+    "apply_kernels": [
+      {
+        "name": "void flashinfer::sampling::air_top_p_parallel::AirTopPRenormSumKernel<float>(float const*, flashinfer::sampling::air_top_p_parallel::Counter<float>*, float*, int, int)",
+        "device_time_us": 6.016000000000076,
+        "start_us": 863.329,
+        "end_us": 869.345
+      },
+      {
+        "name": "void flashinfer::sampling::air_top_p_parallel::AirTopPRenormNormKernel<float>(float const*, int, flashinfer::sampling::air_top_p_parallel::Counter<float>*)",
+        "device_time_us": 1.1840000000000828,
+        "start_us": 869.473,
+        "end_us": 870.657
+      },
+      {
+        "name": "void flashinfer::sampling::air_top_p_parallel::AirTopPRenormApplyKernel<float>(float const*, float*, flashinfer::sampling::air_top_p_parallel::Counter<float>*, int)",
+        "device_time_us": 1.6639999999999873,
+        "start_us": 870.785,
+        "end_us": 872.449
+      }
+    ]
+  },
+  "scope": "Isolated source/JIT module only; installed package and FlashInfer worktree remain unchanged. Public API and workspace sizing are unchanged by the header patch. FP32 public renormalization path on SM120 qualified; other architectures not run.",
+  "evidence_archive": {
+    "path": "sampling-air-parallel-evidence.tar.gz",
+    "sha256": "07f32b579b377cb5496c92fc61d28a44238833c70cd7c09fdf5afda07aea75f4",
+    "files": 40,
+    "bytes": 371562
+  }
+}

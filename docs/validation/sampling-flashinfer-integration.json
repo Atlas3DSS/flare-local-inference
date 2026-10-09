@@ -1,0 +1,84 @@
+{
+  "schema": "sparkgap-flashinfer-sampling-integration-v1",
+  "passed": true,
+  "source_sha256": {
+    "serve/recipes/qwen38/sampling.py": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+    "tests/recipes/test_qwen38_sampling.py": "8698a0506b32e86260873649a57533e11ca8384c4071ec953abc27dfd745131a",
+    "tests/recipes/test_qwen38_sampling_flashinfer.py": "facf4461c92297e2b84eeab2c5c68f8fb5ee863374a61d94dd182cf5291756ac",
+    "scripts/qualify_sampling_paths.py": "9c9b02fca2b82afbec8bafc8eb731210ac51f65009520ae5831d2b7d65809f37"
+  },
+  "source_snapshot": "/tmp/sparkgap-sampling-flashinfer-source",
+  "original_source_snapshot": "/tmp/sparkgap-sampling-original-source",
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "cuda_home": "/opt/cuda",
+  "checks": [
+    {
+      "command": "CUDA_HOME=/opt/cuda CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f SPARKGAP_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest -q tests/recipes/test_qwen38_sampling_flashinfer.py -x",
+      "passed": 5,
+      "failed": 0,
+      "log": "/tmp/sparkgap-sampling-fi-tests-second.log"
+    },
+    {
+      "command": "CUDA_HOME=/opt/cuda CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f SPARKGAP_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest -q tests/recipes/test_qwen38_sampling.py",
+      "passed": 32,
+      "failed": 0,
+      "log": "/tmp/sparkgap-sampling-fi-state.log"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f .venv/bin/python scripts/qualify_sampling_paths.py --validate-only --output /tmp/sparkgap-sampling-fi-cpu-validated.json --artifacts /tmp/sparkgap-sampling-fi-cpu-validated",
+      "passed": true,
+      "cuda_initialized": false,
+      "cases": 18
+    }
+  ],
+  "measurements": {
+    "sampling-paths-original.json": {
+      "sha256": "8e57d38f8c6d6126fb364aed5eeb8d672b04c4577bf02698193cfa4ff38db034",
+      "native_blocks": 552,
+      "passed": true
+    },
+    "sampling-paths-flashinfer.json": {
+      "sha256": "9df1e129104371be2818665aa9ac9205b1cef969476c84ba6bd60ac3094b28df",
+      "native_blocks": 552,
+      "passed": true
+    }
+  },
+  "preserved_failures": [
+    {
+      "artifact": "/tmp/sparkgap-sampling-cpu.json",
+      "failure": "Original CPU oracle incorrectly prohibited EOS inside measured blocks; fixed to preserve EOS and terminal no-op iterations without changing input, seed or filters."
+    },
+    {
+      "artifact": "/tmp/sparkgap-sampling-fi-tests-first.log",
+      "failure": "Triton compile rejected sampled int32 token assigned to int64 branch value; fixed explicit cast before graph execution."
+    },
+    {
+      "artifact": "/tmp/sparkgap-sampling-fi-cpu.json",
+      "failure": "Provenance import of FlashInfer initialized CUDA during --validate-only; replaced import with package metadata/spec. No sampler or model workload ran."
+    }
+  ],
+  "raw_artifact_sha256": {
+    "/tmp/sparkgap-sampling-fi-tests-first.log": "5e8e1f889c7b4afd2b22b3b6f467a75714daf6ce69532717467c15d45aa145c2",
+    "/tmp/sparkgap-sampling-fi-tests-second.log": "e0283d9598bb0097f00b7bcc0431a6a3cb3aad883f7e34785b5a83d56790ae35",
+    "/tmp/sparkgap-sampling-fi-state.log": "74b3abd14462de09a8010ebb99667c42df3dc5586441d4f740539946b04e9eca",
+    "/tmp/sparkgap-sampling-fi-cpu.json": "e4ef0abc709e7cdfe2380195b197c342d60b2fd3e7452182c9bac0edf472e481",
+    "/tmp/sparkgap-sampling-fi-cpu-validated.json": "2ed6b7c64216f78198539053d7d99f96c6c393b0d38e6cce625b8a6814da1585",
+    "/tmp/sparkgap-sampling-flashinfer.log": "55cd66a448c31cdf8155d01c382edfa6d621dbf5661d879b9a7e55dcd91ba449",
+    "/tmp/sparkgap-sampling-original.log": "4737cb1493e1e40423682f67e22bc576c596a0f17cc87ae28cf5607126546771"
+  },
+  "sampling_policy": "flashinfer_top_k_top_p_min_p_philox_v1",
+  "policy_contract": "flashinfer-sampling-contract.md",
+  "limitations": [
+    "Measurements include sampler plus sampled-ID trace copy and common pending-token gather/copy/consume. They exclude model forward and HTTP scheduling.",
+    "FlashInfer threshold ties and CUDA curand uniform conversion differ from the sorted-CDF policy. Stochastic traces are compared with a separately versioned CPU oracle, not historical sampled token IDs.",
+    "FlashInfer general B1 component latency exceeds the sorted-CDF baseline; B2/B4 are lower. Production graph selection has not yet selected the isolated greedy path.",
+    "Full-model captured catalog and HTTP qualification must be rerun after this sampler source change.",
+    "FlashInfer top-k and softmax workspaces are process-global, strongly retained, and require serial execution on the model stream."
+  ],
+  "historical_baseline_archive": {
+    "path": "sampling-original-evidence.tar.gz",
+    "sha256": "e9ac751dfe4e852ae8fb8f1a8ec105f597a89608a2ab29a63c7d39f621ca87e2",
+    "bytes": 33421,
+    "contents": "Executed sorted-CDF sampler, tests, measurement script, CPU failure/terminal receipts, GPU log."
+  }
+}

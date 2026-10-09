@@ -1,0 +1,123 @@
+{
+  "pid": 4101353,
+  "cmdline": ".venv/bin/python -u -m serve --bind 127.0.0.1:0 --memory-report /tmp/sparkgap-server-memory.json ",
+  "request": {
+    "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Count from 1 to 1000, separated by commas. Include every integer and no other text."
+      }
+    ],
+    "enable_thinking": false,
+    "temperature": 0,
+    "max_tokens": 4096,
+    "stream": true
+  },
+  "http_status": 200,
+  "events": [
+    {
+      "id": "chatcmpl-43",
+      "object": "chat.completion.chunk",
+      "created": 1791526647,
+      "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "role": "assistant"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chatcmpl-43",
+      "object": "chat.completion.chunk",
+      "created": 1791526647,
+      "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": "1"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chatcmpl-43",
+      "object": "chat.completion.chunk",
+      "created": 1791526647,
+      "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": ","
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chatcmpl-43",
+      "object": "chat.completion.chunk",
+      "created": 1791526647,
+      "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": " "
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chatcmpl-43",
+      "object": "chat.completion.chunk",
+      "created": 1791526647,
+      "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": "2"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "error": {
+        "message": "model runtime stopped"
+      }
+    }
+  ],
+  "signal_after_visible_delta": {
+    "id": "chatcmpl-43",
+    "object": "chat.completion.chunk",
+    "created": 1791526647,
+    "model": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "content": "1"
+        },
+        "finish_reason": null
+      }
+    ]
+  },
+  "signal": "SIGTERM",
+  "seconds_until_connection_closed": 0.10431422598776408,
+  "signal_sent": true,
+  "process_exit_code": 0,
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "gpu_memory_after_exit_mib": 2,
+  "raw_sse": "/tmp/sparkgap-shutdown.sse",
+  "server_log": "/tmp/sparkgap-server.log"
+}

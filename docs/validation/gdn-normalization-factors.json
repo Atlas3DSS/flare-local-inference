@@ -1,0 +1,73 @@
+{
+  "status": "failed_unchanged_pointwise_gate",
+  "checkpoint": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+  "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "test": "--import-mode=importlib",
+  "source_changes": {
+    "b12x/sequence/_shared/delta_prefill/_cute_kernels.py": {
+      "baseline": "6b091099326a7db4677fbad3935328c9ad8f15334d6bd7ec64b6719e1a0a3afe",
+      "normalization_factors": "88a56cc441d755ae7d9274d69961e2f14b487d3b0f3aa9ac56762a61f4fed32d"
+    }
+  },
+  "measurements": {
+    "baseline": [
+      {
+        "line": 323,
+        "label": "prefill_65",
+        "slot": null,
+        "shape": [
+          66,
+          2560
+        ],
+        "relative_l2": 0.014330066740512848,
+        "relative_l2_limit": 0.015,
+        "rtol": 0.025,
+        "atol": 0.0011216054687499999,
+        "max_abs": 0.002197265625,
+        "pointwise_mismatches": 4,
+        "passed": false
+      }
+    ],
+    "normalization_factors": [
+      {
+        "line": 323,
+        "label": "prefill_65",
+        "slot": null,
+        "shape": [
+          66,
+          2560
+        ],
+        "relative_l2": 0.013501359149813652,
+        "relative_l2_limit": 0.015,
+        "rtol": 0.025,
+        "atol": 0.0011216054687499999,
+        "max_abs": 0.002197265625,
+        "pointwise_mismatches": 4,
+        "passed": false
+      }
+    ]
+  },
+  "sources_unchanged_during_each_run": true,
+  "installed_kernel_unchanged": true,
+  "tensor_artifacts": {
+    "baseline": {
+      "path": "/tmp/sparkgap-gdn65-recorded-baseline.pt",
+      "sha256": "80538e8ac4f45b79bb85e476f8ef7752fccfe6382f62f359c04e3854669fc58e"
+    },
+    "normalization_factors": {
+      "path": "/tmp/sparkgap-gdn65-normalization-factors.pt",
+      "sha256": "02cc1c276730ec79beb6573344851c54ff190aa139e3c752e5b836b1cb1827ab"
+    }
+  },
+  "method": "Original test assertions execute unchanged after fenced CPU observations. Candidate imports an isolated copy of installed b12x with only the normalization-factor kernel edit.",
+  "scope": "Layer-zero exact-checkpoint packed65+1 prefill; both runs fail the first output assertion before continuation and checkpoint assertions. No performance or full-model acceptance.",
+  "limitation": "Raw BF16 Q/K MMA followed by FP32 normalization factors changes rounding and can overflow for extreme operands; the candidate is not installed.",
+  "archive": {
+    "path": "gdn-normalization-factors.tar.gz",
+    "sha256": "53844fa73efbd06187a58ffdf30b86380760accd6bc4d6f45f99c903632c5ef4",
+    "bytes": 37645887,
+    "payloads": 20,
+    "all_payloads_verified": true
+  }
+}

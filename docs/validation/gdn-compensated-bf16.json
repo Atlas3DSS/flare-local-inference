@@ -1,0 +1,275 @@
+{
+  "status": "failed_continued_prefill_canonical_gate",
+  "checkpoint": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+  "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "candidate_patch_sha256": "60dd40ead25184dfba75ef8c8fa4eab2c32383217c45e59db5c63bdea8794221",
+  "source_changes": {
+    "sequence/gdn_prefill/_tuning.py": {
+      "baseline": "6a282268d592b569944ebdf8061dc6279849b3e01930608c88a1f03fb8bd770f",
+      "candidate": "a9dcb9ec1c4a70caa1e0b6d5afda53feb96f2acb4f7540a7df348808f72d93fc"
+    },
+    "sequence/_shared/delta_prefill/_cute_kernels.py": {
+      "baseline": "6b091099326a7db4677fbad3935328c9ad8f15334d6bd7ec64b6719e1a0a3afe",
+      "candidate": "1572519edb6a8902e067aff8fba3de744370510f0f1f9c22ab6abc5f678eaf13"
+    },
+    "sequence/_shared/delta_prefill/workspace.py": {
+      "baseline": "d4ae617546c8f44095ecbcb3df8a16820af68b570e22a43cde40e9c24b74c49b",
+      "candidate": "d07deca6f692d8a99ac6e73e72ebb3e40487457a7b6b2df6f3f214955013abf0"
+    },
+    "sequence/_shared/delta_prefill/contract.py": {
+      "baseline": "e888acbf1f8de89c5582228fc5c410eba26e6d78a9befed9de9b83baec1cfa94",
+      "candidate": "fc5ec6ead3935dc0eda75c1033cfd4456fe5b129a5ecc8586167e4e8dba6b4df"
+    }
+  },
+  "test": "--import-mode=importlib",
+  "measurements": [
+    {
+      "line": 323,
+      "label": "prefill_65",
+      "slot": null,
+      "shape": [
+        66,
+        2560
+      ],
+      "relative_l2": 0.012060169130563736,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.0011216054687499999,
+      "max_abs": 0.001220703125,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 329,
+      "label": "prefill_65",
+      "slot": 1,
+      "shape": [
+        48,
+        128,
+        128
+      ],
+      "relative_l2": 0.001892393222078681,
+      "relative_l2_limit": 0.012,
+      "rtol": 0.025,
+      "atol": 0.00044750621712207793,
+      "max_abs": 4.9765221774578094e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 334,
+      "label": "prefill_65",
+      "slot": 1,
+      "shape": [
+        10240,
+        3
+      ],
+      "relative_l2": 9.290490652347216e-07,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.008497093749999999,
+      "max_abs": 1.52587890625e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 329,
+      "label": "prefill_65",
+      "slot": 2,
+      "shape": [
+        48,
+        128,
+        128
+      ],
+      "relative_l2": 0.0016973011661320925,
+      "relative_l2_limit": 0.012,
+      "rtol": 0.025,
+      "atol": 0.00010217946891114116,
+      "max_abs": 2.0708423107862473e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 334,
+      "label": "prefill_65",
+      "slot": 2,
+      "shape": [
+        10240,
+        3
+      ],
+      "relative_l2": 6.408700301108183e-06,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.00697365625,
+      "max_abs": 6.103515625e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 342,
+      "label": "prefill_65",
+      "slot": 2,
+      "shape": [
+        48,
+        128,
+        128
+      ],
+      "relative_l2": 0.0017649553483352065,
+      "relative_l2_limit": 0.012,
+      "rtol": 0.025,
+      "atol": 0.0003534998761713505,
+      "max_abs": 3.25061846524477e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 323,
+      "label": "decode_1",
+      "slot": 2,
+      "shape": [
+        2,
+        2560
+      ],
+      "relative_l2": 0.009038519114255905,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.000729759765625,
+      "max_abs": 0.000518798828125,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 329,
+      "label": "decode_1",
+      "slot": 1,
+      "shape": [
+        48,
+        128,
+        128
+      ],
+      "relative_l2": 0.0018411529017612338,
+      "relative_l2_limit": 0.012,
+      "rtol": 0.025,
+      "atol": 0.0004135883150845766,
+      "max_abs": 4.953891038894653e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 334,
+      "label": "decode_1",
+      "slot": 1,
+      "shape": [
+        10240,
+        3
+      ],
+      "relative_l2": 9.278834340875619e-07,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.008497093749999999,
+      "max_abs": 1.52587890625e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 329,
+      "label": "decode_1",
+      "slot": 2,
+      "shape": [
+        48,
+        128,
+        128
+      ],
+      "relative_l2": 0.0008095630328170955,
+      "relative_l2_limit": 0.012,
+      "rtol": 0.025,
+      "atol": 6.969953125715255e-05,
+      "max_abs": 8.573057129979134e-06,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 334,
+      "label": "decode_1",
+      "slot": 2,
+      "shape": [
+        10240,
+        3
+      ],
+      "relative_l2": 5.255443738860777e-06,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.00697365625,
+      "max_abs": 6.103515625e-05,
+      "pointwise_mismatches": 0,
+      "passed": true
+    },
+    {
+      "line": 323,
+      "label": "prefill_3",
+      "slot": 2,
+      "shape": [
+        5,
+        2560
+      ],
+      "relative_l2": 0.015581274405121803,
+      "relative_l2_limit": 0.015,
+      "rtol": 0.025,
+      "atol": 0.000846947265625,
+      "max_abs": 0.00152587890625,
+      "pointwise_mismatches": 3,
+      "passed": false
+    }
+  ],
+  "recorded_steps": [
+    {
+      "label": "prefill_65",
+      "mode": "prefill",
+      "lengths": [
+        65,
+        1
+      ],
+      "incoming_state_from_step": null
+    },
+    {
+      "label": "decode_1",
+      "mode": "decode",
+      "lengths": [
+        1,
+        1
+      ],
+      "incoming_state_from_step": "prefill_65"
+    },
+    {
+      "label": "prefill_3",
+      "mode": "prefill",
+      "lengths": [
+        3,
+        2
+      ],
+      "incoming_state_from_step": "decode_1"
+    }
+  ],
+  "both_runs_metrics_identical": true,
+  "sources_unchanged_during_both_runs": true,
+  "installed_sources_unchanged": true,
+  "tensor_artifact": {
+    "path": "/tmp/sparkgap-gdn65-compensated-steps.pt",
+    "sha256": "1260c3c2cd764789984b75f744c4fdd51bd6f86e49b1aa9ec20d623c27c3ae9b"
+  },
+  "numerical_assertions_passed": 11,
+  "numerical_assertions_failed": 1,
+  "method": "Original checkpoint test, inputs, references, and assertions unchanged. CPU observations occur after graph replay and allocation-count assertions. The test stops at the continued-prefill output failure.",
+  "limitations": [
+    "Later continued-state and zero-active assertions do not execute after the failure.",
+    "No generic summary-mode/key-split or latency qualification.",
+    "Candidate remains isolated and is not installed."
+  ],
+  "archive": {
+    "path": "gdn-compensated-bf16.tar.gz",
+    "sha256": "f2b39c8f17397267b4f4ec0eea6159f94b3ace43e07f95c7039edf547986cfc3",
+    "bytes": 77946980,
+    "payloads": 30
+  }
+}

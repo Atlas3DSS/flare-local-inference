@@ -1,0 +1,1405 @@
+{
+  "schema": "sparkgap-prefill-capacity-evidence-v1",
+  "fixture": {
+    "checkpoint": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+    "cases": {
+      "1024": {
+        "prompt_tokens": 1024,
+        "token_ids_sha256": "fe9c0da56950cf23dd607542fbf7da034ff574ba9a72e55ddbddfe54e1af17f5",
+        "request_sha256": "145d29d975202f8d912dbfcde4f9cf19fcee689161a7e906eb29c446a54e1a5f"
+      },
+      "2048": {
+        "prompt_tokens": 2048,
+        "token_ids_sha256": "d0258f31917c8defd5940ceaedf60444378eb6026307af1b6e4ab8ae4626ce43",
+        "request_sha256": "1cd4a0c571d90c990d9833d3ccd322ac7d9a669e78af0d88c35f2670485f948d"
+      },
+      "4043": {
+        "prompt_tokens": 4043,
+        "token_ids_sha256": "ace647f765c84046a4a9e0b01ad7daec0c8df4d37bae440d0f902d32a6434f17",
+        "request_sha256": "5c30681d0d4efdbdc4aacd09cd826f6ff8ea9f3828ea8d53b1d567dca5bafb41"
+      },
+      "4096": {
+        "prompt_tokens": 4096,
+        "token_ids_sha256": "2eb43bb728e4a2234fd56726fe9d9eefde5308564397c1695eabf7558b33bcf8",
+        "request_sha256": "2ec89b48969ad0960ff3fba5540514d0ea4e99252bbd8a0123ebad9d4d8613cf"
+      },
+      "4113": {
+        "prompt_tokens": 4113,
+        "token_ids_sha256": "2b23c6662673671c164625333b468aca4cfe4408fe0675537340b64914c3490e",
+        "request_sha256": "bedf7588e0dd1815b1707bb473d364fd1d3e4495eb44f5b816335eee08a37090"
+      },
+      "8209": {
+        "prompt_tokens": 8209,
+        "token_ids_sha256": "b0f915ed277a6ccc7b281cc63393ccad11dba97c0f6b2b4b76db70618867b009",
+        "request_sha256": "ae72fb7441a0750eeaf8cc8acc10878ac2eda983af7d18a63d569dc95c015253"
+      }
+    }
+  },
+  "native_build": {
+    "native_extension": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/sparkgap_native/sparkgap_native.cpython-312-x86_64-linux-gnu.so",
+    "sha256": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+    "source_files": 34,
+    "sources_unchanged": true,
+    "source_sha256": {
+      "native/src/cache/hash.rs": "795b5b3bde4c7ff73559d8fc116f624f3ac5bc69481e3145b9036ea82a8e5ad6",
+      "native/src/cache/tests.rs": "a7544d06de422e510c5d456e42a3bf6111c28b5b5195edda1fa49cbf3be699a6",
+      "native/src/cache.rs": "dd904f83ff06ad6947530f7c266fcf8032ab0b5220ec1e7f970dbf1f0d45cf51",
+      "native/src/cuda.rs": "684435c7c574ac67a04a037f9c8fbfd3fa1865b5db6dec2e7f4211f0074c9888",
+      "native/src/execution/manifest.rs": "46a59af91ec4bbfb586e24e7ab8e6aadf7e14bd6ea17f8d0ecd73cd6739c619a",
+      "native/src/execution/tests.rs": "04556029d8c144512ce3b8ef0a3ea829c10d259499856e46c6bf968432e05843",
+      "native/src/execution/transport.rs": "28582bb72f7f4e6fd0dcf8b150be76fd8dc8c362ac85ee6319dfbc0244866b16",
+      "native/src/execution/worker.rs": "009dc891c23be63179bddb29ec0dc653bb9b9b3d150f9deb361155a139928254",
+      "native/src/execution.rs": "7757ea216dbf6ebf7ca7aaf4df5c13c78fe9009b4620ed39c6ff8c047df87cfb",
+      "native/src/frontend/images/mod.rs": "ffa1ef341d39805f0b3ec3a59f9b6e1bb85041b643b56a6c43aadfd152cffa25",
+      "native/src/frontend/images/resize.rs": "cffce1937ea0705051e9e03700218f127364de9978db20913d26567b194a16de",
+      "native/src/frontend/json.rs": "d6c79e20e03fe9538f7ff41efdca9dc9f7e789d6a813fdcf7c31becb9e0addf4",
+      "native/src/frontend/mod.rs": "63432fec5a44824ed7cbf85751f1f363e1a6c54af1dfc37b4e4562d0d3e14907",
+      "native/src/grammar.rs": "eb24ce9441b0939eecc0955563b675f7948d210f81313605eb24b377c9ee9e4b",
+      "native/src/lib.rs": "2f7cd1fd659e06ef35d95f04d461f9b89d1bd47adbeade65f0ad658020054f5b",
+      "native/src/lifetime.rs": "950cfbef583f405e46ec1c1da301107a93c6a5451756e94a3cbeed6b210a05bf",
+      "native/src/model/inputs.rs": "0d8e9057caf91ca49135c87252f6da6dd5c9ce3f511e98a07a2af402034d8c26",
+      "native/src/model/tests.rs": "13d2876c55341b931b0bee92f5005e1b5d754995427c45771c9eed4b4444c669",
+      "native/src/model.rs": "6a82e7f5174552070b0e44708390a81acdd059f2fc07476890c31b337daf6f08",
+      "native/src/python.rs": "4c47ef0f05ddd51ff67df4f089196888f0703a0f8d91424eceb73e5873703905",
+      "native/src/replay/tests.rs": "f121bd874648e6c6e72ee04f87e8387e5ca2a0db38206626ddbf5a44222ca7b4",
+      "native/src/replay.rs": "e6d45e6ed6455cc7b548483c3868e396f8899b6d31b93f395f3c8ceaf4cd6e01",
+      "native/src/scheduler/tests.rs": "05c6c2d7c4d6d5f65ec05b60be6f028d3db3d852910cb27e1c98c8ec05b2a6bb",
+      "native/src/scheduler.rs": "cf606f8e9275b4647096b4e5750940cb7af1902e37eea4cdec7fcfd5fb0dcbbe",
+      "native/src/server/config.rs": "fd1863dcbcc767e362b627e8858eb6441b308501f2fe3be5a71386c3accea361",
+      "native/src/server/metrics.rs": "53de38384ad5a7043be94990b94781da95c5137bee0755dd3abefb8135a41373",
+      "native/src/server/output.rs": "b9ba2e83b4997fa59705eb66daddc759979c54c84577149a9e7357c38195c480",
+      "native/src/server/request.rs": "7d187c5b38d51062aecd8a7853116b1c17a2e7af5f5cf0ad933c82882cd23ae9",
+      "native/src/server/runtime.rs": "4cd4bd8629f3a7d750ab6d6c7df486f6bd8596bdb867946a33fc75fe5c87af4b",
+      "native/src/server/stops.rs": "336fa9d0e242691ab0812f93fc3221aaa49601673b1a63e34b49dfaa5684b724",
+      "native/src/server.rs": "3e533cd22dfdebf16a4fe5aaf25e5789d9b40ae5bb853b70338055e43e537f18",
+      "native/Cargo.toml": "acf1a3b9682b3a2cc50b6518afbbaff5366fafe66da4a70be96b0ed2b399ad00",
+      "native/Cargo.lock": "4e3adf21ed6479ba6a1794ec0aba507782f382f43fabcf0b17532adaba2bc48c",
+      "native/pyproject.toml": "7da08fdb2b77c11dca35b2e7a970843c713660b8e03c99f0e61d96770e6f86ba"
+    }
+  },
+  "library_install": {
+    "component": "Installed GDN recurrence policy",
+    "base_revision": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+    "patch_sha256": "4b78c54a1f3078c2e1c67a322ada8ef8eb3223bb6db8770e5b10db7e5ed91d0e",
+    "manifest_sha256": "84bd56a5362369b975594a3dc7b2f0eaa6bbb77596b283140149821c6fd90cf8",
+    "staged_files": 30,
+    "installed_runtime_files_sha256": {
+      "flashinfer/experimental/b12x/_api.py": "513bd1a1cb9699ca6a5be0ddb52e950962d65099e0c6c9499ca456b1290dac4d",
+      "flashinfer/experimental/b12x/attention/__init__.py": "1e7b63da60f56da4ec60fccd470879292ff75e5693e6fa40e29170e43d36972d",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/__init__.py": "96eeb9f1b070e9140960f493a4e71440362d927b8a373e94aedfe99078bbc1bc",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/_preparation.py": "a252c9bce7e099f91946667d188557ed7f695898ac61f7534298b22522ecc489",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/_tuning.py": "cd8fec5e6d839aa9d42bf87e6d709cd6d4ece8d6149bb02ee9e999c4b64b5b97",
+      "flashinfer/experimental/b12x/attention/paged_kv_write/api.py": "7bc74706f7f5dee532632915faa1f988b1b247f6d36a3dad4187607d87758f80",
+      "flashinfer/experimental/b12x/attention/qsa/_contract.py": "5727e5beb75d19d4fdb51783019403e46b0b9ccb6fecb6293719f941e1ed7094",
+      "flashinfer/experimental/b12x/attention/qsa/_tuning.py": "4fc421052de6f65d8835351842ce58dc36df62423b46f398bcf5c27096f9eb4a",
+      "flashinfer/experimental/b12x/moe/fused_moe/_impl.py": "212355b1b465f3a4d64443b4e7d6551c56acbb840642d1c6dde31a5787cdf8bf",
+      "flashinfer/experimental/b12x/moe/fused_moe/_tuning.py": "d8e306aaecab03971ac77e84a769d9eb4a6dbe1747680f04c492dccbc876faaa",
+      "flashinfer/experimental/b12x/sequence/__init__.py": "c7628072c36c3260c3e6b856c6fa8556eaf5beeba69e529b6f69f1b9397672bf",
+      "flashinfer/experimental/b12x/sequence/_shared/delta_prefill/preparation.py": "47e3f34efa9ee055d9f516854a94e2df07d0a3f937559d37537441901558a4cc",
+      "flashinfer/experimental/b12x/sequence/_short_conv.py": "cbd919aeb8309911f19ff7ffdc3f0d09dd0f4e2c0d5a5f1fe557190f01495bbd",
+      "flashinfer/experimental/b12x/sequence/gdn_prefill/_impl.py": "3bb734e50bc80ab2167c5febbdfc7c8a2a1af66dcc4ea4a9f0fa75b105d32dff",
+      "flashinfer/experimental/b12x/sequence/gdn_prefill/_tuning.py": "6a282268d592b569944ebdf8061dc6279849b3e01930608c88a1f03fb8bd770f",
+      "flashinfer/experimental/b12x/sequence/ple/_kernels.py": "42656e4b6d5740cea0d3c0897a13c5a6e23557b51dea6478349f934a6cfa79fb",
+      "flashinfer/experimental/b12x/sequence/short_conv/__init__.py": "d56f81d0d87b2b17df1d39da643c2772700e7871db13d0d181057b49a1b85653",
+      "flashinfer/experimental/b12x/sequence/short_conv/_preparation.py": "8a527b013d0c3e705f704b60aa41824be695c6b12ab331e6024755b985dcbc90",
+      "flashinfer/experimental/b12x/sequence/short_conv/_tuning.py": "4d8970268901fe2342cad873a76be0676c65a81cd639cbf9df685c9c13bade69",
+      "flashinfer/experimental/b12x/sequence/short_conv/api.py": "ae024a3839adb28476ce9f439fc7b3b2c6aac152102d69fe0a79f12f6a145ec2",
+      "include/flashinfer/air_top_p.cuh": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b"
+    },
+    "native_extension_sha256": "6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f",
+    "sampler_before_next_launch": {
+      "path": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "sha256": "9dd90584c6792335f0ad45bb6c3c254e0bec70a25cff65ff1a535751f307bc99",
+      "mtime_ns": 1791544376354164963
+    },
+    "command": "CUDA_HOME=/opt/cuda BUILD_NVEP=0 FLASHINFER_BUILD_NO_PIP=1 uv sync --locked --extra prepare --extra test --reinstall-package flashinfer-python",
+    "exit_code": 0,
+    "log_sha256": "42ad9337291a0c23d95081d6d8a371ef594e4fba1d6072a28fe4d4a9b14b7244"
+  },
+  "source_sets_equal": false,
+  "source_delta": {
+    "serve/preparation/tuning.py": {
+      "baseline_sha256": "e489ce1020a508dee4ead347f8d2ed8a6f562942f926a67d19c6c320dd0808b2",
+      "candidate_sha256": "677fecb8d57c59502b82499b06f9f1807648e9bab80cc640808fc327142d5742"
+    },
+    "serve/recipes/qwen38/bootstrap.py": {
+      "baseline_sha256": "8343dc2fc5a224a1a8af0d968d07fae7dfbb1360fecbbf04a98b990d31598f51",
+      "candidate_sha256": "efb896eacdf0abbcf30ad0a60b45fe04e485f2008a6869a8633c6a519404a03b"
+    },
+    "serve/recipes/qwen38/decoder.py": {
+      "baseline_sha256": "962677ec667796181f3581877ae1f6edd7c89b9f0312c97a5c8deb4a66c5b405",
+      "candidate_sha256": "527d989a394b2a0afb8fab9fdccf93b5b6f3d384f6364551927d66c72774df1d"
+    },
+    "serve/recipes/qwen38/gdn.py": {
+      "baseline_sha256": "881b36f328b507326e46ead80d8a4f15402228ddb5a5596bde1d2dbd22250b87",
+      "candidate_sha256": "4d9257ff2080dc6a16649c904789609c8beffa3e255be4f8bd294baa2923754d"
+    },
+    "serve/recipes/qwen38/moe.py": {
+      "baseline_sha256": "338d8c784803a1832b6cbfd6f2bf51a77233b22b004fa13b1c2edcc61abe508d",
+      "candidate_sha256": "893fd88ab56aaf5cc736ea0221afdcb6c7c223216f98ea88c80e7a9e910f0967"
+    },
+    "serve/recipes/qwen38/state.py": {
+      "baseline_sha256": "ed83482367dcaed71a1763b9bcb36b91976803cdf9bb39693f313f03ca1dd0ee",
+      "candidate_sha256": "cca3ef5c39b6f6884bcd718dc75f2e6753551f6b4987f24bd053d998fb10e254"
+    },
+    "serve/recipes/qwen38/vision_state.py": {
+      "baseline_sha256": "11f70f01db5cb0c2d58907df174227d843afbbf4677746c8c3c7fb04e0999b09",
+      "candidate_sha256": "570234415c2f0f6fa47e07d9930c7941b3a8daecacd76ed632f79d608f0aeae2"
+    }
+  },
+  "observations": [
+    {
+      "chunk": 512,
+      "summary": {
+        "checks": 98,
+        "failed_checks": 0,
+        "case_errors": 0,
+        "requests": 31
+      },
+      "passed": true,
+      "client_exit_code": 0,
+      "raw_receipt_sha256": "3d5a715f817a9fa090c04baf487f47a74ab228f027a070284ffdc1b0d0d66b18",
+      "memory": {
+        "weights_bytes": 72667278336,
+        "mapped_ple_bytes": 28800138240,
+        "hybrid_state_bytes": 5319819776,
+        "snapshot_capacity": 37,
+        "pages": 9708,
+        "page_bytes": 1622016,
+        "kv_bytes": 15746531328,
+        "cached_token_capacity": 621312,
+        "headroom_bytes": 4294967296,
+        "free_device_bytes": 4329635840,
+        "total_device_bytes": 102014189568,
+        "allocated_bytes": 95744252416,
+        "reserved_bytes": 96586432512,
+        "projection_workspace_bytes": 67108864,
+        "recurrence_workspace_bytes": 67108864,
+        "expert_workspace_bytes": 125436208,
+        "qsa_workspace_bytes": 166879232,
+        "graphs": 37,
+        "tuning": {
+          "workload_schema": "qwen38-active-operators-v1",
+          "namespace": {
+            "checkpoint": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+            "config": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28",
+            "headers": "b4884a790482d83fc86cf97eb01054780817d39e866c29013ca63cae881441aa",
+            "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-bf16-pinned",
+            "workload_schema": "qwen38-active-operators-v1"
+          },
+          "requests": 11350,
+          "compile_workers": 8,
+          "cache_hits": 42,
+          "benchmarked_candidates": 0,
+          "elapsed_seconds": 2.3090750480187126,
+          "parent_cute_compilations": 0,
+          "parent_triton_compilations": 0,
+          "selection_counts": {
+            "override": 3508,
+            "fixed": 6093,
+            "cached": 1749
+          },
+          "workspaces": {
+            "projection": {
+              "initial_bytes": 67108864,
+              "candidate_scratch_bytes": 41943040,
+              "reserved_bytes": 67108864,
+              "pending_persistent_bytes": 0
+            },
+            "recurrence": {
+              "initial_bytes": 67108864,
+              "candidate_scratch_bytes": 44624896,
+              "reserved_bytes": 67108864,
+              "pending_persistent_bytes": 0
+            },
+            "qsa": {
+              "initial_bytes": 166879232,
+              "candidate_scratch_bytes": 166879232,
+              "reserved_bytes": 166879232,
+              "pending_persistent_bytes": 0
+            },
+            "vision_attention": {
+              "initial_bytes": 38797312,
+              "candidate_scratch_bytes": 38797312,
+              "reserved_bytes": 38797312,
+              "pending_persistent_bytes": 0
+            }
+          },
+          "shared_benchmark_bytes": 0,
+          "search_limits": {
+            "bf16_projection": "explicit backend and rows_per_tile override",
+            "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
+            "qsa": "fixed attention_splits=16 and singleton kernel configuration",
+            "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
+            "projection_workspace": "64 MiB supplied-workspace query constraint"
+          },
+          "allocated_before_tuning": 81950615552,
+          "allocated_before_trial_release": 81954280960,
+          "allocated_after_trial_release": 79996700160,
+          "released_preparation_bytes": 1957580800,
+          "expert_workspace_cleanup": {
+            "before_bytes": 130244788,
+            "retained_bytes": 125436208,
+            "released_bytes": 4808580,
+            "before_keys": 9,
+            "retained_keys": 8
+          }
+        },
+        "prefill_chunk_size": 512,
+        "prefill_capacities": [
+          1,
+          16,
+          64,
+          128,
+          256,
+          512
+        ]
+      },
+      "pid": 1518696,
+      "mapped_sampler_sha256": "1a17a3858b3dc8bdf189ccaff28dbccb1e10c2472b36fee035b4d6b5fd453757",
+      "shutdown": {
+        "pid": 1518696,
+        "command": [
+          ".venv/bin/python",
+          "-u",
+          "-m",
+          "serve",
+          "--bind",
+          "127.0.0.1:38761",
+          "--prefill-chunk-size",
+          "512",
+          "--memory-report",
+          "/tmp/sparkgap-prefill512-server-memory.json"
+        ],
+        "signal": "SIGTERM",
+        "sent_utc": "2026-10-09T12:19:06.897139+00:00",
+        "sources_unchanged": true,
+        "runtime_manifest": "/tmp/sparkgap-prefill-capacity-runtime-source/manifest.json",
+        "exit_code": 0,
+        "exit_code_source": "execution tool session5896",
+        "process_absent": true,
+        "checked_utc": "2026-10-09T12:19:20.132839+00:00",
+        "listener": "State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\n",
+        "gpu_memory": "2 MiB",
+        "gpu_processes": ""
+      },
+      "cases": [
+        {
+          "fixture": "1024",
+          "phase": "cold",
+          "prompt_tokens": 1024,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 1024,
+            "completion_tokens": 1,
+            "total_tokens": 1025
+          },
+          "elapsed_seconds": 0.21435846699750982
+        },
+        {
+          "fixture": "1024",
+          "phase": "restored",
+          "prompt_tokens": 1024,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 1024,
+            "completion_tokens": 1,
+            "total_tokens": 1025
+          },
+          "elapsed_seconds": 0.002676767995581031
+        },
+        {
+          "fixture": "2048",
+          "phase": "cold",
+          "prompt_tokens": 2048,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 2048,
+            "completion_tokens": 1,
+            "total_tokens": 2049
+          },
+          "elapsed_seconds": 0.4049236089922488
+        },
+        {
+          "fixture": "2048",
+          "phase": "restored",
+          "prompt_tokens": 2048,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 2048,
+            "completion_tokens": 1,
+            "total_tokens": 2049
+          },
+          "elapsed_seconds": 0.0028079479816369712
+        },
+        {
+          "fixture": "4043",
+          "phase": "cold",
+          "prompt_tokens": 4043,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4043,
+            "completion_tokens": 1,
+            "total_tokens": 4044
+          },
+          "elapsed_seconds": 0.8056736100115813
+        },
+        {
+          "fixture": "4043",
+          "phase": "restored",
+          "prompt_tokens": 4043,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4043,
+            "completion_tokens": 1,
+            "total_tokens": 4044
+          },
+          "elapsed_seconds": 0.04690438800025731
+        },
+        {
+          "fixture": "4096",
+          "phase": "cold",
+          "prompt_tokens": 4096,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4096,
+            "completion_tokens": 1,
+            "total_tokens": 4097
+          },
+          "elapsed_seconds": 0.8062455859908368
+        },
+        {
+          "fixture": "4096",
+          "phase": "restored",
+          "prompt_tokens": 4096,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4096,
+            "completion_tokens": 1,
+            "total_tokens": 4097
+          },
+          "elapsed_seconds": 0.0037013900000602007
+        },
+        {
+          "fixture": "4113",
+          "phase": "cold",
+          "prompt_tokens": 4113,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4113,
+            "completion_tokens": 1,
+            "total_tokens": 4114
+          },
+          "elapsed_seconds": 0.8529553689877503
+        },
+        {
+          "fixture": "4113",
+          "phase": "restored",
+          "prompt_tokens": 4113,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4113,
+            "completion_tokens": 1,
+            "total_tokens": 4114
+          },
+          "elapsed_seconds": 0.05185739300213754
+        },
+        {
+          "fixture": "8209",
+          "phase": "cold",
+          "prompt_tokens": 8209,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "x"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 8209,
+            "completion_tokens": 1,
+            "total_tokens": 8210
+          },
+          "elapsed_seconds": 1.6426739169983193
+        },
+        {
+          "fixture": "8209",
+          "phase": "restored",
+          "prompt_tokens": 8209,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "x"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 8209,
+            "completion_tokens": 1,
+            "total_tokens": 8210
+          },
+          "elapsed_seconds": 0.05372943900874816
+        }
+      ]
+    },
+    {
+      "chunk": 4096,
+      "summary": {
+        "checks": 98,
+        "failed_checks": 0,
+        "case_errors": 0,
+        "requests": 31
+      },
+      "passed": true,
+      "client_exit_code": 0,
+      "raw_receipt_sha256": "e6cba23b1bdf02ca949ebb79b193967616218521e89061272660d0e921b92344",
+      "memory": {
+        "weights_bytes": 72667278336,
+        "mapped_ple_bytes": 28800138240,
+        "hybrid_state_bytes": 5319819776,
+        "snapshot_capacity": 37,
+        "pages": 8046,
+        "page_bytes": 1622016,
+        "kv_bytes": 13050740736,
+        "cached_token_capacity": 514944,
+        "headroom_bytes": 4294967296,
+        "free_device_bytes": 4394647552,
+        "total_device_bytes": 102014189568,
+        "allocated_bytes": 95341654528,
+        "reserved_bytes": 96399785984,
+        "projection_workspace_bytes": 67108864,
+        "recurrence_workspace_bytes": 347490304,
+        "expert_workspace_bytes": 664804772,
+        "qsa_workspace_bytes": 214990848,
+        "graphs": 43,
+        "tuning": {
+          "workload_schema": "qwen38-active-operators-v1",
+          "namespace": {
+            "checkpoint": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+            "config": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28",
+            "headers": "b4884a790482d83fc86cf97eb01054780817d39e866c29013ca63cae881441aa",
+            "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-bf16-pinned",
+            "workload_schema": "qwen38-active-operators-v1"
+          },
+          "requests": 14983,
+          "compile_workers": 8,
+          "cache_hits": 43,
+          "benchmarked_candidates": 208,
+          "elapsed_seconds": 18.516072866972536,
+          "parent_cute_compilations": 0,
+          "parent_triton_compilations": 0,
+          "selection_counts": {
+            "override": 4675,
+            "fixed": 8016,
+            "cached": 1846,
+            "tuned": 446
+          },
+          "workspaces": {
+            "projection": {
+              "initial_bytes": 67108864,
+              "candidate_scratch_bytes": 41943040,
+              "reserved_bytes": 67108864,
+              "temporary": false,
+              "pending_persistent_bytes": 0
+            },
+            "recurrence": {
+              "initial_bytes": 74373120,
+              "candidate_scratch_bytes": 347490304,
+              "reserved_bytes": 347490304,
+              "temporary": false,
+              "pending_persistent_bytes": 0
+            },
+            "qsa": {
+              "initial_bytes": 214990848,
+              "candidate_scratch_bytes": 214990848,
+              "reserved_bytes": 214990848,
+              "temporary": false,
+              "pending_persistent_bytes": 0
+            },
+            "moe_benchmark": {
+              "initial_bytes": 0,
+              "candidate_scratch_bytes": 368868096,
+              "reserved_bytes": 368868096,
+              "temporary": true,
+              "pending_persistent_bytes": 0
+            },
+            "vision_attention": {
+              "initial_bytes": 38797312,
+              "candidate_scratch_bytes": 38797312,
+              "reserved_bytes": 38797312,
+              "temporary": false,
+              "pending_persistent_bytes": 0
+            }
+          },
+          "shared_benchmark_bytes": 5866578684,
+          "borrowed_benchmark_bytes": 5319819776,
+          "allocated_shared_benchmark_bytes": 546758908,
+          "search_limits": {
+            "bf16_projection": "explicit backend and rows_per_tile override",
+            "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
+            "qsa": "fixed attention_splits=16 and singleton kernel configuration",
+            "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
+            "projection_workspace": {
+              "query_budget_bytes": 67108864,
+              "reserved_bytes": 67108864,
+              "policy": "capacity-sized supplied-workspace query constraint"
+            }
+          },
+          "allocated_before_tuning": 98209292800,
+          "allocated_before_trial_release": 99478464512,
+          "released_temporary_workspace_bytes": 368868096,
+          "allocated_after_trial_release": 82284889600,
+          "released_preparation_bytes": 17193574912,
+          "expert_workspace_cleanup": {
+            "before_bytes": 1152036384,
+            "retained_bytes": 664804772,
+            "released_bytes": 487231612,
+            "before_keys": 14,
+            "retained_keys": 11
+          }
+        },
+        "prefill_chunk_size": 4096,
+        "prefill_capacities": [
+          1,
+          16,
+          64,
+          128,
+          256,
+          512,
+          1024,
+          2048,
+          4096
+        ]
+      },
+      "pid": 1677522,
+      "mapped_sampler_sha256": "1a17a3858b3dc8bdf189ccaff28dbccb1e10c2472b36fee035b4d6b5fd453757",
+      "shutdown": {
+        "pid": 1677522,
+        "signal": "SIGTERM",
+        "signal_utc": "2026-10-09T12:57:57.318702+00:00",
+        "process_absent": true,
+        "listener_closed": true,
+        "observed_utc": "2026-10-09T12:58:02.822937+00:00",
+        "gpu_memory": "2 MiB",
+        "compute_apps": "",
+        "exit_code": 0,
+        "exit_code_source": "supervisor execution tool session42509",
+        "exit_receipt": "/tmp/sparkgap-prefill4096-server-exit.json"
+      },
+      "cases": [
+        {
+          "fixture": "1024",
+          "phase": "cold",
+          "prompt_tokens": 1024,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 1024,
+            "completion_tokens": 1,
+            "total_tokens": 1025
+          },
+          "elapsed_seconds": 0.16984211301314645
+        },
+        {
+          "fixture": "1024",
+          "phase": "restored",
+          "prompt_tokens": 1024,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 1024,
+            "completion_tokens": 1,
+            "total_tokens": 1025
+          },
+          "elapsed_seconds": 0.0024979299923870713
+        },
+        {
+          "fixture": "2048",
+          "phase": "cold",
+          "prompt_tokens": 2048,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 2048,
+            "completion_tokens": 1,
+            "total_tokens": 2049
+          },
+          "elapsed_seconds": 0.26883826599805616
+        },
+        {
+          "fixture": "2048",
+          "phase": "restored",
+          "prompt_tokens": 2048,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 2048,
+            "completion_tokens": 1,
+            "total_tokens": 2049
+          },
+          "elapsed_seconds": 0.003010842017829418
+        },
+        {
+          "fixture": "4043",
+          "phase": "cold",
+          "prompt_tokens": 4043,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4043,
+            "completion_tokens": 1,
+            "total_tokens": 4044
+          },
+          "elapsed_seconds": 0.5215643489791546
+        },
+        {
+          "fixture": "4043",
+          "phase": "restored",
+          "prompt_tokens": 4043,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4043,
+            "completion_tokens": 1,
+            "total_tokens": 4044
+          },
+          "elapsed_seconds": 0.04725104299723171
+        },
+        {
+          "fixture": "4096",
+          "phase": "cold",
+          "prompt_tokens": 4096,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4096,
+            "completion_tokens": 1,
+            "total_tokens": 4097
+          },
+          "elapsed_seconds": 0.5207086050068028
+        },
+        {
+          "fixture": "4096",
+          "phase": "restored",
+          "prompt_tokens": 4096,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4096,
+            "completion_tokens": 1,
+            "total_tokens": 4097
+          },
+          "elapsed_seconds": 0.0038936760101933032
+        },
+        {
+          "fixture": "4113",
+          "phase": "cold",
+          "prompt_tokens": 4113,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4113,
+            "completion_tokens": 1,
+            "total_tokens": 4114
+          },
+          "elapsed_seconds": 0.5698635260050651
+        },
+        {
+          "fixture": "4113",
+          "phase": "restored",
+          "prompt_tokens": 4113,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "Acknowled"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 4113,
+            "completion_tokens": 1,
+            "total_tokens": 4114
+          },
+          "elapsed_seconds": 0.052704595000250265
+        },
+        {
+          "fixture": "8209",
+          "phase": "cold",
+          "prompt_tokens": 8209,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "x"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 8209,
+            "completion_tokens": 1,
+            "total_tokens": 8210
+          },
+          "elapsed_seconds": 1.093257922999328
+        },
+        {
+          "fixture": "8209",
+          "phase": "restored",
+          "prompt_tokens": 8209,
+          "status": 200,
+          "message": {
+            "role": "assistant",
+            "content": "x"
+          },
+          "finish_reason": "length",
+          "usage": {
+            "prompt_tokens": 8209,
+            "completion_tokens": 1,
+            "total_tokens": 8210
+          },
+          "elapsed_seconds": 0.053804680006578565
+        }
+      ]
+    }
+  ],
+  "cross_capacity_comparisons": [
+    {
+      "fixture": "1024",
+      "phase": "cold",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "1024",
+      "phase": "restored",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "2048",
+      "phase": "cold",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "2048",
+      "phase": "restored",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "4043",
+      "phase": "cold",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "4043",
+      "phase": "restored",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "4096",
+      "phase": "cold",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "4096",
+      "phase": "restored",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "4113",
+      "phase": "cold",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "4113",
+      "phase": "restored",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Acknowled"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "8209",
+      "phase": "cold",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "x"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "x"
+        },
+        "finish_reason": "length"
+      }
+    },
+    {
+      "fixture": "8209",
+      "phase": "restored",
+      "request_bytes_equal": true,
+      "fixture_normalization": {
+        "stream": false
+      },
+      "message_equal": true,
+      "finish_reason_equal": true,
+      "usage_equal": true,
+      "baseline": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "x"
+        },
+        "finish_reason": "length"
+      },
+      "candidate": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "x"
+        },
+        "finish_reason": "length"
+      }
+    }
+  ],
+  "cross_capacity_outputs_equal": true,
+  "passed": true,
+  "startup_passed": true,
+  "cpu_checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--features",
+        "server",
+        "--lib"
+      ],
+      "cwd": "/home/luke/projects/sparkgap/native",
+      "log": "/tmp/sparkgap-prefill-capacity-native-tests-server.log",
+      "exit_code": 0,
+      "elapsed_seconds": 0.0908250130014494
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--lib"
+      ],
+      "cwd": "/home/luke/projects/sparkgap/native",
+      "log": "/tmp/sparkgap-prefill-capacity-native-tests-core.log",
+      "exit_code": 0,
+      "elapsed_seconds": 0.056307663006009534
+    },
+    {
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "cwd": "/home/luke/projects/sparkgap/native",
+      "log": "/tmp/sparkgap-prefill-capacity-native-fmt.log",
+      "exit_code": 0,
+      "elapsed_seconds": 0.099655669007916
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--features",
+        "server",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/home/luke/projects/sparkgap/native",
+      "log": "/tmp/sparkgap-prefill-capacity-native-clippy.log",
+      "exit_code": 0,
+      "elapsed_seconds": 0.08772325600148179
+    }
+  ],
+  "archive": {
+    "path": "prefill-capacity.tar.gz",
+    "sha256": "dc3397ec17f84e39e18961a124ddb9c0d9afb8ffde796a202b53af587bf7deaf",
+    "bytes": 38243564,
+    "payload_members": 592
+  },
+  "limits": [
+    "Only six fixed text prompts and greedy one-token output are compared. No independent numerical reference or steady-state performance bound is evaluated.",
+    "HTTP metrics establish chunk counts and aligned prefix reuse. Complete device-state equivalence requires the separate captured-graph qualifier.",
+    "4096-token preparation and memory observations do not establish all configured upper capacities are feasible. CPU planners expose QSA and MoE launch limits separately."
+  ],
+  "python_test_logs": [
+    {
+      "path": "/tmp/sparkgap-borrowed-gdn-state-final-tests.log",
+      "sha256": "c3a966199331cc9da93d9bf4030d98e9e922f09a7dd8375d01c645471a1e8600",
+      "last_line": "46 passed, 2 skipped in 6.46s",
+      "command": [
+        "env",
+        "-u",
+        "SPARKGAP_RUN_CUDA_TESTS",
+        "CUDA_VISIBLE_DEVICES=",
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/preparation/test_tuning.py",
+        "tests/recipes/test_qwen38_tuning_inputs.py",
+        "tests/recipes/test_qwen38_state.py"
+      ]
+    },
+    {
+      "path": "/tmp/sparkgap-borrowed-gdn-state-lifetime-tests.log",
+      "sha256": "1d9f1ada75be58b05803611a63a7ca44606e3d5030d33c16c80b3f5a18d66954",
+      "last_line": "34 passed in 6.31s",
+      "command": [
+        "env",
+        "-u",
+        "SPARKGAP_RUN_CUDA_TESTS",
+        "CUDA_VISIBLE_DEVICES=",
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/recipes/test_graph_execution_pristine_state.py",
+        "tests/preparation/test_tuning.py"
+      ]
+    },
+    {
+      "path": "/tmp/sparkgap-borrowed-gdn-state-tests-before-fences.log",
+      "sha256": "350240e0bb7844bede278aebd114251040b281d43bbc2e11a8b13de2fe7cdd71",
+      "last_line": "43 passed, 2 skipped in 5.56s",
+      "command": null
+    },
+    {
+      "path": "/tmp/sparkgap-borrowed-gdn-state-tests.log",
+      "sha256": "96ce985722b030c24060a258c16d72538c374c4474a35cbc09e17b64fbb87145",
+      "last_line": "238 passed, 54 skipped in 38.31s",
+      "command": [
+        "env",
+        "-u",
+        "SPARKGAP_RUN_CUDA_TESTS",
+        "CUDA_VISIBLE_DEVICES=",
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/preparation",
+        "tests/recipes"
+      ]
+    },
+    {
+      "path": "/tmp/sparkgap-shared-tuning-candidates-focused-tests.log",
+      "sha256": "ea50833442d38f7da2f7252a2cc8535273579f32bd7a9c65cfedb5e89d9e3485",
+      "last_line": "54 passed in 7.83s",
+      "command": [
+        "env",
+        "-u",
+        "SPARKGAP_RUN_CUDA_TESTS",
+        "CUDA_VISIBLE_DEVICES=",
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/preparation/test_tuning.py",
+        "tests/recipes/test_qwen38_moe_tuning.py",
+        "tests/recipes/test_qwen38_tuning_inputs.py"
+      ]
+    },
+    {
+      "path": "/tmp/sparkgap-shared-tuning-candidates-python-tests.log",
+      "sha256": "bd746972c5a6f94a0d07d9f10bc93dfb4cf4555b7d2a9bf2f3733b7a5f04efd6",
+      "last_line": "255 passed, 54 skipped in 40.01s",
+      "command": [
+        "env",
+        "-u",
+        "SPARKGAP_RUN_CUDA_TESTS",
+        "CUDA_VISIBLE_DEVICES=",
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/preparation",
+        "tests/recipes"
+      ]
+    },
+    {
+      "path": "/tmp/sparkgap-prefill-capacity-python-tests.log",
+      "sha256": "88e816d1bc2474c1e53075cf95e0fc420d5c87e852a76d46b1e0a7652cf72a6d",
+      "last_line": "223 passed, 51 skipped in 37.84s"
+    },
+    {
+      "path": "/tmp/sparkgap-prefill-capacity-injection-tests.log",
+      "sha256": "15de1e23b73c25abf705bed62dfb94b506fba7b67b2c9925556f21ef4afa125a",
+      "last_line": "6 passed in 3.51s"
+    },
+    {
+      "path": "/tmp/sparkgap-prefill-capacity-bootstrap-borrow-tests.log",
+      "sha256": "94aef2299c999067fe6ca75b08918668ff178988b35ed0a896e1df6de9d4416e",
+      "last_line": "25 passed in 3.18s"
+    }
+  ],
+  "vision_http": {
+    "passed": true,
+    "summary": {
+      "requests": 23,
+      "checks": 44,
+      "failed_checks": 0,
+      "case_errors": 0
+    },
+    "request_bytes_equal": 8,
+    "reference_receipt_sha256": "a0989dff826f0655c10b451a36cc37861a1e1b45d132bc1c79e1996c26ab94e9",
+    "raw_receipt_sha256": "69da3f9696bed8c7f031329ac569344ce03398995631d0bb90e9d9fc59367316",
+    "failed_checks": [],
+    "case_errors": []
+  },
+  "prior_preparation_failures": [
+    {
+      "pid": 1598478,
+      "exit_code": 1,
+      "exit_code_source": "execution tool session18940",
+      "process_absent": true,
+      "observed_utc": "2026-10-09T12:45:33.198833+00:00",
+      "error": "torch.OutOfMemoryError: prefill4096.layer0.gdn.prefill tuned v_split16/k_split1/stages3/window_tiles257 requested 332MiB with 93.06MiB device memory free; PyTorch allocated94.06GiB",
+      "server_started": false,
+      "log": "/tmp/sparkgap-prefill4096-server-candidate-cohort-oom-failure.log",
+      "log_sha256": "b9081d5de65511d777f94a735e3fde6a4644cf04c5bb1314ca59db95fa8f267f",
+      "runtime_sources": "/tmp/sparkgap-prefill-capacity-runtime-source-borrowed/manifest.json",
+      "gpu_memory": "2 MiB"
+    },
+    {
+      "pid": 1532666,
+      "exit_code": 1,
+      "exit_code_source": "execution tool session90945",
+      "process_absent": true,
+      "observed_utc": "2026-10-09T12:21:48.365704+00:00",
+      "error": "ValueError: vision embedding injection supports up to 512 prefill tokens",
+      "server_started": false,
+      "log": "/tmp/sparkgap-prefill4096-server-injection-limit-failure.log",
+      "log_sha256": "31ca1114a3e61cbbfad910fb1666b17215ec742b5ff8fbcef0cd2515d88dae4b",
+      "runtime_sources": "/tmp/sparkgap-prefill-capacity-runtime-source/manifest.json",
+      "gpu_memory": "2 MiB"
+    },
+    {
+      "pid": 1544609,
+      "exit_code": 1,
+      "exit_code_source": "execution tool session90572",
+      "process_absent": true,
+      "observed_utc": "2026-10-09T12:27:36.443222+00:00",
+      "error": "torch.OutOfMemoryError: prefill4096.layer0.gdn.prefill benchmark _BenchmarkStateArena requested 4.96GiB with 2.41GiB device memory free",
+      "server_started": false,
+      "log": "/tmp/sparkgap-prefill4096-server-state-arena-oom-failure.log",
+      "log_sha256": "6ff8d6aa10e7f00166951c337a2a19946b106ee788e59414dbdceda721249451",
+      "runtime_sources": "/tmp/sparkgap-prefill-capacity-runtime-source-final/manifest.json",
+      "gpu_memory": "2 MiB"
+    }
+  ]
+}

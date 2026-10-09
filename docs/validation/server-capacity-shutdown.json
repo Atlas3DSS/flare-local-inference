@@ -1,0 +1,22 @@
+{
+  "schema": "sparkgap-native-capacity-shutdown-v1",
+  "recorded_at": "2026-10-09T08:51:48.615003+00:00",
+  "server_pid": 563919,
+  "signal": "SIGTERM",
+  "exit_code": 0,
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "gpu_compute_processes": "",
+  "gpu_memory": "2 MiB",
+  "native_build": "native-grammar-build.json",
+  "native_extension_sha256": "735bf767999b26affeacc5ae574b6e52c6a5e1dc18f42cc208ee8b9f0b2a18ab",
+  "log": "/tmp/sparkgap-vision-grammar-server.log",
+  "log_sha256": "05a3b03877bcc4e263a9c6d5a044f63b5f4b8c0ab7cc39d9f95fcc916b5edfc6",
+  "memory_report": "/tmp/sparkgap-vision-grammar-memory.json",
+  "readiness": "/tmp/sparkgap-vision-grammar-ready.json",
+  "qualifications": [
+    "server-http-vision-grammar.json",
+    "server-http-vision-aggregate.json",
+    "server-http-context-limit.json"
+  ],
+  "state_at_signal": "All qualification requests complete and native metrics idle; no further inference clients active."
+}

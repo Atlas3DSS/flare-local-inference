@@ -1,0 +1,24 @@
+{
+  "schema": "sparkgap-same-graph-attempt-summary-v1",
+  "passed": false,
+  "error": {
+    "type": "RuntimeError",
+    "message": "b12x.loader build dependency is missing: /usr/local/cuda/include/cuda_runtime_api.h",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py\", line 731, in main\n    with prepare_model(snapshot, progress=progress) as model:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py\", line 124, in decorate_context\n    return func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/serve/recipes/qwen38/bootstrap.py\", line 152, in prepare_model\n    weights = ModelWeights.load(manifest, device, progress=report)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/serve/recipes/qwen38/decoder.py\", line 61, in load\n    with QwenWeightLoader(manifest, device) as loader:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/serve/recipes/qwen38/weights.py\", line 166, in __enter__\n    self._session = stack.enter_context(DirectWeightSession(device=self.device.index))\n                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/loader/_checkpoint.py\", line 54, in __init__\n    self.native = load()\n                  ^^^^^^\n  File \"/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/loader/_native.py\", line 130, in load\n    spec = importlib.util.spec_from_file_location(\"_b12x_loader_storage\", _build())\n                                                                          ^^^^^^^^\n  File \"/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/loader/_native.py\", line 43, in _build\n    raise RuntimeError(f\"b12x.loader build dependency is missing: {path}\")\nRuntimeError: b12x.loader build dependency is missing: /usr/local/cuda/include/cuda_runtime_api.h\n"
+  },
+  "checks": 0,
+  "passed_checks": 0,
+  "observed_stages": [],
+  "script_sha256": "912328b08c4e57aec5510c687393123590b71f1533fd9cfdee32528c6c837e6e",
+  "native_extension_sha256": "f16f664d7d798ef33c16f723b7d29a365c3797aaf1375ae8605f6945d7315ff8",
+  "full_receipt": {
+    "path": "graph-execution-parity-toolkit-failure.json.gz",
+    "sha256": "52ca84c9ace633f649d4880dc04b73ea85b81bcdc75a2207a3ee391d7286e984",
+    "bytes": 29298,
+    "uncompressed_sha256": "94855fd8909f5053f7aa8ee405c5f7955b376da599a6b58ea4cdeb2a91dac58c",
+    "uncompressed_bytes": 117554,
+    "raw_copy": "/tmp/sparkgap-graph-execution-parity-toolkit-failure/full-receipt.json"
+  },
+  "artifacts": "/tmp/sparkgap-graph-execution-parity-toolkit-failure",
+  "raw_log": "/tmp/sparkgap-graph-execution-parity-toolkit-failure.log"
+}

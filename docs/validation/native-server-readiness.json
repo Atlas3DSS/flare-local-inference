@@ -1,0 +1,437 @@
+{
+  "schema": "sparkgap-native-readiness-v1",
+  "pid": 145553,
+  "address": "127.0.0.1:38761",
+  "started_at": "2026-10-09T07:03:13.236749+00:00",
+  "build_receipt": "native-build.json",
+  "observations": [
+    {
+      "seconds": 1.266997423954308e-05,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 0.25071908099926077,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 0.5009342999837827,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 0.751083747978555,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 1.001206185988849,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 1.251328273996478,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 1.50163868299569,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 1.751907821977511,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 2.0021822199923918,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 2.252492268977221,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 2.50276367799961,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 4",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 2.753050336992601,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 3.0033578159927856,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 3.2536643949861173,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 3.503964003000874,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 3.7542623519839253,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 4.004539130983176,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 4.254843509988859,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 4.505167458992219,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 4.755473906989209,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 5.005757475999417,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 5.25607287499588,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 5.506378983001923,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 5.756680841994239,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 6.0070797209918965,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 6.25733617998776,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 6.507616337999934,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 6.757923575991299,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 7.008208994986489,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 7.258525043987902,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 7.50881541200215,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 7.759147901000688,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 8.009465798997553,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 8.259768187999725,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 8.510100526997121,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 8.76033924499643,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 9.01062699299655,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 9.260944811976515,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 9.511234859994147,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 9.761541127983946,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 2",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 10.01185792699107,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 10.26214186497964,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 10.512422022991814,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 10.762724350992357,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 11.013008409994654,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 11.2632896679861,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 11.513602605991764,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 11.76390125398757,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 12.014170231996104,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 12.264454179996392,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 12.51472559798276,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 12.765013736992842,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 13.015303334977943,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 13.265596742974594,
+      "memory_report_exists": false,
+      "last_progress": "prepared decode capacity 1",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 13.51587030099472,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 13.766162688989425,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 14.016467476991238,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 14.266772994975327,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 14.517054072988685,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 14.767337750992738,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 15.017652228998486,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 15.267958576994715,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 15.518224704981549,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 15.768505111976992,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 16.018779070000164,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 16.26907445798861,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 16.519328134978423,
+      "memory_report_exists": false,
+      "last_progress": "measured complete graph catalog memory",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 16.769657243974507,
+      "memory_report_exists": true,
+      "last_progress": "}",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 17.019951510999817,
+      "memory_report_exists": true,
+      "last_progress": "}",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 17.270297678973293,
+      "memory_report_exists": true,
+      "last_progress": "}",
+      "error": "[Errno 111] Connection refused"
+    },
+    {
+      "seconds": 17.52060085698031,
+      "memory_report_exists": true,
+      "last_progress": "Listening on 127.0.0.1:38761",
+      "status": 200,
+      "body": "{\"status\":\"ok\"}"
+    }
+  ],
+  "healthy": true
+}

@@ -1,0 +1,1333 @@
+{
+  "schema": "sparkgap-unified-scratch-summary-v1",
+  "collected_utc": "2026-10-09T15:27:56.560898+00:00",
+  "runtime_source": "/tmp/sparkgap-owned-scratch-runtime-source",
+  "runtime_files": 26,
+  "interim_services": [
+    {
+      "run_prefix": "sparkgap-planned-scratch",
+      "http": {
+        "reported_passed": true,
+        "checks": 98,
+        "passed_checks": 98,
+        "failed_checks": [],
+        "case_errors": [],
+        "error": null
+      },
+      "server_exit": {
+        "command": [
+          "/home/luke/projects/sparkgap/.venv/bin/python",
+          "-u",
+          "-m",
+          "serve",
+          "--bind",
+          "127.0.0.1:38761",
+          "--memory-report",
+          "/tmp/sparkgap-planned-scratch-server-memory.json"
+        ],
+        "cwd": "/home/luke/projects/sparkgap",
+        "environment": {
+          "CUDA_HOME": "/opt/cuda",
+          "CUDA_VISIBLE_DEVICES": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+          "PYTHONUNBUFFERED": "1",
+          "PYTHONDONTWRITEBYTECODE": "1"
+        },
+        "prefill_chunk_source": "serve CLI default; no command-line override",
+        "runtime_files": 26,
+        "runtime_sources": "/tmp/sparkgap-planned-scratch-runtime-source/manifest.json",
+        "native_build": "/tmp/sparkgap-prefill-capacity-native-source/build.json",
+        "native_sha256": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+        "native_inputs_verified": 34,
+        "unset_environment": [
+          "PYTHONPATH"
+        ],
+        "outputs": {
+          "log": "/tmp/sparkgap-planned-scratch-server.log",
+          "memory": "/tmp/sparkgap-planned-scratch-server-memory.json",
+          "start": "/tmp/sparkgap-planned-scratch-server-start.json",
+          "exit": "/tmp/sparkgap-planned-scratch-server-exit.json"
+        },
+        "pid": 2127045,
+        "started_utc": "2026-10-09T14:42:59.764703+00:00",
+        "finished_utc": "2026-10-09T14:46:49.458769+00:00",
+        "elapsed_seconds": 229.6940747089975,
+        "exit_code": 0,
+        "supervisor_error": null,
+        "forwarded_signals": [],
+        "process_absent": true,
+        "source_differences": {},
+        "sources_unchanged": true,
+        "native_sha256_after": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+        "native_binary_unchanged": true,
+        "log_sha256": "e53c2494ae28d4238c73829579422c362cd6ccd00a6682ee3d783ca747111bb0",
+        "memory_report_sha256": "6f0343ece7beac7bb1a5f9a0f438c9cd5df006478ab0dc2b04641b65afaa9008",
+        "scope": "Child process exit and source integrity only; HTTP readiness, CUDA mappings and GPU release require separate observations."
+      },
+      "memory_report": {
+        "weights_bytes": 72667278336,
+        "mapped_ple_bytes": 28800138240,
+        "hybrid_state_bytes": 5319819776,
+        "snapshot_capacity": 37,
+        "pages": 7634,
+        "page_bytes": 1622016,
+        "kv_bytes": 12382470144,
+        "cached_token_capacity": 488576,
+        "headroom_bytes": 4294967296,
+        "free_device_bytes": 4338024448,
+        "total_device_bytes": 102014189568,
+        "allocated_bytes": 95574183936,
+        "reserved_bytes": 96458506240,
+        "operator_scratch_bytes": 2256535552,
+        "graphs": 43,
+        "tuning": {
+          "workload_schema": "qwen38-active-operators-v1",
+          "namespace": {
+            "checkpoint": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+            "config": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28",
+            "headers": "b4884a790482d83fc86cf97eb01054780817d39e866c29013ca63cae881441aa",
+            "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-bf16-pinned",
+            "workload_schema": "qwen38-active-operators-v1"
+          },
+          "requests": 14983,
+          "compile_workers": 8,
+          "cache_hits": 35,
+          "benchmarked_candidates": 1152,
+          "elapsed_seconds": 8.081740329012973,
+          "parent_cute_compilations": 0,
+          "parent_triton_compilations": 0,
+          "selection_counts": {
+            "override": 4675,
+            "fixed": 8016,
+            "cached": 2068,
+            "tuned": 224
+          },
+          "scratch_arena": {
+            "initial_bytes": 321562624,
+            "candidate_scratch_bytes": 2256535552,
+            "reserved_bytes": 2256535552,
+            "pending_persistent_bytes": 0
+          },
+          "shared_benchmark_bytes": 5319819776,
+          "borrowed_benchmark_bytes": 5319819776,
+          "allocated_shared_benchmark_bytes": 0,
+          "search_limits": {
+            "bf16_projection": "explicit backend and rows_per_tile override",
+            "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
+            "qsa": "fixed attention_splits=16 and singleton kernel configuration",
+            "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
+            "operator_scratch": "one arena sized to the complete candidate envelope"
+          },
+          "allocated_before_tuning": 81366320640,
+          "allocated_before_trial_release": 83167388672,
+          "allocated_after_trial_release": 83167388672,
+          "released_preparation_bytes": 0
+        },
+        "prefill_chunk_size": 4096,
+        "prefill_capacities": [
+          1,
+          16,
+          64,
+          128,
+          256,
+          512,
+          1024,
+          2048,
+          4096
+        ]
+      },
+      "final_request_comparison": {
+        "request_names_equal": true,
+        "initial_count": 12,
+        "final_count": 12,
+        "byte_identical": 12
+      },
+      "memory_ownership_limitation": "The arena retains the entire candidate-search capacity after preparation.",
+      "runtime_files": 26,
+      "final_runtime_changes": [
+        "serve/preparation/scratch.py",
+        "serve/preparation/tuning.py",
+        "serve/recipes/qwen38/attention.py",
+        "serve/recipes/qwen38/gdn.py",
+        "serve/recipes/qwen38/linear.py",
+        "serve/recipes/qwen38/moe.py",
+        "serve/recipes/qwen38/ple.py",
+        "serve/recipes/qwen38/vision.py"
+      ]
+    },
+    {
+      "run_prefix": "sparkgap-selected-scratch",
+      "http": {
+        "reported_passed": true,
+        "checks": 98,
+        "passed_checks": 98,
+        "failed_checks": [],
+        "case_errors": [],
+        "error": null
+      },
+      "server_exit": {
+        "command": [
+          "/home/luke/projects/sparkgap/.venv/bin/python",
+          "-u",
+          "-m",
+          "serve",
+          "--bind",
+          "127.0.0.1:38761",
+          "--memory-report",
+          "/tmp/sparkgap-selected-scratch-server-memory.json"
+        ],
+        "cwd": "/home/luke/projects/sparkgap",
+        "environment": {
+          "CUDA_HOME": "/opt/cuda",
+          "CUDA_VISIBLE_DEVICES": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+          "PYTHONUNBUFFERED": "1",
+          "PYTHONDONTWRITEBYTECODE": "1"
+        },
+        "prefill_chunk_source": "serve CLI default; no command-line override",
+        "runtime_files": 26,
+        "runtime_sources": "/tmp/sparkgap-selected-scratch-runtime-source/manifest.json",
+        "native_build": "/tmp/sparkgap-prefill-capacity-native-source/build.json",
+        "native_sha256": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+        "native_inputs_verified": 34,
+        "unset_environment": [
+          "PYTHONPATH"
+        ],
+        "outputs": {
+          "log": "/tmp/sparkgap-selected-scratch-server.log",
+          "memory": "/tmp/sparkgap-selected-scratch-server-memory.json",
+          "start": "/tmp/sparkgap-selected-scratch-server-start.json",
+          "exit": "/tmp/sparkgap-selected-scratch-server-exit.json"
+        },
+        "pid": 2155403,
+        "started_utc": "2026-10-09T14:49:57.871908+00:00",
+        "finished_utc": "2026-10-09T14:54:45.683835+00:00",
+        "elapsed_seconds": 287.8119354369992,
+        "exit_code": 0,
+        "supervisor_error": null,
+        "forwarded_signals": [],
+        "process_absent": true,
+        "source_differences": {},
+        "sources_unchanged": true,
+        "native_sha256_after": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+        "native_binary_unchanged": true,
+        "log_sha256": "07c2b5f7da016169de23af6a1b213fd71f4e35d370d8fd4a8b07ce105dfa5dc7",
+        "memory_report_sha256": "6e32ef755ca29d339ecedbac24e5a969c6f24abd4a989de766a7b96a86e8eaa1",
+        "scope": "Child process exit and source integrity only; HTTP readiness, CUDA mappings and GPU release require separate observations."
+      },
+      "memory_report": {
+        "weights_bytes": 72667278336,
+        "mapped_ple_bytes": 28800138240,
+        "hybrid_state_bytes": 5319819776,
+        "snapshot_capacity": 37,
+        "pages": 7457,
+        "page_bytes": 1622016,
+        "kv_bytes": 12095373312,
+        "cached_token_capacity": 477248,
+        "headroom_bytes": 4294967296,
+        "free_device_bytes": 4302372864,
+        "total_device_bytes": 102014189568,
+        "allocated_bytes": 95571726336,
+        "reserved_bytes": 96506740736,
+        "operator_scratch_bytes": 297959168,
+        "graphs": 43,
+        "tuning": {
+          "workload_schema": "qwen38-active-operators-v1",
+          "namespace": {
+            "checkpoint": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+            "config": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28",
+            "headers": "b4884a790482d83fc86cf97eb01054780817d39e866c29013ca63cae881441aa",
+            "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-bf16-pinned",
+            "workload_schema": "qwen38-active-operators-v1"
+          },
+          "requests": 14983,
+          "compile_workers": 8,
+          "cache_hits": 51,
+          "benchmarked_candidates": 0,
+          "elapsed_seconds": 3.7985445740050636,
+          "parent_cute_compilations": 0,
+          "parent_triton_compilations": 0,
+          "selection_counts": {
+            "override": 4675,
+            "fixed": 8016,
+            "cached": 2292
+          },
+          "scratch_arena": {
+            "initial_bytes": 321562624,
+            "candidate_scratch_bytes": 2256535552,
+            "candidate_reserved_bytes": 2256535552,
+            "pending_persistent_bytes": 0,
+            "selected_scratch_bytes": 297959168,
+            "reserved_bytes": 297959168
+          },
+          "shared_benchmark_bytes": 5319819776,
+          "borrowed_benchmark_bytes": 5319819776,
+          "allocated_shared_benchmark_bytes": 0,
+          "search_limits": {
+            "bf16_projection": "explicit backend and rows_per_tile override",
+            "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
+            "qsa": "fixed attention_splits=16 and singleton kernel configuration",
+            "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
+            "operator_scratch": "one arena sized to the complete candidate envelope"
+          },
+          "allocated_before_tuning": 81366320640,
+          "allocated_before_trial_release": 83465348096,
+          "allocated_after_trial_release": 83465348096,
+          "released_preparation_bytes": 0
+        },
+        "prefill_chunk_size": 4096,
+        "prefill_capacities": [
+          1,
+          16,
+          64,
+          128,
+          256,
+          512,
+          1024,
+          2048,
+          4096
+        ]
+      },
+      "final_request_comparison": {
+        "request_names_equal": true,
+        "initial_count": 12,
+        "final_count": 12,
+        "byte_identical": 12
+      },
+      "memory_ownership_limitation": "The arena is trimmed to selected capacity, but b12x prepared-plan owners retain priming bindings and the candidate allocation until session close. The reported operator_scratch_bytes alone does not prove release of candidate storage.",
+      "runtime_files": 26,
+      "final_runtime_changes": [
+        "serve/preparation/scratch.py",
+        "serve/recipes/qwen38/attention.py",
+        "serve/recipes/qwen38/gdn.py",
+        "serve/recipes/qwen38/linear.py",
+        "serve/recipes/qwen38/moe.py",
+        "serve/recipes/qwen38/ple.py",
+        "serve/recipes/qwen38/vision.py"
+      ]
+    }
+  ],
+  "retained_priming_owner_comparison": {
+    "measurement": "torch CUDA allocated bytes after preparation trial cleanup and before graph capture/KV sizing",
+    "concrete_priming_owners_run": "sparkgap-selected-scratch",
+    "concrete_priming_owners_allocated_bytes": 83465348096,
+    "arena_priming_owner_run": "sparkgap-owned-scratch",
+    "arena_priming_owner_allocated_bytes": 81208812544,
+    "allocated_bytes_difference": 2256535552,
+    "candidate_reserved_bytes": 2256535552,
+    "difference_equals_candidate_bytes": true,
+    "trial_cleanup_measurement": "released_preparation_bytes measures only the before/after trial-cleanup interval; candidate storage can be released before that interval."
+  },
+  "source_deltas": [
+    {
+      "path": "serve/__main__.py",
+      "before_sha256": "f16aa94b8eb1ebf7dcc8bfd17d6f42c4d0a3ede1254272f1c54b43d6a28b1dbe",
+      "after_sha256": "f16aa94b8eb1ebf7dcc8bfd17d6f42c4d0a3ede1254272f1c54b43d6a28b1dbe",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/__init__.py",
+      "before_sha256": "e2a460375de081a5f554c1ee822bb30e5aa1bb14c7d908f6244d08eef3b45ec2",
+      "after_sha256": "e2a460375de081a5f554c1ee822bb30e5aa1bb14c7d908f6244d08eef3b45ec2",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/__main__.py",
+      "before_sha256": "c57785460746f149651250e140cc306cdba536c633d4ee8e163dbbfc448e63f2",
+      "after_sha256": "c57785460746f149651250e140cc306cdba536c633d4ee8e163dbbfc448e63f2",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/checkpoint.py",
+      "before_sha256": "0577809f1f60e28816f10838597e82aed9eba3de24c08da1ebaf738c1e2cdb99",
+      "after_sha256": "0577809f1f60e28816f10838597e82aed9eba3de24c08da1ebaf738c1e2cdb99",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/execution.py",
+      "before_sha256": "097fc6ae21f28a16c726abcc3b110ab53f8bb8d0d7a2c75aefb5ebbd62f68a22",
+      "after_sha256": "097fc6ae21f28a16c726abcc3b110ab53f8bb8d0d7a2c75aefb5ebbd62f68a22",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/graphs.py",
+      "before_sha256": "fd0e65bf4577dd4c1ae0f2e7f3fcd727a7a37f47791872027f503ee4df927cee",
+      "after_sha256": "fd0e65bf4577dd4c1ae0f2e7f3fcd727a7a37f47791872027f503ee4df927cee",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/qwen38.py",
+      "before_sha256": "b1bf70b14cdac4148b25d3054b5b3903f7f41dc9b261790970019f953e774d48",
+      "after_sha256": "b1bf70b14cdac4148b25d3054b5b3903f7f41dc9b261790970019f953e774d48",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/preparation/scratch.py",
+      "before_sha256": null,
+      "after_sha256": "b3e0bfc8f3af7320b320864931e5c78da01f9d042e70df140385f1551c12f322",
+      "change": "added"
+    },
+    {
+      "path": "serve/preparation/tuning.py",
+      "before_sha256": "677fecb8d57c59502b82499b06f9f1807648e9bab80cc640808fc327142d5742",
+      "after_sha256": "53edeadc24fddbb6cae078b205a3a08723f39d56e2d705d47643d9680dca657c",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/__init__.py",
+      "before_sha256": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+      "after_sha256": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/attention.py",
+      "before_sha256": "bd60d1bdf8eafa950c0d4dcc48e639ea451159b819c820492860ac932ae652c2",
+      "after_sha256": "1cb449cb413e4d2fa02ab1d286d4a591245f3edc87c22b6f9baa5b8e5dc028b6",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/bootstrap.py",
+      "before_sha256": "c7b8ccc2c53b2af288e3992f561d0fe47a872203bfbd725ae0188bca8187031b",
+      "after_sha256": "7feab0a7984c4fd085e8a4a9caa9f8d8a32878813f0f15a2487f3d1542cae20d",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/decoder.py",
+      "before_sha256": "722bc6bb3d6159667a0f2f5cc38ecdf8a37355a5915126269be8ecf192a8c825",
+      "after_sha256": "157bd7df144f41754021e5eb6925febf77f3d72ef5d0d9318b0a832bc365c131",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/decoder_state.py",
+      "before_sha256": "d7c5f90fb91b705198dd90edb5118126c1b58895f2fc8cee89a1df4b4e29e89b",
+      "after_sha256": "d7c5f90fb91b705198dd90edb5118126c1b58895f2fc8cee89a1df4b4e29e89b",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/gdn.py",
+      "before_sha256": "4d9257ff2080dc6a16649c904789609c8beffa3e255be4f8bd294baa2923754d",
+      "after_sha256": "9fb2421239169f394d23dda9a0f8f8831bf6fc62e831a9a299919f2106a40534",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/hyperconnection.py",
+      "before_sha256": "2bab6283e91e9b2938ed46079e3deaf16acb6823bf0379494f056046da71c02a",
+      "after_sha256": "2bab6283e91e9b2938ed46079e3deaf16acb6823bf0379494f056046da71c02a",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/linear.py",
+      "before_sha256": "718904ed006a441cbc1596ecd027d7a1597c717d54b83fff5694684d8e05aea0",
+      "after_sha256": "c13923cd1ee2cba9da5e867aecd93da0d270500069668b2f1b55439d5e4eff3f",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/maintenance.py",
+      "before_sha256": "15faac8e81cbf9d4d22995cf7749dec322c0e18b176cb76f2ced99bfe3dd0a6f",
+      "after_sha256": "15faac8e81cbf9d4d22995cf7749dec322c0e18b176cb76f2ced99bfe3dd0a6f",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/model.py",
+      "before_sha256": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022",
+      "after_sha256": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/moe.py",
+      "before_sha256": "893fd88ab56aaf5cc736ea0221afdcb6c7c223216f98ea88c80e7a9e910f0967",
+      "after_sha256": "c79584151277499d23ee6f29150b41b7605125df83958737b8fbe3c4c7eb283e",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/ple.py",
+      "before_sha256": "7a5f8c1292baf5bd29399844e3d71e0505cc855143f50e945eaa7d2a7034f01a",
+      "after_sha256": "13fdb352bb0117c2018194e45b8868295a34cff54f111117cee7eb9134a463a7",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/sampling.py",
+      "before_sha256": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+      "after_sha256": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/state.py",
+      "before_sha256": "cca3ef5c39b6f6884bcd718dc75f2e6753551f6b4987f24bd053d998fb10e254",
+      "after_sha256": "cca3ef5c39b6f6884bcd718dc75f2e6753551f6b4987f24bd053d998fb10e254",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/vision.py",
+      "before_sha256": "280ae32d783eeb355ead7103cb9c888b4235b4daa3d8f545748964cfa285f469",
+      "after_sha256": "50d03c062617228de5d4431695b1a958b5e77561186e4a93b7fa9dede5c10e83",
+      "change": "modified"
+    },
+    {
+      "path": "serve/recipes/qwen38/vision_state.py",
+      "before_sha256": "570234415c2f0f6fa47e07d9930c7941b3a8daecacd76ed632f79d608f0aeae2",
+      "after_sha256": "570234415c2f0f6fa47e07d9930c7941b3a8daecacd76ed632f79d608f0aeae2",
+      "change": "unchanged"
+    },
+    {
+      "path": "serve/recipes/qwen38/weights.py",
+      "before_sha256": "b0b602cab35740be7230f518598bbdc152beac99fab8b2451381ccb27bb9e5a4",
+      "after_sha256": "b0b602cab35740be7230f518598bbdc152beac99fab8b2451381ccb27bb9e5a4",
+      "change": "unchanged"
+    }
+  ],
+  "source_delta_counts": {
+    "unchanged": 16,
+    "added": 1,
+    "modified": 9
+  },
+  "server_start": {
+    "command": [
+      "/home/luke/projects/sparkgap/.venv/bin/python",
+      "-u",
+      "-m",
+      "serve",
+      "--bind",
+      "127.0.0.1:38761",
+      "--memory-report",
+      "/tmp/sparkgap-owned-scratch-server-memory.json"
+    ],
+    "cwd": "/home/luke/projects/sparkgap",
+    "environment": {
+      "CUDA_HOME": "/opt/cuda",
+      "CUDA_VISIBLE_DEVICES": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+      "PYTHONUNBUFFERED": "1",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "prefill_chunk_source": "serve CLI default; no command-line override",
+    "runtime_files": 26,
+    "runtime_sources": "/tmp/sparkgap-owned-scratch-runtime-source/manifest.json",
+    "native_build": "/tmp/sparkgap-prefill-capacity-native-source/build.json",
+    "native_sha256": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+    "native_inputs_verified": 34,
+    "unset_environment": [
+      "PYTHONPATH"
+    ],
+    "outputs": {
+      "log": "/tmp/sparkgap-owned-scratch-server.log",
+      "memory": "/tmp/sparkgap-owned-scratch-server-memory.json",
+      "start": "/tmp/sparkgap-owned-scratch-server-start.json",
+      "exit": "/tmp/sparkgap-owned-scratch-server-exit.json"
+    },
+    "pid": 2184428,
+    "started_utc": "2026-10-09T14:57:13.226802+00:00",
+    "helper_pid": 2184420,
+    "runtime_sha256": {
+      "serve/__main__.py": "f16aa94b8eb1ebf7dcc8bfd17d6f42c4d0a3ede1254272f1c54b43d6a28b1dbe",
+      "serve/preparation/__init__.py": "e2a460375de081a5f554c1ee822bb30e5aa1bb14c7d908f6244d08eef3b45ec2",
+      "serve/preparation/__main__.py": "c57785460746f149651250e140cc306cdba536c633d4ee8e163dbbfc448e63f2",
+      "serve/preparation/checkpoint.py": "0577809f1f60e28816f10838597e82aed9eba3de24c08da1ebaf738c1e2cdb99",
+      "serve/preparation/execution.py": "097fc6ae21f28a16c726abcc3b110ab53f8bb8d0d7a2c75aefb5ebbd62f68a22",
+      "serve/preparation/graphs.py": "fd0e65bf4577dd4c1ae0f2e7f3fcd727a7a37f47791872027f503ee4df927cee",
+      "serve/preparation/qwen38.py": "b1bf70b14cdac4148b25d3054b5b3903f7f41dc9b261790970019f953e774d48",
+      "serve/preparation/scratch.py": "b3e0bfc8f3af7320b320864931e5c78da01f9d042e70df140385f1551c12f322",
+      "serve/preparation/tuning.py": "53edeadc24fddbb6cae078b205a3a08723f39d56e2d705d47643d9680dca657c",
+      "serve/recipes/qwen38/__init__.py": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+      "serve/recipes/qwen38/attention.py": "1cb449cb413e4d2fa02ab1d286d4a591245f3edc87c22b6f9baa5b8e5dc028b6",
+      "serve/recipes/qwen38/bootstrap.py": "7feab0a7984c4fd085e8a4a9caa9f8d8a32878813f0f15a2487f3d1542cae20d",
+      "serve/recipes/qwen38/decoder.py": "157bd7df144f41754021e5eb6925febf77f3d72ef5d0d9318b0a832bc365c131",
+      "serve/recipes/qwen38/decoder_state.py": "d7c5f90fb91b705198dd90edb5118126c1b58895f2fc8cee89a1df4b4e29e89b",
+      "serve/recipes/qwen38/gdn.py": "9fb2421239169f394d23dda9a0f8f8831bf6fc62e831a9a299919f2106a40534",
+      "serve/recipes/qwen38/hyperconnection.py": "2bab6283e91e9b2938ed46079e3deaf16acb6823bf0379494f056046da71c02a",
+      "serve/recipes/qwen38/linear.py": "c13923cd1ee2cba9da5e867aecd93da0d270500069668b2f1b55439d5e4eff3f",
+      "serve/recipes/qwen38/maintenance.py": "15faac8e81cbf9d4d22995cf7749dec322c0e18b176cb76f2ced99bfe3dd0a6f",
+      "serve/recipes/qwen38/model.py": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022",
+      "serve/recipes/qwen38/moe.py": "c79584151277499d23ee6f29150b41b7605125df83958737b8fbe3c4c7eb283e",
+      "serve/recipes/qwen38/ple.py": "13fdb352bb0117c2018194e45b8868295a34cff54f111117cee7eb9134a463a7",
+      "serve/recipes/qwen38/sampling.py": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+      "serve/recipes/qwen38/state.py": "cca3ef5c39b6f6884bcd718dc75f2e6753551f6b4987f24bd053d998fb10e254",
+      "serve/recipes/qwen38/vision.py": "50d03c062617228de5d4431695b1a958b5e77561186e4a93b7fa9dede5c10e83",
+      "serve/recipes/qwen38/vision_state.py": "570234415c2f0f6fa47e07d9930c7941b3a8daecacd76ed632f79d608f0aeae2",
+      "serve/recipes/qwen38/weights.py": "b0b602cab35740be7230f518598bbdc152beac99fab8b2451381ccb27bb9e5a4"
+    }
+  },
+  "server_exit": {
+    "command": [
+      "/home/luke/projects/sparkgap/.venv/bin/python",
+      "-u",
+      "-m",
+      "serve",
+      "--bind",
+      "127.0.0.1:38761",
+      "--memory-report",
+      "/tmp/sparkgap-owned-scratch-server-memory.json"
+    ],
+    "cwd": "/home/luke/projects/sparkgap",
+    "environment": {
+      "CUDA_HOME": "/opt/cuda",
+      "CUDA_VISIBLE_DEVICES": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+      "PYTHONUNBUFFERED": "1",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "prefill_chunk_source": "serve CLI default; no command-line override",
+    "runtime_files": 26,
+    "runtime_sources": "/tmp/sparkgap-owned-scratch-runtime-source/manifest.json",
+    "native_build": "/tmp/sparkgap-prefill-capacity-native-source/build.json",
+    "native_sha256": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+    "native_inputs_verified": 34,
+    "unset_environment": [
+      "PYTHONPATH"
+    ],
+    "outputs": {
+      "log": "/tmp/sparkgap-owned-scratch-server.log",
+      "memory": "/tmp/sparkgap-owned-scratch-server-memory.json",
+      "start": "/tmp/sparkgap-owned-scratch-server-start.json",
+      "exit": "/tmp/sparkgap-owned-scratch-server-exit.json"
+    },
+    "pid": 2184428,
+    "started_utc": "2026-10-09T14:57:13.226802+00:00",
+    "finished_utc": "2026-10-09T15:03:51.458939+00:00",
+    "elapsed_seconds": 398.232143094996,
+    "exit_code": 0,
+    "supervisor_error": null,
+    "forwarded_signals": [],
+    "process_absent": true,
+    "source_differences": {},
+    "sources_unchanged": true,
+    "native_sha256_after": "0dcc9ca245ed83bcbf7c0ea8147640a09c3ea2f7de6a8e6bc0559826058a0dca",
+    "native_binary_unchanged": true,
+    "log_sha256": "5047eda7c5911fb61fb96343e14b06a0623c62939b2ea8b5867c9b83c02861c7",
+    "memory_report_sha256": "358aa04ecb414ed3d8ae85ca966298915a03bc0398e4825eca6e34a295e7acab",
+    "scope": "Child process exit and source integrity only; HTTP readiness, CUDA mappings and GPU release require separate observations."
+  },
+  "server_shutdown": {
+    "pid": 2184428,
+    "argv": [
+      "/home/luke/projects/sparkgap/.venv/bin/python",
+      "-u",
+      "-m",
+      "serve",
+      "--bind",
+      "127.0.0.1:38761",
+      "--memory-report",
+      "/tmp/sparkgap-owned-scratch-server-memory.json"
+    ],
+    "signal": "SIGTERM",
+    "reason": "Text and aggregate-vision HTTP qualification completed; release GPU for complete-catalog replay qualification.",
+    "requested_utc": "2026-10-09T15:03:45.867578+00:00",
+    "verified_utc": "2026-10-09T15:04:11.145669+00:00",
+    "process_absent": true,
+    "listener_connect_errno": 111,
+    "gpu_memory_after_exit": "2 MiB",
+    "exit_code": 0
+  },
+  "memory_report": {
+    "weights_bytes": 72667278336,
+    "mapped_ple_bytes": 28800138240,
+    "hybrid_state_bytes": 5319819776,
+    "snapshot_capacity": 37,
+    "pages": 8848,
+    "page_bytes": 1622016,
+    "kv_bytes": 14351597568,
+    "cached_token_capacity": 566272,
+    "headroom_bytes": 4294967296,
+    "free_device_bytes": 4319150080,
+    "total_device_bytes": 102014189568,
+    "allocated_bytes": 95585619968,
+    "reserved_bytes": 96489963520,
+    "operator_scratch_bytes": 297959168,
+    "graphs": 43,
+    "tuning": {
+      "workload_schema": "qwen38-active-operators-v1",
+      "namespace": {
+        "checkpoint": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+        "config": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28",
+        "headers": "b4884a790482d83fc86cf97eb01054780817d39e866c29013ca63cae881441aa",
+        "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-bf16-pinned",
+        "workload_schema": "qwen38-active-operators-v1"
+      },
+      "requests": 14983,
+      "compile_workers": 8,
+      "cache_hits": 51,
+      "benchmarked_candidates": 0,
+      "elapsed_seconds": 3.2008468260173686,
+      "parent_cute_compilations": 0,
+      "parent_triton_compilations": 0,
+      "selection_counts": {
+        "override": 4675,
+        "fixed": 8016,
+        "cached": 2292
+      },
+      "scratch_arena": {
+        "initial_bytes": 321562624,
+        "candidate_scratch_bytes": 2256535552,
+        "candidate_reserved_bytes": 2256535552,
+        "pending_persistent_bytes": 0,
+        "selected_scratch_bytes": 297959168,
+        "reserved_bytes": 297959168
+      },
+      "shared_benchmark_bytes": 5319819776,
+      "borrowed_benchmark_bytes": 5319819776,
+      "allocated_shared_benchmark_bytes": 0,
+      "search_limits": {
+        "bf16_projection": "explicit backend and rows_per_tile override",
+        "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
+        "qsa": "fixed attention_splits=16 and singleton kernel configuration",
+        "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
+        "operator_scratch": "one arena sized to the complete candidate envelope"
+      },
+      "allocated_before_tuning": 81366320640,
+      "allocated_before_trial_release": 81208812544,
+      "allocated_after_trial_release": 81208812544,
+      "released_preparation_bytes": 0
+    },
+    "prefill_chunk_size": 4096,
+    "prefill_capacities": [
+      1,
+      16,
+      64,
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ]
+  },
+  "sampler_mapping": {
+    "pid": 2184428,
+    "captured_utc": "2026-10-09T15:02:58.649475+00:00",
+    "cmdline": [
+      "/home/luke/projects/sparkgap/.venv/bin/python",
+      "-u",
+      "-m",
+      "serve",
+      "--bind",
+      "127.0.0.1:38761",
+      "--memory-report",
+      "/tmp/sparkgap-owned-scratch-server-memory.json"
+    ],
+    "mapped_path": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+    "mapped_device": "103:07",
+    "mapped_inode": 33069572,
+    "mtime_ns": 1791545640593386643,
+    "bytes": 2443272,
+    "files_sha256": {
+      "sampling.so": "1a17a3858b3dc8bdf189ccaff28dbccb1e10c2472b36fee035b4d6b5fd453757",
+      "build.ninja": "50e14c6f503a5b18afd14f2e2bf2617776c88c2403c07fa8365e5d717e20f4ee",
+      ".ninja_log": "a69f96c80d2b6e905a0d0d35bf33346949b963f3399a999ca18e641fdf14e454"
+    },
+    "mapping_rows": [
+      "7f1258a00000-7f1258a08000 r--p 00000000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f1258a08000-7f1258acd000 r-xp 00008000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f1258acd000-7f1258bf4000 r--p 000cd000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f1258bf4000-7f1258bf5000 r--p 001f4000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f1258bf5000-7f1258bf6000 rw-p 001f5000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so"
+    ]
+  },
+  "parity_sampler_mapping": {
+    "pid": 2212255,
+    "captured_utc": "2026-10-09T15:04:57.049054+00:00",
+    "cmdline": [
+      "/home/luke/projects/sparkgap/.venv/bin/python",
+      "-u",
+      "/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py",
+      "--prefill-chunk-size",
+      "4096",
+      "--output",
+      "/tmp/sparkgap-owned-scratch-graph-parity.json",
+      "--artifacts",
+      "/tmp/sparkgap-owned-scratch-graph-parity"
+    ],
+    "mapped_path": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+    "mapped_device": "103:07",
+    "mapped_inode": 33069572,
+    "mtime_ns": 1791545640593386643,
+    "bytes": 2443272,
+    "files_sha256": {
+      "sampling.so": "1a17a3858b3dc8bdf189ccaff28dbccb1e10c2472b36fee035b4d6b5fd453757",
+      "build.ninja": "50e14c6f503a5b18afd14f2e2bf2617776c88c2403c07fa8365e5d717e20f4ee",
+      ".ninja_log": "a69f96c80d2b6e905a0d0d35bf33346949b963f3399a999ca18e641fdf14e454"
+    },
+    "mapping_rows": [
+      "7f4bde600000-7f4bde608000 r--p 00000000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f4bde608000-7f4bde6cd000 r-xp 00008000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f4bde6cd000-7f4bde7f4000 r--p 000cd000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f4bde7f4000-7f4bde7f5000 r--p 001f4000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "7f4bde7f5000-7f4bde7f6000 rw-p 001f5000 103:07 33069572 /home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so"
+    ]
+  },
+  "http": {
+    "reported_passed": true,
+    "checks": 98,
+    "passed_checks": 98,
+    "failed_checks": [],
+    "case_errors": [],
+    "error": null,
+    "requests": 31,
+    "summary": {
+      "checks": 98,
+      "failed_checks": 0,
+      "case_errors": 0,
+      "requests": 31
+    }
+  },
+  "paired_http_outputs": {
+    "receipt": {
+      "path": "/tmp/sparkgap-owned-scratch-http-paired.json",
+      "bytes": 53716,
+      "sha256": "f581de63c86002abe0cc1bca28ae245659451618806d2c6b477d538f7354cc1c"
+    },
+    "comparison": "Identical serialized HTTP requests before and after unified scratch ownership; JSON output equality excludes only response ID, creation timestamp, and tool-call IDs.",
+    "passed": true,
+    "summary": {
+      "paired_requests": 12,
+      "byte_identical_requests": 12,
+      "equal_semantic_outputs": 12,
+      "failed_checks": []
+    },
+    "independently_equal_pairs": 12,
+    "source_sha256": {
+      "before": {
+        "serve/__main__.py": "f16aa94b8eb1ebf7dcc8bfd17d6f42c4d0a3ede1254272f1c54b43d6a28b1dbe",
+        "serve/preparation/__init__.py": "e2a460375de081a5f554c1ee822bb30e5aa1bb14c7d908f6244d08eef3b45ec2",
+        "serve/preparation/__main__.py": "c57785460746f149651250e140cc306cdba536c633d4ee8e163dbbfc448e63f2",
+        "serve/preparation/checkpoint.py": "0577809f1f60e28816f10838597e82aed9eba3de24c08da1ebaf738c1e2cdb99",
+        "serve/preparation/execution.py": "097fc6ae21f28a16c726abcc3b110ab53f8bb8d0d7a2c75aefb5ebbd62f68a22",
+        "serve/preparation/graphs.py": "fd0e65bf4577dd4c1ae0f2e7f3fcd727a7a37f47791872027f503ee4df927cee",
+        "serve/preparation/qwen38.py": "b1bf70b14cdac4148b25d3054b5b3903f7f41dc9b261790970019f953e774d48",
+        "serve/preparation/tuning.py": "677fecb8d57c59502b82499b06f9f1807648e9bab80cc640808fc327142d5742",
+        "serve/recipes/qwen38/__init__.py": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+        "serve/recipes/qwen38/attention.py": "bd60d1bdf8eafa950c0d4dcc48e639ea451159b819c820492860ac932ae652c2",
+        "serve/recipes/qwen38/bootstrap.py": "c7b8ccc2c53b2af288e3992f561d0fe47a872203bfbd725ae0188bca8187031b",
+        "serve/recipes/qwen38/decoder.py": "722bc6bb3d6159667a0f2f5cc38ecdf8a37355a5915126269be8ecf192a8c825",
+        "serve/recipes/qwen38/decoder_state.py": "d7c5f90fb91b705198dd90edb5118126c1b58895f2fc8cee89a1df4b4e29e89b",
+        "serve/recipes/qwen38/gdn.py": "4d9257ff2080dc6a16649c904789609c8beffa3e255be4f8bd294baa2923754d",
+        "serve/recipes/qwen38/hyperconnection.py": "2bab6283e91e9b2938ed46079e3deaf16acb6823bf0379494f056046da71c02a",
+        "serve/recipes/qwen38/linear.py": "718904ed006a441cbc1596ecd027d7a1597c717d54b83fff5694684d8e05aea0",
+        "serve/recipes/qwen38/maintenance.py": "15faac8e81cbf9d4d22995cf7749dec322c0e18b176cb76f2ced99bfe3dd0a6f",
+        "serve/recipes/qwen38/model.py": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022",
+        "serve/recipes/qwen38/moe.py": "893fd88ab56aaf5cc736ea0221afdcb6c7c223216f98ea88c80e7a9e910f0967",
+        "serve/recipes/qwen38/ple.py": "7a5f8c1292baf5bd29399844e3d71e0505cc855143f50e945eaa7d2a7034f01a",
+        "serve/recipes/qwen38/sampling.py": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+        "serve/recipes/qwen38/state.py": "cca3ef5c39b6f6884bcd718dc75f2e6753551f6b4987f24bd053d998fb10e254",
+        "serve/recipes/qwen38/vision.py": "280ae32d783eeb355ead7103cb9c888b4235b4daa3d8f545748964cfa285f469",
+        "serve/recipes/qwen38/vision_state.py": "570234415c2f0f6fa47e07d9930c7941b3a8daecacd76ed632f79d608f0aeae2",
+        "serve/recipes/qwen38/weights.py": "b0b602cab35740be7230f518598bbdc152beac99fab8b2451381ccb27bb9e5a4"
+      },
+      "after": {
+        "serve/__main__.py": "f16aa94b8eb1ebf7dcc8bfd17d6f42c4d0a3ede1254272f1c54b43d6a28b1dbe",
+        "serve/preparation/__init__.py": "e2a460375de081a5f554c1ee822bb30e5aa1bb14c7d908f6244d08eef3b45ec2",
+        "serve/preparation/__main__.py": "c57785460746f149651250e140cc306cdba536c633d4ee8e163dbbfc448e63f2",
+        "serve/preparation/checkpoint.py": "0577809f1f60e28816f10838597e82aed9eba3de24c08da1ebaf738c1e2cdb99",
+        "serve/preparation/execution.py": "097fc6ae21f28a16c726abcc3b110ab53f8bb8d0d7a2c75aefb5ebbd62f68a22",
+        "serve/preparation/graphs.py": "fd0e65bf4577dd4c1ae0f2e7f3fcd727a7a37f47791872027f503ee4df927cee",
+        "serve/preparation/qwen38.py": "b1bf70b14cdac4148b25d3054b5b3903f7f41dc9b261790970019f953e774d48",
+        "serve/preparation/scratch.py": "b3e0bfc8f3af7320b320864931e5c78da01f9d042e70df140385f1551c12f322",
+        "serve/preparation/tuning.py": "53edeadc24fddbb6cae078b205a3a08723f39d56e2d705d47643d9680dca657c",
+        "serve/recipes/qwen38/__init__.py": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+        "serve/recipes/qwen38/attention.py": "1cb449cb413e4d2fa02ab1d286d4a591245f3edc87c22b6f9baa5b8e5dc028b6",
+        "serve/recipes/qwen38/bootstrap.py": "7feab0a7984c4fd085e8a4a9caa9f8d8a32878813f0f15a2487f3d1542cae20d",
+        "serve/recipes/qwen38/decoder.py": "157bd7df144f41754021e5eb6925febf77f3d72ef5d0d9318b0a832bc365c131",
+        "serve/recipes/qwen38/decoder_state.py": "d7c5f90fb91b705198dd90edb5118126c1b58895f2fc8cee89a1df4b4e29e89b",
+        "serve/recipes/qwen38/gdn.py": "9fb2421239169f394d23dda9a0f8f8831bf6fc62e831a9a299919f2106a40534",
+        "serve/recipes/qwen38/hyperconnection.py": "2bab6283e91e9b2938ed46079e3deaf16acb6823bf0379494f056046da71c02a",
+        "serve/recipes/qwen38/linear.py": "c13923cd1ee2cba9da5e867aecd93da0d270500069668b2f1b55439d5e4eff3f",
+        "serve/recipes/qwen38/maintenance.py": "15faac8e81cbf9d4d22995cf7749dec322c0e18b176cb76f2ced99bfe3dd0a6f",
+        "serve/recipes/qwen38/model.py": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022",
+        "serve/recipes/qwen38/moe.py": "c79584151277499d23ee6f29150b41b7605125df83958737b8fbe3c4c7eb283e",
+        "serve/recipes/qwen38/ple.py": "13fdb352bb0117c2018194e45b8868295a34cff54f111117cee7eb9134a463a7",
+        "serve/recipes/qwen38/sampling.py": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+        "serve/recipes/qwen38/state.py": "cca3ef5c39b6f6884bcd718dc75f2e6753551f6b4987f24bd053d998fb10e254",
+        "serve/recipes/qwen38/vision.py": "50d03c062617228de5d4431695b1a958b5e77561186e4a93b7fa9dede5c10e83",
+        "serve/recipes/qwen38/vision_state.py": "570234415c2f0f6fa47e07d9930c7941b3a8daecacd76ed632f79d608f0aeae2",
+        "serve/recipes/qwen38/weights.py": "b0b602cab35740be7230f518598bbdc152beac99fab8b2451381ccb27bb9e5a4"
+      }
+    }
+  },
+  "vision_aggregate": {
+    "reported_passed": true,
+    "checks": 30,
+    "passed_checks": 30,
+    "failed_checks": [],
+    "case_errors": [],
+    "error": null,
+    "requests": 11,
+    "summary": {
+      "requests": 11,
+      "checks": 30,
+      "failed_checks": 0,
+      "case_errors": 0
+    },
+    "supervision": {
+      "exit_code": 0,
+      "output": "/tmp/sparkgap-owned-scratch-vision.json",
+      "log": "/tmp/sparkgap-owned-scratch-vision.log",
+      "checks": 30,
+      "failed_checks": 0,
+      "case_errors": 0
+    },
+    "fixture_geometry": {
+      "name": "four_coordinate_images_16384_patches_each",
+      "purpose": "aggregate capacity and image indexing; no caption-quality oracle",
+      "grid_thw": [
+        [
+          1,
+          128,
+          128
+        ],
+        [
+          1,
+          128,
+          128
+        ],
+        [
+          1,
+          128,
+          128
+        ],
+        [
+          1,
+          128,
+          128
+        ]
+      ],
+      "cu_seqlens": [
+        0,
+        16384,
+        32768,
+        49152,
+        65536
+      ],
+      "expected_feature_offsets": [
+        0,
+        4096,
+        8192,
+        12288
+      ],
+      "aggregate_patches": 65536,
+      "aggregate_features": 16384,
+      "prompt_tokens": 16412,
+      "rope_delta": -16128,
+      "json_request_bytes": 130564,
+      "sse_request_bytes": 130563
+    },
+    "model_metric_deltas": [
+      {
+        "case": "aggregate-cold-json",
+        "delta": {
+          "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"general\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"init\"}": 1,
+          "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"}": 0,
+          "sparkgap_requests_completed_total": 1,
+          "sparkgap_graph_launches_total{kind=\"resume\"}": 0,
+          "sparkgap_mixed_grammar_decode_steps_total": 0,
+          "sparkgap_cache_reused_tokens_total": 0,
+          "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"greedy\"}": 0,
+          "sparkgap_requests_admitted_total": 1,
+          "sparkgap_graph_launches_total{kind=\"restore\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"decode\"}": 32,
+          "sparkgap_cache_misses_total": 1,
+          "sparkgap_snapshot_evictions_total": 0,
+          "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"greedy\"}": 32,
+          "sparkgap_requests_failed_total": 0,
+          "sparkgap_cache_hits_total": 0,
+          "sparkgap_cache_lookups_total": 1,
+          "sparkgap_snapshot_publications_total": 1,
+          "sparkgap_graph_launches_total{kind=\"vision\"}": 4,
+          "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"general\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"snapshot\"}": 1,
+          "sparkgap_graph_launches_total{kind=\"prefill\"}": 5,
+          "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"greedy\"}": 5,
+          "sparkgap_requests_cancelled_total": 0
+        }
+      },
+      {
+        "case": "aggregate-repeat-json",
+        "delta": {
+          "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"general\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"init\"}": 0,
+          "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"}": 0,
+          "sparkgap_requests_completed_total": 1,
+          "sparkgap_graph_launches_total{kind=\"resume\"}": 0,
+          "sparkgap_mixed_grammar_decode_steps_total": 0,
+          "sparkgap_cache_reused_tokens_total": 16384,
+          "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"greedy\"}": 0,
+          "sparkgap_requests_admitted_total": 1,
+          "sparkgap_graph_launches_total{kind=\"restore\"}": 1,
+          "sparkgap_graph_launches_total{kind=\"decode\"}": 32,
+          "sparkgap_cache_misses_total": 0,
+          "sparkgap_snapshot_evictions_total": 0,
+          "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"greedy\"}": 32,
+          "sparkgap_requests_failed_total": 0,
+          "sparkgap_cache_hits_total": 1,
+          "sparkgap_cache_lookups_total": 1,
+          "sparkgap_snapshot_publications_total": 0,
+          "sparkgap_graph_launches_total{kind=\"vision\"}": 4,
+          "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"general\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"snapshot\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"prefill\"}": 1,
+          "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"greedy\"}": 1,
+          "sparkgap_requests_cancelled_total": 0
+        }
+      },
+      {
+        "case": "aggregate-repeat-sse",
+        "delta": {
+          "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"general\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"init\"}": 0,
+          "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"}": 0,
+          "sparkgap_requests_completed_total": 1,
+          "sparkgap_graph_launches_total{kind=\"resume\"}": 0,
+          "sparkgap_mixed_grammar_decode_steps_total": 0,
+          "sparkgap_cache_reused_tokens_total": 16384,
+          "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"greedy\"}": 0,
+          "sparkgap_requests_admitted_total": 1,
+          "sparkgap_graph_launches_total{kind=\"restore\"}": 1,
+          "sparkgap_graph_launches_total{kind=\"decode\"}": 32,
+          "sparkgap_cache_misses_total": 0,
+          "sparkgap_snapshot_evictions_total": 0,
+          "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"greedy\"}": 32,
+          "sparkgap_requests_failed_total": 0,
+          "sparkgap_cache_hits_total": 1,
+          "sparkgap_cache_lookups_total": 1,
+          "sparkgap_snapshot_publications_total": 0,
+          "sparkgap_graph_launches_total{kind=\"vision\"}": 4,
+          "sparkgap_sampling_graph_launches_total{kind=\"resume\",mode=\"general\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"snapshot\"}": 0,
+          "sparkgap_graph_launches_total{kind=\"prefill\"}": 1,
+          "sparkgap_sampling_graph_launches_total{kind=\"prefill\",mode=\"greedy\"}": 1,
+          "sparkgap_requests_cancelled_total": 0
+        }
+      }
+    ],
+    "limitations": [
+      "Coordinate-pattern images qualify full-capacity transport and indexing, with no caption-quality oracle.",
+      "JSON usage is checked against canonical processor token IDs; native SSE does not expose usage.",
+      "Expected arena offsets come from canonical image geometry and the native pack_vision source; HTTP does not expose GPU upload buffers.",
+      "Cold/cache JSON and SSE equality remains an unchanged required check; no canonical model-logit reference runs in this client.",
+      "Request timings are diagnostic observations, not serving-performance acceptance measurements."
+    ]
+  },
+  "graph_parity": {
+    "reported_passed": true,
+    "checks": 3694,
+    "passed_checks": 3694,
+    "failed_checks": [],
+    "case_errors": null,
+    "error": null,
+    "supervision": {
+      "pid": 2212255,
+      "command": [
+        "/home/luke/projects/sparkgap/.venv/bin/python",
+        "-u",
+        "/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py",
+        "--prefill-chunk-size",
+        "4096",
+        "--output",
+        "/tmp/sparkgap-owned-scratch-graph-parity.json",
+        "--artifacts",
+        "/tmp/sparkgap-owned-scratch-graph-parity"
+      ],
+      "started_utc": "2026-10-09T15:04:09.991915+00:00",
+      "finished_utc": "2026-10-09T15:25:44.377315+00:00",
+      "exit_code": 0,
+      "supervisor_error": null,
+      "changed_sources": {},
+      "sources_unchanged": true,
+      "sampler_mapping": {
+        "exit_code": 0,
+        "stdout": "{\"pid\": 2212255, \"sha256\": \"1a17a3858b3dc8bdf189ccaff28dbccb1e10c2472b36fee035b4d6b5fd453757\", \"inode\": 33069572, \"bytes\": 2443272}\n",
+        "stderr": ""
+      },
+      "process_absent": true,
+      "gpu_memory_after_exit": "2 MiB",
+      "gpu_query_exit_code": 0,
+      "log_sha256": "f5c1931500c2507e55ea224db02530337e6c2bc60d3d8edc74a93818b253e704",
+      "output_sha256": "fe08f484521d8876344abc1aebe990030105794eff74d6acf7791c36c618afd9"
+    },
+    "graphs": 43,
+    "commands_per_side": 124,
+    "equal_completion_commands": 124,
+    "observation_groups": 117,
+    "tensor_observations": 413708,
+    "equal_native_observations": 413708,
+    "matching_python_native_descriptors": 413708,
+    "mismatches": 0,
+    "allocation_checks": 234,
+    "allocation_equal_checks": 234,
+    "upload_files": 255,
+    "upload_bytes": 174167696,
+    "elapsed_seconds": 1284.4512296099856,
+    "readback_contract": {
+      "hybrid_rows": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        45
+      ],
+      "regions_per_row": 77,
+      "hybrid_padding": "Every tracked row is compared bytewise, including alignment padding.",
+      "qsa_pages": [
+        0,
+        671
+      ],
+      "qsa_far_canary_page": 8847,
+      "qsa_raw": "All seven QSA fields are covered; full selected pages and all raw slots include invalid payload bytes.",
+      "request_fields": [
+        "generation",
+        "consumed_tokens",
+        "generated_tokens",
+        "pending_token",
+        "status",
+        "error_code",
+        "seed",
+        "rng_counter",
+        "histogram",
+        "parameters",
+        "top_k",
+        "max_new_tokens",
+        "eos_token_ids",
+        "eos_count",
+        "grammar_mask",
+        "grammar_enabled",
+        "ple_history",
+        "boundary_history",
+        "boundary_consumed_tokens",
+        "boundary_generation"
+      ],
+      "mismatches": "Byte differences retain a64KiB window beginning256bytes before the first difference, plus total differing-byte count and full tensor hashes.",
+      "two_frame_groups": [
+        [
+          10,
+          11
+        ],
+        [
+          18,
+          19
+        ],
+        [
+          29,
+          30
+        ],
+        [
+          34,
+          35
+        ],
+        [
+          62,
+          63
+        ],
+        [
+          64,
+          65
+        ],
+        [
+          70,
+          71
+        ]
+      ],
+      "expected_stage_readback_bytes_upper_bound": 3402566788,
+      "expected_total_stage_readback_bytes_upper_bound": 803005761968,
+      "readback_bound_scope": "Expected valid-state reads after each group and initial state on both executors; excludes reset hashes and pristine-scratch snapshots.",
+      "deduplicated_baseline_limit_bytes": 34359738368
+    },
+    "scratch_arena_audit": {
+      "arena_bytes": 297959168,
+      "arena_frozen": true,
+      "families": {
+        "bf16_projection_without_scratch": 1192,
+        "gdn_convolution": 432,
+        "gdn_recurrence": 432,
+        "moe": 576,
+        "ple_convolution": 12,
+        "ple_embedding": 12,
+        "ple_hash": 12,
+        "qsa": 144,
+        "quantized_projection": 4472,
+        "vision_attention": 108
+      },
+      "view_count": 24972,
+      "view_logical_bytes_with_aliases": 1486574571720,
+      "highest_view_end_bytes": 297959168,
+      "external_tensor_count": 12372,
+      "plan_count_with_aliases": 6188,
+      "distinct_prepared_payloads": 1735
+    },
+    "memory_report": {
+      "weights_bytes": 72667278336,
+      "mapped_ple_bytes": 28800138240,
+      "hybrid_state_bytes": 5319819776,
+      "snapshot_capacity": 37,
+      "pages": 8848,
+      "page_bytes": 1622016,
+      "kv_bytes": 14351597568,
+      "cached_token_capacity": 566272,
+      "headroom_bytes": 4294967296,
+      "free_device_bytes": 4319150080,
+      "total_device_bytes": 102014189568,
+      "allocated_bytes": 95585619968,
+      "reserved_bytes": 96489963520,
+      "operator_scratch_bytes": 297959168,
+      "graphs": 43,
+      "tuning": {
+        "workload_schema": "qwen38-active-operators-v1",
+        "namespace": {
+          "checkpoint": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+          "config": "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28",
+          "headers": "b4884a790482d83fc86cf97eb01054780817d39e866c29013ca63cae881441aa",
+          "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-bf16-pinned",
+          "workload_schema": "qwen38-active-operators-v1"
+        },
+        "requests": 14983,
+        "compile_workers": 8,
+        "cache_hits": 51,
+        "benchmarked_candidates": 0,
+        "elapsed_seconds": 3.7585539940046147,
+        "parent_cute_compilations": 0,
+        "parent_triton_compilations": 0,
+        "selection_counts": {
+          "override": 4675,
+          "fixed": 8016,
+          "cached": 2292
+        },
+        "scratch_arena": {
+          "initial_bytes": 321562624,
+          "candidate_scratch_bytes": 2256535552,
+          "candidate_reserved_bytes": 2256535552,
+          "pending_persistent_bytes": 0,
+          "selected_scratch_bytes": 297959168,
+          "reserved_bytes": 297959168
+        },
+        "shared_benchmark_bytes": 5319819776,
+        "borrowed_benchmark_bytes": 5319819776,
+        "allocated_shared_benchmark_bytes": 0,
+        "search_limits": {
+          "bf16_projection": "explicit backend and rows_per_tile override",
+          "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
+          "qsa": "fixed attention_splits=16 and singleton kernel configuration",
+          "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
+          "operator_scratch": "one arena sized to the complete candidate envelope"
+        },
+        "allocated_before_tuning": 81366320640,
+        "allocated_before_trial_release": 81208812544,
+        "allocated_after_trial_release": 81208812544,
+        "released_preparation_bytes": 0
+      },
+      "prefill_chunk_size": 4096,
+      "prefill_capacities": [
+        1,
+        16,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096
+      ]
+    }
+  },
+  "cpu_and_component_test_logs": {
+    "cpu_log": {
+      "path": "/tmp/sparkgap-owned-scratch-cpu.log",
+      "summary_lines": [
+        "355 passed, 56 skipped in 56.04s"
+      ]
+    },
+    "moe_cuda_log": {
+      "path": "/tmp/sparkgap-unified-scratch-moe-cuda.log",
+      "summary_lines": [
+        "9 passed in 20.52s"
+      ]
+    },
+    "collection_failure": {
+      "path": "/tmp/sparkgap-unified-scratch-all-tests.log",
+      "summary_lines": [
+        "!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!",
+        "2 errors in 3.18s"
+      ]
+    }
+  },
+  "cancelled_startup": {
+    "pid": 2108023,
+    "reason": "Stopped by implementation agent during loading to include PLE planned scratch before final validation.",
+    "server_exit_receipt": "/tmp/sparkgap-unified-scratch-server-exit.json",
+    "ready": false,
+    "gpu_used_mib_after_exit": 2,
+    "observed_utc": "2026-10-09T14:40:26.450771+00:00"
+  },
+  "integrity_checks": {
+    "total": 1426,
+    "passed": 1426,
+    "failed": []
+  },
+  "integrity_passed": true,
+  "external_artifacts": {
+    "count": 1,
+    "bytes": 100663296,
+    "inventory_archive_member": "evidence/external-artifacts.json",
+    "retained_inventory": {
+      "path": "/data/sparkgap-artifacts/unified-scratch/external-payloads.json",
+      "bytes": 1265,
+      "sha256": "b04c5f4a2647eb01e04971564b7b2a791bbd0ad7da2a20d9e2ad759b054b1413"
+    }
+  },
+  "scope": "Unified planned operator scratch ownership, component correctness, actual HTTP service, and Python/Rust same-graph replay. Independent model numerical and performance acceptance are not established.",
+  "preserved_collector_schema_failure": {
+    "directory": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure",
+    "files": [
+      {
+        "path": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure/collect_unified_scratch.py",
+        "bytes": 39091,
+        "sha256": "72bed16f3a404d7c0adb736b5946183254c5378918e3ea93433b8b53d7125e2d"
+      },
+      {
+        "path": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure/collector.log",
+        "bytes": 614,
+        "sha256": "fd47e90521882496bf1b30e66bee83ae1706ab3f7fc76216fa89688a40f2a403"
+      },
+      {
+        "path": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure/reason.json",
+        "bytes": 1493,
+        "sha256": "659f5ebcad1ea64dfca7a9287600f78f0f8c0d9afda8baf9478464a7319d6091"
+      },
+      {
+        "path": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure/repository-summary.json",
+        "bytes": 55702,
+        "sha256": "d9ec26fd03a873f22aba37775ad752fcf012c50e6548f99999ae8b9e6ff396e8"
+      },
+      {
+        "path": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure/unified-scratch.json",
+        "bytes": 9597961,
+        "sha256": "1c463cccb53366e424d01820b38a7889f8f779d5a03b44cbf451d02a1ee38d10"
+      },
+      {
+        "path": "/data/sparkgap-artifacts/unified-scratch/collector-check-failure/unified-scratch.tar.gz",
+        "bytes": 32075079,
+        "sha256": "f0c080e16d08f2bc1efb2684450ab0574d17792e2465e0423e4a18d51b6ec918"
+      }
+    ]
+  },
+  "passed": true,
+  "archive": {
+    "path": "/data/sparkgap-artifacts/unified-scratch/unified-scratch.tar.gz",
+    "bytes": 32076279,
+    "sha256": "f718597c484d2979fd3ea31485416bcd96d75f852e322c621974e15bde95449e",
+    "members": 1658,
+    "all_payload_hashes_verified": true
+  },
+  "full_receipt": {
+    "path": "/data/sparkgap-artifacts/unified-scratch/unified-scratch.json",
+    "bytes": 9599671,
+    "sha256": "b4547315037069f91d370eaa0ac8bda1847ba0ff2fef29988887ceb07f3af9da"
+  }
+}

@@ -1,0 +1,315 @@
+{
+  "schema": "sparkgap-sampling-kernel-profile-v1",
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "sampling_sha256": "fec88dc50015bc8d5fece0d260743d7e6100ea4a94ea162e4daed281ac22518a",
+  "inputs": {
+    "receipt": "/home/luke/projects/sparkgap/docs/validation/decoder-execution.json",
+    "receipt_sha256": "df7250500090153f96e2124308971f1b8beed39df9ed65beb4ccc13f2665b767",
+    "artifact": "/tmp/sparkgap-decoder-execution.pt",
+    "artifact_sha256": "261aac8a7ccf7691501bc75509a0a6e25f69534ce69a162a76d67f02cf447731",
+    "checkpoint": {
+      "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+    },
+    "prompt_tokens": [
+      760,
+      6511,
+      314,
+      9338,
+      369
+    ],
+    "generated_tokens": [
+      11751,
+      13,
+      561,
+      6511
+    ],
+    "logits": [
+      {
+        "row": 0,
+        "shape": [
+          248320
+        ],
+        "dtype": "torch.bfloat16",
+        "sha256": "c918e019d732238a0345ba786d5aa5247835c08781142f7ebf1cbfe5d65c11c4",
+        "top_k_20_survivors": 20
+      },
+      {
+        "row": 1,
+        "shape": [
+          248320
+        ],
+        "dtype": "torch.bfloat16",
+        "sha256": "c445edae77d3782fc6c625a737992f2103a42b88059704d65b3a3950ca38a048",
+        "top_k_20_survivors": 20
+      },
+      {
+        "row": 2,
+        "shape": [
+          248320
+        ],
+        "dtype": "torch.bfloat16",
+        "sha256": "b5dc0234dad309045f8f18c508508c20ad2d733ec443c42e0a37838f45d58c47",
+        "top_k_20_survivors": 21
+      },
+      {
+        "row": 3,
+        "shape": [
+          248320
+        ],
+        "dtype": "torch.bfloat16",
+        "sha256": "2e34b974bbcb5ca6b4930899b218792300f2ee5ab95fb006595decaaf3b4570e",
+        "top_k_20_survivors": 20
+      }
+    ],
+    "model_numerical_reference": "not yet compared"
+  },
+  "profiled_case": "checkpoint_defaults-b1-n32-one-sample",
+  "single_sample_kernel_sum_us": 189.31100000000004,
+  "state_equal": true,
+  "profiler": "torch.profiler CPU+CUDA activities over native replay of captured graph; profiler timings separate from uninstrumented event measurements",
+  "repeated_kernel_samples": [
+    {
+      "kernel": "void flashinfer::sampling::air_top_p::AirTopPRenormApplyKernel<float>(float const*, float*, flashinfer::sampling::air_top_p::Counter<float>*, int)",
+      "samples_us": [
+        83.74299999999994,
+        83.77500000000009,
+        84.12699999999995,
+        84.09500000000003,
+        84.0300000000002
+      ],
+      "median_us": 84.0300000000002
+    },
+    {
+      "kernel": "void flashinfer::sampling::RadixTopKMaskLogitsKernel_MultiCTA<1024u, 4u, false, float, int>(float*, float*, int*, unsigned int, unsigned int, unsigned int, flashinfer::sampling::RadixRowState*, unsigned int, unsigned int)",
+      "samples_us": [
+        21.408000000000015,
+        21.248000000000047,
+        21.471000000000004,
+        21.439000000000078,
+        21.567999999999984
+      ],
+      "median_us": 21.439000000000078
+    },
+    {
+      "kernel": "void flashinfer::sampling::OnlineSoftmaxReduceKernel<1024u, 4u, float>(float*, float*, flashinfer::sampling::PartialSoftmaxResult*, float*, float, unsigned int, unsigned int)",
+      "samples_us": [
+        20.639999999999986,
+        20.25500000000011,
+        20.35199999999986,
+        20.607999999999947,
+        20.447999999999865
+      ],
+      "median_us": 20.447999999999865
+    },
+    {
+      "kernel": "void flashinfer::sampling::air_top_p::AirTopPRenormRadixKernel<true, float>(flashinfer::sampling::air_top_p::Counter<float>*, std::conditional<true, std::conditional<std::is_same_v, unsigned long, unsigned int>::type, float>::type*, int*, int, float*, float*)",
+      "samples_us": [
+        10.400000000000091,
+        6.912000000000035,
+        5.47199999999998,
+        10.336000000000013,
+        6.912000000000035,
+        5.504000000000133,
+        10.432000000000016,
+        7.008000000000038,
+        5.536000000000058,
+        10.336000000000013,
+        6.976000000000113,
+        5.536000000000058,
+        10.303999999999633,
+        6.976000000000113,
+        5.5349999999998545
+      ],
+      "median_us": 6.976000000000113
+    },
+    {
+      "kernel": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::MaxOps<float>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::MaxOps<float>, unsigned int, float, 4, 4>)",
+      "samples_us": [
+        5.727999999999952,
+        5.759999999999991,
+        5.7280000000000655,
+        5.759999999999991,
+        5.695999999999913
+      ],
+      "median_us": 5.7280000000000655
+    },
+    {
+      "kernel": "void flashinfer::sampling::SamplingFromProbKernel<1024u, (cub::_V_300402_SM_1200::BlockScanAlgorithm)2, (cub::_V_300402_SM_1200::BlockReduceAlgorithm)2, 4u, true, float, int>(float*, int*, bool*, int*, unsigned int, unsigned long*, unsigned long, unsigned long*, unsigned long, unsigned int, unsigned int)",
+      "samples_us": [
+        5.631999999999948,
+        5.599999999999909,
+        5.695999999999913,
+        5.663999999999987,
+        5.599999999999909
+      ],
+      "median_us": 5.631999999999948
+    },
+    {
+      "kernel": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+      "samples_us": [
+        4.192000000000007,
+        4.192000000000007,
+        4.2560000000000855,
+        4.255999999999858,
+        4.192000000000007
+      ],
+      "median_us": 4.192000000000007
+    },
+    {
+      "kernel": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::MaxNanFunctor<float> >, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::MaxNanFunctor<float> >, unsigned int, float, 4, 4>)",
+      "samples_us": [
+        4.096000000000004,
+        4.096000000000004,
+        4.127999999999929,
+        4.161000000000058,
+        4.160000000000309
+      ],
+      "median_us": 4.127999999999929
+    },
+    {
+      "kernel": "void flashinfer::sampling::OnlineSoftmaxMapKernel<1024u, 4u, float>(float*, flashinfer::sampling::PartialSoftmaxResult*, float*, float, unsigned int, unsigned int)",
+      "samples_us": [
+        2.9440000000000737,
+        2.94399999999996,
+        2.9429999999999836,
+        2.9759999999998854,
+        2.9760000000001128
+      ],
+      "median_us": 2.9440000000000737
+    },
+    {
+      "kernel": "_complete",
+      "samples_us": [
+        2.687999999999988,
+        2.688000000000102,
+        2.7200000000000273,
+        2.688000000000102,
+        2.688000000000102
+      ],
+      "median_us": 2.688000000000102
+    },
+    {
+      "kernel": "_scores",
+      "samples_us": [
+        2.048000000000002,
+        1.9839999999999236,
+        1.9839999999999236,
+        2.0160000000000764,
+        2.0160000000000764
+      ],
+      "median_us": 2.0160000000000764
+    },
+    {
+      "kernel": "_sampling_metadata",
+      "samples_us": [
+        1.759999999999991,
+        1.759999999999991,
+        1.759999999999991,
+        1.759999999999991,
+        1.759999999999991
+      ],
+      "median_us": 1.759999999999991
+    },
+    {
+      "kernel": "_consume",
+      "samples_us": [
+        1.6639999999999873,
+        1.6639999999999873,
+        1.6639999999999873,
+        1.6320000000000618,
+        1.6320000000000618
+      ],
+      "median_us": 1.6639999999999873
+    },
+    {
+      "kernel": "_gather",
+      "samples_us": [
+        1.5679999999999836,
+        1.5679999999999836,
+        1.599999999999909,
+        1.599999999999909,
+        1.568000000000211
+      ],
+      "median_us": 1.568000000000211
+    },
+    {
+      "kernel": "void flashinfer::sampling::air_top_p::AirTopPRenormInitKernel<float, unsigned long>(flashinfer::sampling::air_top_p::Counter<float>*, int, float const*, float*, float, unsigned long*, int*)",
+      "samples_us": [
+        1.3759999999999764,
+        1.344000000000051,
+        1.3439999999998236,
+        1.3759999999999764,
+        1.344000000000051
+      ],
+      "median_us": 1.344000000000051
+    },
+    {
+      "kernel": "_normalize_probs",
+      "samples_us": [
+        1.2480000000000473,
+        1.2799999999999727,
+        1.2799999999999727,
+        1.2480000000000473,
+        1.2800000000002
+      ],
+      "median_us": 1.2799999999999727
+    },
+    {
+      "kernel": "_mask_min_p",
+      "samples_us": [
+        1.2469999999999573,
+        1.2159999999998945,
+        1.2159999999998945,
+        1.2160000000001219,
+        1.1839999999997417
+      ],
+      "median_us": 1.2159999999998945
+    },
+    {
+      "kernel": "_sanitize_scores",
+      "samples_us": [
+        1.2160000000000082,
+        1.2480000000000473,
+        1.183999999999969,
+        1.183999999999969,
+        1.1840000000001965
+      ],
+      "median_us": 1.1840000000001965
+    },
+    {
+      "kernel": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int)#1})",
+      "samples_us": [
+        0.9919999999999618,
+        0.9919999999999618,
+        0.9920000000001892,
+        0.9919999999999618,
+        0.9919999999997344
+      ],
+      "median_us": 0.9919999999999618
+    }
+  ],
+  "artifacts": {
+    "/tmp/sparkgap-sampling-fi-profile.py": "ee5a451458fb1cb5183b966a5284e32b17c7dc3bb6c68e3140dabce776a50455",
+    "/tmp/sparkgap-sampling-fi-profile.json": "461a4acba34ed9ae0e4bd11c544cb67ab86ccf7f9a0b2ad987b766aa8e6b18a2",
+    "/tmp/sparkgap-sampling-fi-profile-trace.json": "154a31ce1a4e77a8241f5e2e280bc0e405c031f87b7c374f7c4bd548e9f297a1",
+    "/tmp/sparkgap-sampling-fi-profile-repeated.py": "e0f1f89bddc983ff341398aaf538c3c5ccfc6105eea083d6dc5dc6815ec8ce85",
+    "/tmp/sparkgap-sampling-fi-profile-repeated.json": "df26462d26f4dc91a635a7995bf832635ee5c5f26af6638cf297ceb02e27e2fe",
+    "/tmp/sparkgap-sampling-fi-profile-repeated-trace.json": "a7c4d7b7de4b347537a6dc6310f7078b581243084a7fef167a534bf5f78ee222",
+    "/tmp/sparkgap-sampling-fi-torch-softmax.py": "d44e8b9715672669022f62466a23ed9f48fbbd55d97bccfbf2a6dcec97af266c"
+  },
+  "measurements": [
+    "sampling-paths-flashinfer.json",
+    "sampling-paths-flashinfer-torch-softmax.json"
+  ],
+  "conclusions": [
+    "AIR top-p apply consumes about84us per B1 graph, versus about5.6us for the final categorical draw.",
+    "Captured torch.softmax(out=) preserves all552 sampled-state/allocation gates but increases B1 default active component time from204\u2013206us to272\u2013273us; production continues to use FlashInfer softmax.",
+    "AIR apply source uses one1024-thread CTA per row for the full-vocabulary retained-mass sum and normalized output pass. Parallelizing those passes is a direct implementation target; no FlashInfer source modification has been made."
+  ],
+  "limitations": [
+    "The five-repeat profile includes captured reset copies between sample graphs; memcpy totals are excluded from the repeated kernel table.",
+    "Profiler kernel durations are not full-model or HTTP latency evidence.",
+    "The suggested AIR apply split requires bitwise-output and unchanged threshold/reduction validation before acceptance."
+  ]
+}

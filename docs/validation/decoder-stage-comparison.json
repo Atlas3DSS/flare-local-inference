@@ -1,0 +1,431 @@
+{
+  "component": "Layer 0 canonical stage comparison and identical-input projection/MoE isolation",
+  "status": "numerical equivalence unqualified",
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+  },
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "conditions": {
+    "prompt": "The capital of France is",
+    "input_ids": [
+      760,
+      6511,
+      314,
+      9338,
+      369
+    ],
+    "teacher_tokens": [
+      11751,
+      13,
+      561
+    ],
+    "native_prefill_capacity": 512,
+    "canonical_prefill_tokens": 5,
+    "float32_matmul_precision": "highest",
+    "reference_stage_hooks": "Canonical forward code and arithmetic are unchanged; hooks detach stage outputs to CPU. Instrumented complete logits are bit-identical to the uninstrumented complete canonical reference on all four steps.",
+    "native_decode_recurrence": "Decode recurrence scratch already holds the fused gated RMSNorm result, so it is not compared against canonical raw recurrence. Native gated scratch is compared to canonical gated output.",
+    "same_input_isolation": "Canonical streamed layer 0 out_proj receives recorded native gdn_gated. Canonical layer 0 MoE receives recorded native mlp_mix. These diagnostic inputs isolate each component from upstream perturbations."
+  },
+  "sources": {
+    "transformers_revision": "4cc2aa84301c9aa210b5513dab9fefae03981f6e",
+    "reference_sha256": {
+      "serve/reference/qwen38_decoder.py": "8ecd3b8af216ecdb2150328ff728dfc28aabef98dc1dbe7c160fa7662ac18463",
+      "serve/reference/qwen38_quant.py": "7fa893735d5efb94190f34d7945af3fdd9624716876e0e5af772249beb99f176",
+      "serve/recipes/qwen38/model.py": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022"
+    },
+    "native_loaded_sources_receipt": "docs/validation/decoder-stage-trace.json"
+  },
+  "artifacts": {
+    "/tmp/sparkgap-decoder-stage-trace.pt": "5c4ece316efec14f30b99fe6207fe9f793773724522945ad4110e058013d3cb6",
+    "/tmp/sparkgap-canonical-stage-trace.pt": "2975163d410735956f5a9aa2803b67eb22cdd728494ab3e34d4dbacb47c87c80",
+    "/tmp/sparkgap-canonical-same-input.json": "2fcda7049810fc79793bd4ff6629eb9b9d98ce7b695ce8ea244f92789ef08608"
+  },
+  "instrumented_logits_exact": true,
+  "stage_comparison": [
+    {
+      "step": 0,
+      "values": {
+        "attn_mix": {
+          "relative_l2": 0.0005992471124045551,
+          "max_abs": 0.03125
+        },
+        "attn_output": {
+          "relative_l2": 0.012142419815063477,
+          "max_abs": 0.025390625
+        },
+        "attn_residual": {
+          "relative_l2": 0.011902233585715294,
+          "max_abs": 0.002685546875
+        },
+        "embedding": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "gdn_convolved_qkv": {
+          "relative_l2": 0.0006392622599378228,
+          "max_abs": 0.015625
+        },
+        "gdn_gated": {
+          "relative_l2": 0.004345512483268976,
+          "max_abs": 0.0078125
+        },
+        "gdn_projected_qkv": {
+          "relative_l2": 0.000846640788950026,
+          "max_abs": 0.0625
+        },
+        "gdn_recurrence": {
+          "relative_l2": 0.0029931142926216125,
+          "max_abs": 0.00048828125
+        },
+        "mlp_mix": {
+          "relative_l2": 0.020122267305850983,
+          "max_abs": 0.1640625
+        },
+        "mlp_output": {
+          "relative_l2": 0.045478835701942444,
+          "max_abs": 0.0166015625
+        },
+        "moe_ids": {
+          "identical_rows": 4,
+          "rows": 5
+        },
+        "moe_routed": {
+          "relative_l2": 0.079780712723732,
+          "max_abs": 0.017578125
+        },
+        "moe_router_logits": {
+          "relative_l2": 0.0027928894851356745,
+          "max_abs": 0.09375
+        },
+        "moe_shared": {
+          "relative_l2": 0.010668964125216007,
+          "max_abs": 0.00830078125
+        },
+        "moe_weights": {
+          "relative_l2": 0.007887001149356365,
+          "max_abs": 0.00390625
+        }
+      },
+      "logits": {
+        "relative_l2": 0.15889275074005127,
+        "max_abs": 1.9375
+      }
+    },
+    {
+      "step": 1,
+      "values": {
+        "attn_mix": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "attn_output": {
+          "relative_l2": 0.010186226107180119,
+          "max_abs": 0.01953125
+        },
+        "attn_residual": {
+          "relative_l2": 0.011220860294997692,
+          "max_abs": 0.00390625
+        },
+        "embedding": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "gdn_convolved_qkv": {
+          "relative_l2": 0.0001728800416458398,
+          "max_abs": 0.0009765625
+        },
+        "gdn_gated": {
+          "relative_l2": 0.0024552682880312204,
+          "max_abs": 0.0078125
+        },
+        "gdn_projected_qkv": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "mlp_mix": {
+          "relative_l2": 0.017965786159038544,
+          "max_abs": 0.046875
+        },
+        "mlp_output": {
+          "relative_l2": 0.024914344772696495,
+          "max_abs": 0.0108642578125
+        },
+        "moe_ids": {
+          "identical_rows": 1,
+          "rows": 1
+        },
+        "moe_routed": {
+          "relative_l2": 0.041056666523218155,
+          "max_abs": 0.003173828125
+        },
+        "moe_router_logits": {
+          "relative_l2": 0.002829109551385045,
+          "max_abs": 0.0625
+        },
+        "moe_shared": {
+          "relative_l2": 0.013852514326572418,
+          "max_abs": 0.0093994140625
+        },
+        "moe_weights": {
+          "relative_l2": 0.009321299381554127,
+          "max_abs": 0.00244140625
+        }
+      },
+      "logits": {
+        "relative_l2": 0.1820678859949112,
+        "max_abs": 2.296875
+      }
+    },
+    {
+      "step": 2,
+      "values": {
+        "attn_mix": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "attn_output": {
+          "relative_l2": 0.01166009996086359,
+          "max_abs": 0.005126953125
+        },
+        "attn_residual": {
+          "relative_l2": 0.011612683534622192,
+          "max_abs": 0.000396728515625
+        },
+        "embedding": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "gdn_convolved_qkv": {
+          "relative_l2": 8.886398427421227e-05,
+          "max_abs": 0.0009765625
+        },
+        "gdn_gated": {
+          "relative_l2": 0.0021526357159018517,
+          "max_abs": 0.00390625
+        },
+        "gdn_projected_qkv": {
+          "relative_l2": 2.9753968533441366e-07,
+          "max_abs": 6.103515625e-05
+        },
+        "mlp_mix": {
+          "relative_l2": 0.020531045272946358,
+          "max_abs": 0.078125
+        },
+        "mlp_output": {
+          "relative_l2": 0.03260080888867378,
+          "max_abs": 0.01025390625
+        },
+        "moe_ids": {
+          "identical_rows": 1,
+          "rows": 1
+        },
+        "moe_routed": {
+          "relative_l2": 0.06173471733927727,
+          "max_abs": 0.0096435546875
+        },
+        "moe_router_logits": {
+          "relative_l2": 0.0025150571018457413,
+          "max_abs": 0.0625
+        },
+        "moe_shared": {
+          "relative_l2": 0.012877348810434341,
+          "max_abs": 0.00323486328125
+        },
+        "moe_weights": {
+          "relative_l2": 0.007165503688156605,
+          "max_abs": 0.001953125
+        }
+      },
+      "logits": {
+        "relative_l2": 0.19982106983661652,
+        "max_abs": 2.78125
+      }
+    },
+    {
+      "step": 3,
+      "values": {
+        "attn_mix": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "attn_output": {
+          "relative_l2": 0.0028066011145710945,
+          "max_abs": 0.001953125
+        },
+        "attn_residual": {
+          "relative_l2": 0.003157852916046977,
+          "max_abs": 0.000244140625
+        },
+        "embedding": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "gdn_convolved_qkv": {
+          "relative_l2": 2.0842489902861416e-05,
+          "max_abs": 0.000244140625
+        },
+        "gdn_gated": {
+          "relative_l2": 0.0014071136247366667,
+          "max_abs": 0.00390625
+        },
+        "gdn_projected_qkv": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        },
+        "mlp_mix": {
+          "relative_l2": 0.005615311209112406,
+          "max_abs": 0.015625
+        },
+        "mlp_output": {
+          "relative_l2": 0.016854476183652878,
+          "max_abs": 0.00390625
+        },
+        "moe_ids": {
+          "identical_rows": 1,
+          "rows": 1
+        },
+        "moe_routed": {
+          "relative_l2": 0.04522617161273956,
+          "max_abs": 0.0032958984375
+        },
+        "moe_router_logits": {
+          "relative_l2": 0.001309510669670999,
+          "max_abs": 0.0625
+        },
+        "moe_shared": {
+          "relative_l2": 0.003082327079027891,
+          "max_abs": 0.001953125
+        },
+        "moe_weights": {
+          "relative_l2": 0.0,
+          "max_abs": 0.0
+        }
+      },
+      "logits": {
+        "relative_l2": 0.24390298128128052,
+        "max_abs": 3.1796875
+      }
+    }
+  ],
+  "same_input_isolation": [
+    {
+      "step": 0,
+      "out_projection_same_native_gated": {
+        "relative_l2": 0.00018838682444766164,
+        "max_abs": 0.001953125
+      },
+      "moe_same_native_mlp_mix": {
+        "relative_l2": 0.003153689671307802,
+        "max_abs": 0.001953125
+      },
+      "moe_router_logits": {
+        "relative_l2": 0.00012947582581546158,
+        "max_abs": 0.03125
+      },
+      "moe_weights": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_shared": {
+        "relative_l2": 8.879477014778203e-11,
+        "max_abs": 3.4924596548080444e-10
+      },
+      "moe_routed": {
+        "relative_l2": 0.00490169832482934,
+        "max_abs": 0.00146484375
+      },
+      "moe_ids_equal": true
+    },
+    {
+      "step": 1,
+      "out_projection_same_native_gated": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_same_native_mlp_mix": {
+        "relative_l2": 0.0026374170556664467,
+        "max_abs": 0.0009765625
+      },
+      "moe_router_logits": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_weights": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_shared": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_routed": {
+        "relative_l2": 0.004528864286839962,
+        "max_abs": 0.0009765625
+      },
+      "moe_ids_equal": true
+    },
+    {
+      "step": 2,
+      "out_projection_same_native_gated": {
+        "relative_l2": 4.4917024411006423e-07,
+        "max_abs": 1.9073486328125e-06
+      },
+      "moe_same_native_mlp_mix": {
+        "relative_l2": 0.002722366712987423,
+        "max_abs": 0.0009765625
+      },
+      "moe_router_logits": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_weights": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_shared": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_routed": {
+        "relative_l2": 0.0044408836401999,
+        "max_abs": 0.0009765625
+      },
+      "moe_ids_equal": true
+    },
+    {
+      "step": 3,
+      "out_projection_same_native_gated": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_same_native_mlp_mix": {
+        "relative_l2": 0.0020798773039132357,
+        "max_abs": 0.0009765625
+      },
+      "moe_router_logits": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_weights": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_shared": {
+        "relative_l2": 0.0,
+        "max_abs": 0.0
+      },
+      "moe_routed": {
+        "relative_l2": 0.004931804724037647,
+        "max_abs": 0.0009765625
+      },
+      "moe_ids_equal": true
+    }
+  ],
+  "conclusions": [
+    "Layer 0 differs before PLE or QSA is applied.",
+    "Prefill gated GDN output relative L2 is 0.00435; the resulting MXFP8 output projection discrepancy is 0.01214. On identical native gated inputs the projection discrepancy is 0.000188.",
+    "On identical native MoE inputs, routed output relative L2 is 0.00444 to 0.00493 and total MoE relative L2 is 0.00208 to 0.00315. Router IDs and weights are identical; shared output is effectively exact.",
+    "The larger full-stage output projection and routed MoE discrepancies depend on upstream input perturbations. These measurements do not attribute complete-model divergence to a single operator or establish numerical acceptance."
+  ]
+}

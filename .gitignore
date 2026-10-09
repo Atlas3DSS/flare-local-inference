@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+/build/
+/dist/
+/cufile.log
+/docs/validation/*.tar.gz
+/docs/validation/*.json.gz

@@ -1,0 +1,111 @@
+{
+  "component": "Qwen decoder layer 1 prime-hashed PLE residual contribution",
+  "status": "passed",
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+    "module": "model.language_model.layers.1.ple"
+  },
+  "environment": {
+    "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "compute_capability": "12.0",
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0"
+  },
+  "sources": {
+    "transformers_revision": "4cc2aa84301c9aa210b5513dab9fefae03981f6e",
+    "flashinfer_revision": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+    "flashinfer_patch_manifest_sha256": "62dbf0066aef6f0c30f5196bf0e0e1181421cf937cc22d9ea586368fc986e4d7",
+    "sha256": {
+      "serve/recipes/qwen38/ple.py": "3ebd5c31f9ea4e78fcac0e7d660c09cceb5307c3b71e0ce6102b3ff889500e31",
+      "tests/recipes/test_qwen38_ple.py": "30bcaebe88f8e02c1ae1aa7219937e3099717d9375724ce86c3cc7bc472956b4",
+      "serve/recipes/qwen38/linear.py": "cdfd6aed6d94de880830379e05ea06dbd8c46640090c2dfc72707755cb35af40",
+      "serve/preparation/graphs.py": "e39a23616cad8674733df63b17913e8676dca18bad8ce436ec2ba4bcd425bc6c"
+    }
+  },
+  "command": "CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f CUDA_HOME=/opt/cuda SPARKGAP_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest tests/recipes/test_qwen38_ple.py -xq --junitxml=/tmp/sparkgap-ple-qualification.xml -o junit_family=xunit1",
+  "result": {
+    "passed": 8,
+    "elapsed_seconds": 13.62,
+    "skipped": 0
+  },
+  "conditions": {
+    "host_table_bytes": 28800138240,
+    "table_rows": 320001536,
+    "checkpoint_planes": 128,
+    "packed_weight_bytes_per_row": 80,
+    "scale_bytes_per_row": 10,
+    "full_table_loaded": true,
+    "seed": 1647,
+    "source": "(torch.randn((sum(lengths),10240), generator=torch.Generator().manual_seed(1647))*0.1).to(torch.bfloat16), generator advanced across steps",
+    "prefill_capacity": 32,
+    "decode_capacity": 3,
+    "request_capacity": 3,
+    "convolution_state_slots": 4,
+    "convolution_history": 9,
+    "eos_token_id": 248044,
+    "reference": "Pinned canonical Qwen4ExpTextPLELayer with exact BF16 key/value projection and convolution weights, exact FP32 norm weights, exact hash constants, and independent selected-row NVFP4 checkpoint decoding. Reference cache has three states for decoder layer 1.",
+    "native": "b12x mapped-host ple_embedding, prepared BF16 projections, captured canonical norm and BF16 gate expressions, b12x raw short convolution with dilation3 and captured BF16 residual addition; CUDA graphs launched through PreparedGraphBundle and Rust GraphReplayWorker."
+  },
+  "acceptance": {
+    "embedding": "bit exact",
+    "output_relative_l2_limit": 0.01,
+    "history_relative_l2_limit": 0.01,
+    "pointwise_rtol": 0.03,
+    "pointwise_atol": "0.01*maxabs(expected)+1e-6",
+    "allocator": "allocation.all.allocated unchanged across each native graph replay",
+    "padding": "inactive output rows exactly zero",
+    "zero_active": "output exactly zero; all persistent convolution slots bitwise unchanged",
+    "lifetime": "worker.close before graph.reset; mapped table released by owner lifetime so unconfirmed native drain retains storage"
+  },
+  "cases": [
+    {
+      "case": "test_full_checkpoint_ple_native_graph_continuity[1]",
+      "relative_l2": {
+        "0.prefill.history0": 1.8344293550853763e-07,
+        "0.prefill.history1": 0.00016275634698104113,
+        "0.prefill.output": 3.2402040233137086e-05,
+        "1.decode.history0": 1.3065638881926134e-07,
+        "1.decode.history1": 0.00012117738515371457,
+        "1.decode.output": 3.4636379950825358e-06,
+        "2.prefill.history0": 9.275296179112047e-05,
+        "2.prefill.history1": 0.00010204685531789437,
+        "2.prefill.output": 8.322804205818102e-05
+      },
+      "mapped_host_bytes": 28800138240
+    },
+    {
+      "case": "test_full_checkpoint_ple_native_graph_continuity[17]",
+      "relative_l2": {
+        "0.prefill.history0": 0.000118229552754201,
+        "0.prefill.history1": 0.0001537903444841504,
+        "0.prefill.output": 9.005151514429599e-05,
+        "1.decode.history0": 0.0001045565732056275,
+        "1.decode.history1": 0.00010716056567616761,
+        "1.decode.output": 6.9337811510195024e-06,
+        "2.prefill.history0": 0.00012079590669600293,
+        "2.prefill.history1": 8.597943815402687e-05,
+        "2.prefill.output": 0.0001553839392727241
+      },
+      "mapped_host_bytes": 28800138240
+    }
+  ],
+  "coverage": [
+    "1+1 and17+1 fresh packed prefill requests",
+    "1+1 cached decode",
+    "3+2 cached prefill continuation",
+    "EOS inside prefill and at request boundaries",
+    "two-token accepted history supplied in fixed GPU metadata",
+    "shared CUDA graph memory pool with persistent exported buffers",
+    "full table byte layout and exact selected embeddings",
+    "CPU bounded plane copies crossing65536-row boundary",
+    "host memory capacity rejection before allocation",
+    "mapped storage cleanup after checkpoint read failure"
+  ],
+  "integration_requirement": "The complete model graph gathers committed_history[B,2] from persistent per-request GPU token history before PLE lookup and updates it after token consumption. The PLE adapter reads these rows and mutates only its convolution state pool.",
+  "raw_report": {
+    "path": "/tmp/sparkgap-ple-qualification.xml",
+    "sha256": "55c16e719cc9539ca169e7b339963ad0ed21d142701b8cab9889cb9634214b64"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "schema": "sparkgap-cache-conversation-qualification-v1",
+  "conditions": {
+    "max_active": 1,
+    "pages": 32,
+    "snapshots": 3,
+    "turns": 12,
+    "added_prompt_tokens_per_turn": 64,
+    "max_new_tokens": 1
+  },
+  "failure_before_fix": {
+    "cache_source_sha256": "306bc2000af35bb37e1a3a3553bbd78c48c27d63a030295f4444a04f92b8bc01",
+    "command": "cargo test --manifest-path native/Cargo.toml --features server --lib --offline appended_conversation_outlives_snapshot_capacity -- --nocapture",
+    "exit_code": 101,
+    "turn": 4,
+    "error": "live request resources are exhausted or awaiting GPU retirement",
+    "active_requests": 0,
+    "free_pages": 29,
+    "free_snapshots": 0,
+    "cached_checkpoints": 3
+  },
+  "result": {
+    "turns_completed": 12,
+    "entire_previous_prefix_reused": true,
+    "page_chain_length_and_unique_page_ids_checked_each_turn": true,
+    "all_32_pages_and_3_snapshots_reclaimed_after_eviction": true
+  },
+  "lifetime_cases": [
+    "Direct request pins prevent compaction.",
+    "Page-only pressure does not compact ancestor snapshots.",
+    "Child IDs, snapshots, page order and ancestor pin counts survive compaction.",
+    "Transferred pages retain outstanding GPU reads through fence 20.",
+    "Pending child cancellation retains transferred pages through fence 9.",
+    "Duplicate publication retains caller resources and returns the surviving checkpoint ID.",
+    "Unlocked leaf eviction precedes ancestor compaction."
+  ],
+  "checks": [
+    {
+      "command": "cargo test --manifest-path native/Cargo.toml --features server --lib --offline",
+      "exit_code": 0,
+      "passed": 82,
+      "ignored": 1,
+      "ignored_reason": "Checkpoint grammar trace requires explicit snapshot environment; exercised separately in grammar qualification."
+    },
+    {
+      "command": "cargo clippy --manifest-path native/Cargo.toml --features server --lib --offline -- -D warnings",
+      "exit_code": 0
+    }
+  ],
+  "source_sha256": {
+    "native/src/cache.rs": "dd904f83ff06ad6947530f7c266fcf8032ab0b5220ec1e7f970dbf1f0d45cf51",
+    "native/src/cache/tests.rs": "a7544d06de422e510c5d456e42a3bf6111c28b5b5195edda1fa49cbf3be699a6",
+    "native/src/scheduler.rs": "acd76f07b18903f26fc1f8dbbbf30363ac12e66d25cab6860528b6dee0e7cd10",
+    "native/src/scheduler/tests.rs": "fed59c29a2530546dca793e13f6312c0fb7696cadd6254b5e8aa2f9b46ac0410"
+  },
+  "limitations": [
+    "CPU scheduler completions are synthetic; HTTP qualification records actual model execution separately.",
+    "A single immutable snapshot slot cannot retain the selected prefix while reserving another request publication slot."
+  ],
+  "http_qualification": {
+    "receipt": "server-http-conversation.json",
+    "requests": 86,
+    "checks_passed": 210,
+    "checks_failed": 0,
+    "model_turns": 40,
+    "snapshot_capacity": 37,
+    "prefix_hits": 39,
+    "prefix_reused_tokens": 52416,
+    "ancestor_snapshot_evictions": 3,
+    "final_checkpoint_tokens": 2624,
+    "repeat_restores_final_checkpoint": true
+  },
+  "shutdown": {
+    "server_pid": 298827,
+    "signal": "SIGTERM",
+    "exit_code": 0,
+    "assigned_gpu_usage_mib": 2,
+    "assigned_gpu_compute_processes": 0,
+    "log": "/tmp/sparkgap-conversation-server.log"
+  }
+}

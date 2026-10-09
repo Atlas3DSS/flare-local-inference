@@ -1,0 +1,97 @@
+{
+  "component": "complete Qwen text decoder native graph execution",
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+  },
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "prefill_capacity": 512,
+  "context_capacity": 262144,
+  "pages": 4096,
+  "hybrid_state_slots": 46,
+  "weight_bytes": 72667278336,
+  "gpu_allocated_bytes": 85838063616,
+  "gpu_peak_bytes": 85889146880,
+  "mapped_host_table_bytes": 28800138240,
+  "prompt": "The capital of France is",
+  "prompt_tokens": [
+    760,
+    6511,
+    314,
+    9338,
+    369
+  ],
+  "generated_tokens": [
+    11751,
+    13,
+    561,
+    6511
+  ],
+  "generated_text": " Paris. The capital",
+  "records": [
+    [
+      1,
+      1,
+      5,
+      1,
+      11751,
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      2,
+      6,
+      2,
+      13,
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      3,
+      7,
+      3,
+      561,
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      4,
+      8,
+      4,
+      6511,
+      2,
+      0,
+      0
+    ]
+  ],
+  "source_sha256": {
+    "serve/recipes/qwen38/__init__.py": "bea5e3924699a0ea8afc9716690eb4fce07e83d516b35a267804e4f00e6abc63",
+    "serve/recipes/qwen38/attention.py": "f38b0c1a2b2c9fdb79daffe2d346d1f198ac0a54e02432f29a3ba308ae3ceb29",
+    "serve/recipes/qwen38/decoder.py": "4260a2065eed5c8ee8163a844d7730111bf33adddf7ba0846261a3608ed05f17",
+    "serve/recipes/qwen38/decoder_state.py": "3ed16cdfe36978c24b2cf5181dad9c727007fc49282eb4b840c9c4bc5f2fbe3a",
+    "serve/recipes/qwen38/gdn.py": "407ec8bacbdcf4d434285723d4f5c0f543a88865c125cafc84090b8e9f8c31ad",
+    "serve/recipes/qwen38/hyperconnection.py": "4db7addb02b9018302257e754284a2d3a69ca353fa4a985aff9124f693906a70",
+    "serve/recipes/qwen38/linear.py": "11644e6731336523c82724c05c347741a4b580650da301a38d71017d1435589a",
+    "serve/recipes/qwen38/maintenance.py": "15faac8e81cbf9d4d22995cf7749dec322c0e18b176cb76f2ced99bfe3dd0a6f",
+    "serve/recipes/qwen38/model.py": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022",
+    "serve/recipes/qwen38/moe.py": "36b91cf9d1b70710f590c1081b81ca6bfa70809e75a43409ae960fc8564bfc96",
+    "serve/recipes/qwen38/ple.py": "3ebd5c31f9ea4e78fcac0e7d660c09cceb5307c3b71e0ce6102b3ff889500e31",
+    "serve/recipes/qwen38/sampling.py": "29bcbcf5ba867abfc02999badb231e16bbf65b8f33a1684e2738bc21e15d79fa",
+    "serve/recipes/qwen38/state.py": "ed83482367dcaed71a1763b9bcb36b91976803cdf9bb39693f313f03ca1dd0ee",
+    "serve/recipes/qwen38/vision.py": "35eb7bd1f57a6cee9c57a5c2b23fb82598976cb1533b69bc5f117eb1ebe27b77",
+    "serve/recipes/qwen38/weights.py": "b0b602cab35740be7230f518598bbdc152beac99fab8b2451381ccb27bb9e5a4"
+  },
+  "diagnostic_readback_allocations": 1,
+  "replay_allocations": 0,
+  "all_logits_finite": true,
+  "numerical_reference": "not yet compared",
+  "elapsed_seconds": 46.24509666400263,
+  "tensor_output": "/tmp/sparkgap-decoder-stage-trace.pt",
+  "tensor_sha256": "5c4ece316efec14f30b99fe6207fe9f793773724522945ad4110e058013d3cb6"
+}

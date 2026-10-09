@@ -1,0 +1,254 @@
+{
+  "schema": "sparkgap-vllm-tp1-startup-v1",
+  "status": "ready_then_stopped",
+  "preserved_utc": "2026-10-09T08:38:05.250880+00:00",
+  "label": "qwen38-exact-tp1-bf16kv-fp32ssm-hostple-no-mtp-512-quantized-mxfp8",
+  "model_id": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+  "checkpoint_revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+  "run_directory": "/tmp/sparkgap-vllm-tp1-reference-64fc1eec/serving-run",
+  "raw_inputs": {
+    "path": "vllm-tp1-startup-raw.json",
+    "bytes": 274805,
+    "sha256": "fdcdfd5cf038a38c1d89075932417b366102135d3116931dd80adef8e9eaaf77"
+  },
+  "selected_plans": {
+    "path": "vllm-tp1-startup-selected-plans.json",
+    "bytes": 15250,
+    "sha256": "eb5b97b645bb18ab1004a079591c3178fd266401f811c0bfe6044da8510c43e7"
+  },
+  "selected_program_metadata": {
+    "path": "vllm-tp1-startup-program-metadata.json",
+    "bytes": 471059,
+    "sha256": "2866b8329540874bad1b52f00767be84cb6eb9cd43ddfaf8c6239f4fbfdda5e1"
+  },
+  "original_startup_analysis": {
+    "path": "/tmp/sparkgap-vllm-tp1-reference-64fc1eec/serving-run/startup-analysis.json",
+    "sha256": "f05e8e6ed45d6e81d2a19086b08085e6f1868fd06e79729e7b151873a605fb4e"
+  },
+  "historical_tp2_reference": {
+    "path": "exact-serving-reference.json",
+    "sha256": "1386ae8cb4f5f1163b9cca142cbf2215ecce6f71641af702702efff279032891",
+    "replaced": false
+  },
+  "sources": {
+    "/home/luke/projects/vllm-lunar-leviathan": {
+      "head": "64fc1eec593397cbd765cc082e9ec90fbeb5ea66",
+      "tree": "272a636af76f2231a897822d83d84d262ff50753",
+      "status": ""
+    },
+    "/tmp/lunar-rebase-20261008/flashinfer-pinned": {
+      "head": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+      "tree": "0884355f2d5bc3ae0e6ea3da927045972d56bbdf",
+      "status": ""
+    }
+  },
+  "source_assets_shards_extensions_and_bundle_unchanged_after_shutdown": true,
+  "native_extension_sha256": {
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/fs_io_C.abi3.so": "eae8ea134e11e4b444beb5abee6cfd1ddb40e5865de9b6905802cd341045b0cf",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/_C_stable_libtorch.abi3.so": "cb7e7c03788a7b99608322c242d11aacc234373ef31935ce91e7f1fefc99edd6",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/_flashkda_C.abi3.so": "67781d5b3a5478183797fe7be67db36381ec9965be9ab060ff3d78437623a7ae",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/cumem_allocator.abi3.so": "c81b91c4241696ee086aed58404e5d3ddc7ee4e3393a67a31c12d93b8c17f6da",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/_qutlass_C.abi3.so": "e37ccdb07c57612c4bec5bdb2e1c76af102c088dfc1006dcb9707673103a7e8b",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/_moe_C_stable_libtorch.abi3.so": "1a628d2424f46648a90088163fd99bf7f04ee3f5f8d3bee76feeeffee419fcd6",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/spinloop.abi3.so": "333439204d3ad8a4630a305afd203c25a4f5850fc6c171c8082150e73fa4ffd9",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so": "bde6e57bc49560781377c732e42e7152fbb00343942269807c3c218c2ec30bfb",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so": "87883f2275d26df584c9f58a0cfb3f8ff96b7736118008622370260cfee5032a",
+    "/home/luke/projects/vllm-lunar-leviathan/vllm/third_party/deep_gemm/_C_extension.abi3.so": "1ddc7a0a1d6660d65ebd09bbd260e6064617f52c23fb725874031f76ef8ca3c1"
+  },
+  "actual_launch_matches_plan": true,
+  "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+  "port": 38762,
+  "startup_seconds": 298.09414104299503,
+  "memory": {
+    "model_loading_gib": 67.9,
+    "weights_plus_non_torch_gib": 68.6,
+    "peak_activation_gib": 1.88,
+    "kv_cache_gib": 18.74,
+    "manager_blocks": 6268,
+    "manager_block_tokens": 1520,
+    "manager_groups": 49,
+    "token_equivalent_capacity": 684632,
+    "max_context": 262144,
+    "max_context_concurrency": 2.61,
+    "mapped_host_ple_gib": 26.82,
+    "final_cuda_graph_gib": 0.04,
+    "final_cuda_graph_seconds": 3,
+    "profile_cuda_graph_gib": 0.15
+  },
+  "preparation": {
+    "weights": {
+      "signatures": 62,
+      "measured_candidates": 500,
+      "compilations": 290
+    },
+    "state": {
+      "signatures": 67,
+      "measured_candidates": 736,
+      "compilations": 1246
+    },
+    "bind_compilations": 0
+  },
+  "selection_cache": {
+    "origin": "/home/luke/.cache/b12x/compile/preparation/8ebf957413b9b1cb8fc301a4520f269f94e274888f14ab7fc7d68c83c24807a2.json",
+    "origin_mtime_ns": 1791534126405221389,
+    "identity": {
+      "compute_capability": [
+        12,
+        0
+      ],
+      "measurement": "stream_gated_events_v1",
+      "namespace": {
+        "decode_context_parallel": 1,
+        "draft_model": null,
+        "dtype": "torch.bfloat16",
+        "kv_cache_dtype": "bfloat16",
+        "model": "/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+        "pipeline_parallel": 1,
+        "speculative_method": null,
+        "tensor_parallel": 1
+      },
+      "schema_version": 22,
+      "sm_count": 188,
+      "tuning_cache_version": 1
+    },
+    "record_count": 18,
+    "program_key_count": 42,
+    "available_cute_metadata_count": 36,
+    "complete_plan_catalog": false,
+    "query_declaration_dump_enabled": false
+  },
+  "log_evidence": [
+    {
+      "line": 21,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:40 [__init__.py:1195] Using B12xNvFp4LinearKernel for NVFP4 GEMM"
+    },
+    {
+      "line": 22,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:40 [cuda.py:599] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention"
+    },
+    {
+      "line": 23,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:40 [__init__.py:937] Using B12xMxfp8LinearKernel for MXFP8 GEMM"
+    },
+    {
+      "line": 24,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:40 [mm_encoder_attention.py:372] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention."
+    },
+    {
+      "line": 25,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:40 [qwen_gdn_linear_attn.py:471] Using b12x CuTeDSL GDN prefill kernel (requested=b12x, head_k_dim=128)."
+    },
+    {
+      "line": 26,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:40 [qwen_gdn_linear_attn.py:914] GDN decode kernel: b12x"
+    },
+    {
+      "line": 30,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:17:42 [b12x_ple.py:369] Using 26.82 GiB of private CUDA-mapped host memory for this TP rank's PLE table"
+    },
+    {
+      "line": 226,
+      "text": "[rank0]:[W1009 01:18:38.957046990 CUDACachingAllocator.cpp:508] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 2686976, total: 102014189568)."
+    },
+    {
+      "line": 227,
+      "text": "[rank0]:[W1009 01:18:54.989844111 CUDACachingAllocator.cpp:508] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 2686976, total: 102014189568)."
+    },
+    {
+      "line": 228,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:18:57 [model_runner.py:450] Model loading took 67.9 GiB memory and 77.575484 seconds"
+    },
+    {
+      "line": 249,
+      "text": "b12x ready gemm.bf16_vocab_projection: 62/62 ready, candidates 0/1 prepared, 500 measured, 0 cached, 290 compilations, 1:35"
+    },
+    {
+      "line": 265,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:20:58 [model_runner.py:1297] Graph capturing finished in 4 secs, took 0.15 GiB"
+    },
+    {
+      "line": 266,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:20:58 [cudagraph_utils.py:1470] CUDA graph memory profile: capture took 0.15 GiB with 3 of 3 FULL graphs (tokens: grown/kept MiB 4: +10.0/10.1, 2: +8.0/8.0, 1: +6.0/6.0); the other 0 FULL graphs add 0.00 GiB; estimate 0.15 GiB."
+    },
+    {
+      "line": 267,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:21:00 [gpu_worker.py:881] Available KV cache memory: 18.74 GiB"
+    },
+    {
+      "line": 269,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:21:00 [kv_cache_utils.py:3017] GPU KV cache size: 684,632 tokens, Maximum concurrency for 262,144 tokens per request: 2.61x"
+    },
+    {
+      "line": 272,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:21:00 [b12x_prepare.py:633] b12x autotuning uses 32 temporary KV blocks before allocating 6268 serving blocks"
+    },
+    {
+      "line": 284,
+      "text": "b12x ready gemm.bf16_vocab_projection: 67/67 ready, 736 measured, 0 cached, 1246 compilations, 1:08"
+    },
+    {
+      "line": 288,
+      "text": "b12x ready gemm.bf16_vocab_projection: 67/67 ready, 0 measured, 6 cached, 0 compilations, 0:00"
+    },
+    {
+      "line": 313,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:22:17 [model_runner.py:1297] Graph capturing finished in 3 secs, took 0.04 GiB"
+    },
+    {
+      "line": 315,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:22:17 [gpu_worker.py:1191] Free memory on device (94.41/95.01 GiB) on startup. Desired GPU memory utilization is (0.94, 89.31 GiB). Actual usage is 68.6 GiB for consumed memory (weights + non-torch), 1.88 GiB for peak activation, and 0.04 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=20006843986` (18.63 GiB) to fit into requested memory, or `--kv-cache-memory=25486228992` (23.74 GiB) to fully utilize gpu memory. Current kv cache memory in use is 18.74 GiB."
+    },
+    {
+      "line": 318,
+      "text": "(EngineCore pid=482074) INFO 10-09 01:22:17 [kv_cache_manager.py:295] Request-boundary recurrent checkpoint caching is enabled. Supported chat requests retain leading instructions, the complete prompt, and the response endpoint."
+    },
+    {
+      "line": 345,
+      "text": "(EngineCore pid=482074) WARNING 10-09 01:22:45 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _stage_qsa_rope_positions_kernel. This causes a latency spike; consider extending warmup to cover this shape/config."
+    },
+    {
+      "line": 346,
+      "text": "(EngineCore pid=482074) WARNING 10-09 01:22:46 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _restore_auxiliary_state_kernel. This causes a latency spike; consider extending warmup to cover this shape/config."
+    },
+    {
+      "line": 374,
+      "text": "(EngineCore pid=482074) WARNING 10-09 01:23:36 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _sorted_softmax_topk_kernel. This causes a latency spike; consider extending warmup to cover this shape/config."
+    }
+  ],
+  "shutdown": {
+    "status": {
+      "label": "qwen38-exact-tp1-bf16kv-fp32ssm-hostple-no-mtp-512-quantized-mxfp8",
+      "ready": true,
+      "status": "stopped",
+      "startup_seconds": 298.09414104299503,
+      "server_exit_code": 0,
+      "elapsed_seconds": 932.1790410359972
+    },
+    "gpu_after": {
+      "compute_processes": ""
+    },
+    "controller_forced_kill": false,
+    "vllm_internal_engine_force_kill_logged": true,
+    "resource_tracker_leaked_semaphores_warning": 1,
+    "server_log_sha256": "fb23b22c586bd29e30da0e448d0c618865843baae5040a389d66fbc62538c063"
+  },
+  "final_log_warning_evidence": [
+    "[rank0]:[W1009 01:18:38.957046990 CUDACachingAllocator.cpp:508] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 2686976, total: 102014189568).",
+    "[rank0]:[W1009 01:18:54.989844111 CUDACachingAllocator.cpp:508] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 2686976, total: 102014189568).",
+    "(EngineCore pid=482074) WARNING 10-09 01:22:45 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _stage_qsa_rope_positions_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.",
+    "(EngineCore pid=482074) WARNING 10-09 01:22:46 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _restore_auxiliary_state_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.",
+    "(EngineCore pid=482074) WARNING 10-09 01:23:36 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _sorted_softmax_topk_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.",
+    "(APIServer pid=481214) WARNING 10-09 01:32:50 [utils.py:638] [shutdown] Process manager: force killing remaining processes count=1",
+    "(APIServer pid=481214) WARNING 10-09 01:32:50 [utils.py:643] [shutdown] Process manager: force killing remaining process EngineCore pid 482074",
+    "/home/luke/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown",
+    "  warnings.warn('resource_tracker: There appear to be %d '"
+  ],
+  "limitations": [
+    "Startup and process cleanup evidence; semantic evaluation reported separately",
+    "No performance acceptance or numerical gate changes",
+    "Selection cache omits default-only plans and complete query/layer mappings",
+    "Recovered allocator warnings contain no allocation stack",
+    "Source receipts verify local checkpoint shard identity but do not independently hash payload bytes",
+    "Exit0 and empty GPU process list do not establish graceful internal engine teardown"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "component": "Qwen exact-checkpoint batched autotuning bootstrap",
+  "implementation_root": "/tmp/sparkgap-autotune-integration",
+  "status": "failed_before_graph_capture",
+  "exit_code": 1,
+  "error": "RuntimeError: planned dynamic direct routing is unsupported for this launch shape",
+  "failure_stage": "b12x MoE compile-plan construction before candidate materialization",
+  "prior_failure": "autotune-bootstrap-missing-producer.json",
+  "partial_selection_cache_retained": true,
+  "last_progress": {
+    "completed_coalesced_requests": 127,
+    "total_coalesced_requests": 255,
+    "measured_candidates": 592,
+    "cache_hits": 20
+  },
+  "progress_is_final_total": false,
+  "cpu_tests": {
+    "passed": 183,
+    "skipped": 51,
+    "elapsed_seconds": 38.74
+  },
+  "main_implementation_changed": false,
+  "gpu_processes_after_exit": [],
+  "source_manifest_sha256": "05a01b5b5e4c72f86a0737abc56e5cea4a572edf8f18e86620d6abaecad05527",
+  "log_sha256": "2eb38bf0f73b402d045c2122bf8879e31e1623f85340ab8e72a898d18274f7c3",
+  "archive": {
+    "path": "autotune-bootstrap-moe-legality.tar.gz",
+    "sha256": "49f6beaa540fd8b133ffea77ca261b0cd2e5c5e9f6207afe8bee5609fe094bab",
+    "bytes": 319825
+  }
+}

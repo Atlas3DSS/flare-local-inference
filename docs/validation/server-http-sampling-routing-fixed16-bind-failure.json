@@ -1,0 +1,11 @@
+{
+  "passed": false,
+  "scope": "Sampling-routing qualifier rejected process identity before HTTP traffic",
+  "exception": "ValueError: server PID bind address differs from the qualification endpoint",
+  "server_pid": 1052913,
+  "cli_bind": "127.0.0.1:0",
+  "endpoint": "http://127.0.0.1:43073",
+  "fixtures_sha256": "b8f529f1522343d88e3b97874748f1a1c300ca08e0e37c3f30dd0b4853a56f6e",
+  "log": "Traceback (most recent call last):\n  File \"/home/luke/projects/sparkgap/scripts/qualify_sampling_routing.py\", line 367, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n  File \"/home/luke/projects/sparkgap/scripts/qualify_sampling_routing.py\", line 334, in main\n    identity = process_identity(args)\n               ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/scripts/qualify_vision_aggregate.py\", line 62, in process_identity\n    raise ValueError(\"server PID bind address differs from the qualification endpoint\")\nValueError: server PID bind address differs from the qualification endpoint\n",
+  "http_requests_sent": 0
+}

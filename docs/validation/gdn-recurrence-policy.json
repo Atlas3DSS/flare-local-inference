@@ -1,0 +1,375 @@
+{
+  "schema": "sparkgap-gdn-recurrence-policy-cpu-v1",
+  "passed": true,
+  "base_revision": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+  "checkout": "/tmp/sparkgap-gdn-recurrence-policy",
+  "baseline_patch": "/tmp/flashinfer-serving-autotune-legality.patch",
+  "baseline_patch_sha256": "c1293fbb4278b4ff779d37a73188fe5eaba93f21fb27f2b1555f664e88353059",
+  "policy": {
+    "public_field": "gdn_prefill.Caps.recurrence_policy",
+    "default": "auto",
+    "restricted": "sequential_k1",
+    "required_algorithm": "sequential",
+    "required_k_split": 1,
+    "remaining_tuned_axes": [
+      "v_split",
+      "stages",
+      "window_tiles"
+    ],
+    "query_schema_version_before": 22,
+    "query_schema_version_after": 23,
+    "config_schema_version_unchanged": 22,
+    "candidate_contract_version_before": 4,
+    "candidate_contract_version_after": 5
+  },
+  "tests": [
+    {
+      "command": "CUDA_VISIBLE_DEVICES= PYTHONPATH=/tmp/sparkgap-gdn-recurrence-policy /home/luke/projects/sparkgap/.venv/bin/python -m pytest --confcutdir=tests/experimental/b12x/preparation tests/experimental/b12x/preparation/test_gdn_recurrence_policy.py -q",
+      "passed": 35,
+      "failed": 0,
+      "seconds": 1.75,
+      "log": "/tmp/sparkgap-gdn-recurrence-policy-tests.log",
+      "cwd": "/tmp/sparkgap-gdn-recurrence-policy"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES= PYTHONPATH=/tmp/sparkgap-gdn-recurrence-policy /home/luke/projects/sparkgap/.venv/bin/python - <<'PY' > /tmp/sparkgap-gdn-recurrence-policy-regressions.log 2>&1\nimport torch, pytest\nfrom b12x.sequence.gdn_prefill import _impl\nassert _impl.__file__.startswith('/tmp/sparkgap-gdn-recurrence-policy/')\ndef reject_cuda():\n    raise AssertionError('CUDA initialization forbidden in CPU checks')\ntorch.cuda._lazy_init = reject_cuda\nresult=pytest.main(['--confcutdir=tests/experimental/b12x/preparation', 'tests/experimental/b12x/preparation/test_gdn_recurrence_policy.py', 'tests/experimental/b12x/preparation/test_tuning_predicates.py', 'tests/experimental/b12x/preparation/test_moe_deterministic_routing.py', '-q'])\nprint('CUDA initialized:', torch.cuda.is_initialized())\nraise SystemExit(result)\nPY",
+      "passed": 127,
+      "failed": 0,
+      "seconds": 2.23,
+      "log": "/tmp/sparkgap-gdn-recurrence-policy-regressions.log",
+      "cuda_initialized": false,
+      "cwd": "/tmp/sparkgap-gdn-recurrence-policy"
+    }
+  ],
+  "enumeration": {
+    "before_command": "CUDA_VISIBLE_DEVICES= /home/luke/projects/sparkgap/.venv/bin/python /tmp/sparkgap-gdn-recurrence-policy-audit.py --output /tmp/sparkgap-gdn-recurrence-policy-before.json",
+    "after_command": "CUDA_VISIBLE_DEVICES= PYTHONPATH=/tmp/sparkgap-gdn-recurrence-policy /home/luke/projects/sparkgap/.venv/bin/python /tmp/sparkgap-gdn-recurrence-policy-audit.py --output /tmp/sparkgap-gdn-recurrence-policy-after.json",
+    "cases": 32,
+    "auto_configurations_and_defaults_unchanged": true,
+    "kda_query_and_selection_key_cases_unchanged": 16,
+    "restricted_sets_exact_sequential_k1_subset": true,
+    "checks": [
+      {
+        "case": "gdn-1-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-1-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 192,
+        "candidates_after": 192,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-2-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-2-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 192,
+        "candidates_after": 192,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-4-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-4-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 192,
+        "candidates_after": 192,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-16-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-16-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 192,
+        "candidates_after": 192,
+        "restricted": 24,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-64-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 96,
+        "candidates_after": 96,
+        "restricted": 36,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-64-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 288,
+        "candidates_after": 288,
+        "restricted": 60,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-128-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 96,
+        "candidates_after": 96,
+        "restricted": 36,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-128-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 416,
+        "candidates_after": 416,
+        "restricted": 108,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-256-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 160,
+        "candidates_after": 160,
+        "restricted": 36,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-256-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 672,
+        "candidates_after": 672,
+        "restricted": 204,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-512-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 192,
+        "candidates_after": 192,
+        "restricted": 36,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "gdn-512-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 1184,
+        "candidates_after": 1184,
+        "restricted": 396,
+        "selection_identity_unchanged": false
+      },
+      {
+        "case": "kda-1-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-1-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-2-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-2-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-4-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-4-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-16-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-16-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 64,
+        "candidates_after": 64,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-64-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 128,
+        "candidates_after": 128,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-64-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 160,
+        "candidates_after": 160,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-128-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 160,
+        "candidates_after": 160,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-128-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 288,
+        "candidates_after": 288,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-256-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 192,
+        "candidates_after": 192,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-256-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 544,
+        "candidates_after": 544,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-512-exhaustiveFalse",
+        "passed": true,
+        "candidates_before": 224,
+        "candidates_after": 224,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      },
+      {
+        "case": "kda-512-exhaustiveTrue",
+        "passed": true,
+        "candidates_before": 1056,
+        "candidates_after": 1056,
+        "restricted": null,
+        "selection_identity_unchanged": true
+      }
+    ]
+  },
+  "fresh_apply": {
+    "checkout": "/tmp/sparkgap-gdn-recurrence-policy-check",
+    "commands": [
+      "git apply --check /tmp/flashinfer-serving-recurrence-policy.patch",
+      "git apply /tmp/flashinfer-serving-recurrence-policy.patch"
+    ],
+    "passed": true,
+    "verified_file_hashes": 30,
+    "previous_file_hashes_preserved": 25
+  },
+  "artifacts": {
+    "/tmp/flashinfer-serving-recurrence-policy.json": "84bd56a5362369b975594a3dc7b2f0eaa6bbb77596b283140149821c6fd90cf8",
+    "/tmp/flashinfer-serving-recurrence-policy.patch": "4b78c54a1f3078c2e1c67a322ada8ef8eb3223bb6db8770e5b10db7e5ed91d0e",
+    "/tmp/sparkgap-gdn-recurrence-policy.patch": "f7dc4d14710d815017a4904300aa485a0e5ab34cb3d1ba5bdbdf02c9839f662b",
+    "/tmp/sparkgap-gdn-recurrence-policy-before.json": "4ec842c0515ac0434f257a2f3366ea5f5d8243929325de1a1bfb9376ffe63a46",
+    "/tmp/sparkgap-gdn-recurrence-policy-after.json": "192de968cc3a68d331a9cb5e20810367ae0354f3ad46830923741e4fdf0fc999",
+    "/tmp/sparkgap-gdn-recurrence-policy-comparison.json": "b3eb0448e21feb0b113b17cad7c9f90d7425672e5f334c4f8909629553c611cc",
+    "/tmp/sparkgap-gdn-recurrence-policy-audit.py": "986ba4bddc59cbe237de5f5bf39dfb5c5d4f63084167b4eaf4f652eda4ada3a9",
+    "/tmp/sparkgap-gdn-recurrence-policy-tests.log": "9688964d2c16627f3bb6c065ae711960e89a77b018b909527a4afa14f86b0755",
+    "/tmp/sparkgap-gdn-recurrence-policy-regressions.log": "0b437056ffaa2727c1780aff7fa7ea55b07029db07191323a41f64bfc05b5672"
+  },
+  "limitations": [
+    "CPU metadata, candidate enumeration and cache identity checks only. No GPU kernel compilation or execution.",
+    "Exact full-model prefix/state/logit replay gate remains required for selected configurations.",
+    "GDN auto uses unchanged candidates/defaults but its query schema and selection identity are versioned; KDA identities remain unchanged.",
+    "Installed packages, user FlashInfer and main Sparkgap source were not modified."
+  ],
+  "archive": {
+    "path": "gdn-recurrence-policy.tar.gz",
+    "sha256": "a77ee79862c54cae0839994ff0be3c60d720f2a977a3bfe4ff236914ae19c451",
+    "bytes": 116829,
+    "members": 17,
+    "manifest": "MANIFEST.json",
+    "all_member_hashes_verified": true
+  },
+  "changed_files": {
+    "flashinfer/experimental/b12x/sequence/_shared/delta_prefill/preparation.py": "47e3f34efa9ee055d9f516854a94e2df07d0a3f937559d37537441901558a4cc",
+    "flashinfer/experimental/b12x/sequence/gdn_prefill/README.md": "5519eca4f53a4afd6e56c00326137fa85fc3ffee7c005690184938ff9fb54ac3",
+    "flashinfer/experimental/b12x/sequence/gdn_prefill/_impl.py": "3bb734e50bc80ab2167c5febbdfc7c8a2a1af66dcc4ea4a9f0fa75b105d32dff",
+    "flashinfer/experimental/b12x/sequence/gdn_prefill/_tuning.py": "6a282268d592b569944ebdf8061dc6279849b3e01930608c88a1f03fb8bd770f",
+    "tests/experimental/b12x/preparation/test_gdn_recurrence_policy.py": "99cfeb2c3e00ac6362167f07de02ff46fd403ae69649c7cc81514ccc57b3b9e5"
+  },
+  "durable_patch": {
+    "path": "../../patches/flashinfer-serving-recurrence-policy.patch",
+    "manifest": "../../patches/flashinfer-serving-recurrence-policy.json",
+    "sha256": "4b78c54a1f3078c2e1c67a322ada8ef8eb3223bb6db8770e5b10db7e5ed91d0e"
+  },
+  "independent_review": {
+    "result": "no blocking defect",
+    "scope": "source, query/cache/compiler propagation, exhaustive predicates, pins, KDA reconstruction",
+    "test_run_reported": {
+      "passed": 35,
+      "seconds": 1.46
+    },
+    "raw_test_log_retained": false
+  },
+  "trigger": {
+    "receipt": "prefix-replay-autotuned.json",
+    "required_check": "exact model state/output equivalence across aligned snapshot restoration and token-capacity variants"
+  },
+  "gpu_arithmetic_acceptance": {
+    "run": false,
+    "passed": null,
+    "required": "Full-model strict prefix replay of selected sequential_k1 configurations, followed by graph replay and serving regression gates."
+  }
+}

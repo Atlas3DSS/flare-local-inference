@@ -1,0 +1,290 @@
+{
+  "component": "Complete Qwen text decoder canonical reference and native comparison",
+  "status": "numerical equivalence unqualified",
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+  },
+  "environment": {
+    "gpu_uuid": "GPU-afd4b1ad-8a64-7057-4bde-241822724c7f",
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "float32_matmul_precision": "highest"
+  },
+  "sources": {
+    "transformers_revision": "4cc2aa84301c9aa210b5513dab9fefae03981f6e",
+    "sha256": {
+      "serve/reference/qwen38_decoder.py": "10b160d12a59ea602f998030a628f7caf8b099c0b1278d598fac061b4ffd9120",
+      "serve/reference/qwen38_quant.py": "7fa893735d5efb94190f34d7945af3fdd9624716876e0e5af772249beb99f176",
+      "tests/reference/test_qwen38_decoder.py": "ee8c7e3149b14221ce7d76c74be39957853498b0a8d7db267c8abbd37ce49cdf",
+      "serve/recipes/qwen38/model.py": "b011c3de250eb485c2e2438e7d8a1eecae3b9b55a53d92ea31de45b6fad69022"
+    }
+  },
+  "reference": {
+    "architecture": "Pinned canonical Qwen4ExpTextModel with all 48 decoder layers and its canonical DynamicCache. Single sequence, unpadded text input.",
+    "dense_projections": "Exact BF16 weights or independent group 32 MXFP8 activation QDQ and E4M3/E8M0 weight decoding with IEEE FP32 accumulation followed by BF16 output. LM head streams 4096 vocabulary rows per block.",
+    "experts": "Canonical router and expert iteration order. Only selected actual CSF NVFP4 expert tensors are read. Independent W4A4 gate/up arithmetic produces a BF16 SwiGLU intermediate. Down outputs round to BF16, weighted contributions round to BF16, and canonical index_add accumulates into BF16.",
+    "gdn": "Canonical Python chunk size 64 and recurrent functions explicitly unwrapped from optional kernel dispatch. FP32 normalized Q/K and recurrence intermediates remain unchanged. Gated RMSNorm retains actual BF16 weights and canonical casts.",
+    "ple": "Canonical hashing/cache/gating/convolution; exact selected-row NVFP4 checkpoint reads, BF16 projections and actual FP32 norm weights.",
+    "hyperconnection": "Canonical grouped normalization, BF16 projections, sigmoid/product/reduction and residual rounding.",
+    "persistent_parameter_bytes": 132990720
+  },
+  "commands": {
+    "cpu": ".venv/bin/python -m pytest tests/reference/test_qwen38_decoder.py -xq",
+    "cuda": "CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f CUDA_HOME=/opt/cuda SPARKGAP_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest tests/reference/test_qwen38_decoder.py -k complete -xqs --junitxml=/tmp/sparkgap-canonical-text-qualification.xml"
+  },
+  "execution_checks": {
+    "cpu_passed": 8,
+    "cpu_cuda_skipped": 2,
+    "cuda_passed": 2,
+    "cuda_seconds": 45.59,
+    "checks": [
+      "finite full-vocabulary logits",
+      "all 48 canonical layers per invocation",
+      "continuation cache length",
+      "actual selected embedding and expert reads",
+      "canonical BF16 expert accumulation",
+      "bounded resident parameter storage"
+    ]
+  },
+  "native_comparison": {
+    "artifact": "/tmp/sparkgap-decoder-execution.pt",
+    "sha256": "261aac8a7ccf7691501bc75509a0a6e25f69534ce69a162a76d67f02cf447731",
+    "prompt": "The capital of France is",
+    "input_ids": [
+      760,
+      6511,
+      314,
+      9338,
+      369
+    ],
+    "teacher_tokens": [
+      11751,
+      13,
+      561
+    ],
+    "prefill_capacity": 512,
+    "steps": [
+      {
+        "step": 0,
+        "logits_relative_l2": 0.1737157255411148,
+        "logits_max_abs": 2.4189453125,
+        "hidden_relative_l2": 0.17256470024585724,
+        "argmax_native": 11751,
+        "argmax_reference": 11751,
+        "top10_overlap": 7,
+        "native_top_probability": 0.3826539218425751,
+        "reference_top_probability": 0.4227546155452728
+      },
+      {
+        "step": 1,
+        "logits_relative_l2": 0.18710188567638397,
+        "logits_max_abs": 3.1953125,
+        "hidden_relative_l2": 0.2985461354255676,
+        "argmax_native": 13,
+        "argmax_reference": 13,
+        "top10_overlap": 9,
+        "native_top_probability": 0.4853326082229614,
+        "reference_top_probability": 0.5198482275009155
+      },
+      {
+        "step": 2,
+        "logits_relative_l2": 0.2071877121925354,
+        "logits_max_abs": 2.96875,
+        "hidden_relative_l2": 0.272320419549942,
+        "argmax_native": 561,
+        "argmax_reference": 561,
+        "top10_overlap": 9,
+        "native_top_probability": 0.3231503367424011,
+        "reference_top_probability": 0.4625959098339081
+      },
+      {
+        "step": 3,
+        "logits_relative_l2": 0.23080040514469147,
+        "logits_max_abs": 3.0,
+        "hidden_relative_l2": 0.23107106983661652,
+        "argmax_native": 6511,
+        "argmax_reference": 6511,
+        "top10_overlap": 6,
+        "native_top_probability": 0.9702786207199097,
+        "reference_top_probability": 0.9878920316696167
+      }
+    ],
+    "conclusion": "All four greedy argmax tokens match. Logit relative L2 ranges 0.1737157 to 0.2308004 and final-hidden relative L2 ranges 0.1725647 to 0.2985461. Numerical equivalence remains unqualified."
+  },
+  "arithmetic_findings": [
+    {
+      "operation": "hyperconnection residual injection",
+      "source": "flashinfer/experimental/b12x/norm/hyperconnection/_kernels.py:_combine_kernel",
+      "finding": "Native sigmoid, injection scale, product and residual addition stay FP32 until the final BF16 store. Canonical injection sigmoid/weights, weighted block output and residual sum have BF16 rounding boundaries. Its contribution to whole-model divergence is not measured."
+    },
+    {
+      "operation": "routed expert reduction",
+      "source": "serve/recipes/qwen38/moe.py:PreparedRoutedExperts",
+      "finding": "Native weighted contributions accumulate FP32 and cast once. Canonical reference rounds down outputs and each weighted contribution to BF16, then uses BF16 index_add. Component tests previously compared both laws; whole-model effects remain unisolated."
+    },
+    {
+      "operation": "GDN prefill recurrence",
+      "source": "docs/validation/gdn65.json",
+      "finding": "Native 16-token chunks use BF16 intermediate operands; canonical 64-token chunks use FP32. The strict 65-token component pointwise gate remains failed."
+    }
+  ],
+  "artifacts": {
+    "short": {
+      "path": "/tmp/sparkgap-canonical-text-short.pt",
+      "sha256": "f5df07709c7b18a55e24236b0488925a98475302a1374f9617b380651229b34a",
+      "input_ids": [
+        760,
+        6511,
+        314,
+        9338,
+        369
+      ],
+      "teacher_tokens": [
+        11751,
+        13,
+        561
+      ],
+      "greedy_tokens": [
+        11751,
+        13,
+        561,
+        6511
+      ],
+      "peak_device_bytes": 662257664,
+      "checkpoint_bytes_read": [
+        9711368568,
+        6903947168,
+        6903873856,
+        6903528744
+      ],
+      "canonical_layer_calls": 192
+    },
+    "64_tokens": {
+      "path": "/tmp/sparkgap-canonical-text-64_tokens.pt",
+      "sha256": "4860734ab231e793ce584c7a66eefe5d89c3c176543658d3ca6e84765b0e3bbf",
+      "input_ids": [
+        32,
+        2136,
+        17313,
+        13205,
+        5222,
+        2193,
+        1881,
+        20319,
+        13,
+        1049,
+        15339,
+        1970,
+        11,
+        11988,
+        30800,
+        11,
+        321,
+        10926,
+        4602,
+        440,
+        13769,
+        5721,
+        13,
+        88409,
+        4779,
+        14908,
+        279,
+        17313,
+        15227,
+        944,
+        1973,
+        38495,
+        279,
+        1788,
+        6157,
+        13,
+        357,
+        2136,
+        17313,
+        13205,
+        5222,
+        2193,
+        1881,
+        20319,
+        13,
+        1049,
+        15339,
+        1970,
+        11,
+        11988,
+        30800,
+        11,
+        321,
+        10926,
+        4602,
+        440,
+        13769,
+        5721,
+        13,
+        88409,
+        4779,
+        14908,
+        279,
+        17313
+      ],
+      "teacher_tokens": [
+        15227
+      ],
+      "greedy_tokens": [
+        15227,
+        944
+      ],
+      "peak_device_bytes": 666663424,
+      "checkpoint_bytes_read": [
+        23644820684,
+        6903676724
+      ],
+      "canonical_layer_calls": 96
+    }
+  },
+  "raw_log": {
+    "path": "/tmp/sparkgap-canonical-text-qualification.log",
+    "sha256": "2c03d879247e447ef8f9230379cf785c8d47e86bf00d4d4b39da4c96d9949780"
+  },
+  "junit": {
+    "path": "/tmp/sparkgap-canonical-text-qualification.xml",
+    "sha256": "b8f0157665a6eea3cdb7091f3f8cd001753b3f1de5b17b5fa727cf265d0bf6e1"
+  },
+  "canonical_hyperconnection_combine_comparison": {
+    "artifact": "/tmp/sparkgap-decoder-canonical-combine.pt",
+    "sha256": "842c59f26e29c3aab5865acdbbe50d9a383bbe050c58ffb850ef00ef2bc168c7",
+    "steps": [
+      {
+        "step": 0,
+        "logits_relative_l2": 0.15889275074005127,
+        "hidden_relative_l2": 0.15913653373718262,
+        "argmax_native": 11751,
+        "argmax_reference": 11751
+      },
+      {
+        "step": 1,
+        "logits_relative_l2": 0.1820678859949112,
+        "hidden_relative_l2": 0.2412264496088028,
+        "argmax_native": 13,
+        "argmax_reference": 13
+      },
+      {
+        "step": 2,
+        "logits_relative_l2": 0.19982106983661652,
+        "hidden_relative_l2": 0.24901610612869263,
+        "argmax_native": 561,
+        "argmax_reference": 561
+      },
+      {
+        "step": 3,
+        "logits_relative_l2": 0.24390298128128052,
+        "hidden_relative_l2": 0.27797919511795044,
+        "argmax_native": 6511,
+        "argmax_reference": 6511
+      }
+    ],
+    "conclusion": "Restoring canonical hyperconnection combination rounding does not remove the full-model numerical divergence."
+  }
+}

@@ -1,0 +1,1444 @@
+{
+  "schema_version": 1,
+  "model_id": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+  "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+  "scope": "Teacher-forced, one MTP block; actual checkpoint weights; three identical target-derived feedback contexts; isolated pinned vLLM module execution.",
+  "numerical_acceptance": {
+    "qualified": false,
+    "threshold": null,
+    "unresolved": "Full-vocabulary relative L2 remains 21.9\u201330.2%; two of three argmax IDs differ. Dispatch cause is unisolated."
+  },
+  "fixture": {
+    "path": "/tmp/sparkgap-mtp-linear-provenance/fixture.pt",
+    "bytes": 147145,
+    "sha256": "63b48403a3d81094169b94dc3effa8f2e52e94ad0074ee4873fa7896228b2a33"
+  },
+  "source_trace": {
+    "path": "/data/sparkgap-artifacts/text-layer-trace/vllm-moe-inprocess-repeat/vllm-layers.pt",
+    "bytes": 29056158,
+    "sha256": "44aed1bafd133c18f7b038717d81bf22a8abc074d518bc71d25baed17cceb400"
+  },
+  "conditions": {
+    "prompt_ids": [
+      760,
+      6511,
+      314,
+      9338,
+      369
+    ],
+    "teacher_ids": [
+      11751,
+      13,
+      561
+    ],
+    "feedback": "h[i] plus x[i+1] at position i",
+    "rows": [
+      5,
+      1,
+      1
+    ],
+    "positions": [
+      [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      [
+        5
+      ],
+      [
+        6
+      ]
+    ],
+    "selected_rows": [
+      [
+        4
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ]
+    ],
+    "sparkgap_graph_capacities": [
+      8,
+      1
+    ],
+    "vllm_eager": true,
+    "sparkgap_cache_page_tokens": 64,
+    "vllm_cache_page_tokens": 48,
+    "kv_dtype": "bfloat16",
+    "mtp_layers": 1,
+    "experts": 512,
+    "top_k": 10,
+    "weight_recipe": "Routed NVFP4 W4A16; BF16 activations, plain E4M3 block scales; shared BF16 dense projections and vocabulary head.",
+    "stored_mtp_tensor_bytes": 1596720640,
+    "shared_embedding_and_head": true,
+    "sparkgap_scratch_bytes": 19402752
+  },
+  "runtime_checks": {
+    "gpu_component_tests": 2,
+    "gpu_component_seconds": 18.01,
+    "cpu_focused_tests": 59,
+    "cpu_cuda_skips": 3,
+    "final_observer_cpu_tests": 11,
+    "graph_replay_allocation_checks": [
+      {
+        "step": 0,
+        "before": 51170,
+        "after": 51170,
+        "equal": true
+      },
+      {
+        "step": 1,
+        "before": 51171,
+        "after": 51171,
+        "equal": true
+      },
+      {
+        "step": 2,
+        "before": 51172,
+        "after": 51172,
+        "equal": true
+      }
+    ],
+    "observer_repeat_tensor_count": 138,
+    "observer_repeat_all_storage_bits_equal": true,
+    "independent_checks": [
+      {
+        "step": 0,
+        "feedback_bitwise_equal": true,
+        "embedding_bitwise_equal": true,
+        "selected_positions_equal": true,
+        "selected_positions_causal": true,
+        "cache_writes": {
+          "sparkgap": {
+            "key_exact": true,
+            "value_exact": true
+          },
+          "vllm": {
+            "key_exact": true,
+            "value_exact": true
+          }
+        },
+        "constants": {
+          "q_norm": {
+            "sparkgap_dtype": "torch.bfloat16",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": true,
+            "bf16_value_bits_equal": true
+          },
+          "k_norm": {
+            "sparkgap_dtype": "torch.bfloat16",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": true,
+            "bf16_value_bits_equal": true
+          },
+          "rope_cos": {
+            "sparkgap_dtype": "torch.float32",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": false,
+            "bf16_value_bits_equal": true
+          },
+          "rope_sin": {
+            "sparkgap_dtype": "torch.float32",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": false,
+            "bf16_value_bits_equal": true
+          }
+        }
+      },
+      {
+        "step": 1,
+        "feedback_bitwise_equal": true,
+        "embedding_bitwise_equal": true,
+        "selected_positions_equal": true,
+        "selected_positions_causal": true,
+        "cache_writes": {
+          "sparkgap": {
+            "key_exact": true,
+            "value_exact": true
+          },
+          "vllm": {
+            "key_exact": true,
+            "value_exact": true
+          }
+        },
+        "constants": {
+          "q_norm": {
+            "sparkgap_dtype": "torch.bfloat16",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": true,
+            "bf16_value_bits_equal": true
+          },
+          "k_norm": {
+            "sparkgap_dtype": "torch.bfloat16",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": true,
+            "bf16_value_bits_equal": true
+          },
+          "rope_cos": {
+            "sparkgap_dtype": "torch.float32",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": false,
+            "bf16_value_bits_equal": true
+          },
+          "rope_sin": {
+            "sparkgap_dtype": "torch.float32",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": false,
+            "bf16_value_bits_equal": true
+          }
+        }
+      },
+      {
+        "step": 2,
+        "feedback_bitwise_equal": true,
+        "embedding_bitwise_equal": true,
+        "selected_positions_equal": true,
+        "selected_positions_causal": true,
+        "cache_writes": {
+          "sparkgap": {
+            "key_exact": true,
+            "value_exact": true
+          },
+          "vllm": {
+            "key_exact": true,
+            "value_exact": true
+          }
+        },
+        "constants": {
+          "q_norm": {
+            "sparkgap_dtype": "torch.bfloat16",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": true,
+            "bf16_value_bits_equal": true
+          },
+          "k_norm": {
+            "sparkgap_dtype": "torch.bfloat16",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": true,
+            "bf16_value_bits_equal": true
+          },
+          "rope_cos": {
+            "sparkgap_dtype": "torch.float32",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": false,
+            "bf16_value_bits_equal": true
+          },
+          "rope_sin": {
+            "sparkgap_dtype": "torch.float32",
+            "vllm_dtype": "torch.bfloat16",
+            "storage_equal": false,
+            "bf16_value_bits_equal": true
+          }
+        }
+      }
+    ]
+  },
+  "dispatch": {
+    "inherited_vllm_bf16_gemv": null,
+    "resolved_vllm_bf16_gemv": false,
+    "vllm_linear_inventory": {
+      "model.embed_tokens": {
+        "weight_shape": [
+          248320,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding",
+        "quant_method": "vllm.model_executor.layers.vocab_parallel_embedding.UnquantizedEmbeddingMethod",
+        "gemm_implementation": null,
+        "prepared_plans": null
+      },
+      "model.fc_embedding": {
+        "weight_shape": [
+          2560,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.fc_hidden": {
+        "weight_shape": [
+          2560,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.self_attn.qkv_proj": {
+        "weight_shape": [
+          13312,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.QKVParallelLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.self_attn.o_proj": {
+        "weight_shape": [
+          2560,
+          6144
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.RowParallelLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.self_attn.indexer.index_qk_proj": {
+        "weight_shape": [
+          640,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.mlp.gate": {
+        "weight_shape": [
+          512,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.fused_moe.router.gate_linear.GateLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.mlp.shared_expert_gate": {
+        "weight_shape": [
+          1,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.mlp.shared_expert.gate_up_proj": {
+        "weight_shape": [
+          1280,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.MergedColumnParallelLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.mlp.shared_expert.down_proj": {
+        "weight_shape": [
+          2560,
+          640
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.RowParallelLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.attn_hyper_connection.input_mix_weight_down_block_inject": {
+        "weight_shape": [
+          336,
+          10240
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.MergedColumnParallelLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.attn_hyper_connection.input_mix_weight_up": {
+        "weight_shape": [
+          10240,
+          320
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.mlp_hyper_connection.input_mix_weight_down_block_inject": {
+        "weight_shape": [
+          336,
+          10240
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.MergedColumnParallelLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.layers.0.mlp_hyper_connection.input_mix_weight_up": {
+        "weight_shape": [
+          10240,
+          320
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.hyper_connection_mixer.input_mix_weight_down": {
+        "weight_shape": [
+          320,
+          10240
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "model.hyper_connection_mixer.input_mix_weight_up": {
+        "weight_shape": [
+          10240,
+          320
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.linear.ReplicatedLinear",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      },
+      "lm_head": {
+        "weight_shape": [
+          248320,
+          2560
+        ],
+        "weight_dtype": "torch.bfloat16",
+        "module_class": "vllm.model_executor.layers.vocab_parallel_embedding.ParallelLMHead",
+        "quant_method": "vllm.model_executor.layers.linear.UnquantizedLinearMethod",
+        "gemm_implementation": "vllm.model_executor.kernels.linear.b12x_unquantized.b12x_unquantized_gemm",
+        "prepared_plans": null
+      }
+    },
+    "executed_functional_linear_calls": [
+      {
+        "step": 0,
+        "calls": [
+          {
+            "modules": [
+              "model.layers.0.attn_hyper_connection.input_mix_weight_down_block_inject"
+            ],
+            "source_shape": [
+              5,
+              10240
+            ],
+            "weight_shape": [
+              336,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.attn_hyper_connection.input_mix_weight_up"
+            ],
+            "source_shape": [
+              5,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.qkv_proj"
+            ],
+            "source_shape": [
+              5,
+              2560
+            ],
+            "weight_shape": [
+              13312,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.indexer.index_qk_proj"
+            ],
+            "source_shape": [
+              5,
+              2560
+            ],
+            "weight_shape": [
+              640,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.o_proj"
+            ],
+            "source_shape": [
+              5,
+              6144
+            ],
+            "weight_shape": [
+              2560,
+              6144
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp_hyper_connection.input_mix_weight_down_block_inject"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              336,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp_hyper_connection.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert.gate_up_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              1280,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert.down_proj"
+            ],
+            "source_shape": [
+              1,
+              640
+            ],
+            "weight_shape": [
+              2560,
+              640
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert_gate"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              1,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.gate"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              512,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.hyper_connection_mixer.input_mix_weight_down"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              320,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.hyper_connection_mixer.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          }
+        ]
+      },
+      {
+        "step": 1,
+        "calls": [
+          {
+            "modules": [
+              "model.layers.0.attn_hyper_connection.input_mix_weight_down_block_inject"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              336,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.attn_hyper_connection.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.qkv_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              13312,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.indexer.index_qk_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              640,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.o_proj"
+            ],
+            "source_shape": [
+              1,
+              6144
+            ],
+            "weight_shape": [
+              2560,
+              6144
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp_hyper_connection.input_mix_weight_down_block_inject"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              336,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp_hyper_connection.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert.gate_up_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              1280,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert.down_proj"
+            ],
+            "source_shape": [
+              1,
+              640
+            ],
+            "weight_shape": [
+              2560,
+              640
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert_gate"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              1,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.gate"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              512,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.hyper_connection_mixer.input_mix_weight_down"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              320,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.hyper_connection_mixer.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          }
+        ]
+      },
+      {
+        "step": 2,
+        "calls": [
+          {
+            "modules": [
+              "model.layers.0.attn_hyper_connection.input_mix_weight_down_block_inject"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              336,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.attn_hyper_connection.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.qkv_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              13312,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.indexer.index_qk_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              640,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.self_attn.o_proj"
+            ],
+            "source_shape": [
+              1,
+              6144
+            ],
+            "weight_shape": [
+              2560,
+              6144
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp_hyper_connection.input_mix_weight_down_block_inject"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              336,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp_hyper_connection.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert.gate_up_proj"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              1280,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert.down_proj"
+            ],
+            "source_shape": [
+              1,
+              640
+            ],
+            "weight_shape": [
+              2560,
+              640
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.shared_expert_gate"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              1,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.layers.0.mlp.gate"
+            ],
+            "source_shape": [
+              1,
+              2560
+            ],
+            "weight_shape": [
+              512,
+              2560
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.hyper_connection_mixer.input_mix_weight_down"
+            ],
+            "source_shape": [
+              1,
+              10240
+            ],
+            "weight_shape": [
+              320,
+              10240
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          },
+          {
+            "modules": [
+              "model.hyper_connection_mixer.input_mix_weight_up"
+            ],
+            "source_shape": [
+              1,
+              320
+            ],
+            "weight_shape": [
+              10240,
+              320
+            ],
+            "source_dtype": "torch.bfloat16",
+            "weight_dtype": "torch.bfloat16",
+            "output_dtype": "torch.bfloat16"
+          }
+        ]
+      }
+    ],
+    "sparkgap_bf16_policy": "BF16Projection explicit b12x SIMT for rows <=8; source hash retained. QKV is separate q/k/v projections; reference QKV is fused.",
+    "internal_pytorch_gemm_algorithm_observed": false,
+    "causal_dispatch_attribution_established": false,
+    "vllm_mtp_nvfp4_lm_head": "0",
+    "qsa_attention_splits_source_derived": {
+      "sparkgap": [
+        16,
+        16,
+        16
+      ],
+      "vllm": [
+        16,
+        64,
+        64
+      ]
+    }
+  },
+  "same_operand_scope": {
+    "embedding_feedback": "Exact input IDs/hidden/weights; storage equality in all three intervals.",
+    "attention": "Each backend actual Q/K/V tested against a CPU dense formula; cross-key-history diagnostic changes only keys. GPU attention on identical cross-backend operands was not run.",
+    "bf16_projection": "Actual dispatch recorded; identical-operand backend projection comparison was not run.",
+    "moe": "Downstream inputs/routes differ; output differences do not isolate expert arithmetic."
+  },
+  "results": [
+    {
+      "step": 0,
+      "reference_selected_rows": [
+        4
+      ],
+      "vocabulary": {
+        "relative_l2": 0.2896738648414612,
+        "reference_l2_norm": 1047.710693359375,
+        "difference_l2_norm": 303.4944152832031,
+        "max_absolute_error": 3.375,
+        "top10_overlap_count": 9,
+        "top10_overlap_fraction": 0.9,
+        "kl_reference_to_actual": 0.05905000865459442,
+        "actual": {
+          "argmax": 11,
+          "top1_logit": 15.8125,
+          "top2_logit": 15.5,
+          "top1_margin": 0.3125
+        },
+        "reference": {
+          "argmax": 13,
+          "top1_logit": 16.875,
+          "top2_logit": 16.625,
+          "top1_margin": 0.25
+        },
+        "argmax_equal": false
+      },
+      "residual_relative_l2": 0.3243522346019745,
+      "hidden_relative_l2": 0.34355583786964417,
+      "stage_relative_l2": {
+        "attn_bottleneck": 0.0017576125683262944,
+        "attn_gate_logits": 0.0020328101236373186,
+        "attn_injection_logits": 0.0015296528581529856,
+        "attn_mix": 0.001819061697460711,
+        "attn_normalized": 2.4027551717153983e-06,
+        "attn_output": 0.07666095346212387,
+        "attn_projected_down": 0.0017266599461436272,
+        "attn_residual": 0.06569942831993103,
+        "embedding": 0.0,
+        "feedback": 0.0,
+        "final_bottleneck": 0.282113641500473,
+        "final_gate_logits": 0.3266395628452301,
+        "final_mix": 0.34355583786964417,
+        "final_normalized": 0.3582346737384796,
+        "final_projected_down": 0.14283737540245056,
+        "history_keys": 0.002504961332306266,
+        "history_values": 0.002274566562846303,
+        "index_projected": 0.0018695351900532842,
+        "k_projected": 0.0037093530409038067,
+        "mlp_bottleneck": 0.09815370291471481,
+        "mlp_gate_logits": 0.06291018426418304,
+        "mlp_injection_logits": 0.06071209907531738,
+        "mlp_mix": 0.09948467463254929,
+        "mlp_normalized": 0.0758810043334961,
+        "mlp_output": 0.42715567350387573,
+        "mlp_projected_down": 0.0845055803656578,
+        "mlp_residual": 0.3243522346019745,
+        "moe_ids": 0.19274380803108215,
+        "moe_routed": 0.7083436846733093,
+        "moe_router_logits": 0.010891981422901154,
+        "moe_shared": 0.054386064410209656,
+        "moe_weights": 0.07235592603683472,
+        "q_projected": 0.0023762062191963196,
+        "qsa_attended": 0.12375934422016144,
+        "qsa_gated": 0.09541080892086029,
+        "qsa_key": 0.002504961332306266,
+        "qsa_query": 0.0027373735792934895,
+        "qsa_selected": 0.0,
+        "v_projected": 0.002274566562846303
+      },
+      "attention_diagnostic": {
+        "key_history": {
+          "relative_l2": 0.002504961332306266,
+          "max_absolute_error": 0.5
+        },
+        "own_dense_vs_native_attended": {
+          "sparkgap": {
+            "relative_l2": 0.0012116386787965894,
+            "max_absolute_error": 0.040340423583984375
+          },
+          "vllm": {
+            "relative_l2": 0.0011508821044117212,
+            "max_absolute_error": 0.015911579132080078
+          }
+        },
+        "sparkgap_actual_vs_vllm_actual": {
+          "relative_l2": 0.07666095346212387,
+          "max_absolute_error": 0.197265625
+        },
+        "sparkgap_query_gate_values_vllm_keys_vs_vllm_actual": {
+          "relative_l2": 0.009912541136145592,
+          "max_absolute_error": 0.021484375
+        },
+        "sparkgap_query_gate_keys_vllm_values_vs_vllm_actual": {
+          "relative_l2": 0.07647370547056198,
+          "max_absolute_error": 0.197265625
+        },
+        "maximum_score_difference": 5.3375244140625,
+        "maximum_probability_difference": 0.537589430809021,
+        "maximum_absolute_score": 766.9000244140625
+      }
+    },
+    {
+      "step": 1,
+      "reference_selected_rows": [
+        0
+      ],
+      "vocabulary": {
+        "relative_l2": 0.30209365487098694,
+        "reference_l2_norm": 1325.02880859375,
+        "difference_l2_norm": 400.28277587890625,
+        "max_absolute_error": 5.7578125,
+        "top10_overlap_count": 7,
+        "top10_overlap_fraction": 0.7,
+        "kl_reference_to_actual": 0.22530575096607208,
+        "actual": {
+          "argmax": 271,
+          "top1_logit": 15.9375,
+          "top2_logit": 15.0,
+          "top1_margin": 0.9375
+        },
+        "reference": {
+          "argmax": 1049,
+          "top1_logit": 15.6875,
+          "top2_logit": 15.5625,
+          "top1_margin": 0.125
+        },
+        "argmax_equal": false
+      },
+      "residual_relative_l2": 0.37760332226753235,
+      "hidden_relative_l2": 0.4418509900569916,
+      "stage_relative_l2": {
+        "attn_bottleneck": 0.0,
+        "attn_gate_logits": 0.0,
+        "attn_injection_logits": 0.0,
+        "attn_mix": 0.0,
+        "attn_normalized": 0.0,
+        "attn_output": 0.27723124623298645,
+        "attn_projected_down": 0.0,
+        "attn_residual": 0.10083138197660446,
+        "embedding": 0.0,
+        "feedback": 0.0,
+        "final_bottleneck": 0.35250186920166016,
+        "final_gate_logits": 0.27694404125213623,
+        "final_mix": 0.4418509900569916,
+        "final_normalized": 0.4281344413757324,
+        "final_projected_down": 0.1897113174200058,
+        "history_keys": 0.0022847082000225782,
+        "history_values": 0.0020917749498039484,
+        "index_projected": 0.0,
+        "k_projected": 0.0,
+        "mlp_bottleneck": 0.09826039522886276,
+        "mlp_gate_logits": 0.07403755187988281,
+        "mlp_injection_logits": 0.04534858837723732,
+        "mlp_mix": 0.1454576849937439,
+        "mlp_normalized": 0.11897499859333038,
+        "mlp_output": 0.4956285357475281,
+        "mlp_projected_down": 0.10346662253141403,
+        "mlp_residual": 0.37760332226753235,
+        "moe_ids": 0.2924233675003052,
+        "moe_routed": 0.652571439743042,
+        "moe_router_logits": 0.011710849590599537,
+        "moe_shared": 0.11062272638082504,
+        "moe_weights": 0.03631569445133209,
+        "q_projected": 9.693829633761197e-05,
+        "qsa_attended": 0.21246157586574554,
+        "qsa_gated": 0.17546287178993225,
+        "qsa_key": 9.867865628621075e-06,
+        "qsa_query": 0.00027353267068974674,
+        "qsa_selected": 0.0,
+        "v_projected": 0.0
+      },
+      "attention_diagnostic": {
+        "key_history": {
+          "relative_l2": 0.0022847082000225782,
+          "max_absolute_error": 0.5
+        },
+        "own_dense_vs_native_attended": {
+          "sparkgap": {
+            "relative_l2": 0.0016208126908168197,
+            "max_absolute_error": 0.030508041381835938
+          },
+          "vllm": {
+            "relative_l2": 0.0016320314025506377,
+            "max_absolute_error": 0.011986255645751953
+          }
+        },
+        "sparkgap_actual_vs_vllm_actual": {
+          "relative_l2": 0.27723124623298645,
+          "max_absolute_error": 0.4580078125
+        },
+        "sparkgap_query_gate_values_vllm_keys_vs_vllm_actual": {
+          "relative_l2": 0.009511994197964668,
+          "max_absolute_error": 0.01123046875
+        },
+        "sparkgap_query_gate_keys_vllm_values_vs_vllm_actual": {
+          "relative_l2": 0.27725949883461,
+          "max_absolute_error": 0.4619140625
+        },
+        "maximum_score_difference": 2.7430419921875,
+        "maximum_probability_difference": 0.39833366870880127,
+        "maximum_absolute_score": 742.77880859375
+      }
+    },
+    {
+      "step": 2,
+      "reference_selected_rows": [
+        0
+      ],
+      "vocabulary": {
+        "relative_l2": 0.21907201409339905,
+        "reference_l2_norm": 1133.7158203125,
+        "difference_l2_norm": 248.3654022216797,
+        "max_absolute_error": 3.359375,
+        "top10_overlap_count": 8,
+        "top10_overlap_fraction": 0.8,
+        "kl_reference_to_actual": 0.050987206399440765,
+        "actual": {
+          "argmax": 6511,
+          "top1_logit": 17.25,
+          "top2_logit": 13.625,
+          "top1_margin": 3.625
+        },
+        "reference": {
+          "argmax": 6511,
+          "top1_logit": 18.0,
+          "top2_logit": 14.625,
+          "top1_margin": 3.375
+        },
+        "argmax_equal": true
+      },
+      "residual_relative_l2": 0.27803561091423035,
+      "hidden_relative_l2": 0.21956132352352142,
+      "stage_relative_l2": {
+        "attn_bottleneck": 0.0,
+        "attn_gate_logits": 7.10656022420153e-05,
+        "attn_injection_logits": 0.0,
+        "attn_mix": 0.0,
+        "attn_normalized": 0.0,
+        "attn_output": 0.12613242864608765,
+        "attn_projected_down": 0.0,
+        "attn_residual": 0.057413432747125626,
+        "embedding": 0.0,
+        "feedback": 0.0,
+        "final_bottleneck": 0.23553770780563354,
+        "final_gate_logits": 0.2636185884475708,
+        "final_mix": 0.21956132352352142,
+        "final_normalized": 0.2524239122867584,
+        "final_projected_down": 0.11219863593578339,
+        "history_keys": 0.0021159453317523003,
+        "history_values": 0.0019976708572357893,
+        "index_projected": 0.0,
+        "k_projected": 0.0,
+        "mlp_bottleneck": 0.05595013126730919,
+        "mlp_gate_logits": 0.04549266770482063,
+        "mlp_injection_logits": 0.016634710133075714,
+        "mlp_mix": 0.06897547096014023,
+        "mlp_normalized": 0.060162708163261414,
+        "mlp_output": 0.3345278203487396,
+        "mlp_projected_down": 0.04707430303096771,
+        "mlp_residual": 0.27803561091423035,
+        "moe_ids": 0.23623168468475342,
+        "moe_routed": 0.4728749096393585,
+        "moe_router_logits": 0.008678763173520565,
+        "moe_shared": 0.06245938688516617,
+        "moe_weights": 0.01775399222970009,
+        "q_projected": 0.00019725978199858218,
+        "qsa_attended": 0.09633050113916397,
+        "qsa_gated": 0.07035821676254272,
+        "qsa_key": 0.00013007305096834898,
+        "qsa_query": 0.0003515997086651623,
+        "qsa_selected": 0.0,
+        "v_projected": 8.568355269744643e-07
+      },
+      "attention_diagnostic": {
+        "key_history": {
+          "relative_l2": 0.0021159453317523003,
+          "max_absolute_error": 0.5
+        },
+        "own_dense_vs_native_attended": {
+          "sparkgap": {
+            "relative_l2": 0.0017213247483596206,
+            "max_absolute_error": 0.009352922439575195
+          },
+          "vllm": {
+            "relative_l2": 0.0017351864371448755,
+            "max_absolute_error": 0.010224342346191406
+          }
+        },
+        "sparkgap_actual_vs_vllm_actual": {
+          "relative_l2": 0.12613242864608765,
+          "max_absolute_error": 0.150390625
+        },
+        "sparkgap_query_gate_values_vllm_keys_vs_vllm_actual": {
+          "relative_l2": 0.006102538201957941,
+          "max_absolute_error": 0.015625
+        },
+        "sparkgap_query_gate_keys_vllm_values_vs_vllm_actual": {
+          "relative_l2": 0.1260150521993637,
+          "max_absolute_error": 0.154296875
+        },
+        "maximum_score_difference": 2.12322998046875,
+        "maximum_probability_difference": 0.4032787084579468,
+        "maximum_absolute_score": 742.1348876953125
+      }
+    }
+  ],
+  "source_snapshot": "/data/sparkgap-artifacts/mtp-implementation/module-oracle/source-snapshot.json",
+  "preserved_failures": [
+    {
+      "path": "raw/sparkgap-mtp-reference/sandbox-failure",
+      "reason": "GPU device nodes absent in agent environment; failure before model execution."
+    },
+    {
+      "path": "raw/sparkgap-mtp-reference/unselected-prefill-failure",
+      "reason": "Reference compact selector default row0, intended request-tail row4; incompatible residual shapes rejected. Corrected through public set_prefill_output_indices."
+    },
+    {
+      "path": "supporting/sparkgap-mtp-cpu-tests.log",
+      "reason": "CPU test found unsupported torch.where out overload; implementation corrected."
+    },
+    {
+      "path": "supporting/sparkgap-mtp-cpu-tests-corrected.log",
+      "reason": "CPU fake test expected original input after mutating it; test expectation corrected."
+    }
+  ],
+  "limitations": [
+    "No full target/draft accept/commit/rollback or end-to-end MTP quality/performance result.",
+    "Source snapshots are collection-time copies; recorded run hashes remain authoritative and mismatches are explicit.",
+    "Pinned module reference preserves serving operators and preparation, but does not exercise vLLM scheduler or target-model execution.",
+    "CPU FP32 attention is a diagnostic formula, not a replacement serving reference or numerical acceptance gate."
+  ],
+  "evidence": {
+    "directory": "/data/sparkgap-artifacts/mtp-implementation/module-oracle",
+    "archive": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/module-oracle/mtp-module.tar.gz",
+      "bytes": 24859815,
+      "sha256": "4c917be2149039c2e721f2c37d2f7dd7b11ee94b7ea9f9990bdcf324ea2a5cc9"
+    },
+    "manifest": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/module-oracle/manifest.json",
+      "sha256": "85ecde38bf77195299dd14d9f2cbd5fc5100e61a40058e20c67b2fdb8279158c"
+    },
+    "archive_payloads_verified": 1216
+  }
+}

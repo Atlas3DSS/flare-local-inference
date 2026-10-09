@@ -1,0 +1,88 @@
+{
+  "checkpoint": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+  "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+  "conditions": {
+    "source": "copy",
+    "mtp_weights_loaded": false,
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95,
+    "context": 262144,
+    "prefill_chunk_size": 4096,
+    "headroom_bytes": 4294967296,
+    "concurrency": [
+      1,
+      2,
+      4
+    ],
+    "budget_cases": [
+      1,
+      2,
+      3,
+      7,
+      8,
+      9,
+      15
+    ],
+    "grammar": "Fixed literal repeated alpha-through-theta words"
+  },
+  "result": {
+    "requests": 14,
+    "passed_checks": 36,
+    "accepted_copy_drafts": 300,
+    "executed_shapes": 14,
+    "graph_catalog": 39,
+    "cached_token_capacity": 415040,
+    "shutdown_exit_code": 0
+  },
+  "round_counts": {
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"1\"}": 24.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"2\"}": 1.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"3\"}": 1.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"4\"}": 1.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"5\"}": 1.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"6\"}": 1.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"7\"}": 4.0,
+    "sparkgap_speculative_rounds_total{batch=\"1\",width=\"8\"}": 7.0,
+    "sparkgap_speculative_rounds_total{batch=\"2\",width=\"1\"}": 6.0,
+    "sparkgap_speculative_rounds_total{batch=\"2\",width=\"2\"}": 2.0,
+    "sparkgap_speculative_rounds_total{batch=\"2\",width=\"3\"}": 1.0,
+    "sparkgap_speculative_rounds_total{batch=\"2\",width=\"4\"}": 15.0,
+    "sparkgap_speculative_rounds_total{batch=\"4\",width=\"1\"}": 9.0,
+    "sparkgap_speculative_rounds_total{batch=\"4\",width=\"2\"}": 31.0
+  },
+  "artifacts": {
+    "http_receipt": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-stochastic-service-01/service.json",
+      "bytes": 11534132,
+      "sha256": "863a7408873df32cd93832ef1b02f388dddb7bab2e20b3bae16a169eecfc2351"
+    },
+    "memory": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-stochastic-service-01/memory.json",
+      "bytes": 10635739,
+      "sha256": "5abb9fac8bcd7002de3cf71ccb66e8585d0155c66b6e013fc579ae2fbdd81b40"
+    },
+    "source_provenance": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-stochastic-service-01/provenance.json",
+      "bytes": 135628,
+      "sha256": "0c402ba82900d67dc61468cc1761f2688e96261cbf36e8646bc954126e7569a9"
+    },
+    "startup_log": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-stochastic-startup-01.log",
+      "bytes": 4151,
+      "sha256": "91751b9fa6443b6a5cbe40d9e2e9b9ca57ad347cbdf26b318c78eeaed81e9a15"
+    },
+    "sampler_endpoint_failure": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/chain-endpoint-baseline/receipt.json",
+      "bytes": 5436,
+      "sha256": "77cf6cbafab5a6e7a3f1fa1372138fb9fb35180e96abe316f0af7b591ec754f5"
+    }
+  },
+  "limitations": [
+    "Forced-output correctness does not establish representative agentic acceptance or performance.",
+    "No independent all-width-one execution of the literal workload has been compared yet.",
+    "The recorded HTTP run used the sampler with the separately reproduced rare uniform-endpoint failure; the paired endpoint correction is qualified separately.",
+    "MTP weights, draft model numerical agreement, image-conditioned speculation and complete state-parity coverage remain open."
+  ],
+  "endpoint_correction": "flashinfer-chain-endpoint.json"
+}

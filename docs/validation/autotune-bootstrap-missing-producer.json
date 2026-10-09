@@ -1,0 +1,29 @@
+{
+  "component": "Qwen exact-checkpoint batched autotuning bootstrap",
+  "implementation_root": "/tmp/sparkgap-autotune-integration",
+  "status": "failed_before_graph_capture",
+  "command": "CUDA_VISIBLE_DEVICES=GPU-afd4b1ad-8a64-7057-4bde-241822724c7f CUDA_HOME=/opt/cuda PYTHONPATH=/tmp/sparkgap-autotune-integration .venv/bin/python -u -m serve --prepare-only --memory-report /tmp/sparkgap-autotune-cold-memory.json",
+  "exit_code": 1,
+  "error": "ValueError: multi-candidate preparation requires a representative benchmark: prefill512.layer0.attn_hc.gate_mean",
+  "last_progress": {
+    "completed_coalesced_requests": 28,
+    "total_coalesced_requests": 255,
+    "measured_candidates": 628,
+    "cache_hits": 0
+  },
+  "progress_is_final_total": false,
+  "source_manifest_sha256": "5bd008b1d0088185fe6c10dec189ed40db0158fbc59e7a9ca02039b8494d7c7e",
+  "log_sha256": "7da85a4089dd747966693ced6eca93c8f581b55ffe57485a9d7558a2f2d68975",
+  "cpu_tests": {
+    "passed": 176,
+    "skipped": 51,
+    "elapsed_seconds": 37.11
+  },
+  "main_implementation_changed": false,
+  "gpu_processes_after_exit": [],
+  "archive": {
+    "path": "autotune-bootstrap-missing-producer.tar.gz",
+    "sha256": "ed7331f0bf46136f72e46a1adbd507cc35614585436be906e24d43cfb113dc6a",
+    "bytes": 190134
+  }
+}

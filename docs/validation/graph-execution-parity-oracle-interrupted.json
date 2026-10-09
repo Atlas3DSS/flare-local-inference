@@ -1,0 +1,37 @@
+{
+  "schema": "sparkgap-same-graph-attempt-summary-v1",
+  "passed": false,
+  "error": {
+    "type": "KeyboardInterrupt",
+    "message": "",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py\", line 752, in main\n    run_comparison(model, state, requests, scratch, cache, reset, scenario, evidence, progress)\n  File \"/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py\", line 612, in run_comparison\n    request_cpu, logits = readback(side, stage)\n                          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py\", line 467, in readback\n    evidence.tensor(side, stage, name, cpu)\n  File \"/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py\", line 59, in tensor\n    digest = sha256(raw)\n             ^^^^^^^^^^^\n  File \"/home/luke/projects/sparkgap/scripts/qualify_graph_execution.py\", line 21, in sha256\n    return hashlib.sha256(data).hexdigest()\n           ^^^^^^^^^^^^^^^^^^^^\nKeyboardInterrupt\n"
+  },
+  "checks": 161,
+  "passed_checks": 161,
+  "observed_stages": [
+    "initial",
+    "group00.init4",
+    "group01.prefill64",
+    "group02.prefill512",
+    "group03.prefill1",
+    "group04.prefill128",
+    "group05.prefill64",
+    "group06.prefill16",
+    "group07.snapshot4",
+    "group08.resume1",
+    "group09.decode4+decode4",
+    "group10.decode2"
+  ],
+  "script_sha256": "b7c77e2da6279a94da1ec11917c2fff43fcc4726f4af02c006f14b61e2fcf82b",
+  "native_extension_sha256": "f16f664d7d798ef33c16f723b7d29a365c3797aaf1375ae8605f6945d7315ff8",
+  "full_receipt": {
+    "path": "graph-execution-parity-oracle-interrupted.json.gz",
+    "sha256": "9675cbf7111d94c3e7205bc96628dd22c281494851ebcf0f7505bf9625d355fd",
+    "bytes": 530796,
+    "uncompressed_sha256": "0da8387476010a89d7632782f9b33ee5db422f34c84e434e200f30cdc1f35987",
+    "uncompressed_bytes": 9618357,
+    "raw_copy": "/tmp/sparkgap-graph-execution-parity-oracle-interrupted/full-receipt.json"
+  },
+  "artifacts": "/tmp/sparkgap-graph-execution-parity-oracle-interrupted",
+  "raw_log": "/tmp/sparkgap-graph-execution-parity-oracle-interrupted.log"
+}

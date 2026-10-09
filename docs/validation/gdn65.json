@@ -1,0 +1,135 @@
+{
+  "status": "failed_pointwise_canonical_parity",
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2",
+    "module": "model.language_model.layers.0.linear_attn"
+  },
+  "sources": {
+    "transformers_revision": "4cc2aa84301c9aa210b5513dab9fefae03981f6e",
+    "flashinfer_revision": "98fb87a461183f98d6a7049ca947fb136cc6fb59",
+    "flashinfer_patch_manifest_sha256": "62dbf0066aef6f0c30f5196bf0e0e1181421cf937cc22d9ea586368fc986e4d7",
+    "sha256": {
+      "serve/recipes/qwen38/gdn.py": "169a157e4c184c8184fc4ddce0600172a0f11345602b5d13f59dbf1f0b02eca5",
+      "tests/recipes/test_qwen38_gdn.py": "ad7fe2875f7ad13cc226a08182edad4478d464200f91791151d557711ccccbfe",
+      "serve/recipes/qwen38/linear.py": "cdfd6aed6d94de880830379e05ea06dbd8c46640090c2dfc72707755cb35af40",
+      "serve/reference/qwen38_quant.py": "7fa893735d5efb94190f34d7945af3fdd9624716876e0e5af772249beb99f176"
+    }
+  },
+  "environment": {
+    "gpu_uuid": "GPU-d3f30e71-0df9-2fcc-add2-977c3893288f",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "compute_capability": "12.0",
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "transformers": "5.19.0.dev0"
+  },
+  "command": "CUDA_VISIBLE_DEVICES=GPU-d3f30e71-0df9-2fcc-add2-977c3893288f CUDA_HOME=/opt/cuda SPARKGAP_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest 'tests/recipes/test_qwen38_gdn.py::test_actual_checkpoint_prefill_decode_continuation_graphs[65]' -xq",
+  "conditions": {
+    "input": "BF16 torch.randn((66,2560), generator=torch.Generator().manual_seed(741)).to(torch.bfloat16)*0.1",
+    "packed_request_lengths": [
+      65,
+      1
+    ],
+    "key_heads": 16,
+    "value_heads": 48,
+    "head_dimension": 128,
+    "convolution_width": 10240,
+    "convolution_kernel": 4,
+    "reference": "Pinned canonical Qwen4ExpTextGatedDeltaNet CPU forward with exact checkpoint BF16/FP32 parameters and five MXFP8 projections independently decoded and activation-QDQ applied. Canonical chunk recurrence uses chunk_size=64 with FP32 normalized Q/K, triangular solve and state arithmetic.",
+    "native": "Prepared b12x GDN prefill, default sequential 16-token tensor-core chunks, FP32 persistent state, canonical captured gated RMSNorm, prepared MXFP8 projections. CUDA graph replay uses external persistent inputs/outputs/state and shared graph pool.",
+    "checkpoint_export": {
+      "request": 0,
+      "tokens": 16,
+      "state_slot": 3
+    },
+    "allocator": "allocation.all.allocated unchanged across native CUDA graph replay"
+  },
+  "canonical_output": {
+    "relative_l2": 0.014330066740512848,
+    "relative_l2_limit": 0.015,
+    "pointwise_rtol": 0.025,
+    "pointwise_atol": "0.015*maxabs(expected)+1e-6",
+    "pointwise_atol_value": 0.0011216054687499999,
+    "mismatched_elements": 4,
+    "elements": 168960,
+    "max_absolute_difference": 0.002197265625,
+    "max_absolute_difference_index": [
+      60,
+      1811
+    ]
+  },
+  "isolation": {
+    "convolution_identical_native_projection_input": {
+      "relative_l2": 0.0,
+      "max_absolute_difference": 0.0,
+      "mismatched_elements": 0
+    },
+    "projection_qkv_relative_l2": 3.462669701548293e-05,
+    "projection_a_relative_l2": 0.0002895119250752032,
+    "projection_b_relative_l2": 0.0,
+    "projection_z_relative_l2": 3.0372066248673946e-05,
+    "recurrence_identical_native_convolution_input_relative_l2": 0.004353695549070835,
+    "recurrence_full_canonical_relative_l2": 0.004354625474661589,
+    "gated_full_canonical_relative_l2": 0.004463970195502043,
+    "out_projection_identical_native_gated_input_relative_l2": 9.418331319466233e-05,
+    "rounded_mirror": {
+      "native_vs_mirror_recurrence": {
+        "l2": 0.0001295060501433909,
+        "maxabs": 9.5367431640625e-07,
+        "nonzero": 110
+      },
+      "native_vs_sequential_recurrence": {
+        "l2": 0.004353818483650684,
+        "maxabs": 3.814697265625e-06,
+        "nonzero": 237000
+      },
+      "canonical_identical_vs_sequential_recurrence": {
+        "l2": 2.9860137146897614e-05,
+        "maxabs": 2.384185791015625e-07,
+        "nonzero": 125
+      },
+      "native_vs_mirror_state": {
+        "l2": 3.3458942198194563e-05,
+        "maxabs": 2.4466426111757755e-06,
+        "nonzero": 417822
+      },
+      "native_vs_canonical_state": {
+        "l2": 0.00303001725114882,
+        "maxabs": 0.00011500902473926544,
+        "nonzero": 786427
+      },
+      "native_vs_sequential_state": {
+        "l2": 0.003030950203537941,
+        "maxabs": 0.00011501088738441467,
+        "nonzero": 786423
+      }
+    }
+  },
+  "rounded_mirror_algorithm": "b12x.sequence.gdn_prefill.reference.chunk_mirror prepares 16-token chunks, rounds normalized Q/K, decayed Q/K, attention matrix and triangular inverse to BF16, uses a BF16 shadow of FP32 recurrent state and BF16 v-prime/u operands, then updates FP32 master state. This mirror diagnoses arithmetic only; canonical acceptance remains the FP32 Transformers recurrence.",
+  "conclusion": "Convolution and final projection agree on identical operands. The dominant recurrence difference tracks intentional BF16 chunk operands and is amplified by gated normalization and MXFP8 output activation quantization. Strict 65-token pointwise canonical parity fails. No tolerance change, xfail, reference replacement or alternate runtime path is applied.",
+  "other_checks": {
+    "original_suite": "9 passed in 10.47 s before adding 65-token case and checkpoint export",
+    "extended_suite": "8 passed, 1 failed in 11.71 s with -x; speculative test not rerun after the failure",
+    "passed_graph_conditions": [
+      "17+1 token fresh prefill",
+      "1+1 token cached decode",
+      "3+2 token cached prefill",
+      "16-token recurrent checkpoint export in 17-token case",
+      "padded output zeroing",
+      "zero-active prefill preserves persistent caches",
+      "accepted_tokens=2 speculative restore in original suite"
+    ]
+  },
+  "local_artifacts": {
+    "/tmp/sparkgap-gdn65-diagnostic.pt": {
+      "sha256": "71633232a1c95914e950d88781647ef1213f0a4cbf7d2ad38a8cbf0f9f4212d5"
+    },
+    "/tmp/sparkgap-gdn65-mirror.pt": {
+      "sha256": "36e5cf8714c99310271f65bb7ede37c3639e8b1438e7b32a5a16ac54b45870d7"
+    },
+    "/tmp/sparkgap-gdn65-metrics.json": {
+      "sha256": "d37d1af54ef392676e80f59bee4179cbd0985c2d62151626225904f7d9a2fe8e"
+    }
+  }
+}

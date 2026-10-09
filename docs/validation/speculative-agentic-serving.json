@@ -1,0 +1,992 @@
+{
+  "artifact_type": "speculative-agentic-serving",
+  "schema_version": 1,
+  "passed": false,
+  "model": {
+    "id": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+  },
+  "run": {
+    "started_at": "2026-10-09T21:16:51.270906+00:00",
+    "finished_at": "2026-10-09T21:18:06.881598+00:00",
+    "arm": {
+      "id": "copy-adaptive",
+      "mtp": true,
+      "speculative_proposal_source": "copy",
+      "speculative_fixed_width": null,
+      "speculative_copy": true
+    },
+    "concurrency": 1,
+    "repetition": 0,
+    "server_pid": 138113,
+    "launch_command": [
+      ".venv/bin/python",
+      "-u",
+      "-m",
+      "sparkgap",
+      "--snapshot",
+      "/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+      "--bind",
+      "127.0.0.1:8000",
+      "--prefill-chunk-size",
+      "4096",
+      "--mtp",
+      "--mtp-proposal-source",
+      "copy",
+      "--memory-report",
+      "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/memory.json"
+    ],
+    "workload_sha256": "45dda5a1f9d69ef7c1c3edf63c6ee65f3f89d3dae64083d0f5f8d505f4b9ba13"
+  },
+  "conditions": {
+    "sampling": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "repetition_penalty": 1.0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0
+    },
+    "eos_policy": {
+      "ignore_eos": false,
+      "token_ids": [
+        248046,
+        248044
+      ]
+    },
+    "request_budgets": {
+      "tool_turn": 512,
+      "code_edit": 1024,
+      "chat_reasoning": 384,
+      "structured_json": 256,
+      "long_context": 512,
+      "prefix_branch": 512
+    },
+    "cache": "Fresh server at trial start; normal cache retained between requests. All four prefix cases reused zero tokens.",
+    "tool_history": "Recorded tool results are fixture input. Generated tool actions and code were not executed.",
+    "max_context_tokens": 262144,
+    "shape": {
+      "graphs": 39,
+      "prefill_chunk_size": 4096,
+      "prefill_capacities": [
+        1,
+        16,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096
+      ],
+      "speculative_shapes": [
+        [
+          4,
+          2
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          1,
+          8
+        ],
+        [
+          1,
+          7
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          1,
+          5
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "speculative_widths": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "speculative_state_columns": 8,
+      "speculative_proposal_source": "copy",
+      "speculative_fixed_width": null,
+      "speculative_copy": true,
+      "mtp_weights_bytes": 0
+    },
+    "memory": {
+      "pages": 6485,
+      "cached_token_capacity": 415040,
+      "snapshot_capacity": 35,
+      "operator_scratch_bytes": 297959168,
+      "headroom_bytes": 4294967296,
+      "free_device_bytes": 4337958912
+    }
+  },
+  "results": {
+    "http_200": 23,
+    "http_400": 1,
+    "automatic_pass": 18,
+    "automatic_fail": 6,
+    "manual_pass": 16,
+    "manual_fail": 8,
+    "manual_inconclusive": 0,
+    "driver_errors": [],
+    "aggregate_harness_passed": false,
+    "aggregate_transport_passed": false,
+    "output_tokens": 5026,
+    "same_server_process": true,
+    "final_idle": true,
+    "runtime_failures": 0,
+    "runtime_cancellations": 0,
+    "requests_admitted": 23,
+    "requests_completed": 23,
+    "cache_hits": 2,
+    "reused_prompt_tokens": 768,
+    "failed_transport_group_checks": [
+      {
+        "cases": [
+          "code-docstrings-stop"
+        ],
+        "failed_checks": [
+          "http_integrity",
+          "admitted_count",
+          "completed_count",
+          "reuse_counter_matches_requests",
+          "speculative_emissions_match_raw_ids"
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "incident-turn-1",
+      "category": "tool_turn",
+      "prompt_tokens": 384,
+      "max_tokens": 512,
+      "seed": 48100,
+      "http_status": 200,
+      "completion_tokens": 41,
+      "finish_reason": "tool_calls",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Requests read_incident with exact incident_id INC-204; no claimed external action."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "f6a19c97453c8cf366b4089c90e1a4ef971cb15a30aa6e754a8a2d827a5dda0c",
+      "content_sha256": "fe322159320fe86d5e980b7991706b764ce0e36f78ef14e49c2138c7f3329d1c",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-000-tools-turn-1/incident-turn-1/response.sse",
+        "bytes": 16003,
+        "sha256": "97a9c02c2af006955576ebbbdf65891e1cc5e02a445dbf4b178df7b1aee178d6"
+      }
+    },
+    {
+      "id": "release-turn-1",
+      "category": "tool_turn",
+      "prompt_tokens": 378,
+      "max_tokens": 512,
+      "seed": 48101,
+      "http_status": 200,
+      "completion_tokens": 32,
+      "finish_reason": "tool_calls",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Requests read_incident with exact incident_id INC-205; no claimed external action."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "1b21978ef660c989571f611a2fd79c3772237fe05b5742edf9e22f92d85a846e",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-001-tools-turn-1/release-turn-1/response.sse",
+        "bytes": 11647,
+        "sha256": "a1f1f1d41d053a5d155143971b3286430532818c3b3118ededfda4ba4b897a0c"
+      }
+    },
+    {
+      "id": "incident-turn-2",
+      "category": "tool_turn",
+      "prompt_tokens": 495,
+      "max_tokens": 512,
+      "seed": 48102,
+      "http_status": 200,
+      "completion_tokens": 26,
+      "finish_reason": "tool_calls",
+      "reused_prompt_tokens": 384,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Requests read_service with exact service billing after the fixed incident result."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "1d1ef83a49ba323c640f030c57fa55df66a8f2d8afeff4a97dd618e0ee091180",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-002-tools-turn-2/incident-turn-2/response.sse",
+        "bytes": 10536,
+        "sha256": "fda0383824c7a0bb2b55d66ce71e6c60bc87ea9838172560b0c377955c0718a6"
+      }
+    },
+    {
+      "id": "release-turn-2",
+      "category": "tool_turn",
+      "prompt_tokens": 487,
+      "max_tokens": 512,
+      "seed": 48103,
+      "http_status": 200,
+      "completion_tokens": 26,
+      "finish_reason": "tool_calls",
+      "reused_prompt_tokens": 384,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Requests read_service with exact service search after the fixed incident result."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "19b93e89890b8f3bcc9541580a9efedf9c56e2dabb2ec20dba05609317dc8a6c",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-003-tools-turn-2/release-turn-2/response.sse",
+        "bytes": 10503,
+        "sha256": "b9fa8716af3fd18732fc22586c223779df2c26a27e9171272f4ccfa621f9622f"
+      }
+    },
+    {
+      "id": "incident-turn-3",
+      "category": "tool_turn",
+      "prompt_tokens": 258,
+      "max_tokens": 512,
+      "seed": 48104,
+      "http_status": 200,
+      "completion_tokens": 143,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Cites retry_limit 5 versus1, time09:12, queue740, p99 850ms versus90ms, errors7% and replicas8; recommends a reversible rollback without claiming execution."
+      ],
+      "manual_caveats": [
+        "Immediate return to baseline is predicted too confidently; the supplied records do not establish that outcome."
+      ],
+      "request_sha256": "3a1b4a21ee6edc7233b9494c1b62f83836dba4c11185c8ce1b650fcd72b14948",
+      "content_sha256": "da9cfbcdbd4cf9838502382e4b363030845bf2609254dd8d4b3048a24ae7e9a2",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-004-tools-turn-3/incident-turn-3/response.sse",
+        "bytes": 74412,
+        "sha256": "317779de6f18974ceb68abeafead4aacd9d88cee790ec7535bc3c09d6fe77646"
+      }
+    },
+    {
+      "id": "release-turn-3",
+      "category": "tool_turn",
+      "prompt_tokens": 268,
+      "max_tokens": 512,
+      "seed": 48105,
+      "http_status": 200,
+      "completion_tokens": 233,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Holds at5% canary, cites observed4 versus required20 minutes, p99 110 versus100/140ms and error0.1% versus0.5%; proposes another16minutes and conditional rollback."
+      ],
+      "manual_caveats": [
+        "The claim of statistical insignificance is unsupported by sample counts; the stated20-minute policy independently supports holding."
+      ],
+      "request_sha256": "f3c9b558af84a025fc0330618368e8e6753e5d54f6d805a2b209c6be8536d014",
+      "content_sha256": "403def66ab30614c50b4516b7a70351c01de6699b8f0e31068d3dcd07d5f25d9",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-005-tools-turn-3/release-turn-3/response.sse",
+        "bytes": 120365,
+        "sha256": "978670e75949f74b3047fb9742bfb7f10ea48a02b4e081043ccc4a847647791e"
+      }
+    },
+    {
+      "id": "code-reject-bool",
+      "category": "code_edit",
+      "prompt_tokens": 518,
+      "max_tokens": 1024,
+      "seed": 48106,
+      "http_status": 200,
+      "completion_tokens": 517,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "All eight validators exactly preserve the source AST except adding isinstance(value,bool) to the TypeError condition. No generated code was executed."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "f283746cd9daa715c54dc992c8f5a418ea808877fdd2b41fa7831b9fb6a1d784",
+      "content_sha256": "612161a50b93b966ce7f1fa3fc51a11242b2bfafd6b9e625260adc89fff4e8d5",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-006-code_edit/code-reject-bool/response.sse",
+        "bytes": 265703,
+        "sha256": "0c4bc39a6930ab7996f16182dd0c02303fee59a772ef0a9ab395202f80d95128"
+      }
+    },
+    {
+      "id": "code-timeout-range",
+      "category": "code_edit",
+      "prompt_tokens": 525,
+      "max_tokens": 1024,
+      "seed": 48107,
+      "http_status": 200,
+      "completion_tokens": 109,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "Requested bounds change is correct, but the returned unified diff declares eight lines per hunk side while containing seven; its start16 also differs from matching source start15. The emitted patch is malformed."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "30ef8477e39489f9b94b60e51f858e6d64b767f073a0185bbb3d34585727179d",
+      "content_sha256": "cc116f443f299d2961d265018e4fb40cc8f608ed2516c98fd61714e82e878bc4",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-007-code_edit/code-timeout-range/response.sse",
+        "bytes": 58215,
+        "sha256": "159dd51cc60771a161d7e154ec68b89a9e53c6734fc455755229467fa742a4b1"
+      }
+    },
+    {
+      "id": "code-tests",
+      "category": "code_edit",
+      "prompt_tokens": 521,
+      "max_tokens": 1024,
+      "seed": 48108,
+      "http_status": 200,
+      "completion_tokens": 961,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "AST inspection verifies parameterized tests for all eight validators, both boundaries, out-of-range values, and the correct return/ValueError branch. Tests were not executed."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "80a23e8d65e73530117c2ff0df65c468f207ea3d78b3ce34f0d91309ab8430d6",
+      "content_sha256": "629a97422f98f10b25ab0f3006ff14dc420d27aca501abca8479c0962fc7906b",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-008-code_edit/code-tests/response.sse",
+        "bytes": 490906,
+        "sha256": "fb3f6055b19ec26e764e47ed67078131362a7ec63eac4132e3ca9cb28ce951bd"
+      }
+    },
+    {
+      "id": "code-docstrings-stop",
+      "category": "code_edit",
+      "prompt_tokens": 522,
+      "max_tokens": 1024,
+      "seed": 48109,
+      "http_status": 400,
+      "completion_tokens": 0,
+      "finish_reason": null,
+      "reused_prompt_tokens": null,
+      "automatic_passed": false,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "HTTP400 rejects request option stop as unimplemented; no model output."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "7272a4f2445e0b1843f57bf3624f07ed60d6e815e161dbe5d5852107b5415464",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-009-code_edit/code-docstrings-stop/response.sse",
+        "bytes": 93,
+        "sha256": "27c293835d044cdb0febfede49c286f8c2a8fb1531bd1dbba0821d2aeffa56ac"
+      }
+    },
+    {
+      "id": "chat-capacity",
+      "category": "chat_reasoning",
+      "prompt_tokens": 44,
+      "max_tokens": 384,
+      "seed": 48110,
+      "http_status": 200,
+      "completion_tokens": 384,
+      "finish_reason": "length",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": false,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "384-token budget ends at the first remedy. The requested second remedy and throughput/latency distinction are absent;22.5jobs/s per worker would only equal90jobs/s and provides no strict capacity margin."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "888daae573277aaca45ea801b322111254f195629c401010868ef79df2924d77",
+      "content_sha256": "23b9b66204723fda024e14aaef7a63b1caef0091530f698d006e85098a47cc26",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-010-chat_reasoning/chat-capacity/response.sse",
+        "bytes": 197101,
+        "sha256": "17d05d68623cdf299de290b14e8fdec60de488b43114b809d196e82839db6cdb"
+      }
+    },
+    {
+      "id": "chat-tradeoff",
+      "category": "chat_reasoning",
+      "prompt_tokens": 43,
+      "max_tokens": 384,
+      "seed": 48111,
+      "http_status": 200,
+      "completion_tokens": 384,
+      "finish_reason": "length",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": false,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "384-token budget ends during early-flight pros. Flight cons and a balanced recommendation are absent."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "cf87a2a15012f6b5900f3f5ecd21a55c412fc8c27c714bfe8dca45fc4b2186a1",
+      "content_sha256": "7e3a45ffea80ad990f855f8cbdc2c03d535d8e20cdf609f8af87cd52b50928c4",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-011-chat_reasoning/chat-tradeoff/response.sse",
+        "bytes": 197423,
+        "sha256": "18ced8dbff9d95760373afeff0832142239a433379ade7e9ae7d8b0f1bbc733b"
+      }
+    },
+    {
+      "id": "chat-deduction",
+      "category": "chat_reasoning",
+      "prompt_tokens": 38,
+      "max_tokens": 384,
+      "seed": 48112,
+      "http_status": 200,
+      "completion_tokens": 384,
+      "finish_reason": "length",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": false,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "384-token budget ends inside the blue-draw branch. The red-draw mapping is correct, but the explanation incorrectly treats drawing red from a red-labeled box as ambiguous even though all labels are wrong."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "4b6465970377f455c06e4a0996c1b40ecefa34a78be963bec87ca36385839196",
+      "content_sha256": "b2eb7c0fb4ec2845fafebd7d1a6abd74cbabaf02501b3d354211e75783d4c36c",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-012-chat_reasoning/chat-deduction/response.sse",
+        "bytes": 197115,
+        "sha256": "9dad5bea091d12fa416bba065db333b75548498a19e41531c7ced146ee2186cc"
+      }
+    },
+    {
+      "id": "chat-review",
+      "category": "chat_reasoning",
+      "prompt_tokens": 38,
+      "max_tokens": 384,
+      "seed": 48113,
+      "http_status": 200,
+      "completion_tokens": 384,
+      "finish_reason": "length",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": false,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "Contains a valid cache-miss failure counterexample and useful reliability metrics, but reaches384tokens mid-table. Delivered output is unfinished."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "775268f81e51da56bfce9531d99a31605f3a3b59c2faa25a4d69de3f2b9e7f52",
+      "content_sha256": "761645b5065ac6079b0bd227fa22091339261611e9bc0c08f68cb6a5cb5226d3",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-013-chat_reasoning/chat-review/response.sse",
+        "bytes": 196085,
+        "sha256": "5ce0b39dfb1f5be8c85657dea7fe6507e2f3809cecf80fd2bf9e46f73c81633c"
+      }
+    },
+    {
+      "id": "json-incident",
+      "category": "structured_json",
+      "prompt_tokens": 28,
+      "max_tokens": 256,
+      "seed": 48114,
+      "http_status": 200,
+      "completion_tokens": 28,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Valid required-field JSON with billing,severity2,retry_limit1 and no extra fields."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "2624fc16189ed3e5cd659780d63a9ab29d1575a1ed7e17f614b190f57e435357",
+      "content_sha256": "4943fbe951adc8ea664dce7ace092ca349fd661197746729ec2ced897d5baf44",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-014-structured_json/json-incident/response.sse",
+        "bytes": 14999,
+        "sha256": "606c7207cc9288911b4ae7b0b0b94d3ecc489aad429a13e1c0496e5acb95000e"
+      }
+    },
+    {
+      "id": "json-plan",
+      "category": "structured_json",
+      "prompt_tokens": 31,
+      "max_tokens": 256,
+      "seed": 48115,
+      "http_status": 200,
+      "completion_tokens": 54,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Three concrete test steps cover staging, automated regression and manual critical-flow validation; approved is false."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "a3422b7525a4468d2b2ec770ee66a48c2c979bc2e8f3fb9f783fc3956a2a4d4c",
+      "content_sha256": "371f8cdd2e6ba0cbf4e62b1116c7e6c77de3e2371f75bbb51b968d60a110de27",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-015-structured_json/json-plan/response.sse",
+        "bytes": 28361,
+        "sha256": "04366f81be0417629b835b271b525f0f21fa525b19942bc5d49eb930baa546d3"
+      }
+    },
+    {
+      "id": "json-literal-tags",
+      "category": "structured_json",
+      "prompt_tokens": 29,
+      "max_tokens": 256,
+      "seed": 48116,
+      "http_status": 200,
+      "completion_tokens": 32,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": false,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "JSON shape and count2 are valid, but text repeats <tool_call> and omits the required literal <think>."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "aa4472cdf8e0fa5680cf21ef4af25adf105c11d522c5e01a8702e164e9d2dea6",
+      "content_sha256": "72e50beb7d33cba953ab79fe8e3d95b25907786f7071694e7379463767ae2dcf",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-016-structured_json/json-literal-tags/response.sse",
+        "bytes": 17083,
+        "sha256": "972aa3d9abf7a1f0ea30cb664e7af5ce85db1b8ab2ab00f790756d5e51a8a6c1"
+      }
+    },
+    {
+      "id": "json-unicode",
+      "category": "structured_json",
+      "prompt_tokens": 32,
+      "max_tokens": 256,
+      "seed": 48117,
+      "http_status": 200,
+      "completion_tokens": 37,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Exact Montréal, 雪 and [-3,2,5] values in the requested JSON."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "e3ef5015d64014991fe983961cfbd95d5f1d9ab743f93213ebafe076e34c4b9a",
+      "content_sha256": "84fe81e787cf6ddbe89f74a71dc993dc82702f5b7b72e79d258a2263de171287",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-017-structured_json/json-unicode/response.sse",
+        "bytes": 19573,
+        "sha256": "7fa81afb2db4c97aefd558854cdf39737f8c996bd7a22c71a2cba64edf7399ee"
+      }
+    },
+    {
+      "id": "long-services-192",
+      "category": "long_context",
+      "prompt_tokens": 12845,
+      "max_tokens": 512,
+      "seed": 48118,
+      "http_status": 200,
+      "completion_tokens": 294,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Accurately extracts all nine requested owner/timeout/retry values for services0007/0096/0191; prioritizes0191 based on highest timeout with three retries."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "62e6197258840a6350cd88acfd42ace27ebd464b9f360ec8f8cb4e56b834055c",
+      "content_sha256": "11e5eaa5c36b4d42eef3d8b6a158f93b385d64fc2c5523eb0b304e127e8e5d5b",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-018-long_context/long-services-192/response.sse",
+        "bytes": 200520,
+        "sha256": "26d532ea82267e735e944316caa589a496974d7a71f28b0a9a916cdca35be036"
+      }
+    },
+    {
+      "id": "long-services-768",
+      "category": "long_context",
+      "prompt_tokens": 51172,
+      "max_tokens": 512,
+      "seed": 48119,
+      "http_status": 200,
+      "completion_tokens": 311,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Accurately extracts all nine requested owner/timeout/retry values for services0007/0384/0767; prioritizes0007 based on timeout1050 with three retries."
+      ],
+      "manual_caveats": [
+        "Calling a zero-retry configuration the most stable is broader than the supplied configuration evidence."
+      ],
+      "request_sha256": "ebcb9f92808ffff16b901776eb4601c05a2895c014d60c61831502aa79b9e31f",
+      "content_sha256": "144d7bd956d73df93112760d347e11adccb451aee29e32cb42b3ce1091d4a58c",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-019-long_context/long-services-768/response.sse",
+        "bytes": 358023,
+        "sha256": "d39827e1a952cc76a28a03e2c095b4e3dcf548607aeaff37eaacc33487285c97"
+      }
+    },
+    {
+      "id": "prefix-seed",
+      "category": "prefix_branch",
+      "prompt_tokens": 6459,
+      "max_tokens": 512,
+      "seed": 49100,
+      "http_status": 200,
+      "completion_tokens": 144,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Both requested complete record lines exactly match the supplied service catalog."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "5a1bb54af5411ef12b186eedebf65382b3addd011243fdd9e4bcd4ad20288035",
+      "content_sha256": "da4067281fdbe641b79a8e512c1cec14b62349b4c4777fc6ff2f34d9ed0cea75",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-020-prefix-seed/prefix-seed/response.sse",
+        "bytes": 99084,
+        "sha256": "d63623e8d36c90ecddf873557e5a817c6ffb6a388b77276f734e07c796730eb7"
+      }
+    },
+    {
+      "id": "prefix-repeat",
+      "category": "prefix_branch",
+      "prompt_tokens": 6459,
+      "max_tokens": 512,
+      "seed": 49100,
+      "http_status": 200,
+      "completion_tokens": 144,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Both complete record lines match the catalog; actual raw token IDs and text equal prefix-seed for this repeated request."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "5a1bb54af5411ef12b186eedebf65382b3addd011243fdd9e4bcd4ad20288035",
+      "content_sha256": "da4067281fdbe641b79a8e512c1cec14b62349b4c4777fc6ff2f34d9ed0cea75",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-021-prefix-repeat/prefix-repeat/response.sse",
+        "bytes": 99084,
+        "sha256": "ae8ea257c7eb06b6e1385a67c0687409893e88bbb3fc8512287c033cf450778a"
+      }
+    },
+    {
+      "id": "prefix-branch-owner",
+      "category": "prefix_branch",
+      "prompt_tokens": 6465,
+      "max_tokens": 512,
+      "seed": 49100,
+      "http_status": 200,
+      "completion_tokens": 66,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "pass",
+      "manual_reasons": [
+        "Correct owners: services0007/0041 team-07; service0089 team-04."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "abf15af4f4d6265dd0641caa146a094b80f74cddf2673bd094a2fdef48d1de7f",
+      "content_sha256": "01afd1af499223d092b3779c2aaec9c5827b45506169f0101d4f0d6eb41643e8",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-022-prefix-branch-owner/prefix-branch-owner/response.sse",
+        "bytes": 59378,
+        "sha256": "ab9bca023df396dd27ed0499b1ea4f121fbe202a68e37e49d67f2ff7594c9347"
+      }
+    },
+    {
+      "id": "prefix-branch-retry",
+      "category": "prefix_branch",
+      "prompt_tokens": 6469,
+      "max_tokens": 512,
+      "seed": 49100,
+      "http_status": 200,
+      "completion_tokens": 292,
+      "finish_reason": "stop",
+      "reused_prompt_tokens": 0,
+      "automatic_passed": true,
+      "manual_result": "fail",
+      "manual_reasons": [
+        "Extracts retry limits3/1/1 correctly, but says \"Increase ... from3 to0\" and later suggests1. Direction and final proposed setting are inconsistent, so the requested single change is ambiguous."
+      ],
+      "manual_caveats": [],
+      "request_sha256": "232fde6d2aab601480bd7c266bc2a208c31e43f7d39dc98f53466a4e869c062a",
+      "content_sha256": "32b0c2f466e5896e485cc24165f03c4acc807b064364c472b6dbefed30c84391",
+      "raw_response": {
+        "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-023-prefix-branch-retry/prefix-branch-retry/response.sse",
+        "bytes": 174836,
+        "sha256": "9cc84e00f481e6e02f02f8f962aadcf3e1793b05b3bd5ece902088bb1c5c26f7"
+      }
+    }
+  ],
+  "provenance": {
+    "launch_source_build_count": 611,
+    "launch_source_build_hashes_reverified": true,
+    "mapped_binaries": [
+      {
+        "path": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+        "bytes": 2448000,
+        "sha256": "7e9777ab864b81d8bddbabf5a55b016da7c70255e1ebdc2beabd602b903433b3",
+        "mapped_device": "103:07",
+        "mapped_inode": 33030432,
+        "same_mapping_before_after": true
+      },
+      {
+        "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/sparkgap_native/sparkgap_native.cpython-312-x86_64-linux-gnu.so",
+        "bytes": 15258320,
+        "sha256": "a81601daee2c5a8cedc7b7d7d59b0ace4f17e83170ff537e4661fa597a1a1f91",
+        "mapped_device": "103:07",
+        "mapped_inode": 57153402,
+        "same_mapping_before_after": true
+      }
+    ],
+    "flashinfer_sampling_header": {
+      "path": "/home/luke/projects/flashinfer/include/flashinfer/sampling.cuh",
+      "bytes": 85054,
+      "sha256": "289412563ad3435ce9bd1548101cdc5d8a33a90f37d35d947505722bae6738f1"
+    }
+  },
+  "limitations": [
+    "One stochastic copy-only arm at concurrency1 and one repetition; no paired speedup or accuracy attribution.",
+    "MTP weights are not loaded; learned MTP proposal quality is not exercised.",
+    "Four chat outputs end at their unchanged explicit384-token budgets.",
+    "All prefix-branch requests report zero reused prompt tokens; output equality does not qualify restored-cache execution.",
+    "Source/build and stream verification is CPU-only; no additional model requests, generated-code execution or tool actions."
+  ],
+  "evidence": {
+    "raw_receipt": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/receipt.json",
+      "bytes": 13257704,
+      "sha256": "88e2c7e9f4f24acec4ede6963cb64f49597f2c9dd217014d62e340f122d76738"
+    },
+    "memory": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/memory.json",
+      "bytes": 10636865,
+      "sha256": "23423f0c2137767d80c41857808c712e60fd70350dd6ac03bc8d7841c423dab3"
+    },
+    "launch": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/provenance.json",
+      "bytes": 135612,
+      "sha256": "a2ed63a8304a5974df689e13fecd6595a32d3600643c2ac4a47b719a0b9679fb"
+    },
+    "workload": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/stochastic-workload/workload.json",
+      "bytes": 1848802,
+      "sha256": "45dda5a1f9d69ef7c1c3edf63c6ee65f3f89d3dae64083d0f5f8d505f4b9ba13"
+    },
+    "workload_manifest": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/stochastic-workload/manifest.json",
+      "bytes": 9438,
+      "sha256": "89ac3d463a6d3977d70bcdb925e8fa505aa97230667153e312cd4b9d61183bcb"
+    },
+    "manual_review": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/manual-review/review.json",
+      "bytes": 42171,
+      "sha256": "d245ade4d233423502b1e4a5b05a27364fef2f09d2c1363e982c159c093ed39f"
+    },
+    "manual_review_markdown": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/manual-review/review.md",
+      "bytes": 4294,
+      "sha256": "c394bf8b86a51e031addbc62079b41a1277ae10edb6c38e80a314c70e8ca769e"
+    },
+    "manual_script": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/manual-review/review.py",
+      "bytes": 12533,
+      "sha256": "5d33f09ff496caeb799f7734f2bedc3632c70c81c15b3ce7ec589b0e46f8f0b4"
+    },
+    "verification": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/manual-review/verification.json",
+      "bytes": 44820,
+      "sha256": "feaa918c3b47b6cb765136e7372b38d2ec4b79e7c4cd782c362e7cc4e952db2e"
+    },
+    "manual_manifest": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/manual-review/manifest.json",
+      "bytes": 1248,
+      "sha256": "5fc94d7a9e97194715c26614d9155a805257292eb118486eb8b0a665e7ee3d4b"
+    },
+    "prefix_publication_analysis": {
+      "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/prefix-publication/analysis.json",
+      "bytes": 8070,
+      "sha256": "37fdd904eccac48a08182421d6a7e53da7d43e60631b0d0540e443831c871ecd"
+    }
+  },
+  "prefix_publication_analysis": {
+    "observed": "All four prefix requests miss. Seed/owner/retry publish one checkpoint apiece; repeat publishes no distinct checkpoint. No eviction or snapshot shortage occurs.",
+    "derivation": "Each response ends with an unconsumed EOS. Consumed=prompt+output-1; latest64-aligned endpoint matches cached-page growth for each unique terminal publication. Endpoint lengths are reconstructed, not a checkpoint-state readback.",
+    "cases": [
+      {
+        "case": "prefix-seed",
+        "prompt_tokens": 6459,
+        "output_tokens_including_pending_EOS": 144,
+        "consumed_tokens_derived": 6602,
+        "terminal_aligned_candidate_derived": 6592,
+        "common_prefix_with_seed": 6459,
+        "shared_aligned_prefix_with_seed": 6400,
+        "observed_reused_tokens": 0,
+        "cache_lookups": 1,
+        "cache_hits": 0,
+        "snapshot_publications": 1,
+        "snapshot_evictions": 0,
+        "snapshot_graphs": 1,
+        "cached_page_growth": 103,
+        "free_snapshots_before": 18,
+        "free_snapshots_after": 17,
+        "request_sha256": "5a1bb54af5411ef12b186eedebf65382b3addd011243fdd9e4bcd4ad20288035",
+        "prompt_tokens_sha256": "b3b5eb47b46d8e8a9a0ae2f3664eb5b76d267a377650a0b728cedf63a3788391",
+        "group_evidence": {
+          "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-020-prefix-seed/group.json",
+          "bytes": 34679,
+          "sha256": "220cd6ee119735386228932fb0b48ea13606d6a450c7f6cfcf99e96911e0be8e"
+        }
+      },
+      {
+        "case": "prefix-repeat",
+        "prompt_tokens": 6459,
+        "output_tokens_including_pending_EOS": 144,
+        "consumed_tokens_derived": 6602,
+        "terminal_aligned_candidate_derived": 6592,
+        "common_prefix_with_seed": 6459,
+        "shared_aligned_prefix_with_seed": 6400,
+        "observed_reused_tokens": 0,
+        "cache_lookups": 1,
+        "cache_hits": 0,
+        "snapshot_publications": 0,
+        "snapshot_evictions": 0,
+        "snapshot_graphs": 1,
+        "cached_page_growth": 0,
+        "free_snapshots_before": 17,
+        "free_snapshots_after": 17,
+        "request_sha256": "5a1bb54af5411ef12b186eedebf65382b3addd011243fdd9e4bcd4ad20288035",
+        "prompt_tokens_sha256": "b3b5eb47b46d8e8a9a0ae2f3664eb5b76d267a377650a0b728cedf63a3788391",
+        "group_evidence": {
+          "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-021-prefix-repeat/group.json",
+          "bytes": 34272,
+          "sha256": "5d3e540817935fe28802ebd0dab32383b8149c9bb396bafbe288065d8dfe7b12"
+        }
+      },
+      {
+        "case": "prefix-branch-owner",
+        "prompt_tokens": 6465,
+        "output_tokens_including_pending_EOS": 66,
+        "consumed_tokens_derived": 6530,
+        "terminal_aligned_candidate_derived": 6528,
+        "common_prefix_with_seed": 6430,
+        "shared_aligned_prefix_with_seed": 6400,
+        "observed_reused_tokens": 0,
+        "cache_lookups": 1,
+        "cache_hits": 0,
+        "snapshot_publications": 1,
+        "snapshot_evictions": 0,
+        "snapshot_graphs": 1,
+        "cached_page_growth": 102,
+        "free_snapshots_before": 17,
+        "free_snapshots_after": 16,
+        "request_sha256": "abf15af4f4d6265dd0641caa146a094b80f74cddf2673bd094a2fdef48d1de7f",
+        "prompt_tokens_sha256": "e43d6471c3d9676662925e2666f34254d275d5d474c99a63856b03cdcf5451b0",
+        "group_evidence": {
+          "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-022-prefix-branch-owner/group.json",
+          "bytes": 34486,
+          "sha256": "53f8b1754ee2f0e227d2ea79d2bd2b6828458d100587a50b5c301f8c01262a48"
+        }
+      },
+      {
+        "case": "prefix-branch-retry",
+        "prompt_tokens": 6469,
+        "output_tokens_including_pending_EOS": 292,
+        "consumed_tokens_derived": 6760,
+        "terminal_aligned_candidate_derived": 6720,
+        "common_prefix_with_seed": 6431,
+        "shared_aligned_prefix_with_seed": 6400,
+        "observed_reused_tokens": 0,
+        "cache_lookups": 1,
+        "cache_hits": 0,
+        "snapshot_publications": 1,
+        "snapshot_evictions": 0,
+        "snapshot_graphs": 1,
+        "cached_page_growth": 105,
+        "free_snapshots_before": 16,
+        "free_snapshots_after": 15,
+        "request_sha256": "232fde6d2aab601480bd7c266bc2a208c31e43f7d39dc98f53466a4e869c062a",
+        "prompt_tokens_sha256": "4ede68b6cf3cc7d9d4379f01c8b9145524f8fd8dc8e000cbeb21b8dd4c6580db",
+        "group_evidence": {
+          "path": "/data/sparkgap-artifacts/mtp-implementation/copy-corrected-agentic/concurrency-1/group-023-prefix-branch-retry/group.json",
+          "bytes": 34700,
+          "sha256": "f4a887a29a5cf3b3d5a38ec8f88edb2295f444f90d849c99819fecf6a45c0ded"
+        }
+      }
+    ],
+    "mechanism": {
+      "candidate_replacement": "native/src/scheduler.rs:750-779 retains one monotonic candidate.",
+      "terminal_freeze": "native/src/scheduler.rs:940-949 switches to Snapshot only at request completion.",
+      "publication": "native/src/scheduler.rs:1018-1039 publishes only the frozen candidate and its full page chain.",
+      "exact_lookup": "native/src/cache.rs:328-358 searches existing exact ready PrefixKeys, not page-only partial histories.",
+      "deduplication": "native/src/cache.rs:281-290 returns an existing checkpoint for the identical final prefix.",
+      "identity": "native/src/cache/hash.rs:34-42,94-105 hashes global model/recipe identity, prior digest, tokens and conditioning. Sampling seed is absent. Text-only requests supply no conditioning at native/src/server/request.rs:173-185."
+    },
+    "conclusion": "The misses follow the documented latest-terminal-checkpoint policy. Generation replaces the6400 prompt candidate with a longer terminal candidate, leaving no retained hybrid state at the common prompt boundary. No lookup/namespace defect is established.",
+    "implication": "An exact continuation including the previous output can match the terminal checkpoint. Retrying the initial prompt or branching before that checkpoint cannot reuse its shorter KV prefix without a separately retained complete recurrent/PLE state."
+  }
+}

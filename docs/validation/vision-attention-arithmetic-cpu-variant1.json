@@ -1,0 +1,3201 @@
+{
+  "checkpoint": {
+    "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD",
+    "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+  },
+  "device": "cpu",
+  "variant": 1,
+  "blocks": 27,
+  "arithmetic": "CPU FP32 matmul with explicit BF16 boundaries; online tile64 reverse order uses torch.exp and FP32 reductions, not CUDA kernel emulation",
+  "reference": "Pinned eager attention precision boundaries; identical CPU checkpoint patch embedding in all trajectories",
+  "input_sha256": "af496d113a2d4aff6d3894f51cdebf7f348d41c5fe4a8c9c954d0912705d963a",
+  "script_sha256": "d2a953bacef270b9f82f3184bf9d89a150397e8c5fff39dcd5b8d511fad289bc",
+  "pinned_canonical_eager_bit_exact_checks": 81,
+  "rows": [
+    {
+      "block": 0,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0024454754311591387,
+              "max_absolute": 0.015625,
+              "changed_elements": 109477,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0022812550887465477,
+              "max_absolute": 0.03125,
+              "changed_elements": 109803,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.009412743151187897,
+              "max_absolute": 0.125,
+              "changed_elements": 15680,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0040739369578659534,
+            "max_absolute": 0.0703125,
+            "changed_elements": 114904,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017270275857299566,
+              "max_absolute": 0.015625,
+              "changed_elements": 59961,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0017140739364549518,
+              "max_absolute": 0.03125,
+              "changed_elements": 74461,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.008266043849289417,
+              "max_absolute": 0.25,
+              "changed_elements": 6500,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0034766437020152807,
+            "max_absolute": 0.06640625,
+            "changed_elements": 91513,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0023536167573183775,
+              "max_absolute": 0.015625,
+              "changed_elements": 109530,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.002240541623905301,
+              "max_absolute": 0.03125,
+              "changed_elements": 106905,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.009511709213256836,
+              "max_absolute": 0.25,
+              "changed_elements": 15739,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.004044791217893362,
+            "max_absolute": 0.0703125,
+            "changed_elements": 114128,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 1,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.00399254122748971,
+              "max_absolute": 0.033203125,
+              "changed_elements": 112710,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003662231843918562,
+              "max_absolute": 0.037109375,
+              "changed_elements": 164998,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012713223695755005,
+              "max_absolute": 0.25,
+              "changed_elements": 17648,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.011509789153933525,
+            "max_absolute": 0.09375,
+            "changed_elements": 226459,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0018163862405344844,
+              "max_absolute": 0.015625,
+              "changed_elements": 42680,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0024299281649291515,
+              "max_absolute": 0.03125,
+              "changed_elements": 109969,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007236907258629799,
+              "max_absolute": 0.25,
+              "changed_elements": 3883,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.010799946263432503,
+            "max_absolute": 0.12109375,
+            "changed_elements": 220019,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0038945458363741636,
+              "max_absolute": 0.033203125,
+              "changed_elements": 111751,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003609691048040986,
+              "max_absolute": 0.04296875,
+              "changed_elements": 163244,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012480351142585278,
+              "max_absolute": 0.25,
+              "changed_elements": 17585,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.011479812674224377,
+            "max_absolute": 0.125,
+            "changed_elements": 226148,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 2,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.004301545675843954,
+              "max_absolute": 0.02703857421875,
+              "changed_elements": 130004,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.006252135615795851,
+              "max_absolute": 0.03125,
+              "changed_elements": 199087,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01301773265004158,
+              "max_absolute": 0.125,
+              "changed_elements": 20547,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.01662500575184822,
+            "max_absolute": 0.15625,
+            "changed_elements": 255453,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017947359010577202,
+              "max_absolute": 0.015625,
+              "changed_elements": 50871,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003932866267859936,
+              "max_absolute": 0.03125,
+              "changed_elements": 141861,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007486869115382433,
+              "max_absolute": 0.125,
+              "changed_elements": 5028,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.01587171107530594,
+            "max_absolute": 0.1875,
+            "changed_elements": 252726,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.004268463235348463,
+              "max_absolute": 0.02642822265625,
+              "changed_elements": 129478,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.006218788214027882,
+              "max_absolute": 0.03125,
+              "changed_elements": 198364,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.013031008653342724,
+              "max_absolute": 0.125,
+              "changed_elements": 20517,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.016453424468636513,
+            "max_absolute": 0.09375,
+            "changed_elements": 255176,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 3,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.005030461587011814,
+              "max_absolute": 0.0390625,
+              "changed_elements": 148854,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008607322350144386,
+              "max_absolute": 0.015625,
+              "changed_elements": 215044,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015257016755640507,
+              "max_absolute": 0.125,
+              "changed_elements": 25063,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.020689036697149277,
+            "max_absolute": 0.25,
+            "changed_elements": 265238,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0019925134256482124,
+              "max_absolute": 0.0078125,
+              "changed_elements": 59656,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005012459587305784,
+              "max_absolute": 0.015625,
+              "changed_elements": 157556,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.008112895302474499,
+              "max_absolute": 0.125,
+              "changed_elements": 6158,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.01995951682329178,
+            "max_absolute": 0.3125,
+            "changed_elements": 263844,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.00495725404471159,
+              "max_absolute": 0.0390625,
+              "changed_elements": 148008,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008482753299176693,
+              "max_absolute": 0.015625,
+              "changed_elements": 214426,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0150296650826931,
+              "max_absolute": 0.125,
+              "changed_elements": 24843,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.020555365830659866,
+            "max_absolute": 0.140625,
+            "changed_elements": 265164,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 4,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0044479756616055965,
+              "max_absolute": 0.03125,
+              "changed_elements": 147425,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00891804974526167,
+              "max_absolute": 0.015625,
+              "changed_elements": 217322,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.013553689233958721,
+              "max_absolute": 0.125,
+              "changed_elements": 25759,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.022686732932925224,
+            "max_absolute": 0.1875,
+            "changed_elements": 267568,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.001730996766127646,
+              "max_absolute": 0.0078125,
+              "changed_elements": 61156,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005122723523527384,
+              "max_absolute": 0.015625,
+              "changed_elements": 158870,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007040317170321941,
+              "max_absolute": 0.125,
+              "changed_elements": 6625,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.021834861487150192,
+            "max_absolute": 0.25,
+            "changed_elements": 266636,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.00443394435569644,
+              "max_absolute": 0.03125,
+              "changed_elements": 146982,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008923583664000034,
+              "max_absolute": 0.015625,
+              "changed_elements": 217627,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.013566367328166962,
+              "max_absolute": 0.125,
+              "changed_elements": 25710,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.022479910403490067,
+            "max_absolute": 0.265625,
+            "changed_elements": 267527,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 5,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.005646074190735817,
+              "max_absolute": 0.0234375,
+              "changed_elements": 160097,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009526889771223068,
+              "max_absolute": 0.03125,
+              "changed_elements": 223189,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015459013171494007,
+              "max_absolute": 0.25,
+              "changed_elements": 29466,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.026330038905143738,
+            "max_absolute": 0.25,
+            "changed_elements": 271812,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.00205391482450068,
+              "max_absolute": 0.015625,
+              "changed_elements": 70945,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0054459343664348125,
+              "max_absolute": 0.01953125,
+              "changed_elements": 167636,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.00814239215105772,
+              "max_absolute": 0.25,
+              "changed_elements": 7556,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.025606488808989525,
+            "max_absolute": 0.25,
+            "changed_elements": 271366,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.005569888278841972,
+              "max_absolute": 0.0234375,
+              "changed_elements": 159735,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009421336464583874,
+              "max_absolute": 0.0234375,
+              "changed_elements": 222611,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015282892622053623,
+              "max_absolute": 0.25,
+              "changed_elements": 29320,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.02633785828948021,
+            "max_absolute": 0.2890625,
+            "changed_elements": 271898,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 6,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.004062364809215069,
+              "max_absolute": 0.017578125,
+              "changed_elements": 152880,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009236064739525318,
+              "max_absolute": 0.03125,
+              "changed_elements": 218857,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01349143497645855,
+              "max_absolute": 0.125,
+              "changed_elements": 25431,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.027162250131368637,
+            "max_absolute": 0.234375,
+            "changed_elements": 272074,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017746029188856483,
+              "max_absolute": 0.0078125,
+              "changed_elements": 61901,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0055599575862288475,
+              "max_absolute": 0.03125,
+              "changed_elements": 166123,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007411759812384844,
+              "max_absolute": 0.125,
+              "changed_elements": 6570,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.026577891781926155,
+            "max_absolute": 0.25,
+            "changed_elements": 272013,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.004035324789583683,
+              "max_absolute": 0.017578125,
+              "changed_elements": 152385,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009131629951298237,
+              "max_absolute": 0.03125,
+              "changed_elements": 218099,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.013297109864652157,
+              "max_absolute": 0.125,
+              "changed_elements": 25319,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.027246948331594467,
+            "max_absolute": 0.359375,
+            "changed_elements": 272319,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 7,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003972409758716822,
+              "max_absolute": 0.01953125,
+              "changed_elements": 133975,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009559199213981628,
+              "max_absolute": 0.017578125,
+              "changed_elements": 220707,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012848417274653912,
+              "max_absolute": 0.125,
+              "changed_elements": 21879,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.028581636026501656,
+            "max_absolute": 0.234375,
+            "changed_elements": 273269,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017147734761238098,
+              "max_absolute": 0.0078125,
+              "changed_elements": 60032,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005531950853765011,
+              "max_absolute": 0.015625,
+              "changed_elements": 165418,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0067169624380767345,
+              "max_absolute": 0.125,
+              "changed_elements": 6537,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.028080930933356285,
+            "max_absolute": 0.21875,
+            "changed_elements": 273179,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003937673754990101,
+              "max_absolute": 0.015625,
+              "changed_elements": 133554,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009460524655878544,
+              "max_absolute": 0.03125,
+              "changed_elements": 219719,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012649972923099995,
+              "max_absolute": 0.125,
+              "changed_elements": 21668,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.02887641079723835,
+            "max_absolute": 0.359375,
+            "changed_elements": 273286,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 8,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.004969493485987186,
+              "max_absolute": 0.02734375,
+              "changed_elements": 154024,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009882280603051186,
+              "max_absolute": 0.017578125,
+              "changed_elements": 227949,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01457213331013918,
+              "max_absolute": 0.125,
+              "changed_elements": 27898,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.031316887587308884,
+            "max_absolute": 0.2265625,
+            "changed_elements": 275054,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0019150171428918839,
+              "max_absolute": 0.0078125,
+              "changed_elements": 64645,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005577004514634609,
+              "max_absolute": 0.017578125,
+              "changed_elements": 174729,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007440963760018349,
+              "max_absolute": 0.125,
+              "changed_elements": 6899,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.030770719051361084,
+            "max_absolute": 0.203125,
+            "changed_elements": 274684,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0049384175799787045,
+              "max_absolute": 0.0263671875,
+              "changed_elements": 153941,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009727973490953445,
+              "max_absolute": 0.021484375,
+              "changed_elements": 226644,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.014357284642755985,
+              "max_absolute": 0.125,
+              "changed_elements": 27688,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03169519826769829,
+            "max_absolute": 0.35546875,
+            "changed_elements": 274635,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 9,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.005291481502354145,
+              "max_absolute": 0.03125,
+              "changed_elements": 168538,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.010792428627610207,
+              "max_absolute": 0.01416015625,
+              "changed_elements": 230070,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015720536932349205,
+              "max_absolute": 0.125,
+              "changed_elements": 31297,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.024520955979824066,
+            "max_absolute": 6.0,
+            "changed_elements": 275263,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0018908153288066387,
+              "max_absolute": 0.0078125,
+              "changed_elements": 65868,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005816508084535599,
+              "max_absolute": 0.0078125,
+              "changed_elements": 172626,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007711502257734537,
+              "max_absolute": 0.125,
+              "changed_elements": 7156,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.021895578131079674,
+            "max_absolute": 6.0,
+            "changed_elements": 274754,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.005263182334601879,
+              "max_absolute": 0.03125,
+              "changed_elements": 167791,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.010755862109363079,
+              "max_absolute": 0.01220703125,
+              "changed_elements": 229658,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015687355771660805,
+              "max_absolute": 0.125,
+              "changed_elements": 31261,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.016779690980911255,
+            "max_absolute": 3.0,
+            "changed_elements": 274971,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 10,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0035098795779049397,
+              "max_absolute": 0.0234375,
+              "changed_elements": 139424,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008272698149085045,
+              "max_absolute": 0.015625,
+              "changed_elements": 212869,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011891073547303677,
+              "max_absolute": 0.125,
+              "changed_elements": 21965,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.025435423478484154,
+            "max_absolute": 6.0,
+            "changed_elements": 276856,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0016977684572339058,
+              "max_absolute": 0.015625,
+              "changed_elements": 63200,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005113330669701099,
+              "max_absolute": 0.015625,
+              "changed_elements": 161627,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.006750349421054125,
+              "max_absolute": 0.125,
+              "changed_elements": 6829,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.02254129759967327,
+            "max_absolute": 6.0,
+            "changed_elements": 276439,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0034549992997199297,
+              "max_absolute": 0.0234375,
+              "changed_elements": 138481,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008161251433193684,
+              "max_absolute": 0.017578125,
+              "changed_elements": 212159,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011705012060701847,
+              "max_absolute": 0.125,
+              "changed_elements": 21792,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.018629590049386024,
+            "max_absolute": 3.0,
+            "changed_elements": 276580,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 11,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0035515089984983206,
+              "max_absolute": 0.01611328125,
+              "changed_elements": 146976,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009071039967238903,
+              "max_absolute": 0.015625,
+              "changed_elements": 220695,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012328719720244408,
+              "max_absolute": 0.25,
+              "changed_elements": 23729,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.026515480130910873,
+            "max_absolute": 6.0,
+            "changed_elements": 277141,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0016428950475528836,
+              "max_absolute": 0.015625,
+              "changed_elements": 62033,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005381312686949968,
+              "max_absolute": 0.015625,
+              "changed_elements": 166803,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.006739236880093813,
+              "max_absolute": 0.125,
+              "changed_elements": 6768,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.023377761244773865,
+            "max_absolute": 6.0,
+            "changed_elements": 276916,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003535162191838026,
+              "max_absolute": 0.015625,
+              "changed_elements": 146469,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.009026149287819862,
+              "max_absolute": 0.015625,
+              "changed_elements": 220751,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01226065307855606,
+              "max_absolute": 0.125,
+              "changed_elements": 23640,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.020702404901385307,
+            "max_absolute": 3.0,
+            "changed_elements": 277299,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 12,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0037256970535963774,
+              "max_absolute": 0.015625,
+              "changed_elements": 148809,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008083360269665718,
+              "max_absolute": 0.0126953125,
+              "changed_elements": 213048,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01276378519833088,
+              "max_absolute": 0.125,
+              "changed_elements": 23576,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.02974582277238369,
+            "max_absolute": 7.0,
+            "changed_elements": 278849,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017882278189063072,
+              "max_absolute": 0.015625,
+              "changed_elements": 67350,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004980033729225397,
+              "max_absolute": 0.01171875,
+              "changed_elements": 160002,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007226824760437012,
+              "max_absolute": 0.125,
+              "changed_elements": 7433,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.02635931596159935,
+            "max_absolute": 7.0,
+            "changed_elements": 278356,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003693945473060012,
+              "max_absolute": 0.015625,
+              "changed_elements": 148122,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008005090989172459,
+              "max_absolute": 0.015625,
+              "changed_elements": 211971,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012592792510986328,
+              "max_absolute": 0.125,
+              "changed_elements": 23559,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.023975394666194916,
+            "max_absolute": 3.0,
+            "changed_elements": 278697,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 13,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.002936683828011155,
+              "max_absolute": 0.015625,
+              "changed_elements": 126731,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00697702681645751,
+              "max_absolute": 0.015625,
+              "changed_elements": 200675,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.010606003925204277,
+              "max_absolute": 0.125,
+              "changed_elements": 17911,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.032786380499601364,
+            "max_absolute": 7.0,
+            "changed_elements": 279418,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0015533330151811242,
+              "max_absolute": 0.015625,
+              "changed_elements": 57506,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0044579701498150826,
+              "max_absolute": 0.015625,
+              "changed_elements": 146536,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.00618841452524066,
+              "max_absolute": 0.125,
+              "changed_elements": 6229,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.028495073318481445,
+            "max_absolute": 7.0,
+            "changed_elements": 278816,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0029286101926118135,
+              "max_absolute": 0.015625,
+              "changed_elements": 126538,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.006947468500584364,
+              "max_absolute": 0.015625,
+              "changed_elements": 200910,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.010557364672422409,
+              "max_absolute": 0.125,
+              "changed_elements": 17908,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.028699859976768494,
+            "max_absolute": 3.0,
+            "changed_elements": 279283,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 14,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0031613740138709545,
+              "max_absolute": 0.0234375,
+              "changed_elements": 140757,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008526806719601154,
+              "max_absolute": 0.02734375,
+              "changed_elements": 217705,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011788819916546345,
+              "max_absolute": 0.25,
+              "changed_elements": 21344,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03592121601104736,
+            "max_absolute": 7.0,
+            "changed_elements": 280710,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0015509051736444235,
+              "max_absolute": 0.015625,
+              "changed_elements": 60489,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004724733531475067,
+              "max_absolute": 0.015625,
+              "changed_elements": 158098,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.005960843060165644,
+              "max_absolute": 0.125,
+              "changed_elements": 6717,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.031154870986938477,
+            "max_absolute": 7.5,
+            "changed_elements": 279719,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003136473475024104,
+              "max_absolute": 0.0234375,
+              "changed_elements": 140703,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008539252914488316,
+              "max_absolute": 0.021484375,
+              "changed_elements": 217204,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011825952678918839,
+              "max_absolute": 0.25,
+              "changed_elements": 21200,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03391264006495476,
+            "max_absolute": 4.34375,
+            "changed_elements": 280306,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 15,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0035972814075648785,
+              "max_absolute": 0.0234375,
+              "changed_elements": 150325,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.008863141760230064,
+              "max_absolute": 0.03515625,
+              "changed_elements": 213171,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012659233994781971,
+              "max_absolute": 0.25,
+              "changed_elements": 25102,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03881020098924637,
+            "max_absolute": 7.0,
+            "changed_elements": 281495,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0016904546646401286,
+              "max_absolute": 0.015625,
+              "changed_elements": 66890,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005469137337058783,
+              "max_absolute": 0.03515625,
+              "changed_elements": 154126,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0073298742063343525,
+              "max_absolute": 0.25,
+              "changed_elements": 7644,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03227028250694275,
+            "max_absolute": 7.0,
+            "changed_elements": 280555,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.00355424708686769,
+              "max_absolute": 0.0234375,
+              "changed_elements": 149939,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00855481717735529,
+              "max_absolute": 0.015625,
+              "changed_elements": 211107,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01214844360947609,
+              "max_absolute": 0.25,
+              "changed_elements": 25052,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.038996148854494095,
+            "max_absolute": 6.1875,
+            "changed_elements": 281564,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 16,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0032769259996712208,
+              "max_absolute": 0.015625,
+              "changed_elements": 154772,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00790682528167963,
+              "max_absolute": 0.0400390625,
+              "changed_elements": 205137,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01249697059392929,
+              "max_absolute": 0.25,
+              "changed_elements": 25489,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.040376774966716766,
+            "max_absolute": 7.0,
+            "changed_elements": 281377,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017752611311152577,
+              "max_absolute": 0.015625,
+              "changed_elements": 72126,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004946663044393063,
+              "max_absolute": 0.017578125,
+              "changed_elements": 151713,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007264609448611736,
+              "max_absolute": 0.25,
+              "changed_elements": 8096,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.033876437693834305,
+            "max_absolute": 7.0,
+            "changed_elements": 280317,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0032392393331974745,
+              "max_absolute": 0.015625,
+              "changed_elements": 153252,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.007715589366853237,
+              "max_absolute": 0.0400390625,
+              "changed_elements": 203417,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012180909514427185,
+              "max_absolute": 0.25,
+              "changed_elements": 25071,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0403737835586071,
+            "max_absolute": 6.21875,
+            "changed_elements": 281557,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 17,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0032276632264256477,
+              "max_absolute": 0.0244140625,
+              "changed_elements": 143135,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005031947046518326,
+              "max_absolute": 0.01025390625,
+              "changed_elements": 170302,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011609307490289211,
+              "max_absolute": 0.125,
+              "changed_elements": 21373,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.041009340435266495,
+            "max_absolute": 7.0,
+            "changed_elements": 281655,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0016672743950039148,
+              "max_absolute": 0.015625,
+              "changed_elements": 71135,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003394761821255088,
+              "max_absolute": 0.0078125,
+              "changed_elements": 118501,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.006907815113663673,
+              "max_absolute": 0.125,
+              "changed_elements": 7560,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03409456089138985,
+            "max_absolute": 7.0,
+            "changed_elements": 280452,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0031983531080186367,
+              "max_absolute": 0.0263671875,
+              "changed_elements": 141623,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004984593018889427,
+              "max_absolute": 0.015625,
+              "changed_elements": 168619,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011438490822911263,
+              "max_absolute": 0.125,
+              "changed_elements": 21095,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.04227292910218239,
+            "max_absolute": 7.1875,
+            "changed_elements": 281838,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 18,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003444976406171918,
+              "max_absolute": 0.015625,
+              "changed_elements": 145295,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005110160447657108,
+              "max_absolute": 0.015625,
+              "changed_elements": 178902,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011976511217653751,
+              "max_absolute": 0.25,
+              "changed_elements": 22467,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.042564135044813156,
+            "max_absolute": 7.0,
+            "changed_elements": 282520,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0016962297959253192,
+              "max_absolute": 0.015625,
+              "changed_elements": 71581,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0032899659126996994,
+              "max_absolute": 0.015625,
+              "changed_elements": 126009,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.006771112326532602,
+              "max_absolute": 0.25,
+              "changed_elements": 8040,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03558923304080963,
+            "max_absolute": 7.0,
+            "changed_elements": 281080,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0034154534805566072,
+              "max_absolute": 0.015625,
+              "changed_elements": 143846,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.005129515193402767,
+              "max_absolute": 0.015625,
+              "changed_elements": 179173,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011983726173639297,
+              "max_absolute": 0.25,
+              "changed_elements": 22215,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.04446149989962578,
+            "max_absolute": 7.5,
+            "changed_elements": 282710,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 19,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003460449166595936,
+              "max_absolute": 0.03515625,
+              "changed_elements": 126225,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0036118996795266867,
+              "max_absolute": 0.03125,
+              "changed_elements": 161764,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01202396024018526,
+              "max_absolute": 0.25,
+              "changed_elements": 17383,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03936531022191048,
+            "max_absolute": 7.0,
+            "changed_elements": 281391,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0019024740904569626,
+              "max_absolute": 0.015625,
+              "changed_elements": 64127,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0026164292357861996,
+              "max_absolute": 0.03125,
+              "changed_elements": 117510,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007473586592823267,
+              "max_absolute": 0.25,
+              "changed_elements": 6263,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03299933671951294,
+            "max_absolute": 7.0,
+            "changed_elements": 279905,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0034273327328264713,
+              "max_absolute": 0.03515625,
+              "changed_elements": 124143,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003642633091658354,
+              "max_absolute": 0.03125,
+              "changed_elements": 160745,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012136738747358322,
+              "max_absolute": 0.25,
+              "changed_elements": 17094,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.04044385254383087,
+            "max_absolute": 7.5,
+            "changed_elements": 281733,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 20,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.002872818149626255,
+              "max_absolute": 0.03125,
+              "changed_elements": 135723,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00285448064096272,
+              "max_absolute": 0.0625,
+              "changed_elements": 114229,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.010800101794302464,
+              "max_absolute": 0.25,
+              "changed_elements": 19901,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03394974395632744,
+            "max_absolute": 7.0,
+            "changed_elements": 279316,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.001833055866882205,
+              "max_absolute": 0.015625,
+              "changed_elements": 68427,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.002188082318753004,
+              "max_absolute": 0.03125,
+              "changed_elements": 79851,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007404283620417118,
+              "max_absolute": 0.25,
+              "changed_elements": 6981,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0284335445612669,
+            "max_absolute": 7.0,
+            "changed_elements": 277584,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0027843285351991653,
+              "max_absolute": 0.0234375,
+              "changed_elements": 133804,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00280588585883379,
+              "max_absolute": 0.0625,
+              "changed_elements": 112316,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.010287157259881496,
+              "max_absolute": 0.25,
+              "changed_elements": 19897,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.035090815275907516,
+            "max_absolute": 8.1875,
+            "changed_elements": 279736,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 21,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0036992912646383047,
+              "max_absolute": 0.017822265625,
+              "changed_elements": 135383,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0032979624811559916,
+              "max_absolute": 0.0625,
+              "changed_elements": 117714,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012321511283516884,
+              "max_absolute": 0.25,
+              "changed_elements": 19788,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03384613245725632,
+            "max_absolute": 7.0,
+            "changed_elements": 278231,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0017929808236658573,
+              "max_absolute": 0.015625,
+              "changed_elements": 64646,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0022489449474960566,
+              "max_absolute": 0.03125,
+              "changed_elements": 72316,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007147620432078838,
+              "max_absolute": 0.125,
+              "changed_elements": 6650,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.028370210900902748,
+            "max_absolute": 7.0,
+            "changed_elements": 275982,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.003638936672359705,
+              "max_absolute": 0.017578125,
+              "changed_elements": 133213,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0033007755409926176,
+              "max_absolute": 0.0625,
+              "changed_elements": 117055,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012213592417538166,
+              "max_absolute": 0.25,
+              "changed_elements": 19567,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03520416468381882,
+            "max_absolute": 8.3125,
+            "changed_elements": 278550,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 22,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0033085811883211136,
+              "max_absolute": 0.01611328125,
+              "changed_elements": 140303,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.002739540534093976,
+              "max_absolute": 0.0625,
+              "changed_elements": 95165,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.011156868189573288,
+              "max_absolute": 0.25,
+              "changed_elements": 21326,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.030555972829461098,
+            "max_absolute": 7.0,
+            "changed_elements": 278393,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0019161388045176864,
+              "max_absolute": 0.015625,
+              "changed_elements": 68445,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0021112863905727863,
+              "max_absolute": 0.0625,
+              "changed_elements": 62490,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007129400037229061,
+              "max_absolute": 0.25,
+              "changed_elements": 7324,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.025620486587285995,
+            "max_absolute": 7.0,
+            "changed_elements": 275854,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0032572310883551836,
+              "max_absolute": 0.015625,
+              "changed_elements": 139231,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0026828052941709757,
+              "max_absolute": 0.0625,
+              "changed_elements": 93440,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.010744564235210419,
+              "max_absolute": 0.25,
+              "changed_elements": 21002,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03200236335396767,
+            "max_absolute": 8.375,
+            "changed_elements": 279086,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 23,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0064568789675831795,
+              "max_absolute": 0.083984375,
+              "changed_elements": 138122,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004234209191054106,
+              "max_absolute": 0.0390625,
+              "changed_elements": 140082,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015835320577025414,
+              "max_absolute": 0.25,
+              "changed_elements": 21691,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.034580010920763016,
+            "max_absolute": 7.0,
+            "changed_elements": 278267,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0020695114508271217,
+              "max_absolute": 0.015625,
+              "changed_elements": 69418,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0023344866931438446,
+              "max_absolute": 0.03125,
+              "changed_elements": 75182,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.00790831446647644,
+              "max_absolute": 0.25,
+              "changed_elements": 7015,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.029428280889987946,
+            "max_absolute": 7.0,
+            "changed_elements": 276600,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0064425221644341946,
+              "max_absolute": 0.08984375,
+              "changed_elements": 135826,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004211078863590956,
+              "max_absolute": 0.04296875,
+              "changed_elements": 139445,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.015553555451333523,
+              "max_absolute": 0.25,
+              "changed_elements": 21410,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03642893210053444,
+            "max_absolute": 8.4375,
+            "changed_elements": 279056,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 24,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0040958900935947895,
+              "max_absolute": 0.033203125,
+              "changed_elements": 146804,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0034517135936766863,
+              "max_absolute": 0.09375,
+              "changed_elements": 120711,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01286529190838337,
+              "max_absolute": 0.125,
+              "changed_elements": 23331,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.034579019993543625,
+            "max_absolute": 7.0,
+            "changed_elements": 278651,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0018141986802220345,
+              "max_absolute": 0.015625,
+              "changed_elements": 65326,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.00229440676048398,
+              "max_absolute": 0.09375,
+              "changed_elements": 72306,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007220556028187275,
+              "max_absolute": 0.25,
+              "changed_elements": 6888,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.029751162976026535,
+            "max_absolute": 7.0,
+            "changed_elements": 276820,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0040326789021492004,
+              "max_absolute": 0.033203125,
+              "changed_elements": 144997,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0034160898067057133,
+              "max_absolute": 0.09375,
+              "changed_elements": 119615,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.012798857875168324,
+              "max_absolute": 0.25,
+              "changed_elements": 23087,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.03646232932806015,
+            "max_absolute": 8.15625,
+            "changed_elements": 279552,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 25,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.006529112346470356,
+              "max_absolute": 0.041015625,
+              "changed_elements": 175280,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.006433839909732342,
+              "max_absolute": 0.0625,
+              "changed_elements": 162164,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.017215371131896973,
+              "max_absolute": 0.25,
+              "changed_elements": 33954,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.04904341325163841,
+            "max_absolute": 7.0,
+            "changed_elements": 281276,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.002041282132267952,
+              "max_absolute": 0.015625,
+              "changed_elements": 77765,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003507957560941577,
+              "max_absolute": 0.03125,
+              "changed_elements": 84028,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.008050928823649883,
+              "max_absolute": 0.25,
+              "changed_elements": 8964,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.04473815858364105,
+            "max_absolute": 7.0,
+            "changed_elements": 280065,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.006449936423450708,
+              "max_absolute": 0.041015625,
+              "changed_elements": 174792,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.006339425686746836,
+              "max_absolute": 0.0625,
+              "changed_elements": 160864,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.016933146864175797,
+              "max_absolute": 0.25,
+              "changed_elements": 33760,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.052613355219364166,
+            "max_absolute": 7.96875,
+            "changed_elements": 281813,
+            "elements": 294912
+          }
+        }
+      }
+    },
+    {
+      "block": 26,
+      "modes": {
+        "eager": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.0,
+              "max_absolute": 0.0,
+              "changed_elements": 0,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.0,
+            "max_absolute": 0.0,
+            "changed_elements": 0,
+            "elements": 294912
+          }
+        },
+        "unrounded_scores_normalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.00451930146664381,
+              "max_absolute": 0.0625,
+              "changed_elements": 156730,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.004912351258099079,
+              "max_absolute": 0.25,
+              "changed_elements": 170304,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.01368988212198019,
+              "max_absolute": 0.5,
+              "changed_elements": 26095,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.05120919644832611,
+            "max_absolute": 1200.0,
+            "changed_elements": 276582,
+            "elements": 294912
+          }
+        },
+        "rounded_scores_unnormalized_probabilities": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.0019578728824853897,
+              "max_absolute": 0.03125,
+              "changed_elements": 65180,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.003077911678701639,
+              "max_absolute": 0.25,
+              "changed_elements": 108013,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.007332894951105118,
+              "max_absolute": 0.25,
+              "changed_elements": 6497,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.05536011606454849,
+            "max_absolute": 1088.0,
+            "changed_elements": 277437,
+            "elements": 294912
+          }
+        },
+        "online_64_unrounded_scores": {
+          "same_input": {
+            "raw_attention": {
+              "relative_l2": 0.004478690680116415,
+              "max_absolute": 0.0546875,
+              "changed_elements": 155930,
+              "elements": 294912
+            },
+            "projected_attention": {
+              "relative_l2": 0.0050152069889009,
+              "max_absolute": 0.25,
+              "changed_elements": 171370,
+              "elements": 294912
+            },
+            "projection_activation_qdq": {
+              "relative_l2": 0.013883504085242748,
+              "max_absolute": 0.5,
+              "changed_elements": 26024,
+              "elements": 294912
+            }
+          },
+          "sequential_block_output": {
+            "relative_l2": 0.061588868498802185,
+            "max_absolute": 2368.0,
+            "changed_elements": 276753,
+            "elements": 294912
+          }
+        }
+      }
+    }
+  ],
+  "merger": {
+    "eager": {
+      "relative_l2": 0.0,
+      "max_absolute": 0.0,
+      "changed_elements": 0,
+      "elements": 163840
+    },
+    "unrounded_scores_normalized_probabilities": {
+      "relative_l2": 0.05939369648694992,
+      "max_absolute": 0.0257568359375,
+      "changed_elements": 158345,
+      "elements": 163840
+    },
+    "rounded_scores_unnormalized_probabilities": {
+      "relative_l2": 0.0729251280426979,
+      "max_absolute": 0.0693359375,
+      "changed_elements": 157717,
+      "elements": 163840
+    },
+    "online_64_unrounded_scores": {
+      "relative_l2": 0.0749928280711174,
+      "max_absolute": 0.0751953125,
+      "changed_elements": 157963,
+      "elements": 163840
+    }
+  }
+}

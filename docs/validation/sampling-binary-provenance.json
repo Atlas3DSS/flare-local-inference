@@ -1,0 +1,422 @@
+{
+  "schema": "sparkgap.sampling-binary-provenance-audit.v1",
+  "created_at": "2026-10-09T11:15:35.544998+00:00",
+  "scope": "CPU read-only audit of historical receipts and a preserved sampler library; no JIT build or GPU execution",
+  "measured_install_binary": {
+    "sha256": "88017d41217c4428528fb6b198279603d021790152e818a0ccec6f593a1f77ed",
+    "direct_evidence": "raw/installed-jit.json",
+    "measurement_method": "hash immediately after explicit Ninja build in rebuild_installed.py",
+    "ninja_link_output_mtime_utc": "2026-10-09T09:23:40.124668+00:00",
+    "binary_copy_found": false
+  },
+  "preserved_observed_binary": {
+    "sha256": "abf5c8569d4a6b948120d4b2628b7c90e3725b0a86a684d2e283289bb5552451",
+    "path": "/tmp/sparkgap-sampling-binary-provenance-audit/raw/sampling-abf5c856.so",
+    "cache_path_at_observation": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+    "cache_size": 2443272,
+    "cache_inode_at_observation": 33069572,
+    "cache_mtime_ns_at_observation": 1791541632304033562,
+    "cache_mtime_utc_at_observation": "2026-10-09T10:27:12.304033562+00:00",
+    "elf_build_id": "b3b0274c44157ccb71c5f27a3a48cf5cb54971c2"
+  },
+  "historical_ninja_rows": [
+    {
+      "start_ms": 1,
+      "end_ms": 5371,
+      "output_mtime_ns": 1791467412373309005,
+      "output_mtime_utc": "2026-10-08T13:50:12.373309+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_flashinfer_sampling_binding.cuda.o",
+      "command_hash": "739a0387f4114406"
+    },
+    {
+      "start_ms": 1,
+      "end_ms": 17620,
+      "output_mtime_ns": 1791467412372351093,
+      "output_mtime_utc": "2026-10-08T13:50:12.372351+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_renorm.cuda.o",
+      "command_hash": "200948ace118b4f7"
+    },
+    {
+      "start_ms": 0,
+      "end_ms": 37092,
+      "output_mtime_ns": 1791467412371351090,
+      "output_mtime_utc": "2026-10-08T13:50:12.371351+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_sampling.cuda.o",
+      "command_hash": "ba6a1f2305dfff17"
+    },
+    {
+      "start_ms": 37092,
+      "end_ms": 37138,
+      "output_mtime_ns": 1791467449463449439,
+      "output_mtime_utc": "2026-10-08T13:50:49.463449+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "command_hash": "25e1078aaa06e7da"
+    },
+    {
+      "start_ms": 1,
+      "end_ms": 5171,
+      "output_mtime_ns": 1791521453619027527,
+      "output_mtime_utc": "2026-10-09T04:50:53.619027+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_flashinfer_sampling_binding.cuda.o",
+      "command_hash": "b7b4eb3a829c6fa1"
+    },
+    {
+      "start_ms": 1,
+      "end_ms": 17819,
+      "output_mtime_ns": 1791521453618938287,
+      "output_mtime_utc": "2026-10-09T04:50:53.618938+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_renorm.cuda.o",
+      "command_hash": "3642d7601a339b67"
+    },
+    {
+      "start_ms": 1,
+      "end_ms": 37614,
+      "output_mtime_ns": 1791521453617904563,
+      "output_mtime_utc": "2026-10-09T04:50:53.617905+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_sampling.cuda.o",
+      "command_hash": "f73da75464ce7241"
+    },
+    {
+      "start_ms": 37614,
+      "end_ms": 37657,
+      "output_mtime_ns": 1791521491230996507,
+      "output_mtime_utc": "2026-10-09T04:51:31.230996+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "command_hash": "25e1078aaa06e7da"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 4687,
+      "output_mtime_ns": 1791536692654742362,
+      "output_mtime_utc": "2026-10-09T09:04:52.654742+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_flashinfer_sampling_binding.cuda.o",
+      "command_hash": "386e1b7085948442"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 17787,
+      "output_mtime_ns": 1791536692654630981,
+      "output_mtime_utc": "2026-10-09T09:04:52.654631+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_renorm.cuda.o",
+      "command_hash": "d4c1bbd6487d7100"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 37010,
+      "output_mtime_ns": 1791536692653276585,
+      "output_mtime_utc": "2026-10-09T09:04:52.653277+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_sampling.cuda.o",
+      "command_hash": "1cba403f9627a6b8"
+    },
+    {
+      "start_ms": 37011,
+      "end_ms": 37056,
+      "output_mtime_ns": 1791536729662419928,
+      "output_mtime_utc": "2026-10-09T09:05:29.662420+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "command_hash": "25e1078aaa06e7da"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 4631,
+      "output_mtime_ns": 1791537782754987891,
+      "output_mtime_utc": "2026-10-09T09:23:02.754988+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_flashinfer_sampling_binding.cuda.o",
+      "command_hash": "386e1b7085948442"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 17744,
+      "output_mtime_ns": 1791537782754885900,
+      "output_mtime_utc": "2026-10-09T09:23:02.754886+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_renorm.cuda.o",
+      "command_hash": "d4c1bbd6487d7100"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 37373,
+      "output_mtime_ns": 1791537782753521748,
+      "output_mtime_utc": "2026-10-09T09:23:02.753522+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_sampling.cuda.o",
+      "command_hash": "1cba403f9627a6b8"
+    },
+    {
+      "start_ms": 37373,
+      "end_ms": 37409,
+      "output_mtime_ns": 1791537820124667712,
+      "output_mtime_utc": "2026-10-09T09:23:40.124668+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "command_hash": "25e1078aaa06e7da"
+    },
+    {
+      "start_ms": 3,
+      "end_ms": 4620,
+      "output_mtime_ns": 1791541595378142950,
+      "output_mtime_utc": "2026-10-09T10:26:35.378143+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_flashinfer_sampling_binding.cuda.o",
+      "command_hash": "386e1b7085948442"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 17451,
+      "output_mtime_ns": 1791541595378031700,
+      "output_mtime_utc": "2026-10-09T10:26:35.378032+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_renorm.cuda.o",
+      "command_hash": "d4c1bbd6487d7100"
+    },
+    {
+      "start_ms": 2,
+      "end_ms": 36895,
+      "output_mtime_ns": 1791541595376900591,
+      "output_mtime_utc": "2026-10-09T10:26:35.376901+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/csrc_sampling.cuda.o",
+      "command_hash": "1cba403f9627a6b8"
+    },
+    {
+      "start_ms": 36895,
+      "end_ms": 36929,
+      "output_mtime_ns": 1791541632270033439,
+      "output_mtime_utc": "2026-10-09T10:27:12.270033+00:00",
+      "output": "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/sampling.so",
+      "command_hash": "25e1078aaa06e7da"
+    }
+  ],
+  "ninja_build_file_matches_0223_receipt": true,
+  "affected_http_receipts": [
+    {
+      "receipt": "/home/luke/projects/sparkgap/docs/validation/server-http-fixed16.json",
+      "receipt_sha256": "c960b4c31802cbad4c1f1787d51944d46497dabe5d51fb6807f761d131d6ea6e",
+      "original_sha256": "07d809e7cfc3243fdf5394db76672870aa58cbedfece2033e32ecd2cdbe44212",
+      "annotation_equals_install_receipt": true,
+      "annotated_hash": "88017d41217c4428528fb6b198279603d021790152e818a0ccec6f593a1f77ed",
+      "original_contains_old_or_observed_hash": false,
+      "started_at": "2026-10-09T10:31:23.289901+00:00",
+      "finished_at": "2026-10-09T10:31:45.166365+00:00",
+      "summary": {
+        "requests": 214,
+        "checks": 152,
+        "failed_checks": 0,
+        "case_errors": 0
+      }
+    },
+    {
+      "receipt": "/home/luke/projects/sparkgap/docs/validation/server-http-vision-grammar-fixed16.json",
+      "receipt_sha256": "4309aff19a3188e732d6cdf6566a59dd5c99e5d87e4c43a6ca6fdd677b56be16",
+      "original_sha256": "dbdc6baf6e8b522d95be2b17a13a25670b49c0f4d93f1c2ad6f8f1fc5bf8b729",
+      "annotation_equals_install_receipt": true,
+      "annotated_hash": "88017d41217c4428528fb6b198279603d021790152e818a0ccec6f593a1f77ed",
+      "original_contains_old_or_observed_hash": false,
+      "started_at": "2026-10-09T10:37:32.143040+00:00",
+      "finished_at": "2026-10-09T10:37:43.348661+00:00",
+      "summary": {
+        "requests": 23,
+        "checks": 44,
+        "failed_checks": 0,
+        "case_errors": 0
+      }
+    },
+    {
+      "receipt": "/home/luke/projects/sparkgap/docs/validation/server-http-sampling-routing-fixed16.json",
+      "receipt_sha256": "64c7c05aea1162dd5d36db2a6349d2172a66d134445ffd9faf41115aaff1b867",
+      "original_sha256": "a9842d35d5b62d4a41c38974276a377e7d1b87ec2a3e63989b1327f3d6b79887",
+      "annotation_equals_install_receipt": true,
+      "annotated_hash": "88017d41217c4428528fb6b198279603d021790152e818a0ccec6f593a1f77ed",
+      "original_contains_old_or_observed_hash": false,
+      "started_at": "2026-10-09T10:36:52.434611+00:00",
+      "finished_at": "2026-10-09T10:37:11.977680+00:00",
+      "summary": {
+        "requests": 126,
+        "checks": 120,
+        "failed_checks": 2,
+        "case_errors": 0
+      }
+    }
+  ],
+  "recorded_sampler_sources": [
+    {
+      "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/sampling.py",
+      "recorded_sha256": "ce794984221a9909499799d5723cd49867339ff7405bac9de98af0f70711c6d3",
+      "observed_sha256": "ce794984221a9909499799d5723cd49867339ff7405bac9de98af0f70711c6d3",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/jit/sampling.py",
+      "recorded_sha256": "82208d829c924ee74e4e4ddba06db9d97fd7f42fb753b42b3503f5d8e0a844a8",
+      "observed_sha256": "82208d829c924ee74e4e4ddba06db9d97fd7f42fb753b42b3503f5d8e0a844a8",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/utils.py",
+      "recorded_sha256": "abc97f7494cecc485395aeecd87d15e05ea518cf3d6ab1cc8c7e96fcdec3ad4d",
+      "observed_sha256": "abc97f7494cecc485395aeecd87d15e05ea518cf3d6ab1cc8c7e96fcdec3ad4d",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/csrc/sampling.cu",
+      "recorded_sha256": "41df79df3c8a3ed6a07101c599977d413e9c9e2df555d977ca83f714cc04361c",
+      "observed_sha256": "41df79df3c8a3ed6a07101c599977d413e9c9e2df555d977ca83f714cc04361c",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/include/flashinfer/sampling.cuh",
+      "recorded_sha256": "e297a6a05581b7bb3328ca8b839ea480f9ff4c3463f86a824565655ed2cd8d6f",
+      "observed_sha256": "e297a6a05581b7bb3328ca8b839ea480f9ff4c3463f86a824565655ed2cd8d6f",
+      "equal": true
+    },
+    {
+      "path": "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/include/flashinfer/air_top_p.cuh",
+      "recorded_sha256": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b",
+      "observed_sha256": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b",
+      "equal": true
+    }
+  ],
+  "retained_binary_search": {
+    "paths": [
+      "/tmp sampling-named shared libraries",
+      "/home/luke/.cache/flashinfer/*/120f/cached_ops/sampling/sampling.so",
+      "/home/luke/projects/sparkgap/docs/validation/*sampling*.tar.gz"
+    ],
+    "found_88017_binary": false,
+    "archive_binaries": [
+      {
+        "archive": "sampling-air-parallel-evidence.tar.gz",
+        "member": "artifacts/sparkgap_air_top_p_82f652b0ae8cba7e.so",
+        "sha256": "deecbab2b714fd2855d2b42c6bf5a09fa09d51c1e8c4f897745c766e86bd7366"
+      },
+      {
+        "archive": "sampling-air-parallel-evidence.tar.gz",
+        "member": "artifacts/sparkgap_air_top_p_ade3a489445fad02.so",
+        "sha256": "67d5c95d1bf3473126352164e26f2f28b1f9a065eea46489675d42597f618b7f"
+      }
+    ]
+  },
+  "conclusions": [
+    "88017 is a directly recorded 02:23 build hash, not a per-server hash measurement for the fixed16 HTTP runs.",
+    "The sampler cache was rebuilt at 03:27 before the fixed16 HTTP requests; the preserved abf5 binary and its file metadata match that rebuild time.",
+    "The HTTP receipts do not establish which sampler ELF was mapped by their server process. Assigning abf5 to them is a temporal/source-path inference, not a direct mapped-library measurement.",
+    "Six recorded sampler source hashes and Ninja commands match. This does not establish complete transitive build-input identity, bytewise binary equality or machine-code equivalence.",
+    "The mismatch does not establish changed sampling arithmetic or explain any HTTP test outcome."
+  ],
+  "files": {
+    "/home/luke/projects/sparkgap/docs/validation/sampling-flashinfer-installed.json": {
+      "retained": "raw/sampling-flashinfer-installed.json",
+      "sha256": "04e02bc30ea9eab59685b1eb40cf65b889cc6db56a3c798ba5e79a559e1b5c99",
+      "bytes": 7471
+    },
+    "/home/luke/projects/sparkgap/docs/validation/sampling-paths-flashinfer-installed.json": {
+      "retained": "raw/sampling-paths-flashinfer-installed.json",
+      "sha256": "4964a770658262be35be3d641313973a53aa81ecc21932db7cbc788987d3c1c8",
+      "bytes": 3163754
+    },
+    "/home/luke/projects/sparkgap/docs/validation/qsa-partitions-install.json": {
+      "retained": "raw/qsa-partitions-install.json",
+      "sha256": "5f21f20ec8945d9ec27efe5fad12434ab165d954e800c88a474844a25cbfe684",
+      "bytes": 3074
+    },
+    "/tmp/sparkgap-air-top-p-candidate/installed-jit.json": {
+      "retained": "raw/installed-jit.json",
+      "sha256": "3fb50540e1c66964ba6f388fad641c7aeac212befb46f0039e17551046a8b93c",
+      "bytes": 454
+    },
+    "/tmp/sparkgap-air-top-p-candidate/installed-jit.log": {
+      "retained": "raw/installed-jit.log",
+      "sha256": "3c6b7ab38671eee7879c7a4f46d7df3f3d1bc8e6c88c10fab28cb237a9766593",
+      "bytes": 6636
+    },
+    "/tmp/sparkgap-air-top-p-candidate/rebuild_installed.py": {
+      "retained": "raw/rebuild_installed.py",
+      "sha256": "195ef927de635cca4e7f9970effd8de397a0a2d230063c096ad93f316be6a835",
+      "bytes": 667
+    },
+    "/tmp/sparkgap-sampling-fi-installed-tests.log": {
+      "retained": "raw/sparkgap-sampling-fi-installed-tests.log",
+      "sha256": "d17d1c46bf63136d669f2bce11c2ba79d59fdd3122c14ae25cdb98802cfadb31",
+      "bytes": 602
+    },
+    "/tmp/sparkgap-sampling-fi-installed.log": {
+      "retained": "raw/sparkgap-sampling-fi-installed.log",
+      "sha256": "4a29057be5109e819967d36c0874392465fbd95423ecd66b39dc92e4966db8e1",
+      "bytes": 1882
+    },
+    "/tmp/sparkgap-sampling-before-legality-qualification.so": {
+      "retained": "raw/sampling-abf5c856.so",
+      "sha256": "abf5c8569d4a6b948120d4b2628b7c90e3725b0a86a684d2e283289bb5552451",
+      "bytes": 2443272
+    },
+    "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/build.ninja": {
+      "retained": "raw/build.ninja",
+      "sha256": "50e14c6f503a5b18afd14f2e2bf2617776c88c2403c07fa8365e5d717e20f4ee",
+      "bytes": 3615
+    },
+    "/home/luke/.cache/flashinfer/0.7.1/120f/cached_ops/sampling/.ninja_log": {
+      "retained": "raw/ninja-log-observed-during-audit.txt",
+      "sha256": "f58f6dd92ea98ff76ace76f06e1b4847a843a16f2f2d0f99e4e423591a99402b",
+      "bytes": 3105
+    },
+    "/home/luke/projects/sparkgap/docs/validation/server-http-fixed16.json": {
+      "retained": "raw/server-http-fixed16.json",
+      "sha256": "c960b4c31802cbad4c1f1787d51944d46497dabe5d51fb6807f761d131d6ea6e",
+      "bytes": 1787879
+    },
+    "/tmp/sparkgap-http-fixed16/receipt-original.json": {
+      "retained": "raw/server-http-fixed16-receipt-original.json",
+      "sha256": "07d809e7cfc3243fdf5394db76672870aa58cbedfece2033e32ecd2cdbe44212",
+      "bytes": 1781617
+    },
+    "/home/luke/projects/sparkgap/docs/validation/server-http-vision-grammar-fixed16.json": {
+      "retained": "raw/server-http-vision-grammar-fixed16.json",
+      "sha256": "4309aff19a3188e732d6cdf6566a59dd5c99e5d87e4c43a6ca6fdd677b56be16",
+      "bytes": 598819
+    },
+    "/tmp/sparkgap-http-vision-grammar-fixed16/receipt-original.json": {
+      "retained": "raw/server-http-vision-grammar-fixed16-receipt-original.json",
+      "sha256": "dbdc6baf6e8b522d95be2b17a13a25670b49c0f4d93f1c2ad6f8f1fc5bf8b729",
+      "bytes": 594808
+    },
+    "/home/luke/projects/sparkgap/docs/validation/server-http-sampling-routing-fixed16.json": {
+      "retained": "raw/server-http-sampling-routing-fixed16.json",
+      "sha256": "64c7c05aea1162dd5d36db2a6349d2172a66d134445ffd9faf41115aaff1b867",
+      "bytes": 1695253
+    },
+    "/tmp/sparkgap-sampling-routing-fixed16/receipt-original.json": {
+      "retained": "raw/server-http-sampling-routing-fixed16-receipt-original.json",
+      "sha256": "a9842d35d5b62d4a41c38974276a377e7d1b87ec2a3e63989b1327f3d6b79887",
+      "bytes": 1691103
+    },
+    "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/sampling.py": {
+      "retained": "raw/sampler-source-sampling.py",
+      "sha256": "ce794984221a9909499799d5723cd49867339ff7405bac9de98af0f70711c6d3",
+      "bytes": 101262
+    },
+    "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/jit/sampling.py": {
+      "retained": "raw/sampler-source-jit_sampling.py",
+      "sha256": "82208d829c924ee74e4e4ddba06db9d97fd7f42fb753b42b3503f5d8e0a844a8",
+      "bytes": 940
+    },
+    "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/utils.py": {
+      "retained": "raw/sampler-source-utils.py",
+      "sha256": "abc97f7494cecc485395aeecd87d15e05ea518cf3d6ab1cc8c7e96fcdec3ad4d",
+      "bytes": 62925
+    },
+    "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/csrc/sampling.cu": {
+      "retained": "raw/sampler-source-data_csrc_sampling.cu",
+      "sha256": "41df79df3c8a3ed6a07101c599977d413e9c9e2df555d977ca83f714cc04361c",
+      "bytes": 19800
+    },
+    "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/include/flashinfer/sampling.cuh": {
+      "retained": "raw/sampler-source-data_include_flashinfer_sampling.cuh",
+      "sha256": "e297a6a05581b7bb3328ca8b839ea480f9ff4c3463f86a824565655ed2cd8d6f",
+      "bytes": 84935
+    },
+    "/home/luke/projects/sparkgap/.venv/lib/python3.12/site-packages/flashinfer/data/include/flashinfer/air_top_p.cuh": {
+      "retained": "raw/sampler-source-data_include_flashinfer_air_top_p.cuh",
+      "sha256": "6753f53c511ad0c64114d4817b50993880804a12664c7d7bfcb8053f3442a48b",
+      "bytes": 21595
+    }
+  },
+  "archive": {
+    "path": "sampling-binary-provenance.tar.gz",
+    "sha256": "ff26132b6fee1d89e515c4c5cbce78982480c1fce89d84a8e2ab4e792ab529a4",
+    "bytes": 1736621
+  }
+}
