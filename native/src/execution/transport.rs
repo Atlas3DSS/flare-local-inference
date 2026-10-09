@@ -155,6 +155,7 @@ struct Resources {
 pub struct GraphExecutor {
     manifest: ExecutionManifest,
     resources: Option<Resources>,
+    resolved_uploads: Vec<ResolvedUpload>,
     next_sequence: u64,
     completed: Fence,
     poison: Option<String>,
@@ -170,6 +171,13 @@ impl GraphExecutor {
     /// these inputs, graph executables, scratch or completion rows concurrently.
     pub unsafe fn new(manifest: ExecutionManifest) -> Result<Self> {
         manifest.validate()?;
+        let upload_capacity = manifest
+            .graphs
+            .iter()
+            .map(|graph| graph.input_bindings.len())
+            .max()
+            .unwrap_or(0)
+            .saturating_mul(REQUEST_LANES);
         let model = Stream::open(manifest.context, manifest.device)?;
         let copy = Stream::open(manifest.context, manifest.device)?;
         let timed = manifest
@@ -194,6 +202,7 @@ impl GraphExecutor {
                 copy,
                 frames,
             }),
+            resolved_uploads: Vec::with_capacity(upload_capacity),
             next_sequence: 1,
             completed: Fence(0),
             poison: None,
@@ -260,7 +269,12 @@ impl GraphExecutor {
             .get(graph_index)
             .ok_or("graph index out of range")?;
         let grammar_constrained = grammar_constrained || graph.kind == GraphKind::Speculative;
-        validate_uploads(&self.manifest, graph_index, uploads)?;
+        let resolved = validate_uploads(
+            &self.manifest,
+            graph_index,
+            uploads,
+            &mut self.resolved_uploads,
+        )?;
         if (resources.frames.iter().any(|frame| frame.pending.is_some()) && grammar_constrained)
             || resources
                 .frames
@@ -282,30 +296,7 @@ impl GraphExecutor {
         }
         let fence = Fence(self.next_sequence);
         let frame = &mut resources.frames[index];
-        for upload in uploads {
-            let binding = graph
-                .input_bindings
-                .iter()
-                .find(|binding| binding.buffer_name == upload.buffer)
-                .unwrap();
-            let start = binding.host_offset + upload.offset;
-            frame.input.bytes_mut()[start..start + upload.bytes.len()]
-                .copy_from_slice(upload.bytes);
-        }
-        let frame_bytes = (index as i32).to_le_bytes();
-        let sequence_bytes = (fence.0 as i64).to_le_bytes();
-        for (name, bytes) in [
-            ("frame_index", frame_bytes.as_slice()),
-            ("submission_sequence", sequence_bytes.as_slice()),
-        ] {
-            let binding = graph
-                .input_bindings
-                .iter()
-                .find(|binding| binding.buffer_name == name)
-                .unwrap();
-            frame.input.bytes_mut()[binding.host_offset..binding.host_offset + bytes.len()]
-                .copy_from_slice(bytes);
-        }
+        resolved.stage(frame.input.bytes_mut(), index as i32, fence.0 as i64);
         frame.pending = Some(Pending {
             fence,
             graph_index,
@@ -314,35 +305,18 @@ impl GraphExecutor {
         });
         self.next_sequence += 1;
         let operation = || -> Result<()> {
-            for upload in uploads {
-                let binding = graph
-                    .input_bindings
-                    .iter()
-                    .find(|binding| binding.buffer_name == upload.buffer)
-                    .unwrap();
-                let buffer = self.manifest.buffer(upload.buffer)?;
+            for upload in resolved.copies() {
+                // SAFETY: Validation resolved aligned device/host subranges within the
+                // retained manifest allocations and this pinned frame. The frame is
+                // marked pending before enqueue, remains immutable until completion,
+                // and cannot be reused after an enqueue error until close drains both
+                // context-bound streams (or intentionally retains their resources).
                 unsafe {
                     resources.model.upload(
-                        buffer.address + upload.offset,
+                        upload.device_address,
                         &frame.input,
-                        binding.host_offset + upload.offset,
-                        upload.bytes.len(),
-                    )?;
-                }
-            }
-            for name in ["frame_index", "submission_sequence"] {
-                let binding = graph
-                    .input_bindings
-                    .iter()
-                    .find(|binding| binding.buffer_name == name)
-                    .unwrap();
-                let buffer = self.manifest.buffer(name)?;
-                unsafe {
-                    resources.model.upload(
-                        buffer.address,
-                        &frame.input,
-                        binding.host_offset,
-                        buffer.nbytes,
+                        upload.host_offset,
+                        upload.nbytes,
                     )?;
                 }
             }
@@ -354,6 +328,10 @@ impl GraphExecutor {
             resources.copy.wait(&frame.produced)?;
             let address = self.manifest.buffer("completion_records")?.address
                 + index * self.manifest.completion_bytes();
+            // SAFETY: The manifest bounds both completion rows; index selects one
+            // row in that retained allocation. The copy stream waits for the model
+            // event, and the pinned output is not read or reused before transferred
+            // completes. Shutdown drains both streams before releasing either owner.
             unsafe {
                 resources.copy.download(
                     &frame.output,
@@ -445,15 +423,77 @@ impl Drop for GraphExecutor {
     }
 }
 
-pub(super) fn validate_uploads(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ResolvedUpload {
+    pub(super) host_offset: usize,
+    pub(super) device_address: usize,
+    pub(super) nbytes: usize,
+}
+
+/// Borrowed descriptors are consumed synchronously; CUDA retains only frame bytes.
+pub(super) struct ResolvedUploads<'uploads, 'bytes, 'storage> {
+    uploads: &'uploads [Upload<'bytes>],
+    bindings: &'storage [ResolvedUpload],
+    frame_index: ResolvedUpload,
+    submission_sequence: ResolvedUpload,
+}
+
+impl ResolvedUploads<'_, '_, '_> {
+    pub(super) fn stage(&self, frame: &mut [u8], index: i32, sequence: i64) {
+        for (upload, binding) in self.uploads.iter().zip(self.bindings) {
+            frame[binding.host_offset..binding.host_offset + binding.nbytes]
+                .copy_from_slice(upload.bytes);
+        }
+        for (binding, bytes) in [
+            (self.frame_index, index.to_le_bytes().as_slice()),
+            (self.submission_sequence, sequence.to_le_bytes().as_slice()),
+        ] {
+            frame[binding.host_offset..binding.host_offset + binding.nbytes].copy_from_slice(bytes);
+        }
+    }
+
+    pub(super) fn copies(&self) -> impl Iterator<Item = ResolvedUpload> + '_ {
+        self.bindings
+            .iter()
+            .copied()
+            .chain([self.frame_index, self.submission_sequence])
+    }
+}
+
+/// Resolve one command against an already validated, immutable manifest.
+/// Omitted inputs and disjoint partial uploads preserve resident device ranges.
+/// Storage grows only to the fragment-count high-water; valid nonempty disjoint
+/// fragments are bounded by input_frame_bytes. The executor reserves four uploads
+/// per binding for physical request lanes before accepting any submissions.
+pub(super) fn validate_uploads<'uploads, 'bytes, 'storage>(
     manifest: &ExecutionManifest,
     graph_index: usize,
-    uploads: &[Upload<'_>],
-) -> Result<()> {
+    uploads: &'uploads [Upload<'bytes>],
+    storage: &'storage mut Vec<ResolvedUpload>,
+) -> Result<ResolvedUploads<'uploads, 'bytes, 'storage>> {
+    storage.clear();
     let graph = manifest
         .graphs
         .get(graph_index)
         .ok_or("graph index out of range")?;
+    if uploads.len() > manifest.input_frame_bytes {
+        return Err("upload count exceeds the nonempty input-fragment bound".into());
+    }
+    let reserved = |name: &str| -> Result<ResolvedUpload> {
+        let binding = graph
+            .input_bindings
+            .iter()
+            .find(|binding| binding.buffer_name == name)
+            .ok_or("graph lacks a reserved input binding")?;
+        let buffer = manifest.buffer(name)?;
+        Ok(ResolvedUpload {
+            host_offset: binding.host_offset,
+            device_address: buffer.address,
+            nbytes: buffer.nbytes,
+        })
+    };
+    let frame_index = reserved("frame_index")?;
+    let submission_sequence = reserved("submission_sequence")?;
     for upload in uploads {
         if ["frame_index", "submission_sequence"].contains(&upload.buffer) {
             return Err("reserved executor inputs cannot be overridden".into());
@@ -477,19 +517,26 @@ pub(super) fn validate_uploads(
                 upload.buffer
             ));
         }
-    }
-    // A shared host input frame cannot simultaneously hold conflicting upload values.
-    for (index, first) in uploads.iter().enumerate() {
-        for second in &uploads[index + 1..] {
-            if first.buffer == second.buffer
-                && first.offset < second.offset + second.bytes.len()
-                && second.offset < first.offset + first.bytes.len()
-            {
-                return Err("uploads overlap within one input buffer".into());
-            }
+        let resolved = ResolvedUpload {
+            host_offset: binding.host_offset + upload.offset,
+            device_address: buffer.address + upload.offset,
+            nbytes: upload.bytes.len(),
+        };
+        // Manifest validation makes different buffers' host spans disjoint.
+        if storage.iter().any(|prior| {
+            prior.host_offset < resolved.host_offset + resolved.nbytes
+                && resolved.host_offset < prior.host_offset + prior.nbytes
+        }) {
+            return Err("uploads overlap within one input buffer".into());
         }
+        storage.push(resolved);
     }
-    Ok(())
+    Ok(ResolvedUploads {
+        uploads,
+        bindings: storage,
+        frame_index,
+        submission_sequence,
+    })
 }
 
 pub(super) fn decode_records(

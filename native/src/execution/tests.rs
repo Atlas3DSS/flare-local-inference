@@ -151,6 +151,7 @@ fn all_prefill_buckets_are_valid_but_other_capacities_are_not() {
 #[test]
 fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
     let manifest = manifest();
+    let mut storage = Vec::new();
     transport::validate_uploads(
         &manifest,
         0,
@@ -159,6 +160,7 @@ fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
             offset: 8,
             bytes: &[1; 8],
         }],
+        &mut storage,
     )
     .unwrap();
     assert!(
@@ -169,7 +171,8 @@ fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
                 buffer: "tokens",
                 offset: 1,
                 bytes: &[1; 8]
-            }]
+            }],
+            &mut storage,
         )
         .is_err()
     );
@@ -181,7 +184,8 @@ fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
                 buffer: "tokens",
                 offset: 32,
                 bytes: &[1; 8]
-            }]
+            }],
+            &mut storage,
         )
         .is_err()
     );
@@ -193,7 +197,8 @@ fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
                 buffer: "frame_index",
                 offset: 0,
                 bytes: &[0; 4]
-            }]
+            }],
+            &mut storage,
         )
         .is_err()
     );
@@ -212,7 +217,8 @@ fn partial_uploads_reject_overlaps_reserved_inputs_and_misalignment() {
                     offset: 8,
                     bytes: &[2; 8]
                 }
-            ]
+            ],
+            &mut storage,
         )
         .is_err()
     );
@@ -318,5 +324,252 @@ fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
             transport::decode_records(&encoded(row), Fence(9)).is_err(),
             "change{change}"
         );
+    }
+}
+
+#[test]
+fn resolved_uploads_reject_unknown_missing_duplicate_and_invalid_ranges() {
+    let manifest = manifest();
+    manifest.validate().unwrap();
+    let mut storage = Vec::new();
+    let valid = Upload {
+        buffer: "tokens",
+        offset: 8,
+        bytes: &[1; 8],
+    };
+    for uploads in [
+        vec![Upload {
+            buffer: "missing",
+            offset: 0,
+            bytes: &[0; 8],
+        }],
+        vec![Upload {
+            buffer: "completion_records",
+            offset: 0,
+            bytes: &[0; 8],
+        }],
+        vec![Upload {
+            buffer: "submission_sequence",
+            offset: 0,
+            bytes: &[0; 8],
+        }],
+        vec![Upload {
+            buffer: "tokens",
+            offset: 0,
+            bytes: &[],
+        }],
+        vec![Upload {
+            buffer: "tokens",
+            offset: 0,
+            bytes: &[0; 7],
+        }],
+        vec![Upload {
+            buffer: "tokens",
+            offset: usize::MAX - 7,
+            bytes: &[0; 16],
+        }],
+        vec![Upload {
+            buffer: "tokens",
+            offset: 24,
+            bytes: &[0; 16],
+        }],
+        vec![
+            Upload {
+                buffer: "tokens",
+                offset: 8,
+                bytes: &[0; 8],
+            },
+            Upload {
+                buffer: "tokens",
+                offset: 8,
+                bytes: &[0; 8],
+            },
+        ],
+        vec![
+            Upload {
+                buffer: "tokens",
+                offset: 0,
+                bytes: &[0; 16],
+            },
+            Upload {
+                buffer: "tokens",
+                offset: 8,
+                bytes: &[0; 16],
+            },
+        ],
+    ] {
+        assert!(transport::validate_uploads(&manifest, 0, &uploads, &mut storage).is_err());
+    }
+    assert!(transport::validate_uploads(&manifest, 1, &[], &mut storage).is_err());
+    let mut missing = manifest.clone();
+    missing.buffers.retain(|buffer| buffer.name != "tokens");
+    assert!(transport::validate_uploads(&missing, 0, &[valid], &mut storage).is_err());
+    missing = manifest.clone();
+    missing.graphs[0]
+        .input_bindings
+        .retain(|binding| binding.buffer_name != "frame_index");
+    assert!(transport::validate_uploads(&missing, 0, &[], &mut storage).is_err());
+
+    // Failure can leave scratch descriptors, but the next validation clears them.
+    let accepted = [Upload {
+        buffer: "tokens",
+        offset: 24,
+        bytes: &[5; 8],
+    }];
+    let resolved = transport::validate_uploads(&manifest, 0, &accepted, &mut storage).unwrap();
+    assert_eq!(
+        resolved.copies().collect::<Vec<_>>(),
+        vec![
+            transport::ResolvedUpload {
+                host_offset: 40,
+                device_address: 0x4018,
+                nbytes: 8
+            },
+            transport::ResolvedUpload {
+                host_offset: 0,
+                device_address: 0x1000,
+                nbytes: 4
+            },
+            transport::ResolvedUpload {
+                host_offset: 8,
+                device_address: 0x2000,
+                nbytes: 8
+            },
+        ]
+    );
+}
+
+#[test]
+fn failed_validation_never_changes_a_staged_frame() {
+    let manifest = manifest();
+    let mut storage = Vec::new();
+    let mut frame = vec![0xA5; manifest.input_frame_bytes];
+    let before = frame.clone();
+    let uploads = [
+        Upload {
+            buffer: "tokens",
+            offset: 0,
+            bytes: &[1; 8],
+        },
+        Upload {
+            buffer: "tokens",
+            offset: 4,
+            bytes: &[2; 8],
+        },
+    ];
+    if let Ok(resolved) = transport::validate_uploads(&manifest, 0, &uploads, &mut storage) {
+        resolved.stage(&mut frame, 0, 1);
+        panic!("invalid command reached frame staging");
+    }
+    assert_eq!(frame, before);
+    // An omitted upload is valid; only executor-owned input words are staged.
+    let resolved = transport::validate_uploads(&manifest, 0, &[], &mut storage).unwrap();
+    resolved.stage(&mut frame, 1, 2);
+    assert_eq!(&frame[..4], &1i32.to_le_bytes());
+    assert_eq!(&frame[8..16], &2i64.to_le_bytes());
+    assert_eq!(&frame[4..8], &before[4..8]);
+    assert_eq!(&frame[16..], &before[16..]);
+    assert_eq!(resolved.copies().count(), 2);
+}
+
+#[test]
+fn reusable_resolution_preserves_two_frames_and_exact_partial_copy_ranges() {
+    let manifest = manifest();
+    manifest.validate().unwrap();
+    let mut storage = Vec::with_capacity(12);
+    let pointer = storage.as_ptr();
+    let capacity = storage.capacity();
+    let mut frames = [
+        vec![0xA5; manifest.input_frame_bytes],
+        vec![0x5A; manifest.input_frame_bytes],
+    ];
+    let mut device = vec![0xCC; 0x4020];
+    let first = {
+        let bytes = 0x0123_4567_89AB_CDEFi64.to_le_bytes();
+        let uploads = [Upload {
+            buffer: "tokens",
+            offset: 8,
+            bytes: &bytes,
+        }];
+        let resolved = transport::validate_uploads(&manifest, 0, &uploads, &mut storage).unwrap();
+        resolved.stage(&mut frames[0], 0, 10);
+        let copies = resolved.copies().collect::<Vec<_>>();
+        assert_eq!(&frames[0][24..32], &bytes);
+        copies
+    };
+    let staged = frames[0].clone();
+    {
+        let bytes = (-77i64).to_le_bytes();
+        let uploads = [Upload {
+            buffer: "tokens",
+            offset: 24,
+            bytes: &bytes,
+        }];
+        let resolved = transport::validate_uploads(&manifest, 0, &uploads, &mut storage).unwrap();
+        resolved.stage(&mut frames[1], 1, 11);
+        assert_eq!(&frames[1][40..48], &bytes);
+    }
+    assert_eq!(frames[0], staged);
+    assert_eq!(storage.as_ptr(), pointer);
+    assert_eq!(storage.capacity(), capacity);
+    // The first pinned frame remains sufficient after source bytes and descriptors
+    // were replaced. This CPU transfer model checks the actual resolved ranges.
+    for binding in first {
+        device[binding.device_address..binding.device_address + binding.nbytes]
+            .copy_from_slice(&frames[0][binding.host_offset..binding.host_offset + binding.nbytes]);
+    }
+    assert_eq!(&device[0x1000..0x1004], &0i32.to_le_bytes());
+    assert_eq!(&device[0x2000..0x2008], &10i64.to_le_bytes());
+    assert_eq!(
+        &device[0x4008..0x4010],
+        &0x0123_4567_89AB_CDEFi64.to_le_bytes()
+    );
+    assert_eq!(&device[0x4000..0x4008], &[0xCC; 8]);
+    assert_eq!(&device[0x4010..0x4020], &[0xCC; 16]);
+    let uploads = [Upload {
+        buffer: "tokens",
+        offset: 16,
+        bytes: &[0x71; 8],
+    }];
+    let resolved = transport::validate_uploads(&manifest, 0, &uploads, &mut storage).unwrap();
+    resolved.stage(&mut frames[0], 0, 12);
+    for binding in resolved.copies() {
+        device[binding.device_address..binding.device_address + binding.nbytes]
+            .copy_from_slice(&frames[0][binding.host_offset..binding.host_offset + binding.nbytes]);
+    }
+    assert_eq!(
+        &device[0x4008..0x4010],
+        &0x0123_4567_89AB_CDEFi64.to_le_bytes()
+    );
+    assert_eq!(&device[0x4010..0x4018], &[0x71; 8]);
+    assert_eq!(&device[0x4018..0x4020], &[0xCC; 8]);
+    assert_eq!(&device[0x2000..0x2008], &12i64.to_le_bytes());
+}
+
+#[test]
+fn fragmented_upload_descriptors_reuse_their_highwater_capacity() {
+    let manifest = manifest();
+    let mut storage = Vec::with_capacity(1);
+    let uploads = [24, 0, 16, 8].map(|offset| Upload {
+        buffer: "tokens",
+        offset,
+        bytes: &[0x31; 8],
+    });
+    let mut frame = vec![0xA5; manifest.input_frame_bytes];
+    transport::validate_uploads(&manifest, 0, &uploads, &mut storage)
+        .unwrap()
+        .stage(&mut frame, 0, 1);
+    let pointer = storage.as_ptr();
+    let capacity = storage.capacity();
+    assert!(capacity >= 4);
+    assert_eq!(&frame[16..48], &[0x31; 32]);
+    for sequence in 2..258 {
+        let count = sequence as usize % 5;
+        let resolved =
+            transport::validate_uploads(&manifest, 0, &uploads[..count], &mut storage).unwrap();
+        assert_eq!(resolved.copies().count(), count + 2);
+        resolved.stage(&mut frame, 0, sequence);
+        assert_eq!(storage.as_ptr(), pointer);
+        assert_eq!(storage.capacity(), capacity);
     }
 }
