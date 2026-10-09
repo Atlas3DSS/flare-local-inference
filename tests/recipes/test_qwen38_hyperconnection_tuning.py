@@ -1,0 +1,154 @@
+"""Representative hyperconnection trials own activations and retain model gain."""
+
+import gc
+import weakref
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from sparkgap.recipes.qwen38 import hyperconnection
+from sparkgap.recipes.qwen38.hyperconnection import HyperconnectionScratch, _HyperconnectionBenchmarkInputs
+
+
+@pytest.mark.parametrize("operation", ["grouped_rmsnorm", "scaled_silu", "gate_mean", "combine"])
+def test_benchmark_inputs_are_finite_private_and_repeatable(operation):
+    tokens = 4
+    if operation == "grouped_rmsnorm":
+        arguments = (torch.zeros(tokens, 10240, dtype=torch.bfloat16),
+            torch.arange(10240, dtype=torch.float32) / 10240 + .5,
+            torch.zeros(tokens, 10240, dtype=torch.bfloat16))
+    elif operation == "scaled_silu":
+        arguments = tuple(torch.zeros(tokens, 320, dtype=torch.bfloat16) for _ in range(2))
+    elif operation == "gate_mean":
+        arguments = (torch.zeros(tokens, 10240, dtype=torch.bfloat16),
+            torch.zeros(tokens, 10240, dtype=torch.bfloat16),
+            torch.zeros(tokens, 2560, dtype=torch.bfloat16))
+    else:
+        arguments = tuple(torch.zeros(tokens, width, dtype=torch.bfloat16)
+                          for width in (10240, 2560, 4, 10240))
+    original = tuple(tensor.clone() for tensor in arguments)
+    fixture = _HyperconnectionBenchmarkInputs(operation, arguments)
+    fixture.produce()
+    for index, (actual, source) in enumerate(zip(fixture.arguments, arguments)):
+        assert actual.shape == source.shape and actual.stride() == source.stride()
+        assert actual.dtype == source.dtype
+        if operation == "grouped_rmsnorm" and index == 1:
+            assert actual is source
+        else:
+            assert actual.untyped_storage().data_ptr() != source.untyped_storage().data_ptr()
+    before = tuple(target.clone() for target, _ in fixture.inputs)
+    for target, _ in fixture.inputs:
+        assert torch.isfinite(target).all() and target.count_nonzero() > 0
+        target.fill_(float("nan"))
+    fixture.produce()
+    assert all(torch.equal(target, saved) for (target, _), saved in zip(fixture.inputs, before))
+    assert all(torch.equal(actual, saved) for actual, saved in zip(arguments, original))
+    assert not fixture.arguments[-1].count_nonzero()
+
+
+def test_priming_borrows_one_source_across_capacities_and_retains_its_owner():
+    scratch = HyperconnectionScratch.allocate(64, torch.device("cpu"))
+    source = torch.zeros_like(scratch.normalized)
+    gain = torch.ones(10240, dtype=torch.float32)
+    reference = weakref.ref(source)
+    storage = source.untyped_storage().data_ptr()
+    calls = [scratch.rows(tokens).priming_arguments(source[:tokens], gain)
+             for tokens in (1, 4, 16, 64)]
+    assert {args["grouped_rmsnorm"][0].untyped_storage().data_ptr()
+            for args in calls} == {storage}
+    del source
+    gc.collect()
+    assert reference() is not None
+    for args in calls:
+        borrowed, weight, output = args["grouped_rmsnorm"]
+        assert weight is gain
+        assert borrowed.stride() == output.stride() == (10240, 1)
+        for arguments in args.values():
+            arguments[-1].fill_(17)
+        assert not borrowed.count_nonzero()
+    del borrowed, args, calls, arguments, output
+    gc.collect()
+    assert reference() is None
+
+
+@pytest.mark.parametrize("operation", ["grouped_rmsnorm", "scaled_silu", "gate_mean", "combine"])
+def test_borrowed_priming_keeps_exact_private_benchmark_fixture(operation):
+    scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"))
+    source = torch.zeros_like(scratch.normalized)
+    gain = torch.arange(10240, dtype=torch.float32) / 10240 + .5
+    arguments = scratch.priming_arguments(source, gain)[operation]
+    previous_arguments = ((torch.zeros_like(source), gain, scratch.normalized)
+                          if operation == "grouped_rmsnorm" else arguments)
+    previous = _HyperconnectionBenchmarkInputs(operation, previous_arguments)
+    borrowed = _HyperconnectionBenchmarkInputs(operation, arguments)
+    previous.produce()
+    borrowed.produce()
+    for before, after in zip(previous.arguments, borrowed.arguments, strict=True):
+        assert torch.equal(before, after)
+        assert before.stride() == after.stride()
+    for target, _ in borrowed.inputs:
+        assert target.untyped_storage().data_ptr() != source.untyped_storage().data_ptr()
+    borrowed.arguments[-1].fill_(23)
+    assert not source.count_nonzero()
+
+
+@pytest.mark.parametrize("mismatch", ["shape", "stride", "dtype", "device", "output_alias"])
+def test_priming_rejects_incompatible_or_mutable_scratch_storage(mismatch):
+    scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"))
+    source = {
+        "shape": lambda: torch.zeros(3, 10240, dtype=torch.bfloat16),
+        "stride": lambda: torch.zeros(4, 20480, dtype=torch.bfloat16)[:, ::2],
+        "dtype": lambda: torch.zeros(4, 10240, dtype=torch.float32),
+        "device": lambda: torch.zeros(4, 10240, dtype=torch.bfloat16, device="meta"),
+        "output_alias": lambda: scratch.normalized[:],
+    }[mismatch]()
+    with pytest.raises(ValueError, match="priming source"):
+        scratch.priming_arguments(source, torch.ones(10240))
+
+
+def test_combine_priming_reuses_disjoint_existing_storage():
+    scratch = HyperconnectionScratch.allocate(64, torch.device("cpu"))
+    source = torch.zeros_like(scratch.normalized)
+    gain = torch.ones(10240, dtype=torch.float32)
+    for tokens in (1, 4, 16, 64):
+        live = scratch.rows(tokens)
+        arguments = live.priming_arguments(source[:tokens], gain)["combine"]
+        assert arguments[1] is live.block_input
+        assert arguments[2] is live.injection_logits
+        assert arguments[3] is live.normalized
+        pointers = [tensor.untyped_storage().data_ptr() for tensor in arguments]
+        assert len(set(pointers)) == 4
+        assert pointers[0] == source.untyped_storage().data_ptr()
+        arguments[-1].fill_(19)
+        assert all(not tensor.count_nonzero() for tensor in arguments[:-1])
+
+
+def test_combine_uses_public_prepared_plan_and_functional_output(monkeypatch):
+    operator = hyperconnection.PreparedHyperconnection.__new__(hyperconnection.PreparedHyperconnection)
+    operator.scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"))
+    operator.injection = object()
+    plan = SimpleNamespace(selection="default")
+    operator.plans = {"combine": plan}
+    residual = torch.zeros(4, 10240, dtype=torch.bfloat16)
+    block = torch.zeros(4, 2560, dtype=torch.bfloat16)
+    output = torch.ones_like(residual)
+    calls = []
+
+    def combine(state, block_output, logits, *, plan):
+        calls.append((state, block_output, logits, plan, plan.selection))
+        return output
+
+    monkeypatch.setattr(hyperconnection.hc, "run_combine", combine)
+    for selection in ("default", "tuned"):
+        plan.selection = selection
+        assert operator.combine(residual, block) is output
+        state, actual_block, logits, selected_plan, selected_config = calls[-1]
+        assert state is residual and actual_block is block
+        assert logits is operator.scratch.injection_logits
+        assert selected_plan is plan and selected_config == selection
+        assert not residual.count_nonzero() and not block.count_nonzero()
+    operator.injection = None
+    with pytest.raises(ValueError, match="no residual injection"):
+        operator.combine(residual, block)
+    assert len(calls) == 2

@@ -1,0 +1,66 @@
+"""The replay qualifier observes borrowed-state restoration before resetting it."""
+
+from pathlib import Path
+import runpy
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from sparkgap.recipes.qwen38.state import EOS_TOKEN_ID
+
+
+@pytest.mark.parametrize("corruption", [None, "state", "null_history", "history"])
+def test_pristine_state_counts_all_bytes_and_checks_eos_history(corruption):
+    harness = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/qualify_graph_execution.py"))
+    backing = torch.zeros((3, 32), dtype=torch.uint8)
+    history = backing[:, 8:24].view(torch.int64)
+    history[1:].fill_(EOS_TOKEN_ID)
+    if corruption == "state":
+        backing[2, 31] = 1
+    elif corruption == "null_history":
+        history[0, 0] = EOS_TOKEN_ID
+    elif corruption == "history":
+        history[1, 0] = EOS_TOKEN_ID + 1
+    before = backing.clone()
+    checks = []
+    evidence = SimpleNamespace(check=lambda name, passed, **details: checks.append((name, passed, details)))
+    harness["verify_prepared_hybrid_state"](SimpleNamespace(backing=backing, ple_history=history), evidence)
+    assert len(checks) == 1
+    name, passed, details = checks[0]
+    assert name == "prepared_hybrid_state_pristine"
+    assert passed is (corruption is None)
+    assert details["expected_nonzero_bytes"] == 12
+    assert torch.equal(backing, before)
+
+
+@pytest.mark.parametrize("corruption", [False, True])
+def test_pristine_state_inspects_late_padding_with_bounded_reductions(monkeypatch, corruption):
+    harness = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/qualify_graph_execution.py"))
+    verify = harness["verify_prepared_hybrid_state"]
+    monkeypatch.setitem(verify.__globals__, "_PRISTINE_COUNT_CHUNK_BYTES", 64)
+    backing = torch.zeros((3, 80), dtype=torch.uint8)
+    history = backing[:, 64:80].view(torch.int64)
+    history[1:].fill_(EOS_TOKEN_ID)
+    if corruption:
+        backing[2, 63] = 11
+    before = backing.clone()
+    reduce = torch.count_nonzero
+    reductions = []
+
+    def bounded_count(tensor, *args, **kwargs):
+        assert tensor.nbytes <= 64
+        if tensor.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr():
+            reductions.append((tensor.storage_offset(), tensor.numel()))
+        return reduce(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "count_nonzero", bounded_count)
+    checks = []
+    evidence = SimpleNamespace(check=lambda name, passed, **details: checks.append((name, passed, details)))
+    verify(SimpleNamespace(backing=backing, ple_history=history), evidence)
+    assert reductions == [(0, 64), (64, 64), (128, 64), (192, 48)]
+    assert checks[0][1] is not corruption
+    assert checks[0][2]["observed_nonzero_bytes"] == 12 + int(corruption)
+    assert checks[0][2]["history_valid"] is True
+    assert checks[0][2]["count_chunk_bytes"] == 64
+    assert torch.equal(backing, before)

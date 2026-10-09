@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+import os
+
+import pytest
+import torch
+
+from sparkgap.preparation.graphs import PreparedGraphBundle
+from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, FINISHED
+from sparkgap.recipes.qwen38.speculation import (
+    PreparedCopyProposals, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
+    PreparedStochasticVerification, SpeculativeRngState, TARGET_RNG_DOMAIN,
+)
+
+pytestmark = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
+    reason="requires explicitly assigned CUDA device and SPARKGAP_RUN_CUDA_TESTS=1")
+VOCAB = 248320
+
+
+def tensors(batch, width):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    state = DeviceRequestState.allocate("cuda", vocab_size=VOCAB)
+    slots = torch.tensor([3, 1, 0, 2][:batch], device="cuda", dtype=torch.int32)
+    epochs = torch.full((batch,), 7, device="cuda", dtype=torch.int64)
+    live = torch.tensor([batch], device="cuda", dtype=torch.int32)
+    inputs = torch.arange(3, 3 + width, device="cuda").expand(batch, -1).contiguous()
+    records = torch.full((2, 4, 24), -99, device="cuda", dtype=torch.int64)
+    frame = torch.tensor([0], device="cuda", dtype=torch.int32)
+    sequence = torch.tensor([1], device="cuda", dtype=torch.int64)
+    for slot in range(4):
+        state.admit(slot, RequestAdmission(generation=7, seed=2**64 - 19 + slot,
+            max_new_tokens=1000, top_k=0, top_p=1, eos_token_ids=()), [1, 2], consumed_tokens=2, ple_history=(1, 2))
+        state.pending_token[slot] = 3
+        state.generated_tokens[slot] = 1
+        state.histogram[slot, 3] = 1
+    return state, slots, epochs, live, inputs, records, frame, sequence
+
+
+def snapshot(state):
+    saved = {name: getattr(state, name).clone() for name in state.__dataclass_fields__}
+    def restore():
+        for name, value in saved.items():
+            getattr(state, name).copy_(value)
+    return restore
+
+
+@pytest.mark.parametrize("temperature", [0., 1.])
+@pytest.mark.parametrize("width", [1, 3, 8])
+def test_native_copy_conditional_grammar_and_stale_metadata(temperature, width):
+    args = tensors(2, width)
+    state, slots, epochs, live, inputs, records, frame, sequence = args
+    state.parameters[:, 0] = temperature
+    copy_ids = torch.arange(4, 11, device="cuda").expand(4, -1).clone()
+    copy_count = torch.full((4,), 7, dtype=torch.int32, device="cuda")
+    copy_expected = torch.full((4,), 2, dtype=torch.int64, device="cuda")
+    copy_generation = torch.full((4,), 7, dtype=torch.int64, device="cuda")
+    masks = torch.zeros((4, 8, VOCAB // 32), dtype=torch.int32, device="cuda")
+    mask_count = torch.zeros(4, dtype=torch.int32, device="cuda")
+    mask_count[3] = width
+    state.grammar_enabled[3] = 1
+    masks[3, :width, 0] = torch.tensor([1 << (4 + j) for j in range(width)], dtype=torch.int32, device="cuda")
+    drafts = torch.zeros((2, width - 1), dtype=torch.int64, device="cuda")
+    probabilities = torch.zeros((2, width - 1, VOCAB), dtype=torch.float32, device="cuda")
+    valid = torch.zeros((2, width - 1), dtype=torch.bool, device="cuda")
+    copy_mask = torch.zeros(2, dtype=torch.int64, device="cuda")
+    previous = torch.full((4,), 8, dtype=torch.int32, device="cuda")
+    accepted_generation = torch.zeros(4, dtype=torch.int64, device="cuda")
+    proposals = PreparedCopyProposals(state, slots, epochs, live, copy_ids=copy_ids,
+        copy_count=copy_count, copy_expected=copy_expected, copy_generation=copy_generation,
+        grammar_mask_count=mask_count, draft_ids=drafts, draft_probabilities=probabilities,
+        draft_valid=valid, copy_mask=copy_mask, previous_accepted=previous,
+        accepted_generation=accepted_generation)
+    logits = torch.zeros((2, width, VOCAB), dtype=torch.float32, device="cuda")
+    # Unconstrained lane one has a deterministic target; lane zero follows masks.
+    logits[1].fill_(-torch.inf)
+    for index in range(width):
+        logits[1, index, 4 + index] = 0
+    distribution = PreparedSpeculativeDistributions(logits, state, slots, epochs, live, drafts,
+        grammar_masks=masks, grammar_mask_count=mask_count)
+    rng = SpeculativeRngState.allocate("cuda")
+    distribution.prepare()
+    verify = PreparedStochasticVerification(probabilities, drafts, distribution.probabilities,
+        state, slots, epochs, live, rng=rng, draft_valid=valid, target_valid=distribution.valid)
+    verify.prepare()
+    commit = PreparedSpeculativeCommit(state, verify.output, inputs, slots, epochs, live,
+        records, frame, sequence, rng=rng, copy_offered_mask=copy_mask, draft_cache_available=False)
+    state_restore = snapshot(state)
+
+    def restore():
+        state_restore()
+        rng.target_offset.zero_(); rng.generation.zero_()
+        previous.fill_(8); accepted_generation.zero_()
+
+    def run():
+        proposals()
+        inputs[:, 0].copy_(state.pending_token[slots.long()])
+        inputs[:, 1:].copy_(drafts)
+        distribution()
+        verify(); commit()
+
+    with captured(run, (*args, proposals, distribution, verify, commit, rng),
+                  {"copy_ids": copy_ids, "masks": masks, "records": records}, restore) as replay:
+        replay()
+        assert records[0, 3, 16:16 + width].cpu().tolist() == list(range(4, 4 + width))
+        assert records[0, 3, 8:12].cpu().tolist() == [width, width - 1, width - 1, (1 << (width - 1)) - 1]
+        assert records[0, 3, 13] == -1 and previous[3] == 1
+        assert rng.target_offset[3] == verify.draw_reservation
+        restore()
+        masks[3, 0].zero_(); masks[3, 0, 1] = 1 << (42 - 32)
+        state.eos_count[3] = 1; state.eos_token_ids[3, 0] = 42
+        replay()
+        assert records[0, 3, 8] == 1 and records[0, 3, 16] == 42
+        assert state.status[3] == FINISHED
+        for fault in ("generation", "position", "mask_count"):
+            restore()
+            copy_generation.fill_(7); copy_expected.fill_(2); mask_count[3] = width
+            if fault == "generation": copy_generation[3] = 6
+            elif fault == "position": copy_expected[3] = 1
+            else: mask_count[3] = width - 1
+            replay()
+            assert records[0, 3, 5:9].cpu().tolist() == [3, 6, 0, 0]
+            assert state.consumed_tokens[3] == 2 and rng.target_offset[3] == 0
+            assert previous[3] == 8 and accepted_generation[3] == 0
+
+
+@contextmanager
+def captured(run, resources, buffers, restore=lambda: None):
+    run()
+    restore()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    restore()
+    bundle = PreparedGraphBundle(device=0, graphs={"speculation": graph}, buffers=buffers,
+        resources=tuple(resources))
+    worker = bundle.start_worker()
+    try:
+        def replay():
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_stats()
+            ticket = worker.submit(0)
+            completion = worker.poll(timeout_ms=30000)
+            assert completion is not None and completion.ticket == ticket and completion.error is None
+            after = torch.cuda.memory_stats()
+            for key in ("allocation.all.allocated", "allocated_bytes.all.allocated"):
+                assert before[key] == after[key]
+        yield replay
+    finally:
+        worker.close()
+        graph.reset()
+
+
+@pytest.mark.parametrize("width", range(1, 9))
+def test_native_flashinfer_one_hot_all_prefix_lengths_and_clipping(width):
+    args = tensors(4, width)
+    state, slots, epochs, live, inputs, records, frame, sequence = args
+    draft_probs = torch.zeros((4, width - 1, VOCAB), device="cuda")
+    target_probs = torch.zeros((4, width, VOCAB), device="cuda")
+    for column in range(width - 1):
+        draft_probs[:, column, 4 + column] = 1
+    def reset_probabilities():
+        target_probs.zero_()
+        for column in range(width):
+            target_probs[:, column, 4 + column] = 1
+    reset_probabilities()
+    rng = SpeculativeRngState.allocate("cuda")
+    verify = PreparedStochasticVerification(draft_probs, inputs[:, 1:].contiguous(),
+        target_probs, state, slots, epochs, live, rng=rng)
+    verify.prepare()
+    commit = PreparedSpeculativeCommit(state, verify.output, inputs, slots, epochs, live,
+        records, frame, sequence, rng=rng)
+    restore_state = snapshot(state)
+    def restore():
+        restore_state(); rng.generation.zero_(); rng.target_offset.zero_()
+    def run():
+        verify(); commit()
+    with captured(run, (*args, verify, commit, rng, draft_probs, target_probs), {"inputs": inputs, "records": records}, restore) as replay:
+        for accepted in range(width):
+            restore()
+            reset_probabilities()
+            target_probs[:, accepted].zero_()
+            target_probs[:, accepted, 100] = 1
+            state.consumed_tokens.fill_(63)
+            frame[0] = accepted % 2
+            sequence[0] = accepted + 1
+            replay()
+            assert commit.emitted_count.cpu().tolist() == [accepted + 1] * 4
+            assert commit.commit_column.cpu().tolist() == [accepted] * 4
+            assert state.pending_token.cpu().tolist() == [100] * 4
+            assert state.consumed_tokens.cpu().tolist() == [64 + accepted] * 4
+            assert state.boundary_history.cpu().tolist() == [[2, 3]] * 4
+            assert state.boundary_consumed_tokens.cpu().tolist() == [64] * 4
+        restore()
+        reset_probabilities()
+        state.max_new_tokens.fill_(2)
+        if width > 1:
+            state.eos_count.fill_(1)
+            state.eos_token_ids[:, 0] = 4
+        replay()
+        assert commit.emitted_count.cpu().tolist() == [1] * 4
+        assert state.status.cpu().tolist() == [FINISHED] * 4
+        assert commit.accepted_drafts.cpu().tolist() == [int(width > 1)] * 4
+        before = state.histogram.cpu()
+        replay()
+        assert commit.emitted_count.eq(0).all()
+        assert torch.equal(state.histogram.cpu(), before)
+
+
+def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
+    args = tensors(4, 8)
+    state, slots, epochs, live, inputs, records, frame, sequence = args
+    logits = torch.full((4, 8, VOCAB), -torch.inf, device="cuda")
+    logits[:, :, 10:12] = 4
+    logits[:, :, 12] = 2
+    candidates = torch.tensor([[10, 11, 10, 11, 10, 11, 10]] * 4, device="cuda")
+    state.top_k.fill_(1)
+    state.parameters[:, 3] = 2
+    state.parameters[1, 0] = 0
+    op = PreparedSpeculativeDistributions(logits, state, slots, epochs, live, candidates)
+    op.prepare()
+    with captured(op, (*args, op, logits, candidates), {"probabilities": op.probabilities}) as replay:
+        replay()
+        assert op.valid.all()
+        probabilities = op.probabilities.cpu()
+        torch.testing.assert_close(probabilities[0, 0, 10:12], torch.tensor([.5, .5]), rtol=0, atol=0)
+        assert probabilities[0, 1, 11] == 1
+        assert probabilities[1, 0, 10] == 1
+        assert probabilities[1, 0, 11] == 0
+        assert probabilities[:, :, :10].count_nonzero() == 0
+        assert probabilities[:, :, 13:].count_nonzero() == 0
+        state.grammar_enabled[3] = 1
+        live[0] = 3
+        replay()
+        assert not op.valid[0].any() and not op.valid[3].any()
+        assert op.probabilities[0, :, 0].eq(1).all() and op.probabilities[3, :, 0].eq(1).all()
+
+
+@pytest.mark.parametrize("width", range(1, 9))
+def test_native_flashinfer_chain_accept_reject_rng_and_budget(width):
+    args = tensors(4, width)
+    state, slots, epochs, live, inputs, records, frame, sequence = args
+    drafts = inputs[:, 1:].contiguous()
+    draft_probs = torch.zeros((4, width - 1, VOCAB), device="cuda")
+    target_probs = torch.zeros((4, width, VOCAB), device="cuda")
+    for column in range(width - 1):
+        draft_probs[:, column, 4 + column] = 1
+        target_probs[:, column, 4 + column] = 1
+    target_probs[:, -1, 100] = 1
+    rng = SpeculativeRngState.allocate("cuda")
+    verify = PreparedStochasticVerification(draft_probs, drafts, target_probs, state, slots, epochs, live, rng=rng)
+    verify.prepare()
+    commit = PreparedSpeculativeCommit(state, verify.output, inputs, slots, epochs, live, records, frame, sequence, rng=rng)
+    restore_state = snapshot(state)
+    def restore():
+        restore_state(); rng.generation.zero_(); rng.target_offset.zero_()
+    def run():
+        verify(); commit()
+    with captured(run, (*args, verify, commit, rng), {"records": records}, restore) as replay:
+        replay()
+        assert commit.emitted_count.cpu().tolist() == [width] * 4
+        assert verify.independent_accepted.cpu().tolist() == [width - 1] * 4
+        assert rng.target_offset.cpu().tolist() == [verify.draw_reservation] * 4
+        expected_seed = state.seed.view(torch.int64)[slots.long()] ^ TARGET_RNG_DOMAIN
+        assert torch.equal(verify.seed_bits, expected_seed)
+        restore()
+        target_probs[:, 0].zero_(); target_probs[:, 0, 101] = 1
+        replay()
+        assert commit.emitted_count.cpu().tolist() == [1] * 4
+        assert state.pending_token.cpu().tolist() == [101] * 4
+        assert verify.emitted_drafts.eq(0).all()
+        restore()
+        target_probs[:, 0].fill_(float("nan"))
+        replay()
+        assert commit.emitted_count.eq(0).all()
+        assert rng.target_offset.eq(0).all()
+        assert state.generated_tokens.eq(1).all()
+
+
+def test_native_chain_one_row_stream_is_invariant_to_packed_lane():
+    args = tensors(4, 4)
+    state, slots, epochs, live, inputs, records, frame, sequence = args
+    draft_probs = torch.zeros((4, 3, VOCAB), device="cuda")
+    target_probs = torch.zeros((4, 4, VOCAB), device="cuda")
+    draft_probs[:, :, 4:7] = torch.tensor([.2, .3, .5], device="cuda")
+    target_probs[:, :, 4:7] = torch.tensor([.3, .4, .3], device="cuda")
+    rng = SpeculativeRngState.allocate("cuda")
+    rng.generation.fill_(7); rng.target_offset.fill_(20)
+    many = PreparedStochasticVerification(draft_probs, inputs[:, 1:].contiguous(), target_probs, state, slots, epochs, live, rng=rng)
+    one_slots, one_epochs, one_live = slots[2:3].clone(), epochs[2:3].clone(), torch.ones(1, device="cuda", dtype=torch.int32)
+    one = PreparedStochasticVerification(draft_probs[2:3], inputs[2:3, 1:].contiguous(), target_probs[2:3],
+        state, one_slots, one_epochs, one_live, rng=rng)
+    many.prepare(); one.prepare()
+    def run():
+        many(); one()
+    with captured(run, (*args, many, one, rng), {"many": many.output.token_ids, "one": one.output.token_ids}) as replay:
+        for offset in (0, 4, 20, 100):
+            rng.target_offset.fill_(offset)
+            replay()
+            assert torch.equal(many.output.token_ids[2], one.output.token_ids[0])
+            assert many.output.proposed_count[2] == one.output.proposed_count[0]
+            assert many.independent_accepted[2] == one.independent_accepted[0]

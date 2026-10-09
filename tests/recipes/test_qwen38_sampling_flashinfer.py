@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+from contextlib import ExitStack, contextmanager
+import math
+import os
+
+import pytest
+import torch
+
+from sparkgap.preparation.graphs import PreparedGraphBundle
+from sparkgap.recipes.qwen38.sampling import (
+    DeviceRequestState, RequestAdmission, PreparedSampling,
+    RUNNING, FINISHED, ERROR, INVALID_DISTRIBUTION, DUPLICATE_SLOT,
+)
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
+    reason="requires SPARKGAP_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
+)
+VOCAB = 248320
+
+
+class CapturedSampler:
+    def __init__(self, rows):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
+        self.rows = rows
+        self.state = DeviceRequestState.allocate("cuda", vocab_size=VOCAB)
+        self.logits = torch.zeros((rows, VOCAB), device="cuda", dtype=torch.float32)
+        self.slots = torch.arange(rows, device="cuda", dtype=torch.int32)
+        self.epochs = torch.ones(rows, device="cuda", dtype=torch.int64)
+        self.live = torch.zeros(1, device="cuda", dtype=torch.int32)
+        self.records = torch.full((2, 4, 8), -99, device="cuda", dtype=torch.int64)
+        self.frame = torch.zeros(1, device="cuda", dtype=torch.int32)
+        self.sequence = torch.ones(1, device="cuda", dtype=torch.int64)
+        self.enabled = torch.ones(rows, device="cuda", dtype=torch.int32)
+        for slot in range(4):
+            self.admit(slot)
+        self.sampler = PreparedSampling(self.logits, self.state, self.slots, self.epochs,
+            self.live, self.records, self.frame, self.sequence, sample_enabled=self.enabled)
+        self.sampler.prepare()
+        self.probabilities_pointer = self.sampler.probabilities.data_ptr()
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.sampler()
+        self.bundle = PreparedGraphBundle(device=0, graphs={"sample": self.graph},
+            buffers={"logits": self.logits, "records": self.records,
+                     "probabilities": self.sampler.probabilities},
+            resources=(self.state, self.sampler, self.slots, self.epochs, self.live,
+                       self.frame, self.sequence, self.enabled))
+
+    def admit(self, slot, *, counter=0, seed=2**64 - 97, **parameters):
+        values = dict(generation=1, seed=seed, max_new_tokens=100,
+                      temperature=1., top_k=0, top_p=1., eos_token_ids=())
+        values.update(parameters)
+        self.state.admit(slot, RequestAdmission(**values), [])
+        self.state.rng_counter[slot] = counter
+
+    def replay(self):
+        torch.cuda.synchronize()
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        ticket = self.worker.submit(0)
+        result = self.worker.poll(timeout_ms=30000)
+        assert result is not None and result.ticket == ticket and result.error is None
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        assert self.sampler.probabilities.data_ptr() == self.probabilities_pointer
+        return self.records[self.frame.item()].cpu()
+
+
+@contextmanager
+def captured(rows):
+    owner = CapturedSampler(rows)
+    owner.worker = owner.bundle.start_worker()
+    try:
+        yield owner
+    finally:
+        owner.worker.close()
+
+
+def snapshot(state):
+    return {name: getattr(state, name).cpu().clone() for name in state.__dataclass_fields__}
+
+
+def test_native_flashinfer_cutoff_ties_and_device_parameter_changes():
+    cases = (
+        # Threshold top-k retains every tie, including more than k tokens.
+        ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
+        # The top-p cutoff retains both equal-probability boundary tokens.
+        ([math.log(2.), 0., 0.], 0, .6, 0., [0, 1, 2]),
+        ([math.log(2.), 0., 0.], -1, 1., .6, [0]),
+        ([0., 0., 0.], 0, 1., 1., [0, 1, 2]),
+        ([0., 0., 0.], 1, 1., 0., [0, 1, 2]),
+        ([4., 3., 3., 1.], VOCAB, 1., 0., [0, 1, 2, 3]),
+        ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
+    )
+    with captured(1) as owner:
+        owner.slots.fill_(2)
+        owner.live.fill_(1)
+        for iteration, (values, top_k, top_p, min_p, support) in enumerate(cases):
+            owner.admit(2, counter=2**32 + iteration, seed=2**64 - 97 - iteration,
+                        top_k=top_k, top_p=top_p, min_p=min_p)
+            owner.logits.fill_(-torch.inf)
+            owner.logits[0, :len(values)].copy_(torch.tensor(values))
+            owner.frame.fill_(iteration % 2)
+            owner.sequence.fill_(101 + iteration)
+            records = owner.replay()
+            probabilities = owner.sampler.probabilities[0].cpu()
+            assert probabilities.isfinite().all()
+            assert torch.nonzero(probabilities > 0).flatten().tolist() == support
+            torch.testing.assert_close(probabilities.sum(), torch.tensor(1.), rtol=0, atol=2e-6)
+            token = records[2, 4].item()
+            assert token in support
+            assert records[2].tolist() == [1, 101 + iteration, 0, 1, token, RUNNING, 0, 0]
+            assert owner.state.rng_counter[2].item() == 2**32 + iteration + 1
+            counts = owner.state.histogram.cpu()
+            assert counts.sum() == 1 and counts[2, token] == 1
+            assert (records[[0, 1, 3], 4] == -1).all()
+            assert records[[0, 1, 3], 5].sum() == 0
+
+
+def test_native_flashinfer_rng_is_invariant_to_capacity_packing_and_physical_slot():
+    with ExitStack() as stack:
+        owners = [stack.enter_context(captured(rows)) for rows in (1, 2, 4)]
+        for seed, counter in ((17, 0), (2**64 - 79, 2**32 - 1), (2**63 + 19, 2**32 + 7)):
+            sampled = []
+            for owner in owners:
+                for rotation in range(4):
+                    order = [(rotation + row) % 4 for row in range(owner.rows)]
+                    for slot in range(4):
+                        owner.admit(slot, seed=seed, counter=counter)
+                    owner.slots.copy_(torch.tensor(order, dtype=torch.int32))
+                    owner.live.fill_(owner.rows)
+                    owner.logits.fill_(-torch.inf)
+                    owner.logits[:, :16].zero_()
+                    records = owner.replay()
+                    sampled.extend(records[order, 4].tolist())
+                    assert owner.state.rng_counter.cpu().tolist() == [
+                        counter + int(slot in order) for slot in range(4)]
+                    assert owner.state.generated_tokens.cpu().tolist() == [
+                        int(slot in order) for slot in range(4)]
+            assert len(set(sampled)) == 1
+            assert 0 <= sampled[0] < 16
+
+
+def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan():
+    with captured(4) as owner:
+        owner.live.fill_(4)
+        owner.logits.zero_()
+        owner.logits[0, 5] = torch.nan
+        owner.logits[1, 5] = torch.inf
+        owner.logits[3, 5] = torch.nan
+        owner.state.grammar_enabled[2:] = 1
+        owner.state.grammar_mask[2:].zero_()
+        owner.state.grammar_mask[3, 0] = 1 << 7
+        records = owner.replay()
+        for slot in (0, 1, 2):
+            assert records[slot].tolist() == [1, 1, 0, 0, -1, ERROR, INVALID_DISTRIBUTION, 0]
+        assert records[3].tolist() == [1, 1, 0, 1, 7, RUNNING, 0, 0]
+        assert owner.state.rng_counter.cpu().tolist() == [0, 0, 0, 1]
+        assert owner.state.histogram.sum().item() == 1
+        assert owner.state.histogram[3, 7].item() == 1
+        before = snapshot(owner.state)
+        owner.live.zero_()
+        owner.replay()
+        after = snapshot(owner.state)
+        for name in before:
+            assert torch.equal(before[name], after[name]), name
+
+        owner.admit(2)
+        owner.slots[0] = 2
+        owner.live.fill_(1)
+        owner.logits[0].fill_(-torch.inf)
+        records = owner.replay()
+        assert records[2].tolist() == [1, 1, 0, 0, -1, ERROR, INVALID_DISTRIBUTION, 0]
+        assert owner.state.rng_counter[2].item() == 0
+
+
+def test_native_flashinfer_stale_duplicate_and_disabled_rows_do_not_sample():
+    with captured(4) as owner:
+        owner.slots.copy_(torch.tensor([0, 0, 2, 3], dtype=torch.int32))
+        owner.epochs[2] = 99
+        owner.enabled[3] = 0
+        owner.live.fill_(4)
+        owner.logits[3].fill_(torch.nan)
+        before = snapshot(owner.state)
+        records = owner.replay()
+        assert records[0].tolist() == [1, 1, 0, 0, -1, ERROR, DUPLICATE_SLOT, 0]
+        assert records[3].tolist() == [1, 1, 0, 0, -1, RUNNING, 0, 0]
+        assert (records[[1, 2], 4] == -1).all() and records[[1, 2], 5].sum() == 0
+        after = snapshot(owner.state)
+        for name in before:
+            expected = before[name]
+            if name == "status":
+                expected[0] = ERROR
+            elif name == "error_code":
+                expected[0] = DUPLICATE_SLOT
+            assert torch.equal(expected, after[name]), name
+
+
+def test_native_flashinfer_mixed_temperatures_eos_and_budget_stop_are_terminal():
+    with captured(4) as owner:
+        owner.admit(0, temperature=0., top_k=1, max_new_tokens=1)
+        owner.admit(1, eos_token_ids=(7,))
+        owner.admit(2, max_new_tokens=1)
+        owner.live.fill_(4)
+        owner.enabled[3] = 0
+        owner.logits.fill_(-torch.inf)
+        owner.logits[0, 5] = owner.logits[0, 9] = 3.
+        owner.logits[1, 7] = 0.
+        owner.logits[2, 9] = 0.
+        records = owner.replay()
+        assert records[:3, 4].tolist() == [5, 7, 9]
+        assert owner.sampler.probabilities[0, 5] == 1
+        assert owner.sampler.probabilities[0].count_nonzero() == 1
+        assert owner.sampler.sampled_tokens[:3].cpu().tolist() == [5, 7, 9]
+        assert owner.sampler.sample_valid[:3].all()
+        assert records[:3, 5].tolist() == [FINISHED] * 3
+        assert owner.state.rng_counter.cpu().tolist() == [1, 1, 1, 0]
+        assert owner.state.generated_tokens.cpu().tolist() == [1, 1, 1, 0]
+        assert owner.state.pending_token.cpu().tolist() == [5, 7, 9, -1]
+        before = snapshot(owner.state)
+        owner.logits.fill_(torch.nan)
+        records = owner.replay()
+        assert records[:, 4].tolist() == [-1] * 4
+        after = snapshot(owner.state)
+        for name in before:
+            assert torch.equal(before[name], after[name]), name

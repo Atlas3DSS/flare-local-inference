@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+import pytest
+import torch
+
+from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, FINISHED, ERROR
+from sparkgap.recipes.qwen38.speculation import (
+    PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
+    PreparedStochasticVerification, SpeculativeAcceptance, SpeculativeRngState,
+    INVALID_SPECULATION, TARGET_RNG_DOMAIN, DRAFT_RNG_DOMAIN,
+)
+
+
+def example(*, batch=1, width=4, consumed=2, budget=20, eos=(), slot=2):
+    state = DeviceRequestState.allocate("cpu", vocab_size=16)
+    state.admit(slot, RequestAdmission(generation=7, seed=2**64 - 1, max_new_tokens=budget,
+        temperature=0, top_k=0, top_p=1, eos_token_ids=eos), [1, 2], consumed_tokens=2, ple_history=(1, 2))
+    state.consumed_tokens[slot] = consumed
+    state.generated_tokens[slot] = 1
+    state.pending_token[slot] = 3
+    state.histogram[slot, 3] = 1
+    state.rng_counter[slot] = 1
+    slots = torch.full((batch,), -1, dtype=torch.int32)
+    slots[0] = slot
+    epochs = torch.full((batch,), 7, dtype=torch.int64)
+    live = torch.tensor([1], dtype=torch.int32)
+    inputs = torch.arange(3, 3 + width).expand(batch, -1).clone()
+    acceptance = SpeculativeAcceptance.allocate(batch, width, "cpu")
+    emitted = min(width, 3)
+    acceptance.token_ids[:, :emitted] = inputs[:, :emitted] + 1
+    if width > 2:
+        acceptance.token_ids[:, emitted - 1] = 9
+    acceptance.proposed_count.fill_(emitted)
+    acceptance.accepted_drafts.fill_(emitted - 1)
+    acceptance.offered_drafts.fill_(width - 1)
+    acceptance.valid.fill_(True)
+    records = torch.full((2, 4, 24), -99, dtype=torch.int64)
+    frame, sequence = torch.tensor([1], dtype=torch.int32), torch.tensor([37], dtype=torch.int64)
+    commit = PreparedSpeculativeCommit(state, acceptance, inputs, slots, epochs, live,
+        records, frame, sequence)
+    return state, acceptance, commit, records
+
+
+@pytest.mark.parametrize("width", range(1, 9))
+def test_commit_accepts_each_explicit_verified_prefix(width):
+    for emitted in range(1, width + 1):
+        state, acceptance, commit, records = example(width=width)
+        acceptance.token_ids.fill_(-1)
+        acceptance.token_ids[:, :emitted] = commit.inputs[:, :emitted] + 1
+        acceptance.proposed_count.fill_(emitted)
+        acceptance.accepted_drafts.fill_(emitted - 1)
+        commit()
+        assert commit.emitted_count.item() == emitted
+        assert commit.commit_column.item() == emitted - 1
+        assert state.consumed_tokens[2] == 2 + emitted
+        assert state.pending_token[2] == 3 + emitted
+        assert records[1, 2, 16:16 + emitted].tolist() == list(range(4, 4 + emitted))
+        assert records[1, 2, 16 + emitted:].eq(-1).all()
+
+
+@pytest.mark.parametrize("field,value", [("proposed_count", 9), ("accepted_drafts", 4),
+    ("offered_drafts", 8), ("offered_drafts", 0)])
+def test_commit_rejects_inconsistent_acceptance_contract(field, value):
+    state, acceptance, commit, records = example(width=8)
+    getattr(acceptance, field).fill_(value)
+    commit()
+    assert commit.emitted_count.item() == 0
+    assert state.consumed_tokens[2] == 2
+    assert state.status[2] == ERROR
+    assert records[1, 2, 6] == INVALID_SPECULATION
+
+
+def test_commit_advances_input_and_output_histories_once():
+    state, acceptance, commit, records = example()
+    commit()
+    assert commit.consumed_before.tolist() == [2]
+    assert commit.generated_before.tolist() == [1]
+    assert commit.history_before.tolist() == [[1, 2]]
+    assert commit.emitted_ids.tolist() == [[4, 5, 9, -1]]
+    assert commit.committed_input_ids.tolist() == [[3, 4, 5, -1]]
+    assert commit.accepted_count.tolist() == [3]
+    assert commit.commit_column.tolist() == [2]
+    assert state.consumed_tokens[2] == 5 and state.generated_tokens[2] == 4
+    assert state.pending_token[2] == 9 and state.ple_history[2].tolist() == [4, 5]
+    assert state.histogram[2, 3] == 1 and state.histogram[2, 9] == 1
+    assert state.rng_counter[2].item() == 4
+    assert records[1, 2, :11].tolist() == [7, 37, 5, 4, 9, RUNNING, 0, 0, 3, 3, 2]
+    assert records[1, 2, 12:].tolist() == [-1, 4, 0, 4, 4, 5, 9, -1, -1, -1, -1, -1]
+    assert records[0].eq(-99).all()
+    assert records[1, 0, 16:].eq(-1).all()
+
+
+@pytest.mark.parametrize("eos,budget", [((5,), 20), ((), 3)])
+def test_clip_inside_drafts_keeps_final_draft_pending(eos, budget):
+    state, acceptance, commit, records = example(eos=eos, budget=budget)
+    commit()
+    assert commit.emitted_ids.tolist() == [[4, 5, -1, -1]]
+    assert commit.accepted_drafts.item() == 2
+    assert commit.commit_column.item() == 1
+    assert state.consumed_tokens[2] == 4 and state.generated_tokens[2] == 3
+    assert state.pending_token[2] == 5
+    assert state.ple_history[2].tolist() == [3, 4]
+    assert state.status[2] == FINISHED
+    assert records[1, 2, 10] == 2
+    frozen = {name: getattr(state, name).clone() for name in state.__dataclass_fields__}
+    commit()
+    for name, expected in frozen.items():
+        assert torch.equal(getattr(state, name), expected), name
+    assert records[1, 2, 8] == 0
+
+
+def test_boundary_history_uses_accepted_input_not_verification_endpoint():
+    state, acceptance, commit, records = example(consumed=63)
+    commit()
+    assert commit.candidate_consumed.tolist() == [64]
+    assert state.boundary_history[2].tolist() == [2, 3]
+    assert state.boundary_consumed_tokens[2] == 64
+    assert state.boundary_generation[2] == 7
+    assert records[1, 2, 12] == 64
+    assert state.consumed_tokens[2] == 66
+
+
+@pytest.mark.parametrize("fault", ["stale", "inactive", "bad_slot", "duplicate", "pending", "invalid_distribution"])
+def test_bad_or_inactive_rows_do_not_advance_state(fault):
+    state, acceptance, commit, _ = example(batch=2)
+    if fault == "stale": commit.generations[0] = 6
+    elif fault == "inactive": commit.live.zero_()
+    elif fault == "bad_slot": commit.slots[0] = 99
+    elif fault == "duplicate": commit.slots[1] = 2; commit.live.fill_(2)
+    elif fault == "pending": commit.inputs[0, 0] = 0
+    elif fault == "invalid_distribution": acceptance.valid[0] = False
+    counts = state.histogram.clone()
+    commit()
+    assert commit.emitted_count.eq(0).all()
+    assert state.consumed_tokens[2] == 2 and state.generated_tokens[2] == 1
+    assert state.pending_token[2] == 3 and torch.equal(state.histogram, counts)
+    assert state.status[2] == (ERROR if fault in ("duplicate", "pending", "invalid_distribution") else RUNNING)
+
+
+def test_rng_domains_epoch_reuse_and_reservation():
+    state, acceptance, commit, _ = example()
+    rng = SpeculativeRngState.allocate("cpu")
+    commit.rng = rng
+    rng.generation[2], rng.target_offset[2] = 6, 1000
+    acceptance.rng_increment.fill_(8); commit()
+    assert rng.generation[2] == 7 and rng.target_offset[2] == 8
+    assert TARGET_RNG_DOMAIN != DRAFT_RNG_DOMAIN
+    for width, reservation in ((1, 4), (2, 4), (4, 8), (8, 12)):
+        sample = PreparedStochasticVerification(torch.empty(1, width - 1, 16), torch.zeros((1, width - 1), dtype=torch.int64),
+            torch.empty(1, width, 16), state, commit.slots, commit.generations, commit.live, rng=rng)
+        assert sample.draw_reservation == reservation
+        with pytest.raises(ValueError, match="requires CUDA"):
+            sample.prepare()
+
+
+def test_conditional_penalties_include_only_prior_drafts():
+    state, _, commit, _ = example()
+    state.parameters[2] = torch.tensor([1., 1., 0., 2., 3., .5])
+    logits = torch.ones((1, 4, 16)) * 8
+    candidates = torch.tensor([[4, 4, 5]])
+    op = PreparedSpeculativeDistributions(logits, state, commit.slots, commit.generations, commit.live, candidates)
+    op.prepare_scores()
+    assert op.counts[0, :, 3].tolist() == [1, 1, 1, 1]
+    assert op.counts[0, :, 4].tolist() == [0, 1, 2, 2]
+    assert op.counts[0, :, 5].tolist() == [0, 0, 0, 1]
+    assert op.scores[0, :, 4].tolist() == [8., .5, 0., 0.]
+    state.grammar_enabled[2] = 1
+    op.prepare_scores()
+    assert not op.valid.any()
+
+
+def test_invalid_conditional_id_does_not_index_histogram_out_of_bounds():
+    state, _, commit, _ = example()
+    op = PreparedSpeculativeDistributions(torch.zeros(1, 4, 16), state,
+        commit.slots, commit.generations, commit.live, torch.tensor([[4, 99, 5]]))
+    op.prepare_scores()
+    assert op.valid.tolist() == [[True, True, False, False]]
+    assert not torch.cuda.is_initialized()

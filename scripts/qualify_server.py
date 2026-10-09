@@ -1,0 +1,1060 @@
+"""Qualify a running Qwen HTTP server and preserve requests, responses and raw SSE."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import concurrent.futures
+import copy
+from datetime import datetime, timezone
+import hashlib
+import http.client
+import importlib.metadata
+import importlib.machinery
+import json
+from pathlib import Path
+import socket
+import sys
+import threading
+import time
+import traceback
+from urllib.parse import urlsplit
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_json(path: Path, value) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def common_prefix(left: list[int], right: list[int]) -> int:
+    return next((i for i, pair in enumerate(zip(left, right)) if pair[0] != pair[1]), min(len(left), len(right)))
+
+
+def metric_delta(before: dict, after: dict) -> dict:
+    return {name: after[name] - before[name] for name in before.keys() & after.keys() if "_total" in name}
+
+
+def resource_totals(metrics: dict) -> dict:
+    return {"pages": metrics["sparkgap_free_kv_pages"] + metrics["sparkgap_cached_kv_pages"],
+        "snapshots": metrics["sparkgap_free_snapshots"] + metrics["sparkgap_cached_checkpoints"],
+        "slots": metrics["sparkgap_free_request_slots"]}
+
+
+def kv_pressure_geometry(memory: dict, metrics: dict, context: int) -> dict:
+    totals = resource_totals(metrics)
+    pages = memory["pages"]
+    if not isinstance(pages, int) or pages <= 0 or memory["cached_token_capacity"] != pages * 64:
+        raise ValueError("KV pressure requires the memory report's 64-token page geometry")
+    if memory["kv_bytes"] != pages * memory["page_bytes"] or totals["pages"] != pages:
+        raise ValueError("memory report KV capacity differs from idle native metrics")
+    if totals["snapshots"] != memory["snapshot_capacity"] or totals["slots"] != 4:
+        raise ValueError("KV pressure requires the reported snapshot capacity and four idle request slots")
+    if context <= 0 or context % 64:
+        raise ValueError("prepared context must be positive and 64-token aligned")
+    reservation = context // 64
+    holders = pages // reservation
+    if not 1 <= holders < totals["slots"]:
+        raise ValueError("KV exhaustion cannot be isolated before the slot limit using context-sized reservations")
+    if totals["snapshots"] < holders + 1:
+        raise ValueError("snapshot capacity cannot isolate KV exhaustion")
+    return {"page_tokens": 64, "pages": pages, "context_tokens": context,
+        "pages_per_request": reservation, "holding_requests": holders,
+        "unreserved_pages": pages - holders * reservation, "max_active": totals["slots"]}
+
+
+class StreamProgress:
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.visible_events = 0
+        self.finished = False
+
+    def observe(self):
+        with self.condition:
+            self.visible_events += 1
+            self.condition.notify_all()
+
+    def finish(self):
+        with self.condition:
+            self.finished = True
+            self.condition.notify_all()
+
+    def count(self):
+        with self.condition:
+            return self.visible_events
+
+    def wait_after(self, count, timeout):
+        with self.condition:
+            self.condition.wait_for(lambda: self.visible_events > count or self.finished, timeout)
+            return self.visible_events > count
+
+
+def aggregate_sse(events: list) -> dict:
+    message = {"role": "assistant", "content": ""}
+    calls: dict[int, dict] = {}
+    finishes = []
+    errors = []
+    for event in events:
+        if "error" in event:
+            errors.append(event["error"])
+            continue
+        for choice in event.get("choices", []):
+            if choice.get("index") != 0:
+                raise ValueError("SSE returned an unexpected choice index")
+            delta = choice.get("delta", {})
+            for key in ("content", "reasoning_content"):
+                if delta.get(key) is not None:
+                    if not isinstance(delta[key], str):
+                        raise ValueError(f"SSE {key} is not a string")
+                    message[key] = message.get(key, "") + delta[key]
+            for call in delta.get("tool_calls", []):
+                target = calls.setdefault(call["index"], {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                if call.get("id"):
+                    target["id"] = call["id"]
+                for key in ("name", "arguments"):
+                    target["function"][key] += call.get("function", {}).get(key, "")
+            if choice.get("finish_reason") is not None:
+                finishes.append(choice["finish_reason"])
+    if calls:
+        message["tool_calls"] = [calls[index] for index in sorted(calls)]
+    return {"message": message, "finish_reasons": finishes, "errors": errors}
+
+
+def comparable_message(message: dict) -> dict:
+    value = {"content": message.get("content") or "", "reasoning_content": message.get("reasoning_content") or ""}
+    value["tool_calls"] = [call["function"] for call in message.get("tool_calls", [])]
+    return value
+
+
+class Run:
+    def __init__(self, args, provenance):
+        self.args = args
+        self.url = urlsplit(args.base_url)
+        if self.url.scheme not in ("http", "https") or not self.url.hostname or self.url.query or self.url.fragment or self.url.username:
+            raise ValueError("base URL must be an HTTP(S) server URL without credentials, query or fragment")
+        self.lock = threading.RLock()
+        self.counter = 0
+        self.receipt = {"schema": "sparkgap-http-qualification-v1", "started_at": datetime.now(timezone.utc).isoformat(),
+            "base_url": args.base_url, "provenance": provenance, "requests": [], "checks": [], "case_errors": [],
+            "limitations": ["The HTTP API does not expose cache-hit or graph-submission counters. Prefix geometry and output consistency are checked; actual cache hits are not directly observable.",
+                "Timings are diagnostic request observations, not serving-throughput acceptance measurements.",
+                "Client disconnect and subsequent admission are observable; internal cancellation fences and slot retirement are not exposed by HTTP.",
+                "PNG decoding and output consistency are exercised; synthetic fixture images have no semantic caption oracle."]}
+        if args.require_metrics:
+            self.receipt["limitations"][0] = "Prefix behavior is observed through native Prometheus counter deltas after model quiescence; no independent numerical model reference runs in this client."
+            self.receipt["limitations"][2] = "Cancellation and reusable-resource counts are observed through native metrics; individual request generations and CUDA fences remain internal."
+        self.receipt["limitations"].append("A stalled TCP reader can be absorbed by socket buffers. Output-queue backpressure is reported only when native failure/cancellation counters actually increase.")
+        self.save()
+
+    def save(self):
+        with self.lock:
+            write_json(self.args.output, self.receipt)
+
+    def check(self, name, condition, **evidence):
+        with self.lock:
+            self.receipt["checks"].append({"name": name, "passed": bool(condition), **evidence})
+            self.save()
+        print(f"{'PASS' if condition else 'FAIL'} {name}", flush=True)
+
+    def case(self, name, function):
+        if self.args.cases and name not in self.args.cases:
+            return None
+        print(f"RUN {name}", flush=True)
+        try:
+            return function()
+        except Exception as exc:
+            with self.lock:
+                self.receipt["case_errors"].append({"case": name, "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
+                self.save()
+            print(f"ERROR {name}: {type(exc).__name__}: {exc}", flush=True)
+            return None
+
+    def request(self, name, body=None, *, path="/v1/chat/completions", stream=False, cancel=False, barrier=None,
+                paused=None, resume=None, receive_buffer=None, progress=None, cancel_event=None):
+        with self.lock:
+            self.counter += 1
+            number = self.counter
+        stem = f"{number:03d}-{name}"
+        if body is not None:
+            body = {**body, "stream": stream}
+            write_json(self.args.artifacts / f"{stem}.request.json", body)
+        if barrier is not None:
+            barrier.wait(timeout=30)
+        started = time.monotonic()
+        record = {"name": name, "method": "POST" if body is not None else "GET", "path": path,
+            "started_monotonic": started, "stream": stream, "cancel_requested": cancel,
+            "request_artifact": str(self.args.artifacts / f"{stem}.request.json") if body is not None else None}
+        connection = None
+        try:
+            cls = http.client.HTTPSConnection if self.url.scheme == "https" else http.client.HTTPConnection
+            connection = cls(self.url.hostname, self.url.port, timeout=self.args.timeout)
+            if receive_buffer is not None:
+                connection.connect()
+                connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
+                if hasattr(socket, "TCP_WINDOW_CLAMP"):
+                    connection.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, receive_buffer)
+                record["socket_receive_buffer_bytes"] = connection.sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+            encoded = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+            connection.request(record["method"], self.url.path.rstrip("/") + path, body=encoded,
+                headers={"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json"})
+            response = connection.getresponse()
+            record.update(status=response.status, headers=dict(response.getheaders()), headers_seconds=time.monotonic() - started)
+            sse = stream and response.status == 200 and response.getheader("Content-Type", "").startswith("text/event-stream")
+            raw_path = self.args.artifacts / f"{stem}.{'sse' if sse else 'response.json'}"
+            record["response_artifact"] = str(raw_path)
+            if not sse:
+                raw = response.read(self.args.max_response_bytes + 1)
+                raw_path.write_bytes(raw)
+                if len(raw) > self.args.max_response_bytes:
+                    raise ValueError("response exceeded byte bound")
+                record["body"] = {"prometheus": raw.decode("utf-8")} if path == "/metrics" and response.status == 200 else json.loads(raw)
+            else:
+                events, data, raw_bytes, done_count, cancelled = [], [], 0, 0, False
+                with raw_path.open("wb") as artifact:
+                    while True:
+                        line = response.readline()
+                        if not line:
+                            break
+                        artifact.write(line)
+                        artifact.flush()
+                        raw_bytes += len(line)
+                        if raw_bytes > self.args.max_response_bytes:
+                            raise ValueError("SSE response exceeded byte bound")
+                        stripped = line.rstrip(b"\r\n")
+                        if stripped.startswith(b"data:"):
+                            data.append(stripped[5:].removeprefix(b" "))
+                        elif not stripped and data:
+                            payload = b"\n".join(data).decode("utf-8")
+                            data.clear()
+                            if payload == "[DONE]":
+                                done_count += 1
+                            else:
+                                event = json.loads(payload)
+                                events.append(event)
+                                visible = any(any(choice.get("delta", {}).get(key) for key in ("content", "reasoning_content", "tool_calls")) for choice in event.get("choices", []))
+                                if visible:
+                                    record.setdefault("first_visible_delta_seconds", time.monotonic() - started)
+                                    if progress is not None:
+                                        progress.observe()
+                                if visible and paused is not None:
+                                    pause_started = time.monotonic()
+                                    paused.set()
+                                    if not resume.wait(timeout=self.args.timeout):
+                                        raise TimeoutError("stalled-reader controller did not release the connection")
+                                    record["paused_read_seconds"] = time.monotonic() - pause_started
+                                    paused = None
+                                if visible and (cancel or (cancel_event is not None and cancel_event.is_set())):
+                                    cancelled = True
+                                    break
+                record.update(events=events, sse=aggregate_sse(events), done_count=done_count,
+                    cancelled=cancelled, raw_bytes=raw_bytes, incomplete_event=bool(data))
+                if cancelled:
+                    response.close()
+            record["response_sha256"] = digest(raw_path)
+        except Exception as exc:
+            record["client_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if connection is not None:
+                connection.close()
+            if progress is not None:
+                progress.finish()
+            record["elapsed_seconds"] = time.monotonic() - started
+            record["finished_monotonic"] = time.monotonic()
+            with self.lock:
+                self.receipt["requests"].append(record)
+                self.save()
+        return record
+
+    def metrics(self, name, *, wait_idle=True):
+        if not self.args.require_metrics:
+            return None
+        deadline = time.monotonic() + self.args.timeout
+        attempt = 0
+        while True:
+            record = self.request(f"{name}-metrics-{attempt}", path="/metrics")
+            if record.get("status") != 200 or "client_error" in record:
+                raise ValueError("required native /metrics endpoint failed")
+            metrics = {}
+            for line in record["body"]["prometheus"].splitlines():
+                if line and not line.startswith("#"):
+                    key, value = line.rsplit(" ", 1)
+                    metrics[key] = int(value)
+            required = ["sparkgap_active_requests", "sparkgap_retiring_request_slots", "sparkgap_pending_requests", "sparkgap_http_inflight_requests"]
+            if not wait_idle or all(metrics[key] == 0 for key in required):
+                return metrics
+            if time.monotonic() >= deadline:
+                raise TimeoutError("model did not reach observable idle state")
+            attempt += 1
+            time.sleep(0.01)
+
+    def reclaimed(self, name, before, after):
+        if before is not None:
+            self.check(name + ".resource_accounting", resource_totals(before) == resource_totals(after)
+                and after["sparkgap_active_requests"] == after["sparkgap_retiring_request_slots"] == 0,
+                before=resource_totals(before), after=resource_totals(after))
+
+    def concurrent(self, name, requests):
+        before = self.metrics(name + "-before")
+        samples = []
+        barrier = threading.Barrier(len(requests))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(requests)) as pool:
+            futures = [pool.submit(self.request, f"{name}-{i}", request, barrier=barrier) for i, request in enumerate(requests)]
+            if before is not None:
+                while not all(future.done() for future in futures):
+                    samples.append(self.metrics(name + f"-active-{len(samples)}", wait_idle=False))
+                    time.sleep(0.01)
+            results = [future.result() for future in futures]
+        after = self.metrics(name + "-after")
+        if before is not None:
+            delta = metric_delta(before, after)
+            peak = max((sample["sparkgap_active_requests"] for sample in samples), default=0)
+            self.check(name + ".all_model_slots_observed", peak == len(requests), peak_active_requests=peak)
+            self.check(name + ".admitted_and_completed", delta["sparkgap_requests_admitted_total"] == len(requests)
+                and delta["sparkgap_requests_completed_total"] == len(requests)
+                and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
+            self.check(name + ".capacity_bounds", all(sample["sparkgap_active_requests"] <= before["sparkgap_free_request_slots"]
+                and sample["sparkgap_frontend_active_workers"] <= sample["sparkgap_frontend_worker_capacity"]
+                and sample["sparkgap_http_inflight_requests"] <= sample["sparkgap_http_request_capacity"] for sample in samples))
+            self.reclaimed(name, before, after)
+        return results
+
+    def complete(self, record, prompt_tokens=None):
+        body = record.get("body", {})
+        valid = record.get("status") == 200 and "client_error" not in record and "error" not in body and len(body.get("choices", [])) == 1
+        self.check(f"{record['name']}.http_completion", valid, status=record.get("status"), error=record.get("client_error") or body.get("error"))
+        if not valid:
+            raise ValueError(f"{record['name']} did not return a successful completion")
+        choice = body["choices"][0]
+        if prompt_tokens is not None:
+            self.check(f"{record['name']}.prompt_token_count", body.get("usage", {}).get("prompt_tokens") == prompt_tokens,
+                expected=prompt_tokens, observed=body.get("usage", {}).get("prompt_tokens"))
+        self.check(f"{record['name']}.terminal_reason", choice.get("finish_reason") in ("stop", "length", "tool_calls"), reason=choice.get("finish_reason"))
+        return choice
+
+    def pair(self, name, body, prompt_tokens=None):
+        before = self.metrics(name + "-before")
+        baseline = self.request(name + "-json", body)
+        expected = self.complete(baseline, prompt_tokens)
+        between = self.metrics(name + "-between")
+        streamed = self.request(name + "-stream", body, stream=True)
+        self.check(name + ".sse_complete", streamed.get("status") == 200 and not streamed.get("client_error") and streamed.get("done_count") == 1
+            and not streamed.get("incomplete_event") and not streamed.get("sse", {}).get("errors"), status=streamed.get("status"), errors=streamed.get("sse", {}).get("errors"), client_error=streamed.get("client_error"))
+        combined = streamed.get("sse", {})
+        self.check(name + ".greedy_stream_equivalence", comparable_message(expected["message"]) == comparable_message(combined.get("message", {}))
+            and combined.get("finish_reasons") == [expected["finish_reason"]], json_choice=expected, stream=combined)
+        after = self.metrics(name + "-after")
+        if before is not None:
+            self.receipt.setdefault("model_metric_deltas", []).append({"case": name, "json": metric_delta(before, between), "stream": metric_delta(between, after)})
+            self.save()
+        return baseline, streamed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--snapshot", type=Path)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--memory-report", type=Path)
+    parser.add_argument("--gdn-intermediate-dtype", choices=("bfloat16", "float32"), required=True)
+    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--max-response-bytes", type=int, default=64 << 20)
+    parser.add_argument("--cases", nargs="+", choices=("initial_health", "models", "greedy_text", "canonical_chat", "concurrent_four",
+        "thinking_output", "tool_call_and_result", "prefix_full_aligned_branch", "structured_literal_tags", "png_image", "png_full_capacity", "image_cache_identity",
+        "cancellation_and_slot_reuse", "mixed_grammar", "cache_pressure", "conversation_pressure", "kv_pressure", "slow_consumer", "final_health"), help="Run only these named qualification cases.")
+    parser.add_argument("--image-repetitions", type=int, default=1)
+    parser.add_argument("--full-vision-png", type=Path, help="PNG encoding of the pinned bucket_16384 RGB fixture; exercise all 16384 image patches.")
+    parser.add_argument("--mixed-grammar", action="store_true", help="Observe constrained and unconstrained requests in the same decode submission.")
+    parser.add_argument("--image-cache-identity", action="store_true", help="Check cache separation and reuse for identical text with different pinned images.")
+    parser.add_argument("--require-metrics", action="store_true", help="Require native Prometheus metrics and record idle counter deltas.")
+    parser.add_argument("--cache-pressure", action="store_true", help="Publish enough unique prefixes to exceed the exposed snapshot capacity.")
+    parser.add_argument("--conversation-pressure", action="store_true", help="Grow one shared prefix beyond the exposed snapshot capacity.")
+    parser.add_argument("--kv-pressure", action="store_true", help="Reserve context-sized KV extents and observe excess admission rejection.")
+    parser.add_argument("--prepared-context-tokens", type=int, help="Actual server --context value, required for KV pressure and verified against HTTP admission.")
+    parser.add_argument("--slow-consumer-seconds", type=float, default=0, help="Pause one real SSE reader for this duration while checking unrelated progress.")
+    args = parser.parse_args()
+    if args.output.exists() or (args.artifacts.exists() and any(args.artifacts.iterdir())):
+        parser.error("output and artifact destinations must not contain a previous run")
+    if args.timeout <= 0 or args.max_response_bytes <= 0 or args.image_repetitions <= 0:
+        parser.error("timeout, response byte bound and image repetitions must be positive")
+    if args.slow_consumer_seconds < 0 or args.slow_consumer_seconds >= args.timeout:
+        parser.error("slow-consumer duration must be nonnegative and shorter than the request timeout")
+    if (args.cache_pressure or args.conversation_pressure or args.kv_pressure or args.slow_consumer_seconds or args.full_vision_png or args.mixed_grammar or args.image_cache_identity) and not args.require_metrics:
+        parser.error("pressure, slow-consumer, full-vision and mixed-grammar qualification require --require-metrics")
+    if args.kv_pressure and (args.memory_report is None or args.prepared_context_tokens is None):
+        parser.error("KV pressure requires --memory-report and --prepared-context-tokens from the server launch")
+    if args.cases and (("cache_pressure" in args.cases and not args.cache_pressure)
+            or ("conversation_pressure" in args.cases and not args.conversation_pressure)
+            or ("kv_pressure" in args.cases and not args.kv_pressure)
+            or ("png_full_capacity" in args.cases and not args.full_vision_png)
+            or ("mixed_grammar" in args.cases and not args.mixed_grammar)
+            or ("image_cache_identity" in args.cases and not args.image_cache_identity)
+            or ("slow_consumer" in args.cases and not args.slow_consumer_seconds)):
+        parser.error("selected pressure/slow-consumer/full-vision cases require their enabling option")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.artifacts.mkdir(parents=True, exist_ok=True)
+    (args.artifacts / "qualify_server.py").write_bytes(Path(__file__).read_bytes())
+
+    text_fixture = json.loads((ROOT / "tests/frontend/qwen38.json").read_text())
+    image_fixture = json.loads((ROOT / "tests/frontend/qwen38_images.json").read_text())
+    model_id, revision = text_fixture["model_id"], text_fixture["revision"]
+    snapshot = (args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + model_id.replace("/", "--")) / "snapshots" / revision).resolve()
+    assets = {name: digest(snapshot / name) for name in image_fixture["assets"]}
+    if assets != image_fixture["assets"]:
+        raise ValueError("snapshot frontend assets differ from pinned canonical fixtures")
+    import transformers
+    import tokenizers
+    import sparkgap_native
+
+    origin = json.loads(importlib.metadata.distribution("transformers").read_text("direct_url.json"))
+    if origin.get("vcs_info", {}).get("commit_id") != text_fixture["transformers_commit"] or tokenizers.__version__ != text_fixture["tokenizers_version"]:
+        raise ValueError("qualification requires the pinned Transformers/tokenizers preparation environment")
+    tokenizer = transformers.AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
+    package = Path(sparkgap_native.__file__).resolve()
+    extensions = [path for path in package.parent.iterdir() if any(path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)]
+    if len(extensions) != 1:
+        raise ValueError("cannot identify exactly one installed native extension")
+    extension = extensions[0]
+    provenance = {"model_id": model_id, "revision": revision, "snapshot": str(snapshot), "assets_sha256": assets,
+        "transformers_version": transformers.__version__, "transformers_origin": origin, "tokenizers_version": tokenizers.__version__,
+        "python": sys.version, "script_sha256": digest(Path(__file__)), "extension": str(extension), "extension_sha256": digest(extension),
+        "native_source_sha256": {str(path.relative_to(ROOT)): digest(path) for path in sorted((ROOT / "native/src").rglob("*.rs"))},
+        "cargo_sha256": {name: digest(ROOT / "native" / name) for name in ("Cargo.toml", "Cargo.lock")},
+        "gdn_intermediate_dtype": args.gdn_intermediate_dtype, "command": sys.argv}
+    if args.memory_report:
+        provenance["memory_report"] = {"path": str(args.memory_report.resolve()), "sha256": digest(args.memory_report), "content": json.loads(args.memory_report.read_text())}
+    run = Run(args, provenance)
+
+    def body(messages, **extra):
+        return {"model": model_id, "messages": messages, "temperature": 0, "seed": 1234, "max_tokens": 32,
+            "enable_thinking": False, "add_generation_prompt": True, **extra}
+
+    def prompt_ids(request):
+        options = {**request.get("chat_template_kwargs", {}), "enable_thinking": request.get("enable_thinking", False),
+            "add_generation_prompt": request.get("add_generation_prompt", True)}
+        for key in ("tools", "reasoning_effort", "continue_final_message"):
+            if key in request:
+                options[key] = request[key]
+        messages = copy.deepcopy(request["messages"])
+        for message in messages:
+            for call in message.get("tool_calls", []):
+                function = call.get("function", {})
+                if isinstance(function.get("arguments"), str):
+                    function["arguments"] = json.loads(function["arguments"])
+        return tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False, **options)
+
+    def health(name):
+        result = run.request(name, path="/health")
+        run.check(name, result.get("status") == 200 and result.get("body", {}).get("status") == "ok", result=result)
+
+    run.case("initial_health", lambda: health("health-before"))
+    def models():
+        result = run.request("models", path="/v1/models")
+        run.check("exact_model_is_served", result.get("status") == 200 and model_id in [model.get("id") for model in result.get("body", {}).get("data", [])], result=result)
+    run.case("models", models)
+    capital = body([{"role": "user", "content": "What is the capital of France? Answer with only the city name."}], max_tokens=16)
+    def text():
+        baseline, _ = run.pair("greedy-text", capital, len(prompt_ids(capital)))
+        run.check("capital_answer", "paris" in baseline["body"]["choices"][0]["message"].get("content", "").casefold(), response=baseline["body"])
+    run.case("greedy_text", text)
+    fixture_case = next(case for case in text_fixture["cases"] if case["name"] == "thinking_disabled")
+    chat = body(copy.deepcopy(fixture_case["messages"]), chat_template_kwargs=fixture_case["options"])
+    run.case("canonical_chat", lambda: run.pair("canonical-chat", chat, len(prompt_ids(chat))))
+
+    def concurrent_requests():
+        requests = [body([{"role": "user", "content": f"Write a short factual paragraph about {subject}."}], max_tokens=64)
+            for subject in ("Saturn", "photosynthesis", "volcanoes", "binary search")]
+        expected = [run.complete(run.request(f"concurrent-baseline-{i}", request), len(prompt_ids(request))) for i, request in enumerate(requests)]
+        results = run.concurrent("concurrent-four", requests)
+        run.check("four_simultaneous_requests_admitted", all(result.get("status") == 200 and not result.get("client_error") for result in results), statuses=[result.get("status") for result in results])
+        run.check("four_client_intervals_overlap", max(result["started_monotonic"] for result in results) < min(result["finished_monotonic"] for result in results), intervals=[[result["started_monotonic"], result["finished_monotonic"]] for result in results])
+        for i, result in enumerate(results):
+            try:
+                observed = run.complete(result, len(prompt_ids(requests[i])))
+                run.check(f"concurrent-{i}.greedy_equivalence", comparable_message(expected[i]["message"]) == comparable_message(observed["message"])
+                    and expected[i]["finish_reason"] == observed["finish_reason"], expected=expected[i], observed=observed)
+            except ValueError:
+                pass
+    run.case("concurrent_four", concurrent_requests)
+
+    def thinking():
+        request = body([{"role": "user", "content": "What is 7 times 8? Give a brief explanation and the answer."}], enable_thinking=True, max_tokens=256)
+        response, _ = run.pair("thinking-output", request, len(prompt_ids(request)))
+        message = response["body"]["choices"][0]["message"]
+        run.check("thinking_has_separate_reasoning", bool(message.get("reasoning_content")), message=message)
+        run.check("thinking_answer", "56" in message.get("content", ""), message=message)
+    run.case("thinking_output", thinking)
+
+    def tools():
+        schema = [{"type": "function", "function": {"name": "get_weather", "description": "Get the current weather for a city.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": False}}}]
+        request = body([{"role": "user", "content": "Use get_weather to find the current weather in Paris. Do not guess."}], tools=schema, max_tokens=192)
+        response, _ = run.pair("tool-call", request, len(prompt_ids(request)))
+        choice = response["body"]["choices"][0]
+        calls = choice["message"].get("tool_calls", [])
+        valid = len(calls) == 1 and calls[0].get("function", {}).get("name") == "get_weather"
+        run.check("tool_call_is_present", valid and choice["finish_reason"] == "tool_calls", choice=choice)
+        if valid:
+            arguments = json.loads(calls[0]["function"]["arguments"])
+            run.check("tool_call_arguments", arguments == {"city": "Paris"}, arguments=arguments)
+            messages = copy.deepcopy(request["messages"]) + [choice["message"], {"role": "tool", "tool_call_id": calls[0]["id"], "content": '{"city":"Paris","temperature_c":17,"condition":"sunny"}'}]
+            continuation = body(messages, tools=schema, max_tokens=96)
+            try:
+                answer, _ = run.pair("tool-result-continuation", continuation, len(prompt_ids(continuation)))
+                run.check("tool_result_used", "17" in answer["body"]["choices"][0]["message"].get("content", ""), response=answer["body"])
+            except ValueError:
+                pass
+        fixture = next(case for case in text_fixture["cases"] if case["name"] == "tool_results")
+        request = body(copy.deepcopy(fixture["messages"]), tools=fixture["options"]["tools"], max_tokens=96)
+        run.pair("canonical-tool-results", request, len(prompt_ids(request)))
+    run.case("tool_call_and_result", tools)
+
+    def aligned_request(group, target):
+        for repeats in range(target + 64):
+            content = f"Cache qualification {group}. Read this context and answer DONE.\nContext:" + " apple" * repeats + "\nAnswer:"
+            request = body([{"role": "user", "content": content}], max_tokens=1)
+            ids = prompt_ids(request)
+            if len(ids) == target:
+                return request, ids
+        raise ValueError(f"cannot construct exact {target}-token canonical chat prompt")
+
+    def prefixes():
+        def measured(name, request, ids):
+            before = run.metrics(name + "-before")
+            completion = run.complete(run.request(name, request), len(ids))
+            after = run.metrics(name + "-after")
+            delta = metric_delta(before, after) if before is not None else None
+            if delta is not None:
+                run.receipt.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
+                run.save()
+            return completion, delta
+
+        def restored(name, delta, *, full=False):
+            if delta is not None:
+                expected_kind, absent_kind = ("resume", "prefill") if full else ("prefill", "resume")
+                run.check(name + ".cache_restore_observed", delta["sparkgap_cache_hits_total"] == 1
+                    and delta["sparkgap_cache_reused_tokens_total"] == 128
+                    and delta['sparkgap_graph_launches_total{kind="restore"}'] == 1
+                    and delta['sparkgap_graph_launches_total{kind="init"}'] == 0, delta=delta)
+                run.check(name + ".suffix_graph_observed", delta[f'sparkgap_graph_launches_total{{kind="{expected_kind}"}}'] == 1
+                    and delta[f'sparkgap_graph_launches_total{{kind="{absent_kind}"}}'] == 0, delta=delta)
+
+        full, full_ids = aligned_request("full", 128)
+        seed, _ = measured("prefix-full-seed", full, full_ids)
+        replay, delta = measured("prefix-full-reuse", full, full_ids)
+        restored("prefix-full-reuse", delta, full=True)
+        run.check("full_prompt_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=128,
+            terminal_candidate_tokens=128, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
+        partial, partial_ids = aligned_request("branch", 160)
+        seed, _ = measured("prefix-aligned-seed", partial, partial_ids)
+        replay, delta = measured("prefix-aligned-reuse", partial, partial_ids)
+        restored("prefix-aligned-reuse", delta)
+        run.check("aligned_prefix_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=160,
+            terminal_candidate_tokens=128, tail_tokens=32, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
+        for name in ("A", "B"):
+            branch = copy.deepcopy(partial)
+            branch["messages"][0]["content"] += f"\nBranch {name}: return {name}."
+            ids = prompt_ids(branch)
+            shared = common_prefix(partial_ids, ids)
+            run.check(f"branch-{name}.aligned_shared_prefix", shared >= 128 and ids != partial_ids, common_prefix_tokens=shared, reusable_boundary_tokens=128,
+                seed_token_ids=partial_ids, branch_token_ids=ids)
+            first, delta = measured(f"prefix-branch-{name}", branch, ids)
+            restored(f"prefix-branch-{name}", delta)
+            repeated, _ = measured(f"prefix-branch-{name}-repeat", branch, ids)
+            run.check(f"branch-{name}.repeat_equivalence", comparable_message(first["message"]) == comparable_message(repeated["message"]), first=first, repeated=repeated)
+    run.case("prefix_full_aligned_branch", prefixes)
+
+    def structured():
+        literal = "<think>analysis</think><tool_call><function=lookup></function></tool_call>"
+        expected = {"literal": literal, "ok": True}
+        request = body([{"role": "user", "content": "Return exactly the object required by the JSON schema."}], max_tokens=256,
+            response_format={"type": "json_schema", "json_schema": {"name": "literal_tags", "strict": True,
+                "schema": {"type": "object", "properties": {"literal": {"enum": [literal]}, "ok": {"enum": [True]}}, "required": ["literal", "ok"], "additionalProperties": False}}})
+        response, stream = run.pair("structured-literal-tags", request, len(prompt_ids(request)))
+        message = response["body"]["choices"][0]["message"]
+        decoded = json.loads(message["content"])
+        run.check("structured_literal_tags_are_verbatim", decoded == expected and not message.get("reasoning_content") and not message.get("tool_calls"), expected=expected, observed=decoded)
+        run.check("structured_stream_json_is_valid", json.loads(stream.get("sse", {}).get("message", {}).get("content", "")) == expected)
+    run.case("structured_literal_tags", structured)
+
+    def image():
+        fixture = next(case for case in image_fixture["cases"] if case["name"] == "png_RGB")
+        source = ROOT / "tests/frontend" / fixture["inputs"][0]["png"]
+        if digest(source) != fixture["inputs"][0]["sha256"]:
+            raise ValueError("PNG fixture bytes differ from canonical processor receipt")
+        messages = copy.deepcopy(fixture["messages"])
+        encoded = base64.b64encode(source.read_bytes()).decode()
+        for message in messages:
+            if isinstance(message.get("content"), list):
+                for i, part in enumerate(message["content"]):
+                    if part.get("type") == "image":
+                        message["content"][i] = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}}
+        request = body(messages, max_tokens=32)
+        tokens = len(prompt_ids(request)) + sum(t * h * w // 4 - 1 for t, h, w in fixture["grid_thw"])
+        run.receipt["provenance"]["png_fixture"] = {"path": str(source), "sha256": digest(source), "canonical_processor_hashes": fixture["hashes"], "grid_thw": fixture["grid_thw"]}
+        for repeat in range(args.image_repetitions):
+            run.pair("png-image" if repeat == 0 else f"png-image-repeat-{repeat}", request, tokens)
+    run.case("png_image", image)
+
+    def full_vision():
+        from PIL import Image
+
+        fixture = next(case for case in image_fixture["cases"] if case["name"] == "bucket_16384")
+        source = args.full_vision_png.resolve()
+        descriptor = fixture["inputs"][0]
+        with Image.open(source) as image:
+            if image.format != "PNG" or image.size != (descriptor["width"], descriptor["height"]):
+                raise ValueError("full-vision PNG geometry differs from the pinned fixture")
+            rgb_hash = hashlib.sha256(image.convert("RGB").tobytes()).hexdigest()
+        if rgb_hash != fixture["input_rgb_sha256"][0] or fixture["grid_thw"] != [[1, 128, 128]]:
+            raise ValueError("full-vision RGB content or patch geometry differs from the pinned fixture")
+        messages = copy.deepcopy(fixture["messages"])
+        encoded = base64.b64encode(source.read_bytes()).decode()
+        image_count = 0
+        for message in messages:
+            for index, part in enumerate(message["content"]):
+                if part.get("type") == "image":
+                    message["content"][index] = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}}
+                    image_count += 1
+        if image_count != 1:
+            raise ValueError("full-vision fixture must contain exactly one image")
+        request = body(messages, max_tokens=32)
+        tokens = len(prompt_ids(request)) + 4096 - 1
+        run.receipt["provenance"]["full_vision_fixture"] = {"name": fixture["name"],
+            "path": str(source), "sha256": digest(source), "input_rgb_sha256": rgb_hash,
+            "canonical_processor_hashes": fixture["hashes"], "grid_thw": fixture["grid_thw"],
+            "patches": 16384, "features": 4096, "prompt_tokens": tokens}
+        before = run.metrics("full-vision-before")
+        run.pair("full-vision", request, tokens)
+        after = run.metrics("full-vision-after")
+        delta = metric_delta(before, after)
+        run.check("full_vision.completes_both_encodes", delta['sparkgap_graph_launches_total{kind="vision"}'] == 2
+            and delta["sparkgap_requests_admitted_total"] == delta["sparkgap_requests_completed_total"] == 2
+            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+            delta=delta, patches_per_image=16384, features_per_image=4096)
+        run.reclaimed("full-vision", before, after)
+    if args.full_vision_png:
+        run.case("png_full_capacity", full_vision)
+
+    def image_cache_identity():
+        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        requests, fixtures = [], []
+        for name in ("png_RGB", "png_L"):
+            fixture = next(case for case in image_fixture["cases"] if case["name"] == name)
+            source = ROOT / "tests/frontend" / fixture["inputs"][0]["png"]
+            if digest(source) != fixture["inputs"][0]["sha256"]:
+                raise ValueError("image identity fixture PNG differs from the pinned input")
+            messages = copy.deepcopy(fixture["messages"])
+            encoded = base64.b64encode(source.read_bytes()).decode()
+            for message in messages:
+                for index, part in enumerate(message["content"]):
+                    if part.get("type") == "text":
+                        part["text"] = f"Image identity {nonce}. " + part["text"]
+                    elif part.get("type") == "image":
+                        message["content"][index] = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}}
+            requests.append(body(messages, max_tokens=8))
+            fixtures.append(fixture)
+        first, second = (prompt_ids(request) for request in requests)
+        if first != second or fixtures[0]["grid_thw"] != fixtures[1]["grid_thw"]:
+            raise ValueError("image identity requests must have identical text tokens and image geometry")
+        if first.count(248056) != 1 or first.index(248056) >= 64:
+            raise ValueError("image identity must distinguish the first cache block")
+        if fixtures[0]["input_rgb_sha256"] == fixtures[1]["input_rgb_sha256"]:
+            raise ValueError("image identity requests require different decoded pixels")
+        grid = fixtures[0]["grid_thw"][0]
+        tokens = len(first) + grid[0] * grid[1] * grid[2] // 4 - 1
+        boundary = tokens // 64 * 64
+        if not boundary:
+            raise ValueError("image identity requests must publish a complete cache block")
+        run.receipt["provenance"]["image_identity_fixtures"] = [
+            {"name": fixture["name"], "inputs": fixture["inputs"], "grid_thw": fixture["grid_thw"],
+                "input_rgb_sha256": fixture["input_rgb_sha256"], "canonical_processor_hashes": fixture["hashes"]}
+            for fixture in fixtures]
+        before = run.metrics("image-identity-before")
+        last = before
+        cold = {}
+        for repeated in (False, True):
+            for index, request in enumerate(requests):
+                name = f"image-identity-{index}-{'repeat' if repeated else 'cold'}"
+                choice = run.complete(run.request(name, request), tokens)
+                after = run.metrics(name + "-after")
+                delta = metric_delta(last, after)
+                run.check(name + ".conditioned_prefix", delta["sparkgap_cache_hits_total"] == int(repeated)
+                    and delta["sparkgap_cache_misses_total"] == int(not repeated)
+                    and delta["sparkgap_cache_reused_tokens_total"] == (boundary if repeated else 0)
+                    and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(repeated)
+                    and delta['sparkgap_graph_launches_total{kind="vision"}'] == 1
+                    and delta["sparkgap_snapshot_publications_total"] == int(not repeated),
+                    delta=delta, checkpoint_tokens=boundary)
+                if repeated:
+                    run.check(name + ".greedy_cache_equivalence",
+                        comparable_message(choice["message"]) == comparable_message(cold[index]["message"])
+                        and choice["finish_reason"] == cold[index]["finish_reason"], expected=cold[index], observed=choice)
+                else:
+                    cold[index] = choice
+                run.reclaimed(name, before, after)
+                last = after
+        delta = metric_delta(before, last)
+        run.check("image_identity.all_requests_complete", delta["sparkgap_requests_admitted_total"] == 4
+            and delta["sparkgap_requests_completed_total"] == 4
+            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+            delta=delta)
+    if args.image_cache_identity:
+        run.case("image_cache_identity", image_cache_identity)
+
+    def mixed_grammar():
+        literal = "alpha " * 512
+        constrained = body([{"role": "user", "content": "Return the exact string required by the response schema."}],
+            response_format={"type": "json_schema", "json_schema": {"name": "mixed_grammar", "strict": True,
+                "schema": {"enum": [literal]}}}, max_tokens=1024)
+        before = run.metrics("mixed-grammar-before")
+        progress = StreamProgress()
+        cancel = threading.Event()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run.request, "mixed-grammar-constrained", constrained,
+                stream=True, progress=progress, cancel_event=cancel)
+            try:
+                if not progress.wait_after(0, min(args.timeout, 30)):
+                    raise ValueError("constrained generation did not produce visible output")
+                plain = run.complete(run.request("mixed-grammar-plain", capital), len(prompt_ids(capital)))
+                constrained_result = future.result()
+            except BaseException:
+                cancel.set()
+                raise
+        combined = constrained_result.get("sse", {})
+        run.check("mixed_grammar.constrained_stream_complete", constrained_result.get("status") == 200
+            and constrained_result.get("done_count") == 1 and not constrained_result.get("client_error")
+            and not constrained_result.get("incomplete_event") and not combined.get("errors")
+            and combined.get("finish_reasons") == ["stop"], response=constrained_result)
+        content = combined.get("message", {}).get("content", "")
+        try:
+            decoded = json.loads(content)
+        except json.JSONDecodeError:
+            decoded = None
+        run.check("mixed_grammar.exact_constrained_output", decoded == literal, content=content)
+        run.check("mixed_grammar.unconstrained_answer", "paris" in plain["message"].get("content", "").casefold(), choice=plain)
+        after = run.metrics("mixed-grammar-after")
+        delta = metric_delta(before, after)
+        run.check("mixed_grammar.shared_decode_observed", delta["sparkgap_mixed_grammar_decode_steps_total"] > 0,
+            delta=delta)
+        run.check("mixed_grammar.one_submission_inflight", after["sparkgap_constrained_max_inflight"] == 1,
+            observed_maximum=after["sparkgap_constrained_max_inflight"])
+        run.check("mixed_grammar.both_requests_complete", delta["sparkgap_requests_admitted_total"] == 2
+            and delta["sparkgap_requests_completed_total"] == 2
+            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+            delta=delta)
+        run.reclaimed("mixed-grammar", before, after)
+    if args.mixed_grammar:
+        run.case("mixed_grammar", mixed_grammar)
+
+    def cancellation():
+        request = body([{"role": "user", "content": "List every integer from 1 through 10000 in order, separated by commas. Do not summarize or stop early."}], max_tokens=2048)
+        before = run.metrics("cancel-before")
+        cancelled = run.request("cancel-live-stream", request, stream=True, cancel=True)
+        run.check("client_disconnected_after_visible_output", cancelled.get("status") == 200 and cancelled.get("cancelled") is True and cancelled.get("done_count") == 0,
+            visible_seconds=cancelled.get("first_visible_delta_seconds"), received_events=len(cancelled.get("events", [])), client_error=cancelled.get("client_error"))
+        after = run.metrics("cancel-after")
+        if before is not None:
+            delta = metric_delta(before, after)
+            run.check("disconnect_cancels_active_generation", delta["sparkgap_requests_admitted_total"] == 1
+                and delta["sparkgap_requests_cancelled_total"] == 1 and delta["sparkgap_requests_completed_total"] == 0,
+                delta=delta)
+            run.reclaimed("cancel", before, after)
+        health("health-after-cancel")
+        for index in range(4):
+            run.complete(run.request(f"after-cancel-{index}", capital), len(prompt_ids(capital)))
+        reused = run.metrics("slot-reuse-after")
+        if after is not None:
+            delta = metric_delta(after, reused)
+            run.check("reclaimed_slots_accept_four_generations", delta["sparkgap_requests_admitted_total"] == 4
+                and delta["sparkgap_requests_completed_total"] == 4
+                and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
+            run.reclaimed("slot-reuse", before, reused)
+    run.case("cancellation_and_slot_reuse", cancellation)
+
+    def cache_pressure():
+        before = run.metrics("pressure-before")
+        capacity = resource_totals(before)["snapshots"]
+        if not 1 <= capacity <= 256:
+            raise ValueError(f"snapshot pressure sweep requires 1..256 slots; server exposes {capacity}")
+        if resource_totals(before)["pages"] < 2 * capacity + 1:
+            raise ValueError("KV capacity cannot isolate snapshot pressure with 128-token prefixes")
+        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        inputs = [aligned_request(f"pressure-{nonce}-{index}", 128) for index in range(capacity + 1)]
+        if len({tuple(ids[:64]) for _, ids in inputs}) != len(inputs):
+            raise ValueError("snapshot pressure inputs share a complete cache block")
+        first = None
+        last = before
+        for index, (request, ids) in enumerate(inputs):
+            result = run.complete(run.request(f"pressure-fill-{index}", request), len(ids))
+            first = result if first is None else first
+            after = run.metrics(f"pressure-fill-{index}-after")
+            delta = metric_delta(last, after)
+            run.check(f"pressure-fill-{index}.unique_publication", delta["sparkgap_cache_misses_total"] == 1
+                and delta["sparkgap_cache_hits_total"] == 0 and delta["sparkgap_snapshot_publications_total"] == 1
+                and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 1, delta=delta)
+            last = after
+        delta = metric_delta(before, last)
+        run.check("snapshot_capacity_is_exercised", last["sparkgap_cached_checkpoints"] == capacity
+            and last["sparkgap_free_snapshots"] == 0 and delta["sparkgap_snapshot_evictions_total"] > 0
+            and delta["sparkgap_snapshot_publications_total"] == capacity + 1,
+            capacity=capacity, published_prefixes=len(inputs), delta=delta)
+        run.reclaimed("pressure-fill", before, last)
+        request, ids = inputs[0]
+        repeated = run.complete(run.request("pressure-evicted-prefix", request), len(ids))
+        after = run.metrics("pressure-evicted-prefix-after")
+        delta = metric_delta(last, after)
+        run.check("oldest_prefix_was_evicted", delta["sparkgap_cache_misses_total"] == 1
+            and delta["sparkgap_cache_hits_total"] == 0 and delta['sparkgap_graph_launches_total{kind="init"}'] == 1
+            and delta['sparkgap_graph_launches_total{kind="restore"}'] == 0
+            and delta["sparkgap_snapshot_evictions_total"] == delta["sparkgap_snapshot_publications_total"] == 1, delta=delta)
+        run.check("evicted_prefix_cold_replay_equivalence", comparable_message(first["message"]) == comparable_message(repeated["message"])
+            and first["finish_reason"] == repeated["finish_reason"], expected=first, observed=repeated)
+        delta = metric_delta(before, after)
+        run.check("pressure_requests_complete_without_failure", delta["sparkgap_requests_admitted_total"] == capacity + 2
+            and delta["sparkgap_requests_completed_total"] == capacity + 2
+            and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
+        run.reclaimed("pressure-evicted-prefix", before, after)
+    if args.cache_pressure:
+        run.case("cache_pressure", cache_pressure)
+
+    def conversation_pressure():
+        before = run.metrics("conversation-before")
+        capacity = resource_totals(before)["snapshots"]
+        if not 2 <= capacity <= 256:
+            raise ValueError(f"conversation snapshot pressure requires 2..256 slots; server exposes {capacity}")
+        turns = capacity + 3
+        if resource_totals(before)["pages"] < turns + 3:
+            raise ValueError("KV capacity cannot isolate conversation snapshot pressure")
+        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        request, ids = aligned_request(f"conversation-{nonce}", 160)
+        previous_boundary = 0
+        last = before
+        for turn in range(turns):
+            if turn:
+                previous = ids
+                content = request["messages"][0]["content"]
+                if not content.endswith("\nAnswer:"):
+                    raise ValueError("conversation fixture has no append boundary")
+                request["messages"][0]["content"] = content[:-len("\nAnswer:")] + " apple" * 64 + "\nAnswer:"
+                ids = prompt_ids(request)
+                if len(ids) != len(previous) + 64 or common_prefix(previous, ids) < previous_boundary:
+                    raise ValueError("appended conversation did not preserve its entire cached prefix")
+            run.complete(run.request(f"conversation-turn-{turn}", request), len(ids))
+            after = run.metrics(f"conversation-turn-{turn}-after")
+            delta = metric_delta(last, after)
+            run.check(f"conversation-turn-{turn}.prefix_and_publication",
+                delta["sparkgap_cache_hits_total"] == int(turn > 0)
+                and delta["sparkgap_cache_misses_total"] == int(turn == 0)
+                and delta["sparkgap_cache_reused_tokens_total"] == previous_boundary
+                and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(turn > 0)
+                and delta['sparkgap_graph_launches_total{kind="prefill"}'] == 1
+                and delta["sparkgap_snapshot_publications_total"] == 1,
+                prompt_tokens=len(ids), restored_tokens=previous_boundary, delta=delta)
+            run.reclaimed(f"conversation-turn-{turn}", before, after)
+            previous_boundary = len(ids) // 64 * 64
+            last = after
+        delta = metric_delta(before, last)
+        run.check("conversation_exceeds_snapshot_capacity",
+            delta["sparkgap_requests_admitted_total"] == turns
+            and delta["sparkgap_requests_completed_total"] == turns
+            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0
+            and delta["sparkgap_snapshot_evictions_total"] >= turns - capacity
+            and last["sparkgap_cached_checkpoints"] == capacity
+            and last["sparkgap_cached_kv_pages"] == previous_boundary // 64,
+            turns=turns, snapshot_capacity=capacity, final_cached_tokens=previous_boundary, delta=delta)
+        run.complete(run.request("conversation-repeat", request), len(ids))
+        after = run.metrics("conversation-repeat-after")
+        delta = metric_delta(last, after)
+        run.check("conversation_repeat_restores_newest_checkpoint",
+            delta["sparkgap_cache_hits_total"] == 1
+            and delta["sparkgap_cache_reused_tokens_total"] == previous_boundary
+            and delta['sparkgap_graph_launches_total{kind="restore"}'] == 1
+            and delta['sparkgap_graph_launches_total{kind="prefill"}'] == 1
+            and delta["sparkgap_snapshot_publications_total"] == 0,
+            restored_tokens=previous_boundary, delta=delta)
+        run.reclaimed("conversation-repeat", before, after)
+    if args.conversation_pressure:
+        run.case("conversation_pressure", conversation_pressure)
+
+    def kv_pressure():
+        before = run.metrics("kv-before")
+        geometry = kv_pressure_geometry(provenance["memory_report"]["content"], before, args.prepared_context_tokens)
+        run.receipt["kv_pressure_geometry"] = geometry
+        run.save()
+        count = geometry["holding_requests"]
+        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+
+        def reserved_request(index, literal):
+            request = body([{"role": "user", "content": f"KV reservation {nonce} {index}. Follow the response schema."}],
+                response_format={"type": "json_schema", "json_schema": {"name": "kv_reservation", "strict": True,
+                    "schema": {"enum": [literal]}}})
+            tokens = len(prompt_ids(request))
+            if tokens >= 64 or tokens >= geometry["context_tokens"]:
+                raise ValueError("KV pressure requires a prompt shorter than one cache block and the context limit")
+            request["max_tokens"] = geometry["context_tokens"] - tokens
+            return request
+
+        boundary = reserved_request("context-boundary", "x")
+        boundary["max_tokens"] += 1
+        invalid = run.request("kv-context-plus-one", boundary, stream=True, cancel=True)
+        valid_boundary = invalid.get("status") == 400 and invalid.get("body", {}).get("error", {}).get("message") == "prompt plus output limit exceeds prepared context capacity"
+        run.check("kv.prepared_context_upper_bound", valid_boundary, response=invalid)
+        if not valid_boundary:
+            run.metrics("kv-context-probe-cleanup")
+            raise ValueError("configured context upper bound was not confirmed by HTTP admission")
+
+        progress = [StreamProgress() for _ in range(count)]
+        cancel = threading.Event()
+        futures = []
+        results = []
+        expected_error = "live request resources are exhausted or awaiting GPU retirement"
+
+        def observed(name, predicate):
+            deadline = time.monotonic() + min(args.timeout, 30)
+            attempt = 0
+            while True:
+                metrics = run.metrics(f"{name}-{attempt}", wait_idle=False)
+                if predicate(metrics):
+                    return metrics
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{name}: native metrics did not reach the required admission state")
+                attempt += 1
+                time.sleep(0.01)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
+            try:
+                for index in range(count):
+                    future = pool.submit(run.request, f"kv-holder-{index}", reserved_request(index, "x " * 4096),
+                        stream=True, progress=progress[index], cancel_event=cancel)
+                    futures.append(future)
+                    if not progress[index].wait_after(0, min(args.timeout, 30)):
+                        raise ValueError(f"KV holder {index} did not produce visible output")
+                held = observed("kv-held", lambda metrics: metrics["sparkgap_active_requests"] == count
+                    and resource_totals(metrics)["pages"] == geometry["unreserved_pages"])
+                run.check("kv.context_reservations_observed", held["sparkgap_free_request_slots"] == 4 - count
+                    and resource_totals(held)["snapshots"] == resource_totals(before)["snapshots"] - count,
+                    geometry=geometry, held=held)
+                rejected = run.request("kv-rejected-json", reserved_request("rejected-json", "x"))
+                run.check("kv.excess_json_admission_rejected", rejected.get("status") == 503
+                    and rejected.get("body", {}).get("error", {}).get("message") == expected_error,
+                    status=rejected.get("status"), response=rejected.get("body"), client_error=rejected.get("client_error"))
+                rejected_stream = run.request("kv-rejected-stream", reserved_request("rejected-stream", "x"), stream=True)
+                run.check("kv.excess_stream_admission_rejected", rejected_stream.get("status") == 200
+                    and rejected_stream.get("sse", {}).get("errors") == [{"message": expected_error}]
+                    and rejected_stream.get("done_count") == 0 and not rejected_stream.get("client_error")
+                    and not rejected_stream.get("sse", {}).get("message", {}).get("content"), response=rejected_stream)
+                rejected_state = observed("kv-rejected", lambda metrics:
+                    metrics["sparkgap_requests_failed_total"] >= before["sparkgap_requests_failed_total"] + 2)
+                delta = metric_delta(before, rejected_state)
+                run.check("kv.rejection_preserves_existing_reservations", rejected_state["sparkgap_active_requests"] == count
+                    and rejected_state["sparkgap_free_request_slots"] == 4 - count
+                    and rejected_state["sparkgap_retiring_request_slots"] == rejected_state["sparkgap_pending_requests"] == 0
+                    and rejected_state["sparkgap_free_kv_pages"] == geometry["unreserved_pages"]
+                    and rejected_state["sparkgap_cached_kv_pages"] == 0
+                    and rejected_state["sparkgap_free_snapshots"] == resource_totals(before)["snapshots"] - count
+                    and delta["sparkgap_requests_admitted_total"] == count and delta["sparkgap_requests_failed_total"] == 2
+                    and delta["sparkgap_requests_completed_total"] == delta["sparkgap_requests_cancelled_total"] == 0
+                    and delta["sparkgap_cache_hits_total"] == delta["sparkgap_cache_reused_tokens_total"] == 0,
+                    delta=delta, metrics=rejected_state)
+                checkpoints = [observer.count() for observer in progress]
+                for index, observer in enumerate(progress):
+                    continued = observer.wait_after(checkpoints[index], min(args.timeout, 10))
+                    run.check(f"kv.holder-{index}-progresses-after-rejection", continued,
+                        visible_events_before=checkpoints[index], visible_events_after=observer.count())
+                health("health-under-kv-pressure")
+            finally:
+                cancel.set()
+                results = [future.result() for future in futures]
+                after = run.metrics("kv-cancelled")
+                run.reclaimed("kv-cancellation", before, after)
+        for index, result in enumerate(results):
+            run.check(f"kv.holder-{index}-cancelled-without-error", result.get("status") == 200
+                and result.get("cancelled") is True and result.get("done_count") == 0
+                and not result.get("client_error") and not result.get("sse", {}).get("errors")
+                and not result.get("sse", {}).get("finish_reasons"), response=result,
+                received_visible_events=progress[index].count())
+        delta = metric_delta(before, after)
+        run.check("kv.all_holders_retired_after_cancellation", delta["sparkgap_requests_admitted_total"] == count
+            and delta["sparkgap_requests_cancelled_total"] == count and delta["sparkgap_requests_failed_total"] == 2
+            and delta["sparkgap_requests_completed_total"] == delta["sparkgap_snapshot_publications_total"] == 0, delta=delta)
+        answer = run.complete(run.request("kv-followup", capital), len(prompt_ids(capital)))
+        run.check("kv.healthy_followup_answer", "paris" in answer["message"].get("content", "").casefold(), choice=answer)
+        final = run.metrics("kv-followup-after")
+        delta = metric_delta(after, final)
+        run.check("kv.reclaimed_resources_serve_followup", delta["sparkgap_requests_admitted_total"] == delta["sparkgap_requests_completed_total"] == 1
+            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0, delta=delta)
+        run.reclaimed("kv-followup", before, final)
+        health("health-after-kv-pressure")
+    if args.kv_pressure:
+        run.case("kv_pressure", kv_pressure)
+
+    def slow_consumer():
+        literal = "x " * 4096
+        request = body([{"role": "user", "content": "Return the exact JSON string required by the schema."}], max_tokens=8192,
+            response_format={"type": "json_schema", "json_schema": {"name": "stalled_reader", "strict": True,
+                "schema": {"enum": [literal]}}})
+        before = run.metrics("slow-reader-before")
+        paused, resume = threading.Event(), threading.Event()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run.request, "slow-reader-stream", request, stream=True, cancel=True,
+                paused=paused, resume=resume, receive_buffer=1024)
+            try:
+                deadline = time.monotonic() + args.timeout
+                while not paused.wait(timeout=0.02):
+                    if future.done():
+                        raise ValueError(f"SSE reader ended before visible output: {future.result()}")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("SSE reader did not reach visible output")
+                started = time.monotonic()
+                held = run.metrics("slow-reader-held", wait_idle=False)
+                followup = run.request("progress-with-stalled-reader", capital)
+                answer = run.complete(followup, len(prompt_ids(capital)))
+                run.check("unrelated_request_completes_with_stalled_reader", "paris" in answer["message"].get("content", "").casefold()
+                    and not future.done(), choice=answer, elapsed_seconds=followup["elapsed_seconds"])
+                remaining = args.slow_consumer_seconds - (time.monotonic() - started)
+                if remaining > 0:
+                    time.sleep(remaining)
+                preclose = run.metrics("slow-reader-preclose", wait_idle=False)
+            finally:
+                resume.set()
+            cancelled = future.result()
+        after = run.metrics("slow-reader-after")
+        delta = metric_delta(before, after)
+        held_delta = metric_delta(before, preclose)
+        run.check("stalled_reader_observed_during_other_progress", held["sparkgap_http_inflight_requests"] >= 1
+            and cancelled.get("paused_read_seconds", 0) >= args.slow_consumer_seconds
+            and cancelled.get("cancelled") is True and cancelled.get("done_count") == 0, stream=cancelled)
+        run.check("stalled_reader_cancelled_and_other_request_completed", delta["sparkgap_requests_admitted_total"] == 2
+            and delta["sparkgap_requests_cancelled_total"] == 1 and delta["sparkgap_requests_completed_total"] == 1,
+            delta=delta, preclose_delta=held_delta)
+        run.receipt["slow_consumer_observation"] = {
+            "native_output_backpressure_observed": held_delta["sparkgap_requests_failed_total"] > 0
+                and held_delta["sparkgap_requests_cancelled_total"] > 0,
+            "preclose_delta": held_delta, "final_delta": delta,
+            "paused_read_seconds": cancelled.get("paused_read_seconds"),
+            "socket_receive_buffer_bytes": cancelled.get("socket_receive_buffer_bytes")}
+        run.reclaimed("stalled-reader", before, after)
+        health("health-after-stalled-reader")
+    if args.slow_consumer_seconds:
+        run.case("slow_consumer", slow_consumer)
+    run.case("final_health", lambda: health("health-after"))
+    run.check("native_sources_unchanged_during_run", all(digest(ROOT / name) == expected for name, expected in provenance["native_source_sha256"].items()))
+    run.receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
+    run.receipt["summary"] = {"requests": len(run.receipt["requests"]), "checks": len(run.receipt["checks"]),
+        "failed_checks": sum(not check["passed"] for check in run.receipt["checks"]), "case_errors": len(run.receipt["case_errors"])}
+    run.receipt["passed"] = run.receipt["summary"]["failed_checks"] == 0 and not run.receipt["case_errors"]
+    run.save()
+    print(json.dumps({"output": str(args.output), **run.receipt["summary"], "passed": run.receipt["passed"]}), flush=True)
+    return 0 if run.receipt["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
