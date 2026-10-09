@@ -665,11 +665,7 @@ fn run_loop<'a, M: ModelContract>(
                     }
                 }
             }
-            for handle in stopped {
-                scheduler.cancel(handle)?;
-                active[handle.slot as usize] = None;
-                admissions[handle.slot as usize] = None;
-            }
+            cancel_stopped::<M>(&stopped, scheduler, active, &mut admissions)?;
             progress = true;
         }
         for slot in 0..4 {
@@ -865,6 +861,24 @@ fn run_loop<'a, M: ModelContract>(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn cancel_stopped<M: ModelContract>(
+    stopped: &[RequestHandle],
+    scheduler: &mut RequestScheduler,
+    active: &mut [Option<Active<'_, M>>; 4],
+    admissions: &mut [Option<M::Admission>; 4],
+) -> Result<()> {
+    for (index, &handle) in stopped.iter().enumerate() {
+        // Several tokens from one completion can encounter the same poisoned grammar.
+        if stopped[..index].contains(&handle) {
+            continue;
+        }
+        scheduler.cancel(handle)?;
+        active[handle.slot as usize] = None;
+        admissions[handle.slot as usize] = None;
     }
     Ok(())
 }
@@ -1212,6 +1226,307 @@ mod tests {
                 enqueue_ns: None,
             },
         )
+    }
+
+    fn retirement_scheduler() -> RequestScheduler {
+        RequestScheduler::new(
+            [3; 32],
+            crate::scheduler::SchedulerLimits {
+                max_active: 2,
+                max_sequence_tokens: 64,
+                prefill_chunk_size: 64,
+                pages: 4,
+                snapshots: 8,
+            },
+            SchedulerCapabilities {
+                vocabulary: 6,
+                vision: Qwen4Exp::metadata().vision,
+                live_state_base: 1,
+                draft_pages_per_request: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn retirement_spec(grammar_constrained: bool) -> RequestSpec {
+        RequestSpec {
+            system_boundary: None,
+            prompt: vec![0],
+            conditioning: vec![],
+            max_new_tokens: 10,
+            grammar_constrained,
+            host_stops: false,
+        }
+    }
+
+    #[test]
+    fn poisoned_grammar_vector_retires_once_and_preserves_other_request() {
+        use crate::{
+            cache::Fence,
+            execution::{CompletionRecord, TokenVector},
+        };
+
+        let vocab: tokenizers::models::bpe::Vocab = ["a", "b", "c", "d", "x"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, token)| (token.to_owned(), id as u32))
+            .collect();
+        let mut tokenizer = tokenizers::Tokenizer::new(
+            tokenizers::models::bpe::BPE::builder()
+                .vocab_and_merges(vocab, vec![])
+                .build()
+                .unwrap(),
+        );
+        tokenizer.with_decoder(Some(tokenizers::decoders::byte_level::ByteLevel::default()));
+        tokenizer
+            .add_special_tokens([tokenizers::AddedToken::from("<eos>", true)])
+            .unwrap();
+        let compiler = crate::grammar::GrammarCompiler::new(&tokenizer, 6, &[5]).unwrap();
+        let mut grammar = compiler.compile_lark("start: \"abcd\"").unwrap();
+        grammar.advance(0).unwrap();
+
+        let mut scheduler = retirement_scheduler();
+        scheduler.enable_speculation(&[1, 4]).unwrap();
+        scheduler.fixed_speculative_width(Some(4)).unwrap();
+        scheduler
+            .proposal_source(crate::scheduler::speculation::ProposalSource::Copy)
+            .unwrap();
+        let failed = scheduler.admit(retirement_spec(true)).unwrap();
+        for (sequence, expected) in [
+            (1, GraphKind::Init),
+            (2, GraphKind::Prefill),
+            (3, GraphKind::Snapshot),
+        ] {
+            let step = scheduler.next_step().unwrap();
+            assert_eq!(step.kind, expected);
+            scheduler.record_submission(&step, Fence(sequence)).unwrap();
+            let sampled = expected != GraphKind::Init;
+            let mut records = [CompletionRecord::default(); 4];
+            records[failed.slot as usize] = CompletionRecord {
+                generation: failed.generation as i64,
+                submission_sequence: sequence as i64,
+                consumed_tokens: i64::from(sampled),
+                generated_tokens: i64::from(sampled),
+                token_id: if expected == GraphKind::Prefill {
+                    0
+                } else {
+                    -1
+                },
+                status: 1,
+                ..Default::default()
+            };
+            scheduler.complete(Fence(sequence), &records).unwrap();
+        }
+        let (count, grammar_masks) = grammar.copy_masks(&[1, 2, 3]).unwrap();
+        assert_eq!(count, 3);
+        scheduler
+            .set_copy_proposal(
+                failed,
+                crate::scheduler::speculation::CopyProposal {
+                    consumed: 1,
+                    tokens: [1, 2, 3, -1, -1, -1, -1],
+                    count,
+                    grammar_masks,
+                },
+            )
+            .unwrap();
+        let step = scheduler.next_step().unwrap();
+        assert_eq!(
+            (step.kind, step.token_capacity),
+            (GraphKind::Speculative, 4)
+        );
+        scheduler.record_submission(&step, Fence(4)).unwrap();
+        let other = scheduler.admit(retirement_spec(false)).unwrap();
+        let other_pages = scheduler
+            .request(other)
+            .unwrap()
+            .pages()
+            .collect::<Vec<_>>();
+        let mut records = [CompletionRecord::default(); 4];
+        records[failed.slot as usize] = CompletionRecord {
+            generation: failed.generation as i64,
+            submission_sequence: 4,
+            consumed_tokens: 4,
+            generated_tokens: 4,
+            token_id: 2,
+            status: 1,
+            vector: Some(TokenVector {
+                emitted_count: 3,
+                offered_drafts: 3,
+                accepted_drafts: 2,
+                draft_cache_consumed: -1,
+                verification_width: 4,
+                tokens: [4, 1, 2, -1, -1, -1, -1, -1],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let generated = scheduler.complete(Fence(4), &records).unwrap();
+        assert_eq!(
+            generated
+                .iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            [4, 1, 2]
+        );
+        let (mut incoming, mut generation) = stream(16);
+        incoming.observation = Some(false);
+        incoming.prompt.grammar = Some(grammar);
+        let failure_metrics = incoming.metrics.clone();
+        let (other_incoming, mut other_generation) = stream(16);
+        let make_active = |handle, incoming| Active {
+            request: handle,
+            incoming,
+            last_token: None,
+            next_image: 0,
+            stops: super::super::stops::TokenStops::new(vec![], 6).unwrap(),
+            text_stops: None,
+        };
+        let mut active: [Option<Active<'_, Qwen4Exp>>; 4] = std::array::from_fn(|_| None);
+        active[failed.slot as usize] = Some(make_active(failed, incoming));
+        active[other.slot as usize] = Some(make_active(other, other_incoming));
+        let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
+        for handle in [failed, other] {
+            admissions[handle.slot as usize] = Some(Admission {
+                handle,
+                sampling: SamplingParameters::default(),
+                max_new_tokens: 10,
+                prompt: vec![0],
+                positions: vec![[0; 3]],
+                vision_token_indices: vec![-1],
+                grammar_mask: None,
+                ignore_eos: false,
+            });
+        }
+        let mut stopped = Vec::new();
+        for token in generated {
+            let request = active[token.request.slot as usize].as_mut().unwrap();
+            request.incoming.observe_token(token.token);
+            let error = request
+                .incoming
+                .prompt
+                .grammar
+                .as_mut()
+                .unwrap()
+                .advance(token.token)
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "token 4 is forbidden by the grammar mask"
+            );
+            request.incoming.fail(
+                ExecutionError::Completion(Failure::caused_by(
+                    format!("grammar advancement failed: {error}"),
+                    error,
+                ))
+                .into(),
+            );
+            stopped.push(token.request);
+        }
+        assert_eq!(stopped, [failed; 3]);
+        assert_eq!(failure_metrics.failed.load(Ordering::Relaxed), 1);
+        cancel_stopped::<Qwen4Exp>(&stopped, &mut scheduler, &mut active, &mut admissions).unwrap();
+        assert!(scheduler.request(failed).is_err());
+        assert!(active[failed.slot as usize].is_none());
+        assert!(admissions[failed.slot as usize].is_none());
+        assert_eq!(scheduler.stats().active_requests, 1);
+        assert_eq!(
+            scheduler
+                .request(other)
+                .unwrap()
+                .pages()
+                .collect::<Vec<_>>(),
+            other_pages
+        );
+        assert_eq!(scheduler.request(other).unwrap().generated_tokens, 0);
+        assert_eq!(active[other.slot as usize].as_ref().unwrap().request, other);
+        assert_eq!(
+            admissions[other.slot as usize].as_ref().unwrap().handle,
+            other
+        );
+        assert_eq!(scheduler.next_step().unwrap().lanes[0].request, other);
+        assert!(matches!(
+            other_generation.events.try_recv(),
+            Err(async_mpsc::error::TryRecvError::Empty)
+        ));
+        let mut observed = Vec::new();
+        let mut errors = 0;
+        while let Ok(event) = generation.events.try_recv() {
+            match event {
+                GenerationEvent::ObservedToken {
+                    token,
+                    timestamp_ns: None,
+                } => observed.push(token),
+                GenerationEvent::Error(Error::Execution(ExecutionError::Completion(_))) => {
+                    errors += 1
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(observed, [4, 1, 2]);
+        assert_eq!(errors, 1);
+    }
+
+    #[test]
+    fn duplicate_retirement_keeps_resources_until_pending_fence_completes() {
+        use crate::{cache::Fence, execution::CompletionRecord};
+
+        let mut scheduler = retirement_scheduler();
+        let handle = scheduler.admit(retirement_spec(false)).unwrap();
+        let step = scheduler.next_step().unwrap();
+        scheduler.record_submission(&step, Fence(1)).unwrap();
+        let free_pages = scheduler.free_page_count();
+        let free_snapshots = scheduler.free_snapshot_count();
+        let mut active: [Option<Active<'_, Qwen4Exp>>; 4] = std::array::from_fn(|_| None);
+        let mut admissions = std::array::from_fn(|_| None);
+        cancel_stopped::<Qwen4Exp>(
+            &[handle, handle],
+            &mut scheduler,
+            &mut active,
+            &mut admissions,
+        )
+        .unwrap();
+        assert_eq!(scheduler.stats().retiring_slots, 1);
+        assert_eq!(scheduler.free_page_count(), free_pages);
+        assert_eq!(scheduler.free_snapshot_count(), free_snapshots);
+        let mut records = [CompletionRecord::default(); 4];
+        records[handle.slot as usize] = CompletionRecord {
+            generation: handle.generation as i64,
+            submission_sequence: 1,
+            token_id: -1,
+            status: 1,
+            ..Default::default()
+        };
+        assert!(scheduler.complete(Fence(1), &records).unwrap().is_empty());
+        assert_eq!(scheduler.stats().retiring_slots, 0);
+        assert_eq!(scheduler.free_page_count(), 4);
+        assert_eq!(scheduler.free_snapshot_count(), 8);
+        let reused = scheduler.admit(retirement_spec(false)).unwrap();
+        assert_eq!(reused.slot, handle.slot);
+        assert!(reused.generation > handle.generation);
+    }
+
+    #[test]
+    fn retirement_deduplication_preserves_generation_and_first_occurrence_order() {
+        let mut scheduler = retirement_scheduler();
+        let first = scheduler.admit(retirement_spec(false)).unwrap();
+        let second = scheduler.admit(retirement_spec(false)).unwrap();
+        let different_epoch = RequestHandle {
+            generation: first.generation + 1,
+            ..first
+        };
+        let mut active: [Option<Active<'_, Qwen4Exp>>; 4] = std::array::from_fn(|_| None);
+        let mut admissions = std::array::from_fn(|_| None);
+        let error = cancel_stopped::<Qwen4Exp>(
+            &[first, first, different_epoch, second],
+            &mut scheduler,
+            &mut active,
+            &mut admissions,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Execution(ExecutionError::State(_))));
+        assert!(scheduler.request(first).is_err());
+        assert!(scheduler.request(second).is_ok());
     }
 
     #[test]
