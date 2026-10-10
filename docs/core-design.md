@@ -273,8 +273,27 @@ persistent state and the tuned operator arena. Embeddings and final normalizatio
 are replicated, while only rank zero loads the vocabulary projection.
 The [full-checkpoint TP test](../tests/recipes/test_glm53_stack_tp_cuda.py) covers
 65- and 4096-token prefill capacities on TP2 and TP4, followed by teacher-forced
-decode through native workers. Complete-model replay qualification is pending.
+decode through native workers. TP4 qualification passed for a 65-token prefill
+and three decode steps: replicated hidden outputs matched exactly across ranks,
+outputs and recurrent state remained finite, and CUDA allocation and segment
+counters did not change during replay. Rank-zero weight allocations occupied
+46,148,968,960 bytes; the selected operator arena occupied 11,896,064 bytes.
+TP2 and complete-model 4096-token replay qualification remain pending.
 Production GLM serving and coordinated native rank execution are not implemented.
+
+[GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
+slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
+Epoch, pending-token, vocabulary, context, and physical-page checks precede cache
+mutation. Eight BF16 flags represent per-slot validation errors and participation;
+a b12x all-reduce makes every rank reject the same rows before packing tokens.
+Requests whose resident epochs do not match are left untouched. Native TP2/TP4
+tests cover a pending-token fault on rank zero and an epoch mismatch on one peer,
+with identical packed metadata on every rank and continued consumption by valid
+requests. The [generation composition](../flare/recipes/glm53/generation.py)
+joins this preparation with the complete decoder and shared token consumption.
+Rank zero samples through FlashInfer; peer ranks use shared completion recording
+without vocabulary tensors or RNG work. Native transport tests cover admission,
+65 live tokens in a 128-token prefill graph, decode, and both completion ABIs.
 
 Shared [sparse MLA components](../flare/components/sparse_mla.py) prepare b12x
 latent-cache writes and attention over caller-selected physical records. Recipes

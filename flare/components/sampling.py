@@ -344,37 +344,38 @@ def _complete(Maximum, Sampled, SampleValid, Mass, Slots, Epochs, Live, SampleEn
         state, code = 3, 4
         tl.store(Status + slot, state)
         tl.store(Error + slot, code)
-    sample_enabled = tl.load(SampleEnabled + row) != 0
-    if (matches_count == 1) & (state == 1) & SAMPLE & sample_enabled:
-        pending = tl.load(Pending + slot)
-        if pending >= 0:
-            state, code = 3, 2
-        elif generated >= tl.load(Budget + slot):
-            state = 2
-        else:
-            maximum = tl.load(Maximum + row)
-            finite = (maximum == maximum) & (maximum != float("inf")) & (maximum != -float("inf"))  # noqa: PLR0124
-            counter = tl.load(Counter + slot)
-            total = tl.load(Mass + row)
-            finite &= (total > 0.) & (total == total) & (total != float("inf"))  # noqa: PLR0124
-            selected = tl.load(Sampled + row).to(tl.int64)
-            finite &= tl.load(SampleValid + row) & (selected >= 0) & (selected < V)
-            if finite:
-                token = selected
-                generated += 1
-                tl.store(Pending + slot, token)
-                tl.store(Generated + slot, generated)
-                tl.store(Counter + slot, counter + 1)
-                count = tl.load(Counts + slot * V + token)
-                tl.store(Counts + slot * V + token, count + 1)
-                eos_index = tl.arange(0, 8)
-                eos = tl.load(Eos + slot * 8 + eos_index)
-                stop = tl.sum(((eos_index < tl.load(EosCount + slot)) & (eos == token)).to(tl.int32), 0) > 0
-                state = tl.where(stop | (generated >= tl.load(Budget + slot)), 2, 1)
+    if SAMPLE:
+        sample_enabled = tl.load(SampleEnabled + row) != 0
+        if (matches_count == 1) & (state == 1) & SAMPLE & sample_enabled:
+            pending = tl.load(Pending + slot)
+            if pending >= 0:
+                state, code = 3, 2
+            elif generated >= tl.load(Budget + slot):
+                state = 2
             else:
-                state, code = 3, 1
-        tl.store(Status + slot, state)
-        tl.store(Error + slot, code)
+                maximum = tl.load(Maximum + row)
+                finite = (maximum == maximum) & (maximum != float("inf")) & (maximum != -float("inf"))  # noqa: PLR0124
+                counter = tl.load(Counter + slot)
+                total = tl.load(Mass + row)
+                finite &= (total > 0.) & (total == total) & (total != float("inf"))  # noqa: PLR0124
+                selected = tl.load(Sampled + row).to(tl.int64)
+                finite &= tl.load(SampleValid + row) & (selected >= 0) & (selected < V)
+                if finite:
+                    token = selected
+                    generated += 1
+                    tl.store(Pending + slot, token)
+                    tl.store(Generated + slot, generated)
+                    tl.store(Counter + slot, counter + 1)
+                    count = tl.load(Counts + slot * V + token)
+                    tl.store(Counts + slot * V + token, count + 1)
+                    eos_index = tl.arange(0, 8)
+                    eos = tl.load(Eos + slot * 8 + eos_index)
+                    stop = tl.sum(((eos_index < tl.load(EosCount + slot)) & (eos == token)).to(tl.int32), 0) > 0
+                    state = tl.where(stop | (generated >= tl.load(Budget + slot)), 2, 1)
+                else:
+                    state, code = 3, 1
+            tl.store(Status + slot, state)
+            tl.store(Error + slot, code)
     consumed = tl.load(Consumed + slot * CS)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
                       token, state, code, matches_count > 0, RECORD_FIELDS)
@@ -390,6 +391,36 @@ def _completion_fields(records, device):
         raise ValueError("completion_records requires ABI2 [2,4,8] or ABI3 [2,4,24]")
     _check_tensor(records, records.shape, torch.int64, device, "completion_records")
     return records.shape[2]
+
+
+class PreparedCompletion:
+    """Record consumption and errors without vocabulary outputs or RNG work."""
+
+    def __init__(self, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
+                 completion_records, frame_index, submission_sequence):
+        rows, device = row_slot_ids.numel(), state.generation.device
+        if device.type != "cuda" or not 1 <= rows <= SLOTS:
+            raise ValueError("completion requires CUDA state and one through four rows")
+        fields = _completion_fields(completion_records, device)
+        for tensor, shape, dtype, name in ((row_slot_ids, (rows,), torch.int32, "row_slot_ids"),
+                (row_generations, (rows,), torch.int64, "row_generations"),
+                (live_rows, (1,), torch.int32, "live_rows"), (frame_index, (1,), torch.int32, "frame_index"),
+                (submission_sequence, (1,), torch.int64, "submission_sequence")):
+            _check_tensor(tensor, shape, dtype, device, name)
+        self._args = (None, None, None, None, row_slot_ids, row_generations, live_rows, None,
+            state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
+            state.error_code, state.rng_counter, state.histogram, state.max_new_tokens, state.eos_token_ids,
+            state.eos_count, completion_records, frame_index, submission_sequence,
+            state.vocab_size, rows, state.consumed_tokens.stride(0), fields, False)
+        self._record = None
+
+    def prepare(self):
+        self._record = _compile(_complete, self._args, (SLOTS, 1, 1))
+
+    def __call__(self):
+        if self._record is None:
+            raise RuntimeError("completion prepare() must finish before capture")
+        self._record()
 
 
 class PreparedSampling:
