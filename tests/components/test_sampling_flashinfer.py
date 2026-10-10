@@ -47,7 +47,16 @@ class CapturedSampler:
             self.live, self.records, self.frame, self.sequence, sample_enabled=self.enabled)
         self.sampler.prepare()
         self.call = self.sampler
-        if compile_forward:
+        if compile_forward == 'aot':
+            import io
+            from flare.preparation.aot import aot_forward
+
+            artifact = aot_forward(self.sampler)
+            artifact(self.sampler)
+            restored = torch.compiler.load_compiled_function(
+                io.BytesIO(type(artifact).serialize(artifact).serialized_data))
+            self.call = lambda: restored(self.sampler)
+        elif compile_forward:
             from flare.preparation.compilation import compile_forward as compile_model
 
             self.call = compile_model(self.sampler)
@@ -94,7 +103,7 @@ def snapshot(state):
     return {name: getattr(state, name).cpu().clone() for name in state.__dataclass_fields__}
 
 
-@pytest.mark.parametrize("compile_forward", [False, True])
+@pytest.mark.parametrize("compile_forward", [False, True, 'aot'])
 def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forward, vocab_size):
     cases = (
         # Threshold top-k retains every tie, including more than k tokens.

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
+from flare.components.flashinfer_sampling import filter_probabilities, verify_chain
+
 from flare.components.sampling import (
     DUPLICATE_SLOT,
     ERROR,
@@ -247,12 +249,12 @@ class PreparedSpeculativeDistributions:
             raise ValueError("FlashInfer probability filtering requires CUDA")
         from flashinfer import sampling
         self._flashinfer = sampling
-        self._prepared = True
-        self()
         self.library_scratch = (
             sampling._get_cache_buf(f"top_k_mask_logits_row_states_{self.logits.device}", 1024 * 1024, self.logits.device, zero_init=True),
             sampling._get_cache_buf("softmax_workspace", 1024 * 1024, self.logits.device),
         )
+        self._prepared = True
+        self()
 
     def __call__(self):
         if not self._prepared:
@@ -261,9 +263,8 @@ class PreparedSpeculativeDistributions:
         dummy = torch.where(self.vocab_ids == 0, 0., -torch.inf)
         self.scores.copy_(torch.where(self.valid[:, :, None], self.scores, dummy))
         flat = self.scores.view(-1, self.state.vocab_size)
-        masked = self._flashinfer.top_k_mask_logits(flat, self.packed_top_k)
-        probabilities = self._flashinfer.softmax(masked)
-        probabilities = self._flashinfer.top_p_renorm_probs(probabilities, self.packed_top_p, is_deterministic=True).view_as(self.probabilities)
+        probabilities = filter_probabilities(flat, self.packed_top_k, self.packed_top_p,
+            *self.library_scratch).view_as(self.probabilities)
         maximum = probabilities.amax(-1, keepdim=True)
         eligible = (probabilities > 0) & (probabilities >= maximum * params[:, None, 2:3])
         filtered = torch.where(eligible, probabilities, 0)
@@ -344,10 +345,10 @@ class PreparedStochasticVerification:
         self.independent_accepted.zero_()
         self.emitted_drafts.zero_()
         for row in range(self.drafts.shape[0]):
-            tokens, _, _ = self._flashinfer.chain_speculative_sampling(
+            tokens, _, _ = verify_chain(
                 self.safe_draft_probs[row:row + 1], self.safe_ids[row:row + 1], self.safe_target_probs[row:row + 1],
                 self.independent_accepted[row:row + 1], self.emitted_drafts[row:row + 1],
-                deterministic=True, seed=self.seed_bits[row:row + 1], offset=self.offset[row:row + 1])
+                seed=self.seed_bits[row:row + 1], offset=self.offset[row:row + 1])
             out.token_ids[row:row + 1].copy_(tokens)
         out.accepted_drafts.copy_(torch.where(valid, self.emitted_drafts, 0))
         out.proposed_count.copy_(torch.where(valid, self.emitted_drafts + 1, 0))

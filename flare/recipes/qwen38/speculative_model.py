@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from flare.components.flashinfer_sampling import sample_probabilities
+
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
 from .mtp import MTPScratch, PreparedMTP
@@ -212,9 +214,8 @@ class PreparedSpeculativeRound:
                                         dtype=torch.float32, device=self.seed.device)
             probabilities[:, 0].fill_(1)
         for row in range(self.batch):
-            sampled = self.flashinfer.sampling_from_probs(probabilities[row:row + 1],
-                seed=self.seed[row:row + 1], offset=self.offset[row:row + 1],
-                deterministic=True, check_nan=False)
+            sampled = sample_probabilities(probabilities[row:row + 1],
+                seed=self.seed[row:row + 1], offset=self.offset[row:row + 1])
             self.sampled[row:row + 1].copy_(sampled)
 
     def __call__(self):

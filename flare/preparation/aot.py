@@ -35,6 +35,11 @@ class _GuardPickler(GuardsStatePickler):
     """Exclude unguarded kernel resources from prepared Python objects."""
 
     def reducer_override(self, obj):
+        from triton.runtime import JITFunction
+        from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
+
+        if isinstance(obj, JITFunction):
+            return _deserialize_triton_kernel, (_serialize_triton_kernel(obj),)
         if (hasattr(obj, '__dict__')
                 and type(obj).__module__.startswith(('flare.', 'b12x.'))
                 and not inspect.isclass(obj) and not isinstance(obj, (torch.Tensor, torch.nn.Module))):

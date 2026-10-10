@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .flashinfer_sampling import filter_probabilities, sample_probabilities
+
 SLOTS = 4
 EOS_CAPACITY = 8
 INACTIVE, RUNNING, FINISHED, ERROR = 0, 1, 2, 3
@@ -512,24 +514,23 @@ class PreparedSampling:
         self._min_p_kernel = _mask_min_p.warmup(self.probabilities, self.probabilities,
             self.probability_maximum, self.packed_min_p, self.state.vocab_size, 1024,
             grid=self._grid, num_warps=4, enable_fp_fusion=False)
-        self._scores()
-        self._filter_scores()
         # FlashInfer's public operators share these buffers on the model stream.
         self.scratch_tensors["flashinfer_top_k_row_states"] = self._flashinfer._get_cache_buf(
             f"top_k_mask_logits_row_states_{self.logits.device}", 1024 * 1024,
             self.logits.device, zero_init=True)
         self.scratch_tensors["flashinfer_softmax_workspace"] = self._flashinfer._get_cache_buf(
             "softmax_workspace", 1024 * 1024, self.logits.device)
+        self._scores()
+        self._filter_scores()
         self._prepared = True
 
     def _filter_scores(self):
         torch.max(self.scores, dim=-1, out=(self.maximum, self.point_mass_ids))
         self._metadata()
         self._sanitize()
-        masked = self._flashinfer.top_k_mask_logits(self.scores, self.packed_top_k)
-        probabilities = self._flashinfer.softmax(masked)
-        probabilities = self._flashinfer.top_p_renorm_probs(probabilities, self.packed_top_p,
-            is_deterministic=True)
+        probabilities = filter_probabilities(self.scores, self.packed_top_k, self.packed_top_p,
+            self.scratch_tensors["flashinfer_top_k_row_states"],
+            self.scratch_tensors["flashinfer_softmax_workspace"])
         torch.amax(probabilities, dim=-1, out=self.probability_maximum)
         from flare.preparation.triton import launch_triton
 
@@ -540,9 +541,9 @@ class PreparedSampling:
         torch.sum(self.probabilities, dim=-1, keepdim=True, out=self.probability_mass)
         self._normalize()
         for row in range(self._rows):
-            sampled, valid = self._flashinfer.sampling_from_probs(self.probabilities[row:row + 1],
+            sampled, valid = sample_probabilities(self.probabilities[row:row + 1],
                 seed=self.packed_seed[row:row + 1], offset=self.packed_offset[row:row + 1],
-                deterministic=True, check_nan=False, return_valid=True)
+                return_valid=True)
             self.sampled_tokens[row:row + 1].copy_(sampled)
             self.sample_valid[row:row + 1].copy_(valid)
 
