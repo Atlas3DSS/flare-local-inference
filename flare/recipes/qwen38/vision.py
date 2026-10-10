@@ -76,7 +76,7 @@ class VisionWeights:
 
     @classmethod
     def load(cls, module, loader) -> VisionWeights:
-        parameters, projections = {}, {}
+        paths, projections = [], {}
         for path, _ in module.named_parameters():
             projection = path.removesuffix(".weight")
             quantized = (path.endswith(".weight") and not path.startswith("patch_embed.")
@@ -84,7 +84,8 @@ class VisionWeights:
             if quantized:
                 projections[projection] = loader.load_linear(f"model.visual.{projection}")
             else:
-                parameters[path] = loader.load_tensor(f"model.visual.{path}")
+                paths.append(path)
+        parameters = dict(zip(paths, loader.load_tensors(tuple(f"model.visual.{path}" for path in paths)), strict=True))
         return cls(parameters, projections)
 
 

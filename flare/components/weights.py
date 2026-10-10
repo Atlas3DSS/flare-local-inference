@@ -171,6 +171,18 @@ class DirectWeightLoader:
 
     def load_tensor(self, name: str, *, dtype: torch.dtype | None = None, extent=None) -> torch.Tensor:
         """Transfer a selected resident weight or declared scalar to the GPU."""
+        target = self._queue_tensor(name, dtype=dtype, extent=extent)
+        self._session.flush()
+        return target
+
+    def load_tensors(self, names: Sequence[str]) -> tuple[torch.Tensor, ...]:
+        """Transfer independent weights together, returning ready GPU tensors."""
+        self._require_open()
+        targets = tuple(self._queue_tensor(name) for name in names)
+        self._session.flush()
+        return targets
+
+    def _queue_tensor(self, name, *, dtype=None, extent=None):
         import torch
 
         self._require_open()
@@ -179,7 +191,6 @@ class DirectWeightLoader:
             source = source[extent]
         target = torch.empty(source.shape, dtype=source.dtype if dtype is None else dtype, device=self.device)
         self._copy(target, source)
-        self._session.flush()
         return target
 
     def load_mxfp8_group(self, prefixes, *, row_ranges=None, column_range=None):

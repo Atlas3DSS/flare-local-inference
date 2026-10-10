@@ -134,8 +134,7 @@ class QwenWeightLoader(DirectWeightLoader):
             raise ValueError(f"{prefix} is not a supported dense quantized projection")
         if recipe == "MXFP8":
             return pack_weight(
-                self.load_tensor(f"{prefix}.weight"),
-                self.load_tensor(f"{prefix}.weight_scale"), recipe="mxfp8",
+                *self.load_tensors((f"{prefix}.weight", f"{prefix}.weight_scale")), recipe="mxfp8",
             )
         import torch
         from b12x._lib.intrinsics import swizzle_block_scale
@@ -149,8 +148,7 @@ class QwenWeightLoader(DirectWeightLoader):
         stored_columns = ((logical_columns + 127) // 128) * 128
         values = torch.zeros((rows, stored_columns // 2), dtype=source.dtype, device=self.device)
         self._copy(values[:, :packed_columns], source)
-        scales = self.load_tensor(f"{prefix}.weight_scale")
-        global_scale = self.load_tensor(f"{prefix}.weight_scale_2")
+        scales, global_scale = self.load_tensors((f"{prefix}.weight_scale", f"{prefix}.weight_scale_2"))
         packed = pack_weight(
             values, swizzle_block_scale(scales), recipe="nvfp4",
             global_scale=global_scale, global_scale_kind="multiplier",

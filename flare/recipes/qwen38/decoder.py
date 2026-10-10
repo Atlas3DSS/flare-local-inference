@@ -61,21 +61,19 @@ class ModelWeights:
         scale_scratch = allocate_expert_scale_scratch(device)
         layers = []
         with QwenWeightLoader(manifest, device, show_progress=progress is not None) as loader:
-            def parameter(path: str):
-                value = loader.load_tensor(path)
-                parent, _, attribute = path.rpartition(".")
-                setattr(tree.get_submodule(parent), attribute, torch.nn.Parameter(value, requires_grad=False))
+            def parameters(paths):
+                for path, value in zip(paths, loader.load_tensors(paths), strict=True):
+                    parent, _, attribute = path.rpartition(".")
+                    setattr(tree.get_submodule(parent), attribute, torch.nn.Parameter(value, requires_grad=False))
 
             def hyperconnection(prefix: str):
                 names = ("hc_norm", "input_mix_weight_down", "input_mix_weight_up")
                 if tree.get_submodule(prefix).block_inject_weight is not None:
                     names += ("block_inject_weight",)
-                for name in names:
-                    parameter(f"{prefix}.{name}.weight")
+                parameters(tuple(f"{prefix}.{name}.weight" for name in names))
                 packed_down_projection(tree.get_submodule(prefix))
 
-            parameter(f"{TEXT_PREFIX}.embed_tokens.weight")
-            parameter("lm_head.weight")
+            parameters((f"{TEXT_PREFIX}.embed_tokens.weight", "lm_head.weight"))
             hyperconnection(f"{TEXT_PREFIX}.hyper_connection_mixer")
             for layer in range(48):
                 prefix = f"{TEXT_PREFIX}.layers.{layer}"
@@ -84,14 +82,13 @@ class ModelWeights:
                 if layer % 4 == 3:
                     attention_prefix = f"{prefix}.self_attn"
                     load_projections = loader.load_qsa_projections
-                    parameters = ("q_norm.weight", "k_norm.weight", "indexer.q_layernorm.weight",
-                                  "indexer.k_layernorm.weight")
+                    names = ("q_norm.weight", "k_norm.weight", "indexer.q_layernorm.weight",
+                             "indexer.k_layernorm.weight")
                 else:
                     attention_prefix = f"{prefix}.linear_attn"
                     load_projections = loader.load_gdn_projections
-                    parameters = ("A_log", "dt_bias", "conv1d.weight", "norm.weight")
-                for name in parameters:
-                    parameter(f"{attention_prefix}.{name}")
+                    names = ("A_log", "dt_bias", "conv1d.weight", "norm.weight")
+                parameters(tuple(f"{attention_prefix}.{name}" for name in names))
                 attention = load_projections(attention_prefix)
                 moe = QwenMoeWeights.load(loader, layer, scale_scratch=scale_scratch)
                 module = tree.get_submodule(f"{prefix}.mlp")
@@ -100,9 +97,9 @@ class ModelWeights:
                 layers.append(DecoderLayerWeights(attention, moe))
 
             prefix = f"{TEXT_PREFIX}.layers.1.ple"
-            for name in ("key_proj.weight", "value_proj.weight", "conv1d.weight", "norm_key.weight",
-                         "norm_query.weight", "norm_conv.weight"):
-                parameter(f"{prefix}.{name}")
+            parameters(tuple(f"{prefix}.{name}" for name in
+                ("key_proj.weight", "value_proj.weight", "conv1d.weight", "norm_key.weight",
+                 "norm_query.weight", "norm_conv.weight")))
             vision = VisionWeights.load(tree.model.visual, loader)
         torch.cuda.synchronize(device)
         return cls(tree, tuple(layers), vision, scale_scratch,

@@ -155,10 +155,12 @@ class MTPWeights:
         module = create_mtp_modules(manifest)
         before = torch.cuda.memory_allocated(device)
         with MTPWeightLoader(manifest, device, show_progress=progress is not None) as loader:
-            for name, _ in tuple(module.named_parameters()):
-                value = loader.load_tensor(f"mtp.{name}")
+            names = tuple(name for name, _ in module.named_parameters())
+            values = loader.load_tensors(tuple(f"mtp.{name}" for name in names))
+            for name, value in zip(names, values, strict=True):
                 parent, _, attribute = name.rpartition(".")
                 setattr(module.get_submodule(parent), attribute, torch.nn.Parameter(value, requires_grad=False))
+            del values
             for mixer in (module.layers[0].attn_hyper_connection, module.layers[0].mlp_hyper_connection):
                 packed_down_projection(mixer)
             shared = loader.load_shared()

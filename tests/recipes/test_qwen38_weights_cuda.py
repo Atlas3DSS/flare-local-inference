@@ -99,6 +99,20 @@ def test_actual_bf16_direct_load_and_expansion(manifest):
     torch.testing.assert_close(fp32.cpu(), original.float(), rtol=0, atol=0)
 
 
+def test_batched_tensors_are_ready_before_loader_exit(manifest):
+    names = (
+        f"{TEXT_PREFIX}.layers.0.attn_hyper_connection.input_mix_weight_down.weight",
+        f"{TEXT_PREFIX}.layers.0.linear_attn.A_log",
+        f"{TEXT_PREFIX}.layers.0.linear_attn.dt_bias",
+    )
+    with QwenWeightLoader(manifest, "cuda:0", prefixes=names) as loader:
+        values = loader.load_tensors(names)
+        assert loader._session.stats(flush=False)["batches"] == 1
+        with CheckpointTensors(manifest) as reader:
+            for name, value in zip(names, values, strict=True):
+                torch.testing.assert_close(value.cpu(), reader.read(name), rtol=0, atol=0)
+
+
 def test_actual_csf_experts_prepared_graph_replay(manifest):
     from b12x.moe import fused_moe as moe
     from b12x.preparation import PreparationSession, PreparedCall
