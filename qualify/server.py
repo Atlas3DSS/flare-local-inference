@@ -14,7 +14,6 @@ import importlib.machinery
 import json
 from pathlib import Path
 import socket
-import sys
 import threading
 import time
 import traceback
@@ -203,33 +202,19 @@ def comparable_message(message: dict) -> dict:
 
 
 class Run:
-    def __init__(self, args, provenance):
+    def __init__(self, args):
         self.args = args
         self.url = urlsplit(args.base_url)
         if self.url.scheme not in ("http", "https") or not self.url.hostname or self.url.query or self.url.fragment or self.url.username:
             raise ValueError("base URL must be an HTTP(S) server URL without credentials, query or fragment")
         self.lock = threading.RLock()
         self.counter = 0
-        self.receipt = {"schema": "flare-http-qualification-v1", "started_at": datetime.now(timezone.utc).isoformat(),
-            "base_url": args.base_url, "provenance": provenance, "requests": [], "checks": [], "case_errors": [],
-            "limitations": ["The HTTP API does not expose cache-hit or graph-submission counters. Prefix geometry and output consistency are checked; actual cache hits are not directly observable.",
-                "Timings are diagnostic request observations, not serving-throughput acceptance measurements.",
-                "Client disconnect and subsequent admission are observable; internal cancellation fences and slot retirement are not exposed by HTTP.",
-                "PNG decoding and output consistency are exercised; synthetic fixture images have no semantic caption oracle."]}
-        if args.require_metrics:
-            self.receipt["limitations"][0] = "Prefix behavior is observed through native Prometheus counter deltas after model quiescence; no independent numerical model reference runs in this client."
-            self.receipt["limitations"][2] = "Cancellation and reusable-resource counts are observed through native metrics; individual request generations and CUDA fences remain internal."
-        self.receipt["limitations"].append("A stalled TCP reader can be absorbed by socket buffers. Output-queue backpressure is reported only when native failure/cancellation counters actually increase.")
-        self.save()
-
-    def save(self):
-        with self.lock:
-            write_json(self.args.output, self.receipt)
+        self.results = {"started_at": datetime.now(timezone.utc).isoformat(),
+                        "requests": [], "checks": [], "case_errors": []}
 
     def check(self, name, condition, **evidence):
         with self.lock:
-            self.receipt["checks"].append({"name": name, "passed": bool(condition), **evidence})
-            self.save()
+            self.results["checks"].append({"name": name, "passed": bool(condition), **evidence})
         print(f"{'PASS' if condition else 'FAIL'} {name}", flush=True)
 
     def case(self, name, function):
@@ -240,8 +225,7 @@ class Run:
             return function()
         except Exception as exc:
             with self.lock:
-                self.receipt["case_errors"].append({"case": name, "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
-                self.save()
+                self.results["case_errors"].append({"case": name, "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
             print(f"ERROR {name}: {type(exc).__name__}: {exc}", flush=True)
             return None
 
@@ -337,8 +321,7 @@ class Run:
             record["elapsed_seconds"] = time.monotonic() - started
             record["finished_monotonic"] = time.monotonic()
             with self.lock:
-                self.receipt["requests"].append(record)
-                self.save()
+                self.results["requests"].append(record)
         return record
 
     def metrics(self, name, *, wait_idle=True):
@@ -420,8 +403,7 @@ class Run:
             and combined.get("finish_reasons") == [expected["finish_reason"]], json_choice=expected, stream=combined)
         after = self.metrics(name + "-after")
         if before is not None:
-            self.receipt.setdefault("model_metric_deltas", []).append({"case": name, "json": metric_delta(before, between), "stream": metric_delta(between, after)})
-            self.save()
+            self.results.setdefault("model_metric_deltas", []).append({"case": name, "json": metric_delta(before, between), "stream": metric_delta(between, after)})
         return baseline, streamed
 
 
@@ -429,7 +411,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--snapshot", type=Path)
-    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--memory-report", type=Path)
     parser.add_argument("--gdn-intermediate-dtype", choices=("bfloat16", "float32"), required=True)
@@ -451,7 +432,7 @@ def main() -> int:
     parser.add_argument("--prepared-context-tokens", type=int, help="Actual server --context value, required for KV pressure and verified against HTTP admission.")
     parser.add_argument("--slow-consumer-seconds", type=float, default=0, help="Pause one real SSE reader for this duration while checking unrelated progress.")
     args = parser.parse_args()
-    if args.output.exists() or (args.artifacts.exists() and any(args.artifacts.iterdir())):
+    if args.artifacts.exists() and any(args.artifacts.iterdir()):
         parser.error("output and artifact destinations must not contain a previous run")
     if args.timeout <= 0 or args.max_response_bytes <= 0 or args.image_repetitions <= 0:
         parser.error("timeout, response byte bound and image repetitions must be positive")
@@ -478,9 +459,7 @@ def main() -> int:
             or (bool({"prompt_endpoint_residues", "generated_terminal_prefix"}.intersection(args.cases)) and not args.checkpoint_endpoints)
             or ("slow_consumer" in args.cases and not args.slow_consumer_seconds)):
         parser.error("selected pressure/slow-consumer/full-vision cases require their enabling option")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.artifacts.mkdir(parents=True, exist_ok=True)
-    (args.artifacts / "qualify_server.py").write_bytes(Path(__file__).read_bytes())
 
     text_fixture = json.loads((ROOT / "tests/frontend/qwen38.json").read_text())
     image_fixture = json.loads((ROOT / "tests/frontend/qwen38_images.json").read_text())
@@ -491,26 +470,12 @@ def main() -> int:
         raise ValueError("snapshot frontend assets differ from pinned canonical fixtures")
     import transformers
     import tokenizers
-    import flare_helios
 
     origin = json.loads(importlib.metadata.distribution("transformers").read_text("direct_url.json"))
     if origin.get("vcs_info", {}).get("commit_id") != text_fixture["transformers_commit"] or tokenizers.__version__ != text_fixture["tokenizers_version"]:
         raise ValueError("qualification requires the pinned Transformers/tokenizers preparation environment")
     tokenizer = transformers.AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
-    package = Path(flare_helios.__file__).resolve()
-    extensions = [path for path in package.parent.iterdir() if any(path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)]
-    if len(extensions) != 1:
-        raise ValueError("cannot identify exactly one installed native extension")
-    extension = extensions[0]
-    provenance = {"model_id": model_id, "revision": revision, "snapshot": str(snapshot), "assets_sha256": assets,
-        "transformers_version": transformers.__version__, "transformers_origin": origin, "tokenizers_version": tokenizers.__version__,
-        "python": sys.version, "script_sha256": digest(Path(__file__)), "extension": str(extension), "extension_sha256": digest(extension),
-        "native_source_sha256": {str(path.relative_to(ROOT)): digest(path) for path in sorted((ROOT / "helios/src").rglob("*.rs"))},
-        "cargo_sha256": {name: digest(ROOT / "helios" / name) for name in ("Cargo.toml", "Cargo.lock")},
-        "gdn_intermediate_dtype": args.gdn_intermediate_dtype, "command": sys.argv}
-    if args.memory_report:
-        provenance["memory_report"] = {"path": str(args.memory_report.resolve()), "sha256": digest(args.memory_report), "content": json.loads(args.memory_report.read_text())}
-    run = Run(args, provenance)
+    run = Run(args)
 
     def body(messages, **extra):
         return {"model": model_id, "messages": messages, "temperature": 0, "seed": 1234, "max_tokens": 32,
@@ -520,7 +485,8 @@ def main() -> int:
         messages, options = template_input(request)
         return tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False, **options)
 
-    chunk_size = provenance.get("memory_report", {}).get("content", {}).get("prefill_chunk_size")
+    memory = json.loads(args.memory_report.read_text()) if args.memory_report else {}
+    chunk_size = memory.get("prefill_chunk_size")
     if chunk_size is not None and (type(chunk_size) is not int or chunk_size < 64 or chunk_size % 64):
         raise ValueError("memory report requires a positive 64-aligned prefill chunk size")
 
@@ -621,8 +587,7 @@ def main() -> int:
             after = run.metrics(name + "-after")
             delta = metric_delta(before, after) if before is not None else None
             if delta is not None:
-                run.receipt.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
-                run.save()
+                run.results.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
             return completion, delta
 
         full, full_ids = aligned_request("full", 128)
@@ -654,7 +619,7 @@ def main() -> int:
     run.case("prefix_full_aligned_branch", prefixes)
 
     def system_prefix():
-        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:4]
+        nonce = hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:4]
         seen = []
         for name, request, expected_reuse in system_prefix_requests(model_id, nonce):
             ids = prompt_ids(request)
@@ -690,9 +655,8 @@ def main() -> int:
         eos_ids = generation["eos_token_id"]
         if isinstance(eos_ids, int):
             eos_ids = [eos_ids]
-        run.receipt["provenance"]["checkpoint_endpoint_qualifier_sha256"] = digest(ROOT / "qualify/checkpoint_http.py")
         run_endpoint_cases(run, tokenizer, model_id,
-                           hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12],
+                           hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:12],
                            chunk_size, set(eos_ids))
 
     def structured():
@@ -712,7 +676,7 @@ def main() -> int:
         fixture = next(case for case in image_fixture["cases"] if case["name"] == "png_RGB")
         source = ROOT / "tests/frontend" / fixture["inputs"][0]["png"]
         if digest(source) != fixture["inputs"][0]["sha256"]:
-            raise ValueError("PNG fixture bytes differ from canonical processor receipt")
+            raise ValueError("PNG fixture bytes differ from canonical processor results")
         messages = copy.deepcopy(fixture["messages"])
         encoded = base64.b64encode(source.read_bytes()).decode()
         for message in messages:
@@ -722,7 +686,6 @@ def main() -> int:
                         message["content"][i] = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}}
         request = body(messages, max_tokens=32)
         tokens = len(prompt_ids(request)) + sum(t * h * w // 4 - 1 for t, h, w in fixture["grid_thw"])
-        run.receipt["provenance"]["png_fixture"] = {"path": str(source), "sha256": digest(source), "canonical_processor_hashes": fixture["hashes"], "grid_thw": fixture["grid_thw"]}
         for repeat in range(args.image_repetitions):
             run.pair("png-image" if repeat == 0 else f"png-image-repeat-{repeat}", request, tokens)
     run.case("png_image", image)
@@ -751,10 +714,6 @@ def main() -> int:
             raise ValueError("full-vision fixture must contain exactly one image")
         request = body(messages, max_tokens=32)
         tokens = len(prompt_ids(request)) + 4096 - 1
-        run.receipt["provenance"]["full_vision_fixture"] = {"name": fixture["name"],
-            "path": str(source), "sha256": digest(source), "input_rgb_sha256": rgb_hash,
-            "canonical_processor_hashes": fixture["hashes"], "grid_thw": fixture["grid_thw"],
-            "patches": 16384, "features": 4096, "prompt_tokens": tokens}
         before = run.metrics("full-vision-before")
         run.pair("full-vision", request, tokens)
         after = run.metrics("full-vision-after")
@@ -768,7 +727,7 @@ def main() -> int:
         run.case("png_full_capacity", full_vision)
 
     def image_cache_identity():
-        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        nonce = hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:12]
         requests, fixtures = [], []
         for name in ("png_RGB", "png_L"):
             fixture = next(case for case in image_fixture["cases"] if case["name"] == name)
@@ -794,10 +753,6 @@ def main() -> int:
             raise ValueError("image identity requests require different decoded pixels")
         grid = fixtures[0]["grid_thw"][0]
         tokens = len(first) + grid[0] * grid[1] * grid[2] // 4 - 1
-        run.receipt["provenance"]["image_identity_fixtures"] = [
-            {"name": fixture["name"], "inputs": fixture["inputs"], "grid_thw": fixture["grid_thw"],
-                "input_rgb_sha256": fixture["input_rgb_sha256"], "canonical_processor_hashes": fixture["hashes"]}
-            for fixture in fixtures]
         before = run.metrics("image-identity-before")
         last = before
         cold = {}
@@ -909,7 +864,7 @@ def main() -> int:
             raise ValueError(f"snapshot pressure sweep requires 1..256 slots; server exposes {capacity}")
         if resource_totals(before)["pages"] < 2 * capacity + 1:
             raise ValueError("KV capacity cannot isolate snapshot pressure with 128-token prefixes")
-        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        nonce = hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:12]
         inputs = [aligned_request(f"pressure-{nonce}-{index}", 128) for index in range(capacity + 1)]
         if any(system_prefix_ids(tokenizer, request, ids) for request, ids in inputs):
             raise ValueError("snapshot-pressure fixtures require no synthesized instruction checkpoint")
@@ -956,7 +911,7 @@ def main() -> int:
         if not 2 <= capacity <= 256:
             raise ValueError(f"conversation snapshot pressure requires 2..256 slots; server exposes {capacity}")
         turns = capacity + 3
-        chunk = provenance["memory_report"]["content"]["prefill_chunk_size"]
+        chunk = memory["prefill_chunk_size"]
         if type(chunk) is not int or chunk <= 0:
             raise ValueError("conversation pressure requires the reported prefill chunk size")
         # Edits before each prompt endpoint do not reuse complete page ownership.
@@ -964,7 +919,7 @@ def main() -> int:
         max_pages += (160 + 64 * (turns - 1) + 1 + 63) // 64
         if resource_totals(before)["pages"] < max_pages:
             raise ValueError("KV capacity cannot isolate independent exact-prompt snapshot pressure")
-        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        nonce = hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:12]
         request, ids = aligned_request(f"conversation-{nonce}", 160)
         retained_lengths = []
         last = before
@@ -1016,11 +971,10 @@ def main() -> int:
 
     def kv_pressure():
         before = run.metrics("kv-before")
-        geometry = kv_pressure_geometry(provenance["memory_report"]["content"], before, args.prepared_context_tokens)
-        run.receipt["kv_pressure_geometry"] = geometry
-        run.save()
+        geometry = kv_pressure_geometry(memory, before, args.prepared_context_tokens)
+        run.results["kv_pressure_geometry"] = geometry
         count = geometry["holding_requests"]
-        nonce = hashlib.sha256(run.receipt["started_at"].encode()).hexdigest()[:12]
+        nonce = hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:12]
 
         def reserved_request(index, literal):
             request = body([{"role": "user", "content": f"KV reservation {nonce} {index}. Follow the response schema."}],
@@ -1173,7 +1127,7 @@ def main() -> int:
         run.check("stalled_reader_cancelled_and_other_request_completed", delta["flare_requests_admitted_total"] == 2
             and delta["flare_requests_cancelled_total"] == 1 and delta["flare_requests_completed_total"] == 1,
             delta=delta, preclose_delta=held_delta)
-        run.receipt["slow_consumer_observation"] = {
+        run.results["slow_consumer_observation"] = {
             "native_output_backpressure_observed": held_delta["flare_requests_failed_total"] > 0
                 and held_delta["flare_requests_cancelled_total"] > 0,
             "preclose_delta": held_delta, "final_delta": delta,
@@ -1184,14 +1138,12 @@ def main() -> int:
     if args.slow_consumer_seconds:
         run.case("slow_consumer", slow_consumer)
     run.case("final_health", lambda: health("health-after"))
-    run.check("native_sources_unchanged_during_run", all(digest(ROOT / name) == expected for name, expected in provenance["native_source_sha256"].items()))
-    run.receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
-    run.receipt["summary"] = {"requests": len(run.receipt["requests"]), "checks": len(run.receipt["checks"]),
-        "failed_checks": sum(not check["passed"] for check in run.receipt["checks"]), "case_errors": len(run.receipt["case_errors"])}
-    run.receipt["passed"] = run.receipt["summary"]["failed_checks"] == 0 and not run.receipt["case_errors"]
-    run.save()
-    print(json.dumps({"output": str(args.output), **run.receipt["summary"], "passed": run.receipt["passed"]}), flush=True)
-    return 0 if run.receipt["passed"] else 1
+    run.results["finished_at"] = datetime.now(timezone.utc).isoformat()
+    run.results["summary"] = {"requests": len(run.results["requests"]), "checks": len(run.results["checks"]),
+        "failed_checks": sum(not check["passed"] for check in run.results["checks"]), "case_errors": len(run.results["case_errors"])}
+    run.results["passed"] = run.results["summary"]["failed_checks"] == 0 and not run.results["case_errors"]
+    print(json.dumps({**run.results["summary"], "passed": run.results["passed"]}), flush=True)
+    return 0 if run.results["passed"] else 1
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-from qualify.provenance import digest, file_record, write_json
+from qualify.provenance import digest, write_json
 from flare.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, INDEX_SHA256,
     MODEL_ID, REVISION, TRANSFORMERS_REVISION,
@@ -289,7 +289,7 @@ def execution_plan(workload, repetitions=2):
                        for repetition in range(repetitions) for concurrency in (1, 2, 4)]}
 
 
-def validate_workload(workload, *, verify_sources=True):
+def validate_workload(workload):
     if (workload.get("artifact_type") != "speculative_http_workload" or workload.get("schema_version") != 1
             or workload.get("model_id") != MODEL_ID or workload.get("revision") != REVISION
             or workload.get("sampling") != SAMPLING
@@ -326,34 +326,19 @@ def validate_workload(workload, *, verify_sources=True):
                     "identical_request": case["request_sha256"] == prefix[0]["request_sha256"]}
         if case.get("prefix_relation") != relation or shared < 64:
             raise ValueError("prefix relation does not match actual token IDs")
-    if verify_sources:
-        sources = workload.get("sources")
-        if not sources:
-            raise ValueError("source fingerprints are required")
-        for path, expected_hash in sources.items():
-            if digest(path) != expected_hash:
-                raise ValueError(f"source fingerprint mismatch: {path}")
 
 
-def load_workload(path, *, expected_sha256=None, verify_sources=True):
+def load_workload(path):
     path = Path(path)
-    if expected_sha256 is not None and digest(path) != expected_sha256:
-        raise ValueError("workload file SHA256 mismatch")
     workload = json.loads(path.read_text())
-    validate_workload(workload, verify_sources=verify_sources)
+    validate_workload(workload)
     return workload
 
 
 def validate_artifacts(folder):
-    """Check every published HTTP payload, input render and native proof file."""
+    """Check that HTTP payloads and renders match the benchmark workload."""
     folder = Path(folder).resolve()
-    manifest = json.loads((folder / "manifest.json").read_text())
-    for record in (manifest["workload"], manifest["execution_plan"]):
-        if file_record(record["path"]) != record:
-            raise ValueError("workload/plan artifact fingerprint mismatch")
-    if Path(manifest["workload"]["path"]) != folder / "workload.json":
-        raise ValueError("manifest points to a different workload directory")
-    workload = load_workload(folder / "workload.json", expected_sha256=manifest["workload"]["sha256"])
+    workload = load_workload(folder / "workload.json")
     if json.loads((folder / "execution-plan.json").read_text()) != execution_plan(workload):
         raise ValueError("paired execution plan changed")
     for case in workload["cases"]:
@@ -361,22 +346,6 @@ def validate_artifacts(folder):
         if ((case_dir / "request.json").read_bytes() != json_bytes(case["request"])
                 or (case_dir / "rendered.txt").read_bytes() != case["rendered_prompt"].encode()):
             raise ValueError(f"{case['id']}: published request/render bytes differ")
-    proof = workload["native_frontend_validation"]
-    for key in ("binary", "fixture", "stdout", "stderr"):
-        if file_record(proof[key]["path"]) != proof[key]:
-            raise ValueError(f"native frontend {key} fingerprint mismatch")
-    native = json.loads(Path(proof["fixture"]["path"]).read_text())
-    actual = native["cases"][-24:]
-    for case, checked in zip(workload["cases"], actual):
-        messages, options = template_input(case["request"])
-        expected = {"name": "speculative-" + case["id"], "messages": messages, "options": options,
-                    "rendered": case["rendered_prompt"], "token_ids": case["prompt_tokens"]}
-        if checked != expected:
-            raise ValueError("native checked input differs from workload")
-    counts = json.loads(Path(proof["stdout"]["path"]).read_text())
-    if (proof["returncode"] != 0 or proof["workload_cases"] != 24 or proof["counts"] != counts
-            or counts["cases"] != len(native["cases"])):
-        raise ValueError("native frontend proof is incomplete")
     return workload
 
 
@@ -397,17 +366,6 @@ def generate(snapshot, output, native_frontend, baseline_fixture):
         raise ValueError("native frontend fixture identity differs")
     output.mkdir(parents=True, exist_ok=False)
     workload = build_workload(AutoTokenizer.from_pretrained(snapshot, local_files_only=True))
-    root = Path(__file__).resolve().parents[1]
-    paths = [Path(__file__), root / "tests/reference/test_speculative_workload.py",
-             root / "qualify/provenance.py", root / "flare/preparation/qwen38.py",
-             root / "helios/tests/tools/test_frontend.rs", root / "helios/src/frontend/mod.rs",
-             root / "helios/src/frontend/json.rs", root / "helios/src/server/request.rs",
-             root / "helios/Cargo.toml", root / "helios/Cargo.lock", baseline_fixture, native_frontend]
-    paths += [snapshot / name for name in ASSETS]
-    workload["sources"] = {str(p.resolve()): digest(p) for p in paths}
-    workload["tokenizer"] = {"assets": {name: file_record(snapshot / name) for name in ASSETS},
-                             "transformers_origin": origin, "transformers_version": distribution.version,
-                             "tokenizers_version": importlib.metadata.version("tokenizers")}
     native_fixture = deepcopy(baseline)
     for case in workload["cases"]:
         messages, options = template_input(case["request"])
@@ -423,27 +381,14 @@ def generate(snapshot, output, native_frontend, baseline_fixture):
     result = subprocess.run(command, capture_output=True, text=True, timeout=180)
     (output / "native-frontend.stdout").write_text(result.stdout)
     (output / "native-frontend.stderr").write_text(result.stderr)
-    proof = {"command": command, "returncode": result.returncode,
-             "binary": file_record(native_frontend), "fixture": file_record(fixture_path),
-             "stdout": file_record(output / "native-frontend.stdout"),
-             "stderr": file_record(output / "native-frontend.stderr"),
-             "scope": "Native Frontend::render_chat bytes and token IDs after explicit request normalization; not HTTP admission or grammar execution."}
-    write_json(output / "native-frontend.json", proof)
     if result.returncode:
         raise RuntimeError(f"native frontend validation failed; inspect {output}")
     counts = json.loads(result.stdout)
     if counts["cases"] != len(native_fixture["cases"]):
         raise ValueError("native frontend case count differs")
-    workload["native_frontend_validation"] = {**proof, "counts": counts, "workload_cases": 24}
     validate_workload(workload)
     write_json(output / "workload.json", workload)
     write_json(output / "execution-plan.json", execution_plan(workload))
-    write_json(output / "manifest.json", {"artifact_type": "speculative_http_workload_manifest", "schema_version": 1,
-        "model_id": MODEL_ID, "revision": REVISION, "workload": file_record(output / "workload.json"),
-        "execution_plan": file_record(output / "execution-plan.json"), "categories": CATEGORIES,
-        "case_count": len(workload["cases"]), "native_frontend": proof,
-        "cases": [{k: c[k] for k in ("id", "category", "prompt_token_count", "request_sha256", "prompt_tokens_sha256")}
-                  for c in workload["cases"]]})
     validate_artifacts(output)
     return workload
 
@@ -458,16 +403,13 @@ def main():
     build.add_argument("--frontend-fixture", type=Path, default=Path("tests/frontend/qwen38.json"))
     check = sub.add_parser("validate")
     check.add_argument("path", type=Path)
-    check.add_argument("--sha256")
     args = parser.parse_args()
     if args.command == "generate":
         workload = generate(args.snapshot, args.output, args.native_frontend, args.frontend_fixture)
     elif args.path.is_dir():
-        if args.sha256 is not None:
-            raise ValueError("--sha256 applies to a workload JSON file, not a directory")
         workload = validate_artifacts(args.path)
     else:
-        workload = load_workload(args.path, expected_sha256=args.sha256)
+        workload = load_workload(args.path)
     print(json.dumps({"passed": True, "cases": len(workload["cases"]), "categories": CATEGORIES}))
 
 

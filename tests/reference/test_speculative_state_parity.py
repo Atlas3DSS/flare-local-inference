@@ -107,7 +107,7 @@ def test_compare_clones_native_upload_defaults_after_reset_before_handoff(tmp_pa
     monkeypatch.setattr(graph_qualification, "verify_prepared_hybrid_state",
                         lambda pool, evidence: evidence.check("pristine", True))
     (tmp_path / "uploads").mkdir()
-    evidence = graph_qualification.Evidence(tmp_path / "receipt.json", tmp_path, {})
+    evidence = graph_qualification.Checks(tmp_path)
     before_cuda = torch.cuda.is_initialized()
     parity.compare(runtime, owner, {**fixture(), "commands": []}, evidence, tmp_path, lambda _: None)
 

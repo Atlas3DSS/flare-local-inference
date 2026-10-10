@@ -115,7 +115,7 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
                   after["flare_cached_checkpoints"] - before["flare_cached_checkpoints"] == publications,
                   before=before["flare_cached_checkpoints"], after=after["flare_cached_checkpoints"])
         run.reclaimed(name, before, after)
-        run.receipt.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
+        run.results.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
         run.save()
         return choice, generated
 

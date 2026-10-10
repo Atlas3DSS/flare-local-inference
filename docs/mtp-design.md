@@ -14,15 +14,7 @@ separately trained parallel drafter is optional; it is not needed to use the
 checkpoint's MTP weights.
 
 The [core design](core-design.md) defines ownership, admission and graph
-lifetime. Its [corrections](core-design-corrections.md) define the serving-path
-oracle, tolerance-based cross-capacity comparisons and performance measurements.
-The source audit is pinned through **2026-10-09** in the
-[research report](/data/sparkgap-artifacts/mtp-research/tensorfold-and-sparkgap-mtp.md),
-[source fingerprints](/data/sparkgap-artifacts/mtp-research/sources.json),
-[checkpoint inventory](/data/sparkgap-artifacts/mtp-research/checkpoint-mtp-headers.json)
-and [research receipt](/data/sparkgap-artifacts/mtp-research/research-receipt.json).
-Additional controller papers and the vLLM DSpark implementation description have
-[separate source fingerprints](/data/sparkgap-artifacts/mtp-research/papers-controller-supplement/manifest.json).
+lifetime.
 
 ## Checkpoint model and reference
 
@@ -427,4 +419,4 @@ from frontend delivery. The approximate 3.9 ms single-token weight-traffic bound
 is a non-speculative batch-one reference: amortized verification can reduce bytes
 per emitted token, while extra expert routes and MTP work can increase round
 cost. No fixed MTP speedup is assumed. Raw observations and large tensor/trace
-artifacts live outside the repository; compact receipts link their hashes.
+data stays outside the repository.

@@ -107,9 +107,9 @@ def test_exact_graph_assertions_require_explicit_server_geometry(tmp_path, monke
     import sys
     from qualify import server
 
-    output, artifacts = tmp_path / "receipt.json", tmp_path / "artifacts"
+    output, artifacts = tmp_path / "unused.json", tmp_path / "artifacts"
     args = ["qualify.server", "--base-url", "http://127.0.0.1:1",
-        "--gdn-intermediate-dtype", "bfloat16", "--output", str(output),
+        "--gdn-intermediate-dtype", "bfloat16",
         "--artifacts", str(artifacts), "--require-metrics", "--cases", case]
     if case == "conversation_pressure":
         args.append("--conversation-pressure")

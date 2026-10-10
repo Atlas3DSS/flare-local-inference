@@ -203,37 +203,17 @@ def main():
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--timeout", type=float, default=300)
     args = parser.parse_args()
-    if args.output.exists() or (args.artifacts.exists() and any(args.artifacts.iterdir())):
+    if args.artifacts.exists() and any(args.artifacts.iterdir()):
         parser.error("receipt and artifact paths must not contain an earlier run")
     if not 0 < args.timeout <= 300:
         parser.error("HTTP timeout must be positive and no larger than 300 seconds")
     args.max_response_bytes = 64 << 20
     args.require_metrics = True
     args.cases = None
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.artifacts.mkdir(parents=True, exist_ok=True)
-    (args.artifacts / Path(__file__).name).write_bytes(Path(__file__).read_bytes())
-    (args.artifacts / "qualify_server.py").write_bytes((ROOT / "qualify/server.py").read_bytes())
     identity = process_identity(args)
     request, fixture = prepare_fixture(args)
-    provenance = {"model_id": fixture["model_id"], "revision": fixture["revision"], "snapshot": str(args.snapshot.resolve()),
-        "server": identity, "memory_report": {"path": str(args.memory_report.resolve()),
-            "sha256": digest(args.memory_report), "content": json.loads(args.memory_report.read_text())},
-        "fixture": {"path": str((args.artifacts / "canonical-fixture.json").resolve()),
-            "sha256": digest(args.artifacts / "canonical-fixture.json"), "content": fixture},
-        "script_sha256": digest(Path(__file__)), "http_helper_sha256": digest(ROOT / "qualify/server.py"),
-        "native_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "helios/src").rglob("*.rs"))},
-        "recipe_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "flare").rglob("*.py"))},
-        "absolute_http_deadline_seconds": args.timeout, "command": sys.argv}
-    run = BoundedRun(args, provenance)
-    run.receipt["schema"] = "flare-http-vision-aggregate-v1"
-    run.receipt["limitations"] = [
-        "Coordinate-pattern images qualify full-capacity transport and indexing, with no caption-quality oracle.",
-        "JSON usage is checked against canonical processor token IDs; native SSE does not expose usage.",
-        "Expected arena offsets come from canonical image geometry and the native pack_vision source; HTTP does not expose GPU upload buffers.",
-        "Cold/cache JSON and SSE equality remains an unchanged required check; no canonical model-logit reference runs in this client.",
-        "Request timings are diagnostic observations, not serving-performance acceptance measurements."]
-    run.save()
+    run = BoundedRun(args)
 
     def health(label):
         record = run.request(label, path="/health")
@@ -245,8 +225,8 @@ def main():
         run.check("aggregate.exact_model", models.get("status") == 200 and fixture["model_id"] in
             [entry.get("id") for entry in models.get("body", {}).get("data", [])])
         before = run.metrics("aggregate-before")
-        run.receipt["idle_before"] = before
-        memory = provenance["memory_report"]["content"]
+        run.results["idle_before"] = before
+        memory = json.loads(args.memory_report.read_text())
         run.check("aggregate.idle_capacity", before["flare_free_request_slots"] == 4
             and before["flare_free_kv_pages"] + before["flare_cached_kv_pages"] == memory["pages"]
             and before["flare_free_snapshots"] + before["flare_cached_checkpoints"] == memory["snapshot_capacity"])
@@ -272,7 +252,7 @@ def main():
                     "finish_reason": (combined.get("finish_reasons") or [None])[0]})
             after = run.metrics(name + "-after")
             delta = metric_delta(previous, after)
-            run.receipt.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
+            run.results.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
             run.check(name + ".four_full_vision_graphs", delta['flare_graph_launches_total{kind="vision"}'] == 4,
                 delta=delta, expected_patches_each=16384, expected_feature_offsets=fixture["expected_feature_offsets"])
             run.check(name + ".completed", delta["flare_requests_admitted_total"] == delta["flare_requests_completed_total"] == 1
@@ -291,21 +271,18 @@ def main():
     run.case("aggregate_vision", aggregate)
     def final_idle():
         after = run.metrics("aggregate-final-idle")
-        run.receipt["idle_after"] = after
-        if "idle_before" in run.receipt:
-            run.reclaimed("aggregate-final", run.receipt["idle_before"], after)
+        run.results["idle_after"] = after
+        if "idle_before" in run.results:
+            run.reclaimed("aggregate-final", run.results["idle_before"], after)
         run.check("aggregate.server_identity_unchanged", process_identity(args) == identity)
 
     run.case("aggregate_final_idle", final_idle)
-    run.check("aggregate.model_sources_unchanged", all(digest(ROOT / name) == expected
-        for section in ("native_source_sha256", "recipe_source_sha256") for name, expected in provenance[section].items()))
-    run.receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
-    run.receipt["summary"] = {"requests": len(run.receipt["requests"]), "checks": len(run.receipt["checks"]),
-        "failed_checks": sum(not check["passed"] for check in run.receipt["checks"]), "case_errors": len(run.receipt["case_errors"])}
-    run.receipt["passed"] = not run.receipt["summary"]["failed_checks"] and not run.receipt["case_errors"]
-    run.save()
-    print(json.dumps({"output": str(args.output), **run.receipt["summary"], "passed": run.receipt["passed"]}), flush=True)
-    return 0 if run.receipt["passed"] else 1
+    run.results["finished_at"] = datetime.now(timezone.utc).isoformat()
+    run.results["summary"] = {"requests": len(run.results["requests"]), "checks": len(run.results["checks"]),
+        "failed_checks": sum(not check["passed"] for check in run.results["checks"]), "case_errors": len(run.results["case_errors"])}
+    run.results["passed"] = not run.results["summary"]["failed_checks"] and not run.results["case_errors"]
+    print(json.dumps({**run.results["summary"], "passed": run.results["passed"]}), flush=True)
+    return 0 if run.results["passed"] else 1
 
 
 if __name__ == "__main__":

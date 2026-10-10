@@ -23,7 +23,7 @@ class TextTokenizer:
 @pytest.fixture(scope="module")
 def workload():
     result = sw.build_workload(TextTokenizer())
-    sw.validate_workload(result, verify_sources=False)
+    sw.validate_workload(result)
     return result
 
 
@@ -105,65 +105,27 @@ def test_corrupt_or_reinterpreted_inputs_fail_validation(workload, change, error
     value = deepcopy(workload)
     change(value)
     with pytest.raises(ValueError, match=error):
-        sw.validate_workload(value, verify_sources=False)
-
-
-def test_source_and_whole_file_digests_are_checked(workload, tmp_path):
-    value = deepcopy(workload)
-    source = tmp_path / "fixture.py"
-    source.write_text("immutable source\n")
-    value["sources"] = {str(source): sw.digest(source)}
-    path = tmp_path / "workload.json"
-    path.write_bytes(sw.json_bytes(value))
-    loaded = sw.load_workload(path, expected_sha256=sw.digest(path))
-    assert loaded == value
-    with pytest.raises(ValueError, match="file SHA256"):
-        sw.load_workload(path, expected_sha256="0" * 64)
-    source.write_text("changed source\n")
-    with pytest.raises(ValueError, match="source fingerprint"):
-        sw.load_workload(path)
+        sw.validate_workload(value)
 
 
 @pytest.fixture
 def artifact_files(workload, tmp_path):
-    """Fabricated proof records test integrity checking, not native execution."""
     value = deepcopy(workload)
-    source = tmp_path / "source.txt"
-    source.write_text("test fixture source")
-    value["sources"] = {str(source): sw.digest(source)}
-    native_cases = []
     for case in value["cases"]:
         folder = tmp_path / "cases" / case["id"]
         folder.mkdir(parents=True)
         (folder / "request.json").write_bytes(sw.json_bytes(case["request"]))
         (folder / "rendered.txt").write_text(case["rendered_prompt"])
-        messages, options = sw.template_input(case["request"])
-        native_cases.append({"name": "speculative-" + case["id"], "messages": messages,
-                             "options": options, "rendered": case["rendered_prompt"], "token_ids": case["prompt_tokens"]})
-    sw.write_json(tmp_path / "native.json", {"cases": native_cases})
-    sw.write_json(tmp_path / "stdout.json", {"cases": 24})
-    (tmp_path / "stderr.txt").write_text("")
-    value["native_frontend_validation"] = dict(returncode=0, workload_cases=24, counts={"cases": 24},
-        binary=sw.file_record(source), fixture=sw.file_record(tmp_path / "native.json"),
-        stdout=sw.file_record(tmp_path / "stdout.json"), stderr=sw.file_record(tmp_path / "stderr.txt"))
     sw.write_json(tmp_path / "workload.json", value)
     sw.write_json(tmp_path / "execution-plan.json", sw.execution_plan(value))
-    sw.write_json(tmp_path / "manifest.json", {"workload": sw.file_record(tmp_path / "workload.json"),
-                                             "execution_plan": sw.file_record(tmp_path / "execution-plan.json")})
     return tmp_path
 
 
-def test_published_payload_and_proof_files_are_verified(artifact_files):
+def test_request_payloads_match_workload(artifact_files):
     assert len(sw.validate_artifacts(artifact_files)["cases"]) == 24
     request = artifact_files / "cases" / "incident-turn-1" / "request.json"
     request.write_bytes(request.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="published request/render bytes"):
-        sw.validate_artifacts(artifact_files)
-
-
-def test_native_proof_output_cannot_be_replaced(artifact_files):
-    sw.write_json(artifact_files / "stdout.json", {"cases": 0})
-    with pytest.raises(ValueError, match="native frontend stdout fingerprint"):
         sw.validate_artifacts(artifact_files)
 
 

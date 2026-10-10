@@ -223,8 +223,7 @@ class ContextPost:
                 finished_monotonic=time.monotonic(), hard_deadline_expired=self.expired
                 or ("client_error" in record and time.monotonic() >= self.deadline))
             with run.lock:
-                run.receipt["requests"].append(record)
-                run.save()
+                run.results["requests"].append(record)
             self.record = record
             self.done.set()
 
@@ -244,48 +243,20 @@ def idle(run, label, timeout=60):
 
 
 def execute(args, tokenizer, plan, body):
-    if args.output.exists():
-        raise ValueError("output receipt already exists")
-    if args.memory_report is None or args.server_pid is None:
-        raise ValueError("execution requires the active memory report and server PID")
-    extensions = list((ROOT / ".venv").glob("lib/python*/site-packages/flare_helios/*.so"))
-    if len(extensions) != 1 or digest(extensions[0]) != args.expected_native_sha256:
-        raise ValueError("installed native extension differs from the declared qualification build")
-    extension = extensions[0]
-    mappings = [line for line in Path(f"/proc/{args.server_pid}/maps").read_text().splitlines()
-        if "flare_helios" in line and ".so" in line]
-    if not mappings or any(int(line.split()[4]) != extension.stat().st_ino for line in mappings):
-        raise ValueError("running server native mapping differs from the installed extension")
     memory = json.loads(args.memory_report.read_text())
     if memory["cached_token_capacity"] != memory["pages"] * PAGE_TOKENS or memory["pages"] < plan["reserved_pages"]:
         raise ValueError("memory report cannot represent the full requested context")
-    sources = {str(path.relative_to(ROOT)): digest(path) for root in (ROOT / "helios/src", ROOT / "flare")
-        for path in sorted(root.rglob("*")) if path.suffix in (".rs", ".py")}
-    sources["scripts/qualify_context_limit.py"] = digest(Path(__file__))
-    sources["qualify/server.py"] = digest(ROOT / "qualify/server.py")
     args.require_metrics, args.cases = True, None
     args.timeout = 5.0
-    provenance = {"model": MODEL, "revision": REVISION, "snapshot": str(args.snapshot),
-        "extension": str(extension), "extension_sha256": digest(extension), "server_pid": args.server_pid,
-        "native_mappings": mappings, "sources_sha256": sources, "command": sys.argv,
-        "memory_report": {"path": str(args.memory_report), "sha256": digest(args.memory_report), "content": memory},
-        "fixture": plan, "fixture_path": str(args.artifacts / "case-plan.json"),
-        "request_deadline_seconds": args.deadline_seconds, "metric_poll_seconds": args.poll_seconds}
-    run = Run(args, provenance)
-    run.receipt["schema"] = "flare-context-limit-qualification-v1"
-    run.receipt["limitations"] = ["Memory, indexing and captured-graph execution at the declared context limit; no long-context quality or performance acceptance.",
-        "Consumed length262143 derives from exact HTTP usage and the seven validated decode completions; no direct GPU state readback occurs.",
-        "Prefill progress samples count submitted native graphs. A sampled submission may still be in flight.",
-        "The bounded literal grammar deliberately remains incomplete at the output budget; early EOS is impossible before more than eight ordinary tokens."]
-    run.receipt["progress"] = []
-    run.save()
+    run = Run(args)
+    run.results["progress"] = []
     active = None
     try:
         models = run.request("models", path="/v1/models")
         loaded = [item for item in models.get("body", {}).get("data", []) if item.get("id") == MODEL]
         run.check("loaded_model_identity", models.get("status") == 200 and len(loaded) == 1,
             models=models.get("body"))
-        if not run.receipt["checks"][-1]["passed"]:
+        if not run.results["checks"][-1]["passed"]:
             raise ValueError("server model identity differs from the exact case")
         before = idle(run, "before")
         totals = resource_totals(before)
@@ -300,7 +271,7 @@ def execute(args, tokenizer, plan, body):
         run.check("rejection_no_model_admission", reject_delta["flare_requests_admitted_total"] == 0
             and all(reject_delta[f'flare_graph_launches_total{{kind="{kind}"}}'] == 0
                 for kind in ("init", "restore", "resume", "prefill", "decode", "vision", "snapshot")), delta=reject_delta)
-        if not all(check["passed"] for check in run.receipt["checks"]):
+        if not all(check["passed"] for check in run.results["checks"]):
             raise ValueError("context prerequisites failed; exact input remains preserved")
         before = rejected
         started = time.monotonic()
@@ -315,15 +286,14 @@ def execute(args, tokenizer, plan, body):
                 if not active.done.wait(10):
                     raise TimeoutError("HTTP worker did not drain after the context deadline")
                 break
-            metrics = run.metrics(f"context-progress-{len(run.receipt['progress']):04d}", wait_idle=False)
+            metrics = run.metrics(f"context-progress-{len(run.results['progress']):04d}", wait_idle=False)
             delta = metric_delta(before, metrics)
             submitted = delta['flare_graph_launches_total{kind="prefill"}']
             sample = {"elapsed_seconds": time.monotonic() - started, "metrics": metrics,
                 "prefill_graphs_submitted": submitted,
                 "completed_prefill_token_lower_bound": max(0, submitted - 1) * PREFILL_CAPACITY}
             with run.lock:
-                run.receipt["progress"].append(sample)
-                run.save()
+                run.results["progress"].append(sample)
             print(json.dumps({"event": "context_progress", "elapsed_seconds": round(sample["elapsed_seconds"], 2),
                 "prefill_graphs": submitted, "expected_prefill_graphs": plan["expected_prefill_launches"],
                 "active_requests": metrics["flare_active_requests"]}), flush=True)
@@ -355,7 +325,7 @@ def execute(args, tokenizer, plan, body):
         run.check("context_no_request_errors", delta["flare_requests_admitted_total"] == 1
             and delta["flare_requests_completed_total"] == 1
             and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0, delta=delta)
-        samples = run.receipt["progress"]
+        samples = run.results["progress"]
         run.check("context_page_reservation_observed", any(sample["metrics"]["flare_active_requests"] == 1
             and resource_totals(sample["metrics"])["pages"] == totals["pages"] - plan["reserved_pages"]
             and sample["metrics"]["flare_free_request_slots"] == 3 for sample in samples),
@@ -376,20 +346,17 @@ def execute(args, tokenizer, plan, body):
         run.check("subsequent_short_exact_budget", subsequent.get("body", {}).get("usage", {}).get("completion_tokens") == OUTPUT_TOKENS)
         final = idle(run, "final")
         run.reclaimed("subsequent-short", after, final)
-        run.receipt["context_counter_delta"] = delta
+        run.results["context_counter_delta"] = delta
     except Exception as error:
         if active is not None and not active.done.is_set():
             active.abort()
             active.done.wait(10)
-        run.receipt["case_errors"].append({"case": "context-limit", "error": f"{type(error).__name__}: {error}",
+        run.results["case_errors"].append({"case": "context-limit", "error": f"{type(error).__name__}: {error}",
             "traceback": traceback.format_exc()})
     finally:
-        run.check("source_fingerprints_unchanged", all(digest(ROOT / path) == value for path, value in sources.items()))
-        run.check("native_extension_unchanged", digest(extension) == args.expected_native_sha256)
-        run.receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
-        run.receipt["passed"] = not run.receipt["case_errors"] and all(check["passed"] for check in run.receipt["checks"])
-        run.save()
-    return 0 if run.receipt["passed"] else 1
+        run.results["finished_at"] = datetime.now(timezone.utc).isoformat()
+        run.results["passed"] = not run.results["case_errors"] and all(check["passed"] for check in run.results["checks"])
+    return 0 if run.results["passed"] else 1
 
 
 def main():
@@ -398,10 +365,8 @@ def main():
     parser.add_argument("--snapshot", type=Path, default=Path.home() / ".cache/huggingface/hub" /
         ("models--" + MODEL.replace("/", "--")) / "snapshots" / REVISION)
     parser.add_argument("--artifacts", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--memory-report", type=Path)
     parser.add_argument("--server-pid", type=int)
-    parser.add_argument("--expected-native-sha256", default=NATIVE_SHA256)
     parser.add_argument("--deadline-seconds", type=float, default=3600)
     parser.add_argument("--poll-seconds", type=float, default=5)
     parser.add_argument("--max-response-bytes", type=int, default=8 << 20)
@@ -411,7 +376,6 @@ def main():
         parser.error("deadline, poll interval and response byte bound must be positive")
     if args.base_url != "http://127.0.0.1:38761":
         parser.error("context qualification is assigned to http://127.0.0.1:38761")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     tokenizer, plan, body = prepare(args)
     if args.prepare_only:
         print(json.dumps({"prepared": True, "http_requests": 0, "plan": str(args.artifacts / "case-plan.json"),

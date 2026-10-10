@@ -19,7 +19,7 @@ import sqlite3
 import statistics
 from urllib.parse import quote
 
-from .provenance import file_record, utc, write_json
+from .provenance import utc, write_json
 
 GRAPH = 'CUPTI_ACTIVITY_KIND_GRAPH_TRACE'
 GPU_TABLES = (GRAPH, 'CUPTI_ACTIVITY_KIND_KERNEL', 'CUPTI_ACTIVITY_KIND_MEMCPY',
@@ -86,9 +86,9 @@ def prepared_graph_map(manifest: dict) -> dict:
     if not rows:
         raise ValueError('graph catalog is empty')
     return {'schema': 'flare-nsys-graph-map-v1', 'pid': os.getpid(), 'created_at': utc(),
-            'cupti_library': file_record(path),
-            'loaded_cupti_libraries': [file_record(candidate) for candidate in candidates],
-            'nsight_injectors': [file_record(injector) for injector in injectors],
+            'cupti_library': str(path),
+            'loaded_cupti_libraries': [str(candidate) for candidate in candidates],
+            'nsight_injectors': [str(injector) for injector in injectors],
             'cupti_selection': 'loaded_nsight_injector_directory' if injectors else 'sole_loaded_library',
             'graphs': rows}
 
@@ -362,7 +362,7 @@ def analyze(database: Path, *, graph_map=None, pid=None, device=None, start_ns=N
                     if row[type_column] != 1 or row['correlationId'] in dependency_correlations]
             else:
                 synchronization[table] = rows(table, where=scope, params=parameters)
-        return {'schema': 'flare-nsys-performance-v1', 'created_at': utc(), 'database': file_record(database),
+        return {'schema': 'flare-nsys-performance-v1', 'created_at': utc(), 'database': str(database),
                 'graph_map': graph_map, 'selection': {'pid': pid, 'device': device, 'start_ns': start_ns, 'end_ns': end_ns},
                 'schema_columns': schema, 'activity_counts': dict(activity_counts), 'graph_executions': len(records),
                 'identity_complete': not errors['unmapped_graph_executions'],
@@ -403,7 +403,7 @@ def main():
     mapping = json.loads(args.graph_map.read_text()) if args.graph_map else None
     result = analyze(args.database, graph_map=mapping, pid=args.pid, device=args.device,
                      start_ns=args.start_ns, end_ns=args.end_ns)
-    result['graph_map_file'] = file_record(args.graph_map) if args.graph_map else None
+    result['graph_map_file'] = str(args.graph_map) if args.graph_map else None
     write_json(args.output, result)
     print(json.dumps({key: result[key] for key in ('graph_executions', 'identity_complete', 'host_correlation_complete', 'diagnostics')}))
 

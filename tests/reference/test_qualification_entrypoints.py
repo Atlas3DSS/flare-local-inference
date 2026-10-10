@@ -65,7 +65,7 @@ import qualify.graph_execution
 assert sys.path == before
 assert not any(name in sys.modules for name in ('torch', 'flashinfer', 'b12x', 'flare_helios'))
 assert qualify.server.Run.__module__ == 'qualify.server'
-assert qualify.graph_execution.Evidence.__module__ == 'qualify.graph_execution'
+assert qualify.graph_execution.Checks.__module__ == 'qualify.graph_execution'
 """,
         ],
         tmp_path,
@@ -99,8 +99,8 @@ assert qualify.graph_execution.Evidence.__module__ == 'qualify.graph_execution'
 def test_cli_validation_precedes_runtime_and_output_creation(
     tmp_path, module, arguments, error
 ):
-    output, artifacts = tmp_path / "receipt.json", tmp_path / "artifacts"
-    tail = [*arguments, "--output", str(output), "--artifacts", str(artifacts)]
+    output, artifacts = tmp_path / "unused.json", tmp_path / "artifacts"
+    tail = [*arguments, "--artifacts", str(artifacts)]
     for command, package_path in [
         ([str(ROOT / f"scripts/qualify_{module}.py")], False),
         (["-m", f"qualify.{module}"], True),
@@ -114,7 +114,7 @@ def test_cli_validation_precedes_runtime_and_output_creation(
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_http_request_bytes_and_receipt_preserve_utf8_and_sse(
+def test_http_request_bytes_and_results_preserve_utf8_and_sse(
     tmp_path, monkeypatch, stream
 ):
     events = [
@@ -197,9 +197,9 @@ def test_http_request_bytes_and_receipt_preserve_utf8_and_sse(
         require_metrics=True,
         cases=None,
         artifacts=tmp_path,
-        output=tmp_path / "receipt.json",
+        output=tmp_path / "unused.json",
     )
-    run = server.Run(args, {"fixture": "transport"})
+    run = server.Run(args)
     record = run.request("completion", body, stream=stream)
     expected_body = {**body, "stream": stream}
     (connection,) = connections
@@ -238,8 +238,6 @@ def test_http_request_bytes_and_receipt_preserve_utf8_and_sse(
     else:
         assert record["body"] == completion
         assert run.complete(record, prompt_tokens=7) == completion["choices"][0]
-        assert all(check["passed"] for check in run.receipt["checks"])
-    saved = json.loads(args.output.read_text())
-    assert saved == run.receipt
-    assert saved["schema"] == "flare-http-qualification-v1"
-    assert saved["requests"] == [record]
+        assert all(check["passed"] for check in run.results["checks"])
+    assert not args.output.exists()
+    assert run.results["requests"] == [record]

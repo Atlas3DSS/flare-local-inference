@@ -14,13 +14,12 @@ import math
 from pathlib import Path
 import re
 import socket
-import sys
 import threading
 import time
 import traceback
 
 from qualify.performance import connection, distribution
-from qualify.provenance import file_record, utc, write_json
+from qualify.provenance import write_json
 from qualify.speculative_workload import (
     MODEL_ID, REVISION, arms, json_bytes, request_groups, validate_artifacts,
 )
@@ -480,46 +479,20 @@ def measurement_summary(workload, observations, groups):
     return result
 
 
-def process_snapshot(pid, folder, label):
-    proc = Path(f"/proc/{pid}")
-    records = {}
-    for name in ("cmdline", "maps", "stat"):
-        path = folder / f"server-{label}-{name}"
-        path.write_bytes((proc / name).read_bytes())
-        records[name] = file_record(path)
-    return {"pid": pid, "starttime_ticks": (folder / f"server-{label}-stat").read_text().rsplit(")", 1)[1].split()[19],
-            "files": records}
-
-
 def run(args):
     workload = validate_artifacts(args.workload)
     arm = next(a for a in arms() if a["id"] == args.arm)
     memory = json.loads(args.memory_report.read_text())
     validate_arm(memory, arm)
     args.output.mkdir(parents=True, exist_ok=False)
-    inputs = [args.memory_report, *args.provenance, args.workload / "manifest.json", args.workload / "workload.json", args.workload / "execution-plan.json"]
-    for index, path in enumerate(inputs):
-        (args.output / f"input-{index:02}-{path.name}").write_bytes(path.read_bytes())
-    sources = [Path(__file__), Path(__file__).with_name("speculative_workload.py"), Path(__file__).with_name("performance.py"), Path(__file__).with_name("provenance.py")]
-    receipt = {"schema": "flare-speculative-http-v1", "started_at": utc(), "arm": arm,
-        "concurrency_ceiling": args.concurrency, "repetition": args.repetition,
-        "provenance": {"inputs": [file_record(p) for p in inputs], "sources": [file_record(p) for p in sources],
-                       "base_url": args.base_url, "server_pid": args.server_pid, "argv": sys.argv},
-        "measurement": {"input": "Frozen request files sent unchanged; every output/failed request retained.",
-            "clocks": "Client perf_counter_ns measures delivery and end-to-end time; native timestamps use a separate process-relative clock.",
-            "core": "CPU token observation after scheduler completion, not GPU kernel completion; speculative emission can be bursty.",
-            "throughput": "Actual raw emitted IDs divided by full group send-to-terminal span; not an equivalent-work speedup.",
-            "semantics": "Automatic JSON/tool checks plus explicit manual prose/code review; no seed-equality assumption.",
-            "counters": "Exclusive-client idle group deltas. Actual graph B/W includes padding; no per-request graph attribution within a concurrent group."},
-        "groups": [], "observations": [], "errors": [], "passed": False}
-    before_process = None
+    measurements = {"arm": arm, "concurrency_ceiling": args.concurrency,
+                    "repetition": args.repetition, "base_url": args.base_url,
+                    "groups": [], "observations": [], "errors": [], "passed": False}
     cases = {c["id"]: c for c in workload["cases"]}
     groups = request_groups(workload, args.concurrency)
     try:
-        before_process = process_snapshot(args.server_pid, args.output, "before")
-        receipt["process_before"] = before_process
         initial = idle_metrics(args.base_url, args.output, "initial", args.timeout)
-        receipt["initial_metrics"] = initial
+        measurements["initial_metrics"] = initial
         if (initial.get("flare_cached_checkpoints") != 0 or initial.get("flare_cached_kv_pages") != 0
                 or initial.get("flare_requests_admitted_total") != 0):
             raise ValueError("paired workload requires a fresh unused server/cache for this arm/concurrency trial")
@@ -536,37 +509,28 @@ def run(args):
 
             with ThreadPoolExecutor(max_workers=group["concurrency"]) as pool:
                 results = list(pool.map(submit, group["case_ids"]))
-            receipt["observations"].extend(results)
+            measurements["observations"].extend(results)
             after = idle_metrics(args.base_url, folder, "after", args.timeout)
             summary = summarize_group(group, results, before, after, memory)
             summary["category"] = cases[group["case_ids"][0]]["category"]
-            receipt["groups"].append(summary)
+            measurements["groups"].append(summary)
             write_json(folder / "group.json", {**summary, "metrics_before": before, "metrics_after": after})
-            write_json(args.output / "receipt.json", receipt)
-        receipt["final_metrics"] = idle_metrics(args.base_url, args.output, "final", args.timeout)
-        complete = len(receipt["observations"]) == len(cases) and len(receipt["groups"]) == len(groups)
-        receipt["transport_passed"] = complete and all(g["transport_passed"] for g in receipt["groups"])
-        receipt["passed"] = complete and all(g["passed"] for g in receipt["groups"])
-        receipt["automatic_semantic_checks_pass"] = all(g["automatic_semantic_checks_pass"] for g in receipt["groups"])
-        receipt["manual_review_cases"] = [c for g in receipt["groups"] for c in g["manual_review_cases"]]
-        receipt["paired_performance_conclusion"] = None
+            write_json(args.output / "measurements.json", measurements)
+        measurements["final_metrics"] = idle_metrics(args.base_url, args.output, "final", args.timeout)
+        complete = len(measurements["observations"]) == len(cases) and len(measurements["groups"]) == len(groups)
+        measurements["transport_passed"] = complete and all(g["transport_passed"] for g in measurements["groups"])
+        measurements["passed"] = complete and all(g["passed"] for g in measurements["groups"])
+        measurements["automatic_semantic_checks_pass"] = all(g["automatic_semantic_checks_pass"] for g in measurements["groups"])
+        measurements["manual_review_cases"] = [c for g in measurements["groups"] for c in g["manual_review_cases"]]
+        measurements["paired_performance_conclusion"] = None
     except Exception as error:
-        receipt["errors"].append(f"{type(error).__name__}: {error}")
-        receipt["traceback"] = traceback.format_exc()
-        receipt["passed"] = False
+        measurements["errors"].append(f"{type(error).__name__}: {error}")
+        measurements["traceback"] = traceback.format_exc()
+        measurements["passed"] = False
     finally:
-        receipt["measurements"] = measurement_summary(workload, receipt["observations"], receipt["groups"])
-        try:
-            receipt["process_after"] = process_snapshot(args.server_pid, args.output, "after")
-            receipt["same_server_process"] = before_process is not None and receipt["process_after"]["starttime_ticks"] == before_process["starttime_ticks"]
-            if not receipt["same_server_process"]:
-                receipt["passed"] = False
-        except Exception as error:
-            receipt["errors"].append(f"process verification failed: {error}")
-            receipt["passed"] = False
-        receipt["finished_at"] = utc()
-        write_json(args.output / "receipt.json", receipt)
-    return receipt
+        measurements["measurements"] = measurement_summary(workload, measurements["observations"], measurements["groups"])
+        write_json(args.output / "measurements.json", measurements)
+    return measurements
 
 
 def main():
@@ -575,21 +539,19 @@ def main():
     parser.add_argument("--arm", choices=[a["id"] for a in arms()], required=True)
     parser.add_argument("--concurrency", type=int, choices=(1, 2, 4), required=True)
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--server-pid", type=int, required=True)
     parser.add_argument("--memory-report", type=Path, required=True)
-    parser.add_argument("--provenance", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repetition", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args()
-    if args.timeout <= 0 or not math.isfinite(args.timeout) or args.repetition < 0 or args.server_pid <= 0:
-        parser.error("timeout and PID must be positive; repetition must be nonnegative")
-    receipt = run(args)
-    print(json.dumps({"passed": receipt["passed"], "requests": len(receipt["observations"]),
-                      "transport_passed": receipt.get("transport_passed", False),
-                      "automatic_semantic_checks_pass": receipt.get("automatic_semantic_checks_pass", False),
-                      "groups": len(receipt["groups"]), "output": str(args.output)}))
-    raise SystemExit(0 if receipt["passed"] else 1)
+    if args.timeout <= 0 or not math.isfinite(args.timeout) or args.repetition < 0:
+        parser.error("timeout must be positive; repetition must be nonnegative")
+    measurements = run(args)
+    print(json.dumps({"passed": measurements["passed"], "requests": len(measurements["observations"]),
+                      "transport_passed": measurements.get("transport_passed", False),
+                      "automatic_semantic_checks_pass": measurements.get("automatic_semantic_checks_pass", False),
+                      "groups": len(measurements["groups"]), "output": str(args.output)}))
+    raise SystemExit(0 if measurements["passed"] else 1)
 
 
 if __name__ == "__main__":

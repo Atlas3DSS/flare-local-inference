@@ -10,15 +10,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
-import json
 import os
 import time
 from collections import Counter
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
-from qualify.provenance import digest, file_record, write_json
+from qualify.provenance import write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 VOCAB = 248320
@@ -459,7 +457,6 @@ def observe(evidence, side, stage, model, owner, pages, operation=None):
 def _require(evidence, name, passed, **details):
     evidence.check(name, passed, **details)
     if not passed:
-        evidence.save()
         raise AssertionError(name)
 
 
@@ -614,7 +611,6 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                         _require(evidence, f"{side}.{index}.checkpoint.{key}", passed)
                 previous_stage = stage
                 evidence.value["commands"] = commands
-                evidence.save()
                 progress(f"{side} {index + 1}/{len(fixture['commands'])} {stage}; retained baseline {evidence.bytes / 2**30:.2f} GiB")
         _require(evidence, "all_observations_bitwise_equal", not evidence.value["mismatches"], mismatches=len(evidence.value["mismatches"]))
     finally:
@@ -627,14 +623,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--prefill-chunk-size", type=int, default=4096)
-    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
     if args.prefill_chunk_size < 128 or args.prefill_chunk_size % 64:
         parser.error("prefill chunk size must be 64-aligned and at least 128")
-    if args.output.exists() or args.artifacts.exists():
-        parser.error("fresh output and artifact paths are required")
+    if args.artifacts.exists():
+        parser.error("diagnostic tensor directory must not exist")
     import torch
     from transformers import AutoTokenizer
 
@@ -646,53 +641,23 @@ def main(argv=None):
     alternative, = tokenizer.encode(" orange", add_special_tokens=False)
     prompt = tokenizer.encode("Speculative state parity: " + "The capital of France is Paris. " * 20, add_special_tokens=False)[:65]
     fixture = command_plan(prompt, token, alternative)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.artifacts.mkdir(parents=True)
     (args.artifacts / "uploads").mkdir()
     write_json(args.artifacts / "fixture.json", fixture)
     if args.validate_only:
         if torch.cuda.is_initialized():
             raise AssertionError("CPU validation initialized CUDA")
-        write_json(args.output, {"schema": "speculative-state-command-contract-v1", "gpu_execution": False,
-            "commands": len(fixture["commands"]), "shapes": fixture["shapes"], "fixture": file_record(args.artifacts / "fixture.json")})
+        print(f"Validated {len(fixture['commands'])} state transitions")
         return 0
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
-    import b12x
-    import flare_helios
-    import flashinfer
 
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from flare.recipes.qwen38.speculative_model import SpeculativePreparation
-    from qualify.graph_execution import Evidence
+    from qualify.graph_execution import Checks
 
-    source_paths = {Path(__file__), ROOT / "qualify/graph_execution.py", ROOT / "qualify/provenance.py"}
-    for directory, suffix in ((ROOT / "flare", "*.py"), (ROOT / "helios/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):
-        source_paths.update(directory.rglob(suffix))
-    fi = Path(flashinfer.__file__).resolve().parent
-    source_paths.update(fi / path for path in ("sampling.py", "utils.py", "jit/sampling.py",
-        "data/csrc/sampling.cu", "data/csrc/renorm.cu", "data/csrc/flashinfer_sampling_binding.cu",
-        "data/csrc/sampling_utils.h", "data/include/flashinfer/sampling.cuh",
-        "data/include/flashinfer/topk.cuh", "data/include/flashinfer/topk_common.cuh",
-        "data/include/flashinfer/air_top_p.cuh"))
-    extension, = Path(flare_helios.__file__).parent.glob("*.so")
-    provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot),
-        "assets": [file_record(snapshot / name) for name in ("config.json", "tokenizer.json", "model.safetensors.index.json")]},
-        "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),
-        "sources": {str(p.resolve()): digest(p) for p in sorted(source_paths)}, "native_extension": file_record(extension),
-        "versions": {name: importlib.metadata.version(name) for name in ("torch", "flashinfer-python", "transformers")},
-        "scope": "Actual checkpoint copy-only target graphs; identical graph handles and uploads through Python and Rust; singleton grammar controls acceptance through FlashInfer; no target-logit substitution."}
-    evidence = Evidence(args.output, args.artifacts, provenance)
-    evidence.value["schema"] = "flare-speculative-state-parity-v1"
+    evidence = Checks(args.artifacts)
     evidence.value["fixture"] = fixture
-    source_dir = args.artifacts / "sources"
-    source_dir.mkdir()
-    for path, sha in provenance["sources"].items():
-        destination = source_dir / sha
-        if not destination.exists():
-            destination.write_bytes(Path(path).read_bytes())
-    import shutil
-    shutil.copy2(extension, args.artifacts / extension.name)
     started = time.monotonic()
     progress = lambda message: print(f"{time.monotonic() - started:.1f}s {message}", flush=True)
     torch.set_grad_enabled(False)
@@ -702,17 +667,7 @@ def main(argv=None):
         with prepare_model(snapshot, config, progress=progress) as model:
             owner = next(x for x in model._resources if isinstance(x, SpeculativePreparation))
             evidence.value["memory_report"] = model.memory_report
-            mappings = [line for line in Path("/proc/self/maps").read_text().splitlines() if "/sampling.so" in line]
-            evidence.value["sampler_mapping"] = mappings
-            evidence.value["sampler_libraries"] = [file_record(path) for path in sorted({line.split(maxsplit=5)[5] for line in mappings})]
-            _require(evidence, "mapped_sampler_recorded", bool(mappings))
-            for record in evidence.value["sampler_libraries"]:
-                path = args.artifacts / (record["sha256"] + ".so")
-                shutil.copy2(record["path"], path)
-                _require(evidence, "mapped_sampler_archive", digest(path) == record["sha256"])
             compare(model, owner, fixture, evidence, args.artifacts, progress)
-        _require(evidence, "sources_unchanged", all(digest(path) == sha for path, sha in provenance["sources"].items()))
-        _require(evidence, "extension_unchanged", digest(extension) == provenance["native_extension"]["sha256"])
     except BaseException as error:
         import traceback
         evidence.value["error"] = {"type": type(error).__name__, "message": str(error), "traceback": traceback.format_exc()}
@@ -721,7 +676,6 @@ def main(argv=None):
         evidence.value["elapsed_seconds"] = time.monotonic() - started
         evidence.value["deduplicated_baseline_bytes"] = evidence.bytes
         evidence.value["passed"] = not evidence.value.get("error") and not evidence.value["mismatches"] and all(x["passed"] for x in evidence.value["checks"])
-        evidence.save()
     return 0 if evidence.value["passed"] else 1
 
 

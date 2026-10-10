@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
 import json
 import os
-import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, fields, is_dataclass
@@ -36,17 +34,12 @@ def save_json(path, value):
     temporary.replace(path)
 
 
-class Evidence:
-    def __init__(self, output, artifacts, provenance):
-        self.output, self.artifacts = output, artifacts
-        self.value = {"schema": "flare-same-graph-execution-v1", "provenance": provenance,
-            "checks": [], "commands": [], "observations": {}, "mismatches": []}
+class Checks:
+    def __init__(self, artifacts):
+        self.artifacts = artifacts
+        self.value = {"checks": [], "commands": [], "observations": {}, "mismatches": []}
         self.baselines = {}
         self.bytes = 0
-        self.save()
-
-    def save(self):
-        save_json(self.output, self.value)
 
     def check(self, name, passed, **details):
         self.value["checks"].append({"name": name, "passed": bool(passed), **details})
@@ -468,7 +461,6 @@ class Request:
 
 class Scenario:
     def __init__(self, model, tokenizer, image, artifacts):
-        import torch
 
         from flare.components.sampling import AdmissionBuffers
 
@@ -807,7 +799,6 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
     python_stream = torch.cuda.Stream(device=model.device)
     reset_hashes = reset.hashes()
     evidence.value["reset"]["python"] = reset_hashes
-    evidence.save()
 
     def allocated():
         statistics = torch.cuda.memory_stats(model.device)
@@ -926,7 +917,6 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
             reference = {}
             readback(side, "initial")
             previous_stage = "initial"
-            evidence.save()
             for group_index, group in enumerate(scenario.groups):
                 stage = f"group{group_index:02d}." + "+".join(command["graph"] for command in group)
                 before = allocated()
@@ -996,7 +986,6 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
                                 == transfer["consumed"] - 1 for layer, value in cache.items()})
                         evidence.check(f"{side}.{stage}.state-copy-{transfer['source']}-{transfer['destination']}",
                             bool(checks) and all(checks.values()), checks=checks)
-                evidence.save()
                 progress(f"{side} {group_index + 1}/{len(scenario.groups)} {stage}; baseline bytes {evidence.bytes / (1 << 30):.2f} GiB")
         evidence.check("all_observations_bitwise_equal", not evidence.value["mismatches"], mismatches=len(evidence.value["mismatches"]))
     finally:
@@ -1059,7 +1048,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--prefill-chunk-size", type=int, default=4096)
-    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
     args = parser.parse_args()
     if args.prefill_chunk_size < 512 or args.prefill_chunk_size % 64:
@@ -1068,16 +1056,11 @@ def main():
         parser.error("qualification requires context space for a full chunk, 65-token continuation and 32 output tokens")
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("assign CUDA_VISIBLE_DEVICES explicitly")
-    if args.output.exists() or (args.artifacts.exists() and any(args.artifacts.iterdir())):
-        parser.error("output and artifacts must not contain a previous qualification")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.artifacts.exists() and any(args.artifacts.iterdir()):
+        parser.error("diagnostic tensor directory must be empty")
     args.artifacts.mkdir(parents=True, exist_ok=True)
     (args.artifacts / "uploads").mkdir()
-    (args.artifacts / "qualify_graph_execution.py").write_bytes(Path(__file__).read_bytes())
 
-    import b12x.attention.qsa._contract as contract
-    import flare_helios
-    import flashinfer
     import torch
     from transformers import AutoTokenizer
 
@@ -1091,28 +1074,7 @@ def main():
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     snapshot = args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
-    extension, = Path(flare_helios.__file__).parent.glob("*.so")
-    b12x_root = Path(contract.__file__).resolve().parents[2]
-    flashinfer_root = Path(flashinfer.__file__).resolve().parent
-    sampling_sources = [flashinfer_root / name for name in (
-        "sampling.py", "utils.py", "jit/sampling.py",
-        "data/csrc/sampling.cu", "data/csrc/renorm.cu",
-        "data/csrc/flashinfer_sampling_binding.cu", "data/csrc/sampling_utils.h",
-        "data/include/flashinfer/sampling.cuh", "data/include/flashinfer/topk.cuh",
-        "data/include/flashinfer/topk_common.cuh", "data/include/flashinfer/air_top_p.cuh",
-    )]
-    source_paths = [Path(__file__).with_name("checkpoint_state.py"),
-        *sorted((ROOT / "flare/recipes/qwen38").glob("*.py")), *sorted((ROOT / "flare/preparation").rglob("*.py")),
-        *sorted((ROOT / "helios/src").rglob("*.rs")), *sorted(b12x_root.rglob("*.py")), *sampling_sources]
-    provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot)},
-        "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),
-        "native_extension": str(extension),
-        "native_extension_sha256": file_hash(extension), "script_sha256": file_hash(__file__),
-        "prefill_chunk_size": args.prefill_chunk_size,
-        "sources": {str(path): file_hash(path) for path in source_paths},
-        "versions": {name: importlib.metadata.version(name) for name in ("torch", "flashinfer-python", "transformers", "tokenizers")},
-        "scope": "Identical captured graph handles, capacities and uploaded bytes; no cross-capacity numerical comparison or performance acceptance."}
-    evidence = Evidence(args.output, args.artifacts, provenance)
+    evidence = Checks(args.artifacts)
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
     image = image_fixture(snapshot)
     started = time.monotonic()
@@ -1140,21 +1102,16 @@ def main():
                 "retained_storage_count": len(reset.storage), "retained_storage_bytes": sum(raw.numel() for _, raw, _ in reset.storage.values())}
             original_manifest = model.manifest()
             evidence.value["manifest"] = original_manifest
-            evidence.save()
             run_comparison(model, state, requests, scratch, cache, reset, scenario, evidence, progress)
-        evidence.check("sources_unchanged", all(file_hash(path) == digest for path, digest in provenance["sources"].items()))
-        evidence.check("native_extension_unchanged", file_hash(extension) == provenance["native_extension_sha256"])
     except BaseException as error:
         import traceback
         evidence.value["error"] = {"type": type(error).__name__, "message": str(error), "traceback": traceback.format_exc()}
-        evidence.save()
         raise
     finally:
         evidence.value["elapsed_seconds"] = time.monotonic() - started
         evidence.value["deduplicated_baseline_bytes"] = evidence.bytes
         evidence.value["passed"] = not evidence.value.get("error") and not evidence.value["mismatches"] and all(check["passed"] for check in evidence.value["checks"])
-        evidence.save()
-    print(json.dumps({"output": str(args.output), "passed": evidence.value["passed"],
+    print(json.dumps({"passed": evidence.value["passed"],
         "checks": len(evidence.value["checks"]), "mismatches": len(evidence.value["mismatches"])}), flush=True)
     return 0 if evidence.value["passed"] else 1
 

@@ -20,14 +20,13 @@ from pathlib import Path
 import re
 import statistics
 import struct
-import sys
 import threading
 import time
 import traceback
 from urllib.parse import urlsplit
 import uuid
 
-from .provenance import digest, file_record, utc, write_json
+from .provenance import digest, write_json
 from flare.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION,
 )
@@ -223,9 +222,7 @@ def prepare(args):
             raise ValueError(f"checkpoint asset mismatch: {name}")
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
     corpus = build_corpus(tokenizer, repetitions=args.repetitions, nonce=args.nonce)
-    corpus["provenance"] = {"snapshot": str(args.snapshot.resolve()), "assets_sha256": assets,
-                            "transformers_origin": origin, "tokenizers_version": tokenizers.__version__,
-                            "sources": [file_record(Path(__file__)), file_record(ROOT / "flare/preparation/qwen38.py")]}
+    corpus["snapshot"] = str(args.snapshot.resolve())
     args.output.mkdir(parents=True)
     for case in corpus["cases"]:
         folder = args.output / case["id"]
@@ -234,7 +231,7 @@ def prepare(args):
         (folder / "prompt.u32le").write_bytes(token_bytes(case["prompt_tokens"]))
         (folder / "rendered.txt").write_text(case["rendered_prompt"])
     write_json(args.output / "corpus.json", corpus)
-    print(json.dumps({"corpus": file_record(args.output / "corpus.json"), "groups": len(corpus["groups"]),
+    print(json.dumps({"corpus": str(args.output / "corpus.json"), "groups": len(corpus["groups"]),
                       "requests": len(corpus["cases"])}))
     return 0
 
@@ -515,19 +512,8 @@ def run(args):
         if memory.get("prefill_chunk_size") != args.prefill_chunk_size:
             raise ValueError("actual prepared prefill capacity differs from the measurement label")
     args.output.mkdir(parents=True)
-    inputs = args.provenance + ([args.memory_report] if args.memory_report else [])
-    provenance = {"corpus": file_record(args.corpus / "corpus.json"), "backend": args.backend,
-                  "server_pid": args.server_pid, "base_url": args.base_url,
-                  "prefill_chunk_size": args.prefill_chunk_size, "model_override": args.model,
-                  "sources": [file_record(Path(__file__)), file_record(ROOT / "qualify/provenance.py")],
-                  "inputs": [file_record(path) for path in inputs], "argv": sys.argv}
-    for index, path in enumerate(inputs):
-        (args.output / f"provenance-{index:02}-{path.name}").write_bytes(path.read_bytes())
-    proc = Path(f"/proc/{args.server_pid}")
-    for name in ("cmdline", "maps", "stat"):
-        (args.output / ("server-" + name)).write_bytes((proc / name).read_bytes())
-    initial_starttime = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19]
-    receipt = {"schema": SCHEMA, "started_at": utc(), "provenance": provenance,
+    measurements = {"backend": args.backend, "base_url": args.base_url,
+                    "prefill_chunk_size": args.prefill_chunk_size,
                "groups": [], "errors": [], "passed": False,
                "measurement": {"clock": "client perf_counter_ns; native token timestamps are a separate process-relative domain",
                    "p99": "nearest rank ceil(0.99*n)", "connection": "connections open before the simultaneous send barrier; connection duration is reported separately",
@@ -572,29 +558,22 @@ def run(args):
                 ttft = observation["analysis"]["delivery_ttft_ns"]
                 if ttft and group["kind"] in ("ttft-4096", "prefill-65536"):
                     observation["analysis"]["http_prefill_tokens_per_second"] = len(cases[observation["case"]]["prompt_tokens"]) * 1e9 / ttft
-            receipt["groups"].append(summary)
+            measurements["groups"].append(summary)
             print(json.dumps(summary), flush=True)
         except Exception as exc:
-            receipt["errors"].append({"group": group["id"], "error": f"{type(exc).__name__}: {exc}",
+            measurements["errors"].append({"group": group["id"], "error": f"{type(exc).__name__}: {exc}",
                                       "traceback": traceback.format_exc()})
-        write_json(args.output / "receipt.json", receipt)
-    receipt["observations"] = all_observations
-    receipt["finished_at"] = utc()
-    receipt["source_unchanged"] = all(digest(record["path"]) == record["sha256"]
-                                      for record in provenance["sources"] + provenance["inputs"])
-    try:
-        receipt["same_server_process"] = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19] == initial_starttime
-    except OSError:
-        receipt["same_server_process"] = False
-    receipt["passed"] = (not receipt["errors"] and len(receipt["groups"]) == len(corpus["groups"])
-                         and all(group["passed"] for group in receipt["groups"]) and receipt["source_unchanged"]
-                         and receipt["same_server_process"])
-    receipt["summary"] = {"groups": len(receipt["groups"]), "requests": len(all_observations),
-                          "failed_groups": sum(not group["passed"] for group in receipt["groups"]),
-                          "errors": len(receipt["errors"])}
-    receipt["measurements"] = summarize_measurements(corpus, receipt["groups"], all_observations)
-    write_json(args.output / "receipt.json", receipt)
-    return 0 if receipt["passed"] else 1
+        write_json(args.output / "measurements.json", measurements)
+    measurements["observations"] = all_observations
+    measurements["passed"] = (not measurements["errors"]
+        and len(measurements["groups"]) == len(corpus["groups"])
+        and all(group["passed"] for group in measurements["groups"]))
+    measurements["summary"] = {"groups": len(measurements["groups"]), "requests": len(all_observations),
+                          "failed_groups": sum(not group["passed"] for group in measurements["groups"]),
+                          "errors": len(measurements["errors"])}
+    measurements["measurements"] = summarize_measurements(corpus, measurements["groups"], all_observations)
+    write_json(args.output / "measurements.json", measurements)
+    return 0 if measurements["passed"] else 1
 
 
 def main():
@@ -610,11 +589,9 @@ def main():
     measure.add_argument("--output", type=Path, required=True)
     measure.add_argument("--backend", choices=("flare", "vllm"), required=True)
     measure.add_argument("--base-url", required=True)
-    measure.add_argument("--server-pid", type=int, required=True)
     measure.add_argument("--prefill-chunk-size", type=int, choices=(512, 4096), required=True)
     measure.add_argument("--model")
     measure.add_argument("--memory-report", type=Path)
-    measure.add_argument("--provenance", type=Path, action="append", default=[])
     measure.add_argument("--timeout", type=float, default=300)
     args = parser.parse_args()
     return prepare(args) if args.command == "prepare" else run(args)

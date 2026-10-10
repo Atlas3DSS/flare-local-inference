@@ -32,7 +32,7 @@ weights, KV pages, recurrent state, feature arena and workspaces. The object
 exposes `address`, `healthy`, `drained`, `wait(timeout_ms=1000)` and idempotent
 `close()`. Construction,
 asset loading and shutdown release the GIL. Failed CUDA drain retains the owner.
-A failed startup releases it only if its drain receipt permits release. Its
+A failed startup releases it only if its drain confirmation permits release. Its
 Python exception carries `resources_retained=true` when drain failed; bootstrap
 must prohibit explicit graph, session and mapped-allocation teardown in that case.
 
@@ -204,7 +204,7 @@ slots. The native ingress channel and pending admission deque each hold at most
 bounded event queue cancels generation and receives an error if still
 connected. Neither case blocks graph scheduling. HTTP shutdown allows five
 seconds for connection drain, then drops remaining connections; CUDA ownership
-remains governed by its separate stream-drain receipt.
+remains governed by its separate stream-drain confirmation.
 
 Full HTTP ingress returns 429; invalid request preparation returns 400.
 Scheduler admission rejection, including exhausted KV pages or snapshots awaiting

@@ -9,7 +9,6 @@ from qualify.checkpoint_http import (
     prompt_ids, terminal_branch,
 )
 from qualify.server import common_prefix, system_prefix_ids
-from tests.reference.test_exact_checkpoint_http import tokenizer
 
 
 @pytest.mark.parametrize("nonce", ["000000000000", "abcdef123456", "999999999999"])
@@ -121,9 +120,9 @@ def test_endpoint_cli_requires_geometry_before_any_artifact_or_connection(tmp_pa
     import sys
     from qualify import server
 
-    output, artifacts = tmp_path / "receipt.json", tmp_path / "raw"
+    output, artifacts = tmp_path / "unused.json", tmp_path / "raw"
     monkeypatch.setattr(sys, "argv", ["qualify.server", "--base-url", "http://127.0.0.1:1",
-        "--gdn-intermediate-dtype", "bfloat16", "--output", str(output), "--artifacts", str(artifacts),
+        "--gdn-intermediate-dtype", "bfloat16", "--artifacts", str(artifacts),
         "--require-metrics", "--checkpoint-endpoints", "--cases", case])
     with pytest.raises(SystemExit) as error:
         server.main()
