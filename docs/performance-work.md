@@ -33,11 +33,14 @@ caller-owned scratch, and allocation-stable replay are required.
    FlashInfer chain verification exposes token and acceptance-counter mutations
    to compilation. Native replay tests cover compiled verification and request
    commit at widths 1–8, invalid distributions, and per-request RNG lane invariance.
-   After profiling stops, the replay qualification compares all 256 steps'
+   With `--check-compiled`, the replay qualification compares all 256 steps'
    logits and completion records, plus final request, hybrid, and KV state,
-   against uncompiled graphs using the same prepared model and buffers.
-4. Evaluate MoE kernel selection against the runtime's deterministic-output
-   contract and identical-input numerical checks.
+   against uncompiled graphs using the same prepared model and buffers. This
+   bytewise diagnostic requires deterministic kernels; ordinary performance runs
+   use b12x's default numerical policy without this check.
+4. Tune MoE with b12x's default numerical policy, including dynamic direct routing
+   and atomic reductions. Measure kernel selection and complete graph latency
+   against vLLM's b12x integration.
 5. Overlap independent graph branches where separate scratch and explicit
    stream dependencies permit concurrent execution. Evaluate QSA indexing
    alongside QKV projection and shared experts alongside routed experts, with

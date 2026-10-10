@@ -235,8 +235,7 @@ class PreparedRoutedExperts:
 
     This component also admits explicit subsets for numerical qualification.
     ``PreparedQwenMoe`` enforces the complete 512-expert model contract.
-    Dynamic execution reduces intermediate slices within each route before a
-    fixed-order FP32 top-k sum. Micro execution uses one writer per output tile.
+    Reduction order follows the execution plan selected by b12x.
     """
 
     def __init__(self, source, experts, ids, weights, output, *, session: PreparationSession, name: str,
@@ -246,9 +245,8 @@ class PreparedRoutedExperts:
         self.scratch = None
         self.plan = fused_moe.plan_execution(
             experts=experts,
-            capacity=fused_moe.ExecutionCapacity(max_tokens=source.shape[0], top_k=ids.shape[1]),
-            invocation={"fast_math": False},
-            routing=fused_moe.RoutingSpec(deterministic_output=True),
+            capacity=fused_moe.ExecutionCapacity(
+                max_tokens=source.shape[0], top_k=ids.shape[1], route_num_experts=0),
         )
 
         def prepare_call(state):

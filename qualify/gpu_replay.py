@@ -93,7 +93,7 @@ def flare(args, corpus):
             if profiling:
                 torch.cuda.profiler.stop()
             runner.stream.synchronize()
-        if args.compile:
+        if args.check_compiled:
             from qualify.compiled_replay import check_compiled_replay
 
             try:
@@ -168,9 +168,13 @@ def main():
         help='annotate one warmed decode at context position 575 per batch for Nsight Compute')
     parser.add_argument('--compile', action='store_true',
         help='compile Flare prefill, decode, and resume forwards before CUDA graph capture')
+    parser.add_argument('--check-compiled', action='store_true',
+        help='compare compiled and uncompiled replay bytewise; requires deterministic kernels')
     args = parser.parse_args()
     if args.compile and args.engine != 'flare':
         parser.error('--compile applies only to Flare')
+    if args.check_compiled and not args.compile:
+        parser.error('--check-compiled requires --compile')
     if len(set(args.batches)) != len(args.batches):
         parser.error('--batches must be unique')
     if args.output.exists():

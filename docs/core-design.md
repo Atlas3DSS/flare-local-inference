@@ -520,10 +520,11 @@ reasoning and tool parsers. The Python entrypoint selects
 or dynamic model dispatch per token. Unknown schema versions, fields, or
 capabilities fail before asset loading and CUDA worker construction.
 
-Captured operators use deterministic reductions. Identical graph inputs,
-persistent state, and explicit RNG state must produce bitwise-identical logits
-and state transitions. Changing graph capacity can change reduction association;
-cross-capacity comparisons use calibrated component bounds.
+Captured operators use b12x's default numerical policy and tuned execution plans.
+MoE reductions may use arrival-ordered atomic additions, so identical graph inputs
+and RNG state do not guarantee identical logits or sampled tokens. State transfers
+and request metadata remain exact; recomputed floating-point results use calibrated
+component bounds.
 
 The Python resource owner retains:
 
@@ -1075,10 +1076,10 @@ Required cases:
 
 Compare Rust execution against Python replay of the same prepared graphs and
 initial state. This isolates runtime correctness from kernel numerical
-differences and requires bitwise equality for every persistent region. Identical
-inputs to the same captured operators require deterministic reductions and
-identical logits on repeated replay. Cross-capacity cold-versus-restored
-comparisons use tolerances established from measured arithmetic variation.
+differences. Require bitwise equality for state transfers and metadata. Numerical
+replay comparisons account for the selected kernels' reduction-order variation;
+cross-capacity cold-versus-restored comparisons also account for changes in
+reduction association.
 
 Qualify each component on identical operands against the exact-checkpoint
 serving reference, with tolerances derived from measured FP32-versus-BF16

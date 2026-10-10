@@ -83,8 +83,8 @@ Those runs do not measure the speculative common-sampler replay floor.
 Required measurements are named per-kernel B1/B4 timelines, per-layer kernel
 counts, fixed-width speculative costs, recurrent-state write cost, and matched
 stochastic workload arms at concurrency 1/2/4. Policy changes require numerical
-qualification and individual before/after measurements. Production deterministic
-reductions remain a contract; a nondeterministic diagnostic is a distinct arm.
+qualification and individual before/after measurements. Production MoE uses
+b12x's default numerical policy, which permits nondeterministic atomic reductions.
 
 Bounded top-k is deferred. The [general sampler measurement](sampling-flashinfer.md)
 records approximately 120–170 microseconds per step over its measured conditions.

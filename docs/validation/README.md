@@ -22,7 +22,8 @@ source, workload, and measurement conditions.
 Complete-logit and encoder relative L2 are diagnostics. Acceptance requires
 identical-input operator checks, exact metadata/state lifecycle, generation
 agreement against the reference's own variation, and task-level output checks.
-Same-graph replay and same-capacity restoration remain bitwise checks.
+State transfers and metadata remain bitwise checks. Recomputed numerical outputs
+can vary with the selected MoE kernel's atomic reduction order.
 
 ## Execution, preparation, and serving
 
