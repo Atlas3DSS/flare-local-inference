@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 import os
 from pathlib import Path
 
@@ -117,8 +118,9 @@ def _set_metadata(metadata, starts, lengths, positions, *, prefill):
 
 
 @CUDA
+@pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
-def test_checkpoint_qsa_chunked_prefill_native_decode(manifest):
+def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
     from b12x.preparation import PreparationSession
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRotaryEmbedding
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
@@ -135,7 +137,7 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest):
     reference_rotary = Qwen4ExpTextRotaryEmbedding(module.config)
     rotary = RotaryTables.allocate(module.config, 128, device)
     state = QSAState.allocate(pages=4, slots=3, device=device)
-    graphs, sources, scratch, metadata, prepared = {}, {}, {}, {}, {}
+    graphs, sources, scratch, metadata, prepared, calls = {}, {}, {}, {}, {}, {}
     pool = torch.cuda.graph_pool_handle()
     stream = torch.cuda.Stream(device=device)
     with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
@@ -145,20 +147,26 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest):
             metadata[label] = QSAMetadata.allocate(tokens=capacity, batch=2, context=128, device=device)
             prepared[label] = PreparedAttention(module, weights, sources[label], scratch[label], state,
                 metadata[label], rotary, session=session, name=label)
+            call = partial(prepared[label], sources[label])
+            if compiled:
+                from flare.preparation.compilation import compile_forward
+
+                call = compile_forward(call)
+            calls[label] = call
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
-                prepared[label](sources[label])
+                calls[label]()
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, pool=pool, stream=stream):
-                prepared[label](sources[label])
+                calls[label]()
             graphs[label] = graph
         session.freeze()
         assert (state.raw_logical_positions == -1).all()
         assert (state.raw_interval_start_positions == -1).all()
         worker = PreparedGraphBundle(device=0, graphs=graphs,
             buffers={label: value.output for label, value in scratch.items()},
-            resources=(module, prepared, state, sources, metadata, session, stream, rotary)).start_worker()
+            resources=(module, prepared, calls, state, sources, metadata, session, stream, rotary)).start_worker()
         generator = torch.Generator().manual_seed(9021)
         histories = [(torch.randn(65, 2560, generator=generator) * .15).bfloat16(),
                      (torch.randn(23, 2560, generator=generator) * .15).bfloat16()]

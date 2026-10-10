@@ -18,8 +18,9 @@ caller-owned scratch, and allocation-stable replay are required.
    output lifetimes, shared scratch, replay allocations, and complete graph
    timing against the uncompiled path.
    Trace the prepared operators after b12x tuning. Preserve every device launch,
-   express mixed-dtype mutations through their shared byte storage, and retain
-   normal Inductor functionalization. Preserve BF16 intermediate rounding.
+   express mutations through shared storage for every captured alias, and retain
+   normal Inductor functionalization. Use byte storage for mixed-dtype views and
+   typed storage for aliases of one dtype. Preserve BF16 intermediate rounding.
    The qualification entry point is `scripts/qualify_decoder.py --tune --compile`;
    server bootstrap integration requires full-model parity and replay timing.
 4. Evaluate MoE kernel selection against the runtime's deterministic-output

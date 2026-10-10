@@ -226,6 +226,18 @@ def main():
                 record = result.records[0]
                 records.append(record)
                 if record[5] == 3:
+                    failure = {"step": step, "record": record,
+                               "logits": scratch.logits[0].cpu(),
+                               "hidden": scratch.sample_hidden[0].cpu()}
+                    if args.layer_trace:
+                        phase = "prefill" if step == 0 else "decode"
+                        live_tokens = len(prompt) if step == 0 else 1
+                        failure["layer_outputs"] = traces[phase][:, :live_tokens].cpu()
+                        failure["stage_outputs"] = {key: value[:live_tokens].cpu()
+                            for key, value in stage_traces[phase].items()}
+                    failure_path = args.tensor_output.with_suffix(".failed.pt")
+                    torch.save(failure, failure_path)
+                    progress(f"saved failed replay tensors to {failure_path}")
                     raise RuntimeError(f"device decoder error {record[6]}")
                 if record[4] < 0:
                     raise RuntimeError("decoder did not produce a token")

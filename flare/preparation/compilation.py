@@ -53,7 +53,7 @@ def compile_forward(fn):
     """Trace and compile one fixed-buffer forward before CUDA graph capture.
 
     Tracing executes the prepared forward once. Mutating native operators
-    receive explicit storage operands, including aliases of different dtypes.
+    receive explicit storage operands for all captured tensor aliases.
     Their typed views are reconstructed inside each opaque invocation so
     Inductor can preserve mutations without cloning strided state regions.
     Tensor operations remain visible to ordinary Inductor compilation.
@@ -95,20 +95,25 @@ def compile_forward(fn):
                                     *torch.fx.map_arg(node.args, lambda arg: arg.meta['val']),
                                     **torch.fx.map_arg(node.kwargs, lambda arg: arg.meta['val']))
                             break
-    dtypes = {}
+    dtypes, constant_views = {}, {}
     for node, key in keys.items():
         dtypes.setdefault(key, set()).add(node.meta['val'].dtype)
+        if node.op == 'get_attr':
+            constant_views.setdefault(key, set()).add(id(node.meta['val']))
 
     for node in originals:
         if node.op != 'get_attr' or not isinstance(node.meta.get('val'), torch.Tensor):
             continue
         key = keys[node]
-        if len(dtypes[key]) <= 1:
+        if len(dtypes[key]) <= 1 and len(constant_views[key]) <= 1:
             continue
         if key not in bases:
             tensor = operator.attrgetter(node.target)(module)
             name = '_storage_' + str(len(bases))
-            module.register_buffer(name, _byte_storage(tensor))
+            storage = _byte_storage(tensor)
+            if len(dtypes[key]) == 1:
+                storage = storage.view(tensor.dtype)
+            module.register_buffer(name, storage)
             with graph.inserting_before(originals[0]):
                 bases[key] = graph.get_attr(name)
 
@@ -144,7 +149,7 @@ def compile_forward(fn):
             isinstance(target, torch._ops.OpOverload) and target.namespace != 'aten')
         operand_nodes = tensor_nodes((node.args, node.kwargs))
         if not is_external and all(arg.meta['val'].is_contiguous() for arg in mutated) and not any(
-            len(dtypes[key_for(arg)]) > 1
+            key_for(arg) in bases
             for arg in operand_nodes):
             continue
         mutable_keys = {key_for(arg) for arg in mutated}
