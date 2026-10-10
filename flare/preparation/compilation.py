@@ -208,7 +208,8 @@ def compile_forward(fn):
         leaves, output_tree = tree_flatten(fn())
         return tuple(leaves)
 
-    module = make_fx(trace, tracing_mode='fake', _allow_non_fake_inputs=True)()
+    module = make_fx(trace, tracing_mode='fake', _allow_non_fake_inputs=True,
+                     _disable_torch_fn_metadata_mode=True)()
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
@@ -375,5 +376,4 @@ def compile_forward(fn):
         graph.erase_node(node)
     graph.eliminate_dead_code()
     graph.lint()
-    module.recompile()
     return _compile_module(module, calls, fn, output_tree)
