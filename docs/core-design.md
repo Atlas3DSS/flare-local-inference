@@ -249,8 +249,7 @@ calls also differ. A 4096-token TP4 native replay preserves recurrent state,
 attention, router logits, selected experts, routing weights, shared-expert output,
 and replicated rank outputs exactly, but differs from the eager residual in
 0.1% of elements under that pointwise check (maximum absolute error 0.0048828125).
-Sparse MLA composition, the complete decoder stack, and GLM serving are not
-implemented.
+The complete decoder stack and GLM serving are not implemented.
 
 Shared [sparse MLA components](../flare/components/sparse_mla.py) prepare b12x
 latent-cache writes and attention over caller-selected physical records. Recipes
@@ -292,8 +291,22 @@ strided MXFP8 KV weights and rowwise E8M0 scales. The b12x BMM supports 16/32-he
 partitions through 4096 rows with no scratch, copies, or weight dequantization.
 Its opaque compiler boundary exposes scale bytes as uint8 views. Checkpoint
 projection tests cover compiled native replay, allocation stability, and the
-BF16 matrix-product error bound against FP64. Complete sparse MLA layers remain
-unimplemented.
+BF16 matrix-product error bound against FP64.
+
+The [GLM MLA recipe](../flare/recipes/glm53/mla.py) composes canonical low-rank
+normalization, head-sharded queries, native query absorption, latent-cache
+writes, C4 selection, sparse attention, value expansion, and the partial hidden
+output projection. Each rank retains identical latent/index cache geometry;
+the output requires a tensor-parallel reduction. Compiled native replay covers
+both 16- and 32-head partitions, decode, and three consecutive prefill chunks
+through 4096 tokens. Cache bytes, C4 tails, selected-token sets, inactive-row
+masking, and allocation counters match uncompiled execution. Exact output
+qualification remains failing for 32-head decode and both 4096-row cases.
+The decode output projection uses BF16 atomic split-K accumulation and varies
+on repeated eager calls. Prefill selection returns the same set in different
+orders; attention replay matches eager execution exactly when both consume the
+same ordered selection. No deterministic kernel policy or runtime sort is
+imposed.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
