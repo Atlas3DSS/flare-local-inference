@@ -199,7 +199,7 @@ def run_flare(args, owners, cases):
             operations = {
                 'hc_norm': lambda: hc.run_grouped_rmsnorm(x['feedback'], mixer.norm_gain, eps=mixer.eps,
                     zero_centered=False, binding=mixer.bindings['grouped_rmsnorm']),
-                'hc_down': lambda: mixer.down(x['attn_normalized']),
+                'hc_down': lambda: mixer.down(x['attn_normalized'])[:, :320],
                 'hc_silu': lambda: hc.run_scaled_silu(x['attn_projected_down'], binding=mixer.bindings['scaled_silu']),
                 'hc_up': lambda: mixer.up(x['attn_bottleneck']),
                 'hc_gate': lambda: hc.run_gate_mean(x['attn_normalized'], x['attn_gate_logits'],
@@ -222,7 +222,7 @@ def run_flare(args, owners, cases):
                 'outputs': values, 'replay': replay})
             _partial(args, 'flare', results, records)
     return _save(args, 'flare', results, records, plans, {
-        'hc_down': tensor_record(mixer.down.weight), 'hc_up': tensor_record(mixer.up.weight),
+        'hc_down': tensor_record(mixer.down.weight[:320]), 'hc_up': tensor_record(mixer.up.weight),
         'hc_gain': tensor_record(mixer.norm_gain),
         **{name: tensor_record(projection.weight) for name, projection in attention.projections.items()}})
 
