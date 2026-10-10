@@ -1,0 +1,62 @@
+"""Saved hidden-output gathering for sampling an exact cached prefix."""
+
+import torch
+
+from .sampling import ERROR, RUNNING, SLOTS, _check_tensor
+
+
+class PreparedResumeState:
+    """Validate rank participation, then gather live-slot hidden outputs.
+
+    A cached prefix must contain consumed tokens and have no pending sample.
+    Sampling state belongs to the admitted request; resume never consumes a
+    token or modifies the cached continuation. The caller reduces validation
+    flags across ranks before gather(), using the same world size as preparation.
+    """
+
+    def __init__(self, requests, saved_hidden, slots, epochs, count, *, world_size):
+        rows, device = slots.numel(), requests.generation.device
+        if device.type != "cuda" or world_size not in (1, 2, 4) or not 1 <= rows <= SLOTS:
+            raise ValueError("resume requires CUDA request state, TP1/2/4, and one through four rows")
+        if saved_hidden.ndim != 2 or saved_hidden.shape[0] != SLOTS or saved_hidden.shape[1] <= 0:
+            raise ValueError("resume requires saved hidden outputs for four physical request slots")
+        _check_tensor(saved_hidden, saved_hidden.shape, torch.bfloat16, device, "saved_hidden", contiguous=False)
+        if saved_hidden.stride(1) != 1 or saved_hidden.stride(0) < saved_hidden.shape[1]:
+            raise ValueError("saved hidden rows must be disjoint with contiguous channels")
+        for value, shape, dtype, name in ((slots, (rows,), torch.int32, "slots"),
+                (epochs, (rows,), torch.int64, "epochs"), (count, (1,), torch.int32, "count")):
+            _check_tensor(value, shape, dtype, device, name)
+        self.requests, self.saved_hidden = requests, saved_hidden
+        self.slots, self.epochs, self.count, self.world_size = slots, epochs, count, world_size
+        self.row_ids, self.slot_ids = torch.arange(rows, device=device), torch.arange(SLOTS, device=device)
+        self.validation_input = torch.zeros((1, 8), dtype=torch.bfloat16, device=device)
+        self.validation_sum = torch.zeros_like(self.validation_input)
+        self.present = torch.zeros(SLOTS, dtype=torch.bool, device=device)
+        self.hidden = torch.zeros((rows, saved_hidden.shape[1]), dtype=torch.bfloat16, device=device)
+
+    def validate(self):
+        r, slots = self.requests, self.slots.long()
+        safe = slots.clamp(0, SLOTS - 1)
+        present = (self.row_ids < self.count) & (slots >= 0) & (slots < SLOTS)
+        present &= (self.epochs == r.generation[safe]) & (r.status[safe] == RUNNING)
+        duplicate = ((slots[:, None] == slots[None, :]) & present[:, None] & present[None, :]).sum(1) > 1
+        valid = (self.count <= self.slots.numel()) & ~duplicate
+        valid &= (r.consumed_tokens[safe] > 0) & (r.pending_token[safe] < 0)
+        slot_rows = self.slot_ids[:, None] == slots[None, :]
+        self.present.copy_((slot_rows & present[None, :]).any(1))
+        self.validation_input[0, :SLOTS].copy_((slot_rows & (present & ~valid)[None, :]).any(1))
+        self.validation_input[0, SLOTS:].copy_(self.present)
+        return self.validation_input
+
+    def gather(self):
+        r = self.requests
+        participants = self.validation_sum[0, SLOTS:]
+        mismatch = (participants > 0) & (participants != self.world_size)
+        bad = self.present & ((self.validation_sum[0, :SLOTS] > 0) | mismatch)
+        r.status.copy_(torch.where(bad, ERROR, r.status))
+        r.error_code.copy_(torch.where(bad, 33, r.error_code))
+        safe = self.slots.long().clamp(0, SLOTS - 1)
+        active = (self.row_ids < self.count) & (self.slots >= 0) & (self.slots < SLOTS)
+        active &= (self.epochs == r.generation[safe]) & (r.status[safe] == RUNNING)
+        self.hidden.copy_(torch.where(active[:, None], self.saved_hidden[safe], 0))
+        return self.hidden
