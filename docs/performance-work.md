@@ -47,9 +47,12 @@ caller-owned scratch, and allocation-stable replay are required.
    stream at capacities up to 16 rows. An opaque projection-pair operation retains
    the fork and join through forward compilation. Scratch planning reserves the
    maximum concurrent candidate requirement, then trims to the selected peak;
-   serial layers and graph variants reuse the same storage. Evaluate QSA indexing
-   alongside QKV projection and shared experts alongside routed experts, with
-   joins captured before dependent operators consume their outputs. Fork and
+   serial layers and graph variants reuse the same storage. Shared-expert
+   projections run alongside routing and routed experts at capacities up to 256
+   rows, using a disjoint arena suffix. A captured join precedes shared-expert
+   gating and the final sum, which remain visible to Inductor. Evaluate QSA indexing
+   alongside QKV projection, with joins captured before dependent operators
+   consume their outputs. Fork and
    rejoin auxiliary streams within Python's capture of a single CUDA graph;
    Rust continues to launch one graph per replay. Allocate workspace by
    simultaneous use across branches, then reuse it across serial layers.

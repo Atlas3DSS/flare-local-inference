@@ -11,10 +11,11 @@ from b12x.moe import fused_moe
 from b12x.norm import hyperconnection
 from b12x.preparation import PreparationSession, PreparedCall
 
+from flare.preparation.fixtures import fused_moe as moe_fixtures
 from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
-from flare.preparation.fixtures import fused_moe as moe_fixtures
+
 from .linear import BF16Projection, QuantizedProjection
 from .weights import QwenWeightLoader
 
@@ -225,9 +226,107 @@ class PreparedSharedExpert:
             round_silu=True, out=self.intermediate, plan=self.activation_plan)
         self.down_projection(self.intermediate)
         self.gate_projection(source)
+        return self.finish()
+
+    def finish(self) -> torch.Tensor:
         torch.sigmoid(self.gate_logits, out=self.gate_probability)
         torch.mul(self.projected, self.gate_probability, out=self.output)
         return self.output
+
+
+@torch.library.custom_op("flare::start_shared_expert", mutates_args=("outputs", "workspace"))
+def _start_shared_expert(
+    source: torch.Tensor, weights: list[torch.Tensor],
+    up_scales: torch.Tensor | None, down_scales: torch.Tensor | None,
+    outputs: list[torch.Tensor], workspace: torch.Tensor,
+    plans: list[int], auxiliary_stream: int,
+) -> None:
+    from b12x.gemm.blockscaled._ops import _out_workspace
+
+    main = torch.cuda.current_stream(source.device)
+    auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
+    auxiliary.wait_stream(main)
+
+    def project(value, index, output, scales):
+        if scales is None:
+            torch.ops.b12x.bf16_gemv_small_n_out(value, weights[index], output, plans[index], None)
+        else:
+            _out_workspace(value, weights[index], scales, None, None, output,
+                           workspace, "none", None, plans[index], "any")
+
+    gate_up, intermediate, projected, gate_logits = outputs
+    with torch.cuda.stream(auxiliary):
+        project(source, 0, gate_up, up_scales)
+        torch.ops.b12x.hyperconnection_swiglu(gate_up, intermediate, float("inf"), True, plans[3])
+        project(intermediate, 1, projected, down_scales)
+        project(source, 2, gate_logits, None)
+
+
+@_start_shared_expert.register_fake
+def _fake_start_shared_expert(source, weights, up_scales, down_scales, outputs, workspace,
+                             plans, auxiliary_stream):
+    pass
+
+
+@torch.library.custom_op("flare::join_shared_expert", mutates_args=("outputs", "workspace"))
+def _join_shared_expert(source: torch.Tensor, routed: torch.Tensor, outputs: list[torch.Tensor],
+                        workspace: torch.Tensor, auxiliary_stream: int) -> None:
+    torch.cuda.current_stream(source.device).wait_stream(
+        torch.cuda.ExternalStream(auxiliary_stream, device=source.device))
+
+
+@_join_shared_expert.register_fake
+def _fake_join_shared_expert(source, routed, outputs, workspace, auxiliary_stream):
+    pass
+
+
+class ConcurrentSharedExpert:
+    """Run shared projections beside routing and experts, then join before gating.
+
+    Explicit source, output, and workspace operands retain lifetime dependencies
+    through forward compilation. Routed experts use the arena prefix; shared
+    projections reuse one disjoint suffix until the captured join.
+    """
+
+    def __init__(self, shared: PreparedSharedExpert, routed_plan, *, session, workspace: ScratchArena):
+        from b12x.gemm.blockscaled._a16 import _weight_parts
+
+        self.shared, self.routed_plan, self.arena = shared, routed_plan, workspace
+        self.projections = (shared.up_projection, shared.down_projection, shared.gate_projection)
+        self.weights, self.scales = [], []
+        for projection in self.projections:
+            if isinstance(projection, QuantizedProjection):
+                values, scales, gain, fp4 = _weight_parts(projection.weight)
+                if (values.dtype != torch.float8_e4m3fn or gain is not None or fp4
+                        or projection.activation_mode != "quantized" or projection.bias is not None):
+                    raise ValueError("concurrent shared projections require unbiased quantized MXFP8 weights")
+                self.weights.append(values)
+                self.scales.append(scales.view(torch.uint8))
+            else:
+                if projection.bias is not None:
+                    raise ValueError("concurrent shared projections require unbiased BF16 weights")
+                self.weights.append(projection.weight)
+                self.scales.append(None)
+            workspace.register_parallel(routed_plan, projection.plan)
+        self.outputs = [shared.gate_up, shared.intermediate, shared.projected, shared.gate_logits]
+        self.plans = [projection.plan.handle for projection in self.projections] + [shared.activation_plan.handle]
+        self.stream = workspace.auxiliary_stream
+        self.refresh()
+        register_finalizer(session, self.refresh, workspace=workspace)
+
+    def refresh(self):
+        routed_bytes = self.routed_plan.memory_requirements().scratch_nbytes
+        shared_bytes = max(projection.plan.memory_requirements().scratch_nbytes
+                           for projection in self.projections)
+        _, self.workspace = self.arena.views(((routed_bytes,), torch.uint8), ((shared_bytes,), torch.uint8))
+
+    def start(self, source):
+        _start_shared_expert(source, self.weights, self.scales[0], self.scales[1],
+                            self.outputs, self.workspace, self.plans, self.stream.cuda_stream)
+
+    def finish(self, source, routed):
+        _join_shared_expert(source, routed, self.outputs, self.workspace, self.stream.cuda_stream)
+        return self.shared.finish()
 
 
 class PreparedRoutedExperts:
@@ -309,14 +408,23 @@ class PreparedQwenMoe:
         self.experts = PreparedRoutedExperts(source, weights.experts, self.router.ids,
             self.router.weights, self.routed_output, session=session, name=f"{name}.experts", workspace=workspace,
             router_weight=weights.router, router_plan=self.routing.plan)
+        self.concurrent_shared = None
+        if source.shape[0] <= 256 and isinstance(workspace, ScratchArena) and workspace is projection_workspace:
+            self.concurrent_shared = ConcurrentSharedExpert(self.shared, self.experts.plan,
+                session=session, workspace=workspace)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         if source is not self.source and (
                 source.data_ptr() != self.source.data_ptr() or source.shape != self.source.shape):
             raise ValueError("prepared Qwen MoE requires its fixed source storage")
-        shared = self.shared(source)
+        if self.concurrent_shared is None:
+            shared = self.shared(source)
+        else:
+            self.concurrent_shared.start(source)
         self.router_projection(source)
         self.routing(self.router_logits)
         routed = self.experts()
+        if self.concurrent_shared is not None:
+            shared = self.concurrent_shared.finish(source, routed)
         torch.add(routed, shared, out=self.output)
         return self.output
