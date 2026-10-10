@@ -59,8 +59,9 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
     from flare.preparation.tuning import RecordedPreparationSession
     from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
     from flare.recipes.glm53.generation import PreparedGeneration
+    from flare.recipes.glm53.pool import ContinuationPool
     from flare.recipes.glm53.stack import DecoderScratch, PreparedDecoder
-    from flare.recipes.glm53.state import DecoderMetadata, DecoderState
+    from flare.recipes.glm53.state import DecoderMetadata
     from flare.recipes.glm53.weights import ModelWeights
 
     peers = []
@@ -92,9 +93,11 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
     worker = None
     graphs = {mode: torch.cuda.CUDAGraph() for mode in ("prefill", "decode")}
     try:
-        state = DecoderState.allocate(weights.tree.config.text_config.layer_types, world, 3, 64, device)
+        pool = ContinuationPool.allocate(weights.tree.config.text_config.layer_types, world, 6, 64, device)
+        state = pool.decoder
         arena = ScratchArena(device)
-        requests = DeviceRequestState.allocate(device, vocab_size=154880) if generate else None
+        requests = DeviceRequestState.allocate(device, vocab_size=154880,
+            consumed_tokens=pool.consumed_tokens[1:5, 0]) if generate else None
         inputs = BatchInputs.allocate(capacity, 64, device) if generate else None
         records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device) if generate else None
         frame = torch.zeros(1, dtype=torch.int32, device=device) if generate else None
@@ -113,7 +116,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                 if generate:
                     batch = PreparedBatch(inputs, requests, metadata[mode], mode=mode, shard=shard, pages=64)
                     forwards[mode] = PreparedGeneration(decoders[mode], batch, records, frame, sequence,
-                        runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.generation")
+                        pool=pool, runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.generation")
             progress("autotuning complete text forwards")
             session.tune()
             compiled = {}
@@ -130,7 +133,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
             session.freeze()
             buffers = dict(state.named_tensors())
             buffers.update({mode + ".hidden": value.hidden for mode, value in scratch.items()})
-            resources = (weights, compiled, decoders, forwards, state, metadata, scratch, session, arena, runtime, stream)
+            resources = (weights, compiled, decoders, forwards, pool, metadata, scratch, session, arena, runtime, stream)
             if generate:
                 buffers = dict(inputs.buffers(), completion_records=records, frame_index=frame, submission_sequence=sequence)
                 signatures = {mode: GraphSignature(mode, 1, capacity if mode == "prefill" else 1, tuple(inputs.buffers()))
@@ -140,7 +143,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
             else:
                 bundle = PreparedGraphBundle(device=rank, graphs=graphs, buffers=buffers, resources=resources)
                 worker = bundle.start_worker()
-            state.clear_for_preparation()
+            pool.clear_for_preparation()
             tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
             seed = tokenizer.encode("Explain how tensor parallelism divides a language model across GPUs.")
             tokens = (seed * ((capacity + 3 + len(seed) - 1) // len(seed)))[:capacity + 3]
@@ -204,6 +207,8 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                     generated.append(token)
                 hidden = scratch[mode].hidden
                 assert torch.isfinite(hidden).all() and hidden.count_nonzero()
+                if generate:
+                    torch.testing.assert_close(pool.last_hidden[1], hidden[0], rtol=0, atol=0)
                 if not generate:
                     gathered = [None] * world
                     dist.all_gather_object(gathered, hidden.cpu(), group=group)
@@ -240,6 +245,8 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                 dist.broadcast_object_list(counts, src=0, group=group)
                 assert requests.consumed_tokens[0] == len(tokens) + counts[0] - 1
                 assert requests.generated_tokens[0] == (counts[0] if rank == 0 else 0)
+                torch.testing.assert_close(pool.last_hidden[1], scratch["decode"].hidden[0], rtol=0, atol=0)
+                assert not pool.backing[[0, 2, 3, 4, 5]].count_nonzero()
             progress(f"weight bytes {weights.allocated_bytes}; operator scratch bytes {arena.nbytes}")
             if worker is not None:
                 worker.close()

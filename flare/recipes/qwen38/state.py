@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -11,6 +10,8 @@ from types import MappingProxyType
 import torch
 import triton
 import triton.language as tl
+
+from flare.components.state import StateLayout, StateStorage
 
 from .gdn import GDNState
 
@@ -24,23 +25,9 @@ RESET = 1
 
 
 @dataclass(frozen=True)
-class StateRegion:
-    name: str
-    offset: int
-    shape: tuple[int, ...]
-    dtype: torch.dtype
-
-    @property
-    def nbytes(self) -> int:
-        return math.prod(self.shape) * self.dtype.itemsize
-
-
-@dataclass(frozen=True)
-class HybridStateLayout:
+class HybridStateLayout(StateLayout):
     """Byte layout for one complete consumed-prefix continuation state."""
 
-    regions: tuple[StateRegion, ...]
-    row_bytes: int
     speculative_tokens: int = 0
     draft_ring_capacity: int = 0
 
@@ -48,15 +35,10 @@ class HybridStateLayout:
     def build(cls, *, speculative_tokens: int = 0) -> HybridStateLayout:
         if type(speculative_tokens) is not int or not 0 <= speculative_tokens <= 7:
             raise ValueError("hybrid state supports zero through seven speculative tokens")
-        regions = []
-        offset = 0
+        specifications = []
 
         def add(name, shape, dtype):
-            nonlocal offset
-            offset = (offset + 255) // 256 * 256
-            region = StateRegion(name, offset, shape, dtype)
-            regions.append(region)
-            offset += region.nbytes
+            specifications.append((name, shape, dtype))
 
         for layer in GDN_LAYERS:
             add(f"gdn.{layer}.recurrent", (48, 128, 128), torch.float32)
@@ -93,22 +75,12 @@ class HybridStateLayout:
             add("draft_boundary_key_extra", geometry.main_k_page_shape, torch.bfloat16)
             add("draft_boundary_value_extra", geometry.main_v_page_shape, torch.bfloat16)
             add("draft_boundary_selector_extra", geometry.compressed_page_shape, torch.bfloat16)
-        return cls(tuple(regions), (offset + 255) // 256 * 256, speculative_tokens, ring)
-
-    def region(self, name: str) -> StateRegion:
-        for region in self.regions:
-            if region.name == name:
-                return region
-        raise KeyError(name)
-
-    def snapshot_capacity(self, budget_bytes: int = 4 << 30) -> int:
-        if type(budget_bytes) is not int or budget_bytes < 0:
-            raise ValueError("snapshot budget must be a nonnegative byte count")
-        return budget_bytes // self.row_bytes
+        layout = StateLayout.from_specs(specifications)
+        return cls(layout.regions, layout.row_bytes, speculative_tokens, ring)
 
 
 @dataclass(frozen=True)
-class HybridStatePool:
+class HybridStatePool(StateStorage):
     """Typed disjoint views into one persistent byte row per state slot.
 
     Slot zero is permanently zero. Native request slots 0..3 use model slots
@@ -165,11 +137,6 @@ class HybridStatePool:
             history,
             view("rope_delta"),
         )
-
-    def region(self, name: str) -> torch.Tensor:
-        region = self.layout.region(name)
-        return self.backing[:, region.offset:region.offset + region.nbytes].view(
-            region.dtype).view(self.backing.shape[0], *region.shape)
 
     def reset_for_preparation(self):
         """Restore empty unpublished model state after serialized benchmark use."""
@@ -724,13 +691,12 @@ __all__ = [
     "EOS_TOKEN_ID",
     "GDN_LAYERS",
     "LIVE_BASE",
+    "QSA_LAYERS",
     "RESET",
     "SNAPSHOT_BASE",
     "HybridStateLayout",
     "HybridStatePool",
-    "PreparedStateTransfers",
     "PreparedCheckpointCaches",
-    "QSA_LAYERS",
-    "StateRegion",
+    "PreparedStateTransfers",
     "StateTransferMetadata",
 ]

@@ -2,6 +2,7 @@
 
 from flare.components.collectives import PreparedAllReduce
 from flare.components.sampling import PreparedCompletion, PreparedSampling
+from flare.components.state import save_hidden
 
 from .batch import PreparedBatch
 from .stack import PreparedDecoder
@@ -15,10 +16,15 @@ class PreparedGeneration:
     """
 
     def __init__(self, decoder: PreparedDecoder, batch: PreparedBatch, completion_records,
-                 frame_index, submission_sequence, *, runtime, coordinator, session, name):
+                 frame_index, submission_sequence, *, pool, runtime, coordinator, session, name):
         if decoder.metadata is not batch.metadata or decoder.weights.shard != batch.shard:
             raise ValueError("GLM generation requires the decoder's metadata and rank")
-        self.decoder, self.batch = decoder, batch
+        if decoder.state is not pool.decoder:
+            raise ValueError("GLM generation requires the decoder's continuation pool")
+        counts = pool.consumed_tokens[1:5, 0]
+        if batch.requests.consumed_tokens.data_ptr() != counts.data_ptr() or batch.requests.consumed_tokens.stride() != counts.stride():
+            raise ValueError("GLM request counts must alias the continuation pool live rows")
+        self.decoder, self.batch, self.pool = decoder, batch, pool
         self.validation = PreparedAllReduce(batch.validation_input, batch.validation_sum,
             runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.validation")
         b, rows = batch.inputs, batch.rows
@@ -31,5 +37,7 @@ class PreparedGeneration:
     def __call__(self):
         self.batch.begin(self.validation(self.batch.validate()))
         self.decoder()
+        save_hidden(self.decoder.scratch.hidden, self.pool.last_hidden[1:5],
+                    self.batch.inputs.row_slot_ids[:self.batch.rows], self.batch.token_state.active)
         self.batch.finish()
         self.completion()

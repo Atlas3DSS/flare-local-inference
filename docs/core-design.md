@@ -288,6 +288,18 @@ handoff through coordinated drain, with stable allocator counters. The test's
 rank-zero Python harness submitted native uploads and inspected completion
 records; rank communication and replay were native. Replicated final hidden
 outputs and consumed-token counts agreed after drain.
+The shared [continuation storage](../flare/components/state.py) lays out aligned
+typed regions in one byte row per null, live, or immutable slot. Qwen retains its
+117,291,776-byte ordinary continuation layout. GLM binds KDA recurrence, convolution
+history, and C4 index tails directly to strided views in the
+[continuation pool](../flare/recipes/glm53/pool.py). Request consumed-token counts
+alias its four live rows, and compiled generation saves each active request's
+final normalized hidden output. A GLM row includes one 256-token latent page and
+one C4 index page per MLA layer for unaligned endpoints. It occupies 75,420,672
+bytes per TP2 rank or 38,515,712 bytes per TP4 rank; a 4-GiB snapshot budget holds
+56 or 111 rows, respectively, excluding null/live rows and shared KV pages.
+Complete TP2/TP4 generation passes with these strided bindings, saved hidden
+outputs, exact replicated-rank agreement, and stable replay allocation counters.
 Production GLM serving, hybrid-state checkpoint maintenance, and HTTP integration
 are not implemented.
 
