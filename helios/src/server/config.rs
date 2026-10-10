@@ -141,10 +141,10 @@ impl Bootstrap {
                         .ok_or("speculative_fixed_width must be an integer or null")
                 })
                 .transpose()?,
-            speculative_copy: match object.get("speculative_copy") {
-                None => true,
+            history_drafts: match object.get("history_drafts") {
+                None => false,
                 Some(Value::Bool(value)) => *value,
-                _ => return Err("speculative_copy must be a boolean".into()),
+                _ => return Err("history_drafts must be a boolean".into()),
             },
             speculative_proposal_source: crate::scheduler::speculation::ProposalSource::parse(
                 match object.get("speculative_proposal_source") {

@@ -33,7 +33,7 @@ fn config() -> ModelConfig {
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_copy: true,
+        history_drafts: true,
         speculative_proposal_source: Default::default(),
     }
 }
@@ -334,7 +334,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
         for copy in [true, false] {
             let mut body = body.clone();
             body["speculative_fixed_width"] = width.clone();
-            body["speculative_copy"] = json!(copy);
+            body["history_drafts"] = json!(copy);
             assert_eq!(
                 Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
                     .err()
@@ -347,8 +347,8 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     for (key, value) in [
         ("speculative_fixed_width", json!(3)),
         ("speculative_fixed_width", json!("8")),
-        ("speculative_copy", json!(null)),
-        ("speculative_copy", json!(1)),
+        ("history_drafts", json!(null)),
+        ("history_drafts", json!(1)),
         ("speculative_widths", json!([1, 8, 4])),
         ("speculative_widths", json!([2, 4, 8])),
         ("speculative_proposal_source", json!(null)),
@@ -486,7 +486,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
             handle.generation as i64
         );
         assert!(generation.bytes[8..].iter().all(|byte| *byte == 0));
-        config.speculative_copy = false;
+        config.history_drafts = false;
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         wire_fixture.observe(&inputs.uploads());
@@ -509,7 +509,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
                 .iter()
                 .all(|b| *b == 0)
         );
-        config.speculative_copy = true;
+        config.history_drafts = true;
         assert!(scheduler.next_step().is_none());
         let mut vector = crate::execution::TokenVector {
             emitted_count: 1,

@@ -181,8 +181,8 @@ def test_actual_prepared_arm_must_match_source_fixed_width_copy_and_catalog():
         sb.validate_arm(actual, arm)
         if arm["mtp"]:
             wrong = deepcopy(actual)
-            wrong["speculative_copy"] = not actual["speculative_copy"]
-            with pytest.raises(ValueError, match="speculative_copy"):
+            wrong["history_drafts"] = not actual["history_drafts"]
+            with pytest.raises(ValueError, match="history_drafts"):
                 sb.validate_arm(wrong, arm)
             wrong = deepcopy(actual)
             wrong["speculative_shapes"].append([4, 8])

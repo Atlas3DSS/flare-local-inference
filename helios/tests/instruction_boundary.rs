@@ -68,7 +68,7 @@ impl Fixture {
             max_new_tokens: 64,
             speculative_widths: vec![],
             speculative_fixed_width: None,
-            speculative_copy: false,
+            history_drafts: false,
             speculative_proposal_source: Default::default(),
         };
         let compiler =

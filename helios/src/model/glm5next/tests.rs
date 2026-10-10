@@ -28,7 +28,7 @@ pub(super) fn config() -> ModelConfig {
         max_new_tokens: 128,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_copy: false,
+        history_drafts: false,
         speculative_proposal_source: Default::default(),
     }
 }

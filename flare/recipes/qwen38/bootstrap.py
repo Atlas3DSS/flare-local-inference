@@ -77,7 +77,7 @@ class PreparationConfig:
     speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = tuple(range(1, 9))
     speculative_fixed_width: int | None = None
-    speculative_copy: bool = True
+    history_drafts: bool = False
 
     def __post_init__(self):
         for name in ("device", "context", "prefill_chunk_size", "snapshot_budget_bytes", "headroom_bytes"):
@@ -89,8 +89,8 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
-        if type(self.mtp) is not bool or type(self.speculative_copy) is not bool:
-            raise TypeError("MTP and copy proposal switches must be booleans")
+        if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
+            raise TypeError("MTP and history draft switches must be booleans")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0).row_bytes
         if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
             raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
@@ -367,7 +367,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 speculative_proposal_source=config.speculative_proposal_source,
                 speculative_state_columns=8, draft_raw_ring_capacity=layout.draft_ring_capacity if has_mtp else 0,
                 speculative_fixed_width=config.speculative_fixed_width,
-                speculative_copy=config.speculative_copy)
+                history_drafts=config.history_drafts)
         hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
             "tokenizer_config": ("tokenizer_config.json", FRONTEND_SHA256["tokenizer_config.json"]),
             "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"]),
@@ -385,7 +385,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         if speculation is not None:
             server_config.update(speculative_widths=config.speculative_widths,
                 speculative_proposal_source=config.speculative_proposal_source,
-                speculative_fixed_width=config.speculative_fixed_width, speculative_copy=config.speculative_copy)
+                speculative_fixed_width=config.speculative_fixed_width, history_drafts=config.history_drafts)
         resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)

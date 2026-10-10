@@ -79,7 +79,7 @@ pub struct ModelConfig {
     pub max_new_tokens: u32,
     pub speculative_widths: Vec<usize>,
     pub speculative_fixed_width: Option<usize>,
-    pub speculative_copy: bool,
+    pub history_drafts: bool,
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
 }
 

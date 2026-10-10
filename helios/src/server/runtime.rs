@@ -863,7 +863,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     live.tokens(),
                     live.consumed_tokens,
                     request.incoming.prompt.grammar.as_ref(),
-                    if self.config.speculative_copy && !live.host_stops() {
+                    if self.config.history_drafts && !live.host_stops() {
                         7
                     } else {
                         0

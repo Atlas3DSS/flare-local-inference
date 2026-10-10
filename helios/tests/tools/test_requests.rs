@@ -20,9 +20,7 @@ fn main() -> Result<(), String> {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() != 4 {
-        return Err(
-            "usage: test_requests ABSOLUTE_SNAPSHOT TEXT_FIXTURES IMAGE_FIXTURES".into(),
-        );
+        return Err("usage: test_requests ABSOLUTE_SNAPSHOT TEXT_FIXTURES IMAGE_FIXTURES".into());
     }
     let snapshot = PathBuf::from(&args[1]);
     let text: Value = serde_json::from_slice(&fs::read(&args[2]).map_err(|e| e.to_string())?)
@@ -67,7 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_new_tokens: 17,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_copy: true,
+        history_drafts: true,
         speculative_proposal_source: Default::default(),
     };
     let mut text_count = 0;

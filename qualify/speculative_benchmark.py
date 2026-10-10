@@ -373,7 +373,7 @@ def validate_arm(memory, arm):
     if actual != arm["mtp"]:
         raise ValueError("actual prepared speculative catalog differs from arm")
     if arm["mtp"]:
-        for key in ("speculative_proposal_source", "speculative_fixed_width", "speculative_copy"):
+        for key in ("speculative_proposal_source", "speculative_fixed_width", "history_drafts"):
             if key not in memory or memory[key] != arm[key] or type(memory[key]) is not type(arm[key]):
                 raise ValueError(f"actual prepared {key} differs from arm")
         widths = memory["speculative_widths"]

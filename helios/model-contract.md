@@ -54,7 +54,7 @@ must prohibit explicit graph, session and mapped-allocation teardown in that cas
 | `max_new_tokens` | Default output limit, 256 if omitted |
 | `speculative_widths` | Optional sorted unique subset of integers 1 through 8 including 1; empty or omitted disables speculative scheduling |
 | `speculative_fixed_width` | Optional width from that catalog; null or omitted selects adaptive scheduling |
-| `speculative_copy` | Boolean, true if omitted; enables history-copy proposals; false forces width one with the copy-only source |
+| `history_drafts` | Boolean, false if omitted; enables draft continuations from request history; false forces width one with the copy-only source |
 | `speculative_proposal_source` | `mtp` by default; `copy` verifies host-supplied continuations without MTP weights or cache |
 | `bind` | Socket address, `127.0.0.1:8000` if omitted |
 | `queue_capacity` | Native ingress queue capacity, 16 if omitted |
@@ -298,7 +298,7 @@ copies for unconstrained lanes at every temperature. Copied IDs use their actual
 one-hot proposal distributions for stochastic verification. The copy-only source
 bounds width by the shortest valid continuation among the
 active lanes plus one, the context limit and `8 / batch_capacity`. No available
-copy, or `speculative_copy=false`, selects width one. Stochastic copied IDs have
+copy, or `history_drafts=false`, selects width one. Stochastic copied IDs have
 a one-hot proposal distribution; target filtering and rejection sampling retain
 the configured temperature, penalties, top-k, top-p and min-p.
 

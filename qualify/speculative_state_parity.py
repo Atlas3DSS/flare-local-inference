@@ -663,7 +663,8 @@ def main(argv=None):
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     try:
-        config = PreparationConfig(prefill_chunk_size=args.prefill_chunk_size, mtp=True, speculative_proposal_source="copy")
+        config = PreparationConfig(prefill_chunk_size=args.prefill_chunk_size, mtp=True,
+            speculative_proposal_source="copy", history_drafts=True)
         with prepare_model(snapshot, config, progress=progress) as model:
             owner = next(x for x in model._resources if isinstance(x, SpeculativePreparation))
             evidence.value["memory_report"] = model.memory_report

@@ -87,7 +87,9 @@ def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
         PreparationConfig(mtp=True, speculative_proposal_source="unknown")
 
 
-def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch):
+@pytest.mark.parametrize("source", ["mtp", "copy"])
+@pytest.mark.parametrize("history_drafts", [False, True])
+def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch, source, history_drafts):
     from flare.__main__ import main
 
     captured = []
@@ -109,10 +111,13 @@ def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch):
         return Model()
 
     monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare)
-    assert main(["--prepare-only", "--mtp", "--mtp-proposal-source", "copy", "--mtp-widths", "1", "2", "4",
-                 "--mtp-fixed-width", "4", "--no-mtp-copy"]) == 0
+    arguments = ["--prepare-only", "--mtp", "--mtp-proposal-source", source, "--mtp-widths", "1", "2", "4",
+                 "--mtp-fixed-width", "4"]
+    if history_drafts:
+        arguments.append("--history-drafts")
+    assert main(arguments) == 0
     assert captured[0].mtp
-    assert captured[0].speculative_proposal_source == "copy"
+    assert captured[0].speculative_proposal_source == source
     assert captured[0].speculative_widths == (1, 2, 4)
     assert captured[0].speculative_fixed_width == 4
-    assert not captured[0].speculative_copy
+    assert captured[0].history_drafts is history_drafts

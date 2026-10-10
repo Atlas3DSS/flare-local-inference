@@ -5,7 +5,8 @@ Flare's speculative engine targets the embedded MTP module in
 `dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2`, on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract and an
-explicit `--mtp` preparation option.
+explicit `--mtp` preparation option. Draft continuations from request history
+are disabled by default and enabled with `--history-drafts`.
 
 The design combines adaptive verification budgets, native MTP proposals and
 continuations copied from request history. Compact recurrent commit and token
@@ -194,7 +195,7 @@ request_capacity: B
 verification_width: W
 sampling_mode: general
 proposal_source: mtp | copy
-copy_enabled: boolean
+history_drafts: boolean
 state_layout_version, arithmetic_policy, checkpoint_identity
 ```
 

@@ -49,8 +49,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if !(3..=4).contains(&arguments.len()) {
         return Err(
-            "usage: test_images ABSOLUTE_SNAPSHOT FIXTURE_JSON [MISMATCH_BINARY_DIRECTORY]"
-                .into(),
+            "usage: test_images ABSOLUTE_SNAPSHOT FIXTURE_JSON [MISMATCH_BINARY_DIRECTORY]".into(),
         );
     }
     let snapshot = PathBuf::from(&arguments[1]);

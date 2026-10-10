@@ -76,7 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_copy: true,
+        history_drafts: true,
         speculative_proposal_source: Default::default(),
     };
     let compiler = GrammarCompiler::new(frontend.tokenizer(), VOCABULARY, &model.eos_token_ids)?;

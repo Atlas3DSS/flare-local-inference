@@ -33,8 +33,8 @@ def main(argv=None):
         help="verification widths including the pending input; batch times width is at most eight (default: 1 through 8)")
     parser.add_argument("--mtp-fixed-width", type=int, choices=range(1, 9),
         help="select a fixed prepared width instead of adaptive verification")
-    parser.add_argument("--mtp-copy", action=argparse.BooleanOptionalAction, default=True,
-        help="offer continuations copied from request history during speculation")
+    parser.add_argument("--history-drafts", action="store_true",
+        help="enable draft continuations from request history during speculation (default: disabled)")
     parser.add_argument("--snapshot-budget-gib", type=float, default=4)
     parser.add_argument("--headroom-gib", type=float, default=4)
     parser.add_argument("--template-defaults", type=Path, help="JSON object of default chat template arguments")
@@ -69,7 +69,7 @@ def main(argv=None):
             prefill_chunk_size=args.prefill_chunk_size,
             mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
             speculative_proposal_source=args.mtp_proposal_source,
-            speculative_fixed_width=args.mtp_fixed_width, speculative_copy=args.mtp_copy, **budgets)
+            speculative_fixed_width=args.mtp_fixed_width, history_drafts=args.history_drafts, **budgets)
         model = prepare_model(args.snapshot, config, progress=progress)
     else:
         parser.error(f"unsupported checkpoint model_type {architecture!r}")

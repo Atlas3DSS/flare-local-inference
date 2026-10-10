@@ -134,7 +134,7 @@ impl Inputs {
                     }
                     continue;
                 }
-                if config.speculative_copy && live.copy_allowed() {
+                if config.history_drafts && live.copy_allowed() {
                     let (copy, count) = crate::scheduler::speculation::copy_proposal(
                         live.tokens(),
                         step.token_capacity - 1,

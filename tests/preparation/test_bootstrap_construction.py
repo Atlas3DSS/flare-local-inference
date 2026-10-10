@@ -641,6 +641,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     config = bootstrap.PreparationConfig(
         mtp=proposal != "ordinary",
         speculative_proposal_source="copy" if proposal == "copy" else "mtp",
+        history_drafts=proposal == "copy",
     )
     with (
         FakeTensorMode(allow_non_fake_inputs=True),

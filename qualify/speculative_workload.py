@@ -254,12 +254,12 @@ def build_workload(tokenizer):
 def arms():
     return [{"id": "no-mtp", "mtp": False}] + [
         {"id": f"mtp-fixed-{width}", "mtp": True, "speculative_proposal_source": "mtp",
-         "speculative_fixed_width": width, "speculative_copy": False} for width in range(1, 9)
+         "speculative_fixed_width": width, "history_drafts": False} for width in range(1, 9)
     ] + [{"id": f"mtp-adaptive-copy-{str(copy).lower()}", "mtp": True,
           "speculative_proposal_source": "mtp", "speculative_fixed_width": None,
-          "speculative_copy": copy} for copy in (False, True)] + [
+          "history_drafts": copy} for copy in (False, True)] + [
         {"id": "copy-adaptive", "mtp": True, "speculative_proposal_source": "copy",
-         "speculative_fixed_width": None, "speculative_copy": True}]
+         "speculative_fixed_width": None, "history_drafts": True}]
 
 
 def request_groups(workload, concurrency):
