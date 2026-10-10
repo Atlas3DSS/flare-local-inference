@@ -15,7 +15,8 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 
 _INVOCATIONS = ContextVar('flare_storage_invocations')
 _OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
-            'triton.cudagraphs': False, 'compile_threads': 4}
+            'triton.cudagraphs': False, 'triton.autotune_at_compile_time': False,
+            'compile_threads': 4}
 
 
 @dataclass
@@ -163,6 +164,8 @@ def _compile_module(module, calls, owner):
         try:
             artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
                 options={'config_patches': _OPTIONS}, aot=True, donate_graph_module=True)
+            # Tune with caller-owned state rather than synthetic full-pool inputs.
+            artifact(*inputs)
         finally:
             _INVOCATIONS.reset(token)
         path.parent.mkdir(parents=True, exist_ok=True)
