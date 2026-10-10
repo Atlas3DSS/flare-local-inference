@@ -232,13 +232,25 @@ KDA. Compiled KDA prefill graphs support chunks through 4096 tokens. KDA decode,
 prefill, and MLP graphs include b12x output reductions and support native replay
 on TP2 and TP4. The shared [prepared mHC component](../flare/components/mhc.py)
 uses FP32 mixing coefficients, BF16 residual streams, fused weighted RMSNorm,
-and caller-owned scratch. The [dense GLM layer](../flare/recipes/glm53/decoder.py)
+and caller-owned scratch. The [GLM KDA layer](../flare/recipes/glm53/decoder.py)
 composes mHC, head-sharded KDA, an attention all-reduce, fused post/pre mixing,
-the sharded dense MLP, a second all-reduce, and residual expansion in one
-compiled graph. Dense-layer graph variants support decode and prefill through
-4096 tokens. Each rank hands its graph to its native replay worker.
-Sparse MLA, routed-MoE layer composition, the complete decoder stack, and GLM
-serving are not implemented.
+the sharded dense MLP or MoE, a second all-reduce, and residual expansion in one
+compiled graph. Graph variants support decode and prefill through 4096 tokens.
+Each rank hands its graph to its native replay worker. The
+[GLM MoE composition](../flare/recipes/glm53/moe.py) uses replicated FP32 router
+logits, sigmoid scores, correction-biased top-8 selection, normalized weights
+scaled by 2.5, and all 288 experts partitioned along the intermediate dimension.
+The MXFP8 shared expert uses the same prepared MLP component as dense layers.
+
+Dense-layer native replay matches the uncompiled prepared forward exactly.
+MoE output qualification remains failing at `rtol=0.01, atol=0.001`: the default
+b12x dynamic expert kernel uses BF16 atomic accumulation, and repeated eager
+calls also differ. A 4096-token TP4 native replay preserves recurrent state,
+attention, router logits, selected experts, routing weights, shared-expert output,
+and replicated rank outputs exactly, but differs from the eager residual in
+0.1% of elements under that pointwise check (maximum absolute error 0.0048828125).
+Sparse MLA composition, the complete decoder stack, and GLM serving are not
+implemented.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.

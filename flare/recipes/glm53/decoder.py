@@ -6,32 +6,32 @@ import torch
 
 from flare.components.collectives import PreparedAllReduce
 from flare.components.mhc import MHCScratch, MHCWeights, PreparedMHC, PreparedMHCPost
-from flare.components.mlp import PreparedMLP
+from flare.components.mlp import MLPScratch, PreparedMLP
 
 from .kda import KDAScratch, PreparedGlmKDA
+from .moe import MoeScratch, PreparedGlmMoe
+from .weights import MoEWeights
 
 
 @dataclass(frozen=True)
-class DenseLayerScratch:
+class LayerScratch:
     attention_hc: MHCScratch
     mlp_hc: MHCScratch
     kda: KDAScratch
     attention_output: torch.Tensor
-    gate_up: torch.Tensor
-    intermediate: torch.Tensor
-    mlp_partial: torch.Tensor
+    mlp: MLPScratch | MoeScratch
     mlp_output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, world_size, device):
+    def allocate(cls, tokens, world_size, device, *, sparse):
         if world_size not in (2, 4):
             raise ValueError("GLM layers require TP2 or TP4")
-        intermediate = 12288 // world_size
         def buffer(width):
             return torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
         return cls(MHCScratch.allocate(tokens, 4096, device), MHCScratch.allocate(tokens, 4096, device),
                    KDAScratch.allocate(tokens, 64 // world_size, device), buffer(4096),
-                   buffer(2 * intermediate), buffer(intermediate), buffer(4096), buffer(4096))
+                   MoeScratch.allocate(tokens, world_size, device) if sparse else
+                   MLPScratch.allocate(tokens, 4096, 12288 // world_size, device), buffer(4096))
 
 
 def _install_mhc(module, norm, weights, prefix, norm_name):
@@ -41,8 +41,8 @@ def _install_mhc(module, norm, weights, prefix, norm_name):
     return MHCWeights(module.fn, module.scale, module.base, norm.weight)
 
 
-class PreparedGlmDenseLayer:
-    """KDA and dense-MLP layer with replicated mHC and two output all-reduces.
+class PreparedGlmLayer:
+    """KDA and MLP layer with replicated mHC and two output all-reduces.
 
     Each rank owns a head/intermediate partition and identical four-stream
     residuals. Post-attention mixing, FFN mixing prediction, and FFN RMSNorm
@@ -51,10 +51,10 @@ class PreparedGlmDenseLayer:
     """
 
     def __init__(self, module, attention_weights, mlp_weights, residual_weights,
-                 source, output, scratch: DenseLayerScratch, state, metadata, *,
+                 source, output, scratch: LayerScratch, state, metadata, *,
                  mode, runtime, coordinator, session, name, workspace):
-        if module.block_type != "linear_attention" or not hasattr(module.mlp, "gate_proj"):
-            raise ValueError("dense GLM layer requires canonical KDA and dense MLP modules")
+        if module.block_type != "linear_attention":
+            raise ValueError("prepared GLM layer requires canonical KDA attention")
         if (source.shape != (scratch.kda.output.shape[0], 4, 4096)
                 or output.shape != source.shape or source.dtype != torch.bfloat16
                 or output.dtype != source.dtype or output.device != source.device):
@@ -77,10 +77,14 @@ class PreparedGlmDenseLayer:
         self.mlp_hc = PreparedMHC((scratch.attention_output, scratch.attention_hc.residual,
                                   scratch.attention_hc.post, scratch.attention_hc.comb),
             mlp_mhc, scratch.mlp_hc, session=session, name=f"{name}.ffn_hc", workspace=workspace, **options)
-        self.mlp = PreparedMLP(scratch.mlp_hc.normalized, mlp_weights, scratch.gate_up, scratch.intermediate,
-            scratch.mlp_partial, session=session, name=f"{name}.mlp", workspace=workspace,
-            swiglu_limit=module.mlp.swiglu_limit)
-        self.mlp_reduce = PreparedAllReduce(scratch.mlp_partial, scratch.mlp_output, runtime=runtime,
+        if isinstance(mlp_weights, MoEWeights):
+            self.mlp = PreparedGlmMoe(module.mlp, scratch.mlp_hc.normalized, mlp_weights, scratch.mlp,
+                                      session=session, name=f"{name}.moe", workspace=workspace)
+        else:
+            self.mlp = PreparedMLP(scratch.mlp_hc.normalized, mlp_weights, scratch.mlp.gate_up,
+                scratch.mlp.intermediate, scratch.mlp.output, session=session, name=f"{name}.mlp", workspace=workspace,
+                swiglu_limit=module.mlp.swiglu_limit)
+        self.mlp_reduce = PreparedAllReduce(scratch.mlp.output, scratch.mlp_output, runtime=runtime,
             session=session, coordinator=coordinator, name=f"{name}.mlp_reduce")
         self.post = PreparedMHCPost(scratch.mlp_output, scratch.mlp_hc.residual, scratch.mlp_hc.post,
                                     scratch.mlp_hc.comb, output, session=session, name=f"{name}.post")
