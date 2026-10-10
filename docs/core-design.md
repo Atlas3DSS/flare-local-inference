@@ -276,8 +276,18 @@ between chunks. Nine consecutive 65-token chunks crossing physical pages produce
 the same cache and tail as ordered decode over the combined input. The strict
 4096-token PyTorch pooling comparison remains failing at two FP8 bytes, each
 one representable step apart; prepared execution matches the original vLLM
-kernel exactly on those inputs. GLM index projections, pooling, selection, and
-absorbed query/value projections still need composition into the recipe.
+kernel exactly on those inputs. The [GLM indexer recipe](../flare/recipes/glm53/indexer.py)
+composes checkpoint MXFP8 query/key/head-weight projections, BF16 pooling gates,
+canonical LayerNorm, rotated FP8 queries, C4 pool updates, selection, and physical
+slot expansion. A model page holds 256 raw tokens and one 64-record index page;
+expanded physical indices address the main latent cache's 64-record pages.
+Prefill graphs admit one request; decode supports packed rows from multiple
+requests. Position -1 and negative state slots mask inactive queries and
+requests. Three consecutive chunks, including 4096-token chunks, preserve
+projection outputs, pool cache, sequence tails and physical selections through
+compiled Rust replay. The compiler bridge retains ATen LayerNorm because
+Inductor's decomposition changes BF16 rounding. Absorbed query/value projections
+and complete sparse MLA layers remain unimplemented.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.

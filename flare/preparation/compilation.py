@@ -65,6 +65,17 @@ def _fake_sigmoid(source):
     return torch.sigmoid(source)
 
 
+@torch.library.custom_op('flare::native_layer_norm', mutates_args=())
+def _native_layer_norm(source: torch.Tensor, shape: list[int], weight: torch.Tensor | None,
+                       bias: torch.Tensor | None, eps: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops.aten.native_layer_norm.default(source, shape, weight, bias, eps)
+
+
+@_native_layer_norm.register_fake
+def _fake_native_layer_norm(source, shape, weight, bias, eps):
+    return torch.ops.aten.native_layer_norm.default(source, shape, weight, bias, eps)
+
+
 def _byte_storage(tensor):
     storage = tensor.untyped_storage()
     return tensor.new_empty(0, dtype=torch.uint8).set_(storage, 0, (storage.nbytes(),), (1,))
@@ -93,7 +104,7 @@ def compile_forward(fn):
     Their typed views are reconstructed inside each opaque invocation so
     Inductor can preserve mutations without cloning strided state regions.
     Pointwise tensor operations remain visible to ordinary Inductor compilation.
-    Mean reductions and FP32 sigmoid retain ATen's rounding.
+    Mean reductions, FP32 sigmoid and LayerNorm retain ATen's rounding.
     The compiled module retains the forward and its prepared kernel owners.
     """
     module = make_fx(lambda: fn(), tracing_mode='real')()
@@ -105,6 +116,8 @@ def compile_forward(fn):
         elif (node.op == 'call_function' and node.target is torch.ops.aten.sigmoid.default
                 and node.meta['val'].dtype == torch.float32):
             node.target = torch.ops.flare.sigmoid.default
+        elif node.op == 'call_function' and node.target is torch.ops.aten.native_layer_norm.default:
+            node.target = torch.ops.flare.native_layer_norm.default
     for node in reversed(list(graph.nodes)):
         if (node.op == 'call_function' and isinstance(node.target, torch._ops.OpOverload)
                 and node.target._schema.name in (
@@ -237,8 +250,10 @@ def compile_forward(fn):
                 raise RuntimeError(f'unsupported returned value: {node}')
             replacement = aliases[0] if len(aliases) == 1 else tuple(aliases)
             for user in list(node.users):
-                user.args = torch.fx.map_arg(user.args, lambda arg: replacement if arg is node else arg)
-                user.kwargs = torch.fx.map_arg(user.kwargs, lambda arg: replacement if arg is node else arg)
+                user.args = torch.fx.map_arg(user.args, lambda arg, node=node, replacement=replacement:
+                                             replacement if arg is node else arg)
+                user.kwargs = torch.fx.map_arg(user.kwargs, lambda arg, node=node, replacement=replacement:
+                                               replacement if arg is node else arg)
         graph.erase_node(node)
 
     for node in originals:

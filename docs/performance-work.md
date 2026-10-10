@@ -23,6 +23,8 @@ caller-owned scratch, and allocation-stable replay are required.
    typed storage for aliases of one dtype. Preserve BF16 intermediate rounding
    and ATen mean-reduction order, including FP32 normalization statistics.
    Preserve ATen FP32 sigmoid results before multiplication and BF16 rounding.
+   Retain native ATen LayerNorm to preserve its BF16 output rounding and affine
+   normalization semantics.
    `scripts/qualify_decoder.py --tune --compile` checks decoder correctness.
    `qualify.gpu_replay flare --compile` measures compiled prefill, decode, and
    resume forwards through model bootstrap. Bootstrap recompiles these forwards

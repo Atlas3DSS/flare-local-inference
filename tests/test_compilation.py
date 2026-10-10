@@ -99,6 +99,39 @@ def test_fp32_sigmoid_preserves_bf16_gate_rounding():
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("rows", [1, 4096])
+@torch.no_grad()
+def test_layer_norm_preserves_aten_rounding(rows):
+    source = torch.zeros((rows, 128), dtype=torch.bfloat16, device="cuda")
+    weight = torch.ones(128, dtype=torch.bfloat16, device="cuda")
+    bias = torch.zeros_like(weight)
+    output = torch.empty_like(source)
+
+    def forward():
+        output.copy_(torch.nn.functional.layer_norm(source, (128,), weight, bias, 1e-6))
+
+    compiled = compile_forward(forward)
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    generator = torch.Generator(device="cuda").manual_seed(532128)
+    for _ in range(3):
+        source.normal_(generator=generator)
+        weight.normal_(generator=generator)
+        bias.normal_(generator=generator)
+        forward()
+        expected = output.clone()
+        output.fill_(float("nan"))
+        before = torch.cuda.memory_stats()["allocation.all.allocated"]
+        graph.replay()
+        torch.cuda.synchronize()
+        assert before == torch.cuda.memory_stats()["allocation.all.allocated"]
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    graph.reset()
+
+
 @torch.library.custom_op("test_compilation::fill_output", mutates_args=("out",))
 def _fill_output(out: torch.Tensor, value: float) -> None:
     out.fill_(value)
