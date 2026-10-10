@@ -35,7 +35,8 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
         request=lambda **kwargs: SimpleNamespace(**kwargs))
     monkeypatch.setattr(moe.fused_moe, "plan_execution", lambda **kwargs: plan)
     monkeypatch.setattr(moe.fused_moe, "bind", lambda plan, **kwargs: SimpleNamespace(**kwargs))
-    monkeypatch.setattr(moe, "register_finalizer", lambda *args, **kwargs: None)
+    finalizers = []
+    monkeypatch.setattr(moe, "register_finalizer", lambda session, callback, **kwargs: finalizers.append(callback))
     router_plan = SimpleNamespace(query=SimpleNamespace(logits_dtype="bfloat16", routed_scaling_factor=1.0))
 
     def route(selected_plan, logits, selected, routed_ids, routed_weights):
@@ -56,8 +57,7 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
     operator = moe.PreparedRoutedExperts(source, experts, ids, weights, output,
         session=session, name="prefill.layer0.experts", workspace=workspace,
         router_weight=router_weight, router_plan=router_plan)
-    default_scratch = operator.scratch
-    assert operator.scratch.data_ptr() == arena.tensor.data_ptr()
+    assert operator.scratch is None
 
     def candidate(index, size):
         def bind(**kwargs):
@@ -84,7 +84,7 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
     assert all(call.owners[3] is experts and call.owners[2].input_scales_static for call in calls)
     assert all(call.reset is None and call.restore is None for call in calls)
     assert all(call.benchmark_producers is fixture.producers for call in calls)
-    assert operator.scratch.data_ptr() == arena.tensor.data_ptr() and operator.scratch is default_scratch
+    assert operator.scratch is None
     assert len(fixture.producers) == (5 if tokens == 4 else 3)
     for index in (0, 1, 2, 0):
         call = calls[index]
@@ -103,6 +103,9 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
     assert runs == [index for index in (0, 1, 2, 0) for _ in fixture.producers]
     assert torch.all(source == 7) and not ids.count_nonzero() and not weights.count_nonzero()
     assert not output.count_nonzero()
+    for finalize in finalizers:
+        finalize()
+    assert operator.scratch.data_ptr() == arena.tensor.data_ptr()
     with pytest.raises((ValueError, RuntimeError), match=f"requires {512 if storage == 'arena' else 257}"):
         requests[0].benchmark_call(candidate(3, 257))
     tensors = (fixture.fixture, fixture.source, fixture.output, fixture.routes,

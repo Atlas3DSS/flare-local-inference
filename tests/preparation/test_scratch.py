@@ -130,15 +130,16 @@ def test_plain_session_arena_finalizers_rebind_every_alias_and_release_old_stora
             assert prior.nbytes == 256
             owner.scratch = arena.tensor
         register_finalizer(ordinary, finalize, workspace=arena)
+    assert order == [0, 1]
     del finalize, original
     arena.reserve(300)
     assert reference() is not None
     arena.finalize()
-    assert order == [0, 1]
+    assert order == [0, 1, 0, 1]
     assert all(owner.scratch is arena.tensor for owner in owners)
     assert reference() is None
     arena.finalize()
-    assert order == [0, 1]
+    assert order == [0, 1, 0, 1]
     arena.freeze()
     with pytest.raises(RuntimeError):
         arena.register_finalizer(lambda: None)

@@ -355,7 +355,6 @@ class PreparedGDN:
             set_binding=set_recurrent_binding,
             run_options={"eps": module.norm.variance_epsilon} if mode == "decode" else None,
         )
-        self.workspace = self.recurrent_binding.scratch
         self.row_ids = torch.arange(
             self.tokens, dtype=torch.int32, device=self.device
         ).view(-1, 1)

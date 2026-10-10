@@ -12,7 +12,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 from flare.preparation.fixtures import bf16_gemv as bf16_fixtures
 from flare.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 from flare.preparation.scratch import ScratchArena, prime_owners, scratch_storage
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 class UnquantizedProjection:
@@ -33,7 +33,7 @@ class UnquantizedProjection:
         self.weight = weight
         self.bias = bias
         self.output = output
-        session.prepare((self.plan.request(
+        declare(session, (self.plan.request(
             name=name,
             prepare_call=lambda state: PreparedCall(run=lambda: state.run(source, weight, out=output, bias=bias)),
             benchmark_call=partial(bf16_fixtures.benchmark_call, source=source,
@@ -84,14 +84,13 @@ class QuantizedProjection:
                                                        out=output, workspace=storage),
                                 owners=prime_owners(workspace, storage) if storage is not None else ())
 
-        session.prepare((self.plan.request(
+        declare(session, (self.plan.request(
             name=name,
             prepare_call=prepare,
             benchmark_call=partial(gemm_fixtures.benchmark_call, source=source, output=output,
                 values=values, scales=scales, gain=gain, bias=bias, weight=weight,
                 selected_workspace=selected_workspace),
         ),))
-        self.workspace = selected_workspace()
         register_finalizer(session, lambda: setattr(self, "workspace", selected_workspace()), workspace=workspace)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
@@ -116,7 +115,7 @@ class BatchedQuantizedProjection:
         self.weight, self.output, self.major = weight, output, major
         self.plan = gemm.plan_bmm(BmmQuery(batch=source.shape[0], max_rows=source.shape[1],
             in_features=source.shape[2], out_features=output.shape[2], b_major=major, sf_axis=major))
-        session.prepare((self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
             run=lambda: state.run(source, weight, output, b_major=major, sf_axis=major))),))
 
     def __call__(self, source):
@@ -177,7 +176,6 @@ class ParallelProjections:
             self.plans.append(projection.plan.handle)
         workspace.register_parallel(*(projection.plan for projection in self.projections))
         self.stream = workspace.auxiliary_stream
-        self.refresh()
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):

@@ -8,6 +8,7 @@ from b12x.preparation import PreparedCall
 
 from flare.components.linear import QuantizedProjection, UnquantizedProjection
 from flare.components.weights import MLPWeights
+from flare.preparation.tuning import declare
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,7 @@ class PreparedMLP:
             hyperconnection.Caps(device=source.device, max_tokens=tokens, hidden_size=width),
             invocation={"operation": "swiglu", "limit": swiglu_limit, "round_silu": round_silu},
         )
-        session.prepare((self.activation_plan.request(
+        declare(session, (self.activation_plan.request(
             name=f"{name}.swiglu", prepare_call=lambda state: PreparedCall(
                 run=lambda: state.launch(gate_up, gate_up, intermediate),
                 owners=(gate_up, intermediate),

@@ -7,7 +7,7 @@ from b12x.preparation import PreparedCall
 
 from flare.preparation.fixtures import indexer as fixtures
 from flare.preparation.scratch import planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 class PreparedSparseIndexer:
@@ -34,15 +34,14 @@ class PreparedSparseIndexer:
             return PreparedCall(run=lambda: fixtures.run(state, runtime, self.inputs),
                                 owners=prime_owners(workspace, storage, runtime))
 
-        session.prepare((self.plan.request(name=name, prepare_call=prepare,
+        declare(session, (self.plan.request(name=name, prepare_call=prepare,
             benchmark_call=partial(fixtures.benchmark_call, arguments=self.inputs,
-                                   session=session, workspace=workspace)),))
+                                   session=session, workspace=workspace)),), stage="state")
 
         def finalize():
             self.binding = dsa_indexer.bind(self.plan,
                 scratch=planned_scratch(self.plan.scratch_specs(), workspace), **self.inputs)
 
-        finalize()
         register_finalizer(session, finalize, workspace=workspace)
 
     def __call__(self):

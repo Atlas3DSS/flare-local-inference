@@ -118,7 +118,6 @@ class ConcurrentSharedExpert:
                 workspace.register_parallel(main_plan, projection.plan)
         self.plans = [projection.plan.handle for projection in self.projections] + [mlp.activation_plan.handle]
         self.stream = workspace.auxiliary_stream
-        self.refresh()
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):

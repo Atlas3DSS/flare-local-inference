@@ -8,7 +8,7 @@ from b12x.norm.mhc import _impl
 from b12x.preparation import PreparedCall
 
 from flare.preparation.scratch import planned_scratch, prime_owners
-from flare.preparation.tuning import benchmark_resource, register_finalizer
+from flare.preparation.tuning import declare, benchmark_resource, register_finalizer
 
 
 @dataclass(frozen=True)
@@ -114,14 +114,13 @@ class PreparedMHC:
                                          lambda: _BenchmarkInputs(residual, self.operation))
             return call(state, fixture.inputs, fixture.scratch, fixture)
 
-        session.prepare((self.plan.request(name=name, prepare_call=lambda state: call(state, inputs, scratch),
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: call(state, inputs, scratch),
                                           benchmark_call=benchmark),))
 
         def finalize():
             self.binding = mhc.bind(self.plan, scratch=planned_scratch(self.plan.scratch_specs(), workspace),
                                     tokens=tokens, **scratch.bind_args())
 
-        finalize()
         register_finalizer(session, finalize, workspace=workspace)
 
     def __call__(self, *inputs):
@@ -137,7 +136,7 @@ class PreparedMHCPost:
         self.plan = mhc.plan(mhc.Caps(device=residual.device, max_tokens=residual.shape[0],
                                      hidden_size=residual.shape[-1]),
                              invocation={"operation": "post", "output_mode": "provided"})
-        session.prepare((self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
             run=lambda: _impl._b12x_mhc_post_impl(source, residual, post, comb, out=output, _state=state))),))
 
     def __call__(self, source, residual, post, comb):

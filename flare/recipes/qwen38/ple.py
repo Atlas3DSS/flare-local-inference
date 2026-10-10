@@ -16,7 +16,7 @@ from flare.components.linear import UnquantizedProjection
 from flare.preparation.checkpoint import CheckpointManifest
 from flare.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
 from flare.preparation.scratch import planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 PLE_LAYER_PREFIX = f"{TEXT_PREFIX}.layers.1.ple"
 TABLE_ROWS = 320001536
@@ -444,13 +444,13 @@ class PreparedPLE:
             )
             return PreparedCall(run=lambda: prepared.run(binding), owners=prime_owners(workspace, scratch, binding))
 
-        session.prepare((plan.request(name=name, prepare_call=prepare_call),))
+        declare(session, (plan.request(name=name, prepare_call=prepare_call),), stage="state")
 
         def refresh():
             scratch = planned_scratch(plan.scratch_specs(), workspace)
             setattr(self, attribute, public_bind(plan, scratch=scratch, **args))
+        setattr(self, attribute, None)
 
-        refresh()
         register_finalizer(session, refresh, workspace=workspace)
         return getattr(self, attribute)
 

@@ -3,6 +3,8 @@
 from b12x.preparation import PreparedCall
 from b12x.sequence import embedding
 
+from flare.preparation.tuning import declare
+
 
 class PreparedEmbedding:
     """Gather token rows into caller storage and zero inactive output rows.
@@ -15,7 +17,7 @@ class PreparedEmbedding:
         self.weight, self.ids, self.output, self.num_rows = weight, ids, output, num_rows
         self.arguments = {"out": output, "num_rows": num_rows}
         self.plan = embedding.plan(embedding.query_from_call(weight, ids, **self.arguments), device=weight.device)
-        session.prepare((self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
             run=lambda: state.run(weight, ids, **self.arguments))),))
 
     def __call__(self):

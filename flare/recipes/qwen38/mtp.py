@@ -12,7 +12,7 @@ from flare.components.embedding import PreparedEmbedding
 from flare.components.linear import UnquantizedProjection
 from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 from .attention import PreparedAttention, QSAScratch
 from .hyperconnection import HyperconnectionScratch, PreparedHyperconnection
@@ -98,13 +98,12 @@ class PreparedMTPFeedback:
                 workspace=workspace, eps=self.eps,
             )
 
-        session.prepare((self.plan.request(name=name, prepare_call=prepare, benchmark_call=benchmark),))
+        declare(session, (self.plan.request(name=name, prepare_call=prepare, benchmark_call=benchmark),))
 
         def finalize():
             self.scratch = planned_scratch(self.plan.scratch_specs(), workspace)
             self.binding = mtp_feedback.bind(self.plan, scratch=self.scratch, **self.kwargs)
 
-        finalize()
         register_finalizer(session, finalize, workspace=workspace)
 
     def __call__(self):

@@ -6,6 +6,8 @@ import weakref
 import torch
 from b12x.preparation import CollectiveRequirement, PreparedCall
 
+from flare.preparation.tuning import declare
+
 _OWNERS = weakref.WeakValueDictionary()
 _HANDLES = itertools.count()
 
@@ -47,7 +49,7 @@ class PreparedAllReduce:
         ranks = tuple(dist.get_process_group_ranks(runtime.exchange_group))
         request = self.plan.request(name=name, prepare_call=prepare,
             collective=CollectiveRequirement(key=name, ranks=ranks))
-        session.prepare((request,), coordinator=coordinator)
+        declare(session, (request,), coordinator=coordinator)
         self.handle = next(_HANDLES)
         _OWNERS[self.handle] = self
 
@@ -96,7 +98,7 @@ class PreparedAllGather:
         query = pcie.query_from_runtime(runtime, surface="DcpAllToAll.all_gather_heads", call=call)
         self.plan = pcie.plan(query, runtime=runtime)
         ranks = tuple(dist.get_process_group_ranks(runtime.exchange_group))
-        session.prepare((self.plan.request(name=name,
+        declare(session, (self.plan.request(name=name,
             prepare_call=lambda state: PreparedCall(run=lambda: state.run(**call), output=output,
                                                     owners=(runtime, source, output)),
             collective=CollectiveRequirement(key=name, ranks=ranks)),), coordinator=coordinator)

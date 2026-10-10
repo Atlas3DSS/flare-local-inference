@@ -12,7 +12,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import apply_rotary_pos_em
 
 from flare.components.linear import QuantizedProjection, UnquantizedProjection
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 from .attention_overlap import ConcurrentAttention
 
@@ -222,20 +222,19 @@ class PreparedAttention:
             return PreparedCall(run=lambda: materialized.run_for_preparation(binding, **self.dynamic()),
                                 owners=prime_owners(workspace, storage, binding))
 
-        session.prepare((self.plan.request(name=f"{name}.qsa", prepare_call=prepare),))
+        declare(session, (self.plan.request(name=f"{name}.qsa", prepare_call=prepare),), stage="state")
         def refresh():
             self.workspace = planned_scratch(self.plan.scratch_specs(), workspace)
             self.binding = qsa.bind(self.plan, scratch=self.workspace, **self.binding_kwargs)
 
-        refresh()
         register_finalizer(session, refresh, workspace=workspace)
         self.writer = paged_kv_write.plan(paged_kv_write.Caps(device=source.device,
             num_kv_heads=2, head_dim_k=256, head_dim_v=256, page_size=page_size))
         self.write_kwargs = {"key": scratch.key, "value": scratch.projected_v.view(self.tokens, 2, 256),
                              "k_cache": state.main_k_cache, "v_cache": state.main_v_cache,
                              "slot_mapping": metadata.slot_mapping}
-        session.prepare((self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
-            PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),))
+        declare(session, (self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
+            PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),), stage="state")
         self.concurrent = None
         if (self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
                 and workspace is projection_workspace

@@ -11,7 +11,7 @@ from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
 from flare.components.linear import UnquantizedProjection
 from flare.preparation.fixtures import hyperconnection as hc_fixtures
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 def packed_down_projection(module: torch.nn.Module) -> torch.Tensor:
@@ -118,7 +118,7 @@ class PreparedHyperconnection:
             plan = hc.plan(caps, invocation=FrozenMapping({"operation": operation, **options}))
             arguments = priming_arguments[operation]
             kwargs = {"eps": self.eps} if operation == "grouped_rmsnorm" else {}
-            session.prepare((plan.request(
+            declare(session, (plan.request(
                 name=f"{name}.{operation}",
                 prepare_call=lambda state, args=arguments, kw=kwargs: PreparedCall(run=lambda: state.launch(*args, **kw)),
                 benchmark_call=partial(hc_fixtures.benchmark_call, operation=operation,
@@ -132,7 +132,6 @@ class PreparedHyperconnection:
                 self.bindings[op] = hc.bind(selected_plan, tokens=self.tokens,
                     normalized=scratch.normalized, bottleneck=scratch.bottleneck, block_input=scratch.block_input)
 
-            finalize()
             register_finalizer(session, finalize)
 
         self.injection = None if module.block_inject_weight is None else scratch.injection_logits
@@ -156,7 +155,7 @@ class PreparedHyperconnection:
         arguments = (priming_state, self.scratch.block_input, self.scratch.injection_logits,
                      following.norm_gain, self.scratch.gate_logits, following.scratch.normalized)
         kwargs = {"eps": following.eps}
-        session.prepare((plan.request(name=name,
+        declare(session, (plan.request(name=name,
             prepare_call=lambda state: PreparedCall(run=lambda: state.launch(*arguments, **kwargs)),
             benchmark_call=partial(hc_fixtures.benchmark_call, operation="combine_norm",
                                    arguments=arguments, kwargs=kwargs)),))

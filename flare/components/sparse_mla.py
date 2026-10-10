@@ -5,7 +5,7 @@ from b12x.attention import sparse_mla
 from b12x.preparation import PreparedCall
 
 from flare.preparation.scratch import planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 class PreparedLatentCacheWriter:
@@ -19,9 +19,9 @@ class PreparedLatentCacheWriter:
     def __init__(self, source, cache, slots, *, session, name):
         self.source, self.cache, self.slots = source, cache, slots
         self.plan = sparse_mla.plan_cache_writer(source, cache, slots)
-        session.prepare((self.plan.request(name=name,
+        declare(session, (self.plan.request(name=name,
             prepare_call=lambda state: PreparedCall(
-                run=lambda: state.run(source, cache, slots), owners=(source, cache, slots))),))
+                run=lambda: state.run(source, cache, slots), owners=(source, cache, slots))),), stage="state")
 
     def __call__(self):
         sparse_mla.concat_and_cache_glm_next_mla(self.source, self.cache, self.slots, plan=self.plan)
@@ -58,13 +58,12 @@ class PreparedSparseMLA:
             return PreparedCall(run=lambda: state.run(runtime, kv_cache=cache, attention_sink=attention_sink),
                                 owners=prime_owners(workspace, storage, runtime))
 
-        session.prepare((self.plan.request(name=name, prepare_call=prepare),))
+        declare(session, (self.plan.request(name=name, prepare_call=prepare),), stage="state")
 
         def finalize():
             self.binding = sparse_mla.bind(self.plan,
                 scratch=planned_scratch(self.plan.scratch_specs(), workspace), **self.inputs)
 
-        finalize()
         register_finalizer(session, finalize, workspace=workspace)
 
     def __call__(self):

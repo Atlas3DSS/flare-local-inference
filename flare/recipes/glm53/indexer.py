@@ -9,6 +9,7 @@ from b12x.preparation import PreparedCall
 
 from flare.components.indexer import PreparedSparseIndexer
 from flare.components.linear import QuantizedProjection, UnquantizedProjection
+from flare.preparation.tuning import declare
 
 
 @dataclass(frozen=True)
@@ -132,12 +133,12 @@ class PreparedGlmIndexer:
         self.pool_arguments = (state.cache, state.tail, metadata.state_slots, metadata.query_start_loc,
             scratch.normalized_key, scratch.gate, self.ape, metadata.token_slots, metadata.positions)
         self.pool_plan = glm_pool.plan_pools(*self.pool_arguments, mode=mode)
-        session.prepare((
+        declare(session, (
             self.query_plan.request(name=f"{name}.rotate", prepare_call=lambda state:
                 PreparedCall(run=lambda: state.quantize(*self.query_arguments))),
             self.pool_plan.request(name=f"{name}.pool", prepare_call=lambda state:
                 PreparedCall(run=lambda: state.update(*self.pool_arguments))),
-        ))
+        ), stage="state")
         page_table = scratch.page_table.expand(rows, -1) if mode == "prefill" else scratch.page_table
         caps = dsa_indexer.Caps(device=source.device, num_q_heads=32, max_q_rows=rows,
             max_page_table_width=page_table.shape[1], topk=512, mode=mode)
@@ -150,8 +151,8 @@ class PreparedGlmIndexer:
                                "num_cache_blocks": state.cache.shape[0]}
         self.expand_plan = sparse_mla.plan_pooled_selection(device=source.device, max_rows=rows,
             page_size=256, max_page_table_width=metadata.block_table.shape[1], num_cache_blocks=state.cache.shape[0])
-        session.prepare((self.expand_plan.request(name=f"{name}.expand", prepare_call=lambda state:
-            PreparedCall(run=lambda: state.run(*self.expand_arguments, **self.expand_options))),))
+        declare(session, (self.expand_plan.request(name=f"{name}.expand", prepare_call=lambda state:
+            PreparedCall(run=lambda: state.run(*self.expand_arguments, **self.expand_options))),), stage="state")
 
     def __call__(self):
         s, m = self.scratch, self.metadata

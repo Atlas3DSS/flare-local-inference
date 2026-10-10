@@ -167,7 +167,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 capacity=capacity, admission_buffers=admission)
             fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
             add(name, operation, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()))
-    report("autotuning complete GLM graph catalog")
+    report("preparing weight kernels, then cache-state kernels")
     tuning = session.tune(show_progress=progress is not None and rank == 0)
     report(f"selected kernels: {tuning['selection_counts']}")
     stream = torch.cuda.Stream(device=device)

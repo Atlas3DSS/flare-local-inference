@@ -11,7 +11,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 
 from flare.preparation.fixtures import fused_moe as moe_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ class PreparedRouter:
             has_correction_bias=correction_bias is not None,
             logits_row_stride=logits.stride(0), topk_row_stride=scratch.selected_logits.stride(0),
             ids_row_stride=scratch.ids.stride(0), weights_row_stride=scratch.weights.stride(0)))
-        session.prepare((self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
             run=lambda: state.run(logits, scratch.selected_logits, scratch.ids, scratch.weights, **self.options),
             owners=(logits, scratch))),))
 
@@ -107,7 +107,7 @@ class PreparedRoutedExperts:
                 output=output, scratch=scratch, input_scales_static=True)
             return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(workspace, scratch, binding))
 
-        session.prepare((self.plan.request(name=name, prepare_call=prepare_call,
+        declare(session, (self.plan.request(name=name, prepare_call=prepare_call,
             benchmark_call=partial(moe_fixtures.benchmark_call, source=source, experts=experts,
                 top_k=ids.shape[1], session=session, name=name, workspace=workspace,
                 allocate_router=RouterScratch.allocate, router_weight=router_weight,
@@ -118,7 +118,6 @@ class PreparedRoutedExperts:
             self.binding = fused_moe.bind(self.plan, a=source, topk_ids=ids, topk_weights=weights,
                 output=output, scratch=self.scratch, input_scales_static=True)
 
-        finalize()
         register_finalizer(session, finalize, workspace=workspace)
 
     def __call__(self) -> torch.Tensor:

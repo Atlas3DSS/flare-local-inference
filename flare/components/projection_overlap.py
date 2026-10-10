@@ -68,7 +68,6 @@ class ConcurrentProjectionChain:
             for main in self.parallel_plans:
                 workspace.register_parallel(main, projection.plan)
         self.stream = workspace.auxiliary_stream
-        self.refresh()
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):

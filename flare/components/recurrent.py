@@ -9,7 +9,7 @@ from b12x.preparation import PreparedCall
 
 from flare.preparation.fixtures import recurrent as recurrent_fixtures
 from flare.preparation.scratch import planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,8 @@ def prepare_sequence_binding(
             run_options=run_options, binding_plan=plan if bind_plan else None, bind_method=bind_method,
         )
 
-    session.prepare((plan.request(name=name, prepare_call=prepare_call,
-        benchmark_call=benchmark_call),))
+    declare(session, (plan.request(name=name, prepare_call=prepare_call,
+        benchmark_call=benchmark_call),), stage="state")
     selected = None
 
     def finalize():
@@ -117,7 +117,6 @@ def prepare_sequence_binding(
         selected = public_bind(plan, scratch=scratch, **args)
         set_binding(selected)
 
-    finalize()
     register_finalizer(session, finalize, workspace=workspace)
     return selected
 

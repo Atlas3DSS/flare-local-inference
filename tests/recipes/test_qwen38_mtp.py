@@ -58,13 +58,13 @@ def test_feedback_refresh_and_private_benchmark_preserve_input_state(monkeypatch
         fc_hidden=SimpleNamespace(weight=torch.empty((2560, 2560), device="meta", dtype=torch.bfloat16)))
     op = mtp.PreparedMTPFeedback(module, token, hidden, output, arena,
                                 session=SimpleNamespace(prepare=requests.extend), name="draft.feedback")
-    first = op.binding
+    assert not hasattr(op, "binding") and arena.nbytes == 0
     plan.size, plan.version = 512, 1
     arena.reserve(1024)
     arena.trim(512)
     arena.finalize()
     arena.freeze()
-    assert op.binding is not first and op.binding.version == 1
+    assert op.binding.version == 1
     assert op.scratch.data_ptr() == arena.tensor.data_ptr()
     assert op.binding.output.untyped_storage().data_ptr() == output.untyped_storage().data_ptr()
     assert op.binding.multi_state.untyped_storage().data_ptr() == hidden.untyped_storage().data_ptr()
@@ -83,6 +83,8 @@ def test_feedback_refresh_and_private_benchmark_preserve_input_state(monkeypatch
 
 
 def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
+    from flare.components import embedding
+
     scratch = mtp.MTPScratch.allocate(3, 2, "cpu")
     ids = torch.tensor([8, -1, 9], dtype=torch.int64)
     target = torch.arange(12, dtype=torch.bfloat16).view(3, 4, 1).expand(3, 4, 2560).reshape(3, 10240).contiguous()
@@ -91,9 +93,9 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
     metadata = SimpleNamespace(request_ids=torch.tensor([0, -1, 1]), rope_positions=positions)
     selected = torch.tensor([2, 0], dtype=torch.int64)
     plan = SimpleNamespace(request=lambda **kwargs: kwargs)
-    monkeypatch.setattr(mtp.embedding, "query_from_call", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mtp.embedding, "plan", lambda *args, **kwargs: plan)
-    monkeypatch.setattr(mtp.embedding, "run", lambda weight, ids, *, out, plan: out.copy_(ids[:, None]))
+    monkeypatch.setattr(embedding.embedding, "query_from_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(embedding.embedding, "plan", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(embedding.embedding, "run", lambda weight, ids, *, out, **kwargs: out.copy_(ids[:, None]))
 
     class Feedback:
         def __init__(self, module, token, hidden, output, workspace, **kwargs):
@@ -154,7 +156,8 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
         monkeypatch.setattr(mtp, name, value)
     layer = SimpleNamespace(attn_hyper_connection=object(), mlp_hyper_connection=object(), self_attn=object())
     weights = SimpleNamespace(module=SimpleNamespace(layers=[layer], hyper_connection_mixer=object()),
-                              attention={}, moe=object(), embedding=object(), lm_head=object())
+                              attention={}, moe=object(), embedding=SimpleNamespace(device=torch.device("cpu")),
+                              lm_head=object())
     operator = mtp.PreparedMTP(weights, scratch, ids, target, object(), metadata, object(),
         ScratchArena("cpu"), output_indices=selected, session=SimpleNamespace(prepare=lambda _: None), name="draft")
     for _ in range(2):
@@ -177,15 +180,18 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
 
 
 def test_shared_bf16_expert_uses_bf16_projections_without_activation_quantization(monkeypatch):
+    from flare.components import mlp
+
     source = torch.ones((1, 2560), dtype=torch.bfloat16)
     weights = moe.SharedExpertWeights(torch.empty((1280, 2560), dtype=torch.bfloat16, device="meta"),
         torch.empty((2560, 640), dtype=torch.bfloat16, device="meta"),
         torch.empty((1, 2560), dtype=torch.bfloat16, device="meta"))
     calls = []
     monkeypatch.setattr(moe, "UnquantizedProjection", lambda *args, **kwargs: calls.append((args, kwargs)))
-    monkeypatch.setattr(moe, "QuantizedProjection", lambda *a, **kw: pytest.fail("BF16 MTP must not use quantized projections"))
+    monkeypatch.setattr(mlp, "UnquantizedProjection", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(mlp, "QuantizedProjection", lambda *a, **kw: pytest.fail("BF16 MTP must not use quantized projections"))
     plan = SimpleNamespace(request=lambda **kwargs: kwargs)
-    monkeypatch.setattr(moe.hyperconnection, "Caps", lambda **kwargs: kwargs)
-    monkeypatch.setattr(moe.hyperconnection, "plan", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(mlp.hyperconnection, "Caps", lambda **kwargs: kwargs)
+    monkeypatch.setattr(mlp.hyperconnection, "plan", lambda *args, **kwargs: plan)
     moe.PreparedSharedExpert(source, weights, session=SimpleNamespace(prepare=lambda _: None), name="mtp.shared")
     assert [kw["name"] for _, kw in calls] == ["mtp.shared.gate_up", "mtp.shared.down", "mtp.shared.shared_gate"]

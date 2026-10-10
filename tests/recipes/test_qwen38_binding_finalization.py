@@ -57,10 +57,9 @@ class Session:
         self.requests, self.finalizers, self.arenas = {}, [], []
         self.benchmark_resources = {}
 
-    def prepare(self, requests):
+    def declare(self, requests, *, stage="weights", coordinator=None):
         for request in requests:
             self.requests[request.name] = request
-            request.prepare_call(Materialized(request.plan)).run()
 
     def finalize(self):
         for arena in self.arenas:
@@ -71,6 +70,9 @@ class Session:
 
 @pytest.fixture
 def session(monkeypatch):
+    from flare.preparation import tuning
+
+    monkeypatch.setattr(tuning, "RecordedPreparationSession", Session)
     value = Session()
     def finalizer(session, callback, *, workspace=None):
         if isinstance(workspace, ScratchArena):
@@ -153,14 +155,15 @@ def test_qsa_binding_refreshes_selected_payload_and_resized_workspace(
         workspace=arena,
         max_cache_pages=2,
     )
-    initial = operator.binding
+    assert not hasattr(operator, "binding")
+    assert arena.nbytes == 0
     assert captured["caps"].attention_splits == 16
     assert (metadata.request_ids == -1).all() and (metadata.slot_mapping == -1).all()
-    assert initial.main_k_cache.shape[0] == 1
     plan.version, plan.nbytes = 2, 32
     grown = arena.reserve(512)
     session.finalize()
-    assert operator.binding is not initial and operator.binding.version == 2
+    assert operator.binding.version == 2
+    assert operator.binding.main_k_cache.shape[0] == 1
     assert operator.binding.scratch.data_ptr() == operator.workspace.data_ptr() == grown.data_ptr()
     assert operator.binding.scratch.shape == (32,)
     replacement = state.resize_pages_for_preparation(2)
@@ -207,8 +210,9 @@ def test_vision_benchmark_owns_active_operands_and_aliases_follow_selected_bindi
         )
         for i in range(2)
     ]
-    initial = owner.binding
-    assert all(alias.binding is initial for alias in aliases)
+    assert not hasattr(owner, "binding")
+    assert all(not hasattr(alias, "binding") for alias in aliases)
+    assert arena.nbytes == 0
     request = session.requests["vision.owner"]
     candidates = [Materialized(plan, nbytes=64) for _ in range(2)]
     calls = [request.benchmark_call(candidate) for candidate in candidates]
@@ -259,7 +263,7 @@ def test_vision_benchmark_owns_active_operands_and_aliases_follow_selected_bindi
     plan.version, plan.nbytes = 2, 32
     grown = arena.reserve(512)
     session.finalize()
-    assert owner.binding.version == 2 and owner.binding is not initial
+    assert owner.binding.version == 2
     assert owner.binding.scratch.data_ptr() == grown.data_ptr()
     assert owner.binding.scratch.shape == (32,)
     assert all(
@@ -308,13 +312,10 @@ def test_ple_singleton_binding_refreshes_without_reinvoking_prepare_factory(
         bind_plan=bind_plan,
         workspace=arena,
     )
-    assert getattr(operator, attribute) is bound
-    original_storage = bound.scratch
-    assert original_storage.shape == (8,)
-    assert original_storage.data_ptr() == arena.tensor.data_ptr()
+    assert getattr(operator, attribute) is bound is None
+    assert arena.nbytes == 0
     plan.version, plan.nbytes = 3, 32
     grown = arena.reserve(512)
-    assert grown.data_ptr() != original_storage.data_ptr()
     session.finalize()
     arena.freeze()
     refreshed = getattr(operator, attribute)
@@ -334,5 +335,5 @@ def test_plain_preparation_session_keeps_workspace_without_finalizer_protocol():
     workspace = torch.empty(8, dtype=torch.uint8)
     invoked = []
     register_finalizer(ordinary, lambda: invoked.append(True))
-    assert not invoked
+    assert invoked == [True]
     assert scratch_storage(workspace, nbytes=8, device="cpu") is workspace

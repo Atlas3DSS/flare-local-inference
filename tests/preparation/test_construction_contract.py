@@ -158,7 +158,7 @@ def test_extracted_attention_fixture_lives_through_trials_and_releases_before_ca
         return result
 
     monkeypatch.setattr(PreparationSession, "prepare", prepare)
-    session.prepare((declaration("first", benchmark=trial), declaration("second", benchmark=trial)))
+    session.declare((declaration("first", benchmark=trial), declaration("second", benchmark=trial)))
 
     def finalize():
         assert references[0]() is references[1]()

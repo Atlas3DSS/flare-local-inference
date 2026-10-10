@@ -64,7 +64,6 @@ class ConcurrentAttention:
         self.dynamic_names = tuple(attention.dynamic())
         self.handle = next(_HANDLES)
         _CONTEXTS[self.handle] = self
-        self.refresh()
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):

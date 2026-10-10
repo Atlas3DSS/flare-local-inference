@@ -15,7 +15,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 from flare.components.linear import QuantizedProjection, UnquantizedProjection
 from flare.preparation.fixtures import varlen_attention as attention_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.preparation.tuning import declare, register_finalizer
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,7 @@ class _Attention(torch.nn.Module):
         if shared is not None:
             def refresh_alias():
                 self.workspace, self.binding = shared.workspace, shared.binding
-            refresh_alias()
+
             register_finalizer(session, refresh_alias, workspace=attention_workspace)
             return
         capacity = scratch.hidden.shape[0]
@@ -137,14 +137,13 @@ class _Attention(torch.nn.Module):
                 state, arguments=kwargs, session=session, workspace=attention_workspace,
             )
 
-        session.prepare((declaration.request(name=name, prepare_call=prepare,
+        declare(session, (declaration.request(name=name, prepare_call=prepare,
                                              benchmark_call=benchmark),))
 
         def refresh():
             self.workspace = planned_scratch(declaration.scratch_specs(), attention_workspace)
             self.binding = varlen.bind(declaration, scratch=self.workspace, **kwargs)
 
-        refresh()
         register_finalizer(session, refresh, workspace=attention_workspace)
 
     def forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):
@@ -217,7 +216,7 @@ class PreparedVision:
                 workspace=projection_workspace)))
         def refresh_attention_workspace():
             self.attention_workspace = module.blocks[0].attn.workspace
-        refresh_attention_workspace()
+
         register_finalizer(session, refresh_attention_workspace, workspace=attention_workspace)
         self.output_rows = torch.arange(capacity // 4, device=device)
 

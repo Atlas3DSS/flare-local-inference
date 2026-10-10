@@ -1,4 +1,4 @@
-"""Default preparation followed by one measured batch before graph capture."""
+"""Declare operators, prepare weight and state batches, then bind serving storage."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ from .scratch import ScratchArena
 class RecordedPreparationSession(PreparationSession):
     """Retain declarations, tune them together, and refresh selected bindings.
 
-    Default priming permits existing constructors to bind inactive buffers.
-    Benchmark callbacks own trial state. Finalizers rebuild persistent bindings
-    even when b12x shares a selected payload without invoking a priming callback.
+    Construction records requests without compiling or launching their kernels.
+    Weight kernels and cache-state kernels prepare in separate batches, using
+    b12x's declaration coalescing and compiler pool. Finalizers bind the selected
+    plans after the shared scratch arena has its serving capacity.
     """
 
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
@@ -35,11 +36,12 @@ class RecordedPreparationSession(PreparationSession):
             raise ValueError("tuning namespace cannot override its workload identity")
         identity.update(checkpoint=checkpoint, workload_schema=workload_schema,
                         numerical_policy=numerical_policy)
-        super().__init__(device=device, autotune=False, compile_workers=0,
+        super().__init__(device=device, autotune=True, compile_workers=0,
                          namespace=identity, race_budget=race_budget,
                          collective_barrier=None if coordinator is None else coordinator.barrier)
         self._coordinator = coordinator
         self._recorded_requests = {}
+        self._request_stages = {}
         self._finalizers = []
         self._scratch_arena = None
         self._benchmark_resources = {}
@@ -55,11 +57,11 @@ class RecordedPreparationSession(PreparationSession):
         if self._tune_status != "collecting":
             raise RuntimeError("preparation declarations are closed after tuning begins")
 
-    def prepare(self, requests, *, coordinator=None, progress=None, autotune=None):
+    def declare(self, requests, *, stage="weights", coordinator=None):
         self._require_collecting()
         requests = tuple(requests)
-        if autotune is not None and autotune is not False:
-            raise ValueError("recorded preparation uses default local priming before tune()")
+        if stage not in ("weights", "state"):
+            raise ValueError("preparation stage must be weights or state")
         if coordinator is not None and coordinator is not self._coordinator:
             raise ValueError("collective declarations must use the session's bootstrap coordinator")
         names = [request.name for request in requests]
@@ -67,9 +69,8 @@ class RecordedPreparationSession(PreparationSession):
             raise ValueError("preparation request names must be unique across the model")
         if any(request.retain_benchmark_call for request in requests):
             raise ValueError("serving preparation cannot retain benchmark calls after tuning")
-        result = self._prepare_job(requests, progress=progress, autotune=False)
         self._recorded_requests.update(zip(names, requests))
-        return result
+        self._request_stages.update((name, stage) for name in names)
 
     def _prepare_job(self, requests, *, progress, autotune):
         if self._coordinator is None or not any(request.collective is not None for request in requests):
@@ -150,7 +151,7 @@ class RecordedPreparationSession(PreparationSession):
         if not self._recorded_requests:
             raise RuntimeError("tuning requires recorded preparation requests")
         self._tune_status = "tuning"
-        result = None
+        results = []
         try:
             allocated_before = self._allocated()
             if self._stop.is_set():
@@ -158,20 +159,26 @@ class RecordedPreparationSession(PreparationSession):
             requests = tuple(self._recorded_requests.values())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
-            with ExitStack() as display_stack:
-                update = progress
-                if show_progress:
-                    display = display_stack.enter_context(PreparationDisplay(global_rank=0))
+            for stage in ("weights", "state"):
+                batch = tuple(request for request in requests if self._request_stages[request.name] == stage)
+                if not batch:
+                    continue
+                with ExitStack() as display_stack:
+                    update = progress
+                    if show_progress:
+                        display = display_stack.enter_context(PreparationDisplay(
+                            global_rank=0, title=f"b12x {stage} preparation"))
 
-                    def update(status):
-                        display.update(status)
-                        if progress is not None:
-                            progress(status)
+                        def update(status):
+                            display.update(status)
+                            if progress is not None:
+                                progress(status)
 
-                result = self._prepare_job(requests, progress=update, autotune=True)
-            if self._stop.is_set():
-                raise RuntimeError("b12x tuning was cancelled before serving preparation completed")
+                    results.append(self._prepare_job(batch, progress=update, autotune=True))
+                if self._stop.is_set():
+                    raise RuntimeError("b12x tuning was cancelled before serving preparation completed")
             selections = []
+            coverage = {name: value for result in results for name, value in result.coverage.items()}
             for request in requests:
                 selection = request.plan.selection
                 if selection is None or selection.source == "default":
@@ -179,7 +186,7 @@ class RecordedPreparationSession(PreparationSession):
                 selections.append({"name": request.name, "component": request.plan.component_id,
                     "source": selection.source,
                     "config": request.plan.contract.config_payload(selection.config).to_dict(),
-                    "coverage": dict(result.coverage.get(request.name, {}))})
+                    "coverage": dict(coverage.get(request.name, {}))})
             self._tune_status = "finalizing"
             if self._scratch_arena is not None:
                 if self._scratch_arena.nbytes != scratch_arena["candidate_reserved_bytes"]:
@@ -201,10 +208,12 @@ class RecordedPreparationSession(PreparationSession):
             self.tuning_report = {
                 "workload_schema": self._workload_schema, "namespace": self.namespace.to_dict(),
                 "requests": len(requests), "compile_workers": self.compile_workers,
-                "cache_hits": result.cache_hits, "benchmarked_candidates": result.benchmarked_candidates,
-                "elapsed_seconds": result.elapsed_seconds,
-                "parent_cute_compilations": result.parent_cute_compilations,
-                "parent_triton_compilations": result.parent_triton_compilations,
+                "stages": dict(Counter(self._request_stages.values())),
+                "cache_hits": sum(result.cache_hits for result in results),
+                "benchmarked_candidates": sum(result.benchmarked_candidates for result in results),
+                "elapsed_seconds": sum(result.elapsed_seconds for result in results),
+                "parent_cute_compilations": sum(result.parent_cute_compilations for result in results),
+                "parent_triton_compilations": sum(result.parent_triton_compilations for result in results),
                 "selection_counts": dict(Counter(item["source"] for item in selections)),
                 "selections": selections, "scratch_arena": scratch_arena,
                 "shared_benchmark_bytes": sum(int(getattr(value, "nbytes", 0))
@@ -224,19 +233,30 @@ class RecordedPreparationSession(PreparationSession):
             raise
         finally:
             try:
-                if result is not None:
-                    result.close()
+                failures = []
+                for result in reversed(results):
+                    try:
+                        result.close()
+                    except BaseException as error:
+                        failures.append(error)
+                if len(failures) == 1:
+                    raise failures[0]
+                if failures:
+                    raise BaseExceptionGroup("preparation result cleanup failed", failures)
             except BaseException:
                 self._tune_status = "failed"
                 raise
             finally:
                 result = None
+                results.clear()
                 requests = ()
+                batch = ()
                 request = None
                 callback = None
                 self._benchmark_resources.clear()
                 self._finalizers.clear()
                 self._recorded_requests.clear()
+                self._request_stages.clear()
                 try:
                     gc.collect()
                     self._restore_benchmark_resources()
@@ -279,6 +299,7 @@ class RecordedPreparationSession(PreparationSession):
                 self._benchmark_resources.clear()
                 self._finalizers.clear()
                 self._recorded_requests.clear()
+                self._request_stages.clear()
                 gc.collect()
                 self._restore_benchmark_resources()
                 self._synchronize()
@@ -292,7 +313,19 @@ class RecordedPreparationSession(PreparationSession):
             self._tune_status = "closed"
 
 
+def declare(session, requests, *, stage="weights", coordinator=None):
+    """Collect model requests, or prepare immediately in a standalone b12x session."""
+    if isinstance(session, RecordedPreparationSession):
+        session.declare(requests, stage=stage, coordinator=coordinator)
+    else:
+        options = {} if coordinator is None else {"coordinator": coordinator}
+        session.prepare(requests, **options)
+
+
 def register_finalizer(session, callback, *, workspace=None):
+    """Bind after model tuning, or immediately after standalone preparation."""
+    if not isinstance(session, RecordedPreparationSession):
+        callback()
     if isinstance(workspace, ScratchArena):
         workspace.register_finalizer(callback)
     elif isinstance(session, RecordedPreparationSession):

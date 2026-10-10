@@ -15,6 +15,7 @@ from flare.preparation.scratch import ScratchArena, scratch_storage
 from flare.preparation.tuning import (
     RecordedPreparationSession,
     benchmark_resource,
+    declare,
     register_finalizer,
 )
 
@@ -30,7 +31,7 @@ def backend(monkeypatch):
     controls = SimpleNamespace(cancel=False, skip_prime=set(), close_error=False)
 
     def initialize(self, *, device, namespace, **kwargs):
-        assert kwargs["autotune"] is False and kwargs["compile_workers"] == 0
+        assert kwargs["autotune"] is True and kwargs["compile_workers"] == 0
         self.device = SimpleNamespace(ordinal=0)
         self.namespace = FrozenMapping(namespace)
         self._stop = Event()
@@ -116,6 +117,70 @@ def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_si
                            benchmark_call=benchmark, retain_benchmark_call=False)
 
 
+def test_declarations_do_no_work_and_prepare_in_two_tuned_batches(backend):
+    events, _ = backend
+    session = make_session(device=0, checkpoint="revision")
+    arena = ScratchArena("cpu")
+    session.register_scratch(arena)
+    calls = []
+    requests = []
+    for name, stage in (("projection", "weights"), ("attention", "state"),
+                        ("experts", "weights"), ("recurrence", "state")):
+        request = declaration(name, prepare=lambda state: calls.append("prime"),
+                              benchmark=lambda state: calls.append("benchmark"))
+        requests.append(request)
+        declare(session, (request,), stage=stage)
+    register_finalizer(session, lambda: calls.append("bind"), workspace=arena)
+    assert not events and not calls and arena.nbytes == 0
+    assert all(request.plan.selection is None for request in requests)
+    with pytest.raises(RuntimeError, match="completed tuning"):
+        with session.capture():
+            pass
+    report = session.tune()
+    assert [event for event in events if event[0] == "prepare"] == [
+        ("prepare", True, ("projection", "experts")),
+        ("prepare", True, ("attention", "recurrence")),
+    ]
+    assert calls == ["benchmark", "prime"] * 4 + ["bind"]
+    assert report["stages"] == {"weights": 2, "state": 2}
+    assert report["cache_hits"] == 4 and report["benchmarked_candidates"] == 14
+    assert events.count(("result_close", True)) == 2
+    assert arena.frozen
+
+
+def test_state_failure_closes_weight_result_without_binding_or_capture(backend, monkeypatch):
+    events, _ = backend
+    session = make_session(device=0, checkpoint="revision")
+    session.declare((declaration("weights"),))
+    session.declare((declaration("cache"),), stage="state")
+    session.register_finalizer(lambda: pytest.fail("binding before state preparation succeeded"))
+    original = PreparationSession.prepare
+
+    def prepare(self, requests, **kwargs):
+        if requests[0].name == "cache":
+            raise RuntimeError("cache preparation failed")
+        return original(self, requests, **kwargs)
+
+    monkeypatch.setattr(PreparationSession, "prepare", prepare)
+    with pytest.raises(RuntimeError, match="cache preparation failed"):
+        session.tune()
+    assert events.count(("result_close", True)) == 1
+    assert not session._request_stages and not session._recorded_requests
+    with pytest.raises(RuntimeError, match="completed tuning"):
+        session.freeze()
+
+
+def test_standalone_preparation_still_precedes_binding(backend):
+    session = PreparationSession(device=0, namespace={}, autotune=True, compile_workers=0)
+    events = []
+    request = declaration("operator", prepare=lambda state: events.append("prime"))
+    # Standalone component tests can choose b12x's preparation policy directly.
+    session.prepare = lambda requests: PreparationSession.prepare(session, requests, autotune=True)
+    declare(session, (request,))
+    register_finalizer(session, lambda: events.append("bind"))
+    assert events == ["prime", "bind"]
+
+
 
 
 def test_benchmark_resource_shared_across_requests_and_released_before_capture(backend):
@@ -134,7 +199,7 @@ def test_benchmark_resource_shared_across_requests_and_released_before_capture(b
     def trial(state):
         observed.append(id(benchmark_resource(session, "strided-state", create)))
 
-    session.prepare((declaration("a", benchmark=trial), declaration("b", benchmark=trial)))
+    session.declare((declaration("a", benchmark=trial), declaration("b", benchmark=trial)))
     report = session.tune()
     assert len(references) == 1 and observed[0] == observed[1]
     assert references[0]() is None
@@ -152,7 +217,7 @@ def test_benchmark_resource_shared_across_requests_and_released_before_capture(b
 @pytest.mark.parametrize("source", ["fixed", "override", "cached", "tuned"])
 def test_completed_selection_sources_are_accepted_and_reported(backend, source):
     session = make_session(device=0, checkpoint="revision")
-    session.prepare((declaration("op", source=source),))
+    session.declare((declaration("op", source=source),))
     assert session.tune()["selection_counts"] == {source: 1}
 
 
@@ -160,7 +225,7 @@ def test_completed_selection_sources_are_accepted_and_reported(backend, source):
 def test_incomplete_tuning_never_allows_capture_or_freeze(backend, failure):
     events, controls = backend
     session = make_session(device=0, checkpoint="revision")
-    session.prepare((declaration("op", source="default" if failure == "default" else "tuned"),))
+    session.declare((declaration("op", source="default" if failure == "default" else "tuned"),))
     controls.cancel = failure == "cancel"
     controls.close_error = failure == "result_close"
     if failure == "finalizer":
@@ -181,7 +246,7 @@ def test_incomplete_tuning_never_allows_capture_or_freeze(backend, failure):
 def test_disabled_tuning_does_not_silently_keep_defaults(backend):
     events, _ = backend
     session = make_session(device=0, checkpoint="revision")
-    session.prepare((declaration("op"),))
+    session.declare((declaration("op"),))
     session._stop.set()
     with pytest.raises(RuntimeError, match="enabled, uncancelled"):
         session.tune()
@@ -192,14 +257,14 @@ def test_names_registration_and_one_shot_lifecycle_are_strict(backend):
     session = make_session(device=0, checkpoint="revision")
     item = declaration("op")
     with pytest.raises(ValueError, match="unique"):
-        session.prepare((item, item))
-    session.prepare((item,))
+        session.declare((item, item))
+    session.declare((item,))
     with pytest.raises(ValueError, match="unique"):
-        session.prepare((item,))
-    with pytest.raises(ValueError, match="default local"):
-        session.prepare((declaration("later"),), autotune=True)
+        session.declare((item,))
+    with pytest.raises(ValueError, match="stage must be"):
+        session.declare((declaration("later"),), stage="unknown")
     session.tune()
-    for action in (lambda: session.tune(), lambda: session.prepare((declaration("late"),)),
+    for action in (lambda: session.tune(), lambda: session.declare((declaration("late"),)),
                    lambda: session.register_finalizer(lambda: None)):
         with pytest.raises(RuntimeError, match="closed after tuning"):
             action()
@@ -222,7 +287,7 @@ def test_recipe_policy_owns_cache_identity_and_report_limits(backend):
         workload_schema="glm53-test-operators-v1", numerical_policy="default-tp2",
         search_limits=limits)
     limits["projection"] = "changed after construction"
-    session.prepare((declaration("op"),))
+    session.declare((declaration("op"),))
     report = session.tune()
     assert report["workload_schema"] == "glm53-test-operators-v1"
     assert report["namespace"]["numerical_policy"] == "default-tp2"
@@ -245,7 +310,9 @@ def test_qwen_recipe_preserves_preparation_cache_identity(backend):
 def test_helpers_preserve_ordinary_session_behavior():
     session = object.__new__(PreparationSession)
     value = object()
-    register_finalizer(session, lambda: pytest.fail("ordinary session finalizer invoked"))
+    called = []
+    register_finalizer(session, lambda: called.append(True))
+    assert called == [True]
     assert benchmark_resource(session, "arena", lambda: value) is value
 
 
@@ -286,7 +353,7 @@ def test_borrowed_state_restores_after_result_close_and_owner_release(backend, m
         assert benchmark_resource(session, "state", lambda: pytest.fail("borrow ignored")) is resource
         storage.fill_(7)
 
-    session.prepare((declaration("op", source=source,
+    session.declare((declaration("op", source=source,
         benchmark=trial if source == "tuned" else None),))
     report = session.tune()
     assert calls == ["restore"] and not storage.count_nonzero()
@@ -305,7 +372,7 @@ def test_borrowed_state_restores_on_tuning_failures(backend, monkeypatch, failur
     session = make_session(device=0, checkpoint="revision")
     storage = torch.full((8,), 7, dtype=torch.uint8)
     session.register_benchmark_resource("state", SimpleNamespace(nbytes=8), restore=storage.zero_)
-    session.prepare((declaration("op"),))
+    session.declare((declaration("op"),))
     if failure == "prepare":
         def fail(*args, **kwargs):
             raise RuntimeError("candidate failed")
@@ -350,7 +417,7 @@ def test_failed_restore_retains_owner_and_close_retries_before_freeze(backend, m
                     raise RuntimeError("restoration fence failed")
             original_sync()
         monkeypatch.setattr(session, "_synchronize", sync)
-    session.prepare((declaration("op"),))
+    session.declare((declaration("op"),))
     with pytest.raises(RuntimeError):
         session.tune()
     assert session._tune_status == "failed" and reference() is not None
@@ -404,7 +471,7 @@ def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(
         assert arena.view(template).stride() == template.stride()
         arena.view(template).fill_(23)
 
-    session.prepare((declaration("op", benchmark=trial),))
+    session.declare((declaration("op", benchmark=trial),))
     report = session.tune()
     assert not storage.count_nonzero()
     assert report["borrowed_benchmark_bytes"] == storage.nbytes
@@ -465,7 +532,7 @@ def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_a
 
         request = declaration(f"layer{index}", component=component, size=size,
                               selected_size=selected_size, prepare=prime)
-        session.prepare((request,))
+        session.declare((request,))
         register_finalizer(session, lambda: setattr(owners[index], "binding", arena.tensor))
         return request
 
@@ -474,7 +541,7 @@ def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_a
                 declaration_for(2, "moe.decode", 400, 129)]
     controls.skip_prime.add("layer1")
     report = session.tune()
-    assert primes == [(0, 256), (1, 256), (2, 256), (0, 768), (2, 768)]
+    assert primes == [(0, 768), (2, 768)]
     assert arena.nbytes == 512 and arena.frozen
     assert all(owner.binding is arena.tensor for owner in owners)
     assert report["scratch_arena"] == {"initial_bytes": 256,
@@ -498,7 +565,7 @@ def test_parallel_workspace_peak_is_reserved_then_trimmed_without_summing_serial
     requests = [declaration("main", size=700, selected_size=300),
                 declaration("auxiliary", size=300, selected_size=20),
                 declaration("following", size=400, selected_size=100)]
-    session.prepare(requests)
+    session.declare(requests)
     main, auxiliary, following = (request.plan for request in requests)
     arena.register_parallel(main, auxiliary)
     arena.register_parallel(auxiliary, following)
@@ -522,7 +589,7 @@ def test_default_storage_released_after_alias_rebind_and_trial_cleanup_before_re
     reference = weakref.ref(original)
     owner = SimpleNamespace(binding=original)
     session.register_scratch(arena)
-    session.prepare((declaration("op", size=513, selected_size=120, prepare=lambda state, saved=original: None),))
+    session.declare((declaration("op", size=513, selected_size=120, prepare=lambda state, saved=original: None),))
     session.register_finalizer(lambda saved=original: setattr(owner, "binding", arena.tensor))
     monkeypatch.setattr(session, "_allocated", lambda: 4096 + arena.nbytes +
         (256 if reference() is not None and reference() is not arena.tensor else 0))
@@ -570,7 +637,7 @@ def test_selected_arena_retained_after_trials_restoration_and_capture(backend, m
         return result
 
     monkeypatch.setattr(PreparationSession, "prepare", prepare)
-    session.prepare((declaration("expert", component="moe.decode", source=source),))
+    session.declare((declaration("expert", component="moe.decode", source=source),))
 
     def restore():
         assert references["trial"]() is None
@@ -612,12 +679,12 @@ def test_arena_registration_is_unique_collecting_only_and_optional(backend):
     session.register_scratch(arena)
     with pytest.raises(ValueError):
         session.register_scratch(arena)
-    session.prepare((declaration("op"),))
+    session.declare((declaration("op"),))
     session.tune()
     with pytest.raises(RuntimeError, match="closed after tuning"):
         session.register_scratch(ScratchArena("cpu"))
     ordinary = make_session(device=0, checkpoint="revision")
-    ordinary.prepare((declaration("op"),))
+    ordinary.declare((declaration("op"),))
     assert ordinary.tune()["scratch_arena"] == {}
 
 
@@ -659,7 +726,7 @@ def test_arena_binding_finalizers_precede_other_finalizers_and_close_trial(backe
     arena.reserve(1)
     session.register_scratch(arena)
     owners = [SimpleNamespace(binding=arena.tensor) for _ in range(2)]
-    session.prepare((declaration("owner", size=512), declaration("alias", size=512)))
+    session.declare((declaration("owner", size=512), declaration("alias", size=512)))
     controls.skip_prime.update(("owner", "alias"))
     for index, owner in enumerate(owners):
         def finalize(index=index, owner=owner):
@@ -683,7 +750,7 @@ def test_arena_binding_failure_keeps_callback_owner_until_session_cleanup(backen
     session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
-    session.prepare((declaration("op"),))
+    session.declare((declaration("op"),))
 
     class Owner:
         def finalize(self):
@@ -731,7 +798,7 @@ def test_candidate_storage_survives_trial_close_then_dies_before_selected_memory
         return result
 
     monkeypatch.setattr(PreparationSession, "prepare", prepare)
-    session.prepare((declaration("expert", component="moe.decode", size=1024, selected_size=257),))
+    session.declare((declaration("expert", component="moe.decode", size=1024, selected_size=257),))
 
     def finalize():
         assert references["candidate"]() is not None
@@ -768,7 +835,7 @@ def test_undeclared_candidate_growth_fails_before_freeze_finalization_or_capture
     def benchmark(state):
         arena.reserve(513)
 
-    session.prepare((declaration("op", size=128, benchmark=benchmark),))
+    session.declare((declaration("op", size=128, benchmark=benchmark),))
     register_finalizer(session, lambda: finalized.append(True), workspace=arena)
     with pytest.raises(RuntimeError):
         session.tune()
@@ -802,8 +869,8 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
         retained = prime_owners(arena, scratch, binding) if retain_arena_owner else (scratch, binding)
         return PreparedCall(run=lambda: binding.output.copy_(binding.source), owners=retained)
 
-    session.prepare((declaration("operator", size=1024, selected_size=257, prepare=prime),))
-    assert session._published_owners["operator"]
+    session.declare((declaration("operator", size=1024, selected_size=257, prepare=prime),))
+    assert not session._published_owners
     for owner in owners:
         def finalize(owner=owner):
             owner.binding = SimpleNamespace(scratch=arena.tensor, source=source, output=output)
@@ -814,7 +881,7 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
          and references["tuned"]() is not arena.tensor else 0))
     report = session.tune()
     assert arena.nbytes == 512 and arena.frozen
-    assert references["default"]() is None
+    assert "default" not in references
     assert all(owner.binding.scratch is arena.tensor for owner in owners)
     assert output.eq(source).all()
     if retain_arena_owner:
@@ -894,7 +961,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
         references.append(weakref.ref(call.owners[0]))
         return call
 
-    session.prepare((declaration("op", benchmark=benchmark),))
+    session.declare((declaration("op", benchmark=benchmark),))
     session.tune()
     assert trial_alive_at_close == [True]
     assert references and all(ref() is None for ref in references)

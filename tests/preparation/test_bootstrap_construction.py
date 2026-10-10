@@ -72,6 +72,7 @@ class ConstructionComplete(Exception):
 class RecordingSession:
     def __init__(self, **kwargs):
         self.requests = {}
+        self.stages = {}
         self.finalizers = []
         self.arena = None
         self.closed = False
@@ -81,11 +82,12 @@ class RecordingSession:
     def __enter__(self):
         return self
 
-    def prepare(self, requests):
+    def declare(self, requests, *, stage="weights", coordinator=None):
         for request in requests:
             assert request.name not in self.requests
             self.memory[request.name] = request.plan.memory_requirements()
             self.requests[request.name] = request
+            self.stages[request.name] = stage
 
     def register_finalizer(self, callback):
         self.finalizers.append(callback)
@@ -730,11 +732,15 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         assert args["target_hidden"].shape[1:] == (10240,)
         assert args["scratch"].logits.shape[1] == 248320
     assert (
-        session.arena.nbytes > 0
+        session.arena.nbytes == 0
         and session.arena.tensor.dtype == torch.uint8
         and session.arena._finalizers
         and not session.arena.frozen
     )
+    assert set(session.stages.values()) == {"weights", "state"}
+    for name, request in session.requests.items():
+        if request.plan.component_id in ("attention.qsa", "sequence.gdn_decode", "sequence.gdn_prefill"):
+            assert session.stages[name] == "state"
     assert len(session.resources) == 1
     borrowed, _ = next(iter(session.resources.values()))
     assert (

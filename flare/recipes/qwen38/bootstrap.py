@@ -233,7 +233,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 handoff.finish()
             add(f"vision{capacity}", vision, "vision", 1, capacity, vision_fields)
             owners.extend((handoff, encoder))
-            report(f"prepared vision capacity {capacity}")
+            report(f"declared vision capacity {capacity}")
 
         forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
                           *(("draft_page_tables",) if has_mtp else ()))
@@ -293,7 +293,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
                 owners.append(maintenance)
         session.register_scratch(workspaces)
-        report("tuning prepared kernel candidates")
+        report("preparing weight kernels, then cache-state kernels")
         tuning = session.tune(show_progress=progress is not None)
         report(f"selected prepared kernels: {tuning['selection_counts']}")
         report(f"preparation allocated bytes: before tuning={tuning['allocated_before_tuning']}, "

@@ -536,10 +536,9 @@ The shared [tuning session](../flare/preparation/tuning.py) owns declaration
 collection, candidate scratch reservation, autotuning, and binding finalization.
 Recipes supply the workload schema, numerical policy, and search-limit metadata;
 the [Qwen policy](../flare/recipes/qwen38/tuning.py) defines those values for its
-operator catalog. Multi-rank sessions coordinate default priming only for jobs
-containing collective declarations. Local projections, including rank-zero-only
-vocabulary heads, prime independently. The mixed local/collective tuning batch
-uses the coordinator until every rank finishes. Each rank tunes
+operator catalog. Constructors declare operators without compiling or launching
+them. Each weight or cache-state batch containing collective declarations uses
+the coordinator until every rank finishes. Each rank tunes
 its local operators, reserves and trims its scratch arena, and finalizes bindings
 before graph capture. Candidate sharding across ranks is not supported.
 
@@ -719,11 +718,21 @@ distance is diagnostic and does not select the recurrence policy.
 
 ### Preparation lifecycle
 
-`RecordedPreparationSession` collects declarations while constructors prime
-default plans locally without tuning or compiler workers. After every admitted
-capacity has an owner, bootstrap submits the declarations to one batched b12x
-tuning pass. On the target RTX PRO 6000, that pass defaults to eight compiler
-workers; `B12X_COMPILE_WORKERS` overrides the count.
+`RecordedPreparationSession.declare()` collects requests without compiling,
+priming, or binding kernels. Components use `flare.preparation.tuning.declare()`
+to submit requests and `register_finalizer()` to defer serving bindings. After
+every admitted capacity has an owner, bootstrap prepares two b12x batches:
+weight operations, then operations that depend on cache or recurrent-state
+layout. Both batches enable autotuning and coalesce equivalent declarations
+across layers, target and draft models, and graph capacities. On the target
+RTX PRO 6000, preparation defaults to eight compiler workers;
+`B12X_COMPILE_WORKERS` overrides the count.
+
+Qwen declares attention against bounded cache capacities and temporary page
+pools. Its selected plans support replacement page pools with the same layout.
+Bootstrap measures graph memory before allocating the final pools, rebinds
+attention to those pools, and captures the serving graphs. GLM's configured
+page pools are allocated before its cache-state batch.
 
 Searchable operations use deterministic finite fixtures with active metadata at
 their declared geometry. Weighted operations use the actual checkpoint weights.
@@ -735,7 +744,7 @@ preparation synchronizes, restores every hybrid state region and PLE history to
 its admission value, and synchronizes again before capture. A restoration failure
 prevents capture and freeze.
 
-Hyperconnection default priming borrows the decoder's zero-initialized residual
+Hyperconnection priming borrows the decoder's zero-initialized residual
 storage through capacity views. Priming only reads that source; normalized and
 projected outputs occupy separate scratch. Autotuning retains private seeded
 fixtures.
@@ -763,9 +772,10 @@ It obtains the selected requirement from each plan's public
 `memory_requirements()`, synchronizes before replacing storage, trims the
 arena, and freezes the retained extent. `arena.finalize()` then refreshes
 every binding and shared alias against that final allocation, including
-singleton operations whose preparation factory need not run again. A plain
-untuned preparation constructs every owner before finalizing and freezing its
-arena, then captures graphs. Bound addresses must not change after capture.
+singleton operations whose equivalent declarations share a prepared payload.
+Standalone component tests using a plain b12x session prepare and bind eagerly;
+model startup always uses the batched, tuned lifecycle.
+Bound addresses must not change after capture.
 The arena remains owned until all referencing graphs and native CUDA work drain.
 
 One preparation-owned auxiliary stream overlaps independent GDN projections,
@@ -838,9 +848,10 @@ Preparation proceeds in a fixed order:
    PLE storage.
 3. Allocate persistent state, live activation/output buffers, one operator scratch
    arena, and a one-page KV sizing pool. Construct every admitted variant and
-   collect its default-primed declarations.
+   collect its weight and cache-state declarations without priming kernels.
 4. Reserve the maximum candidate scratch envelope and keep its extent stable
-   throughout one batched tuning pass.
+   throughout the weight and cache-state preparation batches. Both batches
+   enable autotuning.
 5. Synchronize, trim the arena to the maximum selected scratch requirement,
    freeze its retained extent, and refresh selected bindings and aliases.
    Release trial owners, restore borrowed state, synchronize, and release
