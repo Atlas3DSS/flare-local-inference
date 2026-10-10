@@ -290,8 +290,9 @@ composes mHC, head-sharded KDA or sparse MLA, an attention all-reduce, fused pos
 the sharded dense MLP or MoE, a second all-reduce, and residual expansion in one
 compiled graph. Graph variants support decode and prefill through 4096 tokens.
 Each rank hands its graph to its native replay worker. The
-[GLM MoE composition](../flare/recipes/glm53/moe.py) uses replicated FP32 router
-logits, sigmoid scores, correction-biased top-8 selection, normalized weights
+[GLM MoE composition](../flare/recipes/glm53/moe.py) keeps replicated router weights
+in their stored BF16 format and produces FP32 logits. Routing uses sigmoid scores,
+correction-biased top-8 selection, normalized weights
 scaled by 2.5, and all 288 experts partitioned along the intermediate dimension.
 The MXFP8 shared expert uses the same prepared MLP component as dense layers.
 

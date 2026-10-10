@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="requires an explicitly assigned CUDA device")
 
 
-@pytest.mark.parametrize("tokens", [1, 65])
+@pytest.mark.parametrize("tokens", [1, 65, 4096])
 @torch.no_grad()
 def test_actual_sigmoid_router_compiled_graph(tokens):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -31,8 +31,9 @@ def test_actual_sigmoid_router_compiled_graph(tokens):
     prefix = f"{TEXT_PREFIX}.layers.4.mlp.gate"
     device = torch.device("cuda", 0)
     with GlmWeightLoader(manifest, device, shard=TensorParallelShard(0, 2), prefixes=(prefix + ".",)) as loader:
-        module.weight = torch.nn.Parameter(loader.load_tensor(prefix + ".weight", dtype=torch.float32), requires_grad=False)
+        module.weight = torch.nn.Parameter(loader.load_tensor(prefix + ".weight"), requires_grad=False)
         module.e_score_correction_bias = loader.load_tensor(prefix + ".e_score_correction_bias")
+    assert module.weight.dtype == torch.bfloat16
     source = torch.zeros((tokens, 4096), device=device, dtype=torch.bfloat16)
     logits = torch.empty((tokens, 288), device=device)
     scratch = RouterScratch.allocate(tokens, device, experts=288, top_k=8)

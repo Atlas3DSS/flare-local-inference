@@ -190,7 +190,7 @@ class GlmWeightLoader(DirectWeightLoader):
             self._projection(f"{shared_prefix}.down_proj", columns=extent),
         )
         return MoEWeights(
-            self.load_tensor(f"{prefix}.gate.weight", dtype=torch.float32),
+            self.load_tensor(f"{prefix}.gate.weight"),
             self.load_tensor(f"{prefix}.gate.e_score_correction_bias"),
             self.load_experts(layer, scale_scratch=scale_scratch), shared,
         )
