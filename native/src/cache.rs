@@ -5,7 +5,7 @@ mod hash;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::Result;
-pub use hash::{ConditioningEvent, PAGE_SIZE, PrefixHistory, PrefixKey};
+pub use hash::{ConditioningEvent, PrefixHistory, PrefixKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageId(pub u32);
@@ -160,6 +160,7 @@ pub struct CacheStats {
 /// vector. Page IDs cover every layer's corresponding immutable cache storage.
 pub struct PrefixCheckpointCache {
     identity: [u8; 32],
+    page_tokens: usize,
     page_capacity: u32,
     snapshot_capacity: u32,
     nodes: BTreeMap<CheckpointId, Checkpoint>,
@@ -173,9 +174,18 @@ pub struct PrefixCheckpointCache {
 }
 
 impl PrefixCheckpointCache {
-    pub fn new(identity: [u8; 32], page_capacity: u32, snapshot_capacity: u32) -> Self {
-        Self {
+    pub fn new(
+        identity: [u8; 32],
+        page_capacity: u32,
+        snapshot_capacity: u32,
+        page_tokens: usize,
+    ) -> Result<Self> {
+        if page_tokens == 0 {
+            return Err("physical cache pages require a positive token capacity".into());
+        }
+        Ok(Self {
             identity,
+            page_tokens,
             page_capacity,
             snapshot_capacity,
             nodes: BTreeMap::new(),
@@ -186,7 +196,7 @@ impl PrefixCheckpointCache {
             completed: Fence(0),
             next_id: 1,
             clock: 0,
-        }
+        })
     }
 
     pub fn completed(&self) -> Fence {
@@ -257,7 +267,8 @@ impl PrefixCheckpointCache {
             .checked_sub(parent_len)
             .ok_or("checkpoint endpoint precedes its parent")?;
         if tail_tokens == 0
-            || proposal.consumed_tokens / PAGE_SIZE as u64 - parent_len / PAGE_SIZE as u64
+            || proposal.consumed_tokens / self.page_tokens as u64
+                - parent_len / self.page_tokens as u64
                 != proposal.tail_pages.len() as u64
         {
             return Err(

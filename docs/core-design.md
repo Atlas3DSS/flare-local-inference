@@ -1125,7 +1125,13 @@ prefill or generation resumes afterward. Terminal capture uses the final consume
 count and excludes a sampled pending token. No rolling aligned candidate rows,
 internal GDN checkpoint exports, or boundary-label fields participate in this path.
 
-Complete target pages are immutable and shared. When `S % 64 != 0`, snapshot
+The scheduler and prefix cache use the model's declared physical token capacity
+per page. Qwen uses 64 tokens; GLM uses 256. Prefix identity uses fixed 64-token
+hash blocks independently of physical storage. CPU lifecycle tests cover both
+page geometries, exact system/prompt/terminal checkpoints, and branching restores
+with private partial pages.
+
+Complete target pages are immutable and shared. When `S % page_tokens != 0`, snapshot
 storage owns the whole physical tail page and restore copies it into a private
 allocation; at an aligned endpoint, maintenance never writes a shared full page.
 The copied unused KV rows and incomplete selector-group values do not define

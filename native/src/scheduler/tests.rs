@@ -12,6 +12,7 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
         },
         SchedulerCapabilities {
             vocabulary: 248320,
+            page_tokens: 64,
             vision: crate::model::VisionCapabilities {
                 features_per_request: 16384,
                 max_images: 4,
@@ -217,6 +218,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
             },
             SchedulerCapabilities {
                 vocabulary: 248320,
+                page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
                     features_per_request: 16384,
                     max_images: 4,
@@ -283,6 +285,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
             },
             SchedulerCapabilities {
                 vocabulary: 248320,
+                page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
                     features_per_request: 16384,
                     max_images: 4,
@@ -551,7 +554,7 @@ fn cold_admission_skips_matching_checkpoint_but_retains_capacity_eviction() {
 fn appended_conversation_outlives_snapshot_capacity_without_losing_prefix_pages() {
     let mut scheduler = scheduler(1, 32, 3);
     for turn in 1..=12 {
-        let tokens = turn * PAGE_SIZE;
+        let tokens = turn * 64;
         let handle = scheduler.admit(spec(tokens, 1)).unwrap_or_else(|error| {
             panic!(
                 "turn {turn} failed admission: {error}; {:?}",
@@ -560,13 +563,13 @@ fn appended_conversation_outlives_snapshot_capacity_without_losing_prefix_pages(
         });
         assert_eq!(
             scheduler.request(handle).unwrap().consumed_tokens,
-            (tokens - PAGE_SIZE) as u64
+            (tokens - 64) as u64
         );
         let fence = (turn as u64 - 1) * 3 + 1;
         init(&mut scheduler, fence);
         let step = scheduler.next_step().unwrap();
         assert_eq!(step.kind, GraphKind::Prefill);
-        assert_eq!(step.lanes[0].tokens, PAGE_SIZE);
+        assert_eq!(step.lanes[0].tokens, 64);
         scheduler
             .record_submission(&step, Fence(fence + 1))
             .unwrap();
@@ -1228,6 +1231,7 @@ fn copy_source_uses_no_draft_page_and_host_stops_stay_width_one() {
 fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validation() {
     let capabilities = SchedulerCapabilities {
         vocabulary: 32,
+        page_tokens: 64,
         vision: crate::model::VisionCapabilities {
             features_per_request: 16,
             max_images: 2,

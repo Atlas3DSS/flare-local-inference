@@ -14,7 +14,7 @@ fn history(blocks: u32, offset: u32) -> PrefixHistory {
 }
 
 fn cache() -> PrefixCheckpointCache {
-    PrefixCheckpointCache::new([7; 32], 32, 32)
+    PrefixCheckpointCache::new([7; 32], 32, 32, 64).unwrap()
 }
 
 fn proposal(
@@ -49,6 +49,41 @@ fn created(
 
 fn hexadecimal(digest: [u8; 16]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn physical_page_ownership_is_independent_of_prefix_hash_blocks() {
+    let history = history(9, 0);
+    let mut cache = PrefixCheckpointCache::new([7; 32], 8, 8, 256).unwrap();
+    assert!(PrefixCheckpointCache::new([7; 32], 8, 8, 0).is_err());
+    assert!(
+        cache
+            .publish(&history, &proposal(None, 65, &[0], 0, 0))
+            .is_err()
+    );
+    let system = created(&mut cache, &history, &proposal(None, 65, &[], 0, 0));
+    let aligned = created(
+        &mut cache,
+        &history,
+        &proposal(Some(system), 256, &[0], 1, 0),
+    );
+    let prompt = created(
+        &mut cache,
+        &history,
+        &proposal(Some(aligned), 300, &[], 2, 0),
+    );
+    let end = created(
+        &mut cache,
+        &history,
+        &proposal(Some(prompt), 513, &[1], 3, 0),
+    );
+    assert_eq!(cache.page_chain(system).unwrap(), vec![]);
+    assert_eq!(cache.page_chain(prompt).unwrap(), vec![PageId(0)]);
+    assert_eq!(cache.page_chain(end).unwrap(), vec![PageId(0), PageId(1)]);
+    let hit = cache.lookup(&history).unwrap();
+    assert_eq!(hit.consumed_tokens, 513);
+    assert_eq!(hit.pages, vec![PageId(0), PageId(1)]);
+    assert_eq!(history.aligned_boundaries().len(), 9);
 }
 
 #[test]

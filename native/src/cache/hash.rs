@@ -3,7 +3,7 @@ use blake2::{Blake2b, Digest};
 
 use crate::Result;
 
-pub const PAGE_SIZE: usize = 64;
+const HASH_BLOCK_TOKENS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PrefixKey {
@@ -18,6 +18,7 @@ pub struct ConditioningEvent {
 }
 
 /// Incremental token and conditioning identity for a single model/recipe.
+/// Hash blocks contain 64 tokens independently of physical cache page geometry.
 ///
 /// Events belong to token positions in the appended segment. Events at the same
 /// position retain caller order. A boundary at N contains positions less than N;
@@ -43,7 +44,7 @@ impl PrefixHistory {
                 consumed_tokens: 0,
                 digest: hash.finalize().into(),
             }],
-            tail: Vec::with_capacity(PAGE_SIZE),
+            tail: Vec::with_capacity(HASH_BLOCK_TOKENS),
             tail_events: Vec::new(),
             tokens: Vec::new(),
             events: Vec::new(),
@@ -63,12 +64,12 @@ impl PrefixHistory {
         if end > self.tokens.len() {
             return None;
         }
-        let index = end / PAGE_SIZE;
+        let index = end / HASH_BLOCK_TOKENS;
         let parent = *self.boundaries.get(index)?;
-        if end.is_multiple_of(PAGE_SIZE) {
+        if end.is_multiple_of(HASH_BLOCK_TOKENS) {
             return Some(parent);
         }
-        let start = index * PAGE_SIZE;
+        let start = index * HASH_BLOCK_TOKENS;
         let mut hash = Blake2b::<U16>::new();
         hash.update(b"flare-prefix-tail-v1\0");
         hash.update(self.identity);
@@ -120,9 +121,9 @@ impl PrefixHistory {
                 event_index += 1;
             }
             self.tail.push(*token);
-            if self.tail.len() == PAGE_SIZE {
+            if self.tail.len() == HASH_BLOCK_TOKENS {
                 let parent = *self.boundaries.last().unwrap();
-                let consumed_tokens = parent.consumed_tokens + PAGE_SIZE as u64;
+                let consumed_tokens = parent.consumed_tokens + HASH_BLOCK_TOKENS as u64;
                 let mut hash = Blake2b::<U16>::new();
                 hash.update(b"flare-prefix-block-v1\0");
                 hash.update(self.identity);

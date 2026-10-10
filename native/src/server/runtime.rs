@@ -1222,6 +1222,7 @@ mod tests {
             },
             SchedulerCapabilities {
                 vocabulary: 248320,
+                page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
                     features_per_request: 16384,
                     max_images: 4,
@@ -1341,6 +1342,7 @@ mod tests {
             },
             SchedulerCapabilities {
                 vocabulary: 6,
+                page_tokens: 64,
                 vision: Qwen4Exp::metadata().vision,
                 live_state_base: 1,
                 draft_pages_per_request: 0,
@@ -1822,6 +1824,7 @@ mod tests {
             },
             SchedulerCapabilities {
                 vocabulary: 248320,
+                page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
                     features_per_request: 16384,
                     max_images: 4,

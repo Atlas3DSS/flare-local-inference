@@ -5,8 +5,8 @@ pub mod speculation;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::cache::{
-    CheckpointId, ConditioningEvent, EvictionTarget, Fence, PAGE_SIZE, PageId,
-    PrefixCheckpointCache, PrefixHistory, Publication, PublishResult, SnapshotId, StateSnapshot,
+    CheckpointId, ConditioningEvent, EvictionTarget, Fence, PageId, PrefixCheckpointCache,
+    PrefixHistory, Publication, PublishResult, SnapshotId, StateSnapshot,
 };
 use crate::execution::{CompletionRecord, GraphKind, REQUEST_LANES};
 use crate::{Result, Shutdown};
@@ -31,7 +31,7 @@ pub struct SchedulerLimits {
 
 impl SchedulerLimits {
     pub(crate) fn validate_prefill(&self) -> Result<()> {
-        if self.prefill_chunk_size < crate::cache::PAGE_SIZE
+        if self.prefill_chunk_size < 64
             || !self.prefill_chunk_size.is_multiple_of(64)
             || self.prefill_chunk_size > self.max_sequence_tokens
         {
@@ -58,6 +58,7 @@ pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
 #[derive(Clone, Debug)]
 pub struct SchedulerCapabilities {
     pub vocabulary: usize,
+    pub page_tokens: usize,
     pub vision: crate::model::VisionCapabilities,
     pub live_state_base: u32,
     pub draft_pages_per_request: usize,
@@ -281,11 +282,17 @@ impl RequestScheduler {
         {
             return Err("invalid live request capacities".into());
         }
+        let cache = PrefixCheckpointCache::new(
+            identity,
+            limits.pages,
+            limits.snapshots,
+            capabilities.page_tokens,
+        )?;
         Ok(Self {
             limits,
             capabilities,
             identity,
-            cache: PrefixCheckpointCache::new(identity, limits.pages, limits.snapshots),
+            cache,
             slots: (0..limits.max_active)
                 .map(|_| Slot {
                     generation: 0,
@@ -544,8 +551,8 @@ impl RequestScheduler {
         } else {
             0
         };
-        let reserved_count = execution_limit.div_ceil(PAGE_SIZE)
-            - prefix.consumed_tokens as usize / PAGE_SIZE
+        let reserved_count = execution_limit.div_ceil(self.capabilities.page_tokens)
+            - prefix.consumed_tokens as usize / self.capabilities.page_tokens
             + draft_page;
         let need_system = spec
             .system_boundary
@@ -825,8 +832,8 @@ impl RequestScheduler {
                 return Err("scheduled request exceeds sequence capacity".into());
             }
             let pages = (through.min(request.execution_limit) as usize)
-                .div_ceil(PAGE_SIZE)
-                .saturating_sub(request.prefix_tokens as usize / PAGE_SIZE)
+                .div_ceil(self.capabilities.page_tokens)
+                .saturating_sub(request.prefix_tokens as usize / self.capabilities.page_tokens)
                 .saturating_add(draft_page)
                 .saturating_sub(request.private_pages.len());
             if pages > request.reserved_pages.len() {
@@ -1063,8 +1070,8 @@ impl RequestScheduler {
     fn publish_boundary(&mut self, handle: RequestHandle) -> Result<()> {
         let request = self.request(handle)?;
         let capture = request.boundary_capture.ok_or("missing boundary capture")?;
-        let pages = capture.consumed_tokens as usize / PAGE_SIZE
-            - request.prefix_tokens as usize / PAGE_SIZE;
+        let pages = capture.consumed_tokens as usize / self.capabilities.page_tokens
+            - request.prefix_tokens as usize / self.capabilities.page_tokens;
         let proposal = Publication {
             parent: request.prefix,
             consumed_tokens: capture.consumed_tokens,
@@ -1175,8 +1182,9 @@ impl RequestScheduler {
         let publication = (publish && request.terminal_snapshot_ready).then(|| Publication {
             parent: request.prefix,
             consumed_tokens: request.consumed_tokens,
-            tail_pages: request.private_pages[..(request.consumed_tokens as usize / PAGE_SIZE
-                - request.prefix_tokens as usize / PAGE_SIZE)]
+            tail_pages: request.private_pages[..(request.consumed_tokens as usize
+                / self.capabilities.page_tokens
+                - request.prefix_tokens as usize / self.capabilities.page_tokens)]
                 .to_vec(),
             snapshot: StateSnapshot {
                 id: request.terminal_snapshot,

@@ -1,6 +1,10 @@
 use super::*;
 
 fn scheduler(snapshots: u32, mtp: bool) -> RequestScheduler {
+    scheduler_with_pages(snapshots, mtp, 64)
+}
+
+fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> RequestScheduler {
     let mut s = RequestScheduler::new(
         [9; 32],
         SchedulerLimits {
@@ -12,6 +16,7 @@ fn scheduler(snapshots: u32, mtp: bool) -> RequestScheduler {
         },
         SchedulerCapabilities {
             vocabulary: 248320,
+            page_tokens,
             vision: crate::model::VisionCapabilities {
                 features_per_request: 16384,
                 max_images: 4,
@@ -113,71 +118,76 @@ fn finish(s: &mut RequestScheduler, h: RequestHandle) -> CheckpointId {
 
 #[test]
 fn exact_system_prompt_terminal_endpoints_and_partial_restore_pages() {
-    for system in [1, 2, 3, 10, 15, 63, 64, 65, 66, 67, 127] {
-        for mtp in [false, true] {
-            let mut s = scheduler(8, mtp);
-            let prompt = system + 67;
-            let h = s.admit(spec(Some(system), prompt, 3)).unwrap();
-            stop_at_capture(&mut s, h, system as u64);
-            let prior = s.request(h).unwrap().pages().collect::<Vec<_>>();
-            assert_eq!(s.request(h).unwrap().generated_tokens, 0);
-            assert_eq!(
-                s.request(h).unwrap().snapshot_destination(),
-                s.request(h).unwrap().system_snapshot.unwrap()
-            );
-            run_step(&mut s);
-            let r = s.request(h).unwrap();
-            assert_eq!(r.prefix_tokens, system as u64);
-            assert_eq!(r.shared_pages.len(), system / 64);
-            assert_eq!(r.pages().collect::<Vec<_>>(), prior);
-            assert_eq!(r.reused_prompt_tokens(), 0);
-            let continuation = s.next_step().unwrap();
-            assert_eq!(continuation.kind, GraphKind::Prefill);
-            assert_eq!(continuation.lanes[0].start_position, system as u64);
-            assert_eq!(continuation.lanes[0].tokens, 67);
-            stop_at_capture(&mut s, h, prompt as u64);
-            run_step(&mut s);
-            let terminal = finish(&mut s, h);
-            assert_eq!(
-                s.cache
-                    .checkpoint(terminal)
-                    .unwrap()
-                    .prefix()
-                    .consumed_tokens,
-                (prompt + 2) as u64
-            );
-            assert_eq!(
-                s.cache.page_chain(terminal).unwrap().len(),
-                (prompt + 2) / 64
-            );
-            assert_eq!(
-                s.cache.lookup(&history(system)).unwrap().consumed_tokens,
-                system as u64
-            );
-            assert_eq!(
-                s.cache.lookup(&history(prompt)).unwrap().consumed_tokens,
-                prompt as u64
-            );
-            let mut branch = spec(Some(system), prompt, 3);
-            branch.prompt[system] = 777;
-            let a = s.admit(branch.clone()).unwrap();
-            let b = s.admit(branch).unwrap();
-            assert_eq!(s.request(a).unwrap().consumed_tokens, system as u64);
-            run_step(&mut s);
-            let a = s.request(a).unwrap();
-            let b = s.request(b).unwrap();
-            assert_eq!(a.phase, RequestPhase::Prefill);
-            assert_eq!(a.shared_pages, b.shared_pages);
-            if system % 64 != 0 || mtp {
-                assert_ne!(a.private_pages[0], b.private_pages[0]);
-            }
-            assert_eq!(a.pages().count(), system.div_ceil(64) + usize::from(mtp));
-            if mtp && system % 64 >= 2 {
-                let target_full = system / 64;
-                let a_pages = a.pages().collect::<Vec<_>>();
-                let b_pages = b.pages().collect::<Vec<_>>();
-                assert_ne!(a_pages[target_full], b_pages[target_full]);
-                assert_ne!(a_pages[target_full + 1], b_pages[target_full + 1]);
+    for page_tokens in [64, 256] {
+        for system in [1, 2, 3, 10, 15, 63, 64, 65, 66, 67, 127, 255, 256, 257, 511] {
+            for mtp in [false, true] {
+                let mut s = scheduler_with_pages(8, mtp, page_tokens);
+                let prompt = system + 67;
+                let h = s.admit(spec(Some(system), prompt, 3)).unwrap();
+                stop_at_capture(&mut s, h, system as u64);
+                let prior = s.request(h).unwrap().pages().collect::<Vec<_>>();
+                assert_eq!(s.request(h).unwrap().generated_tokens, 0);
+                assert_eq!(
+                    s.request(h).unwrap().snapshot_destination(),
+                    s.request(h).unwrap().system_snapshot.unwrap()
+                );
+                run_step(&mut s);
+                let r = s.request(h).unwrap();
+                assert_eq!(r.prefix_tokens, system as u64);
+                assert_eq!(r.shared_pages.len(), system / page_tokens);
+                assert_eq!(r.pages().collect::<Vec<_>>(), prior);
+                assert_eq!(r.reused_prompt_tokens(), 0);
+                let continuation = s.next_step().unwrap();
+                assert_eq!(continuation.kind, GraphKind::Prefill);
+                assert_eq!(continuation.lanes[0].start_position, system as u64);
+                assert_eq!(continuation.lanes[0].tokens, 67);
+                stop_at_capture(&mut s, h, prompt as u64);
+                run_step(&mut s);
+                let terminal = finish(&mut s, h);
+                assert_eq!(
+                    s.cache
+                        .checkpoint(terminal)
+                        .unwrap()
+                        .prefix()
+                        .consumed_tokens,
+                    (prompt + 2) as u64
+                );
+                assert_eq!(
+                    s.cache.page_chain(terminal).unwrap().len(),
+                    (prompt + 2) / page_tokens
+                );
+                assert_eq!(
+                    s.cache.lookup(&history(system)).unwrap().consumed_tokens,
+                    system as u64
+                );
+                assert_eq!(
+                    s.cache.lookup(&history(prompt)).unwrap().consumed_tokens,
+                    prompt as u64
+                );
+                let mut branch = spec(Some(system), prompt, 3);
+                branch.prompt[system] = 777;
+                let a = s.admit(branch.clone()).unwrap();
+                let b = s.admit(branch).unwrap();
+                assert_eq!(s.request(a).unwrap().consumed_tokens, system as u64);
+                run_step(&mut s);
+                let a = s.request(a).unwrap();
+                let b = s.request(b).unwrap();
+                assert_eq!(a.phase, RequestPhase::Prefill);
+                assert_eq!(a.shared_pages, b.shared_pages);
+                if system % page_tokens != 0 || mtp {
+                    assert_ne!(a.private_pages[0], b.private_pages[0]);
+                }
+                assert_eq!(
+                    a.pages().count(),
+                    system.div_ceil(page_tokens) + usize::from(mtp)
+                );
+                if mtp && system % page_tokens >= 2 {
+                    let target_full = system / page_tokens;
+                    let a_pages = a.pages().collect::<Vec<_>>();
+                    let b_pages = b.pages().collect::<Vec<_>>();
+                    assert_ne!(a_pages[target_full], b_pages[target_full]);
+                    assert_ne!(a_pages[target_full + 1], b_pages[target_full + 1]);
+                }
             }
         }
     }

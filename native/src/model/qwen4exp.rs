@@ -61,6 +61,7 @@ impl ModelContract for Qwen4Exp {
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
         SchedulerCapabilities {
             vocabulary: config.contract.vocabulary,
+            page_tokens: 64,
             vision: config.contract.vision.clone(),
             live_state_base: 1,
             draft_pages_per_request: 1,
