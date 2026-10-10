@@ -1,6 +1,7 @@
 """Compile prepared text forwards and capture one native executable per shape."""
 
-from contextlib import nullcontext
+import gc
+from contextlib import contextmanager, nullcontext
 from time import monotonic
 
 import torch
@@ -8,6 +9,18 @@ import torch
 from .compilation import ForwardTracer, compile_forward
 
 
+@contextmanager
+def _defer_full_collection():
+    thresholds = gc.get_threshold()
+    # Repeated full-heap scans dominate collection while FX graphs are constructed.
+    gc.set_threshold(thresholds[0], thresholds[1], max(thresholds[2], 1000))
+    try:
+        yield
+    finally:
+        gc.set_threshold(*thresholds)
+
+
+@_defer_full_collection()
 def capture_forwards(functions, signatures, *, session, device, stream, pool,
                      collective=None, compile_decoder=True, progress=None):
     """Retain compiled callables and capture with an optional b12x IPC runtime.
