@@ -53,8 +53,9 @@ def _replay(worker, graph=0):
 
 
 @CUDA
+@pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
-def test_native_vision_handoff_append_epoch_validation_and_completion():
+def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
     from flare.preparation.graphs import PreparedGraphBundle
 
     device = _device()
@@ -72,15 +73,23 @@ def test_native_vision_handoff_append_epoch_validation_and_completion():
         inputs, features, requests, output, records, frame, sequence
     )
     operation.prepare()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    def forward():
         operation.begin()
         operation.finish()
+
+    if compiled:
+        from flare.preparation.compilation import compile_forward
+
+        forward = compile_forward(forward)
+        forward()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
     worker = PreparedGraphBundle(
         device=0,
         graphs={"vision": graph},
         buffers={"features": features.arena},
-        resources=(operation,),
+        resources=(operation, forward),
     ).start_worker()
     try:
         features.arena.fill_(7)
@@ -162,8 +171,9 @@ def test_native_vision_handoff_append_epoch_validation_and_completion():
 
 @CUDA
 @pytest.mark.parametrize("capacity", [512, 3072, 4096, 8192])
+@pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
-def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity):
+def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity, compiled):
     from flare.preparation.graphs import PreparedGraphBundle
     from flare.recipes.qwen38.sampling import PreparedTokenState
 
@@ -186,16 +196,24 @@ def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity)
     starts = torch.tensor([0, capacity], dtype=torch.int32, device=device)
     token_state = PreparedTokenState(requests, tokens, starts, slots, epochs, live)
     token_state.prepare()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    def forward():
         operation.validate()
         token_state.gather()
         operation.inject()
+
+    if compiled:
+        from flare.preparation.compilation import compile_forward
+
+        forward = compile_forward(forward)
+        forward()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
     worker = PreparedGraphBundle(
         device=0,
         graphs={"inject": graph},
         buffers={"embedding": embedding},
-        resources=(operation, token_state),
+        resources=(operation, token_state, forward),
     ).start_worker()
     try:
         features.generation[3] = 27
