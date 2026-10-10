@@ -25,6 +25,61 @@ class MoEWeights:
     shared: MLPWeights
 
 
+@dataclass(frozen=True)
+class LayerWeights:
+    attention: dict[str, object]
+    mlp: MLPWeights | MoEWeights
+    residual: dict[str, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class ModelWeights:
+    """One text rank's canonical modules and all packed decoder weights.
+
+    Embeddings and normalization are replicated. Rank zero owns the vocabulary
+    projection. Routed layers share one scale-expansion workspace and execute
+    serially. Vision and MTP weights are outside this text stack.
+    """
+
+    tree: torch.nn.Module
+    shard: TensorParallelShard
+    layers: tuple[LayerWeights, ...]
+    expert_scale_scratch: tuple[torch.Tensor, torch.Tensor]
+    allocated_bytes: int
+
+    @classmethod
+    def load(cls, manifest, device, *, shard, progress=None):
+        import torch
+
+        from .model import create_model_tree
+
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise ValueError("GLM model weights require a CUDA device")
+        device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
+        if torch.cuda.get_device_capability(device) not in ((12, 0), (12, 1)):
+            raise ValueError("GLM prepared execution requires SM120 or SM121")
+        tree = create_model_tree(manifest.snapshot)
+        before = torch.cuda.memory_allocated(device)
+        layers = []
+        with GlmWeightLoader(manifest, device, shard=shard) as loader:
+            names = [f"{TEXT_PREFIX}.embed_tokens.weight", f"{TEXT_PREFIX}.norm.weight"]
+            if shard.rank == 0:
+                names.append("lm_head.weight")
+            for name in names:
+                path, attribute = name.rsplit(".", 1)
+                setattr(tree.get_submodule(path), attribute,
+                        torch.nn.Parameter(loader.load_tensor(name), requires_grad=False))
+            scales = loader.allocate_expert_scale_scratch()
+            for index in range(len(tree.model.language_model.layers)):
+                layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),
+                                           loader.load_residual(index)))
+                if progress is not None:
+                    progress(f"loaded text layer {index + 1}/{len(tree.model.language_model.layers)}")
+        torch.cuda.synchronize(device)
+        return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before)
+
+
 class GlmWeightLoader(DirectWeightLoader):
     """Head and intermediate sharding with replicated latent attention and mHC.
 

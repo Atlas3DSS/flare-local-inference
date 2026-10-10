@@ -264,7 +264,17 @@ calls also differ. A 4096-token TP4 native replay preserves recurrent state,
 attention, router logits, selected experts, routing weights, shared-expert output,
 and replicated rank outputs exactly, but differs from the eager residual in
 0.1% of elements under that pointwise check (maximum absolute error 0.0048828125).
-The complete decoder stack and GLM serving are not implemented.
+The [complete text stack](../flare/recipes/glm53/stack.py) composes all 45 layers,
+canonical token embeddings, final stream averaging and RMSNorm, and a rank-zero
+vocabulary projection. Each graph capacity owns one residual buffer and one set
+of mHC, KDA, MLA, dense-MLP, and MoE intermediates reused across serialized layers.
+Every layer owns separate recurrent or cache state; graph variants share that
+persistent state and the tuned operator arena. Embeddings and final normalization
+are replicated, while only rank zero loads the vocabulary projection.
+The [full-checkpoint TP test](../tests/recipes/test_glm53_stack_tp_cuda.py) covers
+65- and 4096-token prefill capacities on TP2 and TP4, followed by teacher-forced
+decode through native workers. Complete-model replay qualification is pending.
+Production GLM serving and coordinated native rank execution are not implemented.
 
 Shared [sparse MLA components](../flare/components/sparse_mla.py) prepare b12x
 latent-cache writes and attention over caller-selected physical records. Recipes
