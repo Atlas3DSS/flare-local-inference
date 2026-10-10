@@ -9,7 +9,6 @@ a Python bootstrap helper, not a serving dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 import math
 
 import torch
@@ -236,8 +235,9 @@ def philox4x32_reference(seed: int, counter: int) -> tuple[int, int, int, int]:
 
 
 def _compile(kernel, args, grid):
-    compiled = kernel.warmup(*args, grid=grid, num_warps=4, enable_fp_fusion=False)
-    return partial(compiled[grid], *args)
+    from flare.preparation.triton import prepare_triton
+
+    return prepare_triton(kernel, args, grid, num_warps=4, enable_fp_fusion=False)
 
 
 @triton.jit

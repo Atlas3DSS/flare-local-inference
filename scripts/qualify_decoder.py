@@ -60,6 +60,8 @@ def main():
                         help="consume the exact prompt and continuation inputs recorded in a reference trace")
     parser.add_argument("--tune", action="store_true",
                         help="tune both decoders together and refresh selected bindings before capture")
+    parser.add_argument("--compile", action="store_true",
+                        help="compile complete forwards with Inductor autotuning before CUDA graph capture")
     args = parser.parse_args()
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("assign CUDA_VISIBLE_DEVICES explicitly")
@@ -166,6 +168,12 @@ def main():
             return model
 
         def capture(mode, capacity, model):
+            if args.compile:
+                from flare.preparation.compilation import compile_forward
+
+                model = compile_forward(model)
+                prepared.append(model)
+                progress(f"compiling complete {mode}")
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
                 model()

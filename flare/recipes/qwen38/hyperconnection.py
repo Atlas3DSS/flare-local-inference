@@ -170,8 +170,8 @@ class PreparedHyperconnection:
         self.down(normalized)
         bottleneck = hc.run_scaled_silu(self.scratch.projected_down, binding=self.bindings["scaled_silu"])
         gate_logits = self.up(bottleneck)
-        result = hc.run_gate_mean(normalized, gate_logits, binding=self.bindings["gate_mean"])
-        return result
+        hc.run_gate_mean(normalized, gate_logits, binding=self.bindings["gate_mean"])
+        return self.scratch.block_input
 
     def combine(self, residual: torch.Tensor, block_output: torch.Tensor) -> torch.Tensor:
         """Inject in FP32 and return a BF16 intermediate inside the captured graph."""

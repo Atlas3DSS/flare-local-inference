@@ -456,7 +456,7 @@ class PreparedPLE:
         return getattr(self, attribute)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
-        if (
+        if source is not self.source and (
             source.data_ptr() != self.source.data_ptr()
             or source.shape != self.source.shape
         ):

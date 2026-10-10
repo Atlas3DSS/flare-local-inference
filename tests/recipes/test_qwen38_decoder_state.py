@@ -22,8 +22,9 @@ def test_input_contract():
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("compile_forward", [False, True])
 @torch.no_grad()
-def test_native_metadata_exact_endpoints_and_terminal_guards():
+def test_native_metadata_exact_endpoints_and_terminal_guards(compile_forward):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     device = torch.device("cuda", 0)
     pool = HybridStatePool.allocate(5, device)
@@ -47,9 +48,15 @@ def test_native_metadata_exact_endpoints_and_terminal_guards():
         decode.finish()
 
     graphs = {}
+    compiled_calls = []
     stream = torch.cuda.Stream(device=device)
     stream.wait_stream(torch.cuda.current_stream())
     for name, function in (("prefill", prefill), ("decode", step)):
+        if compile_forward:
+            from flare.preparation.compilation import compile_forward as compile_model
+
+            function = compile_model(function)
+            compiled_calls.append(function)
         with torch.cuda.stream(stream):
             function()
         stream.synchronize()
@@ -58,7 +65,7 @@ def test_native_metadata_exact_endpoints_and_terminal_guards():
             function()
         graphs[name] = graph
     worker = PreparedGraphBundle(device=0, graphs=graphs, buffers={"sample": sample},
-        resources=(pool, requests, inputs, metadata, decode, source, hidden)).start_worker()
+        resources=(pool, requests, inputs, metadata, decode, source, hidden, compiled_calls)).start_worker()
 
     def replay(index):
         torch.cuda.synchronize()

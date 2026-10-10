@@ -313,7 +313,8 @@ class PreparedQwenMoe:
             router_weight=weights.router, router_plan=self.routing.plan)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
-        if source.data_ptr() != self.source.data_ptr() or source.shape != self.source.shape:
+        if source is not self.source and (
+                source.data_ptr() != self.source.data_ptr() or source.shape != self.source.shape):
             raise ValueError("prepared Qwen MoE requires its fixed source storage")
         shared = self.shared(source)
         self.router_projection(source)

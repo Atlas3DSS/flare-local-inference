@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 
 import torch
 import triton
 import triton.language as tl
+
+from flare.preparation.triton import prepare_triton
 
 from .attention import QSAMetadata
 from .gdn import GDNMetadata
@@ -17,8 +18,7 @@ from .state import HybridStatePool
 
 
 def compile_kernel(kernel, args, grid):
-    compiled = kernel.warmup(*args, grid=grid, num_warps=4)
-    return partial(compiled[grid], *args)
+    return prepare_triton(kernel, args, grid, num_warps=4)
 
 
 @triton.jit
