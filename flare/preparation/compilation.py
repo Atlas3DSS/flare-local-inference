@@ -195,7 +195,7 @@ def _compile_module(module, calls, owner):
 def compile_forward(fn):
     """Trace and compile one fixed-buffer forward before CUDA graph capture.
 
-    Tracing executes the prepared forward once. Mutating native operators
+    Tracing uses tensor metadata without executing kernels. Mutating native operators
     receive explicit storage operands for all captured tensor aliases.
     Their typed views are reconstructed inside each opaque invocation so
     Inductor can preserve mutations without cloning strided state regions.
@@ -205,7 +205,7 @@ def compile_forward(fn):
     weight payloads or process-local kernel handles. Each callable retains its
     own prepared invocations, buffers, and forward owner.
     """
-    module = make_fx(lambda: fn(), tracing_mode='real')()
+    module = make_fx(lambda: fn(), tracing_mode='fake', _allow_non_fake_inputs=True)()
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
