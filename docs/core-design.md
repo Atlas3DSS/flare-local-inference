@@ -202,6 +202,14 @@ host.
 The [Qwen3.8 recipe](../flare/recipes/qwen38/model.py) keeps the Transformers
 module tree and replaces its forwards with prepared operations.
 
+Recipes control checkpoint loading, model composition, memory policy, tuning,
+and graph-catalog construction. They compose concrete components from
+`flare/components` and select preparation helpers from `flare/preparation`.
+Shared components implement operations and resource ownership; each recipe
+defines its own orchestration. Compatibility is enforced at the native handoff
+through graph signatures, fixed device buffers, completion records, and owner
+lifetimes.
+
 [Prepared projection components](../flare/components/linear.py) provide BF16,
 FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,
 shared scratch, and captured projection overlap. Recipes supply weights and
