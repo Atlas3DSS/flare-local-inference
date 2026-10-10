@@ -1,4 +1,4 @@
-"""Compile prepared forwards with explicit byte-storage mutation boundaries."""
+"""Compile prepared forwards with explicit storage mutation boundaries."""
 
 import itertools
 import math
@@ -44,9 +44,35 @@ def _fake_storage_call(reads, writes, handle):
     pass
 
 
+@torch.library.custom_op('flare::mean', mutates_args=())
+def _mean(source: torch.Tensor, dim: list[int] | None, keepdim: bool = False,
+          dtype: torch.dtype | None = None) -> torch.Tensor:
+    return torch.mean(source, dim, keepdim, dtype=dtype)
+
+
+@_mean.register_fake
+def _fake_mean(source, dim, keepdim=False, dtype=None):
+    return torch.mean(source, dim, keepdim, dtype=dtype)
+
+
 def _byte_storage(tensor):
     storage = tensor.untyped_storage()
     return tensor.new_empty(0, dtype=torch.uint8).set_(storage, 0, (storage.nbytes(),), (1,))
+
+
+def _returned_alias(node, index):
+    if not isinstance(node.target, torch._ops.OpOverload):
+        return None
+    schema = node.target._schema
+    result = schema.returns[index]
+    if result.alias_info is None:
+        return None
+    for position, argument in enumerate(schema.arguments):
+        if argument.alias_info is not None and result.alias_info.before_set & argument.alias_info.before_set:
+            value = node.args[position] if position < len(node.args) else node.kwargs.get(argument.name)
+            if isinstance(value, torch.fx.Node):
+                return value
+    return None
 
 
 def compile_forward(fn):
@@ -56,11 +82,16 @@ def compile_forward(fn):
     receive explicit storage operands for all captured tensor aliases.
     Their typed views are reconstructed inside each opaque invocation so
     Inductor can preserve mutations without cloning strided state regions.
-    Tensor operations remain visible to ordinary Inductor compilation.
+    Pointwise tensor operations remain visible to ordinary Inductor compilation.
+    Mean reductions retain ATen's FP32 accumulation order.
     The compiled module retains the forward and its prepared kernel owners.
     """
-    module = make_fx(fn, tracing_mode='real')()
+    module = make_fx(lambda: fn(), tracing_mode='real')()
     graph = module.graph
+    # A one-ULP reduction difference can cross a BF16 rounding boundary.
+    for node in graph.nodes:
+        if node.op == 'call_function' and node.target is torch.ops.aten.mean.dim:
+            node.target = torch.ops.flare.mean.default
     for node in reversed(list(graph.nodes)):
         if (node.op == 'call_function' and isinstance(node.target, torch._ops.OpOverload)
                 and node.target._schema.name in (
@@ -79,6 +110,13 @@ def compile_forward(fn):
             actual = operator.attrgetter(node.target)(module)
             keys[node] = actual.untyped_storage()._cdata
             node.meta['val'] = actual
+        elif node.op == 'call_function' and node.target is operator.getitem:
+            source, index = node.args
+            if isinstance(source, torch.fx.Node) and isinstance(index, int):
+                alias = _returned_alias(source, index)
+                if alias is not None:
+                    keys[node] = keys[alias]
+                    node.meta['val'] = alias.meta['val']
         elif node.op == 'call_function' and isinstance(node.target, torch._ops.OpOverload):
             schema = node.target._schema
             if len(schema.returns) == 1 and schema.returns[0].alias_info is not None:
@@ -95,17 +133,17 @@ def compile_forward(fn):
                                     *torch.fx.map_arg(node.args, lambda arg: arg.meta['val']),
                                     **torch.fx.map_arg(node.kwargs, lambda arg: arg.meta['val']))
                             break
-    dtypes, constant_views = {}, {}
+    dtypes, storage_references = {}, {}
     for node, key in keys.items():
         dtypes.setdefault(key, set()).add(node.meta['val'].dtype)
         if node.op == 'get_attr':
-            constant_views.setdefault(key, set()).add(id(node.meta['val']))
+            storage_references.setdefault(key, set()).add(node)
 
     for node in originals:
         if node.op != 'get_attr' or not isinstance(node.meta.get('val'), torch.Tensor):
             continue
         key = keys[node]
-        if len(dtypes[key]) <= 1 and len(constant_views[key]) <= 1:
+        if len(dtypes[key]) <= 1 and len(storage_references[key]) <= 1:
             continue
         if key not in bases:
             tensor = operator.attrgetter(node.target)(module)
@@ -180,16 +218,15 @@ def compile_forward(fn):
         with graph.inserting_before(node):
             graph.call_function(torch.ops.flare.storage_call.default, (reads, writes, handle))
         if node.users:
-            result = node.meta.get('val')
-            matches = [arg for arg in operand_nodes if isinstance(result, torch.Tensor)
-                and key_for(arg) == key_for(node)
-                and arg.meta['val'].shape == result.shape
-                and arg.meta['val'].stride() == result.stride()
-                and arg.meta['val'].storage_offset() == result.storage_offset()
-                and arg.meta['val'].dtype == result.dtype]
-            if not matches:
+            schema = getattr(target, '_schema', None)
+            aliases = [] if schema is None else [
+                _returned_alias(node, index) for index in range(len(schema.returns))]
+            if not aliases or any(alias is None for alias in aliases):
                 raise RuntimeError(f'unsupported returned value: {node}')
-            node.replace_all_uses_with(matches[0])
+            replacement = aliases[0] if len(aliases) == 1 else tuple(aliases)
+            for user in list(node.users):
+                user.args = torch.fx.map_arg(user.args, lambda arg: replacement if arg is node else arg)
+                user.kwargs = torch.fx.map_arg(user.kwargs, lambda arg: replacement if arg is node else arg)
         graph.erase_node(node)
 
     for node in originals:

@@ -86,18 +86,19 @@ def _fake_fill_output(out, value):
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("separate_views", [False, True])
 @torch.no_grad()
-def test_captured_scratch_aliases_preserve_intermediate_values():
+def test_captured_scratch_aliases_preserve_intermediate_values(separate_views):
     workspace = torch.zeros(5, 336, device="cuda", dtype=torch.bfloat16)
-    first_writer = workspace[:]
-    projection = workspace[:, :320]
+    first_writer = workspace[:] if separate_views else workspace
+    projection = workspace[:, :320] if separate_views else workspace
     injection = workspace[:, 320:324]
     snapshot = torch.empty_like(projection)
     injection_snapshot = torch.empty_like(injection)
     final = torch.empty_like(projection)
 
-    def forward():
-        _fill_output(first_writer, 1.)
+    def forward(writer=first_writer):
+        _fill_output(writer, 1.)
         snapshot.copy_(projection)
         injection_snapshot.copy_(injection)
         _fill_output(workspace, 2.)
@@ -114,3 +115,36 @@ def test_captured_scratch_aliases_preserve_intermediate_values():
         torch.testing.assert_close(snapshot, torch.ones_like(snapshot), rtol=0, atol=0)
         torch.testing.assert_close(injection_snapshot, torch.ones_like(injection_snapshot), rtol=0, atol=0)
         torch.testing.assert_close(final, torch.full_like(final, 2.), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("rows", [1, 512])
+@torch.no_grad()
+def test_compiled_head_norm_preserves_fp32_reduction_order(rows):
+    packed = torch.zeros(rows, 13312, device="cuda", dtype=torch.bfloat16)
+    source = packed[:, 12288:12800].view(rows, 2, 256)
+    weight = torch.randn(256, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty_like(source)
+    variance = torch.empty(rows, 2, 1, device="cuda", dtype=torch.float32)
+
+    def forward():
+        value = source.float()
+        mean = value.square().mean(-1, keepdim=True)
+        variance.copy_(mean)
+        normalized = value * torch.rsqrt(mean + 1e-6)
+        output.copy_((normalized * (1.0 + weight.float())).bfloat16())
+
+    compiled = compile_forward(forward)
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    generator = torch.Generator(device="cuda").manual_seed(903)
+    for _ in range(3):
+        source.normal_(generator=generator)
+        forward()
+        expected, expected_variance = output.clone(), variance.clone()
+        output.fill_(float("nan"))
+        graph.replay()
+        torch.testing.assert_close(variance, expected_variance, rtol=0, atol=0)
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
