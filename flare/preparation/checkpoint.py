@@ -11,10 +11,10 @@ import json
 import math
 import os
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Mapping
 
 from . import qwen38
 
@@ -55,13 +55,10 @@ class ShardMetadata:
 
 
 @dataclass(frozen=True, slots=True)
-class CheckpointManifest:
+class IndexedCheckpoint:
     snapshot: Path
     tensors: Mapping[str, TensorMetadata]
     shards: tuple[ShardMetadata, ...]
-    metadata_sha256: Mapping[str, str]
-    headers_sha256: str
-    generation_config: Mapping
 
     @property
     def shard_paths(self) -> tuple[Path, ...]:
@@ -70,6 +67,13 @@ class CheckpointManifest:
     @property
     def index_path(self) -> Path:
         return self.snapshot / "model.safetensors.index.json"
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointManifest(IndexedCheckpoint):
+    metadata_sha256: Mapping[str, str]
+    headers_sha256: str
+    generation_config: Mapping
 
     def to_dict(self) -> dict:
         sizes = Counter()
@@ -298,6 +302,50 @@ def _inspect_frontend_assets(snapshot: Path) -> dict[str, str]:
     return fingerprints
 
 
+def inspect_indexed_checkpoint(snapshot: str | Path) -> IndexedCheckpoint:
+    """Read indexed safetensors geometry and validate byte ranges without CUDA.
+
+    Model recipes validate configuration, tensor names and expected precision.
+    The direct loader revalidates source file identity before moving payloads.
+    """
+    snapshot = Path(snapshot).expanduser().absolute()
+    index = _parse_json((snapshot / "model.safetensors.index.json").read_bytes(),
+                        "model.safetensors.index.json")
+    return _inspect_indexed_checkpoint(snapshot, index)
+
+
+def _inspect_indexed_checkpoint(snapshot: Path, index: dict) -> IndexedCheckpoint:
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise CheckpointError("model.safetensors.index.json: missing weight_map")
+    for name, shard in weight_map.items():
+        if (
+            not name or not isinstance(shard, str) or PurePosixPath(shard).is_absolute()
+            or ".." in PurePosixPath(shard).parts or not shard.endswith(".safetensors")
+        ):
+            raise CheckpointError(f"invalid indexed shard for {name}: {shard!r}")
+    tensors, shards = {}, []
+    for shard in sorted(set(weight_map.values())):
+        record, entries = _read_header(snapshot / shard, shard)
+        for name in entries:
+            if name in tensors:
+                raise CheckpointError(f"duplicate tensor across shards: {name}")
+            if weight_map.get(name) != shard:
+                raise CheckpointError(f"index/shard mismatch for {name}: found in {shard}")
+        tensors.update(entries)
+        shards.append(record)
+    missing = weight_map.keys() - tensors.keys()
+    if missing:
+        raise CheckpointError(f"indexed tensor missing from shards: {min(missing)}")
+    total = sum(tensor.nbytes for tensor in tensors.values())
+    if (
+        not isinstance(index.get("metadata"), dict)
+        or index["metadata"].get("total_size") != total
+    ):
+        raise CheckpointError(f"index total_size does not match tensor payload bytes: {total}")
+    return IndexedCheckpoint(snapshot, MappingProxyType(tensors), tuple(shards))
+
+
 def inspect_qwen38_checkpoint(snapshot: str | Path) -> CheckpointManifest:
     """Validate the pinned model's metadata; payload integrity is not verified.
 
@@ -318,37 +366,12 @@ def inspect_qwen38_checkpoint(snapshot: str | Path) -> CheckpointManifest:
     _validate_config(config)
     index = read_json("model.safetensors.index.json")
     generation = read_json("generation_config.json")
-    weight_map = index.get("weight_map")
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise CheckpointError("model.safetensors.index.json: missing weight_map")
-    for name, shard in weight_map.items():
-        if (
-            not name or not isinstance(shard, str) or PurePosixPath(shard).is_absolute()
-            or ".." in PurePosixPath(shard).parts or not shard.endswith(".safetensors")
-        ):
-            raise CheckpointError(f"invalid indexed shard for {name}: {shard!r}")
-    tensors, shards = {}, []
-    header_digest = hashlib.sha256()
-    for shard in sorted(set(weight_map.values())):
-        record, entries = _read_header(snapshot / shard, shard)
-        for name in entries:
-            if name in tensors:
-                raise CheckpointError(f"duplicate tensor across shards: {name}")
-            if weight_map.get(name) != shard:
-                raise CheckpointError(f"index/shard mismatch for {name}: found in {shard}")
-        tensors.update(entries)
-        shards.append(record)
-        header_digest.update(shard.encode() + b"\0" + bytes.fromhex(record.header_sha256))
-    missing = weight_map.keys() - tensors.keys()
-    if missing:
-        raise CheckpointError(f"indexed tensor missing from shards: {min(missing)}")
+    indexed = _inspect_indexed_checkpoint(snapshot, index)
+    tensors, shards = indexed.tensors, indexed.shards
     _validate_tensors(tensors)
-    total = sum(tensor.nbytes for tensor in tensors.values())
-    if (
-        not isinstance(index.get("metadata"), dict)
-        or index["metadata"].get("total_size") != total
-    ):
-        raise CheckpointError(f"index total_size does not match tensor payload bytes: {total}")
+    header_digest = hashlib.sha256()
+    for shard in shards:
+        header_digest.update(shard.path.encode() + b"\0" + bytes.fromhex(shard.header_sha256))
     for name, expected in (
         ("config.json", qwen38.CONFIG_SHA256),
         ("model.safetensors.index.json", qwen38.INDEX_SHA256),

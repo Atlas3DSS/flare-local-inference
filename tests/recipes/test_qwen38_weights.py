@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 import torch
 
+from flare.components.weights import join_nvfp4_csf
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
 from flare.recipes.qwen38.weights import (
     QwenWeightLoader,
     _expert_ids,
     _expert_scale_vectors,
-    _join_csf,
     allocate_expert_scale_scratch,
     expert_memory_plan,
 )
@@ -35,7 +35,7 @@ def test_csf_join_preserves_up_gate_order_and_exception_payload():
     gate[:, :16] = 40
     up_ex = torch.tensor([(101 << 24) | 0, (102 << 24) | 63], dtype=torch.uint32)
     gate_ex = torch.tensor([(201 << 24) | 1, (202 << 24) | 62], dtype=torch.uint32)
-    fixed, exceptions = _join_csf(up, up_ex, gate, gate_ex, rows=16, columns=4)
+    fixed, exceptions = join_nvfp4_csf(up, up_ex, gate, gate_ex, rows=16, columns=4)
     decoded = decode_csf_scales(fixed, exceptions, rows=32, columns=4)
     expected = torch.cat((
         decode_csf_scales(up, up_ex, rows=16, columns=4),
@@ -50,7 +50,7 @@ def test_csf_join_rejects_corrupt_exception_positions(positions):
     fixed = torch.zeros((1, 48), dtype=torch.uint8)
     exceptions = torch.tensor(positions, dtype=torch.uint32)
     with pytest.raises(ValueError, match="unique, sorted, in-range"):
-        _join_csf(fixed, exceptions, fixed, exceptions, rows=16, columns=4)
+        join_nvfp4_csf(fixed, exceptions, fixed, exceptions, rows=16, columns=4)
 
 
 def _scalars():
@@ -130,6 +130,6 @@ def test_actual_layer_scales_and_csf_order(manifest):
         prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts.511"
         planes = [tuple(reader.read(f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}")
                         for suffix in ("fixed", "exceptions")) for projection in ("up_proj", "gate_proj")]
-        fixed, exceptions = _join_csf(*planes[0], *planes[1])
+        fixed, exceptions = join_nvfp4_csf(*planes[0], *planes[1], rows=640, columns=160)
         expected = torch.cat([decode_csf_scales(*plane, rows=640, columns=160) for plane in planes])
         assert torch.equal(decode_csf_scales(fixed, exceptions, rows=1280, columns=160), expected)
