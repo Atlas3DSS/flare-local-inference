@@ -391,6 +391,60 @@ fn serve_tensor_parallel_rank(
     }
 }
 
+/// Monitor owned child ranks in Rust; unexpected peer exit terminates this process.
+#[pyclass(name = "RankSupervisor", module = "flare_native")]
+struct NativeRankSupervisor {
+    supervisor: Mutex<crate::processes::RankSupervisor>,
+}
+
+#[pymethods]
+impl NativeRankSupervisor {
+    #[new]
+    fn new(pids: Vec<i32>) -> PyResult<Self> {
+        Ok(Self {
+            supervisor: Mutex::new(
+                crate::processes::RankSupervisor::new(&pids)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            ),
+        })
+    }
+
+    #[pyo3(signature = (timeout_ms=30000))]
+    fn begin_shutdown(&self, timeout_ms: u64) -> PyResult<()> {
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .begin_shutdown(Duration::from_millis(timeout_ms))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn finish_shutdown(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            self.supervisor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish_shutdown()
+        })
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn abort(&self, reason: &str) {
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .abort(reason)
+    }
+}
+
+#[pyfunction]
+fn bind_parent_lifetime(parent_pid: i32) -> PyResult<()> {
+    if parent_pid <= 0 {
+        return Err(PyValueError::new_err("parent PID must be positive"));
+    }
+    crate::processes::bind_parent_lifetime(parent_pid)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
 impl Drop for PreparedGraphExecutor {
     fn drop(&mut self) {
         let shutdown = self.worker.close();
@@ -414,10 +468,12 @@ fn flare_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     module.add_class::<PreparedGraphExecutor>()?;
     module.add_class::<ExecutionCompletion>()?;
+    module.add_class::<NativeRankSupervisor>()?;
     #[cfg(feature = "server")]
     module.add_class::<NativeServer>()?;
     module.add_function(wrap_pyfunction!(current_context, module)?)?;
     module.add_function(wrap_pyfunction!(serve_tensor_parallel_rank, module)?)?;
+    module.add_function(wrap_pyfunction!(bind_parent_lifetime, module)?)?;
     Ok(())
 }
 

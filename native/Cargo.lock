@@ -483,6 +483,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "blake2",
+ "libc",
  "libloading",
  "llguidance",
  "minijinja",

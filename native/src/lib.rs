@@ -7,6 +7,8 @@ pub mod grammar;
 pub mod model;
 #[cfg(feature = "server")]
 pub mod output;
+#[cfg(feature = "python")]
+mod processes;
 mod replay;
 pub mod scheduler;
 #[cfg(feature = "server")]
