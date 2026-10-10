@@ -30,9 +30,12 @@ def summarize(values):
             'median_ms': statistics.median(values) / 1e6,
             'p90_ms': sorted(values)[int(.9 * (len(values)-1))] / 1e6}
 
-def analyze(root, engine):
+def analyze(root, engine, batches=(1, 2, 4)):
     completed = json.loads((root / engine / 'results.json').read_text())
-    assert len(completed['groups']) == 12, 'require all warmup and measured groups to complete'
+    groups = [g for g in completed['groups'] if g['batch'] in batches]
+    expected = {(b, r, r > 0) for b in batches for r in range(4)}
+    assert len(groups) == len(expected) and {(g['batch'], g['repeat'], g['measured']) for g in groups} == expected, \
+        'require all selected warmup and measured groups to complete'
     db = sqlite3.connect(f'file:{root / (engine + "-trace.sqlite")}?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
     tables = {r[0] for r in db.execute("select name from sqlite_master where type='table'")}
@@ -79,6 +82,8 @@ def analyze(root, engine):
             if not m:
                 continue
             b, repeat = map(int, m.groups())
+            if b not in batches:
+                continue
             gs = sorted(types['GRAPH_TRACE'], key=lambda g: g['start'])
             assert len(gs) == 255, (name, len(gs))
             assert all(decode[g['graphExecId']] == b for g in gs)
@@ -87,8 +92,8 @@ def analyze(root, engine):
     else:
         steps = json.loads((root / 'vllm/steps.json').read_text())
         request_sets = {frozenset(step['request_ids']) for step in steps}
-        cohorts = {ids for ids in request_sets if not any(ids < other for other in request_sets)}
-        assert Counter(map(len, cohorts)) == {1: 3, 2: 3, 4: 3}, cohorts
+        cohorts = {ids for ids in request_sets if len(ids) in batches and not any(ids < other for other in request_sets)}
+        assert Counter(map(len, cohorts)) == {b: 3 for b in batches}, cohorts
         groups = defaultdict(list)
         for step in steps:
             if step['has_prefill'] or frozenset(step['request_ids']) not in cohorts:
@@ -105,7 +110,7 @@ def analyze(root, engine):
             assert gs, step
             all_gpu = [g for types in (forward, sample) for rs in types.values() for g in rs]
             samples[b].append({'group': group, 'position': pos[0], 'graph_ns': union_ns(gs), 'total_ns': union_ns(all_gpu), 'graphs': len(gs)})
-        assert Counter(b for b,g in groups) == {1:3,2:3,4:3}, Counter(b for b,g in groups)
+        assert Counter(b for b,g in groups) == {b: 3 for b in batches}, Counter(b for b,g in groups)
         for (b, group), positions in groups.items():
             assert len(positions) in (254, 255), (group, len(positions))
             assert max(positions[-1]) == 766 and min(positions[0]) == 512
@@ -120,15 +125,17 @@ def analyze(root, engine):
             groups[str(r['group'])].append(r['graph_ns'])
         report[b] = {'graph': summarize([r['graph_ns'] for r in rs]), 'forward_sample_gpu': summarize([r['total_ns'] for r in rs]),
                      'graphs_per_step': dict(Counter(r['graphs'] for r in rs)), 'repeat_mean_ms': [statistics.mean(v)/1e6 for v in groups.values()]}
-    assert set(report) == {1, 2, 4}, 'require measured batches 1, 2, and 4'
+    assert set(report) == set(batches), 'require all selected measured batches'
     db.close()
     return report
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument('--batches', type=int, nargs='+', choices=(1, 2, 4), default=(1, 2, 4))
+    parser.add_argument('--engines', nargs='+', choices=('flare', 'vllm'), default=('flare', 'vllm'))
     args = parser.parse_args()
-    report = {e: analyze(args.directory.resolve(), e) for e in ('flare', 'vllm')}
+    report = {e: analyze(args.directory.resolve(), e, args.batches) for e in args.engines}
     text = json.dumps(report, indent=2) + '\n'
     (args.directory / 'timings.json').write_text(text)
     print(text, end='')

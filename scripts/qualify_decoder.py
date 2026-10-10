@@ -56,6 +56,8 @@ def main():
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--prefill-capacity", type=int, choices=(1, 16, 64, 128, 256, 512), default=512)
     parser.add_argument("--layer-trace", action="store_true", help="retain all layer outputs and layer-0 operator intermediates")
+    parser.add_argument("--teacher-trace", type=Path,
+                        help="consume the exact prompt and continuation inputs recorded in a reference trace")
     parser.add_argument("--tune", action="store_true",
                         help="tune both decoders together and refresh selected bindings before capture")
     args = parser.parse_args()
@@ -97,6 +99,12 @@ def main():
     manifest = inspect_qwen38_checkpoint(snapshot)
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
     prompt = tokenizer.encode(args.prompt, add_special_tokens=False)
+    teacher = None
+    if args.teacher_trace:
+        from qualify.text_oracle import load_trace
+        teacher = load_trace(args.teacher_trace)
+        if tuple(prompt) != teacher.prompt_tokens or args.steps != len(teacher.logits):
+            parser.error("--prompt and --steps must match --teacher-trace")
     if not 0 < len(prompt) <= args.prefill_capacity:
         parser.error("prompt must fit the selected nonempty prefill capacity")
     device = torch.device("cuda", 0)
@@ -173,7 +181,9 @@ def main():
         tuning = _prepare_decoder_graphs(session, workspace, build, capture,
             prefill_capacity=args.prefill_capacity, tune=args.tune, progress=progress)
         session.freeze()
-        requests.admit(0, RequestAdmission(1, 1234, max_new_tokens=args.steps, temperature=0), prompt)
+        admission = RequestAdmission(1, 1234, max_new_tokens=args.steps, temperature=1,
+                                     **({"eos_token_ids": ()} if teacher else {}))
+        requests.admit(0, admission, prompt)
         inputs.row_slot_ids[0] = 0
         inputs.row_generations[0] = 1
         inputs.live_rows.fill_(1)
@@ -191,6 +201,9 @@ def main():
         diagnostic_allocations = 0
         try:
             for step in range(args.steps):
+                if teacher is not None and step > 0:
+                    requests.pending_token[0] = teacher.teacher_tokens[step - 1]
+                    torch.cuda.synchronize(device)
                 allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
                 fence = executor.submit(0 if step == 0 else 1, [])
                 deadline = time.monotonic() + 120
@@ -223,7 +236,11 @@ def main():
                     break
         finally:
             executor.close()
-        torch.save({"prompt": prompt, "tokens": tokens, "logits": logits, "hidden": hidden,
+        context = ({"schema_version": 1, "prompt_tokens": prompt,
+                    "teacher_tokens": list(teacher.teacher_tokens), "sampled_tokens": tokens,
+                    "model_id": MODEL_ID, "revision": REVISION} if teacher else
+                   {"prompt": prompt, "tokens": tokens})
+        torch.save({**context, "logits": logits, "hidden": hidden,
                     "layer_outputs": layer_outputs, "stage_outputs": stage_outputs}, args.tensor_output)
         result = {"component": "complete Qwen text decoder native graph execution",
             "checkpoint": {"repository": MODEL_ID, "revision": REVISION},

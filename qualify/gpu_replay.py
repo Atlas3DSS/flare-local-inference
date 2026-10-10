@@ -34,7 +34,7 @@ def prepare(args):
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
     groups = []
     for repeat in range(4):
-        for batch in (1, 2, 4):
+        for batch in args.batches:
             cases = []
             for lane in range(batch):
                 request, tokens, _ = make_prompt(tokenizer, f'gpu-b{batch}-r{repeat}-lane{lane}', 512, 256)
@@ -54,6 +54,7 @@ def flare(args, corpus):
     result = {'engine': 'flare', 'groups': []}
     with prepare_model(args.snapshot, PreparationConfig(prefill_chunk_size=4096),
                        progress=lambda message: print(message, flush=True)) as model:
+        save(args.output / 'tuning.json', model.memory_report['tuning'])
         if not args.ncu:
             save(args.output / 'graphs.json', prepared_graph_map(model.manifest()))
         runner = ReplayCase(model)
@@ -151,9 +152,12 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--corpus', type=Path)
     parser.add_argument('--plan', type=Path)
+    parser.add_argument('--batches', type=int, nargs='+', choices=(1, 2, 4), default=(1, 2, 4))
     parser.add_argument('--ncu', action='store_true',
         help='annotate one warmed decode at context position 575 per batch for Nsight Compute')
     args = parser.parse_args()
+    if len(set(args.batches)) != len(args.batches):
+        parser.error('--batches must be unique')
     if args.output.exists():
         parser.error('output must be fresh')
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +167,10 @@ def main():
         parser.error('require --corpus and vLLM --plan')
     args.output.mkdir()
     corpus = json.loads(args.corpus.read_text())
+    corpus['groups'] = [group for group in corpus['groups'] if group['batch'] in args.batches]
+    expected = {(batch, repeat) for batch in args.batches for repeat in range(4)}
+    if {(group['batch'], group['repeat']) for group in corpus['groups']} != expected or len(corpus['groups']) != len(expected):
+        parser.error('corpus must contain one warmup and three measured groups per selected batch')
     (flare if args.engine == 'flare' else vllm)(args, corpus)
 
 
