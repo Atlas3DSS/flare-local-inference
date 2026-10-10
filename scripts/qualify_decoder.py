@@ -236,11 +236,11 @@ def main():
                     break
         finally:
             executor.close()
-        context = ({"schema_version": 1, "prompt_tokens": prompt,
+        trace_context = ({"schema_version": 1, "prompt_tokens": prompt,
                     "teacher_tokens": list(teacher.teacher_tokens), "sampled_tokens": tokens,
                     "model_id": MODEL_ID, "revision": REVISION} if teacher else
                    {"prompt": prompt, "tokens": tokens})
-        torch.save({**context, "logits": logits, "hidden": hidden,
+        torch.save({**trace_context, "logits": logits, "hidden": hidden,
                     "layer_outputs": layer_outputs, "stage_outputs": stage_outputs}, args.tensor_output)
         result = {"component": "complete Qwen text decoder native graph execution",
             "checkpoint": {"repository": MODEL_ID, "revision": REVISION},
