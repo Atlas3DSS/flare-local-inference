@@ -278,7 +278,15 @@ and three decode steps: replicated hidden outputs matched exactly across ranks,
 outputs and recurrent state remained finite, and CUDA allocation and segment
 counters did not change during replay. Rank-zero weight allocations occupied
 46,148,968,960 bytes; the selected operator arena occupied 11,896,064 bytes.
-TP2 and complete-model 4096-token replay qualification remain pending.
+TP2 qualification passed for a 4096-token prefill and three decode steps with
+the same rank-agreement and allocation checks. Rank-zero weight allocations
+occupied 89,184,592,384 bytes; the operator arena occupied 161,084,160 bytes.
+Sampled TP2 generation through native uploads also passed: a 24-token chat
+prompt produced 30 tokens and stopped at a checkpoint EOS token. Sampling used
+the complete checkpoint, all 45 layers, and FlashInfer. This generation test
+uses a Python control group to distribute rank-zero token IDs between steps;
+it does not qualify native rank coordination or HTTP serving. Complete-model
+4096-token TP4 replay and TP4 sampled generation remain pending.
 Production GLM serving and coordinated native rank execution are not implemented.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
