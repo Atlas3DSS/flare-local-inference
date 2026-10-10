@@ -6,7 +6,7 @@ from time import monotonic
 
 import torch
 
-from .compilation import ForwardTracer, compile_forward
+from .aot import ForwardCache
 
 
 @contextmanager
@@ -30,17 +30,20 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     serving replays variants serially and may choose them in any order.
     """
     graphs, compiled = {}, {}
-    tracer = ForwardTracer() if compile_decoder else None
+    cache = ForwardCache(namespace=session.namespace.to_dict(), device=device) if compile_decoder else None
     for name, function in functions.items():
         started = monotonic()
-        if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative"):
+        should_compile = compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative")
+        if should_compile:
             if progress is not None:
                 progress(f"compiling {name}")
-            function = compile_forward(function, tracer=tracer)
-            compiled[name] = function
         stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):
-            function()
+            if should_compile:
+                function = cache.prepare(function, name=name, signature=signatures[name])
+                compiled[name] = function
+            else:
+                function()
         stream.synchronize()
         graph = torch.cuda.CUDAGraph()
         communication = nullcontext() if collective is None else collective.capture(stream=stream)
@@ -48,7 +51,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
             function()
         graphs[name] = graph
         if progress is not None:
-            cache = " (compiled cache hit)" if name in compiled and compiled[name].cache_hit else ""
-            progress(f"captured {name} in {monotonic() - started:.2f}s{cache}")
+            cached = " (compiled cache hit)" if name in compiled and compiled[name].cache_hit else ""
+            progress(f"captured {name} in {monotonic() - started:.2f}s{cached}")
     torch.cuda.synchronize(device)
     return graphs, compiled

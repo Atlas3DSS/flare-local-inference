@@ -146,11 +146,12 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   layer; [PreparedMHC](flare/components/mhc.py) supports fused post/pre mixing.
   Avoid materializing an intermediate solely because a Python module ends.
 - **Compile complete prepared forwards.** Use
-  [compile_forward](flare/preparation/compilation.py), which enables full-graph
-  static compilation and autotuning for the remaining PyTorch operations while
-  preserving native mutation contracts. Complete b12x preparation, tuning,
-  binding refresh, and compiled warmup before capturing each serving graph.
-  Retain compiled kernel owners until native replay has drained.
+  [capture_forwards](flare/preparation/capture.py), which restores compiled
+  forwards before tracing and compiles missing variants with static shapes and
+  autotuning. Preserve native mutations, storage aliases, and stream dependencies;
+  bind process-local kernel handles and caller-owned tensors at startup. Complete
+  b12x preparation, tuning, binding refresh, and compiled warmup before capturing
+  each serving graph. Retain compiled kernel owners until native replay has drained.
 - **Prepare the whole serving shape range.** Include batch-one decode, packed
   decode, partial/inactive rows, and configurable chunked prefill through at
   least 4096 tokens. Test alternating graph variants with shared scratch and
