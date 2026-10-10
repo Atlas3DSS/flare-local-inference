@@ -1,6 +1,7 @@
 """Restored forwards bind live storage and native handles before graph capture."""
 
 import os
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -8,7 +9,7 @@ import triton
 import triton.language as tl
 from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
 
-from flare.preparation.aot import ForwardCache, aot_forward
+from flare.preparation.aot import ForwardCache, _guard_code_cache, aot_forward
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="explicit CUDA assignment required")
@@ -89,13 +90,15 @@ def test_restored_handles_aliases_and_triton_registration(handle, tmp_path):
 
 @torch.no_grad()
 @pytest.mark.parametrize("rebind", [False, True])
-def test_restored_forward_rejects_changed_storage_aliases(tmp_path, rebind):
+@pytest.mark.parametrize("cached_guards", [False, True])
+def test_restored_forward_rejects_changed_storage_aliases(tmp_path, rebind, cached_guards):
     original = BufferForward(19)
     compiled = aot_forward(original)
     compiled(original)
     path = tmp_path / "forward.bin"
     compiled.save_compiled_function(str(path))
-    with path.open("rb") as file:
+    restoration = _guard_code_cache(tmp_path / "guards") if cached_guards else nullcontext()
+    with restoration, path.open("rb") as file:
         restored = torch.compiler.load_compiled_function(file)
     fresh = BufferForward(23)
     different = torch.empty_like(fresh.storage).view(torch.float32)[16:48]

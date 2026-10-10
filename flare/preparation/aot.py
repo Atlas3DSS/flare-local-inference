@@ -8,6 +8,7 @@ import os
 import pickle
 import tempfile
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -22,6 +23,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, tr
 from .compilation import _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table, _byte_storage, _lower_storage
 
 _GUARD_LOCK = RLock()
+_GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
 
 
 class BindingMismatch(ValueError):
@@ -34,6 +36,17 @@ def _guard_object(cls):
 
 class _GuardPickler(GuardsStatePickler):
     """Exclude unguarded kernel resources from prepared Python objects."""
+
+    @classmethod
+    def _unpickle_tensor(cls, meta_tensor, device, pytype, dispatch_keys_raw, grad):
+        mode = _GUARD_TENSOR_MODE.get()
+        if mode is None:
+            return super()._unpickle_tensor(meta_tensor, device, pytype, dispatch_keys_raw, grad)
+        value = mode.fake_tensor_converter.from_meta_and_device(
+            mode, meta_tensor, device, pytype,
+            torch._C.DispatchKeySet.from_raw_repr(dispatch_keys_raw))
+        value.grad = grad
+        return value
 
     def reducer_override(self, obj):
         from triton.runtime import JITFunction
@@ -88,11 +101,13 @@ def _guard_code_cache(root):
                     temporary.unlink(missing_ok=True)
             return result
 
+        token = _GUARD_TENSOR_MODE.set(torch._subclasses.FakeTensorMode())
         guards.build_guard_function = build
         try:
             yield
         finally:
             guards.build_guard_function = original
+            _GUARD_TENSOR_MODE.reset(token)
 
 
 def _signature(inputs):
@@ -276,7 +291,8 @@ class ForwardCache:
         from torch._inductor.codecache import torch_key
 
         properties = torch.cuda.get_device_properties(device)
-        key = hashlib.sha256(pickle.dumps((namespace, _OPTIONS, torch_key(),
+        options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
+        key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
             properties.name, properties.major, properties.minor, properties.multi_processor_count)))
         for root in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
             for path in sorted(root.rglob('*.py')):
