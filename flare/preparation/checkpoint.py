@@ -318,14 +318,17 @@ def _inspect_indexed_checkpoint(snapshot: Path, index: dict) -> IndexedCheckpoin
     weight_map = index.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
         raise CheckpointError("model.safetensors.index.json: missing weight_map")
+    shard_names = set()
     for name, shard in weight_map.items():
-        if (
-            not name or not isinstance(shard, str) or PurePosixPath(shard).is_absolute()
-            or ".." in PurePosixPath(shard).parts or not shard.endswith(".safetensors")
-        ):
+        if not name or not isinstance(shard, str):
             raise CheckpointError(f"invalid indexed shard for {name}: {shard!r}")
+        if shard not in shard_names:
+            path = PurePosixPath(shard)
+            if path.is_absolute() or ".." in path.parts or not shard.endswith(".safetensors"):
+                raise CheckpointError(f"invalid indexed shard for {name}: {shard!r}")
+            shard_names.add(shard)
     tensors, shards = {}, []
-    for shard in sorted(set(weight_map.values())):
+    for shard in sorted(shard_names):
         record, entries = _read_header(snapshot / shard, shard)
         for name in entries:
             if name in tensors:
