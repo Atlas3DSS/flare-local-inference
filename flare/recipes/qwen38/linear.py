@@ -6,14 +6,13 @@ from dataclasses import replace
 from functools import partial
 
 import torch
-from b12x.gemm import bf16_gemv
-from b12x.gemm import blockscaled
+from b12x.gemm import bf16_gemv, blockscaled
 from b12x.preparation import PreparationSession, PreparedCall
 
-from flare.preparation.scratch import ScratchArena, scratch_storage, prime_owners
-from flare.preparation.tuning import register_finalizer
-from flare.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 from flare.preparation.fixtures import bf16_gemv as bf16_fixtures
+from flare.preparation.fixtures import blockscaled_gemm as gemm_fixtures
+from flare.preparation.scratch import ScratchArena, prime_owners, scratch_storage
+from flare.preparation.tuning import register_finalizer
 
 
 class BF16Projection:
@@ -106,7 +105,7 @@ class QuantizedProjection:
 def _parallel_mxfp8_projections(
     source: torch.Tensor, values: list[torch.Tensor], scales: list[torch.Tensor],
     outputs: list[torch.Tensor], workspaces: list[torch.Tensor],
-    plans: list[int], auxiliary_stream: int,
+    plans: list[int], auxiliary_stream: int, join: bool = True,
 ) -> None:
     from b12x.gemm.blockscaled._ops import _out_workspace
 
@@ -122,11 +121,12 @@ def _parallel_mxfp8_projections(
     with torch.cuda.stream(auxiliary):
         project(1)
     project(0)
-    main.wait_stream(auxiliary)
+    if join:
+        main.wait_stream(auxiliary)
 
 
 @_parallel_mxfp8_projections.register_fake
-def _fake_parallel_mxfp8_projections(source, values, scales, outputs, workspaces, plans, auxiliary_stream):
+def _fake_parallel_mxfp8_projections(source, values, scales, outputs, workspaces, plans, auxiliary_stream, join=True):
     pass
 
 

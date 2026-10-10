@@ -137,7 +137,7 @@ def test_qsa_binding_refreshes_selected_payload_and_resized_workspace(
     )
     weights = {
         name: object()
-        for name in ("q_proj", "k_proj", "v_proj", "o_proj", "indexer.index_qk_proj")
+        for name in ("qkv_proj", "o_proj", "indexer.index_qk_proj")
     }
     arena = ScratchArena("cpu")
     operator = attention.PreparedAttention(

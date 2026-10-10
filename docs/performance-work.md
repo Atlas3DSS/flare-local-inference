@@ -50,10 +50,14 @@ caller-owned scratch, and allocation-stable replay are required.
    serial layers and graph variants reuse the same storage. Shared-expert
    projections run alongside routing and routed experts at capacities up to 256
    rows, using a disjoint arena suffix. A captured join precedes shared-expert
-   gating and the final sum, which remain visible to Inductor. Evaluate QSA indexing
-   alongside QKV projection, with joins captured before dependent operators
-   consume their outputs. Fork and
-   rejoin auxiliary streams within Python's capture of a single CUDA graph;
+   gating and the final sum, which remain visible to Inductor. MXFP8 QSA input
+   projections overlap at capacities up to 16 rows. Index projection and b12x
+   selection use the auxiliary stream while QKV projection, normalization,
+   rotary embedding, and KV writes use the main stream. Separate workspace
+   views isolate both projections and QSA. The b12x selection-stream join
+   precedes attention, and explicit tensor operands preserve cache mutations
+   and final KV-pool rebinding through compilation. Fork and rejoin auxiliary
+   streams within Python's capture of a single CUDA graph;
    Rust continues to launch one graph per replay. Allocate workspace by
    simultaneous use across branches, then reuse it across serial layers.
    Verify the graph retains overlap after compilation and measure complete

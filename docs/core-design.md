@@ -400,17 +400,21 @@ projected outputs occupy separate scratch. Autotuning retains private seeded
 fixtures. [Shared-priming qualification](validation/hyperconnection-priming.md)
 accounts for 15.08 GiB of removed duplicate allocations at the 4,096-token limit.
 
-One `flare.preparation.scratch.ScratchArena` supplies byte storage to serialized
-quantized projections, GDN, QSA, routed MoE, PLE, and vision attention across all
-layers and graph capacities. `arena.views(*shapes_and_dtypes)` returns contiguous
+One `flare.preparation.scratch.ScratchArena` supplies byte storage to quantized
+projections, GDN, QSA, routed MoE, PLE, and vision attention across serialized
+layers and graph executions. `arena.views(*shapes_and_dtypes)` returns contiguous
 typed views with 256-byte-aligned, nonoverlapping regions for buffers needed by
-one invocation. Separate invocations reuse the arena from offset zero.
+simultaneous work. Serial invocations reuse the arena from offset zero.
+`register_parallel(*plans)` declares operations whose scratch must coexist;
+their aligned requirements are added within each group. Separate groups reuse
+storage, so the reserved extent is the maximum across serial operations and
+concurrent groups.
 `reserve(nbytes)` grows the backing tensor during preparation. Candidate
 measurement uses the maximum scratch requirement of the complete legal
 candidate envelope, including alignment, rather than a sum of per-family,
 per-layer, or per-candidate allocations. After selection and CUDA synchronization,
-`trim(nbytes)` replaces that storage with the maximum scratch requirement of
-the selected plans. `freeze()` then rejects growth beyond the retained extent.
+`trim(nbytes)` replaces that storage with the peak requirement of the selected
+plans and concurrent groups. `freeze()` then rejects growth beyond the retained extent.
 
 `RecordedPreparationSession.register_scratch(arena)` associates that storage
 with the batched declarations. The session reserves the complete candidate
@@ -423,6 +427,14 @@ singleton operations whose preparation factory need not run again. A plain
 untuned preparation constructs every owner before finalizing and freezing its
 arena, then captures graphs. Bound addresses must not change after capture.
 The arena remains owned until all referencing graphs and native CUDA work drain.
+
+One preparation-owned auxiliary stream overlaps independent GDN projections,
+shared and routed experts, and QSA selection with its main QKV producer.
+Concurrent branches use disjoint scratch views. Opaque operations preserve
+forks, joins, input lifetimes, and tensor mutations through forward compilation.
+Every branch rejoins before dependent outputs or reused scratch are consumed.
+Python captures these dependencies inside one CUDA graph; Rust submits that
+graph without calling Python or managing the internal streams.
 
 b12x retains priming `PreparedCall.owners` with prepared plans. Priming calls use
 `prime_owners(arena, ...)` to retain the arena object without retaining obsolete

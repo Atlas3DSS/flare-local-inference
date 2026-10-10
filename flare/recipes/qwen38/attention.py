@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 import torch
 from b12x.attention import paged_kv_write, qsa
 from b12x.preparation import PreparationSession, PreparedCall
 from transformers.models.qwen4_exp.modeling_qwen4_exp import apply_rotary_pos_emb
 
-from flare.preparation.scratch import planned_scratch, prime_owners
+from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
 
+from .attention_overlap import ConcurrentAttention
 from .linear import BF16Projection, QuantizedProjection
 
 
@@ -158,8 +159,8 @@ class PreparedAttention:
     def __init__(self, module: torch.nn.Module, weights: Mapping, source: torch.Tensor,
                  scratch: QSAScratch, state: QSAState, metadata: QSAMetadata,
                  rotary: RotaryTables, *, session: PreparationSession, name: str,
-                 draft_tokens: int = 0, workspace: torch.Tensor | None = None,
-                 projection_workspace: torch.Tensor | None = None,
+                 draft_tokens: int = 0, workspace: ScratchArena | torch.Tensor | None = None,
+                 projection_workspace: ScratchArena | torch.Tensor | None = None,
                  max_cache_pages: int | None = None) -> None:
         self.module, self.scratch, self.state = module, scratch, state
         self.metadata, self.rotary = metadata, rotary
@@ -230,11 +231,17 @@ class PreparedAttention:
         register_finalizer(session, refresh, workspace=workspace)
         self.writer = paged_kv_write.plan(paged_kv_write.Caps(device=source.device,
             num_kv_heads=2, head_dim_k=256, head_dim_v=256, page_size=page_size))
-        self.write_kwargs = dict(key=scratch.key, value=scratch.projected_v.view(self.tokens, 2, 256),
-                                 k_cache=state.main_k_cache, v_cache=state.main_v_cache,
-                                 slot_mapping=metadata.slot_mapping)
+        self.write_kwargs = {"key": scratch.key, "value": scratch.projected_v.view(self.tokens, 2, 256),
+                             "k_cache": state.main_k_cache, "v_cache": state.main_v_cache,
+                             "slot_mapping": metadata.slot_mapping}
         session.prepare((self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
             PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),))
+        self.concurrent = None
+        if (self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
+                and workspace is projection_workspace
+                and all(isinstance(self.projections[key], QuantizedProjection)
+                        for key in ("qkv_proj", "indexer.index_qk_proj"))):
+            self.concurrent = ConcurrentAttention(self, session=session, workspace=workspace)
 
     def dynamic(self) -> dict:
         return {"query": self.scratch.query, "index_query": self.index_query,
@@ -262,8 +269,11 @@ class PreparedAttention:
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         s = self.scratch
-        self.projections["indexer.index_qk_proj"](source)
-        self.projections["qkv_proj"](source)
+        if self.concurrent is None:
+            self.projections["indexer.index_qk_proj"](source)
+            self.projections["qkv_proj"](source)
+        else:
+            self.concurrent.project(source)
         projected = s.projected_q.view(self.tokens, 24, 512)
         query, gate = projected[..., :256], projected[..., 256:]
         key = s.projected_k.view(self.tokens, 2, 256)
@@ -273,7 +283,7 @@ class PreparedAttention:
         s.query.copy_(query)
         s.key.copy_(key)
         paged_kv_write.run(self.writer, **self.write_kwargs)
-        attention = qsa.run(self.binding, **self.dynamic())
+        attention = qsa.run(self.binding, **self.dynamic()) if self.concurrent is None else self.concurrent.attend(source)
         s.gated.copy_(attention.flatten(1) * torch.sigmoid(gate.reshape(self.tokens, 6144)))
         output = self.projections["o_proj"](s.gated)
         output.masked_fill_((self.metadata.request_ids < 0)[:, None], 0)
