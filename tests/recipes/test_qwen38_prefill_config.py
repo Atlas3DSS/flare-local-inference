@@ -6,11 +6,11 @@ from flare.recipes.qwen38.bootstrap import PreparationConfig
 
 
 @pytest.mark.parametrize("size, expected", [
-    (64, (1, 16, 64)),
-    (512, (1, 16, 64, 128, 256, 512)),
-    (3072, (1, 16, 64, 128, 256, 512, 1024, 2048, 3072)),
-    (4096, (1, 16, 64, 128, 256, 512, 1024, 2048, 4096)),
-    (8192, (1, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192)),
+    (64, (64,)),
+    (512, (128, 256, 512)),
+    (3072, (128, 256, 512, 1024, 2048, 3072)),
+    (4096, (128, 256, 512, 1024, 2048, 4096)),
+    (8192, (128, 256, 512, 1024, 2048, 4096, 8192)),
 ])
 def test_prefill_catalog_covers_aligned_limit_and_partial_tails(size, expected):
     config = PreparationConfig(prefill_chunk_size=size)
@@ -34,7 +34,7 @@ def test_prefill_chunk_requires_page_alignment_and_context_bound(size):
 def test_prefill_chunk_must_fit_explicit_context():
     with pytest.raises(ValueError, match="prefill chunk size"):
         PreparationConfig(context=2048, prefill_chunk_size=4096)
-    assert PreparationConfig(context=64, prefill_chunk_size=64).prefill_capacities == (1, 16, 64)
+    assert PreparationConfig(context=64, prefill_chunk_size=64).prefill_capacities == (64,)
 
 
 @pytest.mark.parametrize("arguments, expected", [([], 4096), (["--prefill-chunk-size", "3072"], 3072)])

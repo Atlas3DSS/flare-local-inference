@@ -7,7 +7,7 @@ from flare.recipes.glm53.bootstrap import PreparationConfig
 
 def test_default_catalog_covers_4096_prefill_and_four_requests():
     config = PreparationConfig()
-    assert config.prefill_capacities == (1, 16, 64, 128, 256, 512, 1024, 2048, 4096)
+    assert config.prefill_capacities == (128, 256, 512, 1024, 2048, 4096)
     assert config.batch_capacities == (4, 2, 1)
     assert config.page_capacity == 4 * (262144 // 256)
     assert PreparationConfig(prefill_chunk_size=3072).prefill_capacities[-2:] == (2048, 3072)

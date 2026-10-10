@@ -26,7 +26,7 @@ def make_scenario(tmp_path, cap=512):
     for kind in ('init', 'restore', 'snapshot', 'resume', 'decode'):
         for batch in (1, 2, 4):
             signatures[f'{kind}{batch}'] = GraphSignature(kind, batch, 1, tuple(buffers))
-    for size in (1, 16, 64, 128, 256, 512, *([1024] if cap > 512 else [])):
+    for size in (128, 256, 512, *([1024] if cap > 512 else [])):
         signatures[f'prefill{size}'] = GraphSignature('prefill', 1, size, tuple(buffers))
     for size in (256, 1024, 4096, 16384):
         signatures[f'vision{size}'] = GraphSignature('vision', 1, size, tuple(buffers))
@@ -88,7 +88,7 @@ def test_partial_restore_has_private_tail_and_physical_tables_before_maintenance
     assert uploaded(scenario, command, 'state_destination_slots', torch.int64).tolist() == [4, 0, 0, 0]
     pages = uploaded(scenario, command, 'page_tables', torch.int32).reshape(4, -1)
     assert pages[3, :len(restored_pages)].tolist() == restored_pages
-    scenario.prefill(3, 75, 16)
+    scenario.prefill(3, 75, 128)
     assert scenario.groups[-1][0]['expected_records']['3']['consumed'] == 75
     bad = prompt.copy(); bad[66] += 1
     with pytest.raises(ValueError, match='exact checkpoint token prefix'):

@@ -46,13 +46,9 @@ impl SchedulerLimits {
 
 /// Required token capacities for a validated, 64-aligned prefill chunk limit.
 pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
-    [1, 16]
-        .into_iter()
-        .chain(
-            std::iter::successors(Some(64usize), |capacity| capacity.checked_mul(2))
-                .take_while(move |capacity| *capacity <= chunk_size),
-        )
-        .chain((!chunk_size.is_power_of_two()).then_some(chunk_size))
+    std::iter::successors(Some(128usize), |capacity| capacity.checked_mul(2))
+        .take_while(move |capacity| *capacity < chunk_size)
+        .chain(std::iter::once(chunk_size))
 }
 
 #[derive(Clone, Debug)]

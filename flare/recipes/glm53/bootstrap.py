@@ -65,7 +65,7 @@ class PreparationConfig:
 
     @property
     def prefill_capacities(self):
-        sizes, capacity = [1, 16], 64
+        sizes, capacity = [], 128
         while capacity < self.prefill_chunk_size:
             sizes.append(capacity)
             capacity *= 2

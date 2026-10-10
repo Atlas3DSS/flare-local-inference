@@ -654,7 +654,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     assert session.closed
     expected = {
         "vision": 4,
-        "prefill": 9,
+        "prefill": 6,
         "resume": 3,
         "init": 3,
         "restore": 3,
@@ -684,7 +684,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         if signature.kind in ("prefill", "resume", "speculative")
     )
     decoders = constructors["PreparedDecoder"]
-    assert len(decoders) == (12 if proposal == "ordinary" else 23)
+    assert len(decoders) == (9 if proposal == "ordinary" else 20)
     assert len(constructors["PreparedVision"]) == 4
     assert len(constructors["PreparedMaintenance"]) == 9
     assert len(constructors["PreparedResume"]) == 3
@@ -715,7 +715,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
             assert type(layer[1]).__name__ == (
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
-    assert len(constructors["PreparedMTP"]) == (34 if proposal == "mtp" else 0)
+    assert len(constructors["PreparedMTP"]) == (31 if proposal == "mtp" else 0)
     assert len(constructors["PreparedCheckpointCaches"]) == 9
     for owner, _ in constructors["PreparedMaintenance"]:
         assert owner.transfers.exact.pool is owner.pool

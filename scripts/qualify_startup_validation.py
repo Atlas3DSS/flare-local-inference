@@ -35,7 +35,7 @@ SNAPSHOT = Path.home() / ".cache/huggingface/hub" / (
 ABI_VERSION = 2
 GRAPH_CAPACITIES = {
     **{kind: ((1, 1), (2, 1), (4, 1)) for kind in ("init", "restore", "snapshot", "resume", "decode")},
-    "prefill": tuple((1, n) for n in (1, 16, 64, 128, 256, 512)),
+    "prefill": tuple((1, n) for n in (128, 256, 512)),
     "vision": tuple((1, n) for n in (256, 1024, 4096, 16384)),
 }
 

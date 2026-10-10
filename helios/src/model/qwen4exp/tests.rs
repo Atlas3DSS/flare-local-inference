@@ -151,7 +151,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
 fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
     let config = config();
     let original = manifest(&config);
-    assert_eq!(original.graphs.len(), 25);
+    assert_eq!(original.graphs.len(), 22);
     for kind in [GraphKind::Prefill, GraphKind::Decode, GraphKind::Resume] {
         {
             let mode = SamplingMode::General;
@@ -254,7 +254,7 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
     config.speculative_widths = (1..=8).collect();
     let original = manifest(&config);
     validate::<Qwen4Exp>(&config, &original).unwrap();
-    assert_eq!(original.graphs.len(), 36);
+    assert_eq!(original.graphs.len(), 33);
     assert!(
         original
             .graphs
@@ -857,7 +857,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
     };
     scheduler.complete(Fence(1), &records).unwrap();
     let mut inputs = Inputs::new();
-    for (sequence, start, count, capacity) in [(2, 0, 4096, 4096), (3, 4096, 17, 64)] {
+    for (sequence, start, count, capacity) in [(2, 0, 4096, 4096), (3, 4096, 17, 128)] {
         let step = scheduler.next_step().unwrap();
         assert_eq!(
             (step.lanes[0].tokens, step.token_capacity),

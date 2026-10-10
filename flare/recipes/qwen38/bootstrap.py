@@ -112,8 +112,8 @@ class PreparationConfig:
 
     @property
     def prefill_capacities(self) -> tuple[int, ...]:
-        capacities = [1, 16]
-        capacity = 64
+        capacities = []
+        capacity = 128
         while capacity < self.prefill_chunk_size:
             capacities.append(capacity)
             capacity *= 2

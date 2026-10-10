@@ -190,7 +190,7 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
         .complete(Fence(2), &records(handle, 2, 512, 0, -1, 1))
         .unwrap();
     let step = scheduler.next_step().unwrap();
-    assert_eq!((step.token_capacity, step.lanes[0].tokens), (64, 17));
+    assert_eq!((step.token_capacity, step.lanes[0].tokens), (128, 17));
     scheduler.record_submission(&step, Fence(3)).unwrap();
     assert_eq!(scheduler.request(handle).unwrap().pages().count(), 9);
     scheduler
@@ -205,7 +205,7 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
 
 #[test]
 fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents() {
-    for (chunk_size, tail, tail_capacity) in [(4096, 17, 64), (3072, 2050, 3072), (8192, 513, 1024)]
+    for (chunk_size, tail, tail_capacity) in [(4096, 17, 128), (3072, 2050, 3072), (8192, 513, 1024)]
     {
         let mut scheduler = RequestScheduler::new(
             [9; 32],

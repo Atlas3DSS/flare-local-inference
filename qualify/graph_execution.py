@@ -636,17 +636,17 @@ class Scenario:
         self.emit(f"snapshot{capacity}", slots, note="copy exact live state and private cache tails into an immutable snapshot")
 
     def build(self):
-        if not {1, 16, 64, 128, 256, 512} <= set(self.prefill_capacities):
-            raise ValueError("qualification retains every original prefill case and requires a chunk limit of at least 512")
+        if not {128, 256, 512} <= set(self.prefill_capacities):
+            raise ValueError("graph execution scenarios require prefill capacities 128, 256 and 512")
         prompts = {3: self.tokens(64, "aligned"), 0: self.tokens(513, "chunked"),
             2: self.tokens(67, "cold-tail"), 1: self.tokens(77, "split-tail")}
         self.admit("init", 4, [(slot, prompts[slot], 11, 0xF0123456789ABCDE + slot, None, 32) for slot in (3, 0, 2, 1)])
-        self.prefill(3, 64, 64, sample=False)
+        self.prefill(3, 64, 128, sample=False)
         self.prefill(0, 512, 512, sample=False)
-        self.prefill(0, 513, 1)
+        self.prefill(0, 513, 128)
         self.prefill(2, 67, 128)
-        self.prefill(1, 64, 64, sample=False)
-        self.prefill(1, 77, 16)
+        self.prefill(1, 64, 128, sample=False)
+        self.prefill(1, 77, 128)
         self.snapshot(4, [1, 3, 0, 2], [1, 3, 0, 2])
         self.forward("resume", 1, [3])
         self.forward("decode", 4, [0, 3, 1, 2])
@@ -657,11 +657,11 @@ class Scenario:
         branch = prompts[2][:64] + self.tokens(13, "branch")
         # The branch changes tokens after 64; produce its exact prefix independently.
         self.admit("init", 1, [(0, prompts[2], 12, 3456, None, 32)])
-        self.prefill(0, 64, 64, sample=False)
+        self.prefill(0, 64, 128, sample=False)
         self.snapshot(1, [0], [4])
         self.admit("restore", 2, [(1, prompts[3], 12, 2345, 3, 32), (0, branch, 13, 3456, 4, 32)])
         self.forward("resume", 2, [1])
-        self.prefill(0, 77, 16)
+        self.prefill(0, 77, 128)
         self.forward("decode", 2, [1, 0])
         self.forward("decode", 2, [0, 1], pair=True)
         self.snapshot(2, [2, 3], [4, 5])
@@ -673,7 +673,7 @@ class Scenario:
         self.admit("restore", 1, [(0, sixth, 14, 6789, 7, 32)])
         self.forward("resume", 4, [0])
         self.admit("init", 1, [(1, self.tokens(63, "page-boundary"), 13, 7890, None, 2)])
-        self.prefill(1, 63, 64)
+        self.prefill(1, 63, 128)
         self.forward("decode", 1, [1])
         self.forward("decode", 1, [1], pair=True)
         self.snapshot(1, [1], [8])
@@ -698,13 +698,13 @@ class Scenario:
             2: self.tokens(255, "greedy-wide-tail"), 1: self.tokens(77, "greedy-split-tail")}
         self.admit("init", 4, [(slot, prompts[slot], 201, 12000 + slot, None, 32) for slot in (3, 0, 2, 1)],
             temperatures={slot: 0. for slot in range(4)})
-        self.prefill(3, 64, 64, sample=False)
+        self.prefill(3, 64, 128, sample=False)
         self.prefill(3, 128, 128, sample=False)
         self.prefill(0, 512, 512, sample=False)
-        self.prefill(0, 513, 1)
+        self.prefill(0, 513, 128)
         self.prefill(2, 255, 256)
-        self.prefill(1, 64, 64, sample=False)
-        self.prefill(1, 77, 16)
+        self.prefill(1, 64, 128, sample=False)
+        self.prefill(1, 77, 128)
         self.snapshot(4, [1, 3, 0, 2], [1, 3, 0, 2])
         self.forward("resume", 1, [3])
         self.forward("decode", 4, [0, 3, 1, 2])

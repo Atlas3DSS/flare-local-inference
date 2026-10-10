@@ -144,7 +144,7 @@ single-GPU core.
 | Decode graph capacities | 1, 2, 4 |
 | Prefill scheduling | One request per chunk, interleaved with decode |
 | Maximum prefill chunk | 4,096 tokens; configurable with `--prefill-chunk-size` |
-| Prefill graph capacities | 1, 16, 64, 128, 256, 512, 1,024, 2,048, 4,096 tokens |
+| Prefill graph capacities | 128, 256, 512, 1,024, 2,048, 4,096 tokens |
 | Prefill tail placement | Smallest capacity that holds the tail |
 | Maximum context | Checkpoint limit: 262,144 tokens |
 | Main KV precision | BF16 |
@@ -156,10 +156,10 @@ single-GPU core.
 | Speculative decoding | Optional copy or learned-MTP preparation; one round in flight; qualification requirements in the MTP design |
 
 The configured prefill chunk size must be a multiple of 64 between 64 and the
-configured context limit. Its graph capacities are the sorted union of
-`{1, 16}`, powers of two starting at 64 and not exceeding the configured chunk
-size, and the exact chunk size. A non-power-of-two limit therefore has its own
-captured graph. The native scheduler uses the declared limit and selects the
+configured context limit. Its graph capacities are powers of two starting at
+128 below the configured chunk size, plus the exact chunk size. An explicit
+64-token chunk limit uses a single 64-token prefill graph. A non-power-of-two
+limit therefore has its own captured graph. The native scheduler uses the declared limit and selects the
 smallest captured capacity that contains each chunk or tail.
 This configuration range is a structural contract, not a guarantee that every
 size fits the model's kernel and device-memory limits. Preparation must validate
@@ -167,9 +167,9 @@ every declared operator query and workspace envelope; unsupported geometry or
 insufficient memory fails startup without reducing the chunk size or omitting a
 graph variant.
 
-At the default prefill limit, ordinary execution declares 28 graphs. Speculative
+At the default prefill limit, ordinary execution declares 25 graphs. Speculative
 execution replaces the three ordinary decode graphs with 14 verification shapes,
-producing 39 graphs. Every variant uses the common FlashInfer sampler. The
+producing 36 graphs. Every variant uses the common FlashInfer sampler. The
 catalog includes vision, prefill, resume, initialization, snapshot, and restore;
 startup rejects incomplete declarations.
 
@@ -603,12 +603,11 @@ The loader must:
 
 Avoid materializing a second full model or a fully dequantized expert table.
 
-Native NVFP4 compressed-scale batches are cached under
-`$XDG_CACHE_HOME/flare/nvfp4-scales`, defaulting to `~/.cache/flare/nvfp4-scales`.
-Checkpoint file metadata, tensor ranges, partition geometry, and b12x's code
-cache identity determine reuse. Warm loads transfer these batches through the
-b12x direct loader. The cache contains compressed scales and exception indices;
-packed expert weights continue to load from the checkpoint.
+NVFP4 compressed scales load directly from checkpoint tensors into CUDA storage
+through b12x's direct loader. b12x performs TP slicing, gate/up joining, native
+layout conversion, and exception indexing on the GPU. Temporary compressed
+source storage is released after each layer is prepared. W4A16 scale repacking
+also remains on the GPU. No prepared-scale disk cache is used.
 
 The local snapshot's safetensors headers give this storage breakdown:
 
@@ -1121,9 +1120,9 @@ There is no separate greedy graph or runtime route.
 
 Execution ABIs 2 and 3 retain `sampling_mode="general"` as their sole supported
 manifest value. With batch capacities 1, 2 and 4, the ordinary serving catalog
-contains `19 + len(prefill_capacities)` graphs: 28 with the 4,096-token default,
-or 25 with a 512-token limit. The speculative catalog replaces three ordinary
-decode graphs with 14 verification shapes, for 39 graphs at the default prefill
+contains `19 + len(prefill_capacities)` graphs: 25 with the 4,096-token default,
+or 22 with a 512-token limit. The speculative catalog replaces three ordinary
+decode graphs with 14 verification shapes, for 36 graphs at the default prefill
 capacity. Bounded top-k optimization is deferred. Historical component
 measurements of the general path were 120–170 microseconds per step; each
 prepared implementation requires its own measurement. Threshold ties must never
