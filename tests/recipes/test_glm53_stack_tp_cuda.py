@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -41,7 +42,7 @@ def _inputs(metadata, tokens, start):
                                    * 256 + index.positions[:count] % 256)
 
 
-def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
+def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=()):
     from transformers import AutoTokenizer
 
     from flare.components.parallel import TensorParallelShard
@@ -62,6 +63,17 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
     from flare.recipes.glm53.state import DecoderMetadata, DecoderState
     from flare.recipes.glm53.weights import ModelWeights
 
+    peers = []
+    for index, (root, peer) in enumerate(sockets, start=1):
+        if rank == 0:
+            peers.append(root)
+            peer.close()
+        else:
+            root.close()
+            if rank == index:
+                connection = peer
+            else:
+                peer.close()
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     def progress(message):
@@ -125,7 +137,6 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
                               for mode in graphs}
                 bundle = PreparedExecution(device=rank, graphs=graphs, buffers=buffers, signatures=signatures,
                     resources=(*resources, requests, inputs))
-                worker = bundle.start_executor()
             else:
                 bundle = PreparedGraphBundle(device=rank, graphs=graphs, buffers=buffers, resources=resources)
                 worker = bundle.start_worker()
@@ -146,7 +157,14 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
                 host.live_rows.fill_(1)
                 host.sample_enabled[0] = 1
                 host.page_tables[0].copy_(torch.arange(63, -1, -1, dtype=torch.int32))
-            for index in range(32 if generate else 4):
+                torch.cuda.synchronize(device)
+                dist.barrier(group=group)
+                before_handoff = torch.cuda.memory_stats(device)
+                if rank == 0:
+                    worker = bundle.start_executor(peers=peers)
+                else:
+                    bundle.serve_rank(connection, rank=rank, world=world)
+            for index in range((0 if rank else 32) if generate else 4):
                 mode = "prefill" if index == 0 else "decode"
                 start = 0 if index == 0 else (len(tokens) if generate else capacity) + index - 1
                 if generate:
@@ -159,7 +177,8 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
                     _inputs(metadata[mode], tokens[:capacity] if index == 0 else tokens[start:start + 1], start)
                 torch.cuda.synchronize(device)
                 before = torch.cuda.memory_stats(device)
-                dist.barrier(group=group)
+                if not generate:
+                    dist.barrier(group=group)
                 if generate:
                     ticket = worker.submit(bundle.graph_indices[mode], uploads)
                     completion = None
@@ -180,17 +199,16 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
                     record = completion.records[0]
                     assert record[:4] == [1, ticket, len(tokens) + index, index + 1 if rank == 0 else 0]
                     assert record[6] == 0 and record[5] in (1, 2)
-                    message = [record[4], record[5] == 2] if rank == 0 else [None, None]
-                    dist.broadcast_object_list(message, src=0, group=group)
-                    token, finished = message
+                    token, finished = record[4], record[5] == 2
                     assert 0 <= token < 154880
                     generated.append(token)
                 hidden = scratch[mode].hidden
                 assert torch.isfinite(hidden).all() and hidden.count_nonzero()
-                gathered = [None] * world
-                dist.all_gather_object(gathered, hidden.cpu(), group=group)
-                for value in gathered:
-                    torch.testing.assert_close(value, hidden.cpu(), rtol=0, atol=0)
+                if not generate:
+                    gathered = [None] * world
+                    dist.all_gather_object(gathered, hidden.cpu(), group=group)
+                    for value in gathered:
+                        torch.testing.assert_close(value, hidden.cpu(), rtol=0, atol=0)
                 if rank == 0:
                     logits = scratch[mode].logits
                     assert torch.isfinite(logits).all() and logits.count_nonzero()
@@ -202,11 +220,30 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
                 if finished:
                     break
             if generate:
-                assert generated and finished
-                progress(f"sampled {len(generated)} tokens: {tokenizer.decode(generated)!r}")
+                if rank == 0:
+                    assert generated and finished
+                    progress(f"sampled {len(generated)} tokens: {tokenizer.decode(generated)!r}")
+                    worker.close()
+                    assert worker.drained
+                    worker = None
+                after_handoff = torch.cuda.memory_stats(device)
+                for key in ("allocation.all.allocated", "allocation.all.freed", "segment.all.allocated", "segment.all.freed"):
+                    # Rank-zero output checks allocate diagnostic tensors after each step.
+                    if rank:
+                        assert before_handoff[key] == after_handoff[key], key
+                for value in scratch.values():
+                    gathered = [None] * world
+                    dist.all_gather_object(gathered, value.hidden.cpu(), group=group)
+                    for hidden in gathered:
+                        torch.testing.assert_close(hidden, value.hidden.cpu(), rtol=0, atol=0)
+                counts = [len(generated)]
+                dist.broadcast_object_list(counts, src=0, group=group)
+                assert requests.consumed_tokens[0] == len(tokens) + counts[0] - 1
+                assert requests.generated_tokens[0] == (counts[0] if rank == 0 else 0)
             progress(f"weight bytes {weights.allocated_bytes}; operator scratch bytes {arena.nbytes}")
-            worker.close()
-            worker = None
+            if worker is not None:
+                worker.close()
+                worker = None
             for graph in graphs.values():
                 graph.reset()
     finally:
@@ -216,6 +253,9 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
             graph.reset()
         runtime.close()
         dist.destroy_process_group()
+        for pair in sockets:
+            for connection in pair:
+                connection.close()
 
 
 @pytest.mark.parametrize("world", [2, 4])
@@ -237,5 +277,11 @@ def test_complete_generation_native_tp_replay(world, tmp_path):
         "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
-    mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), 128, True),
-             nprocs=world, join=True)
+    sockets = [socket.socketpair() for _ in range(world - 1)]
+    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), 128, True, sockets),
+                         nprocs=world, join=False)
+    for pair in sockets:
+        for connection in pair:
+            connection.close()
+    while not processes.join(timeout=1):
+        pass
