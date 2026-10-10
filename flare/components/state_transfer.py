@@ -37,6 +37,10 @@ class StateCommands:
                    torch.zeros(1, dtype=torch.int32, device=device),
                    torch.zeros(4, dtype=torch.int32, device=device))
 
+    def buffers(self):
+        """Fixed native upload names; validation errors are device-owned output."""
+        return {f"state_{name}": getattr(self, name) for name in self.__dataclass_fields__ if name != "errors"}
+
 
 @triton.jit
 def _validate(Sources, Destinations, Operations, Expected, Count, Errors, Consumed, Tables,

@@ -318,8 +318,23 @@ Resident request state remains unchanged on failure. Native TP2/TP4 component
 tests cover successful admission and branch restoration, plus an epoch,
 endpoint, page, admission, or command-count fault on one rank. Replay allocation
 and segment counters remain stable. These maintenance tests use Python/Gloo to
-coordinate rank submissions to native replay workers; complete-model snapshot
-and resume through the Rust rank coordinator remain unqualified.
+coordinate rank submissions to native replay workers.
+
+The shared [resume state](../flare/components/resume.py) validates consumed
+endpoints, pending samples, epochs, and rank participation before gathering saved
+normalized hidden outputs. [GLM resume](../flare/recipes/glm53/resume.py) then runs
+the vocabulary projection and FlashInfer sampling on rank zero; peers record
+completion without consuming tokens or changing continuation state.
+Complete-checkpoint TP2/TP4 tests run native init, 267 live tokens in a compiled
+512-token prefill graph, snapshot, two branch restores, resume, and decode through
+the Rust rank coordinator. Each branch shares the full 256-token page and owns
+its partial latent/index page. The snapshot includes three unfinished C4 tokens.
+Resume logits match prefill logits byte-for-byte. Both branches preserve the
+immutable snapshot and source KV pages and finish at a checkpoint EOS token.
+The sampled continuations contain 18/18 tokens on TP2 and 18/26 tokens on TP4.
+Peers remain inside Rust throughout execution and coordinated drain; allocation
+and segment counters stay stable during replay. The rank-zero test harness
+submits uploads and inspects results in Python.
 Production GLM serving and HTTP integration are not implemented.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,

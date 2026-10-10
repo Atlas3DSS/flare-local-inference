@@ -42,11 +42,16 @@ def _inputs(metadata, tokens, start):
                                    * 256 + index.positions[:count] % 256)
 
 
-def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=()):
+def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(), checkpoint=False):
     from transformers import AutoTokenizer
 
     from flare.components.parallel import TensorParallelShard
-    from flare.components.sampling import DeviceRequestState, RequestAdmission
+    from flare.components.sampling import (
+        AdmissionBuffers,
+        DeviceRequestState,
+        RequestAdmission,
+    )
+    from flare.components.state_transfer import StateCommands
     from flare.preparation.checkpoint import inspect_indexed_checkpoint
     from flare.preparation.collectives import (
         CollectivePreparation,
@@ -59,7 +64,9 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
     from flare.preparation.tuning import RecordedPreparationSession
     from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
     from flare.recipes.glm53.generation import PreparedGeneration
+    from flare.recipes.glm53.maintenance import PreparedMaintenance
     from flare.recipes.glm53.pool import ContinuationPool
+    from flare.recipes.glm53.resume import PreparedResume
     from flare.recipes.glm53.stack import DecoderScratch, PreparedDecoder
     from flare.recipes.glm53.state import DecoderMetadata
     from flare.recipes.glm53.weights import ModelWeights
@@ -102,6 +109,8 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
         records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device) if generate else None
         frame = torch.zeros(1, dtype=torch.int32, device=device) if generate else None
         sequence = torch.zeros(1, dtype=torch.int64, device=device) if generate else None
+        admission = AdmissionBuffers.allocate(device, vocab_size=154880) if checkpoint else None
+        commands = StateCommands.allocate(device) if checkpoint else None
         with RecordedPreparationSession(device=device, checkpoint="GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
                 workload_schema="glm-text-stack-tp-v1", numerical_policy="default", coordinator=coordinator) as session:
             session.register_scratch(arena)
@@ -117,13 +126,20 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                     batch = PreparedBatch(inputs, requests, metadata[mode], mode=mode, shard=shard, pages=64)
                     forwards[mode] = PreparedGeneration(decoders[mode], batch, records, frame, sequence,
                         pool=pool, runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.generation")
+            if checkpoint:
+                forwards["resume"] = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
+                    rows=1, runtime=runtime, coordinator=coordinator, session=session, name="resume")
+                for mode in ("init", "restore", "snapshot"):
+                    forwards[mode] = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                        runtime=runtime, coordinator=coordinator, session=session, name=mode, admission_buffers=admission)
+                graphs.update({mode: torch.cuda.CUDAGraph() for mode in ("resume", "init", "restore", "snapshot")})
             progress("autotuning complete text forwards")
             session.tune()
             compiled = {}
             stream = torch.cuda.Stream(device=device)
             for mode, decoder in forwards.items():
                 progress(f"compiling {mode}")
-                compiled[mode] = compile_forward(decoder)
+                compiled[mode] = decoder if isinstance(decoder, PreparedMaintenance) else compile_forward(decoder)
                 compiled[mode]()
                 torch.cuda.synchronize(device)
                 stream.wait_stream(torch.cuda.current_stream(device))
@@ -138,8 +154,18 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                 buffers = dict(inputs.buffers(), completion_records=records, frame_index=frame, submission_sequence=sequence)
                 signatures = {mode: GraphSignature(mode, 1, capacity if mode == "prefill" else 1, tuple(inputs.buffers()))
                               for mode in graphs}
+                if checkpoint:
+                    state_buffers = commands.buffers()
+                    admission_buffers = {name: getattr(admission, name) for name in admission.__dataclass_fields__}
+                    buffers.update(state_buffers)
+                    buffers.update(admission_buffers)
+                    rows = ("row_slot_ids", "row_generations", "live_rows")
+                    signatures["resume"] = GraphSignature("resume", 1, 1, rows)
+                    signatures["snapshot"] = GraphSignature("snapshot", 4, 1, (*rows, "page_tables", *state_buffers))
+                    for mode in ("init", "restore"):
+                        signatures[mode] = GraphSignature(mode, 4, 1, (*admission_buffers, "page_tables", *state_buffers))
                 bundle = PreparedExecution(device=rank, graphs=graphs, buffers=buffers, signatures=signatures,
-                    resources=(*resources, requests, inputs))
+                    resources=(*resources, requests, inputs, admission, commands))
             else:
                 bundle = PreparedGraphBundle(device=rank, graphs=graphs, buffers=buffers, resources=resources)
                 worker = bundle.start_worker()
@@ -149,12 +175,17 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
             tokens = (seed * ((capacity + 3 + len(seed) - 1) // len(seed)))[:capacity + 3]
             generated, finished = [], False
             if generate:
-                tokens = tokenizer.apply_chat_template([{"role": "user", "content":
-                    "In one short sentence, what does tensor parallelism do?"}],
+                content = "In one short sentence, what does tensor parallelism do?"
+                if checkpoint:
+                    content = "Context: " + "Tensor operations can run on multiple GPUs. " * 30 + "\n" + content
+                tokens = tokenizer.apply_chat_template([{"role": "user", "content": content}],
                     tokenize=True, return_dict=False, add_generation_prompt=True, reasoning_effort="low")
                 assert 0 < len(tokens) <= capacity
+                if checkpoint:
+                    assert len(tokens) > 256 and len(tokens) % 4 != 0
                 eos = json.loads((Path(snapshot) / "generation_config.json").read_text())["eos_token_id"]
-                requests.admit(0, RequestAdmission(1, 13, max_new_tokens=32, eos_token_ids=tuple(eos)), tokens)
+                if not checkpoint:
+                    requests.admit(0, RequestAdmission(1, 13, max_new_tokens=32, eos_token_ids=tuple(eos)), tokens)
                 host = BatchInputs.allocate(capacity, 64, "cpu")
                 host.row_slot_ids[0], host.row_generations[0] = 0, 1
                 host.live_rows.fill_(1)
@@ -167,7 +198,14 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                     worker = bundle.start_executor(peers=peers)
                 else:
                     bundle.serve_rank(connection, rank=rank, world=world)
-            for index in range((0 if rank else 32) if generate else 4):
+            branches = {}
+            if checkpoint and rank == 0:
+                from tests.recipes.glm53_cached_generation import run_cached_generation
+
+                branches = run_cached_generation(worker, bundle, pool, requests, scratch, forwards["resume"],
+                    tokens, eos, capacity, progress)
+                finished = True
+            for index in range((0 if rank or checkpoint else 32) if generate else 4):
                 mode = "prefill" if index == 0 else "decode"
                 start = 0 if index == 0 else (len(tokens) if generate else capacity) + index - 1
                 if generate:
@@ -226,8 +264,12 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                     break
             if generate:
                 if rank == 0:
-                    assert generated and finished
-                    progress(f"sampled {len(generated)} tokens: {tokenizer.decode(generated)!r}")
+                    assert (branches if checkpoint else generated) and finished
+                    if checkpoint:
+                        for slot, result in branches.items():
+                            progress(f"cached branch {slot}: {tokenizer.decode(result)!r}")
+                    else:
+                        progress(f"sampled {len(generated)} tokens: {tokenizer.decode(generated)!r}")
                     worker.close()
                     assert worker.drained
                     worker = None
@@ -241,12 +283,18 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                     dist.all_gather_object(gathered, value.hidden.cpu(), group=group)
                     for hidden in gathered:
                         torch.testing.assert_close(hidden, value.hidden.cpu(), rtol=0, atol=0)
-                counts = [len(generated)]
+                counts = [{slot: len(result) for slot, result in branches.items()} if checkpoint else {0: len(generated)}]
                 dist.broadcast_object_list(counts, src=0, group=group)
-                assert requests.consumed_tokens[0] == len(tokens) + counts[0] - 1
-                assert requests.generated_tokens[0] == (counts[0] if rank == 0 else 0)
-                torch.testing.assert_close(pool.last_hidden[1], scratch["decode"].hidden[0], rtol=0, atol=0)
-                assert not pool.backing[[0, 2, 3, 4, 5]].count_nonzero()
+                for slot, count in counts[0].items():
+                    assert requests.consumed_tokens[slot] == len(tokens) + count - 1
+                    assert requests.generated_tokens[slot] == (count if rank == 0 else 0)
+                last_slot = 3 if checkpoint else 1
+                torch.testing.assert_close(pool.last_hidden[last_slot], scratch["decode"].hidden[0], rtol=0, atol=0)
+                assert not pool.backing[[0, 4] if checkpoint else [0, 2, 3, 4, 5]].count_nonzero()
+                if checkpoint:
+                    assert pool.consumed_tokens[1] == len(tokens) and pool.consumed_tokens[5] == len(tokens)
+                    torch.testing.assert_close(pool.last_hidden[5], scratch["prefill"].hidden[0], rtol=0, atol=0)
+                    torch.testing.assert_close(forwards["resume"].state.hidden[0], pool.last_hidden[5], rtol=0, atol=0)
             progress(f"weight bytes {weights.allocated_bytes}; operator scratch bytes {arena.nbytes}")
             if worker is not None:
                 worker.close()
@@ -286,6 +334,23 @@ def test_complete_generation_native_tp_replay(world, tmp_path):
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     sockets = [socket.socketpair() for _ in range(world - 1)]
     processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), 128, True, sockets),
+                         nprocs=world, join=False)
+    for pair in sockets:
+        for connection in pair:
+            connection.close()
+    while not processes.join(timeout=1):
+        pass
+
+
+@pytest.mark.parametrize("world", [2, 4])
+def test_complete_cached_generation_native_tp_replay(world, tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
+    snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
+        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+    if not snapshot.is_dir():
+        pytest.skip("GLM 5.3 Flash checkpoint is not available")
+    sockets = [socket.socketpair() for _ in range(world - 1)]
+    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), 512, True, sockets, True),
                          nprocs=world, join=False)
     for pair in sockets:
         for connection in pair:
