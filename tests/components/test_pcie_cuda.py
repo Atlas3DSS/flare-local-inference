@@ -12,14 +12,16 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
     reason="requires four explicitly assigned CUDA devices and FLARE_RUN_TP_CUDA_TESTS=1")
 
 
-def _rank(rank, world_size, rendezvous, rows):
+def _rank(rank, world_size, rendezvous, rows, uneven=False):
     from b12x.comm.pcie import AllReduce
     from b12x.preparation import PreparationSession
 
     from flare.components.collectives import PreparedAllReduce
+    from flare.components.linear import UnquantizedProjection
     from flare.preparation.collectives import CollectivePreparation
     from flare.preparation.compilation import compile_forward
     from flare.preparation.graphs import PreparedGraphBundle
+    from flare.preparation.tuning import RecordedPreparationSession
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
@@ -36,14 +38,33 @@ def _rank(rank, world_size, rendezvous, rows):
     graph = torch.cuda.CUDAGraph()
     worker = None
     try:
-        with PreparationSession(device=device, autotune=True, compile_workers=0,
-                                collective_barrier=coordinator.barrier) as session:
+        preparation = RecordedPreparationSession(device=device, checkpoint="collective-test",
+            workload_schema="uneven-rank-preparation-v1", numerical_policy="default",
+            coordinator=coordinator) if uneven else PreparationSession(device=device, autotune=True,
+                compile_workers=0, collective_barrier=coordinator.barrier)
+        with preparation as session:
             reduction = PreparedAllReduce(source, output, runtime=runtime, session=session,
                 coordinator=coordinator, name=f"reduce{rows}")
+            projection, second = None, None
+            if uneven:
+                if rank == 0:
+                    projection_output = torch.empty((rows, 64), dtype=torch.bfloat16, device=device)
+                    projection = UnquantizedProjection(source,
+                        torch.full((64, 4096), .125, dtype=torch.bfloat16, device=device), projection_output,
+                        session=session, name="vocabulary")
+                second_output = torch.empty_like(source)
+                second = PreparedAllReduce(output, second_output, runtime=runtime, session=session,
+                    coordinator=coordinator, name=f"second{rows}")
+                session.tune()
 
             def forward():
                 source.copy_(seed + counter.float() * .125)
-                result.copy_(reduction(source) * 2)
+                value = reduction(source)
+                if projection is not None:
+                    projection(source)
+                if second is not None:
+                    value = second(value)
+                result.copy_(value * 2)
                 counter.add_(1)
 
             dist.barrier(group=group)
@@ -52,15 +73,14 @@ def _rank(rank, world_size, rendezvous, rows):
             torch.cuda.synchronize(device)
             stream = torch.cuda.Stream(device=device)
             stream.wait_stream(torch.cuda.current_stream(device))
-            with runtime.capture(stream=stream), session.capture():
-                with torch.cuda.graph(graph, stream=stream):
-                    compiled()
+            with runtime.capture(stream=stream), session.capture(), torch.cuda.graph(graph, stream=stream):
+                compiled()
             torch.cuda.synchronize(device)
             session.freeze()
             bundle = PreparedGraphBundle(device=rank, graphs={"reduce": graph},
                 buffers={"source": source, "output": output, "seed": seed,
                          "result": result, "counter": counter},
-                resources=(compiled, reduction, runtime, session, stream))
+                resources=(compiled, reduction, second, projection, runtime, session, stream))
             worker = bundle.start_worker()
             for repetitions, offset in ((8, 0.), (31, .5)):
                 counter.zero_()
@@ -78,6 +98,8 @@ def _rank(rank, world_size, rendezvous, rows):
                     assert before[key] == after[key]
                 expected = 2 * (world_size * (world_size + 1) / 2
                                 + world_size * (offset + (repetitions - 1) * .125))
+                if uneven:
+                    expected *= world_size
                 torch.testing.assert_close(result, torch.full_like(result, expected), rtol=0, atol=0)
                 assert counter.item() == repetitions
                 dist.barrier(group=group)
@@ -98,4 +120,11 @@ def test_native_compiled_all_reduce(world_size, rows, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     assert torch.cuda.device_count() == 4
     mp.spawn(_rank, args=(world_size, (tmp_path / "rendezvous").as_uri(), rows),
+             nprocs=world_size, join=True)
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_rank_local_projection_between_collectives(world_size, tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
+    mp.spawn(_rank, args=(world_size, (tmp_path / "rendezvous").as_uri(), 1, True),
              nprocs=world_size, join=True)

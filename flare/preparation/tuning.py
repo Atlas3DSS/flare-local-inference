@@ -72,7 +72,7 @@ class RecordedPreparationSession(PreparationSession):
         return result
 
     def _prepare_job(self, requests, *, progress, autotune):
-        if self._coordinator is None:
+        if self._coordinator is None or not any(request.collective is not None for request in requests):
             return super().prepare(requests, progress=progress, autotune=autotune)
         return self._coordinator.prepare(self, requests, progress=progress, autotune=autotune)
 

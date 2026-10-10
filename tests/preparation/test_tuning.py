@@ -112,7 +112,7 @@ def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_si
     plan = SimpleNamespace(component_id=component, bytes=size, source=source, selection=None,
         memory_requirements=lambda: requirement,
         contract=SimpleNamespace(config_payload=lambda config: FrozenMapping(config)))
-    return SimpleNamespace(name=name, plan=plan, prepare_call=prepare,
+    return SimpleNamespace(name=name, plan=plan, prepare_call=prepare, collective=None,
                            benchmark_call=benchmark, retain_benchmark_call=False)
 
 

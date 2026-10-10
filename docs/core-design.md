@@ -353,8 +353,10 @@ The shared [tuning session](../flare/preparation/tuning.py) owns declaration
 collection, candidate scratch reservation, autotuning, and binding finalization.
 Recipes supply the workload schema, numerical policy, and search-limit metadata;
 the [Qwen policy](../flare/recipes/qwen38/tuning.py) defines those values for its
-operator catalog. Multi-rank sessions accept a bootstrap coordinator and use it
-for default priming and the mixed local/collective tuning batch. Each rank tunes
+operator catalog. Multi-rank sessions coordinate default priming only for jobs
+containing collective declarations. Local projections, including rank-zero-only
+vocabulary heads, prime independently. The mixed local/collective tuning batch
+uses the coordinator until every rank finishes. Each rank tunes
 its local operators, reserves and trims its scratch arena, and finalizes bindings
 before graph capture. Candidate sharding across ranks is not supported.
 
