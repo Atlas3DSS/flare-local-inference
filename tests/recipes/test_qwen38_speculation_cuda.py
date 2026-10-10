@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import os
 
 import pytest
@@ -16,6 +17,47 @@ from flare.recipes.qwen38.speculation import (
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires explicitly assigned CUDA device and FLARE_RUN_CUDA_TESTS=1")
 VOCAB = 248320
+
+
+@torch.no_grad()
+def test_compiled_commit_preserves_pooled_state_without_pool_copies():
+    from flare.preparation.compilation import compile_forward
+    from flare.recipes.qwen38.speculation import SpeculativeAcceptance
+    from flare.recipes.qwen38.state import HybridStatePool
+
+    state, slots, epochs, live, inputs, records, frame, sequence = tensors(4, 2)
+    pool = HybridStatePool.allocate(34, "cuda", speculative_tokens=7)
+    consumed = pool.consumed_tokens[1:5, 0]
+    history = pool.ple_history[1:5]
+    consumed.copy_(state.consumed_tokens)
+    history.copy_(state.ple_history)
+    state = replace(state, consumed_tokens=consumed, ple_history=history)
+    state.status[1] = 0
+    acceptance = SpeculativeAcceptance.allocate(4, 2, "cuda")
+    acceptance.token_ids[:, 0] = 4
+    acceptance.token_ids[:, 1] = 100
+    acceptance.proposed_count.fill_(2)
+    acceptance.accepted_drafts.fill_(1)
+    acceptance.offered_drafts.fill_(1)
+    acceptance.valid.fill_(True)
+    commit = PreparedSpeculativeCommit(state, acceptance, inputs, slots, epochs, live,
+        records, frame, sequence)
+    restore = snapshot(state)
+    def run():
+        commit()
+    compiled = compile_forward(run)
+    torch.cuda.synchronize()
+    allocated = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    compiled()
+    torch.cuda.synchronize()
+    assert torch.cuda.max_memory_allocated() - allocated < pool.backing.nbytes // 4
+
+    with captured(compiled, (commit, pool, state), {"records": records}, restore) as replay:
+        replay()
+        assert consumed.tolist() == [4, 2, 4, 4]
+        assert history.tolist() == [[3, 4], [1, 2], [3, 4], [3, 4]]
+        assert records[0, :, 2].tolist() == [4, 2, 4, 4]
 
 
 def tensors(batch, width):

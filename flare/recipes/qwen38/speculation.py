@@ -393,6 +393,8 @@ class PreparedSpeculativeCommit:
         self.consumed_before = torch.zeros(batch, dtype=torch.int64, device=device)
         self.generated_before = torch.zeros_like(self.consumed_before)
         self.history_before = torch.zeros((batch, 2), dtype=torch.int64, device=device)
+        self.consumed_after = torch.empty(4, dtype=torch.int64, device=device)
+        self.history_after = torch.empty((4, 2), dtype=torch.int64, device=device)
         self._records = torch.zeros((4, 24), dtype=torch.int64, device=device)
 
     def __call__(self):
@@ -459,11 +461,11 @@ class PreparedSpeculativeCommit:
                 torch.where(failed, torch.where(shape_valid, INVALID_DISTRIBUTION, INVALID_SPECULATION), state.error_code[slot]))
 
             state.histogram[slot].scatter_add_(0, ids.clamp(0, state.vocab_size - 1), take.to(torch.int32))
-            state.consumed_tokens[slot].copy_(consumed)
+            self.consumed_after[slot].copy_(consumed)
             state.generated_tokens[slot].copy_(generated)
             state.pending_token[slot].copy_(torch.where(emitted > 0, pending, state.pending_token[slot]))
             state.rng_counter.view(torch.int64)[slot].add_(emitted)
-            state.ple_history[slot].copy_(torch.where(emitted > 0, tail, state.ple_history[slot]))
+            self.history_after[slot].copy_(torch.where(emitted > 0, tail, state.ple_history[slot]))
             state.status[slot].copy_(status)
             state.error_code[slot].copy_(error)
             if self.rng is not None:
@@ -495,5 +497,7 @@ class PreparedSpeculativeCommit:
                 record[13].fill_(-1)
             record[15].copy_(torch.where(participating, columns.numel(), 0))
             record[16:16 + columns.numel()].copy_(torch.where(take, ids, -1))
+        state.consumed_tokens.copy_(self.consumed_after)
+        state.ple_history.copy_(self.history_after)
         self.records.index_copy_(0, self.frame.long(), self._records.unsqueeze(0))
         return self
