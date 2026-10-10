@@ -300,8 +300,27 @@ bytes per TP2 rank or 38,515,712 bytes per TP4 rank; a 4-GiB snapshot budget hol
 56 or 111 rows, respectively, excluding null/live rows and shared KV pages.
 Complete TP2/TP4 generation passes with these strided bindings, saved hidden
 outputs, exact replicated-rank agreement, and stable replay allocation counters.
-Production GLM serving, hybrid-state checkpoint maintenance, and HTTP integration
-are not implemented.
+Shared [state transfers](../flare/components/state_transfer.py) validate complete
+row copies, resets, exact consumed endpoints, destination conflicts, and partial
+page aliases before writing. A snapshot saves every KDA state, index tail, and
+the unaligned physical latent/index page; restore writes the saved page into the
+request's private tail page. Aligned endpoints copy no external KV bytes.
+Immutable snapshots can restore into multiple independent live slots. Native
+bytewise tests cover endpoints 1, 3, 4, 255, 256, 257, 511, 512, and 513 and verify
+that rejected commands leave all pool and cache bytes unchanged.
+
+[GLM maintenance](../flare/recipes/glm53/maintenance.py) composes shared request
+admission and continuation transfers into init, restore, and snapshot graphs.
+Eight BF16 flags carry per-command validation failures and participation through
+a b12x all-reduce before any persistent write. Any rank's rejection suppresses
+the command on all ranks and emits completion error 72 with zero counters.
+Resident request state remains unchanged on failure. Native TP2/TP4 component
+tests cover successful admission and branch restoration, plus an epoch,
+endpoint, page, admission, or command-count fault on one rank. Replay allocation
+and segment counters remain stable. These maintenance tests use Python/Gloo to
+coordinate rank submissions to native replay workers; complete-model snapshot
+and resume through the Rust rank coordinator remain unqualified.
+Production GLM serving and HTTP integration are not implemented.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
