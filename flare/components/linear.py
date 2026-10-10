@@ -99,6 +99,34 @@ class QuantizedProjection:
                               workspace=self.workspace)
 
 
+class BatchedQuantizedProjection:
+    """Prepared BF16-by-rowwise-MXFP8 BMM over caller-owned strided tensors.
+
+    The RHS remains packed E4M3 values and per-32 E8M0 scales. The native b12x
+    kernel has a fixed configuration and requires no scratch. The major axis
+    describes the RHS layout and the axis compressed by its scales.
+    """
+
+    def __init__(self, source, weight, output, *, major, session, name):
+        from b12x import gemm
+        from b12x.gemm._bmm._tuning import BmmQuery
+
+        if source.ndim != 3 or output.ndim != 3 or source.shape[:2] != output.shape[:2]:
+            raise ValueError("batched projections require matching batch and row dimensions")
+        self.weight, self.output, self.major = weight, output, major
+        self.plan = gemm.plan_bmm(BmmQuery(batch=source.shape[0], max_rows=source.shape[1],
+            in_features=source.shape[2], out_features=output.shape[2], b_major=major, sf_axis=major))
+        session.prepare((self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+            run=lambda: state.run(source, weight, output, b_major=major, sf_axis=major))),))
+
+    def __call__(self, source):
+        from b12x import gemm
+
+        return gemm.bmm(source, self.weight, self.output, plan=self.plan,
+            a_dtype="bfloat16", b_dtype="float8_e4m3fn", sf_dtype="float8_e8m0fnu",
+            c_dtype="bfloat16", sf_vec_size=32, b_major=self.major, sf_axis=self.major)
+
+
 @torch.library.custom_op("flare::parallel_mxfp8_projections", mutates_args=("outputs", "workspaces"))
 def _parallel_mxfp8_projections(
     source: torch.Tensor, values: list[torch.Tensor], scales: list[torch.Tensor],

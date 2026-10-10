@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `cc45b75e7dd8dedb9bce9cd446765fe65c915927`, including the CuTe DSL operators
+  `d019c06357ba22009f8112c2f8606b1edd174fcc`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -286,8 +286,14 @@ requests. Position -1 and negative state slots mask inactive queries and
 requests. Three consecutive chunks, including 4096-token chunks, preserve
 projection outputs, pool cache, sequence tails and physical selections through
 compiled Rust replay. The compiler bridge retains ATen LayerNorm because
-Inductor's decomposition changes BF16 rounding. Absorbed query/value projections
-and complete sparse MLA layers remain unimplemented.
+Inductor's decomposition changes BF16 rounding. Shared prepared batched
+projections implement query absorption and value expansion directly from
+strided MXFP8 KV weights and rowwise E8M0 scales. The b12x BMM supports 16/32-head
+partitions through 4096 rows with no scratch, copies, or weight dequantization.
+Its opaque compiler boundary exposes scale bytes as uint8 views. Checkpoint
+projection tests cover compiled native replay, allocation stability, and the
+BF16 matrix-product error bound against FP64. Complete sparse MLA layers remain
+unimplemented.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
