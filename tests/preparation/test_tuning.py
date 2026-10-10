@@ -71,8 +71,10 @@ def backend(monkeypatch):
 
     def envelope(self, requests):
         events.append(("envelope", tuple(item.name for item in requests)))
-        return SimpleNamespace(scratch_nbytes=max((item.plan.bytes for item in requests), default=0),
-                               pending_persistent_nbytes=0)
+        return MemoryRequirements.sequential(MemoryRequirements(
+            scratch=(ScratchBufferSpec(name="workspace", shape=(item.plan.bytes,),
+                                       dtype=torch.uint8, device=torch.device("cpu")),),
+            persistent=getattr(item.plan, "persistent", ())) for item in requests)
 
     def workers(self, count):
         assert count is None
@@ -549,7 +551,7 @@ def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_a
     assert arena.nbytes == 512 and arena.frozen
     assert all(owner.binding is arena.tensor for owner in owners)
     assert report["scratch_arena"] == {"initial_bytes": 256,
-        "candidate_scratch_bytes": 513, "candidate_reserved_bytes": 768,
+        "candidate_scratch_bytes": 768, "candidate_reserved_bytes": 768,
         "parallel_candidate_scratch_bytes": 0, "parallel_selected_scratch_bytes": 0,
         "selected_scratch_bytes": 512, "reserved_bytes": 512, "pending_persistent_bytes": 0}
     envelope = ("envelope", tuple(request.name for request in requests))
@@ -587,20 +589,29 @@ def test_parallel_workspace_peak_is_reserved_then_trimmed_without_summing_serial
 
 
 def test_parallel_candidate_envelope_bounds_all_equivalent_bindings_once(backend):
+    from collections import Counter
+    from b12x.preparation import PersistentMemory
+
     events, _ = backend
     session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     requests = [declaration("a", size=300), declaration("b", size=700),
-                declaration("c", size=100)]
+                declaration("c", size=100), declaration("serial", size=1800)]
     for request in requests[:2]:
         request.plan.query = "same workload"
+    requests[0].plan.persistent = (PersistentMemory("shared", 400, 100),)
+    requests[-1].plan.persistent = (PersistentMemory("shared", 700, 100),)
     session.declare(requests)
-    a, b, c = (request.plan for request in requests)
+    a, b, c = (request.plan for request in requests[:3])
     arena.register_parallel(a, c)
     arena.register_parallel(b, c)
     report = session.tune()["scratch_arena"]
     assert report["parallel_candidate_scratch_bytes"] == 1024
+    assert report["candidate_scratch_bytes"] == 2048
+    assert report["pending_persistent_bytes"] == 600
+    inspected = Counter(name for event in events if event[0] == "envelope" for name in event[1])
+    assert inspected == Counter(request.name for request in requests)
     assert events.count(("envelope", ("a", "b"))) == 1
     assert ("envelope", ("a",)) not in events
     assert ("envelope", ("b",)) not in events
@@ -681,7 +692,7 @@ def test_selected_arena_retained_after_trials_restoration_and_capture(backend, m
     monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
     report = session.tune()
     assert restored == ([True] if borrowed_state else [])
-    assert report["scratch_arena"] == {"initial_bytes": 0, "candidate_scratch_bytes": 128,
+    assert report["scratch_arena"] == {"initial_bytes": 0, "candidate_scratch_bytes": 256,
         "parallel_candidate_scratch_bytes": 0, "parallel_selected_scratch_bytes": 0,
         "candidate_reserved_bytes": 256, "selected_scratch_bytes": 256,
         "reserved_bytes": 256, "pending_persistent_bytes": 0}

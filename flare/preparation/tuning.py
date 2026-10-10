@@ -135,8 +135,7 @@ class RecordedPreparationSession(PreparationSession):
         if self._scratch_arena is None:
             return {}
         arena = self._scratch_arena
-        envelope = self.candidate_memory_envelope(requests)
-        groups, keys, sizes = {}, {}, {}
+        groups, keys, envelopes = {}, {}, {}
         for request in requests:
             key = _declaration_key(request.plan)
             keys[id(request.plan)] = key
@@ -144,12 +143,17 @@ class RecordedPreparationSession(PreparationSession):
 
         def scratch_bytes(plan):
             key = keys[id(plan)]
-            if key not in sizes:
+            if key not in envelopes:
                 # Bound every binding in the group while enumerating configs once.
-                sizes[key] = self.candidate_memory_envelope(groups[key]).scratch_nbytes
-            return sizes[key]
+                envelopes[key] = self.candidate_memory_envelope(groups[key])
+            return envelopes[key].scratch_nbytes
 
         parallel = arena.parallel_nbytes(scratch_bytes)
+        remaining = [request for request in requests if keys[id(request.plan)] not in envelopes]
+        requirements = list(envelopes.values())
+        if remaining:
+            requirements.append(self.candidate_memory_envelope(remaining))
+        envelope = MemoryRequirements.sequential(requirements)
         before = arena.nbytes
         required = max(envelope.scratch_nbytes, parallel)
         arena.reserve(required)
