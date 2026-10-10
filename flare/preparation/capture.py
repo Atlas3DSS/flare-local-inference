@@ -1,6 +1,7 @@
 """Compile prepared text forwards and capture one native executable per shape."""
 
 from contextlib import nullcontext
+from time import monotonic
 
 import torch
 
@@ -17,6 +18,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     """
     graphs, compiled = {}, {}
     for name, function in functions.items():
+        started = monotonic()
         if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative"):
             if progress is not None:
                 progress(f"compiling {name}")
@@ -31,5 +33,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
         with communication, session.capture(), torch.cuda.graph(graph, pool=pool, stream=stream):
             function()
         graphs[name] = graph
+        if progress is not None:
+            progress(f"captured {name} in {monotonic() - started:.2f}s")
     torch.cuda.synchronize(device)
     return graphs, compiled

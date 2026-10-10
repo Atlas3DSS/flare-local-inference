@@ -301,15 +301,15 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         stream = torch.cuda.Stream(device=device)
         graph_pool = torch.cuda.graph_pool_handle()
         compiled_functions = {}
-        def capture_catalog():
+        def capture_catalog(*, compile_decoder):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
                 stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=report)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
 
-        capture_catalog()
-        report("measured complete graph catalog memory")
+        capture_catalog(compile_decoder=False)
+        report("measured uncompiled graph catalog memory")
         free, total = torch.cuda.mem_get_info(device)
         available = free - config.headroom_bytes - _KV_ALLOCATION_MARGIN
         page_capacity = available // page_bytes if config.pages is None else config.pages
@@ -332,7 +332,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         for graph in graphs.values():
             graph.reset()
         graphs.clear()
-        capture_catalog()
+        capture_catalog(compile_decoder=compile_decoder)
         session.freeze()
         free, total = torch.cuda.mem_get_info(device)
         if free < config.headroom_bytes:
