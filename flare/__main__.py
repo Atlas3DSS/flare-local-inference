@@ -49,7 +49,7 @@ def main(argv=None):
         if not isinstance(defaults, dict):
             parser.error("template defaults must be a JSON object")
     architecture = json.loads((args.snapshot / "config.json").read_text()).get("model_type")
-    progress = lambda text: print(text, file=sys.stderr, flush=True)
+    progress = lambda text: print(f"{monotonic() - started:6.1f}s {text}", file=sys.stderr, flush=True)
     budgets = {"snapshot_budget_bytes": int(args.snapshot_budget_gib * (1 << 30)),
                "headroom_bytes": int(args.headroom_gib * (1 << 30))}
     if architecture == "glm5_next":

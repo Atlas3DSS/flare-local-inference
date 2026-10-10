@@ -603,6 +603,13 @@ The loader must:
 
 Avoid materializing a second full model or a fully dequantized expert table.
 
+Native NVFP4 compressed-scale batches are cached under
+`$XDG_CACHE_HOME/flare/nvfp4-scales`, defaulting to `~/.cache/flare/nvfp4-scales`.
+Checkpoint file metadata, tensor ranges, partition geometry, and b12x's code
+cache identity determine reuse. Warm loads transfer these batches through the
+b12x direct loader. The cache contains compressed scales and exception indices;
+packed expert weights continue to load from the checkpoint.
+
 The local snapshot's safetensors headers give this storage breakdown:
 
 | Component | Stored GiB | Initial placement |
