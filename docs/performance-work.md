@@ -27,8 +27,12 @@ caller-owned scratch, and allocation-stable replay are required.
    `qualify.gpu_replay flare --compile` measures compiled prefill, decode, and
    resume forwards through model bootstrap. Bootstrap recompiles these forwards
    after binding the final KV pools and retains their operator owners until
-   execution drains. Vision, maintenance, and speculative rounds require
-   separate compilation qualification before enabling compilation by default.
+   execution drains. Vision and complete speculative rounds require separate
+   compilation qualification before enabling compilation by default. Maintenance
+   graphs retain their prepared native kernels.
+   FlashInfer chain verification exposes token and acceptance-counter mutations
+   to compilation. Native replay tests cover compiled verification and request
+   commit at widths 1–8, invalid distributions, and per-request RNG lane invariance.
    After profiling stops, the replay qualification compares all 256 steps'
    logits and completion records, plus final request, hybrid, and KV state,
    against uncompiled graphs using the same prepared model and buffers.

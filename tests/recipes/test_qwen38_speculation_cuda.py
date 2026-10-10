@@ -236,7 +236,8 @@ def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
 
 
 @pytest.mark.parametrize("width", range(1, 9))
-def test_native_flashinfer_chain_accept_reject_rng_and_budget(width):
+@pytest.mark.parametrize("compiled", [False, True])
+def test_native_flashinfer_chain_accept_reject_rng_and_budget(width, compiled):
     args = tensors(4, width)
     state, slots, epochs, live, inputs, records, frame, sequence = args
     drafts = inputs[:, 1:].contiguous()
@@ -255,6 +256,9 @@ def test_native_flashinfer_chain_accept_reject_rng_and_budget(width):
         restore_state(); rng.generation.zero_(); rng.target_offset.zero_()
     def run():
         verify(); commit()
+    if compiled:
+        from flare.preparation.compilation import compile_forward
+        run = compile_forward(run)
     with captured(run, (*args, verify, commit, rng), {"records": records}, restore) as replay:
         replay()
         assert commit.emitted_count.cpu().tolist() == [width] * 4
@@ -276,7 +280,8 @@ def test_native_flashinfer_chain_accept_reject_rng_and_budget(width):
         assert state.generated_tokens.eq(1).all()
 
 
-def test_native_chain_one_row_stream_is_invariant_to_packed_lane():
+@pytest.mark.parametrize("compiled", [False, True])
+def test_native_chain_one_row_stream_is_invariant_to_packed_lane(compiled):
     args = tensors(4, 4)
     state, slots, epochs, live, inputs, records, frame, sequence = args
     draft_probs = torch.zeros((4, 3, VOCAB), device="cuda")
@@ -292,6 +297,9 @@ def test_native_chain_one_row_stream_is_invariant_to_packed_lane():
     many.prepare(); one.prepare()
     def run():
         many(); one()
+    if compiled:
+        from flare.preparation.compilation import compile_forward
+        run = compile_forward(run)
     with captured(run, (*args, many, one, rng), {"many": many.output.token_ids, "one": one.output.token_ids}) as replay:
         for offset in (0, 4, 20, 100):
             rng.target_offset.fill_(offset)
