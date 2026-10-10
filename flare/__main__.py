@@ -41,6 +41,8 @@ def main(argv=None):
         help="enable draft continuations from request history during speculation (default: disabled)")
     parser.add_argument("--snapshot-budget-gib", type=float, default=4)
     parser.add_argument("--headroom-gib", type=float, default=4)
+    parser.add_argument("--no-compile", action="store_true",
+        help="skip torch.compile for faster development startup; still capture CUDA graphs")
     parser.add_argument("--template-defaults", type=Path, help="JSON object of default chat template arguments")
     parser.add_argument("--memory-report", type=Path)
     parser.add_argument("--prepare-only", action="store_true", help="validate the graph catalog and release it without binding HTTP")
@@ -65,7 +67,7 @@ def main(argv=None):
 
         config = PreparationConfig(devices=tuple(range(args.device, args.device + args.tp)),
             context=args.context, pages=args.pages, prefill_chunk_size=args.prefill_chunk_size,
-            max_active=args.max_active, **budgets)
+            max_active=args.max_active, compile_decoder=not args.no_compile, **budgets)
         model = prepare_group(args.snapshot, config, prepare_rank, progress=progress)
     elif architecture == "qwen4_exp":
         if args.tp != 1 or args.max_active != 4:
@@ -79,7 +81,7 @@ def main(argv=None):
             mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
             speculative_proposal_source=args.mtp_proposal_source,
             speculative_fixed_width=args.mtp_fixed_width, history_drafts=args.history_drafts, **budgets)
-        model = prepare_model(args.snapshot, config, progress=progress)
+        model = prepare_model(args.snapshot, config, progress=progress, compile_decoder=not args.no_compile)
     else:
         parser.error(f"unsupported checkpoint model_type {architecture!r}")
     with model:

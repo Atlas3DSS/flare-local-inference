@@ -173,6 +173,11 @@ producing 36 graphs. Every variant uses the common FlashInfer sampler. The
 catalog includes vision, prefill, resume, initialization, snapshot, and restore;
 startup rejects incomplete declarations.
 
+`--no-compile` skips PyTorch forward compilation and compiled-forward cache
+loading for development startup. b12x preparation and autotuning still run,
+and every serving path is captured as a CUDA graph. The option applies to Qwen
+and every GLM tensor-parallel rank; compiled forwards remain the default.
+
 A context limit is distinct from aggregate cache capacity. Admission must reserve
 enough resources for each request's prompt and permitted output. Aggregate page
 capacity is the GPU memory remaining after prepared weights, operator

@@ -24,7 +24,7 @@ def _defer_full_collection():
 
 @_defer_full_collection()
 def capture_forwards(functions, signatures, *, session, device, stream, pool,
-                     collective=None, compile_decoder=True, progress=None):
+                     collective=None, compile_decoder=True, progress=None, label="Prepare serving graphs"):
     """Retain compiled callables and capture with an optional b12x IPC runtime.
 
     Persistent state and graph outputs must live in caller-owned storage.
@@ -32,7 +32,6 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     serving replays variants serially and may choose them in any order.
     """
     graphs, compiled = {}, {}
-    label = "Prepare serving graphs" if compile_decoder else "Measure graph memory"
     with phase(progress, label, total=len(functions)) as stage:
         stage.update("initializing compiled-forward cache" if compile_decoder else "initializing graph pool")
         cache = ForwardCache(namespace=session.namespace.to_dict(), device=device) if compile_decoder else None

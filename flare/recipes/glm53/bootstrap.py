@@ -43,8 +43,11 @@ class PreparationConfig:
     pages: int | None = None
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
+    compile_decoder: bool = True
 
     def __post_init__(self):
+        if type(self.compile_decoder) is not bool:
+            raise TypeError("compile_decoder must be a boolean")
         if (not isinstance(self.devices, tuple) or len(self.devices) not in (2, 4)
                 or len(set(self.devices)) != len(self.devices)
                 or any(type(d) is not int or d < 0 for d in self.devices)):
@@ -178,7 +181,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle()
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
-        stream=stream, pool=graph_pool, collective=collective, progress=progress)
+        stream=stream, pool=graph_pool, collective=collective,
+        compile_decoder=config.compile_decoder, progress=progress)
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
@@ -194,7 +198,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
         "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes,
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
-        "tuning": tuning}
+        "tuning": tuning, "compiled_decoder": config.compile_decoder}
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
         for role, filename in (("tokenizer", "tokenizer.json"), ("tokenizer_config", "tokenizer_config.json"),
                                ("chat_template", "chat_template.jinja"), ("generation_config", "generation_config.json"))}

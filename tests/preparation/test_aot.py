@@ -2,6 +2,7 @@
 
 import os
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -56,6 +57,32 @@ class BufferForward:
         if self.negate:
             self.output.neg_()
         return self.output
+
+
+@torch.no_grad()
+def test_uncompiled_capture_bypasses_forward_cache_and_replays_without_allocating(monkeypatch):
+    from flare.preparation import capture
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("uncompiled capture must not load or build compiled forwards")
+
+    monkeypatch.setattr(capture, "ForwardCache", unexpected)
+    monkeypatch.setattr(torch, "compile", unexpected)
+    forward = BufferForward(73)
+    graphs, compiled = capture.capture_forwards(
+        {"decode1": forward}, {"decode1": SimpleNamespace(kind="decode")},
+        session=SimpleNamespace(capture=nullcontext), device=torch.device("cuda:0"),
+        stream=torch.cuda.Stream(), pool=torch.cuda.graph_pool_handle(), compile_decoder=False,
+    )
+    assert compiled == {}
+    for value in (1., -2.):
+        forward.source.fill_(value)
+        forward.output.fill_(float("nan"))
+        allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
+        graphs["decode1"].replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+        torch.testing.assert_close(forward.output, torch.full_like(forward.output, value + 73.25))
 
 
 @pytest.mark.parametrize("handle", [0, 1, 73])

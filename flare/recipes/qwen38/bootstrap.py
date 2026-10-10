@@ -303,14 +303,14 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         stream = torch.cuda.Stream(device=device)
         graph_pool = torch.cuda.graph_pool_handle()
         compiled_functions = {}
-        def capture_catalog(*, compile_decoder):
+        def capture_catalog(*, compile_decoder, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
-                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress)
+                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress, label=label)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
 
-        capture_catalog(compile_decoder=False)
+        capture_catalog(compile_decoder=False, label="Measure graph memory")
         with phase(progress, "Allocate KV cache"):
             free, total = torch.cuda.mem_get_info(device)
             available = free - config.headroom_bytes - _KV_ALLOCATION_MARGIN

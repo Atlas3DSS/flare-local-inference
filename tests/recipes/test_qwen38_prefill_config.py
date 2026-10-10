@@ -38,7 +38,8 @@ def test_prefill_chunk_must_fit_explicit_context():
 
 
 @pytest.mark.parametrize("arguments, expected", [([], 4096), (["--prefill-chunk-size", "3072"], 3072)])
-def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expected):
+@pytest.mark.parametrize("no_compile", [False, True])
+def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expected, no_compile):
     from flare.__main__ import main
 
     configurations = []
@@ -55,12 +56,13 @@ def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expecte
         def manifest(self):
             return {}
 
-    def prepare(snapshot, config, *, progress):
+    def prepare(snapshot, config, *, progress, compile_decoder):
+        assert compile_decoder is not no_compile
         configurations.append(config)
         return Model()
 
     monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare)
-    assert main(["--prepare-only", *arguments]) == 0
+    assert main(["--prepare-only", *arguments, *(["--no-compile"] if no_compile else [])]) == 0
     assert len(configurations) == 1
     assert configurations[0].prefill_chunk_size == expected
 
@@ -106,7 +108,8 @@ def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch, source, hist
         def manifest(self):
             return {}
 
-    def prepare(snapshot, config, *, progress):
+    def prepare(snapshot, config, *, progress, compile_decoder):
+        assert compile_decoder
         captured.append(config)
         return Model()
 
