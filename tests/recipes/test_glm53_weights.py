@@ -120,7 +120,9 @@ def test_actual_dense_and_attention_shards(manifest, world, rank):
     for name, width in (("q_b_proj", 16384), ("kv_b_proj", 32768)):
         assert_mxfp8(manifest, mla[name], f"{prefix}.{name}", rows=shard.partition(width))
     assert_mxfp8(manifest, mla["o_proj"], f"{prefix}.o_proj", columns=shard.partition(16384))
-    for name in ("q_a_proj", "kv_a_proj_with_mqa", "indexer.wk", "indexer.wq_b", "indexer.weights_proj"):
+    assert_mxfp8(manifest, mla["qkv_a_proj"], f"{prefix}.q_a_proj", output_rows=(0, 1536))
+    assert_mxfp8(manifest, mla["qkv_a_proj"], f"{prefix}.kv_a_proj_with_mqa", output_rows=(1536, 2048))
+    for name in ("indexer.wk", "indexer.wq_b", "indexer.weights_proj"):
         assert_mxfp8(manifest, mla[name], f"{prefix}.{name}")
     prefix = f"{TEXT_PREFIX}.layers.0.mlp"
     extent = slice(*shard.partition(12288))

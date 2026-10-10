@@ -138,8 +138,10 @@ class GlmWeightLoader(DirectWeightLoader):
         head_channels = self.shard.partition(64 * 256, alignment=256)
         result = {
             name: self._projection(f"{prefix}.{name}")
-            for name in ("q_a_proj", "kv_a_proj_with_mqa", "indexer.wq_b", "indexer.wk", "indexer.weights_proj")
+            for name in ("indexer.wq_b", "indexer.wk", "indexer.weights_proj")
         }
+        result["qkv_a_proj"] = self.load_mxfp8_group(
+            tuple(f"{prefix}.{name}" for name in ("q_a_proj", "kv_a_proj_with_mqa")))
         result["q_b_proj"] = self._projection(f"{prefix}.q_b_proj", rows=head_channels)
         result["kv_b_proj"] = self._projection(
             f"{prefix}.kv_b_proj", rows=self.shard.partition(64 * 512, alignment=512))

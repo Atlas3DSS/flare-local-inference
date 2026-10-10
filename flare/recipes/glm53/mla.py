@@ -24,6 +24,7 @@ class MLAState:
 
 @dataclass(frozen=True)
 class MLAScratch:
+    projected_input: torch.Tensor
     query_input: torch.Tensor
     query_residual: torch.Tensor
     latent_input: torch.Tensor
@@ -43,14 +44,16 @@ class MLAScratch:
         index = IndexScratch.allocate(tokens, blocks, mode, device)
         def buffer(*shape):
             return torch.zeros((tokens, *shape), dtype=torch.bfloat16, device=device)
-        return cls(buffer(1536), buffer(1536), buffer(512), buffer(512),
+        projected = buffer(2048)
+        return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:], buffer(512),
             buffer(heads, 256), buffer(heads, 512), buffer(heads, 512), buffer(heads, 256),
             buffer(4096), torch.zeros(tokens, dtype=torch.int32, device=device), index)
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
             raise ValueError("GLM MLA rows exceed scratch capacity")
-        return MLAScratch(self.query_input[:tokens], self.query_residual[:tokens], self.latent_input[:tokens],
+        return MLAScratch(self.projected_input[:tokens], self.query_input[:tokens],
+            self.query_residual[:tokens], self.latent_input[:tokens],
             self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
             self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode))
 
@@ -84,9 +87,8 @@ class PreparedGlmMLA:
             module.get_submodule(key).weight = torch.nn.Parameter(weights[f"{key}.weight"], requires_grad=False)
         self.projections = {}
         for key, input, output in (
-            ("q_a_proj", source, scratch.query_input),
+            ("qkv_a_proj", source, scratch.projected_input),
             ("q_b_proj", scratch.query_residual, scratch.query.view(rows, -1)),
-            ("kv_a_proj_with_mqa", source, scratch.latent_input),
             ("o_proj", scratch.expanded.view(rows, -1), scratch.output),
         ):
             self.projections[key] = QuantizedProjection(input, weights[key], output,
@@ -114,10 +116,11 @@ class PreparedGlmMLA:
 
     def __call__(self, source):
         s, p = self.scratch, self.projections
-        s.query_residual.copy_(self.module.q_a_layernorm(p["q_a_proj"](source)))
+        p["qkv_a_proj"](source)
+        s.query_residual.copy_(self.module.q_a_layernorm(s.query_input))
         p["q_b_proj"](s.query_residual)
         self.query_absorption(s.query.transpose(0, 1))
-        s.latent.copy_(self.module.kv_a_layernorm(p["kv_a_proj_with_mqa"](source)))
+        s.latent.copy_(self.module.kv_a_layernorm(s.latent_input))
         self.writer()
         self.indexer()
         s.visible.copy_(self.metadata.positions + 1)
