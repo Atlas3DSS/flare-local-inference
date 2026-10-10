@@ -3,6 +3,8 @@ use super::{
     config::required_buffers,
     inputs::{Admission, Inputs},
 };
+use crate::execution::SamplingMode;
+use crate::model::catalog::{select, validate};
 use crate::{
     cache::Fence,
     execution::{ABI_VERSION, BufferDescriptor, CompletionRecord, GraphDescriptor, InputBinding},
@@ -38,30 +40,6 @@ fn config() -> ModelConfig {
 fn manifest(config: &ModelConfig) -> ExecutionManifest {
     let mut descriptions = required_buffers(config);
     let speculative = !config.speculative_widths.is_empty();
-    if speculative {
-        descriptions.extend([
-            ("copy_token_ids", Dtype::Int64, vec![4, 7]),
-            ("copy_token_count", Dtype::Int32, vec![4]),
-            ("copy_expected_consumed", Dtype::Int64, vec![4]),
-            ("copy_generation", Dtype::Int64, vec![4]),
-            (
-                "draft_page_tables",
-                Dtype::Int32,
-                vec![4, config.limits.max_sequence_tokens / 64],
-            ),
-        ]);
-        if !config.has_draft_cache() {
-            descriptions.retain(|(name, _, _)| *name != "draft_page_tables");
-            descriptions.extend([
-                (
-                    "copy_grammar_mask",
-                    Dtype::Int32,
-                    vec![4, 8, VOCABULARY.div_ceil(32)],
-                ),
-                ("copy_grammar_mask_count", Dtype::Int32, vec![4]),
-            ]);
-        }
-    }
     descriptions.extend([
         ("frame_index", Dtype::Int32, vec![1]),
         ("submission_sequence", Dtype::Int64, vec![1]),
@@ -185,10 +163,10 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
                 .unwrap();
             let removed = missing.graphs.remove(index);
             assert!(matches!(
-                Qwen4Exp::validate(&config, &missing).unwrap_err(),
+                validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
                 crate::Error::Execution(crate::ExecutionError::Manifest(_))
             ));
-            let selected = Qwen4Exp::graph(
+            let selected = select::<Qwen4Exp>(
                 &config,
                 &original,
                 kind,
@@ -204,7 +182,7 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
             extra.handle = duplicate.graphs.len() + 1;
             duplicate.graphs.push(extra);
             assert!(matches!(
-                Qwen4Exp::validate(&config, &duplicate).unwrap_err(),
+                validate::<Qwen4Exp>(&config, &duplicate).unwrap_err(),
                 crate::Error::Execution(crate::ExecutionError::Manifest(_))
             ));
         }
@@ -212,11 +190,39 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
 }
 
 #[test]
+fn optional_decode_graphs_in_speculative_catalogs_obey_the_shared_contract() {
+    let mut config = config();
+    config.speculative_widths = (1..=8).collect();
+    let mut prepared = manifest(&config);
+    let mut decode = prepared
+        .graphs
+        .iter()
+        .find(|g| g.kind == GraphKind::Resume)
+        .unwrap()
+        .clone();
+    decode.kind = GraphKind::Decode;
+    decode.name = "optional-decode".into();
+    decode.handle = prepared.graphs.len() + 1;
+    prepared.graphs.push(decode);
+    validate::<Qwen4Exp>(&config, &prepared).unwrap();
+    prepared
+        .graphs
+        .last_mut()
+        .unwrap()
+        .input_bindings
+        .retain(|b| b.buffer_name != "sampling_grammar_mask");
+    assert!(matches!(
+        validate::<Qwen4Exp>(&config, &prepared),
+        Err(crate::Error::Execution(crate::ExecutionError::Manifest(_)))
+    ));
+}
+
+#[test]
 fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
     let mut config = config();
     config.speculative_widths = (1..=8).collect();
     let original = manifest(&config);
-    Qwen4Exp::validate(&config, &original).unwrap();
+    validate::<Qwen4Exp>(&config, &original).unwrap();
     assert_eq!(original.graphs.len(), 36);
     assert!(
         original
@@ -235,7 +241,7 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
         let mut missing = original.clone();
         missing.graphs.remove(index);
         assert!(matches!(
-            Qwen4Exp::validate(&config, &missing).unwrap_err(),
+            validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
             crate::Error::Execution(crate::ExecutionError::Manifest(_))
         ));
     }
@@ -253,7 +259,7 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
             .input_bindings
             .retain(|i| i.buffer_name != "draft_page_tables");
         assert!(matches!(
-            Qwen4Exp::validate(&config, &missing).unwrap_err(),
+            validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
             crate::Error::Execution(crate::ExecutionError::Manifest(_))
         ));
     }
@@ -271,15 +277,15 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
             .find(|b| b.name == name)
             .unwrap()
             .dtype = Dtype::Float32;
-        assert!(Qwen4Exp::validate(&config, &wrong).is_err());
+        assert!(validate::<Qwen4Exp>(&config, &wrong).is_err());
     }
     config.speculative_fixed_width = Some(9);
     assert!(matches!(
-        Qwen4Exp::validate(&config, &original).unwrap_err(),
+        validate::<Qwen4Exp>(&config, &original).unwrap_err(),
         crate::Error::Execution(crate::ExecutionError::Manifest(_))
     ));
     config.speculative_fixed_width = Some(8);
-    Qwen4Exp::validate(&config, &original).unwrap();
+    validate::<Qwen4Exp>(&config, &original).unwrap();
 }
 
 #[test]
@@ -502,13 +508,13 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
 fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
     let config = config();
     let manifest = manifest(&config);
-    Qwen4Exp::validate(&config, &manifest).unwrap();
+    validate::<Qwen4Exp>(&config, &manifest).unwrap();
     let mut missing = manifest.clone();
     missing
         .graphs
         .retain(|graph| graph.kind != GraphKind::Resume);
     assert!(matches!(
-        Qwen4Exp::validate(&config, &missing).unwrap_err(),
+        validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
         crate::Error::Execution(crate::ExecutionError::Manifest(_))
     ));
     let mut missing = manifest.clone();
@@ -521,7 +527,7 @@ fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
         .input_bindings
         .retain(|input| input.buffer_name != "vision_token_indices");
     assert!(matches!(
-        Qwen4Exp::validate(&config, &missing).unwrap_err(),
+        validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
         crate::Error::Execution(crate::ExecutionError::Manifest(_))
     ));
     let mut wrong = manifest;
@@ -531,7 +537,7 @@ fn missing_semantic_inputs_and_graph_capacities_reject_before_cuda() {
         .find(|buffer| buffer.name == "admission_seed_bits")
         .unwrap()
         .dtype = Dtype::Float32;
-    assert!(Qwen4Exp::validate(&config, &wrong).is_err());
+    assert!(validate::<Qwen4Exp>(&config, &wrong).is_err());
 }
 
 #[test]
@@ -541,7 +547,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
         config.limits.max_sequence_tokens = 32768;
         config.limits.prefill_chunk_size = chunk_size;
         let original = manifest(&config);
-        Qwen4Exp::validate(&config, &original).unwrap();
+        validate::<Qwen4Exp>(&config, &original).unwrap();
         {
             let mode = SamplingMode::General;
             let mut missing = original.clone();
@@ -550,7 +556,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
                     && graph.sampling_mode == mode
                     && graph.token_capacity == chunk_size)
             });
-            let error = Qwen4Exp::validate(&config, &missing).unwrap_err();
+            let error = validate::<Qwen4Exp>(&config, &missing).unwrap_err();
             assert!(matches!(
                 error,
                 crate::Error::Execution(crate::ExecutionError::Manifest(_))
@@ -580,7 +586,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
                     .nbytes /= 2;
             }
             assert!(matches!(
-                Qwen4Exp::validate(&config, &short).unwrap_err(),
+                validate::<Qwen4Exp>(&config, &short).unwrap_err(),
                 crate::Error::Execution(crate::ExecutionError::Manifest(_))
             ));
         }
@@ -903,7 +909,7 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
     config.speculative_widths = (1..=8).collect();
     config.speculative_proposal_source = ProposalSource::Copy;
     let original = manifest(&config);
-    Qwen4Exp::validate(&config, &original).unwrap();
+    validate::<Qwen4Exp>(&config, &original).unwrap();
     assert!(
         !original
             .buffers
@@ -924,7 +930,7 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
             .input_bindings
             .retain(|b| b.buffer_name != name);
         assert!(matches!(
-            Qwen4Exp::validate(&config, &missing).unwrap_err(),
+            validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
             crate::Error::Execution(crate::ExecutionError::Manifest(_))
         ));
         let mut wrong = original.clone();
@@ -934,11 +940,11 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
             .find(|b| b.name == name)
             .unwrap()
             .dtype = Dtype::Float32;
-        assert!(Qwen4Exp::validate(&config, &wrong).is_err());
+        assert!(validate::<Qwen4Exp>(&config, &wrong).is_err());
     }
     config.speculative_widths.clear();
     assert!(matches!(
-        Qwen4Exp::validate(&config, &original).unwrap_err(),
+        validate::<Qwen4Exp>(&config, &original).unwrap_err(),
         crate::Error::Execution(crate::ExecutionError::Manifest(_))
     ));
     assert!(ProposalSource::parse("auto").is_err());
@@ -1210,7 +1216,7 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
         .token_capacity = 512;
     manifest.validate().unwrap();
     assert!(matches!(
-        Qwen4Exp::validate(&config, &manifest).unwrap_err(),
+        validate::<Qwen4Exp>(&config, &manifest).unwrap_err(),
         crate::Error::Execution(crate::ExecutionError::Manifest(_))
     ));
 }
@@ -1639,7 +1645,7 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
             config.speculative_widths = vec![1, 2, 4, 8];
         }
         let valid = manifest(&config);
-        Qwen4Exp::validate(&config, &valid).unwrap();
+        validate::<Qwen4Exp>(&config, &valid).unwrap();
         for kind in [GraphKind::Init, GraphKind::Restore, GraphKind::Snapshot] {
             let mut broken = valid.clone();
             for graph in broken.graphs.iter_mut().filter(|g| g.kind == kind) {
@@ -1648,7 +1654,7 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
                     .retain(|b| b.buffer_name != "state_expected_consumed");
             }
             assert!(matches!(
-                Qwen4Exp::validate(&config, &broken).unwrap_err(),
+                validate::<Qwen4Exp>(&config, &broken).unwrap_err(),
                 crate::Error::Execution(crate::ExecutionError::Manifest(_))
             ));
         }
@@ -1662,7 +1668,7 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
                     graph.input_bindings.retain(|b| b.buffer_name != name);
                 }
                 assert!(matches!(
-                    Qwen4Exp::validate(&config, &broken).unwrap_err(),
+                    validate::<Qwen4Exp>(&config, &broken).unwrap_err(),
                     crate::Error::Execution(crate::ExecutionError::Manifest(_))
                 ));
             }
@@ -1674,6 +1680,6 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
             .find(|b| b.name == "state_expected_consumed")
             .unwrap()
             .shape = vec![2, 2];
-        assert!(Qwen4Exp::validate(&config, &broken).is_err());
+        assert!(validate::<Qwen4Exp>(&config, &broken).is_err());
     }
 }

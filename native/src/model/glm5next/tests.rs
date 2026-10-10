@@ -1,5 +1,7 @@
 use super::inputs::{Admission, Inputs};
 use super::*;
+use crate::execution::SamplingMode;
+use crate::model::catalog::{select, validate};
 use crate::{
     cache::Fence,
     execution::{ABI_VERSION, BufferDescriptor, Dtype, GraphDescriptor, InputBinding},
@@ -130,12 +132,12 @@ fn catalog_requires_each_capacity_and_semantic_binding() {
         let mut config = config();
         config.limits.prefill_chunk_size = chunk;
         let original = manifest(&config);
-        Glm5Next::validate(&config, &original).unwrap();
+        validate::<Glm5Next>(&config, &original).unwrap();
         for index in 0..original.graphs.len() {
             let mut missing = original.clone();
             let graph = missing.graphs.remove(index);
             assert!(
-                Glm5Next::validate(&config, &missing).is_err(),
+                validate::<Glm5Next>(&config, &missing).is_err(),
                 "{}",
                 graph.name
             );
@@ -145,7 +147,7 @@ fn catalog_requires_each_capacity_and_semantic_binding() {
                     .input_bindings
                     .retain(|b| b.buffer_name != *input);
                 assert!(
-                    Glm5Next::validate(&config, &missing).is_err(),
+                    validate::<Glm5Next>(&config, &missing).is_err(),
                     "{} {input}",
                     graph.name
                 );
@@ -160,15 +162,15 @@ fn catalog_requires_each_capacity_and_semantic_binding() {
         .find(|b| b.name == "page_tables")
         .unwrap()
         .shape[1] *= 4;
-    assert!(Glm5Next::validate(&config, &invalid).is_err());
+    assert!(validate::<Glm5Next>(&config, &invalid).is_err());
     let mut duplicate = manifest(&config);
     let mut graph = duplicate.graphs[0].clone();
     graph.name.push_str("-duplicate");
     graph.handle = 999;
     duplicate.graphs.push(graph);
-    assert!(Glm5Next::validate(&config, &duplicate).is_err());
+    assert!(validate::<Glm5Next>(&config, &duplicate).is_err());
     config.speculative_widths = vec![1, 2];
-    assert!(Glm5Next::validate(&config, &manifest(&config)).is_err());
+    assert!(validate::<Glm5Next>(&config, &manifest(&config)).is_err());
 }
 
 #[test]
@@ -285,7 +287,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         inputs
             .pack(&config, &scheduler, &step, &admissions)
             .unwrap();
-        let index = Glm5Next::graph(
+        let index = select::<Glm5Next>(
             &config,
             &manifest,
             step.kind,

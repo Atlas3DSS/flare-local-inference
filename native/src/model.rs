@@ -1,13 +1,12 @@
 //! Statically dispatched prepared-model semantics; CUDA transport remains model-independent.
 
+pub mod catalog;
 pub mod glm5next;
 pub(crate) mod inputs;
 pub mod qwen4exp;
 use crate::{
     Result,
-    execution::{
-        CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, SamplingMode, Upload,
-    },
+    execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
     scheduler::{
         RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities, SchedulerLimits,
     },
@@ -150,16 +149,11 @@ impl ModelConfig {
 pub trait ModelContract: Send + Sync + Sized + 'static {
     type Admission;
     type Inputs: Default;
-    fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()>;
+    fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()>;
+    fn required_buffers(config: &ModelConfig) -> Vec<catalog::BufferSpec>;
+    fn required_inputs(config: &ModelConfig, kind: GraphKind)
+    -> impl Iterator<Item = &'static str>;
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities;
-    fn graph(
-        config: &ModelConfig,
-        manifest: &ExecutionManifest,
-        kind: GraphKind,
-        batch: usize,
-        tokens: usize,
-        mode: SamplingMode,
-    ) -> Result<usize>;
     fn pack(
         inputs: &mut Self::Inputs,
         config: &ModelConfig,

@@ -210,6 +210,14 @@ defines its own orchestration. Compatibility is enforced at the native handoff
 through graph signatures, fixed device buffers, completion records, and owner
 lifetimes.
 
+Rust owns one serving lifecycle for HTTP admission, scheduling, cache ownership,
+graph submission, and completion retirement. Model adapters declare input
+layouts, capabilities, and prompt/output semantics through `ModelContract`.
+The shared [graph catalog](../native/src/model/catalog.rs) validates model limits,
+buffer layouts, declared capacities, required operations, and every supplied
+graph's input bindings. Native startup and graph selection use this common
+implementation; adapters supply declarations and model-specific constraints.
+
 [Prepared projection components](../flare/components/linear.py) provide BF16,
 FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,
 shared scratch, and captured projection overlap. Recipes supply weights and
@@ -359,8 +367,7 @@ shares incremental think/tool envelopes with Qwen while interpreting GLM
 rendered bytes, token IDs, instruction boundaries, assistant continuations, and
 parallel tool history against Transformers. GLM structured output with an open
 reasoning prefix is unsupported; the template does not honor Qwen's
-`enable_thinking=false` option. Production GLM bootstrap and HTTP execution
-remain unimplemented.
+`enable_thinking=false` option. GLM HTTP execution has not been qualified.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
@@ -475,8 +482,12 @@ through [RankExecutor](../native/src/execution/ranks.rs), with no intervening
 execution-worker queue. Native server startup accepts prepared peer sockets.
 The Python server binding selects Qwen or GLM from the prepared input schema
 once at startup. Both model runtimes use the same native rank coordinator and
-HTTP server. Rank-process supervision and GLM HTTP integration remain
-unimplemented.
+HTTP server. The [Rust rank supervisor](../native/src/processes.rs) watches
+owned children through Linux pidfds. Unexpected peer exit or an expired drain
+deadline terminates the rank group without running CUDA destructors. Peer
+processes receive a parent-death signal if their root exits. Coordinated shutdown
+allows peers to finish before Python reaps them. Process-level tests cover peer
+crashes, parent exit, shutdown deadlines, and normal drain.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
 
 The shared [tuning session](../flare/preparation/tuning.py) owns declaration

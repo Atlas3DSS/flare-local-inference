@@ -187,7 +187,7 @@ impl<M: ModelContract> ModelRuntime<M> {
         frontend: Arc<crate::frontend::Frontend>,
         peers: Option<Vec<UnixStream>>,
     ) -> Result<Self> {
-        M::validate(&config, &manifest)?;
+        crate::model::catalog::validate::<M>(&config, &manifest)?;
         super::observation::initialize_clock();
         if queue_capacity == 0 || queue_capacity > 1024 || !(2..=4096).contains(&event_capacity) {
             return Err("invalid native request/event queue capacity".into());
@@ -929,7 +929,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             return Ok(false);
         }
         validate_sampling_admissions::<M>(step, &self.admissions)?;
-        let graph = M::graph(
+        let graph = crate::model::catalog::select::<M>(
             self.config,
             executor.manifest(),
             step.kind,

@@ -177,7 +177,7 @@ impl Bootstrap {
                 },
             )?,
         };
-        M::validate(&model, manifest)?;
+        crate::model::catalog::validate::<M>(&model, manifest)?;
         let assets = object
             .get("assets")
             .and_then(Value::as_object)
@@ -223,7 +223,7 @@ impl Bootstrap {
         }
         model.sampling_defaults =
             super::request::sampling_parameters(&generation, &model.sampling_defaults)?;
-        M::validate(&model, manifest)?;
+        crate::model::catalog::validate::<M>(&model, manifest)?;
         let mut defaults = match object.get("template_defaults") {
             None => serde_json::Map::new(),
             Some(Value::Object(defaults)) => defaults.clone(),

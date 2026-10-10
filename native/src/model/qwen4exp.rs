@@ -11,9 +11,7 @@ mod tests;
 
 use crate::{
     Result,
-    execution::{
-        CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, SamplingMode, Upload,
-    },
+    execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
     model::{ContractMetadata, ModelConfig, ModelContract, VisionCapabilities},
     scheduler::{RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities},
 };
@@ -55,8 +53,17 @@ impl Qwen4Exp {
 impl ModelContract for Qwen4Exp {
     type Admission = inputs::Admission;
     type Inputs = inputs::Inputs;
-    fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        Self::validate(config, manifest)
+    fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
+        config::validate_config(config, manifest)
+    }
+    fn required_buffers(config: &ModelConfig) -> Vec<crate::model::catalog::BufferSpec> {
+        config::required_buffers(config)
+    }
+    fn required_inputs(
+        config: &ModelConfig,
+        kind: GraphKind,
+    ) -> impl Iterator<Item = &'static str> {
+        config::required_inputs(config, kind)
     }
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
         SchedulerCapabilities {
@@ -66,16 +73,6 @@ impl ModelContract for Qwen4Exp {
             live_state_base: 1,
             draft_pages_per_request: 1,
         }
-    }
-    fn graph(
-        config: &ModelConfig,
-        manifest: &ExecutionManifest,
-        kind: GraphKind,
-        batch: usize,
-        tokens: usize,
-        mode: SamplingMode,
-    ) -> Result<usize> {
-        Self::graph(config, manifest, kind, batch, tokens, mode)
     }
     fn pack(
         inputs: &mut Self::Inputs,

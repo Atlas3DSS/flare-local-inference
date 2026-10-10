@@ -1,151 +1,28 @@
-use super::{Glm5Next, PAGE_TOKENS};
+use super::Glm5Next;
+use super::PAGE_TOKENS;
 use crate::{
     Result,
-    execution::{ABI_VERSION, Dtype, ExecutionManifest, GraphKind, SamplingMode},
+    execution::{ABI_VERSION, Dtype, ExecutionManifest, GraphKind},
     model::ModelConfig,
-    scheduler::prefill_capacities,
 };
 
-impl Glm5Next {
-    pub fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        Self::validate_inner(config, manifest).map_err(|error| match error {
-            crate::Error::Execution(crate::ExecutionError::Manifest(_)) => error,
-            _ => {
-                crate::ExecutionError::Manifest(crate::Failure::caused_by(error.to_string(), error))
-                    .into()
-            }
-        })
+pub(super) fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
+    if config.contract != Glm5Next::metadata() || manifest.abi_version != ABI_VERSION {
+        return Err(
+            "unsupported GLM graph-input schema, vocabulary, capabilities, or completion ABI"
+                .into(),
+        );
     }
-
-    fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        manifest.validate()?;
-        if config.contract != Self::metadata() || manifest.abi_version != ABI_VERSION {
-            return Err(
-                "unsupported GLM graph-input schema, vocabulary, capabilities, or completion ABI"
-                    .into(),
-            );
-        }
-        if !config.speculative_widths.is_empty()
-            || config.speculative_fixed_width.is_some()
-            || config.speculative_proposal_source
-                == crate::scheduler::speculation::ProposalSource::Copy
-        {
-            return Err("prepared GLM catalog does not support speculative execution".into());
-        }
-        config.sampling_defaults.validate()?;
-        config.limits.validate_prefill()?;
-        if config.model_id.is_empty()
-            || config.limits.max_active != manifest.max_active
-            || config.limits.max_sequence_tokens == 0
-            || config.limits.max_sequence_tokens > 1048576
-            || !config
-                .limits
-                .max_sequence_tokens
-                .is_multiple_of(PAGE_TOKENS)
-            || config.limits.pages == 0
-            || config.limits.pages > i32::MAX as u32
-            || config.limits.snapshots == 0
-            || config.limits.snapshots > i32::MAX as u32 - 5
-            || config.max_new_tokens == 0
-            || config.max_new_tokens > i32::MAX as u32
-            || config.sampling_defaults.top_k > config.contract.vocabulary as i32
-            || config.eos_token_ids.len() > 8
-            || config
-                .eos_token_ids
-                .iter()
-                .any(|id| *id as usize >= config.contract.vocabulary)
-        {
-            return Err("invalid prepared GLM model configuration".into());
-        }
-        for (name, dtype, shape) in required_buffers(config) {
-            let buffer = manifest.buffer(name)?;
-            if buffer.dtype != dtype || buffer.shape != shape {
-                return Err(format!(
-                    "invalid GLM semantic buffer {name}: expected {dtype:?}{shape:?}"
-                )
-                .into());
-            }
-        }
-        for graph in &manifest.graphs {
-            Self::graph(
-                config,
-                manifest,
-                graph.kind,
-                graph.batch_capacity,
-                graph.token_capacity,
-                graph.sampling_mode,
-            )?;
-        }
-        for kind in [
-            GraphKind::Init,
-            GraphKind::Restore,
-            GraphKind::Snapshot,
-            GraphKind::Resume,
-            GraphKind::Decode,
-        ] {
-            for batch in [1, 2, 4]
-                .into_iter()
-                .filter(|b| *b <= config.limits.max_active.next_power_of_two())
-            {
-                Self::graph(config, manifest, kind, batch, 1, SamplingMode::General)?;
-            }
-        }
-        for tokens in prefill_capacities(config.limits.prefill_chunk_size) {
-            Self::graph(
-                config,
-                manifest,
-                GraphKind::Prefill,
-                1,
-                tokens,
-                SamplingMode::General,
-            )?;
-        }
-        Ok(())
+    if !config.speculative_widths.is_empty()
+        || config.speculative_fixed_width.is_some()
+        || config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
+    {
+        return Err("prepared GLM catalog does not support speculative execution".into());
     }
-
-    pub fn graph(
-        config: &ModelConfig,
-        manifest: &ExecutionManifest,
-        kind: GraphKind,
-        batch: usize,
-        tokens: usize,
-        mode: SamplingMode,
-    ) -> Result<usize> {
-        if matches!(kind, GraphKind::Vision | GraphKind::Speculative)
-            || ![1, 2, 4].contains(&batch)
-            || batch > config.limits.max_active.next_power_of_two()
-            || if kind == GraphKind::Prefill {
-                batch != 1
-                    || !prefill_capacities(config.limits.prefill_chunk_size).any(|n| n == tokens)
-            } else {
-                tokens != 1
-            }
-        {
-            return Err("undeclared GLM graph kind or capacity".into());
-        }
-        let mut matches = manifest.graphs.iter().enumerate().filter(|(_, g)| {
-            g.kind == kind
-                && g.batch_capacity == batch
-                && g.token_capacity == tokens
-                && g.sampling_mode == mode
-        });
-        let (index, graph) = matches.next().ok_or_else(|| {
-            format!(
-                "prepared model lacks {kind:?}/{mode:?} graph with batch {batch}, tokens {tokens}"
-            )
-        })?;
-        if matches.next().is_some() {
-            return Err("ambiguous prepared GLM graph capacity".into());
-        }
-        for name in required_inputs(kind) {
-            if !graph.input_bindings.iter().any(|b| b.buffer_name == *name) {
-                return Err(
-                    format!("prepared graph {} lacks required input {name}", graph.name).into(),
-                );
-            }
-        }
-        Ok(index)
+    if config.limits.max_sequence_tokens > 1048576 {
+        return Err("invalid prepared GLM context capacity".into());
     }
+    Ok(())
 }
 
 pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype, Vec<usize>)> {

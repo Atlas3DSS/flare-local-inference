@@ -1,271 +1,24 @@
 use super::Qwen4Exp;
 use crate::{
     Result,
-    execution::{Dtype, ExecutionManifest, GraphKind, SamplingMode},
+    execution::{Dtype, ExecutionManifest, GraphKind},
     model::ModelConfig,
-    scheduler::prefill_capacities,
 };
 
-impl Qwen4Exp {
-    pub fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        Self::validate_inner(config, manifest).map_err(|error| match error {
-            crate::Error::Execution(crate::ExecutionError::Manifest(_)) => error,
-            _ => {
-                crate::ExecutionError::Manifest(crate::Failure::caused_by(error.to_string(), error))
-                    .into()
-            }
-        })
+pub(super) fn validate_config(config: &ModelConfig, _: &ExecutionManifest) -> Result<()> {
+    Qwen4Exp::validate_metadata(&config.contract)?;
+    if config.limits.max_sequence_tokens > 262144 || config.limits.prefill_chunk_size > 262144 {
+        return Err("invalid prepared Qwen4Exp context capacity".into());
     }
-
-    fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        manifest.validate()?;
-        Self::validate_metadata(&config.contract)?;
-        crate::scheduler::speculation::validate_widths(&config.speculative_widths)?;
-        if config
-            .speculative_fixed_width
-            .is_some_and(|w| !config.speculative_widths.contains(&w))
-        {
-            return Err(
-                "speculative_fixed_width must belong to the prepared speculative_widths".into(),
-            );
-        }
-        if !config.speculative_widths.is_empty() {
-            if manifest.abi_version != crate::execution::SPECULATIVE_ABI_VERSION {
-                return Err("speculative catalog requires ABI3".into());
-            }
-            let mut buffers = vec![
-                ("copy_token_ids", Dtype::Int64, vec![4, 7]),
-                ("copy_token_count", Dtype::Int32, vec![4]),
-                ("copy_expected_consumed", Dtype::Int64, vec![4]),
-                ("copy_generation", Dtype::Int64, vec![4]),
-            ];
-            if config.has_draft_cache() {
-                buffers.push((
-                    "draft_page_tables",
-                    Dtype::Int32,
-                    vec![4, config.limits.max_sequence_tokens / 64],
-                ));
-            } else {
-                buffers.extend([
-                    (
-                        "copy_grammar_mask",
-                        Dtype::Int32,
-                        vec![4, 8, config.contract.vocabulary.div_ceil(32)],
-                    ),
-                    ("copy_grammar_mask_count", Dtype::Int32, vec![4]),
-                ]);
-            }
-            for (name, dtype, shape) in buffers {
-                let buffer = manifest.buffer(name)?;
-                if buffer.dtype != dtype || buffer.shape != shape {
-                    return Err(format!("invalid speculative buffer {name}").into());
-                }
-            }
-            for width in &config.speculative_widths {
-                for batch in [1, 2, 4]
-                    .into_iter()
-                    .filter(|b| *b <= config.limits.max_active.next_power_of_two())
-                {
-                    if batch * width > 8 {
-                        continue;
-                    }
-                    Self::graph(
-                        config,
-                        manifest,
-                        GraphKind::Speculative,
-                        batch,
-                        *width,
-                        SamplingMode::General,
-                    )?;
-                }
-            }
-        }
-        if config.speculative_widths.is_empty()
-            && config.speculative_proposal_source
-                == crate::scheduler::speculation::ProposalSource::Copy
-        {
-            return Err("copy proposal source requires speculative graphs".into());
-        }
-        config.sampling_defaults.validate()?;
-        if config.sampling_defaults.top_k > config.contract.vocabulary as i32 {
-            return Err("top_k exceeds the prepared vocabulary".into());
-        }
-        config.limits.validate_prefill()?;
-        if config.limits.max_sequence_tokens > 262144 || config.limits.prefill_chunk_size > 262144 {
-            return Err("invalid prepared Qwen4Exp model configuration".into());
-        }
-        for graph in &manifest.graphs {
-            if (graph.kind == GraphKind::Vision
-                && !config
-                    .contract
-                    .vision
-                    .patch_capacities
-                    .contains(&graph.token_capacity))
-                || (graph.kind == GraphKind::Prefill
-                    && !prefill_capacities(config.limits.prefill_chunk_size)
-                        .any(|n| n == graph.token_capacity))
-            {
-                return Err(
-                    format!("graph {} has an undeclared Qwen4Exp capacity", graph.name).into(),
-                );
-            }
-        }
-        if config.model_id.is_empty()
-            || config.limits.max_active != manifest.max_active
-            || config.limits.max_sequence_tokens == 0
-            || !config.limits.max_sequence_tokens.is_multiple_of(64)
-            || config.limits.pages == 0
-            || config.limits.pages > i32::MAX as u32
-            || config.limits.snapshots == 0
-            || config.limits.snapshots > i32::MAX as u32 - 5
-            || config.contract.vision.features_per_request == 0
-            || config.max_new_tokens == 0
-            || config.max_new_tokens > i32::MAX as u32
-            || config.eos_token_ids.len() > 8
-            || config
-                .eos_token_ids
-                .iter()
-                .any(|id| *id as usize >= config.contract.vocabulary)
-        {
-            return Err("invalid prepared Qwen4Exp model configuration".into());
-        }
-        for (name, dtype, shape) in required_buffers(config) {
-            let buffer = manifest.buffer(name)?;
-            if buffer.dtype != dtype || buffer.shape != shape {
-                return Err(format!(
-                    "invalid Qwen4Exp semantic buffer {name}: expected {dtype:?}{shape:?}"
-                )
-                .into());
-            }
-        }
-        for kind in [
-            GraphKind::Init,
-            GraphKind::Restore,
-            GraphKind::Snapshot,
-            GraphKind::Resume,
-            GraphKind::Decode,
-        ] {
-            if kind == GraphKind::Decode && !config.speculative_widths.is_empty() {
-                continue;
-            }
-            for batch in [1, 2, 4]
-                .into_iter()
-                .filter(|batch| *batch <= config.limits.max_active.next_power_of_two())
-            {
-                Self::graph(config, manifest, kind, batch, 1, SamplingMode::General)?;
-            }
-        }
-        for tokens in prefill_capacities(config.limits.prefill_chunk_size) {
-            Self::graph(
-                config,
-                manifest,
-                GraphKind::Prefill,
-                1,
-                tokens,
-                SamplingMode::General,
-            )?;
-        }
-        for &patches in &config.contract.vision.patch_capacities {
-            Self::graph(
-                config,
-                manifest,
-                GraphKind::Vision,
-                1,
-                patches,
-                SamplingMode::General,
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn graph(
-        config: &ModelConfig,
-        manifest: &ExecutionManifest,
-        kind: GraphKind,
-        batch: usize,
-        tokens: usize,
-        sampling_mode: SamplingMode,
-    ) -> Result<usize> {
-        let mut candidates = manifest.graphs.iter().enumerate().filter(|(_, graph)| {
-            graph.kind == kind
-                && graph.batch_capacity == batch
-                && graph.token_capacity == tokens
-                && graph.sampling_mode == sampling_mode
-        });
-        let (index, graph) = candidates.next().ok_or_else(|| {
-            format!("prepared model lacks {kind:?}/{sampling_mode:?} graph with batch {batch}, tokens {tokens}")
-        })?;
-        if candidates.next().is_some() {
-            return Err("ambiguous prepared model graph capacity".into());
-        }
-        if config.has_draft_cache()
-            && matches!(
-                kind,
-                GraphKind::Prefill | GraphKind::Decode | GraphKind::Resume | GraphKind::Speculative
-            )
-            && !graph
-                .input_bindings
-                .iter()
-                .any(|binding| binding.buffer_name == "draft_page_tables")
-        {
-            return Err(format!(
-                "prepared graph {} lacks required input draft_page_tables",
-                graph.name
-            )
-            .into());
-        }
-        if kind == GraphKind::Speculative && !config.has_draft_cache() {
-            for name in ["copy_grammar_mask", "copy_grammar_mask_count"] {
-                if !graph.input_bindings.iter().any(|b| b.buffer_name == name) {
-                    return Err(format!(
-                        "prepared graph {} lacks required input {name}",
-                        graph.name
-                    )
-                    .into());
-                }
-            }
-        }
-        if matches!(kind, GraphKind::Restore | GraphKind::Snapshot) {
-            for name in [
-                Some("page_tables"),
-                config.has_draft_cache().then_some("draft_page_tables"),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if !graph
-                    .input_bindings
-                    .iter()
-                    .any(|input| input.buffer_name == name)
-                {
-                    return Err(format!(
-                        "prepared graph {} lacks required input {name}",
-                        graph.name
-                    )
-                    .into());
-                }
-            }
-        }
-        for name in required_inputs(kind) {
-            if !graph
-                .input_bindings
-                .iter()
-                .any(|binding| binding.buffer_name == *name)
-            {
-                return Err(
-                    format!("prepared graph {} lacks required input {name}", graph.name).into(),
-                );
-            }
-        }
-        Ok(index)
-    }
+    Ok(())
 }
+
 pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype, Vec<usize>)> {
     use Dtype::{Float32 as F32, Int32 as I32, Int64 as I64};
     let context = config.limits.max_sequence_tokens;
     let prefill_chunk_size = config.limits.prefill_chunk_size;
     let patch_capacity = *config.contract.vision.patch_capacities.last().unwrap();
-    vec![
+    let mut buffers = vec![
         ("row_slot_ids", I32, vec![4]),
         ("row_generations", I64, vec![4]),
         ("live_rows", I32, vec![1]),
@@ -316,10 +69,50 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         ("state_qsa_slots", I64, vec![4]),
         ("state_accepted_tokens", I32, vec![4]),
         ("state_num_ops", I32, vec![1]),
-    ]
+    ];
+    if !config.speculative_widths.is_empty() {
+        buffers.extend([
+            ("copy_token_ids", I64, vec![4, 7]),
+            ("copy_token_count", I32, vec![4]),
+            ("copy_expected_consumed", I64, vec![4]),
+            ("copy_generation", I64, vec![4]),
+        ]);
+        if config.has_draft_cache() {
+            buffers.push(("draft_page_tables", I32, vec![4, context / 64]));
+        } else {
+            buffers.extend([
+                (
+                    "copy_grammar_mask",
+                    I32,
+                    vec![4, 8, config.contract.vocabulary.div_ceil(32)],
+                ),
+                ("copy_grammar_mask_count", I32, vec![4]),
+            ]);
+        }
+    }
+    buffers
 }
 
-pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
+pub(super) fn required_inputs(
+    config: &ModelConfig,
+    kind: GraphKind,
+) -> impl Iterator<Item = &'static str> {
+    let transfer = matches!(kind, GraphKind::Restore | GraphKind::Snapshot);
+    let draft = config.has_draft_cache() && (transfer || kind.samples());
+    let copy = kind == GraphKind::Speculative && !config.has_draft_cache();
+    base_inputs(kind).iter().copied().chain(
+        [
+            transfer.then_some("page_tables"),
+            draft.then_some("draft_page_tables"),
+            copy.then_some("copy_grammar_mask"),
+            copy.then_some("copy_grammar_mask_count"),
+        ]
+        .into_iter()
+        .flatten(),
+    )
+}
+
+fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
     match kind {
         GraphKind::Init | GraphKind::Restore => &[
             "admission_count",

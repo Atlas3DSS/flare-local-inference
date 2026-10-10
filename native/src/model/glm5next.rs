@@ -11,9 +11,7 @@ mod tests;
 
 use crate::{
     Result,
-    execution::{
-        CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, SamplingMode, Upload,
-    },
+    execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
     model::{ContractMetadata, ModelConfig, ModelContract, VisionCapabilities},
     scheduler::{RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities},
 };
@@ -37,10 +35,15 @@ impl ModelContract for Glm5Next {
     type Admission = inputs::Admission;
     type Inputs = inputs::Inputs;
 
-    fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        Self::validate(config, manifest)
+    fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
+        config::validate_config(config, manifest)
     }
-
+    fn required_buffers(config: &ModelConfig) -> Vec<crate::model::catalog::BufferSpec> {
+        config::required_buffers(config)
+    }
+    fn required_inputs(_: &ModelConfig, kind: GraphKind) -> impl Iterator<Item = &'static str> {
+        config::required_inputs(kind).iter().copied()
+    }
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
         SchedulerCapabilities {
             vocabulary: config.contract.vocabulary,
@@ -49,17 +52,6 @@ impl ModelContract for Glm5Next {
             live_state_base: 1,
             draft_pages_per_request: 0,
         }
-    }
-
-    fn graph(
-        config: &ModelConfig,
-        manifest: &ExecutionManifest,
-        kind: GraphKind,
-        batch: usize,
-        tokens: usize,
-        mode: SamplingMode,
-    ) -> Result<usize> {
-        Self::graph(config, manifest, kind, batch, tokens, mode)
     }
 
     fn pack(
