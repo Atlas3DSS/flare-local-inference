@@ -123,19 +123,19 @@ class CompiledForward:
     inputs: list
     invocations: list
     owner: object
-    wrapped_output: bool
+    output_tree: object
     cache_hit: bool
 
     def __call__(self):
         token = _INVOCATIONS.set(self.invocations)
         try:
             result = self.artifact(*self.inputs)
-            return result[0] if self.wrapped_output else result
+            return tree_unflatten(result, self.output_tree)
         finally:
             _INVOCATIONS.reset(token)
 
 
-def _compile_module(module, calls, owner):
+def _compile_module(module, calls, owner, output_tree):
     from torch._inductor import standalone_compile
     from torch._inductor.codecache import torch_key
     from torch._inductor.standalone_compile import CompiledArtifact
@@ -156,10 +156,6 @@ def _compile_module(module, calls, owner):
         inputs.append(tensor)
     # Placeholders and runtime operands must retain the same order.
     inputs.reverse()
-    output = next(node for node in graph.nodes if node.op == 'output')
-    wrapped_output = not isinstance(output.args[0], (tuple, list))
-    if wrapped_output:
-        output.args = ((output.args[0],),)
     module = torch.fx.GraphModule({}, graph)
     storages = {}
     metadata = []
@@ -189,7 +185,7 @@ def _compile_module(module, calls, owner):
         path.parent.mkdir(parents=True, exist_ok=True)
         with _artifact_kernel_table():
             artifact.save(path=str(path))
-    return CompiledForward(artifact, inputs, calls, owner, wrapped_output, cache_hit)
+    return CompiledForward(artifact, inputs, calls, owner, output_tree, cache_hit)
 
 
 def compile_forward(fn):
@@ -205,7 +201,14 @@ def compile_forward(fn):
     weight payloads or process-local kernel handles. Each callable retains its
     own prepared invocations, buffers, and forward owner.
     """
-    module = make_fx(lambda: fn(), tracing_mode='fake', _allow_non_fake_inputs=True)()
+    output_tree = None
+
+    def trace():
+        nonlocal output_tree
+        leaves, output_tree = tree_flatten(fn())
+        return tuple(leaves)
+
+    module = make_fx(trace, tracing_mode='fake', _allow_non_fake_inputs=True)()
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
@@ -373,4 +376,4 @@ def compile_forward(fn):
     graph.eliminate_dead_code()
     graph.lint()
     module.recompile()
-    return _compile_module(module, calls, fn)
+    return _compile_module(module, calls, fn, output_tree)

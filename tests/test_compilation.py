@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from collections import namedtuple
 
 import pytest
 import torch
@@ -10,6 +11,32 @@ import triton
 import triton.language as tl
 
 from flare.preparation.compilation import compile_forward
+
+ForwardOutput = namedtuple("ForwardOutput", ("hidden", "auxiliary"))
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_compiled_named_output_preserves_tensor_aliases():
+    source = torch.ones(64, device="cuda")
+    output = torch.empty_like(source)
+
+    def forward():
+        output.copy_(source * 3)
+        return ForwardOutput(output, {"input": source, "optional": None})
+
+    compiled = compile_forward(forward)
+    result = compiled()
+    assert isinstance(result, ForwardOutput)
+    assert result.hidden.data_ptr() == output.data_ptr()
+    assert result.auxiliary["input"].data_ptr() == source.data_ptr()
+    assert result.auxiliary["optional"] is None
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    source.fill_(7)
+    graph.replay()
+    torch.testing.assert_close(result.hidden, torch.full_like(output, 21), rtol=0, atol=0)
 
 
 @triton.jit

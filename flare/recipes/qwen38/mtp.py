@@ -67,6 +67,9 @@ class MTPOutput:
     logits: torch.Tensor
 
 
+torch.utils._pytree.register_dataclass(MTPOutput)
+
+
 class PreparedMTPFeedback:
     """Qwen's flattened-state normalization and shared-stream BF16 projection."""
 
