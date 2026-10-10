@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
     reason="requires four assigned GPUs and FLARE_RUN_TP_CUDA_TESTS=1")
 
 
-def _rank(rank, world, rendezvous, sockets, fields):
+def _rank(rank, world, rendezvous, sockets, fields, persistent):
     from flare.components.collectives import PreparedAllReduce
     from flare.components.parallel import TensorParallelShard
     from flare.components.sampling import (
@@ -94,7 +94,19 @@ def _rank(rank, world, rendezvous, sockets, fields):
             session.tune()
             stream = torch.cuda.Stream(device=device)
             for name, operation in operations.items():
-                operations[name] = call = compile_forward(operation)
+                if persistent:
+                    import io
+                    from functools import partial
+                    from flare.preparation.aot import aot_forward
+
+                    artifact = aot_forward(operation)
+                    artifact(operation)
+                    restored = torch.compiler.load_compiled_function(
+                        io.BytesIO(type(artifact).serialize(artifact).serialized_data))
+                    call = partial(restored, operation)
+                else:
+                    call = compile_forward(operation)
+                operations[name] = call
                 call()
                 torch.cuda.synchronize(device)
                 stream.wait_stream(torch.cuda.current_stream(device))
@@ -173,10 +185,11 @@ def _rank(rank, world, rendezvous, sockets, fields):
 
 
 @pytest.mark.parametrize("world,fields", [(2, 8), (4, 24)])
-def test_native_rank_coordination(world, fields, tmp_path):
+@pytest.mark.parametrize("persistent", [False, True])
+def test_native_rank_coordination(world, fields, persistent, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
     sockets = [socket.socketpair() for _ in range(world - 1)]
-    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), sockets, fields),
+    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), sockets, fields, persistent),
                          nprocs=world, join=False)
     for pair in sockets:
         for connection in pair:
