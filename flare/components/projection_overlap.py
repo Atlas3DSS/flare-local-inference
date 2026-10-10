@@ -68,6 +68,7 @@ class ConcurrentProjectionChain:
             for main in self.parallel_plans:
                 workspace.register_parallel(main, projection.plan)
         self.stream = workspace.auxiliary_stream
+        self.stream_handle = self.stream.cuda_stream
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):
@@ -76,8 +77,8 @@ class ConcurrentProjectionChain:
         _, self.workspace = self.arena.views(((main_bytes,), torch.uint8), ((side_bytes,), torch.uint8))
 
     def start(self, source):
-        _start(source, self.weights, self.scales, self.outputs, self.workspace, self.plans, self.stream.cuda_stream)
+        _start(source, self.weights, self.scales, self.outputs, self.workspace, self.plans, self.stream_handle)
 
     def finish(self, source, dependency):
-        _join(source, dependency, self.outputs, self.workspace, self.stream.cuda_stream)
+        _join(source, dependency, self.outputs, self.workspace, self.stream_handle)
         return self.outputs[-1]

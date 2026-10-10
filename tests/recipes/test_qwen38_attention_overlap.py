@@ -50,9 +50,21 @@ def weights():
 
 
 @pytest.mark.parametrize("rows", [1, 8])
-@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("compiled", [False, True, "aot"])
 @torch.no_grad()
 def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
+    def compile_call(fn):
+        if compiled == "aot":
+            import io
+            from flare.preparation.aot import aot_forward
+
+            artifact = aot_forward(fn)
+            artifact(fn)
+            data = type(artifact).serialize(artifact).serialized_data
+            restored = torch.compiler.load_compiled_function(io.BytesIO(data))
+            return lambda: restored(fn)
+        return compile_forward(fn)
+
     module, weights = weights
     device = torch.device("cuda:0")
     arena = ScratchArena(device)
@@ -75,7 +87,7 @@ def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
         assert all(a.data_ptr() + a.nbytes <= b.data_ptr() for a, b in pairwise(views))
         concurrent, attention.concurrent = attention.concurrent, None
         try:
-            serial = compile_forward(lambda: attention(input_copy)) if compiled else lambda: attention(input_copy)
+            serial = compile_call(lambda: attention(input_copy)) if compiled else lambda: attention(input_copy)
             serial()
         finally:
             attention.concurrent = concurrent
@@ -87,7 +99,7 @@ def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
             arena.tensor.fill_(255)
             input_copy.zero_()
 
-        call = compile_forward(forward) if compiled else forward
+        call = compile_call(forward) if compiled else forward
         call()
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph(keep_graph=True)

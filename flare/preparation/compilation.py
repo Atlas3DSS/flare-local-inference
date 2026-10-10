@@ -7,7 +7,7 @@ import os
 import pickle
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -27,9 +27,12 @@ class _Invocation:
     leaves: list
     tree: object
     operands: list
+    integers: list = field(default_factory=list)
 
-    def run(self, reads, writes):
+    def run(self, reads, writes, integers=()):
         leaves = self.leaves.copy()
+        for position, value in zip(self.integers, integers, strict=True):
+            leaves[position] = value
         for position, mutable, index, view in self.operands:
             tensor = writes[index] if mutable else reads[index]
             if view is not None:
@@ -41,12 +44,13 @@ class _Invocation:
 
 
 @torch.library.custom_op('flare::storage_call', mutates_args=('writes',))
-def _storage_call(reads: list[torch.Tensor], writes: list[torch.Tensor], handle: int) -> None:
-    _INVOCATIONS.get()[handle].run(reads, writes)
+def _storage_call(reads: list[torch.Tensor], writes: list[torch.Tensor], handle: int,
+                  integers: list[int] | None = None) -> None:
+    _INVOCATIONS.get()[handle].run(reads, writes, () if integers is None else integers)
 
 
 @_storage_call.register_fake
-def _fake_storage_call(reads, writes, handle):
+def _fake_storage_call(reads, writes, handle, integers=None):
     pass
 
 
@@ -232,6 +236,11 @@ def compile_forward(fn, *, tracer=None):
         return tuple(leaves)
 
     module = (ForwardTracer() if tracer is None else tracer)(trace)
+    calls = _lower_storage(module)
+    return _compile_module(module, calls, fn, output_tree)
+
+
+def _lower_storage(module):
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
@@ -342,11 +351,16 @@ def compile_forward(fn, *, tracer=None):
         mutable_keys = {key_for(arg) for arg in mutated}
         reads, writes, read_indices, write_indices = [], [], {}, {}
         leaves, tree = tree_flatten((node.args, node.kwargs))
-        operands = []
+        operands, integers, integer_positions = [], [], []
         for position, arg in enumerate(leaves):
             if not isinstance(arg, torch.fx.Node):
                 continue
             value = arg.meta.get('val')
+            if isinstance(value, torch.SymInt):
+                integers.append(arg)
+                integer_positions.append(position)
+                leaves[position] = None
+                continue
             if not isinstance(value, torch.Tensor):
                 raise TypeError(f'non-tensor dynamic operand: {arg}')
             key = key_for(arg)
@@ -357,14 +371,16 @@ def compile_forward(fn, *, tracer=None):
             if identity not in indices:
                 indices[identity] = len(array)
                 array.append(base if base is not None else arg)
-            descriptor = (value.dtype, tuple(value.shape), value.stride(), value.storage_offset()) if base is not None else None
+            descriptor = (value.dtype, tuple(map(int, value.shape)), tuple(map(int, value.stride())),
+                          int(value.storage_offset())) if base is not None else None
             operands.append((position, mutable, indices[identity], descriptor))
             leaves[position] = None
-        invocation = _Invocation(target, leaves, tree, operands)
+        invocation = _Invocation(target, leaves, tree, operands, integer_positions)
         handle = len(calls)
         calls.append(invocation)
         with graph.inserting_before(node):
-            graph.call_function(torch.ops.flare.storage_call.default, (reads, writes, handle))
+            arguments = (reads, writes, handle, integers) if integers else (reads, writes, handle)
+            graph.call_function(torch.ops.flare.storage_call.default, arguments)
         if node.users:
             schema = getattr(target, '_schema', None)
             aliases = [] if schema is None else [
@@ -385,17 +401,20 @@ def compile_forward(fn, *, tracer=None):
         if key_for(node) not in bases:
             continue
         value = node.meta['val']
+        shape = tuple(map(int, value.shape))
+        stride = tuple(map(int, value.stride()))
+        offset = int(value.storage_offset())
         with graph.inserting_before(node):
             typed = graph.call_function(torch.ops.aten.view.dtype, (bases[key_for(node)], value.dtype))
             if value.is_contiguous():
                 sliced = graph.call_function(torch.ops.aten.slice.Tensor,
-                    (typed, 0, value.storage_offset(), value.storage_offset() + math.prod(value.shape)))
-                view = graph.call_function(torch.ops.aten.view.default, (sliced, tuple(value.shape)))
+                    (typed, 0, offset, offset + math.prod(shape)))
+                view = graph.call_function(torch.ops.aten.view.default, (sliced, shape))
             else:
                 view = graph.call_function(torch.ops.aten.as_strided.default,
-                    (typed, tuple(value.shape), value.stride(), value.storage_offset()))
+                    (typed, shape, stride, offset))
         node.replace_all_uses_with(view)
         graph.erase_node(node)
     graph.eliminate_dead_code()
     graph.lint()
-    return _compile_module(module, calls, fn, output_tree)
+    return calls

@@ -57,6 +57,7 @@ class ConcurrentAttention:
             self.plans.append(projection.plan.handle)
         workspace.register_parallel(attention.plan, *(projection.plan for projection in self.projections))
         self.stream = workspace.auxiliary_stream
+        self.stream_handle = self.stream.cuda_stream
         self.ready, self.done = torch.cuda.Event(), torch.cuda.Event()
         self.ready.record(self.stream)
         self.done.record(self.stream)
@@ -73,7 +74,7 @@ class ConcurrentAttention:
 
     def project(self, source):
         _parallel_mxfp8_projections(source, self.values, self.scales, self.outputs,
-            self.projection_workspaces, self.plans, self.stream.cuda_stream, False)
+            self.projection_workspaces, self.plans, self.stream_handle, False)
 
     def attend(self, source):
         bindings = self.attention.binding_kwargs

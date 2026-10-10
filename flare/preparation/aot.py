@@ -1,0 +1,269 @@
+"""Serializable compiled forwards with caller-owned storage and runtime handles."""
+
+import hashlib
+import importlib
+import inspect
+import operator
+import os
+import pickle
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from threading import RLock
+
+import torch
+from torch._dynamo.aot_compile_types import SerializableCallable
+from torch._dynamo.guards import GuardsStatePickler, _Missing
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
+from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, treespec_loads
+
+from .compilation import _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table, _byte_storage, _lower_storage
+
+_GUARD_LOCK = RLock()
+
+
+class BindingMismatch(ValueError):
+    """Prepared tensor storage differs from the compiled input contract."""
+
+
+def _guard_object(cls):
+    return object.__new__(cls)
+
+
+class _GuardPickler(GuardsStatePickler):
+    """Exclude unguarded kernel resources from prepared Python objects."""
+
+    def reducer_override(self, obj):
+        if (hasattr(obj, '__dict__')
+                and type(obj).__module__.startswith(('flare.', 'b12x.'))
+                and not inspect.isclass(obj) and not isinstance(obj, (torch.Tensor, torch.nn.Module))):
+            state = {key: value if id(value) in self.guard_tree_values
+                     else _Missing('unguarded attribute')
+                     for key, value in vars(obj).items()}
+            return _guard_object, (type(obj),), state
+        return super().reducer_override(obj)
+
+
+@contextmanager
+def _guard_serialization():
+    from torch._dynamo import guards
+
+    with _GUARD_LOCK:
+        original = guards.GuardsStatePickler
+        guards.GuardsStatePickler = _GuardPickler
+        try:
+            yield
+        finally:
+            guards.GuardsStatePickler = original
+
+
+def _signature(inputs):
+    aliases, result = {}, []
+    for value in inputs:
+        if isinstance(value, torch.Tensor):
+            storage = value.untyped_storage()
+            alias = aliases.setdefault(storage._cdata, len(aliases))
+            result.append((tuple(map(int, value.shape)), tuple(map(int, value.stride())),
+                           int(value.storage_offset()), value.dtype, value.device, alias))
+        elif isinstance(value, (int, torch.SymInt)):
+            result.append(int)
+        else:
+            raise TypeError(f'unsupported compiled input: {type(value)}')
+    return tuple(result)
+
+
+@dataclass
+class _Input:
+    index: int
+    view: tuple | None = None
+
+    def bind(self, args):
+        value = args[self.index]
+        if self.view is not None:
+            dtype, shape, stride, offset = self.view
+            value = _byte_storage(value).view(dtype).as_strided(shape, stride, offset)
+        return value
+
+
+class StorageBackend(SerializableCallable):
+    def __init__(self, module, examples):
+        from torch._guards import detect_fake_mode
+        from torch._inductor import standalone_compile
+
+        module = make_fx(module, tracing_mode='fake', _allow_non_fake_inputs=True,
+                         _disable_torch_fn_metadata_mode=True)(*examples)
+        graph = module.graph
+        arguments = [node for node in graph.nodes if node.op == 'placeholder']
+        examples = [node.meta['val'] for node in arguments]
+        self.signature = _signature(examples)
+        storages, scalar_inputs = {}, {}
+        for index, node in enumerate(arguments):
+            value = node.meta['val']
+            if not isinstance(value, torch.Tensor):
+                scalar_inputs[node] = _Input(index)
+                continue
+            storages.setdefault(value.untyped_storage()._cdata, index)
+            name = f'_input_{index}'
+            module.register_buffer(name, value)
+            with graph.inserting_before(node):
+                replacement = graph.get_attr(name)
+            replacement.meta = node.meta.copy()
+            node.replace_all_uses_with(replacement)
+            graph.erase_node(node)
+
+        self.invocations = _lower_storage(module)
+        bindings = dict(scalar_inputs)
+        for node in list(graph.nodes):
+            if node.op != 'get_attr':
+                continue
+            value = operator.attrgetter(node.target)(module)
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f'compiled constant must be a tensor: {node.target}')
+            index = storages[value.untyped_storage()._cdata]
+            with graph.inserting_before(next(iter(graph.nodes))):
+                argument = graph.placeholder(f'buffer_{len(bindings)}')
+            argument.meta['val'] = value
+            bindings[argument] = _Input(index, (value.dtype, tuple(map(int, value.shape)),
+                                              tuple(map(int, value.stride())), int(value.storage_offset())))
+            node.replace_all_uses_with(argument)
+            graph.erase_node(node)
+        graph.eliminate_dead_code()
+        graph.lint()
+        arguments = [node for node in graph.nodes if node.op == 'placeholder']
+        self.inputs = [bindings[node] for node in arguments]
+        examples = [node.meta['val'] for node in arguments]
+        module = torch.fx.GraphModule({}, graph)
+        self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
+            fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
+            aot=True, donate_graph_module=True)
+        self._bound = None
+
+    def __call__(self, *args):
+        identity = tuple((id(value), value.untyped_storage()._cdata, value.storage_offset())
+                         if isinstance(value, torch.Tensor) else value for value in args)
+        if self._bound is None or identity != self._bound[0]:
+            if _signature(args) != self.signature:
+                raise BindingMismatch('compiled forward input shapes, layouts, or storage aliases changed')
+            self._bound = identity, [item.bind(args) for item in self.inputs]
+        token = _INVOCATIONS.set(self.invocations)
+        try:
+            return self.artifact(*self._bound[1])
+        finally:
+            _INVOCATIONS.reset(token)
+
+    @classmethod
+    def serialize_compile_artifacts(cls, fn):
+        from torch._library.custom_ops import _maybe_get_opdef
+        from torch._dynamo.aot_compile_types import _serialize_triton_kernel
+
+        with _artifact_kernel_table():
+            artifact = fn.artifact.serialize()
+        calls = []
+        for call in fn.invocations:
+            target = call.target
+            leaves = call.leaves
+            if target is torch.ops.higher_order.triton_kernel_wrapper_mutation:
+                args, kwargs = tree_unflatten(leaves, call.tree)
+                kwargs = dict(kwargs)
+                kernel = kernel_side_table.get_kernel(kwargs['kernel_idx'])
+                constants = kernel_side_table.get_constant_args(kwargs['constant_args_idx'])
+                name = ('triton', _serialize_triton_kernel(kernel), constants)
+                kwargs['kernel_idx'] = kwargs['constant_args_idx'] = None
+                leaves, _ = tree_flatten((args, kwargs))
+            elif isinstance(target, torch._ops.OpOverload):
+                definition = _maybe_get_opdef(target)
+                registration = None if definition is None else definition._init_fn.__module__
+                name = ('op', target.namespace, target._opname, target._overloadname, registration)
+            else:
+                raise TypeError(f'cannot serialize native operator: {target}')
+            calls.append((name, leaves, treespec_dumps(call.tree), call.operands, call.integers))
+        return pickle.dumps((artifact, fn.inputs, calls, fn.signature))
+
+    @classmethod
+    def deserialize_compile_artifacts(cls, data):
+        from torch._inductor.standalone_compile import AOTCompiledArtifact
+        from torch._dynamo.aot_compile_types import _deserialize_triton_kernel
+
+        fn = cls.__new__(cls)
+        artifact, fn.inputs, calls, fn.signature = pickle.loads(data)
+        fn.invocations = []
+        for name, leaves, tree, operands, integers in calls:
+            tree = treespec_loads(tree)
+            if name[0] == 'triton':
+                _, kernel, constants = name
+                target = torch.ops.higher_order.triton_kernel_wrapper_mutation
+                args, kwargs = tree_unflatten(leaves, tree)
+                kwargs = dict(kwargs)
+                kwargs['kernel_idx'] = kernel_side_table.add_kernel(_deserialize_triton_kernel(kernel))
+                kwargs['constant_args_idx'] = kernel_side_table.add_constant_args(constants)
+                leaves, _ = tree_flatten((args, kwargs))
+            else:
+                _, namespace, opname, overload, registration = name
+                if registration is not None:
+                    importlib.import_module(registration)
+                target = getattr(getattr(getattr(torch.ops, namespace), opname), overload)
+            fn.invocations.append(_Invocation(target, leaves, tree, operands, integers))
+        with _artifact_kernel_table():
+            fn.artifact = AOTCompiledArtifact.deserialize(artifact)
+        fn._bound = None
+        return fn
+
+
+def _execute(forward):
+    return forward()
+
+
+def aot_forward(forward):
+    sources = r'.*\.(?:_?handle|stream_handle|plans\[\d+\])$'
+    with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
+        return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
+                             dynamic=False).aot_compile(((forward,), {}))
+
+
+@dataclass
+class BoundForward:
+    artifact: object
+    owner: object
+    cache_hit: bool
+
+    def __call__(self):
+        return self.artifact(self.owner)
+
+
+class ForwardCache:
+    """Load complete compiled forwards before tracing the serving catalog."""
+
+    def __init__(self, *, namespace, device):
+        import flashinfer
+        from torch._inductor.codecache import torch_key
+
+        properties = torch.cuda.get_device_properties(device)
+        key = hashlib.sha256(pickle.dumps((namespace, _OPTIONS, torch_key(),
+            properties.name, properties.major, properties.minor, properties.multi_processor_count)))
+        for root in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
+            for path in sorted(root.rglob('*.py')):
+                key.update(str(path.relative_to(root)).encode())
+                key.update(path.read_bytes())
+        root = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+        self.root = root / 'flare' / 'forwards' / key.hexdigest()
+
+    def prepare(self, forward, *, name, signature):
+        """Bind and warm one callable on the caller's preparation stream."""
+        identity = (type(forward).__module__, type(forward).__qualname__, name, signature)
+        path = self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
+        if path.is_file():
+            with path.open('rb') as file:
+                artifact = torch.compiler.load_compiled_function(file)
+            if artifact.guard_check(forward):
+                try:
+                    artifact(forward)
+                except BindingMismatch:
+                    pass
+                else:
+                    return BoundForward(artifact, forward, True)
+        artifact = aot_forward(forward)
+        artifact(forward)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        artifact.save_compiled_function(str(path))
+        return BoundForward(artifact, forward, False)

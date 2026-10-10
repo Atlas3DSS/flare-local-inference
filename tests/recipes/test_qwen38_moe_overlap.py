@@ -1,6 +1,8 @@
 """Concurrent expert branches retain graph dependencies and scratch lifetimes."""
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -90,3 +92,51 @@ def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
             # Native routed experts permit atomic accumulation in either order.
             torch.testing.assert_close(output_copy, expected, rtol=.01, atol=.001)
         graph.reset()
+
+
+def test_aot_moe_restores_fresh_buffers_plans_and_streams_without_tracing(tmp_path):
+    if os.environ.get("FLARE_QWEN38_SNAPSHOT") is None:
+        pytest.skip("FLARE_QWEN38_SNAPSHOT must identify the checkpoint")
+    artifact = tmp_path / "moe.bin"
+    script = r'''
+import importlib.util
+import sys
+from pathlib import Path
+import torch
+from flare.preparation import aot
+
+mode, module_path, artifact = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("test_qwen38_moe_overlap", module_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def forbidden(*args, **kwargs):
+    raise AssertionError("restoring a forward must not trace or compile")
+
+def compile_forward(forward):
+    if mode == "save":
+        compiled = aot.aot_forward(forward)
+        compiled(forward)
+        compiled.save_compiled_function(artifact)
+    else:
+        aot.make_fx = forbidden
+        aot.StorageBackend.__init__ = forbidden
+        torch._dynamo.convert_frame.fullgraph_capture = forbidden
+        with open(artifact, "rb") as file:
+            compiled = torch.compiler.load_compiled_function(file)
+    return lambda: compiled(forward)
+
+module.compile_forward = compile_forward
+with torch.no_grad():
+    weights = module.weights.__wrapped__()
+    if mode == "load":
+        module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, False)
+    module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, True)
+    if mode == "load":
+        module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, True)
+'''
+    for mode in ("save", "load"):
+        subprocess.run([sys.executable, "-c", script, mode, str(Path(__file__).resolve()),
+                        str(artifact)], check=True, timeout=180)
+    assert artifact.stat().st_size < 2 * 1024 * 1024

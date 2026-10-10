@@ -78,7 +78,7 @@ def test_exact_weight_feedback_matches_published_operator_reference(weights):
             stream.synchronize(); graph.reset()
 
 
-@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("compiled", [False, True, "aot"])
 def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs(weights, compiled):
     from b12x.preparation import PreparationSession
 
@@ -97,7 +97,16 @@ def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs
             output_indices=selected, session=session, name="mtp", max_cache_pages=2)
         arena.finalize(); arena.freeze()
         forward = op
-        if compiled:
+        if compiled == "aot":
+            import io
+            from flare.preparation.aot import aot_forward
+
+            artifact = aot_forward(op)
+            artifact(op)
+            data = type(artifact).serialize(artifact).serialized_data
+            restored = torch.compiler.load_compiled_function(io.BytesIO(data))
+            forward = lambda: restored(op)
+        elif compiled:
             from flare.preparation.compilation import compile_forward
 
             forward = compile_forward(op)

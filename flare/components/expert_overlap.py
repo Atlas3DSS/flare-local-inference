@@ -118,6 +118,7 @@ class ConcurrentSharedExpert:
                 workspace.register_parallel(main_plan, projection.plan)
         self.plans = [projection.plan.handle for projection in self.projections] + [mlp.activation_plan.handle]
         self.stream = workspace.auxiliary_stream
+        self.stream_handle = self.stream.cuda_stream
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):
@@ -128,10 +129,10 @@ class ConcurrentSharedExpert:
     def start(self, source):
         _start_shared_expert(source, self.weights, self.scales, self.gains, self.scale_kinds,
                             self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                            self.mlp.round_silu, self.stream.cuda_stream, self.defer_launch)
+                            self.mlp.round_silu, self.stream_handle, self.defer_launch)
 
     def finish(self, source, routed):
         _join_shared_expert(source, routed, self.weights, self.scales, self.gains, self.scale_kinds,
                            self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                           self.mlp.round_silu, self.stream.cuda_stream, self.defer_launch)
+                           self.mlp.round_silu, self.stream_handle, self.defer_launch)
         return self.mlp.down_projection.output

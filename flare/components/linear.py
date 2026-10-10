@@ -176,6 +176,7 @@ class ParallelProjections:
             self.plans.append(projection.plan.handle)
         workspace.register_parallel(*(projection.plan for projection in self.projections))
         self.stream = workspace.auxiliary_stream
+        self.stream_handle = self.stream.cuda_stream
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):
@@ -185,4 +186,4 @@ class ParallelProjections:
 
     def __call__(self, source):
         _parallel_mxfp8_projections(source, self.values, self.scales, self.outputs,
-                                   self.workspaces, self.plans, self.stream.cuda_stream)
+                                   self.workspaces, self.plans, self.stream_handle)
