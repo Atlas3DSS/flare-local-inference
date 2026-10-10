@@ -200,9 +200,13 @@ def _identity(manifest):
 
 
 @torch.no_grad()
-def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(), *, progress=None) -> PreparedModel:
+def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(), *, progress=None,
+                  compile_decoder: bool = False) -> PreparedModel:
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
     from .vision_state import VisionFeatureState, VisionInputs, PreparedVisionHandoff, PreparedEmbeddingInjection
+
+    if compile_decoder and config.mtp:
+        raise ValueError("compiled decoder qualification requires ordinary decoding")
 
     def report(message):
         if progress is not None:
@@ -371,8 +375,16 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
                f"after trial release={tuning['allocated_after_trial_release']}")
         stream = torch.cuda.Stream(device=device)
         graph_pool = torch.cuda.graph_pool_handle()
+        compiled_functions = {}
         def capture_catalog():
+            compiled_functions.clear()
             for name, function in functions.items():
+                if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume"):
+                    from flare.preparation.compilation import compile_forward
+
+                    report(f"compiling {name}")
+                    function = compile_forward(function)
+                    compiled_functions[name] = function
                 stream.wait_stream(torch.cuda.current_stream(device))
                 with torch.cuda.stream(stream):
                     function()
@@ -421,7 +433,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
             "free_device_bytes": free, "total_device_bytes": total,
             "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
             "operator_scratch_bytes": workspaces.nbytes, "graphs": len(graphs), "tuning": tuning,
-            "prefill_chunk_size": config.prefill_chunk_size, "prefill_capacities": config.prefill_capacities}
+            "prefill_chunk_size": config.prefill_chunk_size, "prefill_capacities": config.prefill_capacities,
+            "compiled_decoder": compile_decoder}
         if speculation is not None:
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
                 speculative_widths=config.speculative_widths,
@@ -450,7 +463,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
                 speculative_fixed_width=config.speculative_fixed_width, speculative_copy=config.speculative_copy)
         resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
-            functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)
+            functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)
         report(f"prepared {len(graphs)} graphs and {page_capacity * 64} cached-token capacity")
         return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
             resources=resources, server_config=server_config, memory_report=memory, session=session, table=table)

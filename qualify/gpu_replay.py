@@ -51,8 +51,9 @@ def flare(args, corpus):
     from qualify.performance_trace import prepared_graph_map
     from qualify.replay_floor import ReplayCase
 
-    result = {'engine': 'flare', 'groups': []}
+    result = {'engine': 'flare', 'compiled_decoder': args.compile, 'groups': []}
     with prepare_model(args.snapshot, PreparationConfig(prefill_chunk_size=4096),
+                       compile_decoder=args.compile,
                        progress=lambda message: print(message, flush=True)) as model:
         save(args.output / 'tuning.json', model.memory_report['tuning'])
         if not args.ncu:
@@ -155,7 +156,11 @@ def main():
     parser.add_argument('--batches', type=int, nargs='+', choices=(1, 2, 4), default=(1, 2, 4))
     parser.add_argument('--ncu', action='store_true',
         help='annotate one warmed decode at context position 575 per batch for Nsight Compute')
+    parser.add_argument('--compile', action='store_true',
+        help='compile Flare prefill, decode, and resume forwards before CUDA graph capture')
     args = parser.parse_args()
+    if args.compile and args.engine != 'flare':
+        parser.error('--compile applies only to Flare')
     if len(set(args.batches)) != len(args.batches):
         parser.error('--batches must be unique')
     if args.output.exists():
