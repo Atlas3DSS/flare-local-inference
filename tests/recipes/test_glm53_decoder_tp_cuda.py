@@ -1,4 +1,4 @@
-"""GLM KDA and dense/MoE layers in compiled TP graphs with native rank replay."""
+"""GLM KDA/MLA and dense/MoE layers in compiled TP graphs with native rank replay."""
 
 import os
 from datetime import timedelta
@@ -26,6 +26,8 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
     from flare.preparation.scratch import ScratchArena
     from flare.preparation.tuning import RecordedPreparationSession
     from flare.recipes.glm53.decoder import LayerScratch, PreparedGlmLayer
+    from flare.recipes.glm53.indexer import IndexMetadata
+    from flare.recipes.glm53.mla import MLAState
     from flare.recipes.glm53.model import create_model_tree
     from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
@@ -47,9 +49,18 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
     try:
         count = capacity if mode == "prefill" else 1
         heads = 64 // world
-        state = DeltaState.allocate(6, device, heads=heads, channels=3 * heads * 128)
-        metadata = DeltaMetadata.allocate(2, device)
-        scratch = LayerScratch.allocate(capacity, world, device, sparse=layer_index >= 3)
+        module = model.model.language_model.layers[layer_index]
+        is_mla = module.block_type == "indexed_attention"
+        if is_mla:
+            state = MLAState.allocate(128, 6, device)
+            metadata = IndexMetadata.allocate(capacity, 1 if mode == "prefill" else capacity, 64, device)
+            persistent = {"latent_cache": state.cache, "index_cache": state.index.cache, "tail": state.index.tail}
+        else:
+            state = DeltaState.allocate(6, device, heads=heads, channels=3 * heads * 128)
+            metadata = DeltaMetadata.allocate(2, device)
+            persistent = {"state": state.recurrent, "history": state.convolution}
+        scratch = LayerScratch.allocate(capacity, world, device, sparse=layer_index >= 3,
+            block_type=module.block_type, mode=mode, blocks=64)
         source = torch.zeros((capacity, 4, 4096), dtype=torch.bfloat16, device=device)
         output = torch.empty_like(source)
         arena = ScratchArena(device)
@@ -57,7 +68,7 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
                                         workload_schema="glm-layer-tp-v1", numerical_policy="default",
                                         coordinator=coordinator) as session:
             session.register_scratch(arena)
-            layer = PreparedGlmLayer(model.model.language_model.layers[layer_index], attention, mlp, residual,
+            layer = PreparedGlmLayer(module, attention, mlp, residual,
                 source, output, scratch, state, metadata, mode=mode, runtime=runtime, coordinator=coordinator,
                 session=session, name=f"layer{layer_index}", workspace=arena)
             session.tune()
@@ -76,20 +87,28 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
             torch.cuda.synchronize(device)
             session.freeze()
             bundle = PreparedGraphBundle(device=rank, graphs={mode: graph},
-                buffers={"source": source, "output": output, "state": state.recurrent, "history": state.convolution},
+                buffers={"source": source, "output": output, **persistent},
                 resources=(compiled, layer, runtime, session, arena, stream, metadata))
             worker = bundle.start_worker()
             generator = torch.Generator().manual_seed(530)
             source[:count].copy_((torch.randn((count, 4, 4096), generator=generator) * .1).to(torch.bfloat16))
-            metadata.query_start_loc.copy_(torch.tensor([0, count, count], dtype=torch.int32))
-            metadata.convolution_slots.copy_(torch.tensor([1, -1], dtype=torch.int64))
-            metadata.state_indices[0, 0] = 1
-            metadata.initial_state_indices[0] = 1
-            metadata.final_state_indices[0] = 1
-            metadata.checkpoint_state_indices[0] = 2 if count >= 16 else 0
-            metadata.checkpoint_offsets[0] = 16 if count >= 16 else 0
-            metadata.num_seqs.fill_(1)
-            metadata.num_tokens.fill_(count)
+            if is_mla:
+                metadata.block_table[0].copy_(torch.arange(64, dtype=torch.int32, device=device).flip(0))
+                metadata.state_slots[0] = 1
+                metadata.query_start_loc[1:].fill_(count)
+                metadata.positions[:count].copy_(torch.arange(count, dtype=torch.int64, device=device))
+                metadata.token_slots[:count].copy_(metadata.block_table[0, metadata.positions[:count] // 256].long()
+                                                  * 256 + metadata.positions[:count] % 256)
+            else:
+                metadata.query_start_loc.copy_(torch.tensor([0, count, count], dtype=torch.int32))
+                metadata.convolution_slots.copy_(torch.tensor([1, -1], dtype=torch.int64))
+                metadata.state_indices[0, 0] = 1
+                metadata.initial_state_indices[0] = 1
+                metadata.final_state_indices[0] = 1
+                metadata.checkpoint_state_indices[0] = 2 if count >= 16 else 0
+                metadata.checkpoint_offsets[0] = 16 if count >= 16 else 0
+                metadata.num_seqs.fill_(1)
+                metadata.num_tokens.fill_(count)
             stages = {
                 "attention_norm": scratch.attention_hc.normalized,
                 "attention": scratch.attention_output,
@@ -99,13 +118,14 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
                 stages.update(router_logits=scratch.mlp.router_logits, ids=scratch.mlp.router.ids,
                               weights=scratch.mlp.router.weights, shared=scratch.mlp.shared.output)
             for repetitions in (1, 4):
-                initial = (state.recurrent.clone(), state.convolution.clone())
+                initial = {key: value.clone() for key, value in persistent.items()}
                 for _ in range(repetitions):
                     forward()
-                expected = (output.clone(), state.recurrent.clone(), state.convolution.clone())
+                expected_output = output.clone()
+                expected_state = {key: value.clone() for key, value in persistent.items()}
                 expected_stages = {name: value.clone() for name, value in stages.items()}
-                state.recurrent.copy_(initial[0])
-                state.convolution.copy_(initial[1])
+                for key, value in persistent.items():
+                    value.copy_(initial[key])
                 torch.cuda.synchronize(device)
                 before = torch.cuda.memory_stats(device)
                 dist.barrier(group=group)
@@ -115,12 +135,11 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
                 after = torch.cuda.memory_stats(device)
                 for key in ("allocation.all.allocated", "allocation.all.freed", "segment.all.allocated", "segment.all.freed"):
                     assert before[key] == after[key]
-                for name, value in stages.items():
-                    torch.testing.assert_close(value, expected_stages[name], rtol=0, atol=0)
-                for actual, reference in zip((state.recurrent, state.convolution), expected[1:], strict=True):
-                    assert bool(torch.isfinite(actual).all())
-                    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
-                assert not state.recurrent[0].count_nonzero()
+                for key, value in persistent.items():
+                    assert bool(torch.isfinite(value).all())
+                    torch.testing.assert_close(value, expected_state[key], rtol=0, atol=0)
+                if not is_mla:
+                    assert not state.recurrent[0].count_nonzero()
                 gathered = [None] * world
                 dist.all_gather_object(gathered, output.cpu(), group=group)
                 for other in gathered:
@@ -130,7 +149,10 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
                     for other in gathered:
                         torch.testing.assert_close(other, scratch.mlp.router.ids.cpu(), rtol=0, atol=0)
                 assert bool(torch.isfinite(output).all())
-                torch.testing.assert_close(output, expected[0],
+                for name, value in stages.items():
+                    torch.testing.assert_close(value, expected_stages[name], rtol=0, atol=0,
+                        msg=lambda message, name=name: f"{name}: {message}")
+                torch.testing.assert_close(output, expected_output,
                     rtol=.01 if layer_index >= 3 else 0,
                     atol=.001 if layer_index >= 3 else 0)
             worker.close()
@@ -144,7 +166,7 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("layer_index", [0, 4])
+@pytest.mark.parametrize("layer_index", [0, 3, 4])
 @pytest.mark.parametrize("world,mode,capacity", [(2, "decode", 2), (4, "decode", 2),
                                                (2, "prefill", 65), (4, "prefill", 4096)])
 def test_actual_layer_native_tp_graph(world, mode, capacity, layer_index, tmp_path):

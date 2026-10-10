@@ -9,6 +9,7 @@ from flare.components.mhc import MHCScratch, MHCWeights, PreparedMHC, PreparedMH
 from flare.components.mlp import MLPScratch, PreparedMLP
 
 from .kda import KDAScratch, PreparedGlmKDA
+from .mla import MLAScratch, PreparedGlmMLA
 from .moe import MoeScratch, PreparedGlmMoe
 from .weights import MoEWeights
 
@@ -17,19 +18,25 @@ from .weights import MoEWeights
 class LayerScratch:
     attention_hc: MHCScratch
     mlp_hc: MHCScratch
-    kda: KDAScratch
+    attention: KDAScratch | MLAScratch
     attention_output: torch.Tensor
     mlp: MLPScratch | MoeScratch
     mlp_output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, world_size, device, *, sparse):
+    def allocate(cls, tokens, world_size, device, *, sparse, block_type, mode, blocks=0):
         if world_size not in (2, 4):
             raise ValueError("GLM layers require TP2 or TP4")
         def buffer(width):
             return torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+        if block_type == "linear_attention":
+            attention = KDAScratch.allocate(tokens, 64 // world_size, device)
+        elif block_type == "indexed_attention":
+            attention = MLAScratch.allocate(tokens, 64 // world_size, blocks, mode, device)
+        else:
+            raise ValueError("GLM layers require linear_attention or indexed_attention")
         return cls(MHCScratch.allocate(tokens, 4096, device), MHCScratch.allocate(tokens, 4096, device),
-                   KDAScratch.allocate(tokens, 64 // world_size, device), buffer(4096),
+                   attention, buffer(4096),
                    MoeScratch.allocate(tokens, world_size, device) if sparse else
                    MLPScratch.allocate(tokens, 4096, 12288 // world_size, device), buffer(4096))
 
@@ -42,7 +49,7 @@ def _install_mhc(module, norm, weights, prefix, norm_name):
 
 
 class PreparedGlmLayer:
-    """KDA and MLP layer with replicated mHC and two output all-reduces.
+    """KDA or sparse MLA layer with replicated mHC and two output all-reduces.
 
     Each rank owns a head/intermediate partition and identical four-stream
     residuals. Post-attention mixing, FFN mixing prediction, and FFN RMSNorm
@@ -53,9 +60,9 @@ class PreparedGlmLayer:
     def __init__(self, module, attention_weights, mlp_weights, residual_weights,
                  source, output, scratch: LayerScratch, state, metadata, *,
                  mode, runtime, coordinator, session, name, workspace):
-        if module.block_type != "linear_attention":
-            raise ValueError("prepared GLM layer requires canonical KDA attention")
-        if (source.shape != (scratch.kda.output.shape[0], 4, 4096)
+        if module.block_type not in ("linear_attention", "indexed_attention"):
+            raise ValueError("prepared GLM layer requires canonical KDA or sparse MLA attention")
+        if (source.shape != (scratch.attention.output.shape[0], 4, 4096)
                 or output.shape != source.shape or source.dtype != torch.bfloat16
                 or output.dtype != source.dtype or output.device != source.device):
             raise ValueError("GLM layer residuals require BF16 [tokens, 4, 4096] on one device")
@@ -69,10 +76,15 @@ class PreparedGlmLayer:
                    "norm_eps": module.input_layernorm.variance_epsilon}
         self.attention_hc = PreparedMHC((source,), attention_mhc, scratch.attention_hc,
             session=session, name=f"{name}.attn_hc", workspace=workspace, **options)
-        self.attention = PreparedGlmKDA(module.self_attn, attention_weights, scratch.attention_hc.normalized,
-            scratch.kda, state, metadata, mode=mode, session=session, name=f"{name}.kda", workspace=workspace,
-            checkpoint_export=mode == "prefill")
-        self.attention_reduce = PreparedAllReduce(scratch.kda.output, scratch.attention_output, runtime=runtime,
+        attention_args = (module.self_attn, attention_weights, scratch.attention_hc.normalized,
+                          scratch.attention, state, metadata)
+        if module.block_type == "linear_attention":
+            self.attention = PreparedGlmKDA(*attention_args, mode=mode, session=session, name=f"{name}.kda",
+                                            workspace=workspace, checkpoint_export=mode == "prefill")
+        else:
+            self.attention = PreparedGlmMLA(*attention_args, mode=mode, session=session, name=f"{name}.mla",
+                                            workspace=workspace)
+        self.attention_reduce = PreparedAllReduce(scratch.attention.output, scratch.attention_output, runtime=runtime,
             session=session, coordinator=coordinator, name=f"{name}.attention_reduce")
         self.mlp_hc = PreparedMHC((scratch.attention_output, scratch.attention_hc.residual,
                                   scratch.attention_hc.post, scratch.attention_hc.comb),

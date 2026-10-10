@@ -232,8 +232,8 @@ KDA. Compiled KDA prefill graphs support chunks through 4096 tokens. KDA decode,
 prefill, and MLP graphs include b12x output reductions and support native replay
 on TP2 and TP4. The shared [prepared mHC component](../flare/components/mhc.py)
 uses FP32 mixing coefficients, BF16 residual streams, fused weighted RMSNorm,
-and caller-owned scratch. The [GLM KDA layer](../flare/recipes/glm53/decoder.py)
-composes mHC, head-sharded KDA, an attention all-reduce, fused post/pre mixing,
+and caller-owned scratch. The [GLM decoder layer](../flare/recipes/glm53/decoder.py)
+composes mHC, head-sharded KDA or sparse MLA, an attention all-reduce, fused post/pre mixing,
 the sharded dense MLP or MoE, a second all-reduce, and residual expansion in one
 compiled graph. Graph variants support decode and prefill through 4096 tokens.
 Each rank hands its graph to its native replay worker. The
@@ -307,6 +307,17 @@ on repeated eager calls. Prefill selection returns the same set in different
 orders; attention replay matches eager execution exactly when both consume the
 same ordered selection. No deterministic kernel policy or runtime sort is
 imposed.
+
+Sparse MLA decoder layers include the sigmoid MoE and both b12x reductions in
+one compiled graph per rank. Native TP2/TP4 decode, TP2 65-token prefill, and
+TP4 4096-token prefill preserve cache/tail state and allocator counters relative
+to uncompiled execution; reduced outputs and selected experts agree across
+ranks. Numerical qualification remains failing: atomic projection and expert
+reductions, and unordered top-k attention, propagate differences through the
+residual. Maximum observed residual absolute error is 0.015625 for the decode
+and 65-token cases. The 4096-token case first differs at the reduced attention
+output (maximum absolute error 0.00146484375). Dense KDA layer checks remain
+exact on TP2/TP4 through 4096 tokens.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
