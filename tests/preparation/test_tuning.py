@@ -450,6 +450,7 @@ def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_a
     assert all(owner.binding is arena.tensor for owner in owners)
     assert report["scratch_arena"] == {"initial_bytes": 256,
         "candidate_scratch_bytes": 513, "candidate_reserved_bytes": 768,
+        "parallel_candidate_scratch_bytes": 0, "parallel_selected_scratch_bytes": 0,
         "selected_scratch_bytes": 512, "reserved_bytes": 512, "pending_persistent_bytes": 0}
     envelope = ("envelope", tuple(request.name for request in requests))
     assert events.count(envelope) == 1
@@ -459,6 +460,30 @@ def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_a
     with session.capture():
         assert all(owner.binding is arena.tensor for owner in owners)
     session.freeze()
+
+
+def test_parallel_workspace_peak_is_reserved_then_trimmed_without_summing_serial_groups(backend):
+    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    arena = ScratchArena("cpu")
+    session.register_scratch(arena)
+    requests = [declaration("main", size=700, selected_size=300),
+                declaration("auxiliary", size=300, selected_size=20),
+                declaration("following", size=400, selected_size=100)]
+    session.prepare(requests)
+    main, auxiliary, following = (request.plan for request in requests)
+    arena.register_parallel(main, auxiliary)
+    arena.register_parallel(auxiliary, following)
+    report = session.tune()["scratch_arena"]
+    assert report["candidate_reserved_bytes"] == 1280
+    assert report["parallel_candidate_scratch_bytes"] == 1280
+    assert report["parallel_selected_scratch_bytes"] == 768
+    assert arena.nbytes == 768 and arena.frozen
+    one, two = arena.views(((300,), torch.uint8), ((20,), torch.uint8))
+    one.fill_(7)
+    two.fill_(11)
+    assert one.eq(7).all() and two.eq(11).all()
+    with pytest.raises(RuntimeError, match="frozen"):
+        arena.register_parallel(main, auxiliary)
 
 
 def test_default_storage_released_after_alias_rebind_and_trial_cleanup_before_report(backend, monkeypatch):
@@ -537,6 +562,7 @@ def test_selected_arena_retained_after_trials_restoration_and_capture(backend, m
     report = session.tune()
     assert restored == ([True] if borrowed_state else [])
     assert report["scratch_arena"] == {"initial_bytes": 0, "candidate_scratch_bytes": 128,
+        "parallel_candidate_scratch_bytes": 0, "parallel_selected_scratch_bytes": 0,
         "candidate_reserved_bytes": 256, "selected_scratch_bytes": 256,
         "reserved_bytes": 256, "pending_persistent_bytes": 0}
     assert report["released_preparation_bytes"] == 0

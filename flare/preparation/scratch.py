@@ -14,6 +14,8 @@ class ScratchArena:
         self.tensor = torch.empty(0, dtype=torch.uint8, device=device)
         self.frozen = False
         self._finalizers = []
+        self._parallel_plans = []
+        self._auxiliary_stream = None
 
     @property
     def device(self):
@@ -22,6 +24,30 @@ class ScratchArena:
     @property
     def nbytes(self):
         return self.tensor.nbytes
+
+    @property
+    def auxiliary_stream(self):
+        if self._auxiliary_stream is None:
+            self._auxiliary_stream = torch.cuda.Stream(device=self.device)
+        return self._auxiliary_stream
+
+    def register_parallel(self, *plans):
+        """Declare plans whose workspaces must coexist within a captured fork."""
+        if self.frozen:
+            raise RuntimeError("scratch declarations are frozen")
+        if len(plans) < 2:
+            raise ValueError("parallel scratch requires at least two plans")
+        self._parallel_plans.append(plans)
+
+    def parallel_nbytes(self, requirement):
+        sizes = {}
+        def aligned(plan):
+            key = id(plan)
+            if key not in sizes:
+                sizes[key] = (requirement(plan) + 255) // 256 * 256
+            return sizes[key]
+        return max((sum(aligned(plan) for plan in group)
+                    for group in self._parallel_plans), default=0)
 
     def reserve(self, nbytes):
         if type(nbytes) is not int or nbytes < 0:

@@ -122,9 +122,14 @@ class RecordedPreparationSession(PreparationSession):
             return {}
         arena = self._scratch_arena
         envelope = self.candidate_memory_envelope(requests)
+        by_plan = {id(request.plan): request for request in requests}
+        parallel = arena.parallel_nbytes(lambda plan:
+            self.candidate_memory_envelope((by_plan[id(plan)],)).scratch_nbytes)
         before = arena.nbytes
-        arena.reserve(envelope.scratch_nbytes)
-        return {"initial_bytes": before, "candidate_scratch_bytes": envelope.scratch_nbytes,
+        required = max(envelope.scratch_nbytes, parallel)
+        arena.reserve(required)
+        return {"initial_bytes": before, "candidate_scratch_bytes": required,
+                "parallel_candidate_scratch_bytes": parallel,
                 "candidate_reserved_bytes": arena.nbytes,
                 "pending_persistent_bytes": envelope.pending_persistent_nbytes}
 
@@ -159,9 +164,13 @@ class RecordedPreparationSession(PreparationSession):
                     raise RuntimeError("candidate binding exceeded the planned scratch envelope")
                 self._synchronize()
                 selected = MemoryRequirements.sequential(request.plan.memory_requirements() for request in requests)
-                self._scratch_arena.trim(selected.scratch_nbytes)
+                parallel = self._scratch_arena.parallel_nbytes(lambda plan:
+                    plan.memory_requirements().scratch_nbytes)
+                required = max(selected.scratch_nbytes, parallel)
+                self._scratch_arena.trim(required)
                 self._scratch_arena.freeze()
-                scratch_arena.update(selected_scratch_bytes=selected.scratch_nbytes,
+                scratch_arena.update(selected_scratch_bytes=required,
+                                     parallel_selected_scratch_bytes=parallel,
                                      reserved_bytes=self._scratch_arena.nbytes)
                 self._scratch_arena.finalize()
             for callback in self._finalizers:
