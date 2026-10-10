@@ -380,11 +380,19 @@ shares incremental think/tool envelopes with Qwen while interpreting GLM
 rendered bytes, token IDs, instruction boundaries, assistant continuations, and
 parallel tool history against Transformers. GLM structured output with an open
 reasoning prefix is unsupported; the template does not honor Qwen's
-`enable_thinking=false` option. Native TP2 HTTP checks cover repeated-prompt
+`enable_thinking=false` option. Native TP2/TP4 HTTP checks cover repeated-prompt
 cache reuse, four concurrent requests, SSE, a 6,639-token prompt spanning
 4096-token prefill chunks, and parsed tool calls. These checks exercise the
 Python CLI handoff and the shared Rust server; independent full-model numerical
 qualification remains incomplete.
+
+The [GLM bootstrap](../flare/recipes/glm53/bootstrap.py) prepares 24 graphs per
+rank for four active requests and a 4096-token prefill limit. Decoder variants
+bind bounded views of one largest-capacity activation allocation; distinct
+layers reuse those intermediates while persistent continuation state remains
+separate. Recurrent autotuning borrows inactive continuation storage and clears
+it before capture. The HTTP checks use 16,384-token context, 256 KV pages, a
+1 GiB snapshot budget, and 4 GiB of reserved headroom per rank.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
@@ -505,6 +513,10 @@ deadline terminates the rank group without running CUDA destructors. Peer
 processes receive a parent-death signal if their root exits. Coordinated shutdown
 allows peers to finish before Python reaps them. Process-level tests cover peer
 crashes, parent exit, shutdown deadlines, and normal drain.
+The TP2 CLI exits normally on SIGTERM and releases both CUDA contexts. Injecting
+SIGKILL into one TP4 peer during a streamed HTTP response produces a control-socket
+error, terminates all four owned ranks, and releases their CUDA contexts. Forced
+exit leaves multiprocessing semaphore cleanup to Python's resource tracker.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
 
 The shared [tuning session](../flare/preparation/tuning.py) owns declaration
