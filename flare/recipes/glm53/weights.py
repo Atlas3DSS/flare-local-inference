@@ -90,8 +90,8 @@ class GlmWeightLoader(DirectWeightLoader):
     """
 
     def __init__(self, manifest: IndexedCheckpoint, device, *, shard: TensorParallelShard,
-                 prefixes=None, csf_byte_budget=128 << 20, show_progress=False):
-        super().__init__(manifest, device, prefixes=prefixes, csf_byte_budget=csf_byte_budget,
+                 prefixes=None, show_progress=False):
+        super().__init__(manifest, device, prefixes=prefixes,
                          show_progress=show_progress)
         self.shard = shard
         config = json.loads((manifest.snapshot / "config.json").read_text())

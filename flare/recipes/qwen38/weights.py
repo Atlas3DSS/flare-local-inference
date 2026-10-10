@@ -114,14 +114,13 @@ class QwenWeightLoader(DirectWeightLoader):
     ``prefixes`` bounds component qualification; omit it for a complete recipe.
     MTP and PLE table payloads are excluded. Returned tensors own GPU storage
     beyond this context's lifetime. Compressed expert scales use at most one
-    layer of CPU staging; no full model or expert weight is decoded on the CPU.
+    layer of CUDA staging for layout conversion.
     """
 
     def _selected_names(self):
         return {
             name for name, tensor in self.manifest.tensors.items()
             if tensor.component not in ("mtp", "ple_tables")
-            and "nvfp4_csf_" not in name
             and (self.prefixes is None or name.startswith(self.prefixes))
         }
 
@@ -189,8 +188,6 @@ class QwenWeightLoader(DirectWeightLoader):
         """
         self._require_open()
         memory = expert_memory_plan(self.manifest, layer, expert_ids)
-        if memory.csf_bytes > self.csf_byte_budget:
-            raise ValueError(f"layer CSF planes require {memory.csf_bytes} bytes, exceeding the CPU staging budget")
         ids = memory.expert_ids
         return self.load_nvfp4_experts(
             tuple(f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}" for expert in ids),

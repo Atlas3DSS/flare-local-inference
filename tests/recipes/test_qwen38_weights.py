@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import os
-from contextlib import ExitStack
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 import torch
 
-from flare.components.weights import join_nvfp4_csf
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
 from flare.recipes.qwen38.weights import (
@@ -18,7 +15,7 @@ from flare.recipes.qwen38.weights import (
     allocate_expert_scale_scratch,
     expert_memory_plan,
 )
-from flare.reference.qwen38_quant import CheckpointTensors, decode_csf_scales
+from flare.reference.qwen38_quant import CheckpointTensors
 
 
 @pytest.fixture(scope="module")
@@ -28,31 +25,6 @@ def manifest():
     if not snapshot.exists():
         pytest.skip("exact Qwen checkpoint snapshot is unavailable")
     return inspect_qwen38_checkpoint(snapshot)
-
-
-def test_csf_join_preserves_up_gate_order_and_exception_payload():
-    up = torch.zeros((1, 48), dtype=torch.uint8)
-    gate = torch.full((1, 48), 0x11, dtype=torch.uint8)
-    up[:, :16] = 20
-    gate[:, :16] = 40
-    up_ex = torch.tensor([(101 << 24) | 0, (102 << 24) | 63], dtype=torch.uint32)
-    gate_ex = torch.tensor([(201 << 24) | 1, (202 << 24) | 62], dtype=torch.uint32)
-    fixed, exceptions = join_nvfp4_csf(up, up_ex, gate, gate_ex, rows=16, columns=4)
-    decoded = decode_csf_scales(fixed, exceptions, rows=32, columns=4)
-    expected = torch.cat((
-        decode_csf_scales(up, up_ex, rows=16, columns=4),
-        decode_csf_scales(gate, gate_ex, rows=16, columns=4),
-    ))
-    assert torch.equal(decoded, expected)
-    assert (exceptions.to(torch.int64) & 0xFFFFFF).tolist() == [0, 63, 65, 126]
-
-
-@pytest.mark.parametrize("positions", [[2, 1], [3, 3], [64]])
-def test_csf_join_rejects_corrupt_exception_positions(positions):
-    fixed = torch.zeros((1, 48), dtype=torch.uint8)
-    exceptions = torch.tensor(positions, dtype=torch.uint32)
-    with pytest.raises(ValueError, match="unique, sorted, in-range"):
-        join_nvfp4_csf(fixed, exceptions, fixed, exceptions, rows=16, columns=4)
 
 
 def _scalars():
@@ -116,7 +88,7 @@ def test_loader_construction_and_memory_plan_are_cpu_only(manifest):
         allocate_expert_scale_scratch("cpu")
 
 
-def test_actual_layer_scales_and_csf_order(manifest):
+def test_actual_layer_scales(manifest):
     sources = {}
     with CheckpointTensors(manifest, byte_budget=2 << 20) as reader:
         for expert in range(512):
@@ -129,64 +101,3 @@ def test_actual_layer_scales_and_csf_order(manifest):
         assert scale_vectors[0].unique().numel() > 1
         assert scale_vectors[3].unique().numel() > 1
         assert scale_vectors[2].shape == (512,)
-        prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts.511"
-        planes = [tuple(reader.read(f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}")
-                        for suffix in ("fixed", "exceptions")) for projection in ("up_proj", "gate_proj")]
-        fixed, exceptions = join_nvfp4_csf(*planes[0], *planes[1], rows=640, columns=160)
-        expected = torch.cat([decode_csf_scales(*plane, rows=640, columns=160) for plane in planes])
-        assert torch.equal(decode_csf_scales(fixed, exceptions, rows=1280, columns=160), expected)
-
-
-def test_mapped_scale_planes_match_checkpoint_and_own_storage(manifest):
-    loader = QwenWeightLoader(manifest, "cpu")
-    loader._session = object()
-    prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts.511.up_proj.weight_scale.nvfp4_csf_"
-    with ExitStack() as stack:
-        loader._stack = stack
-        tensors = {suffix: loader._cpu_csf(prefix + suffix) for suffix in ("fixed", "exceptions")}
-    with CheckpointTensors(manifest, byte_budget=2 << 20) as reader:
-        for suffix, tensor in tensors.items():
-            assert torch.equal(tensor, reader.read(prefix + suffix))
-            tensor.zero_()
-            assert torch.count_nonzero(reader.read(prefix + suffix).view(torch.uint8)) > 0
-
-
-@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
-@torch.no_grad()
-def test_cached_scale_layout_replays_exactly(manifest, scale_cache):
-    prepared, outputs = [], []
-    prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts."
-    for warm in (False, True):
-        scratch = allocate_expert_scale_scratch("cuda:0")
-        with QwenWeightLoader(manifest, "cuda:0", prefixes=(prefix,)) as loader:
-            if warm:
-                def unexpected_read(name):
-                    raise AssertionError("cached scales must bypass checkpoint conversion")
-                loader._cpu_csf = unexpected_read
-            prepared.append(loader.load_experts(0, scale_scratch=scratch))
-            outputs.append(scratch)
-    routes = torch.tensor([0, 511, 7], dtype=torch.int32, device="cuda")
-    graphs = []
-    for value, scratch in zip(prepared, outputs, strict=True):
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            value._impl.nvfp4_csf.decode(routes, *scratch)
-        graphs.append(graph)
-    for selected in ((0, 511, 7), (99, 3, 501)):
-        routes.copy_(torch.tensor(selected, dtype=torch.int32, device="cuda"))
-        for scratch in outputs:
-            for tensor in scratch:
-                tensor.view(torch.uint8).fill_(0xD6)
-        for graph in graphs:
-            graph.replay()
-        torch.cuda.synchronize()
-        for first, second in zip(*outputs, strict=True):
-            assert torch.equal(first.view(torch.uint8), second.view(torch.uint8))
-
-
-@pytest.fixture
-def scale_cache(monkeypatch):
-    # GDS requires disk storage rather than tmpfs.
-    with TemporaryDirectory(prefix="flare-scales-test-", dir=Path.home() / ".cache") as directory:
-        monkeypatch.setenv("XDG_CACHE_HOME", directory)
-        yield Path(directory)

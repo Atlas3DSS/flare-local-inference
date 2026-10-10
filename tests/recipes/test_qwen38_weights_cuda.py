@@ -196,3 +196,39 @@ def test_packed_mxfp8_projections_preserve_serialized_rows(manifest, layer, regi
             assert torch.equal(scales[offset:offset + rows, :columns // 32], original_scales[:rows, :columns // 32])
             offset += rows
     assert offset == packed.out_features
+
+
+def test_complete_layer_csf_load_and_captured_expansion(manifest):
+    from flare.reference.qwen38_quant import decode_csf_scales
+
+    scratch = allocate_expert_scale_scratch('cuda:0')
+    prefix = f'{TEXT_PREFIX}.layers.0.mlp.experts.'
+    with QwenWeightLoader(manifest, 'cuda:0', prefixes=(prefix,)) as loader:
+        prepared = loader.load_experts(0, scale_scratch=scratch)
+        assert loader._session.torch_copy_bytes == 0
+    routes = torch.tensor([0, 511, 7], dtype=torch.int32, device='cuda')
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        prepared._impl.nvfp4_csf.decode(routes, *scratch)
+    for selected in ((0, 511, 7), (99, 3, 501)):
+        routes.copy_(torch.tensor(selected, dtype=torch.int32, device='cuda'))
+        for tensor in scratch:
+            tensor.view(torch.uint8).fill_(0xD6)
+        allocated = torch.cuda.memory_stats()['allocation.all.allocated']
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()['allocation.all.allocated'] == allocated
+        with CheckpointTensors(manifest, byte_budget=2 << 20) as reader:
+            for expert in selected:
+                scales = []
+                for projection in ('up_proj', 'gate_proj', 'down_proj'):
+                    name = f'{prefix}{expert}.{projection}.weight_scale.nvfp4_csf_'
+                    rows, columns = (2560, 40) if projection == 'down_proj' else (640, 160)
+                    scales.append(decode_csf_scales(reader.read(name + 'fixed'), reader.read(name + 'exceptions'),
+                                                   rows=rows, columns=columns))
+                for storage, rows, columns, expected in (
+                    (scratch[0], 1280, 160, torch.cat(scales[:2])), (scratch[1], 2560, 40, scales[2]),
+                ):
+                    actual = storage[expert].view(torch.uint8).reshape(rows // 128, columns // 4, 32, 4, 4)
+                    actual = actual.permute(0, 3, 2, 1, 4).reshape(rows, columns).cpu()
+                    assert torch.equal(actual, expected.view(torch.uint8))

@@ -1,4 +1,4 @@
-"""Direct checkpoint transfers into final GPU weights with bounded CPU scale staging."""
+"""Direct checkpoint transfers and CUDA compressed-scale preparation."""
 
 from __future__ import annotations
 
@@ -22,60 +22,34 @@ class MLPWeights:
     down: Weight | torch.Tensor
 
 
-def join_nvfp4_csf(up_fixed, up_exceptions, gate_fixed, gate_exceptions, *, rows, columns):
-    import torch
-
-    expected_shape = (rows // 16, 16 * (1 + columns // 2))
-    for fixed, exceptions in ((up_fixed, up_exceptions), (gate_fixed, gate_exceptions)):
-        if fixed.device.type != "cpu" or fixed.dtype != torch.uint8 or tuple(fixed.shape) != expected_shape:
-            raise ValueError("CSF fixed plane has the wrong shape, dtype, or device")
-        if exceptions.device.type != "cpu" or exceptions.dtype != torch.uint32 or exceptions.ndim != 1:
-            raise ValueError("CSF exceptions must be a CPU uint32 vector")
-        positions = exceptions.to(torch.int64) & 0xFFFFFF
-        if positions.numel() and (positions[-1] >= rows * columns or (positions[1:] <= positions[:-1]).any()):
-            raise ValueError("CSF exceptions must have unique, sorted, in-range positions")
-    gate_words = gate_exceptions.to(torch.int64)
-    gate_words = (gate_words & 0xFF000000) | ((gate_words & 0xFFFFFF) + rows * columns)
-    return (
-        torch.cat((up_fixed, gate_fixed)),
-        torch.cat((up_exceptions.to(torch.int64), gate_words)).to(torch.uint32),
-    )
-
-
 class DirectWeightLoader:
     """Own b12x tensor views until direct transfers finish.
 
     Recipe subclasses select tensors and validate model-specific quantization.
     Source views may partition weight rows or columns without CPU weight copies.
-    Compressed scale payloads alone use bounded CPU staging.
+    Compressed scale payloads are converted on CUDA one layer at a time.
     """
 
     def __init__(
         self, manifest: IndexedCheckpoint, device: torch.device | str,
-        *, prefixes: Sequence[str] | None = None, csf_byte_budget: int = 128 << 20,
+        *, prefixes: Sequence[str] | None = None,
         show_progress: bool = False,
     ):
-        if csf_byte_budget <= 0:
-            raise ValueError("csf_byte_budget must be positive")
         self.manifest = manifest
         self.device = device
         self.prefixes = None if prefixes is None else tuple(prefixes)
         if self.prefixes is not None and not self.prefixes:
             raise ValueError("prefixes must be nonempty when supplied")
-        self.csf_byte_budget = csf_byte_budget
         self.show_progress = show_progress
         self._display = None
         self._load_stats = None
         self._session = None
         self._sources = {}
         self._stack = None
-        self._csf_files = {}
-        self._source_stats = {}
 
     def _selected_names(self):
         return {name for name in self.manifest.tensors
-                if "nvfp4_csf_" not in name
-                and (self.prefixes is None or name.startswith(self.prefixes))}
+                if self.prefixes is None or name.startswith(self.prefixes)}
 
     @contextmanager
     def _loading_display(self):
@@ -156,8 +130,6 @@ class DirectWeightLoader:
             self._session = None
             self._display = self._load_stats = None
             self._sources.clear()
-            self._csf_files.clear()
-            self._source_stats.clear()
 
     def _require_open(self):
         if self._session is None:
@@ -245,7 +217,7 @@ class DirectWeightLoader:
         layers; both buffers remain caller-owned through replay.
         """
         import torch
-        from b12x.loader._nvfp4_csf import slice_nvfp4_csf_plane
+        from b12x.loader._nvfp4_csf import queue_nvfp4_csf
         from b12x.moe import fused_moe as moe
 
         self._require_open()
@@ -271,12 +243,7 @@ class DirectWeightLoader:
 
         w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
         w2 = torch.empty((count, hidden_size, local // 2), dtype=torch.uint8, device=self.device)
-        scale_path = self._scale_cache_path(prefixes, hidden_size, intermediate_size, first, last)
-        cached = scale_path.is_file()
-        fixed13, exceptions13, fixed2, exceptions2 = [], [], [], []
-        staged_bytes = 0
         for index, prefix in enumerate(prefixes):
-            planes = {}
             for projection, destination, rows, columns, rr, cr in (
                 ("up_proj", w13[index, :local], intermediate_size, hidden_size, (first, last), None),
                 ("gate_proj", w13[index, local:], intermediate_size, hidden_size, (first, last), None),
@@ -288,33 +255,29 @@ class DirectWeightLoader:
                 r0, r1 = (0, rows) if rr is None else rr
                 c0, c1 = (0, columns) if cr is None else cr
                 self._copy(destination, source[r0:r1, c0 // 2:c1 // 2])
-                if cached:
-                    continue
-                names = [f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"
-                         for suffix in ("fixed", "exceptions")]
-                incoming_bytes = sum(self.manifest.tensors[name].nbytes for name in names)
-                if staged_bytes + 2 * incoming_bytes > self.csf_byte_budget:
-                    raise ValueError("expert CSF planes exceed the CPU staging budget")
-                fixed, exceptions = slice_nvfp4_csf_plane(
-                    *(self._cpu_csf(name) for name in names), rows=rows, columns=columns // 16,
-                    row_range=rr, column_range=None if cr is None else (c0 // 16, c1 // 16),
-                )
-                staged_bytes += fixed.nbytes + exceptions.nbytes
-                planes[projection] = fixed, exceptions
-            if not cached:
-                fixed, exceptions = join_nvfp4_csf(
-                    *planes["up_proj"], *planes["gate_proj"], rows=local, columns=hidden_size // 16,
-                )
-                fixed13.append(fixed)
-                exceptions13.append(exceptions)
-                fixed2.append(planes["down_proj"][0])
-                exceptions2.append(planes["down_proj"][1])
         device_scales = []
         for scale in scale_vectors:
             target = torch.empty_like(scale, device=self.device)
             self._copy(target, scale)
             device_scales.append(target)
+        transfers = []
+        for projections, rows, columns, row_range, column_range in (
+            (("up_proj", "gate_proj"), intermediate_size, hidden_size // 16, (first, last), None),
+            (("down_proj",), hidden_size, intermediate_size // 16, None, (first // 16, last // 16)),
+        ):
+            names = [f"{prefix}.{projection}.weight_scale.nvfp4_csf_"
+                     for prefix in prefixes for projection in projections]
+            transfers.append(queue_nvfp4_csf(
+                self._session, [self._sources[name + "fixed"] for name in names],
+                [self._sources[name + "exceptions"] for name in names],
+                rows=rows, columns=columns, join=len(projections),
+                row_range=row_range, column_range=column_range,
+            ))
         self._session.flush()
+        planes = tuple(transfer.convert() for transfer in transfers)
+        del transfers
+        if self._display is not None:
+            self._display.update(self._session.payload_bytes)
         plan = moe.plan_weights(
             source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
             activation=moe.ActivationSpec(mode="a4", nonlinearity="silu", io_dtype=torch.bfloat16,
@@ -327,96 +290,8 @@ class DirectWeightLoader:
             input_scale=device_scales[2], intermediate_scale=device_scales[3],
             immutable_input_scales=True,
         )
-        geometry = ((2 * local, hidden_size // 16), (hidden_size, local // 16))
-        if cached:
-            planes = self._load_scale_cache(scale_path, geometry)
-        else:
-            from b12x._lib.quant.nvfp4_csf import make_nvfp4_csf_batch
-
-            planes = tuple(make_nvfp4_csf_batch(fixed, exceptions,
-                rows=rows, columns=columns, device=self.device)
-                for fixed, exceptions, (rows, columns) in zip(
-                    (fixed13, fixed2), (exceptions13, exceptions2), geometry, strict=True))
-            self._save_scale_cache(scale_path, planes)
         return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
             packed=packed, w13_scales=planes[0], w2_scales=planes[1]))
-
-    def _scale_cache_path(self, prefixes, hidden_size, intermediate_size, first, last):
-        import hashlib
-        import os
-        import pickle
-        from pathlib import Path
-        from b12x._lib.compiler import b12x_package_fingerprint
-
-        sources = []
-        for prefix in prefixes:
-            for projection in ("up_proj", "gate_proj", "down_proj"):
-                for suffix in ("fixed", "exceptions"):
-                    tensor = self.manifest.tensors[f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"]
-                    if tensor.shard not in self._source_stats:
-                        source = (self.manifest.snapshot / tensor.shard).resolve()
-                        stat = source.stat()
-                        self._source_stats[tensor.shard] = (str(source), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-                    sources.append((self._source_stats[tensor.shard], tensor.offset, tensor.nbytes, tensor.shape))
-        key = hashlib.sha256(pickle.dumps((sources, hidden_size, intermediate_size, first, last,
-                                          b12x_package_fingerprint()))).hexdigest()
-        root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-        return root / "flare" / "nvfp4-scales" / (key + ".safetensors")
-
-    def _load_scale_cache(self, path, geometry):
-        import torch
-        from b12x._lib.quant.nvfp4_csf import Nvfp4CsfBatch
-
-        tensors = {}
-        for name, source in self._session.weights((path,)):
-            target = torch.empty(source.shape, dtype=source.dtype, device=self.device)
-            self._copy(target, source)
-            tensors[name] = target
-        self._session.flush()
-        planes = tuple(Nvfp4CsfBatch(*(tensors[f"{index}.{name}"] for name in
-            ("fixed", "exceptions", "task_offsets")), rows, columns)
-            for index, (rows, columns) in enumerate(geometry))
-        for plane in planes:
-            plane.validate()
-        return planes
-
-    @staticmethod
-    def _save_scale_cache(path, planes):
-        import os
-        import tempfile
-        from safetensors.torch import save_file
-
-        tensors = {f"{index}.{name}": getattr(plane, name).cpu().contiguous()
-            for index, plane in enumerate(planes) for name in ("fixed", "exceptions", "task_offsets")}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        os.close(descriptor)
-        try:
-            save_file(tensors, temporary)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-
-    def _cpu_csf(self, name):
-        import math
-        import mmap
-        import torch
-
-        self._require_open()
-
-        metadata = self.manifest.tensors[name]
-        if "nvfp4_csf_" not in name:
-            raise ValueError("CPU payload reads are restricted to compressed scale planes")
-        if metadata.shard not in self._csf_files:
-            with (self.manifest.snapshot / metadata.shard).open("rb") as source:
-                self._csf_files[metadata.shard] = self._stack.enter_context(
-                    mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_COPY))
-        dtype = {"U8": torch.uint8, "U32": torch.uint32}[metadata.dtype]
-        if not metadata.nbytes:
-            return torch.empty(metadata.shape, dtype=dtype)
-        return torch.frombuffer(self._csf_files[metadata.shard], dtype=dtype,
-            count=math.prod(metadata.shape), offset=metadata.offset).reshape(metadata.shape).clone()
 
 
 def _aligned_range(selected, extent, alignment):
