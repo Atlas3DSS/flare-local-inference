@@ -76,7 +76,8 @@ class GraphTimingWorker(Worker):
         if not is_start:
             torch.cuda.synchronize()
             self._timing_active = False
-            path = Path(os.environ['FLARE_GPU_REPLAY_OUTPUT']) / 'steps.json'
+            filename = 'steps.json' if self.rank == 0 else f'steps-rank{self.rank}.json'
+            path = Path(os.environ['FLARE_GPU_REPLAY_OUTPUT']) / filename
             path.write_text(json.dumps(self._timing_steps, indent=2) + '\n')
         result = super().profile(is_start, *args, **kwargs)
         if is_start:
