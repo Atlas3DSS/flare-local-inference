@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from math import isfinite
 from typing import TYPE_CHECKING
 
 from flare.components.weights import DirectWeightLoader
@@ -86,9 +87,10 @@ def _expert_scale_vectors(sources: Mapping[str, torch.Tensor], layer: int, ids: 
                 value = sources[name]
                 if value.device.type != "cpu" or value.dtype != torch.float32 or value.numel() != 1:
                     raise ValueError(f"{name} requires a CPU float32 scalar")
-                if not bool(torch.isfinite(value).all() & (value > 0).all()):
+                scalar = value.item()
+                if not isfinite(scalar) or scalar <= 0:
                     raise ValueError(f"{name} must be finite and positive")
-                values[projection, suffix] = value.item()
+                values[projection, suffix] = scalar
         for suffix in ("weight_scale_2", "input_scale"):
             if values["gate_proj", suffix] != values["up_proj", suffix]:
                 raise ValueError(f"{prefix}: gate/up {suffix} differ; fused NVFP4 requires equal scales")
