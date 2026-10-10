@@ -1,5 +1,6 @@
 //! Statically dispatched prepared-model semantics; CUDA transport remains model-independent.
 
+pub mod glm5next;
 pub mod qwen4exp;
 use crate::{
     Result,

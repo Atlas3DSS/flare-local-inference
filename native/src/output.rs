@@ -1,5 +1,7 @@
 //! Model-owned output protocols and transport-neutral incremental events.
 
+pub mod tagged;
+
 use crate::Result;
 
 /// Presented token IDs and stable decoded deltas are independent ordered
