@@ -82,6 +82,9 @@ class DirectWeightLoader:
         self.device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         stack = ExitStack()
         try:
+            # Small CPU scale planes do not amortize intra-op thread dispatch.
+            stack.callback(torch.set_num_threads, torch.get_num_threads())
+            torch.set_num_threads(1)
             self._session = stack.enter_context(DirectWeightSession(device=self.device.index))
             selected = self._selected_names()
             shards = {self.manifest.tensors[name].shard for name in selected}

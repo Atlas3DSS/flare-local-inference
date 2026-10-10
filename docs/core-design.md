@@ -236,7 +236,9 @@ replicated. Dense MLPs retain BF16 checkpoint precision; attention and shared
 experts retain MXFP8. b12x slices compressed NVFP4 scales and rebases exceptions
 before preparing GPU weights. Packed weight slices transfer directly through the
 shared [weight loader](../flare/components/weights.py); scale expansion uses
-caller-owned buffers that serialized layers can share. The shared
+caller-owned buffers that serialized layers can share. Loader contexts use one
+PyTorch CPU thread for small compressed-scale planes and restore the caller's
+thread count on exit. The shared
 [prepared MLP](../flare/components/mlp.py) executes BF16 dense and MXFP8 shared
 experts with the checkpoint's SwiGLU clamp and caller-owned intermediates.
 The [KDA branch](../flare/recipes/glm53/kda.py) uses packed MXFP8 QKV projections,
