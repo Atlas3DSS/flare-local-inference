@@ -70,7 +70,7 @@ cuda = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                          reason="requires an explicitly assigned CUDA device and FLARE_RUN_CUDA_TESTS=1")
 
 
-def assert_mxfp8(manifest, packed, name, *, rows=None, columns=None):
+def assert_mxfp8(manifest, packed, name, *, rows=None, columns=None, output_rows=None):
     rows = slice(None) if rows is None else slice(*rows)
     columns = slice(None) if columns is None else slice(*columns)
     expected = read(manifest, name + ".weight", (rows, columns)).view(torch.uint8)
@@ -78,6 +78,8 @@ def assert_mxfp8(manifest, packed, name, *, rows=None, columns=None):
     expected_scales = read(manifest, name + ".weight_scale", (rows, scale_columns))
     actual = packed.weight.values.view(torch.uint8).reshape(packed.out_features, -1).cpu()
     scales = packed.weight.scale_rows.view(torch.uint8).reshape(packed.out_features, -1).cpu()
+    if output_rows is not None:
+        actual, scales = actual[slice(*output_rows)], scales[slice(*output_rows)]
     assert torch.equal(actual[:, :expected.shape[1]], expected)
     assert torch.equal(scales[:, :expected_scales.shape[1]], expected_scales)
 
@@ -96,14 +98,18 @@ def test_actual_dense_and_attention_shards(manifest, world, rank):
         assert loader._session.torch_copy_bytes == 0
     channels = shard.partition(8192)
     prefix = f"{TEXT_PREFIX}.layers.0.self_attn"
-    for name in ("q_proj", "k_proj", "v_proj", "f_b_proj", "g_b_proj"):
+    width = channels[1] - channels[0]
+    for index, name in enumerate(("q_proj", "k_proj", "v_proj")):
+        assert_mxfp8(manifest, kda["qkv_proj"], f"{prefix}.{name}", rows=channels,
+                     output_rows=(index * width, (index + 1) * width))
+    for name in ("f_b_proj", "g_b_proj"):
         assert_mxfp8(manifest, kda[name], f"{prefix}.{name}", rows=channels)
     assert_mxfp8(manifest, kda["b_proj"], f"{prefix}.b_proj", rows=shard.partition(64))
     assert_mxfp8(manifest, kda["o_proj"], f"{prefix}.o_proj", columns=channels)
     for name in ("f_a_proj", "g_a_proj"):
         assert_mxfp8(manifest, kda[name], f"{prefix}.{name}")
     expected_conv = torch.cat([read(manifest, f"{prefix}.{name}_conv1d.weight", slice(*channels))
-                               for name in ("q", "k", "v")]).squeeze(1).float()
+                               for name in ("q", "k", "v")]).squeeze(1)
     assert torch.equal(kda["conv1d.weight"].cpu(), expected_conv)
     assert torch.equal(kda["A_log"].cpu(), read(manifest, prefix + ".A_log", slice(*shard.partition(64))))
     assert torch.equal(kda["dt_bias"].cpu(), read(manifest, prefix + ".dt_bias", slice(*channels)))

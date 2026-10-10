@@ -99,7 +99,10 @@ class GlmWeightLoader(DirectWeightLoader):
         channels = self.shard.partition(8192, alignment=128)
         heads = self.shard.partition(64)
         result = {name: self._projection(f"{prefix}.{name}", rows=channels)
-                  for name in ("q_proj", "k_proj", "v_proj", "f_b_proj", "g_b_proj")}
+                  for name in ("f_b_proj", "g_b_proj")}
+        result["qkv_proj"] = self.load_mxfp8_group(
+            tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj")),
+            row_ranges=(channels,) * 3)
         result.update({name: self._projection(f"{prefix}.{name}") for name in ("f_a_proj", "g_a_proj")})
         result["b_proj"] = self._projection(f"{prefix}.b_proj", rows=heads)
         result["o_proj"] = self._projection(f"{prefix}.o_proj", columns=channels)
@@ -107,7 +110,7 @@ class GlmWeightLoader(DirectWeightLoader):
         result["dt_bias"] = self.load_tensor(f"{prefix}.dt_bias", extent=slice(*channels))
         result["o_norm.weight"] = self.load_tensor(f"{prefix}.o_norm.weight")
         result["conv1d.weight"] = torch.cat([
-            self.load_tensor(f"{prefix}.{name}_conv1d.weight", dtype=torch.float32,
+            self.load_tensor(f"{prefix}.{name}_conv1d.weight",
                              extent=slice(*channels)) for name in ("q", "k", "v")
         ]).squeeze(1)
         return result

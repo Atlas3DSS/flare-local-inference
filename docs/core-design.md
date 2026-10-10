@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `4d926a1e0a838ae4a70eb0836a3f8a6dc1f42636`, including the CuTe DSL operators
+  `e844e35841562a13781fa182dc46ffa5d4e9bd9c`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -220,8 +220,14 @@ shared [weight loader](../flare/components/weights.py); scale expansion uses
 caller-owned buffers that serialized layers can share. The shared
 [prepared MLP](../flare/components/mlp.py) executes BF16 dense and MXFP8 shared
 experts with the checkpoint's SwiGLU clamp and caller-owned intermediates.
-Compiled MLP and all-reduce graphs support per-rank native replay. GLM attention,
-complete decoder-layer replacement, and serving are not implemented.
+The [KDA branch](../flare/recipes/glm53/kda.py) uses packed MXFP8 QKV projections,
+b12x convolution and recurrence, and head-sharded FP32 recurrent state. Shared
+[recurrent components](../flare/components/recurrent.py) provide state allocation,
+device metadata, checkpoint export, and prepared bindings for Qwen GDN and GLM
+KDA. Compiled KDA prefill graphs support chunks through 4096 tokens. KDA decode,
+prefill, and MLP graphs include b12x output reductions and support native replay
+on TP2 and TP4. Sparse MLA, mHC integration, complete decoder-layer replacement,
+and GLM serving are not implemented.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
