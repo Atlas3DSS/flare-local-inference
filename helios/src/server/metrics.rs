@@ -17,8 +17,29 @@ struct RoundMetrics {
     accepted: AtomicU64,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct Snapshot {
+    pub prefill_tokens: u64,
+    pub generated_tokens: u64,
+    pub draft_steps: u64,
+    pub verify_steps: u64,
+    pub accepted_drafts: u64,
+    pub draft_rounds: u64,
+    pub active: u64,
+    pub pending: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub reused_tokens: u64,
+    pub cached_pages: u64,
+    pub free_pages: u64,
+}
+
 #[derive(Default)]
 pub(super) struct Metrics {
+    prefill_tokens: AtomicU64,
+    generated_tokens: AtomicU64,
+    accepted_drafts: AtomicU64,
+    draft_rounds: AtomicU64,
     pub admitted: AtomicU64,
     pub completed: AtomicU64,
     pub cancelled: AtomicU64,
@@ -48,6 +69,46 @@ pub(super) struct Metrics {
 }
 
 impl Metrics {
+    pub fn progress(&self, prefill: u64, generated: usize, accepted: u64, rounds: u64) {
+        for (counter, value) in [
+            (&self.prefill_tokens, prefill),
+            (&self.generated_tokens, generated as u64),
+            (&self.accepted_drafts, accepted),
+            (&self.draft_rounds, rounds),
+        ] {
+            if value != 0 {
+                counter.fetch_add(value, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn snapshot(&self, learned_drafter: bool) -> Snapshot {
+        let mut snapshot = Snapshot {
+            prefill_tokens: self.prefill_tokens.load(Ordering::Relaxed),
+            generated_tokens: self.generated_tokens.load(Ordering::Relaxed),
+            accepted_drafts: self.accepted_drafts.load(Ordering::Relaxed),
+            draft_rounds: self.draft_rounds.load(Ordering::Relaxed),
+            active: self.active_requests.load(Ordering::Relaxed),
+            pending: self.pending.load(Ordering::Relaxed),
+            completed: self.completed.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            reused_tokens: self.reused_tokens.load(Ordering::Relaxed),
+            cached_pages: self.cached_pages.load(Ordering::Relaxed),
+            free_pages: self.free_pages.load(Ordering::Relaxed),
+            ..Snapshot::default()
+        };
+        for widths in &self.speculative {
+            for (drafts, counts) in widths.iter().enumerate() {
+                let rounds = counts.rounds.load(Ordering::Relaxed);
+                snapshot.verify_steps += rounds;
+                if learned_drafter {
+                    snapshot.draft_steps += rounds * drafts as u64;
+                }
+            }
+        }
+        snapshot
+    }
+
     pub fn launched(&self, kind: GraphKind) {
         let index = match kind {
             GraphKind::Init => 0,
@@ -207,6 +268,26 @@ impl Metrics {
             }
         }
         for (name, help, value) in [
+            (
+                "prefill_tokens_total",
+                "Prompt tokens consumed by successful completed prefill work, excluding padding and prefix reuse.",
+                &self.prefill_tokens,
+            ),
+            (
+                "generated_tokens_total",
+                "Committed generated tokens, including EOS and tokens subsequently withheld by text stops.",
+                &self.generated_tokens,
+            ),
+            (
+                "accepted_draft_tokens_total",
+                "Accepted draft tokens from progressing live request rounds, excluding the bonus token.",
+                &self.accepted_drafts,
+            ),
+            (
+                "draft_request_rounds_total",
+                "Progressing live request rounds offering at least one draft; denominator for mean acceptance length.",
+                &self.draft_rounds,
+            ),
             (
                 "requests_admitted_total",
                 "Requests admitted into a physical model slot.",

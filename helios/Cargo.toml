@@ -18,7 +18,7 @@ extension-module = ["python", "pyo3/extension-module"]
 frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
-server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64"]
+server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 thiserror = "2.0"
@@ -40,6 +40,8 @@ tokio = { version = "1.53.1", default-features = false, features = ["rt-multi-th
 async-stream = { version = "0.3.6", optional = true }
 base64 = { version = "0.22.1", optional = true }
 llguidance = { version = "=1.9.1", default-features = false, features = ["lark", "referencing", "ahash", "jsonschema_validation"], optional = true }
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
+crossterm = { version = "0.28", default-features = false, optional = true }
 
 [[bin]]
 name = "test_frontend"

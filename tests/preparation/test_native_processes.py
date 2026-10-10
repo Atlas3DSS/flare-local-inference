@@ -74,3 +74,86 @@ def test_supervisor_rejects_unowned_process():
 
     with pytest.raises(ValueError):
         flare_helios.RankSupervisor([os.getpid()])
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_cli_signals_exit_during_native_gil_hold_without_python_finalization(signum):
+    code = r'''
+import atexit, ctypes, time
+import flare_helios
+atexit.register(lambda: print("finalizer ran", flush=True))
+with flare_helios.CliSignals():
+    print("ready", flush=True)
+    ctypes.PyDLL(None).sleep(60)
+'''
+    process = subprocess.Popen([sys.executable, "-u", "-c", code],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        assert process.stdout.readline() == b"ready\n"
+        started = time.monotonic()
+        process.send_signal(signum)
+        output, error = process.communicate(timeout=2)
+        assert process.returncode == 128 + signum
+        assert time.monotonic() - started < 1
+        assert output == error == b""
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+def test_cli_signal_scope_restores_embedded_python_handlers():
+    import flare_helios
+
+    observed = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: observed.append(signum))
+    try:
+        with flare_helios.CliSignals():
+            with pytest.raises(RuntimeError, match="already installed"):
+                flare_helios.CliSignals()
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert observed == [signal.SIGTERM]
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_cli_interrupt_leaves_no_compiler_processes():
+    code = r'''
+import json, os, time
+from pathlib import Path
+import flare_helios
+from torch._inductor.compile_worker.subproc_pool import SubprocPool
+with flare_helios.CliSignals():
+    pool = SubprocPool(1)
+    pending = pool.submit(time.sleep, 60)
+    coordinator = pool.process.pid
+    children = Path(f"/proc/{coordinator}/task/{coordinator}/children")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        workers = [int(pid) for pid in children.read_text().split()]
+        if workers:
+            break
+        time.sleep(.01)
+    else:
+        raise RuntimeError("compiler worker did not start")
+    print(json.dumps([coordinator, *workers]), flush=True)
+    pending.result()
+'''
+    process = subprocess.Popen([sys.executable, "-u", "-c", code], text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    peers = []
+    try:
+        line = process.stdout.readline()
+        assert line, process.stderr.read()
+        peers = json.loads(line)
+        process.send_signal(signal.SIGINT)
+        process.communicate(timeout=3)
+        assert process.returncode == 130
+        deadline = time.monotonic() + 5
+        while not all(terminated(pid) for pid in peers) and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert all(terminated(pid) for pid in peers)
+    finally:
+        if process.poll() is None or not all(terminated(pid) for pid in peers):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)

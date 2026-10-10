@@ -1,6 +1,7 @@
 //! Native HTTP admission, bounded generation streams and direct graph scheduling.
 
 mod config;
+mod dashboard;
 mod listener;
 mod metrics;
 mod observation;
@@ -12,6 +13,11 @@ mod runtime;
 mod stops;
 pub use config::Bootstrap;
 pub use runtime::{Generation, GenerationEvent, ModelRuntime, Prompt};
+
+#[cfg(feature = "python")]
+pub(crate) fn restore_terminal_for_exit() {
+    dashboard::restore_for_exit();
+}
 
 use crate::{
     AdmissionError, Error, ExecutionError, Failure, Result, Shutdown,
@@ -80,6 +86,7 @@ pub struct Server<M: ModelContract> {
     model: Arc<ModelRuntime<M>>,
     control: Mutex<HttpControl>,
     shutdown: Mutex<Option<Shutdown>>,
+    dashboard: Mutex<Option<dashboard::Dashboard>>,
 }
 struct HttpControl {
     stop: Option<oneshot::Sender<()>>,
@@ -242,6 +249,7 @@ impl<M: ModelContract> Server<M> {
                     thread: Some(thread),
                 }),
                 shutdown: Mutex::new(None),
+                dashboard: Mutex::new(None),
             }),
             result => {
                 let returned = thread.join().ok().and_then(Result::err);
@@ -270,8 +278,24 @@ impl<M: ModelContract> Server<M> {
     pub fn wait(&self, timeout: Duration) -> bool {
         self.model.wait(timeout)
     }
+    pub fn start_dashboard(&self) -> std::io::Result<bool> {
+        let _control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dashboard = self.dashboard.lock().unwrap_or_else(|e| e.into_inner());
+        if dashboard.is_none() && self.healthy() {
+            *dashboard = dashboard::Dashboard::start(
+                self.model.metrics_handle(),
+                format!("{} · {}", self.model.config().model_id, self.address),
+                self.model.config().has_draft_cache(),
+            )?;
+        }
+        Ok(dashboard.is_some())
+    }
     pub fn close(&self) -> Shutdown {
         let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        self.dashboard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(shutdown) = self
             .shutdown
             .lock()

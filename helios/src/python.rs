@@ -445,6 +445,28 @@ fn bind_parent_lifetime(parent_pid: i32) -> PyResult<()> {
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
+#[pyclass(name = "CliSignals", module = "flare_helios", unsendable)]
+struct NativeCliSignals {
+    signals: Option<crate::processes::CliSignals>,
+}
+
+#[pymethods]
+impl NativeCliSignals {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(Self {
+            signals: Some(
+                crate::processes::CliSignals::new()
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+            ),
+        })
+    }
+    fn __enter__(&self) {}
+    fn __exit__(&mut self, _kind: Py<PyAny>, _value: Py<PyAny>, _traceback: Py<PyAny>) {
+        self.signals.take();
+    }
+}
+
 impl Drop for PreparedGraphExecutor {
     fn drop(&mut self) {
         let shutdown = self.worker.close();
@@ -469,6 +491,7 @@ fn flare_helios(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PreparedGraphExecutor>()?;
     module.add_class::<ExecutionCompletion>()?;
     module.add_class::<NativeRankSupervisor>()?;
+    module.add_class::<NativeCliSignals>()?;
     #[cfg(feature = "server")]
     module.add_class::<NativeServer>()?;
     module.add_function(wrap_pyfunction!(current_context, module)?)?;
@@ -508,6 +531,12 @@ enum ModelServer {
 
 #[cfg(feature = "server")]
 impl ModelServer {
+    fn start_dashboard(&self) -> std::io::Result<bool> {
+        match self {
+            Self::Qwen(s) => s.start_dashboard(),
+            Self::Glm(s) => s.start_dashboard(),
+        }
+    }
     fn address(&self) -> std::net::SocketAddr {
         match self {
             Self::Qwen(s) => s.address(),
@@ -649,6 +678,10 @@ impl NativeServer {
     #[getter]
     fn healthy(&self) -> bool {
         self.server.healthy()
+    }
+    fn start_dashboard(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| self.server.start_dashboard())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
     #[pyo3(signature = (timeout_ms=1000))]
     fn wait(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<bool> {

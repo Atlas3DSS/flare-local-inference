@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import signal
 import sys
 from pathlib import Path
 from time import monotonic
@@ -12,8 +11,6 @@ from time import monotonic
 
 def main(argv=None):
     started = monotonic()
-    from flare.progress import StartupProgress, phase
-
     from flare.preparation.qwen38 import MODEL_ID, REVISION
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -43,10 +40,21 @@ def main(argv=None):
     parser.add_argument("--headroom-gib", type=float, default=4)
     parser.add_argument("--no-compile", action="store_true",
         help="skip torch.compile for faster development startup; still capture CUDA graphs")
+    parser.add_argument("--no-dashboard", action="store_true",
+        help="disable the native terminal metrics dashboard (automatically disabled when stderr is redirected)")
     parser.add_argument("--template-defaults", type=Path, help="JSON object of default chat template arguments")
     parser.add_argument("--memory-report", type=Path)
     parser.add_argument("--prepare-only", action="store_true", help="validate the graph catalog and release it without binding HTTP")
     args = parser.parse_args(argv)
+    import flare_helios
+
+    with flare_helios.CliSignals():
+        return _run(args, parser, started)
+
+
+def _run(args, parser, started):
+    from flare.progress import StartupProgress, phase
+
     progress = StartupProgress()
     defaults = {}
     if args.template_defaults is not None:
@@ -60,8 +68,6 @@ def main(argv=None):
         if args.tp not in (2, 4) or args.mtp:
             parser.error("GLM requires --tp 2 or --tp 4 and has no prepared MTP catalog")
         with phase(progress, "Initialize model runtime"):
-            # Retain the native runtime before lengthy preparation can overlap a rebuild.
-            import flare_helios
             from flare.preparation.rank_group import prepare_group
             from flare.recipes.glm53.bootstrap import PreparationConfig, prepare_rank
 
@@ -73,7 +79,6 @@ def main(argv=None):
         if args.tp != 1 or args.max_active != 4:
             parser.error("Qwen requires --tp 1 and --max-active 4")
         with phase(progress, "Initialize model runtime"):
-            import flare_helios
             from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
         config = PreparationConfig(device=args.device, context=args.context, pages=args.pages,
@@ -94,17 +99,14 @@ def main(argv=None):
         with phase(progress, "Start Helios"):
             server = model.start_server(bind=args.bind, template_defaults=defaults)
         print(f"Listening on {server.address}; startup {monotonic() - started:.2f}s", file=sys.stderr, flush=True)
-        def stop(signum, frame):
-            raise KeyboardInterrupt
-        previous = signal.signal(signal.SIGTERM, stop)
-        try:
-            while server.wait(1000):
-                pass
-            raise RuntimeError("native server stopped unexpectedly")
-        except KeyboardInterrupt:
-            return 0
-        finally:
-            signal.signal(signal.SIGTERM, previous)
+        if not args.no_dashboard:
+            try:
+                server.start_dashboard()
+            except RuntimeError as error:
+                print(f"Cannot start Helios dashboard: {error}", file=sys.stderr)
+        while server.wait(1000):
+            pass
+        raise RuntimeError("native server stopped unexpectedly")
 
 
 if __name__ == "__main__":

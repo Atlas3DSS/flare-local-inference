@@ -333,6 +333,9 @@ impl<M: ModelContract> ModelRuntime<M> {
     pub(super) fn metrics(&self) -> &super::metrics::Metrics {
         &self.metrics
     }
+    pub(super) fn metrics_handle(&self) -> Arc<super::metrics::Metrics> {
+        self.metrics.clone()
+    }
     pub fn wait(&self, timeout: std::time::Duration) -> bool {
         let finished = self.finished.0.lock().unwrap_or_else(|e| e.into_inner());
         let _ = self
@@ -657,6 +660,31 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 M::validate_completion(self.config, kind, record)?;
             }
         }
+        let mut prefill = 0;
+        let mut accepted = 0;
+        let mut draft_rounds = 0;
+        if matches!(kind, GraphKind::Prefill | GraphKind::Speculative) {
+            let step = self.scheduler.submitted_step(completion.fence)?;
+            for lane in &step.lanes {
+                let Ok(live) = self.scheduler.request(lane.request) else {
+                    continue;
+                };
+                let record = &completion.records[lane.request.slot as usize];
+                if !matches!(record.status, 1 | 2) {
+                    continue;
+                }
+                if kind == GraphKind::Prefill {
+                    prefill += (record.consumed_tokens.max(0) as u64)
+                        .saturating_sub(live.consumed_tokens)
+                        .min(lane.tokens as u64);
+                } else if record.generated_tokens > live.generated_tokens as i64 {
+                    if let Some(vector) = record.vector.filter(|v| v.offered_drafts > 0) {
+                        accepted += vector.accepted_drafts as u64;
+                        draft_rounds += 1;
+                    }
+                }
+            }
+        }
         let measured_step = completion
             .elapsed_ns
             .map(|_| self.scheduler.submitted_step(completion.fence).cloned())
@@ -664,6 +692,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         let generated = self
             .scheduler
             .complete(completion.fence, &completion.records)?;
+        self.metrics
+            .progress(prefill, generated.len(), accepted, draft_rounds);
         if let (Some(step), Some(nanos)) = (measured_step, completion.elapsed_ns) {
             self.scheduler
                 .observe_round(&step, nanos, generated.len())?;

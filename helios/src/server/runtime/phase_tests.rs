@@ -328,6 +328,8 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
     assert!(worker.publish().unwrap());
     assert!(!worker.publish().unwrap());
     assert_eq!(worker.scheduler.stats().snapshot_publications, 3);
+    let metrics = fixture.metrics.snapshot(false);
+    assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 2));
     let mut finished = 0;
     while let Ok(event) = generation.events.try_recv() {
         if let GenerationEvent::Finished {
@@ -356,6 +358,90 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
         (live.phase, live.reused_prompt_tokens()),
         (RequestPhase::Restore, 13)
     );
+    advance(&mut worker, GraphKind::Restore, 8, None);
+    advance(&mut worker, GraphKind::Resume, 9, Some(1));
+    let metrics = fixture.metrics.snapshot(false);
+    assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 3));
+}
+
+#[test]
+fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
+    for copy in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.config.speculative_widths = vec![1, 4];
+        fixture.config.speculative_fixed_width = Some(4);
+        fixture.config.history_drafts = copy;
+        if copy {
+            fixture.config.speculative_proposal_source =
+                crate::scheduler::speculation::ProposalSource::Copy;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
+        sender.send(incoming).unwrap();
+        let mut worker = fixture.worker(receiver);
+        worker.scheduler.enable_speculation(&[1, 4]).unwrap();
+        worker.scheduler.fixed_speculative_width(Some(4)).unwrap();
+        worker
+            .scheduler
+            .proposal_source(fixture.config.speculative_proposal_source)
+            .unwrap();
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        advance(&mut worker, GraphKind::Init, 1, None);
+        advance(&mut worker, GraphKind::Prefill, 2, Some(0));
+        advance(&mut worker, GraphKind::Snapshot, 3, None);
+        if copy {
+            let handle = worker.active[0].as_ref().unwrap().request;
+            worker
+                .scheduler
+                .set_copy_proposal(
+                    handle,
+                    crate::scheduler::speculation::CopyProposal {
+                        consumed: 13,
+                        tokens: [0, 0, 0, -1, -1, -1, -1],
+                        count: 3,
+                        grammar_masks: vec![],
+                    },
+                )
+                .unwrap();
+        }
+        let step = planned(&mut worker, GraphKind::Speculative, 4);
+        assert_eq!(step.token_capacity, 4);
+        let mut frame = completion(&worker, &step, 4, None);
+        frame.elapsed_ns = Some(1000);
+        let record = &mut frame.records[step.lanes[0].request.slot as usize];
+        record.consumed_tokens = 16;
+        record.generated_tokens = 4;
+        record.token_id = 2;
+        record.vector = Some(crate::execution::TokenVector {
+            emitted_count: 3,
+            offered_drafts: 3,
+            accepted_drafts: 2,
+            verification_width: 4,
+            draft_cache_consumed: if copy { -1 } else { 15 },
+            tokens: [1, 1, 2, -1, -1, -1, -1, -1],
+            ..Default::default()
+        });
+        let mut invalid = frame.records;
+        invalid[step.lanes[0].request.slot as usize].generated_tokens = 20;
+        assert!(
+            worker
+                .complete(
+                    GraphKind::Speculative,
+                    FrameCompletion {
+                        records: invalid,
+                        ..frame
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(fixture.metrics.snapshot(!copy).generated_tokens, 1);
+        worker.complete(GraphKind::Speculative, frame).unwrap();
+        let metrics = fixture.metrics.snapshot(!copy);
+        assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 4));
+        assert_eq!((metrics.accepted_drafts, metrics.draft_rounds), (2, 1));
+        assert_eq!(metrics.verify_steps, 1);
+        assert_eq!(metrics.draft_steps, if copy { 0 } else { 3 });
+    }
 }
 
 #[test]

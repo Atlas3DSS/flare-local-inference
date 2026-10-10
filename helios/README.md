@@ -8,6 +8,27 @@ from Rust without Python types. The `server` feature adds HTTP/SSE, native reque
 preparation and direct scheduling of Qwen4Exp and Glm5Next prepared models. Python loads and
 captures the model before handing it to Rust.
 
+On an interactive terminal, the `flare` CLI starts a native metrics dashboard
+after preparation. `--no-dashboard` disables it; redirected stderr stays plain.
+The dashboard uses a separate, lower-priority Rust thread and reads atomic
+counters twice per second without contacting the GPU or execution worker.
+Braille plots retain 120 seconds of history, with rates measured over a rolling
+two-second wall-clock window. Ctrl-C and SIGTERM restore the terminal and exit
+the CLI process directly, including during preparation. They bypass Python
+finalizers, CUDA graph destruction, and request draining. Tensor-parallel peers
+are killed by their parent-death signal. Embedded server `close()` still drains
+native execution before releasing caller-owned resources.
+
+Prefill throughput counts consumed prompt tokens, excluding padding and prefix
+reuse. Generation throughput counts committed output tokens, including EOS and
+tokens withheld by text stops. Drafter steps count batched learned-proposal
+forwards inside completed speculative graphs; verification steps count completed
+speculative graphs. Copy-only proposals contribute no drafter steps. Mean draft
+acceptance length is accepted draft tokens per progressing request round with
+at least one offered draft, excluding the bonus token and width-one rounds.
+The display also shows active/queued requests, completed/failed requests, reused
+tokens, and cached/free KV pages. Token counters are available through `/metrics`.
+
 Native APIs return `flare_helios::Error`, with separate `AdmissionError`,
 `ExecutionError`, and `FrontendError` variants. Validation, capacity exhaustion,
 unsupported features, grammar failures, image decoding, manifest violations,

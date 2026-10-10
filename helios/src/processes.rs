@@ -1,12 +1,82 @@
-//! Linux child-rank lifetime monitoring independent of Python and CUDA progress.
+//! Native CLI signal handling and Linux child-rank lifetime supervision.
 
 use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+static CLI_SIGNALS: AtomicBool = AtomicBool::new(false);
+static CLI_TERMINAL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn exit_cli(signal: libc::c_int) {
+    if CLI_TERMINAL.load(Ordering::Relaxed) {
+        #[cfg(feature = "server")]
+        crate::server::restore_terminal_for_exit();
+        // SAFETY: write and _exit are async-signal-safe; the bytes have static storage.
+        unsafe {
+            let reset = b"\x1b[0m\x1b[?25h\r\n";
+            libc::write(libc::STDERR_FILENO, reset.as_ptr().cast(), reset.len());
+        }
+    }
+    unsafe { libc::_exit(128 + signal) }
+}
+
+/// Process-wide immediate CLI termination, scoped away from embedded servers.
+pub struct CliSignals {
+    previous: [libc::sigaction; 2],
+}
+
+impl CliSignals {
+    pub fn new() -> io::Result<Self> {
+        if CLI_SIGNALS.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::other(
+                "CLI signal handlers are already installed",
+            ));
+        }
+        // SAFETY: sigaction receives initialized handlers and writable previous actions.
+        unsafe {
+            CLI_TERMINAL.store(libc::isatty(libc::STDERR_FILENO) == 1, Ordering::Relaxed);
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = exit_cli as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaddset(&mut action.sa_mask, libc::SIGINT);
+            libc::sigaddset(&mut action.sa_mask, libc::SIGTERM);
+            let mut previous = [std::mem::zeroed(); 2];
+            for (index, signal) in [libc::SIGINT, libc::SIGTERM].into_iter().enumerate() {
+                if libc::sigaction(signal, &action, &mut previous[index]) != 0 {
+                    let error = io::Error::last_os_error();
+                    if index == 1 {
+                        libc::sigaction(libc::SIGINT, &previous[0], std::ptr::null_mut());
+                    }
+                    CLI_SIGNALS.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            }
+            Ok(Self { previous })
+        }
+    }
+}
+
+impl Drop for CliSignals {
+    fn drop(&mut self) {
+        for (signal, action) in [libc::SIGINT, libc::SIGTERM]
+            .into_iter()
+            .zip(&self.previous)
+        {
+            // SAFETY: The scoped CLI owner restores the actions saved during installation.
+            unsafe {
+                libc::sigaction(signal, action, std::ptr::null_mut());
+            }
+        }
+        CLI_SIGNALS.store(false, Ordering::Release);
+    }
+}
 
 #[derive(Default)]
 struct Control {
