@@ -10,9 +10,43 @@ import torch
 import triton
 import triton.language as tl
 
-from flare.preparation.compilation import compile_forward
+from flare.preparation.compilation import ForwardTracer, compile_forward
 
 ForwardOutput = namedtuple("ForwardOutput", ("hidden", "auxiliary"))
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_shared_tracer_preserves_shape_specific_aliases_and_replay():
+    source = torch.randn(8, 64, device="cuda")
+    weight = torch.randn(64, device="cuda")
+    scratch = torch.empty_like(source)
+    output = torch.empty_like(source)
+    tracer = ForwardTracer()
+    graphs = []
+    compiled = []
+    for rows in (8, 1, 4):
+        def forward(rows=rows):
+            scratch[:rows].copy_(source[:rows] * weight)
+            output[:rows].copy_(scratch[:rows].sum(dim=1, keepdim=True))
+            return output[:rows]
+
+        function = compile_forward(forward, tracer=tracer)
+        compiled.append(function)
+        function()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            function()
+        graphs.append((rows, graph))
+    del tracer
+    for rows, graph in reversed(graphs):
+        source.normal_()
+        weight.normal_()
+        output.fill_(float('nan'))
+        graph.replay()
+        expected = (source[:rows] * weight).sum(dim=1, keepdim=True).expand(rows, 64)
+        torch.testing.assert_close(output[:rows], expected)
+        assert output[rows:].isnan().all()
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")

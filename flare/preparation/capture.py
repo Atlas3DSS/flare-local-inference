@@ -5,7 +5,7 @@ from time import monotonic
 
 import torch
 
-from .compilation import compile_forward
+from .compilation import ForwardTracer, compile_forward
 
 
 def capture_forwards(functions, signatures, *, session, device, stream, pool,
@@ -17,12 +17,13 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     serving replays variants serially and may choose them in any order.
     """
     graphs, compiled = {}, {}
+    tracer = ForwardTracer() if compile_decoder else None
     for name, function in functions.items():
         started = monotonic()
         if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative"):
             if progress is not None:
                 progress(f"compiling {name}")
-            function = compile_forward(function)
+            function = compile_forward(function, tracer=tracer)
             compiled[name] = function
         stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):

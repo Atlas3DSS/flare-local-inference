@@ -188,7 +188,30 @@ def _compile_module(module, calls, owner, output_tree):
     return CompiledForward(artifact, inputs, calls, owner, output_tree, cache_hit)
 
 
-def compile_forward(fn):
+class ForwardTracer:
+    """Reuse persistent tensor metadata across a fixed-buffer graph catalog."""
+
+    def __init__(self):
+        from torch._functorch import config
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with config.patch(fake_tensor_allow_unsafe_data_ptr_access=False):
+            self.mode = FakeTensorMode(allow_non_fake_inputs=True, static_shapes=True)
+        self.inputs = {}
+
+    def __call__(self, fn):
+        with self.mode:
+            module = make_fx(fn, tracing_mode='fake', _allow_non_fake_inputs=True,
+                             _disable_torch_fn_metadata_mode=True)()
+        for node in module.graph.nodes:
+            if node.op == 'get_attr':
+                value = operator.attrgetter(node.target)(module)
+                if isinstance(value, torch.Tensor):
+                    self.inputs[id(value)] = (value, self.mode.from_tensor(value))
+        return module
+
+
+def compile_forward(fn, *, tracer=None):
     """Trace and compile one fixed-buffer forward before CUDA graph capture.
 
     Tracing uses tensor metadata without executing kernels. Mutating native operators
@@ -208,8 +231,7 @@ def compile_forward(fn):
         leaves, output_tree = tree_flatten(fn())
         return tuple(leaves)
 
-    module = make_fx(trace, tracing_mode='fake', _allow_non_fake_inputs=True,
-                     _disable_torch_fn_metadata_mode=True)()
+    module = (ForwardTracer() if tracer is None else tracer)(trace)
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
