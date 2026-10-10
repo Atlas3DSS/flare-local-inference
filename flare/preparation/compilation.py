@@ -5,12 +5,13 @@ import math
 import operator
 import os
 import pickle
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from torch._higher_order_ops.triton_kernel_wrap import get_mutated_tensors
+from torch._higher_order_ops.triton_kernel_wrap import get_mutated_tensors, kernel_side_table
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
@@ -86,6 +87,21 @@ def _byte_storage(tensor):
     return tensor.new_empty(0, dtype=torch.uint8).set_(storage, 0, (storage.nbytes(),), (1,))
 
 
+@contextmanager
+def _artifact_kernel_table():
+    # Native launches are runtime bindings; artifacts must not restore their IDs.
+    names = ('id_to_kernel', 'kernel_to_id', 'constant_args')
+    with kernel_side_table.lock:
+        tables = [getattr(kernel_side_table, name) for name in names]
+        try:
+            for name in names:
+                setattr(kernel_side_table, name, {})
+            yield
+        finally:
+            for name, table in zip(names, tables):
+                setattr(kernel_side_table, name, table)
+
+
 def _returned_alias(node, index):
     if not isinstance(node.target, torch._ops.OpOverload):
         return None
@@ -159,7 +175,8 @@ def _compile_module(module, calls, owner):
     path = root / 'flare' / 'compiled' / (key + '.bin')
     cache_hit = path.is_file()
     if cache_hit:
-        artifact = CompiledArtifact.load(path=str(path))
+        with _artifact_kernel_table():
+            artifact = CompiledArtifact.load(path=str(path))
     else:
         token = _INVOCATIONS.set(calls)
         try:
@@ -170,7 +187,8 @@ def _compile_module(module, calls, owner):
         finally:
             _INVOCATIONS.reset(token)
         path.parent.mkdir(parents=True, exist_ok=True)
-        artifact.save(path=str(path))
+        with _artifact_kernel_table():
+            artifact.save(path=str(path))
     return CompiledForward(artifact, inputs, calls, owner, wrapped_output, cache_hit)
 
 

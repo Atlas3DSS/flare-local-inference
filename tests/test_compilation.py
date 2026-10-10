@@ -6,8 +6,22 @@ import sys
 
 import pytest
 import torch
+import triton
+import triton.language as tl
 
 from flare.preparation.compilation import compile_forward
+
+
+@triton.jit
+def _cached_fill_triton(out, value: tl.constexpr):
+    offsets = tl.arange(0, 64)
+    tl.store(out + offsets, value)
+
+
+@triton.jit
+def _cached_negate_triton(out, value: tl.constexpr):
+    offsets = tl.arange(0, 64)
+    tl.store(out + offsets, -value)
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
@@ -175,7 +189,8 @@ def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatc
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
-def test_compilation_cache_survives_process_restart(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native_kind", ["custom", "triton"])
+def test_compilation_cache_survives_process_restart(tmp_path, monkeypatch, native_kind):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     program = '''
 import sys
@@ -193,8 +208,16 @@ def fake_fill(out, value):
 warm = sys.argv[1] == "warm"
 source = torch.empty(64, device="cuda")
 output = torch.empty_like(source)
+if sys.argv[2] == "triton":
+    sys.path.insert(0, sys.argv[3])
+    from test_compilation import _cached_fill_triton, _cached_negate_triton
+    from flare.preparation.triton import prepare_triton
+    kernel = _cached_negate_triton if warm else _cached_fill_triton
+    launch = prepare_triton(kernel, (source, 7. if warm else 3.), (1,))
+else:
+    launch = lambda: fill(source, 7. if warm else 3.)
 def forward():
-    fill(source, 7. if warm else 3.)
+    launch()
     output.copy_(source * 2)
 with torch.no_grad():
     if warm:
@@ -209,11 +232,15 @@ with torch.no_grad():
         compiled()
     output.zero_()
     graph.replay()
-    torch.testing.assert_close(output, torch.full_like(output, 14. if warm else 6.), rtol=0, atol=0)
+    expected = 14. if warm else 6.
+    if warm and sys.argv[2] == "triton":
+        expected = -expected
+    torch.testing.assert_close(output, torch.full_like(output, expected), rtol=0, atol=0)
 '''
     for mode in ("cold", "warm"):
         environment = dict(os.environ, TORCHINDUCTOR_CACHE_DIR=str(tmp_path / (mode + "-inductor")))
-        subprocess.run([sys.executable, "-c", program, mode], env=environment, check=True)
+        subprocess.run([sys.executable, "-c", program, mode, native_kind, os.path.dirname(__file__)],
+                       env=environment, check=True)
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
