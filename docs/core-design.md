@@ -216,6 +216,11 @@ epochs, Philox state, penalties, grammar masks, admission, FlashInfer sampling,
 and completion records. Vocabulary size and EOS tokens come from the recipe.
 Qwen extends request state with its PLE token history; the shared sampler has no
 model-history dependency. Admission and sampling remain captured device work.
+Shared [token-state operations](../flare/components/token_state.py) gather
+pending tokens and positions, validate request epochs, and commit consumed
+spans. Recipes can supply two-token history storage for previous-token
+embeddings. Omitting history storage removes history loads and stores from
+the kernels. Qwen supplies its PLE history and padding token explicitly.
 Shared [routing and expert components](../flare/components/moe.py) retain FP32
 route weights, configurable scoring and correction bias, fixed output buffers,
 and b12x's default expert execution policy. Autotuning uses private activation

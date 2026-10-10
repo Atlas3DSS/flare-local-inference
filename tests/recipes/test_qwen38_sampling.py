@@ -20,12 +20,9 @@ from flare.components.sampling import (
     PreparedSampling,
     philox4x32_reference,
 )
+from flare.components.token_state import PreparedTokenState
 from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.sampling import (
-    DeviceRequestState,
-    PreparedTokenState,
-    RequestAdmission,
-)
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 
 
 def test_philox_random123_zero_vector_and_uniform_distribution():
@@ -226,7 +223,7 @@ def test_native_categorical_distribution_and_exact_seed_progression():
     sampler.prepare()
     tokens = torch.empty(4, dtype=torch.int64, device="cuda")
     spans = torch.arange(5, dtype=torch.int32, device="cuda")
-    token_state = PreparedTokenState(state, tokens, spans, *metadata[:3])
+    token_state = PreparedTokenState(state, tokens, spans, *metadata[:3], history=state.ple_history, history_pad_id=248044)
     token_state.prepare()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -275,7 +272,7 @@ def test_native_sampling_full_vocabulary_batch_reordering_and_pending_consumptio
     sampler.prepare()
     tokens = torch.empty(4, dtype=torch.int64, device="cuda")
     spans = torch.arange(5, dtype=torch.int32, device="cuda")
-    token_state = PreparedTokenState(state, tokens, spans, slots, epochs, live)
+    token_state = PreparedTokenState(state, tokens, spans, slots, epochs, live, history=state.ple_history, history_pad_id=248044)
     token_state.prepare()
     sample_graph, decode_graph = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
     with torch.cuda.graph(sample_graph):
@@ -379,7 +376,7 @@ def test_consumption_strided_live_history_and_pending_guard():
     slots.copy_(torch.tensor([2, 0, 3, 1], dtype=torch.int32))
     state.pending_token[0] = 88
     state.pending_token[1] = 91
-    operation = PreparedTokenState(state, tokens, spans, slots, epochs, live)
+    operation = PreparedTokenState(state, tokens, spans, slots, epochs, live, history=state.ple_history, history_pad_id=248044)
     operation.prepare()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -390,7 +387,7 @@ def test_consumption_strided_live_history_and_pending_guard():
     try:
         _replay(worker)
         assert operation.positions.cpu().tolist() == [63] * 4
-        assert operation.ple_history.cpu().tolist() == [[61, 62]] * 4
+        assert operation.history.cpu().tolist() == [[61, 62]] * 4
         assert state.consumed_tokens.cpu().tolist() == [63, 63, 67, 66]
         assert state.ple_history[2].cpu().tolist() == [65, 66]
         assert state.status[1] == ERROR and state.pending_token[1] == 91

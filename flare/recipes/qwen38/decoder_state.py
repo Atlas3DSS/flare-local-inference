@@ -9,11 +9,12 @@ import triton
 import triton.language as tl
 
 from flare.components.recurrent import DeltaMetadata
+from flare.components.token_state import PreparedTokenState
 from flare.preparation.triton import prepare_triton
 
 from .attention import QSAMetadata
 from .ple import PLEMetadata
-from .sampling import DeviceRequestState, PreparedTokenState
+from .sampling import DeviceRequestState
 from .state import HybridStatePool
 
 
@@ -225,7 +226,7 @@ class PreparedDecoderState:
             self.qsa.rope_positions, self.qsa.sequence_lengths, self.gdn.query_start_loc,
             self.gdn.accepted_tokens, self.qsa.is_prefilling, self.qsa.slot_mapping)
         self.token_state = PreparedTokenState(requests, inputs.token_ids[:tokens], self.gdn.query_start_loc,
-            inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows)
+            inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows, history=requests.ple_history, history_pad_id=248044)
         self.token_state.prepare()
         self._validate = compile_kernel(_validate,
             (inputs.row_slot_ids, inputs.row_generations, inputs.live_rows, inputs.query_lengths,
@@ -233,7 +234,7 @@ class PreparedDecoderState:
              requests.consumed_tokens, rows, tokens, inputs.page_tables.shape[1] * 64,
              requests.consumed_tokens.stride(0), mode == "prefill"), (4, 1, 1))
         self.ple = PLEMetadata(inputs.token_ids[:tokens], self.gdn.query_start_loc,
-            self.token_state.ple_history, self.gdn.convolution_slots, self.gdn.fresh,
+            self.token_state.history, self.gdn.convolution_slots, self.gdn.fresh,
             self.gdn.accepted_tokens, self.gdn.num_seqs, self.gdn.num_tokens)
         g, q, t = self.gdn, self.qsa, self.token_state
         args = (inputs.row_slot_ids, inputs.live_rows, inputs.query_lengths,

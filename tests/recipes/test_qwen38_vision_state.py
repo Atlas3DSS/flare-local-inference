@@ -174,8 +174,8 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
 def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity, compiled):
+    from flare.components.token_state import PreparedTokenState
     from flare.preparation.graphs import PreparedGraphBundle
-    from flare.recipes.qwen38.sampling import PreparedTokenState
 
     device = _device()
     features = VisionFeatureState.allocate(device)
@@ -194,7 +194,7 @@ def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity,
     operation.prepare()
     tokens = torch.tensor(prompt, dtype=torch.int64, device=device)
     starts = torch.tensor([0, capacity], dtype=torch.int32, device=device)
-    token_state = PreparedTokenState(requests, tokens, starts, slots, epochs, live)
+    token_state = PreparedTokenState(requests, tokens, starts, slots, epochs, live, history=requests.ple_history, history_pad_id=248044)
     token_state.prepare()
     def forward():
         operation.validate()

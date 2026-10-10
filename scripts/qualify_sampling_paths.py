@@ -149,7 +149,8 @@ class CapturedCase:
         import torch
 
         from flare.components.sampling import PreparedSampling
-        from flare.recipes.qwen38.sampling import DeviceRequestState, PreparedTokenState
+        from flare.components.token_state import PreparedTokenState
+        from flare.recipes.qwen38.sampling import DeviceRequestState
 
         self.case = case
         self.name = case["name"]
@@ -167,7 +168,7 @@ class CapturedCase:
         self.spans = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
         self.sampler = PreparedSampling(self.logits, self.state, self.slots, self.epochs, self.live,
             self.records, self.frame, self.sequence)
-        self.token_state = PreparedTokenState(self.state, self.tokens, self.spans, self.slots, self.epochs, self.live)
+        self.token_state = PreparedTokenState(self.state, self.tokens, self.spans, self.slots, self.epochs, self.live, history=self.state.ple_history, history_pad_id=248044)
         for name, value in case["initial"].items():
             getattr(self.state, name).copy_(value)
         self.sampler.prepare()
@@ -178,7 +179,7 @@ class CapturedCase:
             tokens=self.tokens, spans=self.spans, sample_enabled=self.sampler.sample_enabled)
         for name, tensor in self.sampler.scratch_tensors.items():
             self.buffers["sampler." + name] = tensor
-        for name in ("pending_tokens", "positions", "ple_history", "active"):
+        for name in ("pending_tokens", "positions", "history", "active"):
             self.buffers["token_state." + name] = getattr(self.token_state, name)
         self.initial = {name: value.clone() for name, value in self.buffers.items()}
         self.start = torch.cuda.Event(enable_timing=True, external=True)

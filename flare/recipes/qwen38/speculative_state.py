@@ -7,11 +7,11 @@ import triton
 import triton.language as tl
 
 from flare.components.recurrent import DeltaMetadata
+from flare.components.token_state import PreparedTokenState
 
 from .attention import QSAMetadata
 from .decoder_state import compile_kernel
 from .ple import PLEMetadata
-from .sampling import PreparedTokenState
 
 
 @triton.jit
@@ -129,9 +129,9 @@ class PreparedVerificationState:
             self.qsa.rope_positions, self.qsa.sequence_lengths, self.gdn.query_start_loc,
             self.gdn.accepted_tokens, self.qsa.is_prefilling, self.qsa.slot_mapping)
         self.token_state = PreparedTokenState(requests, self.token_ids, self.gdn.query_start_loc,
-            inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows)
+            inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows, history=requests.ple_history, history_pad_id=248044)
         self.token_state.prepare()
-        self.ple = PLEMetadata(self.token_ids, self.gdn.query_start_loc, self.token_state.ple_history,
+        self.ple = PLEMetadata(self.token_ids, self.gdn.query_start_loc, self.token_state.history,
             self.gdn.convolution_slots, self.gdn.fresh, self.gdn.accepted_tokens,
             self.gdn.num_seqs, self.gdn.num_tokens)
         self._validate = compile_kernel(_validate_round,
