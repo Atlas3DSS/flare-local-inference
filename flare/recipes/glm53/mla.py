@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 from b12x.attention import sparse_mla
+from flashinfer.triton.norm import rms_norm
 
 from flare.components.linear import BatchedQuantizedProjection, QuantizedProjection
 from flare.components.sparse_mla import PreparedLatentCacheWriter, PreparedSparseMLA
@@ -117,10 +118,12 @@ class PreparedGlmMLA:
     def __call__(self, source):
         s, p = self.scratch, self.projections
         p["qkv_a_proj"](source)
-        s.query_residual.copy_(self.module.q_a_layernorm(s.query_input))
+        rms_norm(s.query_input, self.module.q_a_layernorm.weight, s.query_residual,
+            self.module.q_a_layernorm.variance_epsilon, round_before_weight=True)
         p["q_b_proj"](s.query_residual)
         self.query_absorption(s.query.transpose(0, 1))
-        s.latent.copy_(self.module.kv_a_layernorm(s.latent_input))
+        rms_norm(s.latent_input, self.module.kv_a_layernorm.weight, s.latent,
+            self.module.kv_a_layernorm.variance_epsilon, round_before_weight=True)
         self.writer()
         self.indexer()
         s.visible.copy_(self.metadata.positions + 1)

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 import torch
+from flashinfer.triton.norm import rms_norm
 
 from flare.components.embedding import PreparedEmbedding
 from flare.components.mhc import MHCScratch
@@ -119,6 +120,7 @@ class PreparedDecoder:
             value = layer(value)
         torch.index_select(s.residual, 0, self.metadata.sample_indices, out=s.selected_residual)
         collapsed = language.hc_head(s.selected_residual[:, None]).squeeze(1)
-        s.hidden.copy_(language.norm(collapsed))
+        rms_norm(collapsed, language.norm.weight, s.hidden, language.norm.variance_epsilon,
+            round_before_weight=True)
         self.lm_head(s.hidden)
         return s.hidden
