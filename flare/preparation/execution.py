@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from .graphs import PreparedGraphBundle
 
@@ -91,16 +92,30 @@ class PreparedExecution(PreparedGraphBundle):
                 "max_active": self.max_active, "input_frame_bytes": (cursor + 7) // 8 * 8,
                 "buffers": descriptors, "graphs": graphs}
 
-    def start_executor(self):
+    def start_executor(self, *, peers=None):
         """Synchronize preparation and consume the bundle into the native executor."""
-        import torch
         import flare_native
+        import torch
 
         with self._handoff_lock:
             if self._consumed:
                 raise RuntimeError("graph bundle has already been consumed by a native worker")
             manifest = self.manifest()
             torch.cuda.synchronize(self.device)
-            executor = flare_native.GraphExecutor(self, manifest)
+            arguments = {} if peers is None else {"peer_fds": [peer.fileno() for peer in peers]}
+            executor = flare_native.GraphExecutor(self, manifest, **arguments)
             self._consumed = True
             return executor
+
+    def serve_rank(self, socket, *, rank, world):
+        """Hand a peer to Rust until every rank drains; Python does no step work."""
+        import flare_native
+        import torch
+
+        with self._handoff_lock:
+            if self._consumed:
+                raise RuntimeError("graph bundle has already been consumed by a native worker")
+            manifest = self.manifest()
+            torch.cuda.synchronize(self.device)
+            self._consumed = True
+        flare_native.serve_tensor_parallel_rank(self, manifest, socket.fileno(), rank, world)

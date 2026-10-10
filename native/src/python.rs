@@ -1,3 +1,5 @@
+use std::os::fd::BorrowedFd;
+use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -221,7 +223,13 @@ struct PreparedGraphExecutor {
 #[pymethods]
 impl PreparedGraphExecutor {
     #[new]
-    fn new(py: Python<'_>, owner: Py<PyAny>, manifest: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (owner, manifest, *, peer_fds=None))]
+    fn new(
+        py: Python<'_>,
+        owner: Py<PyAny>,
+        manifest: &Bound<'_, PyAny>,
+        peer_fds: Option<Vec<i32>>,
+    ) -> PyResult<Self> {
         if owner.bind(py).is_none() {
             return Err(PyValueError::new_err(
                 "owner must retain prepared execution resources",
@@ -231,13 +239,23 @@ impl PreparedGraphExecutor {
         manifest
             .validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let peers = peer_fds
+            .map(|fds| {
+                fds.into_iter()
+                    .map(rank_socket)
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
         let worker = py
             .detach(|| {
                 // SAFETY: Preparation's owner retains the validated buffers,
                 // executable graphs, and context with exclusive native access.
                 // Startup holds owner locally; OwnerLease releases it only after
                 // close confirms both streams drained, including failed submits.
-                unsafe { ExecutionWorker::new(manifest) }
+                match peers {
+                    Some(peers) => unsafe { ExecutionWorker::new_parallel(manifest, peers) },
+                    None => unsafe { ExecutionWorker::new(manifest) },
+                }
             })
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self {
@@ -316,6 +334,63 @@ impl PreparedGraphExecutor {
     }
 }
 
+fn rank_socket(fd: i32) -> PyResult<UnixStream> {
+    if fd < 0 {
+        return Err(PyValueError::new_err(
+            "rank socket descriptor must be nonnegative",
+        ));
+    }
+    // SAFETY: Python supplies a live socket descriptor and retains it during this
+    // call. Duplication gives Rust an independent owner of the same connection.
+    let socket = unsafe { BorrowedFd::borrow_raw(fd) }
+        .try_clone_to_owned()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let socket = UnixStream::from(socket);
+    socket
+        .peer_addr()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(socket)
+}
+
+#[pyfunction]
+fn serve_tensor_parallel_rank(
+    py: Python<'_>,
+    owner: Py<PyAny>,
+    manifest: &Bound<'_, PyAny>,
+    socket_fd: i32,
+    rank: usize,
+    world: usize,
+) -> PyResult<()> {
+    if owner.bind(py).is_none() {
+        return Err(PyValueError::new_err(
+            "owner must retain prepared rank resources",
+        ));
+    }
+    let manifest = execution_manifest(manifest)?;
+    manifest
+        .validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let socket = rank_socket(socket_fd)?;
+    let mut owner = OwnerLease(Some(owner));
+    // SAFETY: The lease retains every graph and IPC mapping until the native
+    // coordinator confirms that all ranks drained, or intentionally retains them.
+    let shutdown =
+        py.detach(|| unsafe { crate::execution::serve_rank(manifest, socket, rank, world) });
+    if shutdown.drained {
+        drop(owner.take_after_drain());
+    }
+    match shutdown.error {
+        Some(error) => {
+            let error = PyRuntimeError::new_err(error.to_string());
+            error
+                .value(py)
+                .setattr("resources_retained", !shutdown.drained)?;
+            Err(error)
+        }
+        None => Ok(()),
+    }
+}
+
 impl Drop for PreparedGraphExecutor {
     fn drop(&mut self) {
         let shutdown = self.worker.close();
@@ -342,6 +417,7 @@ fn flare_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "server")]
     module.add_class::<NativeServer>()?;
     module.add_function(wrap_pyfunction!(current_context, module)?)?;
+    module.add_function(wrap_pyfunction!(serve_tensor_parallel_rank, module)?)?;
     Ok(())
 }
 

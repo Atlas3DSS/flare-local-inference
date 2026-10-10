@@ -2,7 +2,7 @@ use super::*;
 use crate::cache::Fence;
 use crate::{Error, ExecutionError};
 
-fn manifest() -> ExecutionManifest {
+pub(super) fn manifest() -> ExecutionManifest {
     let buffers = vec![
         BufferDescriptor {
             name: "frame_index".into(),

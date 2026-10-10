@@ -1,0 +1,185 @@
+"""Native rank fanout, b12x agreement, and coordinated completion without Python peer steps."""
+
+import os
+import socket
+import time
+from datetime import timedelta
+
+import pytest
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1",
+    reason="requires four assigned GPUs and FLARE_RUN_TP_CUDA_TESTS=1")
+
+
+def _rank(rank, world, rendezvous, sockets, fields):
+    from flare.components.collectives import PreparedAllReduce
+    from flare.components.parallel import TensorParallelShard
+    from flare.components.sampling import (
+        AdmissionBuffers,
+        DeviceRequestState,
+        PreparedAdmission,
+        PreparedCompletion,
+        PreparedSampling,
+        RequestAdmission,
+    )
+    from flare.preparation.collectives import (
+        CollectivePreparation,
+        create_all_reduce_runtime,
+    )
+    from flare.preparation.compilation import compile_forward
+    from flare.preparation.execution import GraphSignature, PreparedExecution
+    from flare.preparation.tuning import RecordedPreparationSession
+    from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
+    from flare.recipes.glm53.state import DecoderMetadata
+
+    peers = []
+    for index, (root, peer) in enumerate(sockets, start=1):
+        if rank == 0:
+            peers.append(root)
+            peer.close()
+        else:
+            root.close()
+            if rank == index:
+                connection = peer
+            else:
+                peer.close()
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=world,
+                            timeout=timedelta(minutes=2))
+    group = dist.group.WORLD
+    coordinator = CollectivePreparation(group)
+    runtime = create_all_reduce_runtime(group, device, max_tokens=1, hidden_size=8)
+    worker, graphs = None, {}
+    try:
+        requests = DeviceRequestState.allocate(device, vocab_size=154880)
+        inputs = BatchInputs.allocate(128, 32, device)
+        admission = AdmissionBuffers.allocate(device, vocab_size=requests.vocab_size)
+        records = torch.zeros((2, 4, fields), dtype=torch.int64, device=device)
+        frame = torch.zeros(1, dtype=torch.int32, device=device)
+        sequence = torch.zeros(1, dtype=torch.int64, device=device)
+        init = PreparedAdmission(requests, admission, records, frame, sequence, capacity=1)
+        init.prepare()
+        operations, owners = {"init": init}, [init]
+        signatures = {"init": GraphSignature("init", 1, 1, tuple(admission.__dataclass_fields__))}
+        with RecordedPreparationSession(device=device, checkpoint="native-rank-coordination",
+                workload_schema="rank-request-tp-v1", numerical_policy="default", coordinator=coordinator) as session:
+            for mode, capacity in (("prefill", 128), ("decode", 1)):
+                metadata = DecoderMetadata.allocate(capacity, 1, 32, device)
+                batch = PreparedBatch(inputs, requests, metadata, mode=mode,
+                    shard=TensorParallelShard(rank, world), pages=64)
+                agreement = PreparedAllReduce(batch.validation_input, batch.validation_sum,
+                    runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.validation")
+                arguments = (requests, inputs.row_slot_ids[:1], inputs.row_generations[:1],
+                             inputs.live_rows, records, frame, sequence)
+                if rank == 0:
+                    logits = torch.full((1, requests.vocab_size), -torch.inf, device=device, dtype=torch.bfloat16)
+                    logits[0, 11:14] = 0
+                    completion = PreparedSampling(logits, *arguments, sample_enabled=inputs.sample_enabled[:1])
+                else:
+                    completion = PreparedCompletion(*arguments)
+                completion.prepare()
+
+                def forward(batch=batch, agreement=agreement, completion=completion):
+                    batch.begin(agreement(batch.validate()))
+                    batch.finish()
+                    completion()
+
+                operations[mode] = forward
+                owners.extend((batch, metadata, agreement, completion))
+                signatures[mode] = GraphSignature(mode, 1, capacity, tuple(inputs.buffers()))
+            session.tune()
+            stream = torch.cuda.Stream(device=device)
+            for name, operation in operations.items():
+                operations[name] = call = compile_forward(operation)
+                call()
+                torch.cuda.synchronize(device)
+                stream.wait_stream(torch.cuda.current_stream(device))
+                graph = torch.cuda.CUDAGraph()
+                with runtime.capture(stream=stream), session.capture(), torch.cuda.graph(graph, stream=stream):
+                    call()
+                graphs[name] = graph
+            session.freeze()
+            buffers = inputs.buffers()
+            buffers.update({name: getattr(admission, name) for name in admission.__dataclass_fields__})
+            buffers.update(completion_records=records, frame_index=frame, submission_sequence=sequence)
+            prepared = PreparedExecution(device=rank, graphs=graphs, buffers=buffers, signatures=signatures,
+                resources=(requests, inputs, admission, operations, owners, session, runtime, stream))
+            torch.cuda.synchronize(device)
+            dist.barrier(group=group)
+            before = torch.cuda.memory_stats(device)
+            if rank:
+                prepared.serve_rank(connection, rank=rank, world=world)
+            else:
+                worker = prepared.start_executor(peers=peers)
+                with pytest.raises(RuntimeError, match="upload is not bound"):
+                    worker.submit(prepared.graph_indices["prefill"], [("unknown", 0, b"12345678")])
+
+                def replay(name, fields):
+                    uploads = [(name, 0, value.numpy().tobytes()) for name, value in fields.items()]
+                    ticket = worker.submit(prepared.graph_indices[name], uploads)
+                    assert ticket is not None
+                    assert worker.submit(prepared.graph_indices[name], uploads) is None
+                    deadline = time.monotonic() + 30
+                    result = None
+                    while result is None and time.monotonic() < deadline:
+                        result = worker.poll()
+                        if result is None:
+                            time.sleep(.001)
+                    assert result is not None and result.fence == ticket
+                    return result.records[2]
+
+                host_admission = AdmissionBuffers.allocate("cpu", vocab_size=requests.vocab_size)
+                host_admission.stage(0, 2, RequestAdmission(7, 13, max_new_tokens=4), list(range(65)))
+                host_admission.admission_count.fill_(1)
+                record = replay("init", {name: getattr(host_admission, name) for name in host_admission.__dataclass_fields__})
+                assert record[:8] == [7, 1, 0, 0, -1, 1, 0, 0]
+                host = BatchInputs.allocate(128, 32, "cpu")
+                host.row_slot_ids[0], host.row_generations[0] = 2, 7
+                host.live_rows.fill_(1)
+                host.query_lengths[0] = 65
+                host.token_ids[:65].copy_(torch.arange(65))
+                host.page_tables[2].copy_(torch.arange(32) + 7)
+                host.sample_enabled[0] = 1
+                for step in range(4):
+                    record = replay("prefill" if step == 0 else "decode", host.buffers())
+                    assert record[:4] == [7, step + 2, 65 + step, step + 1]
+                    assert record[4] in (11, 12, 13)
+                    assert record[5:8] == [2 if step == 3 else 1, 0, 0]
+                    host.query_lengths[0] = 1
+                    host.token_ids[0] = record[4]
+                worker.close()
+                assert worker.drained
+                worker = None
+            after = torch.cuda.memory_stats(device)
+            for key in ("allocation.all.allocated", "allocation.all.freed", "segment.all.allocated", "segment.all.freed"):
+                assert before[key] == after[key], key
+            assert requests.consumed_tokens[2] == 68
+            assert requests.generated_tokens[2] == (4 if rank == 0 else 0)
+            assert requests.rng_counter[2] == (4 if rank == 0 else 0)
+    finally:
+        if worker is not None:
+            worker.close()
+        for graph in graphs.values():
+            graph.reset()
+        runtime.close()
+        dist.destroy_process_group()
+        for pair in sockets:
+            for connection in pair:
+                connection.close()
+
+
+@pytest.mark.parametrize("world,fields", [(2, 8), (4, 24)])
+def test_native_rank_coordination(world, fields, tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
+    sockets = [socket.socketpair() for _ in range(world - 1)]
+    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), sockets, fields),
+                         nprocs=world, join=False)
+    for pair in sockets:
+        for connection in pair:
+            connection.close()
+    while not processes.join(timeout=1):
+        pass

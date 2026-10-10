@@ -287,7 +287,8 @@ the complete checkpoint, all 45 layers, and FlashInfer. This generation test
 uses a Python control group to distribute rank-zero token IDs between steps;
 it does not qualify native rank coordination or HTTP serving. Complete-model
 4096-token TP4 replay and TP4 sampled generation remain pending.
-Production GLM serving and coordinated native rank execution are not implemented.
+Production GLM serving is not implemented. Full-checkpoint generation through
+coordinated native rank execution remains unqualified.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
@@ -383,7 +384,22 @@ continue exchanging readiness until all peers finish local preparation. Kernel
 preparation failures propagate through the control group before job cleanup.
 Per-rank native
 workers can replay the captured reductions without Python between iterations.
-Production multi-rank scheduling and failure coordination are not implemented.
+The [native rank coordinator](../native/src/execution/parallel.rs) owns rank-zero
+execution and Unix control sockets to peer processes. Each peer enters Rust once
+after Python prepares its graph bundle. Startup compares rank identities and
+logical graph I/O schemas; CUDA handles and addresses stay process-local.
+Before launch, every rank validates the same uploads and next fence. One step
+may be outstanding, and its completion retires only after all ranks agree on
+request epochs, consumed-token counts, and compatible status. Rank zero alone
+returns sampled tokens. b12x performs GPU collectives inside the captured graphs.
+Native TP2/TP4 tests cover admission, prefill, sampled decode, backpressure,
+both completion ABIs, and allocation stability without Python peer-step calls.
+Shutdown drains every rank before releasing graph owners and IPC mappings.
+Disconnected ranks or graph-completion timeouts retain resources without
+synchronizing a potentially stranded collective. Process supervision must
+terminate the whole failed rank group before reclaiming those resources.
+Production multi-rank scheduling, process supervision, and HTTP integration
+remain unimplemented.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
 
 The shared [tuning session](../flare/preparation/tuning.py) owns declaration

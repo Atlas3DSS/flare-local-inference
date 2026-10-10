@@ -264,6 +264,33 @@ impl GraphExecutor {
         })
     }
 
+    /// Validate a coordinated submission without touching CUDA or advancing its fence.
+    pub(super) fn validate_submission(
+        &mut self,
+        graph: usize,
+        uploads: &[Upload<'_>],
+        grammar: bool,
+    ) -> Result<Option<Fence>> {
+        let fence = self.next_fence()?;
+        validate_uploads(&self.manifest, graph, uploads, &mut self.resolved_uploads)?;
+        Ok(self
+            .can_submit(grammar || self.manifest.graphs[graph].kind == GraphKind::Speculative)
+            .then_some(fence))
+    }
+
+    /// Retain allocations after a peer failure that may strand a GPU collective.
+    pub(super) fn abandon(&mut self, error: Error) -> Shutdown {
+        if let Some(resources) = self.resources.take() {
+            std::mem::forget(resources);
+        }
+        let shutdown = Shutdown {
+            drained: false,
+            error: Some(error),
+        };
+        self.shutdown = Some(shutdown.clone());
+        shutdown
+    }
+
     /// Returns None on frame or grammar backpressure without changing CUDA state.
     pub fn submit(
         &mut self,

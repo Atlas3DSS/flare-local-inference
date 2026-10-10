@@ -1,0 +1,391 @@
+//! Native rank coordination over process-local CUDA executors and Unix sockets.
+
+#[cfg(test)]
+mod tests;
+mod wire;
+
+use std::os::unix::net::UnixStream;
+use std::time::Instant;
+
+use super::{ExecutionManifest, FrameCompletion, GraphExecutor, Upload};
+use crate::{Error, Result, Shutdown, cache::Fence};
+use wire::*;
+
+struct Peer {
+    channel: Channel,
+    completion: Option<FrameCompletion>,
+}
+
+/// Rank zero owns request scheduling; peer processes execute identical graph steps.
+/// One step can be outstanding. Its fence retires only after every rank completes.
+pub struct TensorParallelExecutor {
+    local: GraphExecutor,
+    peers: Vec<Peer>,
+    pending: Option<(Fence, usize, Instant)>,
+    completion: Option<FrameCompletion>,
+    poison: Option<Error>,
+    shutdown: Option<Shutdown>,
+}
+
+impl TensorParallelExecutor {
+    /// # Safety
+    /// GraphExecutor's ownership contract applies. Each socket must connect to a
+    /// distinct prepared rank in order 1..world; every owner includes its b12x IPC
+    /// runtime and remains retained until coordinated shutdown confirms drain.
+    pub unsafe fn new(manifest: ExecutionManifest, sockets: Vec<UnixStream>) -> Result<Self> {
+        let world = sockets.len() + 1;
+        if ![2, 4].contains(&world) {
+            return Err(invalid("tensor parallelism requires two or four ranks"));
+        }
+        manifest.validate()?;
+        let expected = layout(&manifest);
+        let mut peers = Vec::new();
+        for (index, socket) in sockets.into_iter().enumerate() {
+            let mut channel = Channel::new(socket)?;
+            let hello = channel.receive(HELLO)?;
+            let mut reader = Reader(&hello);
+            if reader.number()? != index + 1 || reader.number()? != world || reader.0 != expected {
+                return Err(invalid(
+                    "tensor-parallel rank identity or graph I/O schema differs",
+                ));
+            }
+            peers.push(Peer {
+                channel,
+                completion: None,
+            });
+        }
+        // SAFETY: The caller retains all rank-local prepared resources through drain.
+        let local = unsafe { GraphExecutor::new(manifest)? };
+        for peer in &mut peers {
+            peer.channel.send(READY, &[])?;
+        }
+        Ok(Self {
+            local,
+            peers,
+            pending: None,
+            completion: None,
+            poison: None,
+            shutdown: None,
+        })
+    }
+
+    pub fn outstanding(&self) -> usize {
+        usize::from(self.pending.is_some())
+    }
+
+    pub fn submit(
+        &mut self,
+        graph: usize,
+        uploads: &[Upload<'_>],
+        grammar: bool,
+    ) -> Result<Option<Fence>> {
+        if let Some(error) = &self.poison {
+            return Err(error.clone());
+        }
+        if self.shutdown.is_some() {
+            return Err(invalid("tensor-parallel executor is closed"));
+        }
+        if self.pending.is_some() {
+            return Ok(None);
+        }
+        let Some(fence) = self.local.validate_submission(graph, uploads, grammar)? else {
+            return Ok(None);
+        };
+        let result = self.prepare_and_commit(graph, uploads, grammar, fence);
+        if let Err(error) = &result {
+            self.poison = Some(error.clone());
+        }
+        result.map(Some)
+    }
+
+    fn prepare_and_commit(
+        &mut self,
+        graph: usize,
+        uploads: &[Upload<'_>],
+        grammar: bool,
+        fence: Fence,
+    ) -> Result<Fence> {
+        let mut payload = Vec::new();
+        for value in [fence.0 as usize, graph, usize::from(grammar), uploads.len()] {
+            number(&mut payload, value);
+        }
+        for upload in uploads {
+            let index = self
+                .local
+                .manifest()
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == upload.buffer)
+                .ok_or_else(|| invalid("rank upload buffer is absent"))?;
+            for value in [index, upload.offset, upload.bytes.len()] {
+                number(&mut payload, value);
+            }
+            payload.extend_from_slice(upload.bytes);
+        }
+        for peer in &mut self.peers {
+            peer.channel.nonblocking(false)?;
+            peer.channel.send(PREPARE, &payload)?;
+        }
+        for peer in &mut self.peers {
+            if !peer.channel.receive(READY)?.is_empty() {
+                return Err(invalid("unexpected rank readiness payload"));
+            }
+        }
+        // Every rank has validated the same inputs and reserved the same next fence.
+        self.pending = Some((fence, graph, Instant::now()));
+        for peer in &mut self.peers {
+            peer.channel.send(COMMIT, &[])?;
+        }
+        if self.local.submit(graph, uploads, grammar)? != Some(fence) {
+            return Err(invalid(
+                "rank-zero submission changed after coordinated validation",
+            ));
+        }
+        for peer in &self.peers {
+            peer.channel.nonblocking(true)?;
+        }
+        Ok(fence)
+    }
+
+    pub fn poll(&mut self) -> Result<Option<FrameCompletion>> {
+        if let Some(error) = &self.poison {
+            return Err(error.clone());
+        }
+        if self.shutdown.is_some() {
+            return Err(invalid("tensor-parallel executor is closed"));
+        }
+        let result = self.poll_ranks();
+        if let Err(error) = &result {
+            self.poison = Some(error.clone());
+        }
+        result
+    }
+
+    fn poll_ranks(&mut self) -> Result<Option<FrameCompletion>> {
+        let Some((fence, graph, started)) = self.pending else {
+            return Ok(None);
+        };
+        if started.elapsed() > TIMEOUT {
+            return Err(invalid("tensor-parallel graph completion deadline expired"));
+        }
+        if self.completion.is_none() {
+            self.completion = self.local.poll()?;
+        }
+        for peer in &mut self.peers {
+            if peer.completion.is_some() {
+                continue;
+            }
+            if let Some((tag, bytes)) = peer.channel.poll()? {
+                if tag != COMPLETE {
+                    return Err(invalid("expected rank graph completion"));
+                }
+                let mut reader = Reader(&bytes);
+                if reader.number()? != fence.0 as usize || reader.number()? != graph {
+                    return Err(invalid("rank completion fence or graph differs"));
+                }
+                if reader.0.len() != self.local.manifest().completion_bytes() {
+                    return Err(invalid("rank completion size differs from its ABI"));
+                }
+                peer.completion = Some(FrameCompletion {
+                    fence,
+                    graph_index: graph,
+                    elapsed_ns: None,
+                    records: super::transport::decode_records(reader.0, fence)?,
+                });
+            }
+        }
+        if self.completion.is_none() || self.peers.iter().any(|peer| peer.completion.is_none()) {
+            return Ok(None);
+        }
+        let root = self.completion.as_ref().unwrap();
+        for peer in &self.peers {
+            agree(root, peer.completion.as_ref().unwrap())?;
+        }
+        for peer in &mut self.peers {
+            peer.completion = None;
+        }
+        self.pending = None;
+        Ok(self.completion.take())
+    }
+
+    pub fn close(&mut self) -> Shutdown {
+        if let Some(shutdown) = &self.shutdown {
+            return shutdown.clone();
+        }
+        let result = (|| -> Result<()> {
+            while self.pending.is_some() {
+                self.poll()?;
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+            if let Some(error) = &self.poison {
+                return Err(error.clone());
+            }
+            for peer in &mut self.peers {
+                peer.channel.nonblocking(false)?;
+                peer.channel.send(DRAIN, &[])?;
+            }
+            for peer in &mut self.peers {
+                if !peer.channel.receive(DRAINED)?.is_empty() {
+                    return Err(invalid("unexpected rank drain payload"));
+                }
+            }
+            Ok(())
+        })();
+        let shutdown = match result {
+            Err(error) => self.local.abandon(error),
+            Ok(()) => self.local.close(),
+        };
+        if shutdown.drained {
+            // All GPU streams have drained. A lost release can retain a peer's
+            // owner, but cannot make any rank free resources still used by CUDA.
+            for peer in &mut self.peers {
+                let _ = peer.channel.send(RELEASE, &[]);
+            }
+        }
+        for peer in &self.peers {
+            let _ = peer.channel.stream.shutdown(std::net::Shutdown::Both);
+        }
+        self.shutdown = Some(shutdown.clone());
+        shutdown
+    }
+}
+
+impl Drop for TensorParallelExecutor {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()> {
+    if root.fence != peer.fence || root.graph_index != peer.graph_index {
+        return Err(invalid("rank completion identity differs"));
+    }
+    for (root, peer) in root.records.iter().zip(&peer.records) {
+        if root.generation != peer.generation
+            || root.submission_sequence != peer.submission_sequence
+            || root.consumed_tokens != peer.consumed_tokens
+            || root.error_code != peer.error_code
+            || !(root.status == peer.status || root.status == 2 && peer.status == 1)
+        {
+            return Err(invalid(
+                "tensor-parallel request epochs, consumption, or status differ",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Run a peer's native control loop until coordinated drain and release.
+///
+/// # Safety
+/// The caller retains all graph owners and b12x IPC mappings when drained is
+/// false. A failed collective requires coordinated process termination before
+/// reclaiming those resources; this function never synchronizes a stranded graph.
+pub unsafe fn serve_rank(
+    manifest: ExecutionManifest,
+    socket: UnixStream,
+    rank: usize,
+    world: usize,
+) -> Shutdown {
+    let mut executor = match unsafe { GraphExecutor::new(manifest) } {
+        Ok(executor) => executor,
+        Err(error) => {
+            return Shutdown {
+                drained: true,
+                error: Some(error),
+            };
+        }
+    };
+    let result = (|| -> Result<()> {
+        if ![2, 4].contains(&world) || !(1..world).contains(&rank) {
+            return Err(invalid("invalid tensor-parallel peer identity"));
+        }
+        let mut channel = Channel::new(socket)?;
+        let result = (|| -> Result<()> {
+            let mut hello = Vec::new();
+            number(&mut hello, rank);
+            number(&mut hello, world);
+            hello.extend(layout(executor.manifest()));
+            channel.send(HELLO, &hello)?;
+            if !channel.receive(READY)?.is_empty() {
+                return Err(invalid("unexpected coordinator readiness payload"));
+            }
+            loop {
+                channel.idle(true)?;
+                let (tag, bytes) = channel
+                    .poll()?
+                    .ok_or_else(|| invalid("rank control deadline expired"))?;
+                channel.idle(false)?;
+                if tag == DRAIN && bytes.is_empty() {
+                    let shutdown = executor.close();
+                    if !shutdown.drained {
+                        return Err(shutdown
+                            .error
+                            .unwrap_or_else(|| invalid("rank did not drain")));
+                    }
+                    channel.send(DRAINED, &[])?;
+                    if !channel.receive(RELEASE)?.is_empty() {
+                        return Err(invalid("unexpected rank release payload"));
+                    }
+                    return Ok(());
+                }
+                if tag != PREPARE {
+                    return Err(invalid("expected rank prepare or drain"));
+                }
+                let mut reader = Reader(&bytes);
+                let fence = Fence(reader.number()? as u64);
+                let graph = reader.number()?;
+                let grammar = match reader.number()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(invalid("invalid grammar flag")),
+                };
+                let owned = uploads(executor.manifest(), &mut reader)?;
+                reader.end()?;
+                let uploads: Vec<_> = owned
+                    .iter()
+                    .map(|upload| Upload {
+                        buffer: &upload.buffer,
+                        offset: upload.offset,
+                        bytes: &upload.bytes,
+                    })
+                    .collect();
+                if executor.validate_submission(graph, &uploads, grammar)? != Some(fence) {
+                    return Err(invalid("rank submission sequence or capacity differs"));
+                }
+                channel.send(READY, &[])?;
+                if !channel.receive(COMMIT)?.is_empty() {
+                    return Err(invalid("unexpected rank commit payload"));
+                }
+                if executor.submit(graph, &uploads, grammar)? != Some(fence) {
+                    return Err(invalid("rank lost its prepared submission"));
+                }
+                let started = Instant::now();
+                channel.nonblocking(true)?;
+                let completed = loop {
+                    if let Some(completion) = executor.poll()? {
+                        break completion;
+                    }
+                    if channel.poll()?.is_some() {
+                        return Err(invalid("rank command arrived before graph completion"));
+                    }
+                    if started.elapsed() > TIMEOUT {
+                        return Err(invalid("rank graph completion deadline expired"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                };
+                channel.nonblocking(false)?;
+                channel.send(COMPLETE, &completion(&completed))?;
+            }
+        })();
+        if let Err(error) = &result {
+            let _ = channel.nonblocking(false);
+            let _ = channel.send(FAILED, error.to_string().as_bytes());
+        }
+        result
+    })();
+    match result {
+        Ok(()) => executor.close(),
+        Err(error) => executor.abandon(error),
+    }
+}
