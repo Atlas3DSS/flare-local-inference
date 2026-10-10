@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flare"
 version = "0.1.0"
-description = "Python model preparation for a native CUDA graph serving core"
+description = "Python model preparation for the Helios CUDA graph serving core"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
@@ -26,7 +26,7 @@ prepare = [
     "huggingface-hub==1.33.0",
     "accelerate==1.14.0",
     "Pillow==12.3.0",
-    "flare-native",
+    "flare-helios",
 ]
 
 [[tool.uv.index]]
@@ -38,7 +38,7 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 flashinfer-python = { path = "../flashinfer", editable = true }
-flare-native = { path = "native" }
+flare-helios = { path = "native" }
 
 [tool.flare.source-revisions]
 flashinfer = "d019c06357ba22009f8112c2f8606b1edd174fcc"

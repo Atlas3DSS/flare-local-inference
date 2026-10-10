@@ -235,7 +235,7 @@ def main():
     parser.add_argument("--extension", type=Path, required=True)
     arguments = parser.parse_args()
     extension = arguments.extension.resolve(strict=True)
-    spec = importlib.util.spec_from_file_location("flare_native", extension)
+    spec = importlib.util.spec_from_file_location("flare_helios", extension)
     native = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = native
     spec.loader.exec_module(native)

@@ -101,21 +101,21 @@ class PreparedGraphBundle:
             return worker
 
     def _register(self, queue_capacity: int) -> Any:
-        import flare_native
+        import flare_helios
 
-        if not hasattr(flare_native, "GraphReplayWorker"):
+        if not hasattr(flare_helios, "GraphReplayWorker"):
             raise RuntimeError("raw replay requires the native qualification Cargo feature")
         import torch
 
         context, handles, spans = self._validate_resources()
         torch.cuda.synchronize(self._device)
-        return flare_native.GraphReplayWorker(
+        return flare_helios.GraphReplayWorker(
             self, context, self._device, handles, spans, queue_capacity=queue_capacity,
         )
 
     def _validate_resources(self) -> tuple[int, list[int], list[tuple[int, int]]]:
         import torch
-        import flare_native
+        import flare_helios
 
         with torch.cuda.device(self._device):
             capability = torch.cuda.get_device_capability(self._device)
@@ -153,7 +153,7 @@ class PreparedGraphBundle:
                     raise ValueError(f"buffer {name!r} extends outside its backing storage")
                 spans.append((address, nbytes))
 
-            context, device = flare_native.current_context()
+            context, device = flare_helios.current_context()
             if device != self._device:
                 raise RuntimeError(f"native CUDA context belongs to device {device}, expected {self._device}")
             return context, handles, spans

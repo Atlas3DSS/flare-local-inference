@@ -12,9 +12,9 @@ import torch.multiprocessing as mp
 
 
 def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare):
-    import flare_native
+    import flare_helios
 
-    flare_native.bind_parent_lifetime(parent)
+    flare_helios.bind_parent_lifetime(parent)
     try:
         dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=len(config.devices),
                                 timeout=timedelta(minutes=15))
@@ -98,7 +98,7 @@ def prepare_group(snapshot, config, prepare, *, progress=None):
     This function owns the process's Gloo group and must run in the main thread.
     Peer failure or unconfirmed CUDA drain terminates this process and its peers.
     """
-    import flare_native
+    import flare_helios
 
     if dist.is_initialized():
         raise RuntimeError("rank preparation requires exclusive ownership of the control group")
@@ -120,7 +120,7 @@ def prepare_group(snapshot, config, prepare, *, progress=None):
                 peer.close()
                 child_control.close()
             processes.append(process)
-        supervisor = flare_native.RankSupervisor([process.pid for process in processes])
+        supervisor = flare_helios.RankSupervisor([process.pid for process in processes])
     except BaseException:
         for process in processes:
             process.kill()

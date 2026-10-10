@@ -46,7 +46,7 @@ def main() -> int:
         environment = dict(os.environ, BUILD_NVEP="0", FLASHINFER_BUILD_NO_PIP="1")
         subprocess.run(
             ["uv", "sync", "--locked", "--extra", "prepare", "--extra", "test",
-             "--reinstall-package", "flashinfer-python", "--reinstall-package", "flare-native"],
+             "--reinstall-package", "flashinfer-python", "--reinstall-package", "flare-helios"],
             cwd=ROOT, env=environment, check=True,
         )
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:

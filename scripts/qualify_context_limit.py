@@ -248,12 +248,12 @@ def execute(args, tokenizer, plan, body):
         raise ValueError("output receipt already exists")
     if args.memory_report is None or args.server_pid is None:
         raise ValueError("execution requires the active memory report and server PID")
-    extensions = list((ROOT / ".venv").glob("lib/python*/site-packages/flare_native/*.so"))
+    extensions = list((ROOT / ".venv").glob("lib/python*/site-packages/flare_helios/*.so"))
     if len(extensions) != 1 or digest(extensions[0]) != args.expected_native_sha256:
         raise ValueError("installed native extension differs from the declared qualification build")
     extension = extensions[0]
     mappings = [line for line in Path(f"/proc/{args.server_pid}/maps").read_text().splitlines()
-        if "flare_native" in line and ".so" in line]
+        if "flare_helios" in line and ".so" in line]
     if not mappings or any(int(line.split()[4]) != extension.stat().st_ino for line in mappings):
         raise ValueError("running server native mapping differs from the installed extension")
     memory = json.loads(args.memory_report.read_text())

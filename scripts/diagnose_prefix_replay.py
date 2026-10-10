@@ -232,7 +232,7 @@ def main():
     import b12x.attention.qsa._contract as qsa_contract
     import b12x.attention.varlen._preparation as varlen_preparation
     import b12x.sequence.gdn_prefill._impl as gdn_implementation
-    import flare_native
+    import flare_helios
     import torch
     from transformers import AutoTokenizer
 
@@ -274,7 +274,7 @@ def main():
         parser.error(str(error))
     bucket = lambda tokens: next(size for size in config.prefill_capacities if size >= tokens)
     full_capacity, tail_capacity = bucket(len(prompt)), bucket(len(prompt) - boundary)
-    extensions = list(Path(flare_native.__file__).parent.glob("*.so"))
+    extensions = list(Path(flare_helios.__file__).parent.glob("*.so"))
     if len(extensions) != 1:
         raise RuntimeError("expected one installed native extension for provenance")
     b12x_root = Path(qsa_contract.__file__).resolve().parents[2]

@@ -42,7 +42,7 @@ def model_fixture(monkeypatch, *, synchronize=None, server=None):
     )
     monkeypatch.setattr(model, "manifest", lambda: {"test_manifest": True})
     monkeypatch.setattr("torch.cuda.synchronize", synchronize or (lambda device: events.append("synchronize")))
-    monkeypatch.setitem(sys.modules, "flare_native", SimpleNamespace(Server=server))
+    monkeypatch.setitem(sys.modules, "flare_helios", SimpleNamespace(Server=server))
     return model, events, weights_ref
 
 

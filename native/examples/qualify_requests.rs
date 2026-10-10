@@ -1,6 +1,6 @@
 use base64::Engine;
-use flare_native::model::qwen4exp::Qwen4Exp;
-use flare_native::{
+use flare_helios::model::qwen4exp::Qwen4Exp;
+use flare_helios::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -72,7 +72,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut text_count = 0;
     let mut tool_string_count = 0;
-    let compiler = flare_native::grammar::GrammarCompiler::new(
+    let compiler = flare_helios::grammar::GrammarCompiler::new(
         frontend.tokenizer(),
         248320,
         &config.eos_token_ids,
@@ -95,7 +95,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| expected["message"].as_str().unwrap());
             match result {
                 Err(error)
-                    if matches!(&error, flare_native::Error::Admission(_))
+                    if matches!(&error, flare_helios::Error::Admission(_))
                         && error.to_string() == expected => {}
                 Err(error) => {
                     return Err((format!(

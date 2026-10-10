@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
-use flare_native::frontend::images::{ImageLimits, ImageProcessor, RgbImage};
-use flare_native::frontend::{Asset, Frontend, FrontendAssets};
+use flare_helios::frontend::images::{ImageLimits, ImageProcessor, RgbImage};
+use flare_helios::frontend::{Asset, Frontend, FrontendAssets};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 

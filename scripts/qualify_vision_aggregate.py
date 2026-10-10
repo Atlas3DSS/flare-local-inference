@@ -66,7 +66,7 @@ def process_identity(args):
     if memory_path != args.memory_report.resolve():
         raise ValueError("server PID memory-report argument differs from the selected report")
     mappings = [line.split(maxsplit=5) for line in (process / "maps").read_text().splitlines()
-                if "flare_native" in line and ".so" in line]
+                if "flare_helios" in line and ".so" in line]
     paths = {row[5] for row in mappings}
     if len(paths) != 1:
         raise ValueError("server must map exactly one identifiable native extension")

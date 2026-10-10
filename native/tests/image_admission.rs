@@ -1,6 +1,6 @@
 #![cfg(feature = "server")]
 use base64::Engine;
-use flare_native::{
+use flare_helios::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -59,7 +59,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         speculative_copy: false,
         speculative_proposal_source: Default::default(),
     };
-    let compiler = flare_native::grammar::GrammarCompiler::new(
+    let compiler = flare_helios::grammar::GrammarCompiler::new(
         frontend.tokenizer(),
         248320,
         &config.eos_token_ids,
@@ -129,7 +129,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             prepare_request::<Qwen4Exp>(&frontend, Some(&limited), &compiler, &config, request)
                 .err()
                 .unwrap(),
-            flare_native::Error::Admission(flare_native::AdmissionError::Image(_))
+            flare_helios::Error::Admission(flare_helios::AdmissionError::Image(_))
         ));
         counts += 1;
     }

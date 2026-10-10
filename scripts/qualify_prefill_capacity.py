@@ -43,9 +43,9 @@ def main():
         if body["temperature"] != 0 or body["max_tokens"] != 1 or body["model"] != fixture["checkpoint"]:
             raise ValueError("fixtures require greedy single-token generation for the declared checkpoint")
         bodies[name] = body
-    extension, = (ROOT / ".venv").glob("lib/python*/site-packages/flare_native/*.so")
+    extension, = (ROOT / ".venv").glob("lib/python*/site-packages/flare_helios/*.so")
     maps = Path(f"/proc/{args.server_pid}/maps").read_text()
-    mappings = [line for line in maps.splitlines() if "flare_native" in line and ".so" in line]
+    mappings = [line for line in maps.splitlines() if "flare_helios" in line and ".so" in line]
     if not mappings or any(int(line.split()[4]) != extension.stat().st_ino for line in mappings):
         raise ValueError("server native extension mapping differs from the installed file")
     sources = {str(path.relative_to(ROOT)): digest(path)

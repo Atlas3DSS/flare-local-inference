@@ -659,7 +659,7 @@ def main(argv=None):
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
     import b12x
-    import flare_native
+    import flare_helios
     import flashinfer
 
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
@@ -675,7 +675,7 @@ def main(argv=None):
         "data/csrc/sampling_utils.h", "data/include/flashinfer/sampling.cuh",
         "data/include/flashinfer/topk.cuh", "data/include/flashinfer/topk_common.cuh",
         "data/include/flashinfer/air_top_p.cuh"))
-    extension, = Path(flare_native.__file__).parent.glob("*.so")
+    extension, = Path(flare_helios.__file__).parent.glob("*.so")
     provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot),
         "assets": [file_record(snapshot / name) for name in ("config.json", "tokenizer.json", "model.safetensors.index.json")]},
         "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),

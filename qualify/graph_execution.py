@@ -1076,7 +1076,7 @@ def main():
     (args.artifacts / "qualify_graph_execution.py").write_bytes(Path(__file__).read_bytes())
 
     import b12x.attention.qsa._contract as contract
-    import flare_native
+    import flare_helios
     import flashinfer
     import torch
     from transformers import AutoTokenizer
@@ -1091,7 +1091,7 @@ def main():
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     snapshot = args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
-    extension, = Path(flare_native.__file__).parent.glob("*.so")
+    extension, = Path(flare_helios.__file__).parent.glob("*.so")
     b12x_root = Path(contract.__file__).resolve().parents[2]
     flashinfer_root = Path(flashinfer.__file__).resolve().parent
     sampling_sources = [flashinfer_root / name for name in (

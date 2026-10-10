@@ -125,7 +125,7 @@ def run(args, model, server):
 
 def main():
     import flashinfer
-    import flare_native
+    import flare_helios
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -144,7 +144,7 @@ def main():
     source_paths = [Path(__file__)]
     source_paths += sorted((root / "flare").rglob("*.py"))
     source_paths += sorted((root / "native" / "src").rglob("*.rs"))
-    source_paths += sorted(Path(flare_native.__file__).parent.glob("*.so"))
+    source_paths += sorted(Path(flare_helios.__file__).parent.glob("*.so"))
     source_paths += sorted((Path(flashinfer.__file__).parent / "experimental" / "b12x").rglob("*.py"))
     source_paths += [Path(flashinfer.__file__).parent / "sampling.py",
                      Path(flashinfer.__file__).parent.parent / "include/flashinfer/sampling.cuh"]

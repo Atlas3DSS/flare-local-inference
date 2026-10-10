@@ -10,16 +10,16 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("flare_native")
+pytest.importorskip("flare_helios")
 
 DRIVER = r'''
 import json, os, subprocess, sys, time
-import flare_native
-child = "import flare_native,sys; flare_native.bind_parent_lifetime(int(sys.argv[1])); print('ready',flush=True); sys.stdin.read(1)"
+import flare_helios
+child = "import flare_helios,sys; flare_helios.bind_parent_lifetime(int(sys.argv[1])); print('ready',flush=True); sys.stdin.read(1)"
 peers = [subprocess.Popen([sys.executable, '-c', child, str(os.getpid())], stdin=subprocess.PIPE, stdout=subprocess.PIPE) for _ in range(2)]
 for peer in peers:
     assert peer.stdout.readline() == b'ready\n'
-supervisor = flare_native.RankSupervisor([peer.pid for peer in peers])
+supervisor = flare_helios.RankSupervisor([peer.pid for peer in peers])
 print(json.dumps([peer.pid for peer in peers]), flush=True)
 mode = sys.stdin.readline().strip()
 if mode == 'normal':
@@ -70,7 +70,7 @@ def test_rank_group_shutdown_and_failure_do_not_leave_live_peers(mode):
 
 
 def test_supervisor_rejects_unowned_process():
-    import flare_native
+    import flare_helios
 
     with pytest.raises(ValueError):
-        flare_native.RankSupervisor([os.getpid()])
+        flare_helios.RankSupervisor([os.getpid()])

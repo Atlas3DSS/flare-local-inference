@@ -491,13 +491,13 @@ def main() -> int:
         raise ValueError("snapshot frontend assets differ from pinned canonical fixtures")
     import transformers
     import tokenizers
-    import flare_native
+    import flare_helios
 
     origin = json.loads(importlib.metadata.distribution("transformers").read_text("direct_url.json"))
     if origin.get("vcs_info", {}).get("commit_id") != text_fixture["transformers_commit"] or tokenizers.__version__ != text_fixture["tokenizers_version"]:
         raise ValueError("qualification requires the pinned Transformers/tokenizers preparation environment")
     tokenizer = transformers.AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
-    package = Path(flare_native.__file__).resolve()
+    package = Path(flare_helios.__file__).resolve()
     extensions = [path for path in package.parent.iterdir() if any(path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)]
     if len(extensions) != 1:
         raise ValueError("cannot identify exactly one installed native extension")

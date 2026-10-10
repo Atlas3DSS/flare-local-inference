@@ -68,9 +68,9 @@ def main():
     if args.steps < 1:
         parser.error("steps must be positive")
     if args.extension:
-        spec = importlib.util.spec_from_file_location("flare_native", args.extension.resolve())
+        spec = importlib.util.spec_from_file_location("flare_helios", args.extension.resolve())
         module = importlib.util.module_from_spec(spec)
-        sys.modules["flare_native"] = module
+        sys.modules["flare_helios"] = module
         spec.loader.exec_module(module)
 
     import torch

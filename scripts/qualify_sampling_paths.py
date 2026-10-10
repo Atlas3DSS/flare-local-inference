@@ -244,7 +244,7 @@ def check_outputs(expected, observed, artifacts, label):
 
 
 def measure(args, artifact, cases, receipt):
-    import flare_native
+    import flare_helios
     import torch
 
     from flare.preparation.graphs import PreparedGraphBundle
@@ -253,7 +253,7 @@ def measure(args, artifact, cases, receipt):
         raise ValueError("GPU execution requires --gpu-uuid matching the single assigned CUDA_VISIBLE_DEVICES UUID")
     if not args.gpu_uuid.startswith("GPU-"):
         raise ValueError("GPU selection must use its explicit UUID")
-    package = Path(flare_native.__file__).resolve()
+    package = Path(flare_helios.__file__).resolve()
     extensions = [p for p in package.parent.iterdir() if any(p.name.endswith(s) for s in importlib.machinery.EXTENSION_SUFFIXES)]
     if len(extensions) != 1:
         raise ValueError("cannot identify one native extension")

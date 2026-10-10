@@ -63,7 +63,7 @@ before = list(sys.path)
 import qualify.server
 import qualify.graph_execution
 assert sys.path == before
-assert not any(name in sys.modules for name in ('torch', 'flashinfer', 'b12x', 'flare_native'))
+assert not any(name in sys.modules for name in ('torch', 'flashinfer', 'b12x', 'flare_helios'))
 assert qualify.server.Run.__module__ == 'qualify.server'
 assert qualify.graph_execution.Evidence.__module__ == 'qualify.graph_execution'
 """,

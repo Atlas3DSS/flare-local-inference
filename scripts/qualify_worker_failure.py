@@ -107,13 +107,13 @@ class Evidence:
 
 
 def qualify_case(evidence, snapshot, stream):
-    import flare_native
+    import flare_helios
 
     case = "waiting-sse" if stream else "waiting-json"
     owner, config = catalog(snapshot)
     manifest = owner.manifest()
     retained = weakref.ref(owner)
-    server = flare_native.Server(owner, manifest, json.dumps(config))
+    server = flare_helios.Server(owner, manifest, json.dumps(config))
     del owner
     gc.collect()
     save(evidence.artifacts / f"{case}.manifest.json", manifest)
@@ -179,17 +179,17 @@ def main():
     if args.artifacts is None or not args.device_uuid or os.environ.get("CUDA_VISIBLE_DEVICES") != args.device_uuid:
         parser.error("--run requires --artifacts and --device-uuid matching CUDA_VISIBLE_DEVICES")
     import torch
-    import flare_native
+    import flare_helios
 
     torch.cuda.set_device(0)
     actual_uuid = str(torch.cuda.get_device_properties(0).uuid)
     if actual_uuid.removeprefix("GPU-") != args.device_uuid.removeprefix("GPU-"):
         raise RuntimeError(f"CUDA UUID {actual_uuid} does not match assigned {args.device_uuid}")
     args.artifacts.mkdir(parents=True, exist_ok=False)
-    extension = next(Path(flare_native.__file__).parent.glob("*.so"))
+    extension = next(Path(flare_helios.__file__).parent.glob("*.so"))
     sources = [Path(__file__).resolve(), Path(__file__).with_name("qualify_startup_validation.py"),
         *sorted((ROOT / "native/src").rglob("*.rs")), ROOT / "native/Cargo.toml", ROOT / "native/Cargo.lock"]
-    value = {"schema": "flare-native-worker-failure-v1", "plan": plan(), "checks": [],
+    value = {"schema": "flare-helios-worker-failure-v1", "plan": plan(), "checks": [],
         "extension": {"path": str(extension), "sha256": digest(extension)}, "device_uuid": actual_uuid,
         "assigned_device_uuid": args.device_uuid,
         "torch": torch.__version__, "cuda": torch.version.cuda,

@@ -1,6 +1,6 @@
 #![cfg(feature = "server")]
 
-use flare_native::{
+use flare_helios::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -97,7 +97,7 @@ impl Fixture {
         .unwrap();
         assert_eq!(prepared.rendered_prompt, expected.text);
         assert_eq!(prepared.prompt.tokens, expected.token_ids);
-        flare_native::model::admission::validate_prompt::<Qwen4Exp>(&self.config, &prepared.prompt)
+        flare_helios::model::admission::validate_prompt::<Qwen4Exp>(&self.config, &prepared.prompt)
             .unwrap();
         prepared
     }
@@ -142,7 +142,7 @@ fn exact_short_instruction_boundary_survives_changed_user_content() {
     for boundary in [0, malformed.prompt.tokens.len(), usize::MAX] {
         malformed.prompt.system_boundary = Some(boundary);
         assert!(
-            flare_native::model::admission::validate_prompt::<Qwen4Exp>(
+            flare_helios::model::admission::validate_prompt::<Qwen4Exp>(
                 &fixture.config,
                 &malformed.prompt
             )

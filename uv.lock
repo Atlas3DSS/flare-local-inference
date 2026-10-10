@@ -254,6 +254,51 @@ wheels = [
 ]
 
 [[package]]
+name = "flare"
+version = "0.1.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+prepare = [
+    { name = "accelerate" },
+    { name = "cuda-python" },
+    { name = "flare-helios" },
+    { name = "flashinfer-python", extra = ["b12x"] },
+    { name = "huggingface-hub" },
+    { name = "pillow" },
+    { name = "safetensors" },
+    { name = "tokenizers" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers", extra = ["chat-template", "torch", "vision"] },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'prepare'", specifier = "==1.14.0" },
+    { name = "cuda-python", marker = "extra == 'prepare'", specifier = "==13.3.1" },
+    { name = "flare-helios", marker = "extra == 'prepare'", directory = "native" },
+    { name = "flashinfer-python", extras = ["b12x"], marker = "extra == 'prepare'", editable = "../flashinfer" },
+    { name = "huggingface-hub", marker = "extra == 'prepare'", specifier = "==1.33.0" },
+    { name = "pillow", marker = "extra == 'prepare'", specifier = "==12.3.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=9,<10" },
+    { name = "safetensors", marker = "extra == 'prepare'", specifier = "==0.8.0" },
+    { name = "tokenizers", marker = "extra == 'prepare'", specifier = "==0.23.2" },
+    { name = "torch", marker = "extra == 'prepare'", specifier = "==2.13.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torchvision", marker = "extra == 'prepare'", specifier = "==0.28.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "transformers", extras = ["torch", "vision", "chat-template"], marker = "extra == 'prepare'", git = "https://github.com/huggingface/transformers.git?rev=4cc2aa84301c9aa210b5513dab9fefae03981f6e" },
+]
+provides-extras = ["test", "prepare"]
+
+[[package]]
+name = "flare-helios"
+version = "0.1.0"
+source = { directory = "native" }
+
+[[package]]
 name = "flashinfer-python"
 source = { editable = "../flashinfer" }
 dependencies = [
@@ -1046,51 +1091,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/58/15/8b3609fd3830ef7b2
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686", size = 9755, upload-time = "2023-10-24T04:13:38.866Z" },
 ]
-
-[[package]]
-name = "flare"
-version = "0.1.0"
-source = { editable = "." }
-
-[package.optional-dependencies]
-prepare = [
-    { name = "accelerate" },
-    { name = "cuda-python" },
-    { name = "flashinfer-python", extra = ["b12x"] },
-    { name = "huggingface-hub" },
-    { name = "pillow" },
-    { name = "safetensors" },
-    { name = "flare-native" },
-    { name = "tokenizers" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "transformers", extra = ["chat-template", "torch", "vision"] },
-]
-test = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'prepare'", specifier = "==1.14.0" },
-    { name = "cuda-python", marker = "extra == 'prepare'", specifier = "==13.3.1" },
-    { name = "flashinfer-python", extras = ["b12x"], marker = "extra == 'prepare'", editable = "../flashinfer" },
-    { name = "huggingface-hub", marker = "extra == 'prepare'", specifier = "==1.33.0" },
-    { name = "pillow", marker = "extra == 'prepare'", specifier = "==12.3.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=9,<10" },
-    { name = "safetensors", marker = "extra == 'prepare'", specifier = "==0.8.0" },
-    { name = "flare-native", marker = "extra == 'prepare'", directory = "native" },
-    { name = "tokenizers", marker = "extra == 'prepare'", specifier = "==0.23.2" },
-    { name = "torch", marker = "extra == 'prepare'", specifier = "==2.13.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "torchvision", marker = "extra == 'prepare'", specifier = "==0.28.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "transformers", extras = ["torch", "vision", "chat-template"], marker = "extra == 'prepare'", git = "https://github.com/huggingface/transformers.git?rev=4cc2aa84301c9aa210b5513dab9fefae03981f6e" },
-]
-provides-extras = ["test", "prepare"]
-
-[[package]]
-name = "flare-native"
-version = "0.1.0"
-source = { directory = "native" }
 
 [[package]]
 name = "sympy"

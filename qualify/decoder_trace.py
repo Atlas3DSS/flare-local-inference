@@ -51,13 +51,13 @@ def source_paths():
                      if path.suffix in ('.py', '.rs'))
     paths.update(ROOT / name for name in ('pyproject.toml', 'uv.lock',
         'native/Cargo.toml', 'native/Cargo.lock'))
-    for name in ('b12x', 'flashinfer', 'flare_native'):
+    for name in ('b12x', 'flashinfer', 'flare_helios'):
         spec = importlib.util.find_spec(name)
         if spec is None or spec.origin is None:
             raise RuntimeError(f'required preparation package is absent: {name}')
         package = Path(spec.origin).parent
         paths.update(package.rglob('*.py'))
-        if name == 'flare_native':
+        if name == 'flare_helios':
             paths.update(package.glob('*.so'))
     spec = importlib.util.find_spec('transformers')
     paths.update((Path(spec.origin).parent / 'models/qwen4_exp').glob('*.py'))

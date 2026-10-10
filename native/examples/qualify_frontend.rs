@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use flare_native::frontend::{Asset, Frontend, FrontendAssets};
+use flare_helios::frontend::{Asset, Frontend, FrontendAssets};
 use serde_json::{Map, Value};
 
 fn main() -> Result<(), String> {

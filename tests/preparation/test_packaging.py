@@ -40,7 +40,7 @@ def test_package_import_has_no_runtime_or_cuda_side_effects():
         [sys.executable, "-c", "import sys, flare; "
          "assert flare.__all__ == ['__version__']; "
          "assert 'torch' not in sys.modules; "
-         "assert 'flare_native' not in sys.modules; "
+         "assert 'flare_helios' not in sys.modules; "
          "assert not any(n == 'serve' or n.startswith('serve.') for n in sys.modules)"],
         cwd=ROOT, check=False, capture_output=True, text=True,
     )

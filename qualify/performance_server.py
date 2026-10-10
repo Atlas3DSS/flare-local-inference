@@ -51,7 +51,7 @@ def main():
                'replay_corpus': file_record(args.replay_corpus) if args.replay_corpus else None}
     write_json(args.output / 'launch.json', receipt)
     import flashinfer
-    import flare_native
+    import flare_helios
     import torch
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
@@ -64,8 +64,8 @@ def main():
     receipt.update(
         sources={'flare': source_record(ROOT),
                  'flashinfer': source_record(Path(flashinfer.__file__).resolve().parents[1])},
-        native_extension=file_record(Path(flare_native.__file__).parent /
-                                     'flare_native.cpython-312-x86_64-linux-gnu.so'),
+        native_extension=file_record(Path(flare_helios.__file__).parent /
+                                     'flare_helios.cpython-312-x86_64-linux-gnu.so'),
         versions={name: importlib.metadata.version(name) for name in
                   ('torch', 'transformers', 'flashinfer-python', 'nvidia-cutlass-dsl', 'triton')})
     receipt['source_recording_finished_ns'] = time.perf_counter_ns() - started

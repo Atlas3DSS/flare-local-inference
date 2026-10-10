@@ -1,12 +1,12 @@
 [package]
-name = "flare-native"
+name = "flare-helios"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
 publish = false
 
 [lib]
-name = "flare_native"
+name = "flare_helios"
 crate-type = ["cdylib", "rlib"]
 
 [features]

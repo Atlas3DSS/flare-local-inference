@@ -1,7 +1,7 @@
 //! Verify frozen generation-corpus prompts through native HTTP request preparation.
-use flare_native::model::qwen4exp::Qwen4Exp;
+use flare_helios::model::qwen4exp::Qwen4Exp;
 
-use flare_native::{
+use flare_helios::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},

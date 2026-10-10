@@ -1,6 +1,6 @@
 #![cfg(feature = "server")]
 
-use flare_native::{
+use flare_helios::{
     frontend::{Asset, Frontend, FrontendAssets},
     grammar::GrammarCompiler,
     model::{ModelConfig, ModelContract, SamplingParameters, glm5next::Glm5Next},
@@ -65,7 +65,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         let prepared =
             prepare_request::<Glm5Next>(&frontend, None, &compiler, &config, case["body"].clone())
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
-        flare_native::model::admission::validate_prompt::<Glm5Next>(&config, &prepared.prompt)
+        flare_helios::model::admission::validate_prompt::<Glm5Next>(&config, &prepared.prompt)
             .unwrap();
         assert_eq!(
             prepared.rendered_prompt,
@@ -126,7 +126,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
                 .unwrap()
                 .clone();
             let mut output = <Glm5Next as ModelContract>::Output::new(
-                flare_native::model::glm5next::output::OutputConfig {
+                flare_helios::model::glm5next::output::OutputConfig {
                     verbatim: false,
                     reasoning: false,
                     tools,

@@ -839,7 +839,10 @@ Native startup validates and consumes the model before binding the server socket
 as specified in section 3. Preparation success and cache reuse do not establish
 numerical or performance acceptance.
 
-## 3. Rust runtime and graph interface
+## 3. Helios runtime and graph interface
+
+Helios is the Rust serving core, packaged as `flare-helios` and imported by
+Python as `flare_helios`.
 
 ### Process and ownership model
 

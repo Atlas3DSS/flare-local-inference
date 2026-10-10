@@ -1,8 +1,9 @@
 # Flare
 
 Flare prepares Transformers models with FlashInfer kernels, including b12x,
-in Python, then transfers captured CUDA graphs and their resource owners to a
-Rust serving core. The execution contract targets NVIDIA SM120/121. See [the core design](docs/core-design.md)
+in Python, then transfers captured CUDA graphs and their resource owners to
+Helios, its Rust serving core (`flare-helios`). The execution contract targets
+NVIDIA SM120/121. See [the core design](docs/core-design.md)
 for model, cache, runtime, and acceptance requirements.
 
 Preparation loads Qwen3.8 or GLM 5.3 Flash into canonical module trees and

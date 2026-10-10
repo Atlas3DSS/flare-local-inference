@@ -25,7 +25,7 @@ class PreparedModel(PreparedExecution):
         self._preparation_thread = get_ident()
 
     def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None, peers=None):
-        import flare_native
+        import flare_helios
 
         with self._handoff_lock:
             if self._consumed or self.closed:
@@ -36,7 +36,7 @@ class PreparedModel(PreparedExecution):
             torch.cuda.synchronize(self.device)
             try:
                 arguments = {} if peers is None else {"peer_fds": [peer.fileno() for peer in peers]}
-                server = flare_native.Server(self, manifest, json.dumps(config), **arguments)
+                server = flare_helios.Server(self, manifest, json.dumps(config), **arguments)
             except BaseException as error:
                 if getattr(error, "resources_retained", False):
                     self._startup_undrained = True

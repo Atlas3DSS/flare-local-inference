@@ -94,7 +94,7 @@ class PreparedExecution(PreparedGraphBundle):
 
     def start_executor(self, *, peers=None):
         """Synchronize preparation and consume the bundle into the native executor."""
-        import flare_native
+        import flare_helios
         import torch
 
         with self._handoff_lock:
@@ -103,13 +103,13 @@ class PreparedExecution(PreparedGraphBundle):
             manifest = self.manifest()
             torch.cuda.synchronize(self.device)
             arguments = {} if peers is None else {"peer_fds": [peer.fileno() for peer in peers]}
-            executor = flare_native.GraphExecutor(self, manifest, **arguments)
+            executor = flare_helios.GraphExecutor(self, manifest, **arguments)
             self._consumed = True
             return executor
 
     def serve_rank(self, socket, *, rank, world):
         """Hand a peer to Rust until every rank drains; Python does no step work."""
-        import flare_native
+        import flare_helios
         import torch
 
         with self._handoff_lock:
@@ -118,4 +118,4 @@ class PreparedExecution(PreparedGraphBundle):
             manifest = self.manifest()
             torch.cuda.synchronize(self.device)
             self._consumed = True
-        flare_native.serve_tensor_parallel_rank(self, manifest, socket.fileno(), rank, world)
+        flare_helios.serve_tensor_parallel_rank(self, manifest, socket.fileno(), rank, world)

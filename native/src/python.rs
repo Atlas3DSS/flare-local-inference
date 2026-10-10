@@ -15,7 +15,7 @@ use crate::lifetime::OwnerLease;
 use crate::{BufferSpan, GraphBundle, ReplayWorker};
 
 #[cfg(feature = "qualification")]
-#[pyclass(module = "flare_native")]
+#[pyclass(module = "flare_helios")]
 struct ReplayCompletion {
     #[pyo3(get)]
     ticket: u64,
@@ -33,7 +33,7 @@ struct ReplayCompletion {
 /// Graph handles must not be reinstantiated and tensor storage must not be resized
 /// or mutated concurrently. Captured PyTorch generator-backed RNG is unsupported.
 #[cfg(feature = "qualification")]
-#[pyclass(module = "flare_native")]
+#[pyclass(module = "flare_helios")]
 struct GraphReplayWorker {
     worker: ReplayWorker,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
@@ -201,7 +201,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
     })
 }
 
-#[pyclass(module = "flare_native")]
+#[pyclass(module = "flare_helios")]
 struct ExecutionCompletion {
     #[pyo3(get)]
     fence: u64,
@@ -213,7 +213,7 @@ struct ExecutionCompletion {
     elapsed_ns: Option<u64>,
 }
 
-#[pyclass(name = "GraphExecutor", module = "flare_native")]
+#[pyclass(name = "GraphExecutor", module = "flare_helios")]
 struct PreparedGraphExecutor {
     worker: ExecutionWorker,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
@@ -392,7 +392,7 @@ fn serve_tensor_parallel_rank(
 }
 
 /// Monitor owned child ranks in Rust; unexpected peer exit terminates this process.
-#[pyclass(name = "RankSupervisor", module = "flare_native")]
+#[pyclass(name = "RankSupervisor", module = "flare_helios")]
 struct NativeRankSupervisor {
     supervisor: Mutex<crate::processes::RankSupervisor>,
 }
@@ -460,7 +460,7 @@ impl Drop for PreparedGraphExecutor {
 }
 
 #[pymodule]
-fn flare_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn flare_helios(module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "qualification")]
     {
         module.add_class::<GraphReplayWorker>()?;
@@ -485,8 +485,8 @@ mod binding_tests {
     fn raw_replay_exports_require_qualification_feature() {
         Python::initialize();
         Python::attach(|py| {
-            let module = PyModule::new(py, "flare_native").unwrap();
-            flare_native(&module).unwrap();
+            let module = PyModule::new(py, "flare_helios").unwrap();
+            flare_helios(&module).unwrap();
             for name in ["GraphReplayWorker", "ReplayCompletion"] {
                 assert_eq!(
                     module.hasattr(name).unwrap(),
@@ -535,7 +535,7 @@ impl ModelServer {
 }
 
 #[cfg(feature = "server")]
-#[pyclass(name = "Server", module = "flare_native")]
+#[pyclass(name = "Server", module = "flare_helios")]
 struct NativeServer {
     server: ModelServer,
     owner: Mutex<OwnerLease<Py<PyAny>>>,

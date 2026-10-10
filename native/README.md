@@ -1,13 +1,14 @@
-# Native CUDA graph replay
+# Helios
 
-This crate supplies a native frontend, prefix cache and live-request scheduler,
+Helios (`flare-helios`) is Flare's Rust serving core. It supplies a native
+frontend, prefix cache and live-request scheduler,
 and launches Python-prepared CUDA graph executables through direct driver calls.
 The raw `ReplayWorker` and the two-frame `execution::GraphExecutor` are usable
 from Rust without Python types. The `server` feature adds HTTP/SSE, native request
-preparation and direct scheduling of the Qwen4Exp prepared model. Python loads and
+preparation and direct scheduling of Qwen4Exp and Glm5Next prepared models. Python loads and
 captures the model before handing it to Rust.
 
-Native APIs return `flare_native::Error`, with separate `AdmissionError`,
+Native APIs return `flare_helios::Error`, with separate `AdmissionError`,
 `ExecutionError`, and `FrontendError` variants. Validation, capacity exhaustion,
 unsupported features, grammar failures, image decoding, manifest violations,
 worker failure, poison, and drain failures remain distinct through worker channels.
@@ -63,7 +64,7 @@ mirrored and axis-swapped images. Invalid orientation metadata is rejected.
 RGB conversion discards alpha and does not apply embedded color profiles.
 Pillow is used only to generate test fixtures, never by native image admission.
 
-The extension is named `flare_native`. It requires the NVIDIA driver at runtime
+The extension is named `flare_helios`. It requires the NVIDIA driver at runtime
 and dynamically loads `libcuda.so.1`; building and running native unit tests does
 not require CUDA libraries. Tests exercise queueing and teardown using explicit
 Rust test functions. Production always calls the CUDA driver.
@@ -122,7 +123,7 @@ Qualify real PyTorch-to-Rust graph replay on an explicitly assigned idle GPU:
 ```sh
 PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml --features extension-module,qualification
 CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python native/tests/test_cuda_graph_replay.py \
-  --extension native/target/debug/libflare_native.so
+  --extension native/target/debug/libflare_helios.so
 ```
 
 The integration cases capture real PyTorch graphs, change device inputs between
@@ -179,7 +180,7 @@ methods provide a qualification surface.
 PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml \
   --features extension-module --offline
 timeout 60s env CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python \
-  native/tests/test_execution.py --extension native/target/debug/libflare_native.so
+  native/tests/test_execution.py --extension native/target/debug/libflare_helios.so
 ```
 
 The four CUDA integration cases cover physical-slot scatter, different graph

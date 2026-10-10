@@ -20,7 +20,7 @@ drain of the model and completion-copy streams.
 Build with `server,extension-module` and construct:
 
 ```python
-server = flare_native.Server(owner, manifest, config_json)
+server = flare_helios.Server(owner, manifest, config_json)
 print(server.address)
 # The interpreter may wait for process signals. Requests execute entirely in Rust.
 server.close()
