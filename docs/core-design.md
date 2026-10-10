@@ -213,6 +213,10 @@ lifetimes.
 Rust owns one serving lifecycle for HTTP admission, scheduling, cache ownership,
 graph submission, and completion retirement. Model adapters declare input
 layouts, capabilities, and prompt/output semantics through `ModelContract`.
+Every adapter participates in the same native lifecycle. Model differences are
+expressed as capabilities, buffer layouts, and semantic checks; adapters do not
+implement separate admission, scheduling, cache-ownership, replay, or shutdown
+loops.
 The shared [graph catalog](../native/src/model/catalog.rs) validates model limits,
 buffer layouts, declared capacities, required operations, and every supplied
 graph's input bindings. Native startup and graph selection use this common
@@ -840,13 +844,16 @@ native GPU worker. Python completes bootstrap and invokes native server startup;
 Rust binds the listening sockets and owns the server lifetime and request paths.
 
 `Server<M>` and `ModelRuntime<M>` statically select the
-[`ModelContract`](../native/src/model.rs). The contract validates preparation
-metadata and graph geometry, constructs admissions, packs model inputs, and
-interprets completion records. Its associated output protocol composes separate
-reasoning and tool parsers. The Python entrypoint selects
-[`Qwen4Exp`](../native/src/model/qwen4exp.rs); there is no runtime backend registry
-or dynamic model dispatch per token. Unknown schema versions, fields, or
-capabilities fail before asset loading and CUDA worker construction.
+[`ModelContract`](../native/src/model.rs). Shared core code validates graph
+geometry, constructs admissions, schedules work, and retires completions. The
+contract supplies prepared-buffer declarations, model-specific constraints,
+input encoding, and completion checks. Its associated output protocol composes
+separate reasoning and tool parsers. The Python entrypoint selects
+[`Qwen4Exp`](../native/src/model/qwen4exp.rs) or
+[`Glm5Next`](../native/src/model/glm5next.rs) from the prepared input schema;
+there is no runtime backend registry or dynamic model dispatch per token.
+Unknown schema versions, fields, or capabilities fail before asset loading and
+CUDA worker construction.
 
 Captured operators use b12x's default numerical policy and tuned execution plans.
 MoE reductions may use arrival-ordered atomic additions, so identical graph inputs

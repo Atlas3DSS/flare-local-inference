@@ -1,9 +1,11 @@
 # Qwen4Exp native model contract
 
-`ModelRuntime<M>` and `Server<M>` statically select a `ModelContract`. The
-contract owns prepared-schema validation, prompt interpretation, admission,
-input packing, model-specific completion checks, and the associated
-`ModelOutput` implementation. The Python entrypoint selects `Qwen4Exp`.
+`ModelRuntime<M>` and `Server<M>` statically select a `ModelContract`. The shared
+core owns graph-catalog validation and selection, request admission, scheduling,
+cache ownership, and completion retirement. The contract supplies buffer and
+capability declarations, prompt interpretation, input encoding, model-specific
+completion checks, and the associated `ModelOutput` implementation. For the
+Qwen4Exp schema, the Python entrypoint selects `Qwen4Exp`.
 Transport owns graph handles, four physical completion lanes, bounded output
 vectors, host spans, fences, and confirmed resource drain.
 
