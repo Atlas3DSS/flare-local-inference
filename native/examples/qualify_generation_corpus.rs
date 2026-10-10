@@ -91,8 +91,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .as_object_mut()
             .ok_or("invalid corpus request")?
             .insert("model".into(), Value::String(model.model_id.clone()));
-        let prepared = prepare_request::<Qwen4Exp>(&frontend, &images, &compiler, &model, request)
-            .map_err(|error| format!("{id}: {error}"))?;
+        let prepared =
+            prepare_request::<Qwen4Exp>(&frontend, Some(&images), &compiler, &model, request)
+                .map_err(|error| format!("{id}: {error}"))?;
         let expected: Vec<u32> = serde_json::from_value(case["prompt_tokens"].clone())
             .map_err(|error| format!("{id}: {error}"))?;
         if prepared.prompt.tokens != expected

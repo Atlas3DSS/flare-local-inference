@@ -75,9 +75,14 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         );
         let request = json!({"model":config.model_id,"messages":[{"role":"user","content":[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":url}}]}],"max_tokens":8,"chat_template_kwargs":{"add_generation_prompt":true}});
-        let prepared =
-            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, request.clone())
-                .unwrap();
+        let prepared = prepare_request::<Qwen4Exp>(
+            &frontend,
+            Some(&processor),
+            &compiler,
+            &config,
+            request.clone(),
+        )
+        .unwrap();
         let decoded = if jpeg {
             processor.decode_jpeg(&bytes)
         } else {
@@ -121,7 +126,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         )
         .unwrap();
         assert!(matches!(
-            prepare_request::<Qwen4Exp>(&frontend, &limited, &compiler, &config, request)
+            prepare_request::<Qwen4Exp>(&frontend, Some(&limited), &compiler, &config, request)
                 .err()
                 .unwrap(),
             flare_native::Error::Admission(flare_native::AdmissionError::Image(_))
@@ -136,7 +141,8 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     ] {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":url}}]}]});
         assert!(
-            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body).is_err()
+            prepare_request::<Qwen4Exp>(&frontend, Some(&processor), &compiler, &config, body)
+                .is_err()
         );
     }
     println!("{counts} JPEG/EXIF checkpoint admissions and encoded-size rejections passed");

@@ -17,7 +17,7 @@ pub struct PreparedRequest<M: ModelContract> {
 
 pub fn prepare<M: ModelContract>(
     frontend: &Frontend,
-    processor: &ImageProcessor,
+    processor: Option<&ImageProcessor>,
     compiler: &crate::grammar::GrammarCompiler,
     config: &ModelConfig,
     body: Value,
@@ -33,7 +33,7 @@ pub fn prepare<M: ModelContract>(
 
 fn prepare_inner<M: ModelContract>(
     frontend: &Frontend,
-    processor: &ImageProcessor,
+    processor: Option<&ImageProcessor>,
     compiler: &crate::grammar::GrammarCompiler,
     config: &ModelConfig,
     body: Value,
@@ -109,6 +109,12 @@ fn prepare_inner<M: ModelContract>(
                         }
                     }
                     "image_url" => {
+                        let processor = processor.ok_or_else(|| {
+                            Error::admission(
+                                AdmissionError::Feature,
+                                "prepared model does not support image inputs",
+                            )
+                        })?;
                         let url = part
                             .get("image_url")
                             .and_then(|value| value.get("url"))
@@ -209,7 +215,7 @@ fn prepare_inner<M: ModelContract>(
         &normalized,
         &options,
         grammar.is_some(),
-    );
+    )?;
     let crate::model::PreparedInput {
         tokens,
         data,

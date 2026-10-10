@@ -89,7 +89,7 @@ impl Fixture {
         let request = json!({"model":self.config.model_id,"messages":messages,"chat_template_kwargs":options});
         let prepared = prepare_request::<Qwen4Exp>(
             &self.frontend,
-            &self.processor,
+            Some(&self.processor),
             &self.compiler,
             &self.config,
             request,
@@ -170,7 +170,7 @@ fn tool_instructions_are_rendered_without_explicit_system_and_disable_with_none(
     let request = json!({"model":fixture.config.model_id,"messages":messages,"tools":[tool("weather")],"tool_choice":"none","enable_thinking":false});
     let disabled = prepare_request::<Qwen4Exp>(
         &fixture.frontend,
-        &fixture.processor,
+        Some(&fixture.processor),
         &fixture.compiler,
         &fixture.config,
         request,

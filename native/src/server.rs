@@ -66,7 +66,7 @@ impl Default for ServerConfig {
 struct HttpState<M: ModelContract> {
     model: Arc<ModelRuntime<M>>,
     frontend: Arc<Frontend>,
-    images: Arc<ImageProcessor>,
+    images: Option<Arc<ImageProcessor>>,
     grammar: Arc<crate::grammar::GrammarCompiler>,
     frontend_slots: Arc<Semaphore>,
     ingress_slots: Arc<Semaphore>,
@@ -111,10 +111,13 @@ impl<M: ModelContract> Server<M> {
         manifest: ExecutionManifest,
         model: ModelConfig,
         frontend: Frontend,
-        images: ImageProcessor,
+        images: Option<ImageProcessor>,
         config: ServerConfig,
         peers: Option<Vec<std::os::unix::net::UnixStream>>,
     ) -> std::result::Result<Self, StartFailure> {
+        if model.contract.vision.enabled() != images.is_some() {
+            return Err("image processor must match prepared vision capabilities".into());
+        }
         if config.qualification_token_trace && !config.bind.ip().is_loopback() {
             return Err("token qualification requires a loopback listener".into());
         }
@@ -150,7 +153,7 @@ impl<M: ModelContract> Server<M> {
         let state = Arc::new(HttpState {
             model: model.clone(),
             frontend,
-            images: Arc::new(images),
+            images: images.map(Arc::new),
             grammar,
             frontend_slots: Arc::new(Semaphore::new(config.frontend_workers)),
             ingress_slots: Arc::new(Semaphore::new(ingress_capacity)),
@@ -428,7 +431,7 @@ async fn chat<M: ModelContract>(
         let _ingress = preparation_ingress;
         request::prepare::<M>(
             &prepare_state.frontend,
-            &prepare_state.images,
+            prepare_state.images.as_deref(),
             &prepare_state.grammar,
             prepare_state.model.config(),
             body,

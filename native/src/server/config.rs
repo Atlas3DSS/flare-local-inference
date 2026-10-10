@@ -14,7 +14,7 @@ use serde_json::Value;
 pub struct Bootstrap {
     pub model: ModelConfig,
     pub frontend: Frontend,
-    pub images: ImageProcessor,
+    pub images: Option<ImageProcessor>,
     pub server: ServerConfig,
 }
 impl Bootstrap {
@@ -240,14 +240,18 @@ impl Bootstrap {
             },
             defaults,
         )?;
-        let images = ImageProcessor::load(
-            asset("preprocessor_config")?,
-            asset("model_config")?,
-            ImageLimits {
-                max_total_patches: 65536,
-                ..ImageLimits::default()
-            },
-        )?;
+        let images = if model.contract.vision.enabled() {
+            Some(ImageProcessor::load(
+                asset("preprocessor_config")?,
+                asset("model_config")?,
+                ImageLimits {
+                    max_total_patches: 65536,
+                    ..ImageLimits::default()
+                },
+            )?)
+        } else {
+            None
+        };
         let server = ServerConfig {
             bind: object
                 .get("bind")

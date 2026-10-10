@@ -253,7 +253,7 @@ impl RequestScheduler {
         capabilities: SchedulerCapabilities,
     ) -> Result<Self> {
         limits.validate_prefill()?;
-        let vision = &capabilities.vision;
+        capabilities.vision.validate()?;
         if capabilities.draft_pages_per_request > limits.pages as usize
             || capabilities.vocabulary == 0
             || capabilities.vocabulary > i32::MAX as usize
@@ -261,15 +261,6 @@ impl RequestScheduler {
                 .live_state_base
                 .checked_add(REQUEST_LANES as u32)
                 .is_none()
-            || vision.patches_per_feature == 0
-            || vision.max_images == 0
-            || vision.features_per_request == 0
-            || vision.patch_capacities.is_empty()
-            || vision
-                .patch_capacities
-                .iter()
-                .any(|n| *n == 0 || !n.is_multiple_of(vision.patches_per_feature))
-            || vision.patch_capacities.windows(2).any(|p| p[0] >= p[1])
         {
             return Err("invalid model scheduling capabilities".into());
         }

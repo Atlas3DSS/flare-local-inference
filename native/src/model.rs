@@ -1,6 +1,7 @@
 //! Statically dispatched prepared-model semantics; CUDA transport remains model-independent.
 
 pub mod glm5next;
+pub(crate) mod inputs;
 pub mod qwen4exp;
 use crate::{
     Result,
@@ -20,6 +21,40 @@ pub struct VisionCapabilities {
     pub max_images: usize,
     pub patches_per_feature: usize,
     pub patch_capacities: Vec<usize>,
+}
+
+impl VisionCapabilities {
+    pub fn disabled() -> Self {
+        Self {
+            features_per_request: 0,
+            max_images: 0,
+            patches_per_feature: 0,
+            patch_capacities: Vec::new(),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.max_images > 0
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self == &Self::disabled() {
+            return Ok(());
+        }
+        if self.patches_per_feature == 0
+            || self.max_images == 0
+            || self.features_per_request == 0
+            || self.patch_capacities.is_empty()
+            || self
+                .patch_capacities
+                .iter()
+                .any(|n| *n == 0 || !n.is_multiple_of(self.patches_per_feature))
+            || self.patch_capacities.windows(2).any(|p| p[0] >= p[1])
+        {
+            return Err("invalid prepared vision capabilities".into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(feature = "server", derive(serde::Deserialize))]
@@ -157,7 +192,7 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
     #[cfg(feature = "server")]
     fn prepare_input(
         frontend: &crate::frontend::Frontend,
-        processor: &crate::frontend::images::ImageProcessor,
+        processor: Option<&crate::frontend::images::ImageProcessor>,
         rendered: &crate::frontend::RenderedPrompt,
         images: Vec<crate::frontend::images::RgbImage>,
     ) -> Result<PreparedInput<Self::PromptData>>;
@@ -175,7 +210,7 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         messages: &[serde_json::Value],
         options: &serde_json::Map<String, serde_json::Value>,
         structured: bool,
-    ) -> Self::OutputConfig;
+    ) -> Result<Self::OutputConfig>;
     #[cfg(feature = "server")]
     fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()>;
     #[cfg(feature = "server")]

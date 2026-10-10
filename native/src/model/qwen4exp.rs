@@ -167,7 +167,7 @@ impl ModelContract for Qwen4Exp {
     #[cfg(feature = "server")]
     fn prepare_input(
         frontend: &crate::frontend::Frontend,
-        processor: &crate::frontend::images::ImageProcessor,
+        processor: Option<&crate::frontend::images::ImageProcessor>,
         rendered: &crate::frontend::RenderedPrompt,
         images: Vec<crate::frontend::images::RgbImage>,
     ) -> Result<crate::model::PreparedInput<Self::PromptData>> {
@@ -189,8 +189,10 @@ impl ModelContract for Qwen4Exp {
         messages: &[serde_json::Value],
         options: &serde_json::Map<String, serde_json::Value>,
         structured: bool,
-    ) -> Self::OutputConfig {
-        output::prepare_output(frontend, rendered, messages, options, structured)
+    ) -> Result<Self::OutputConfig> {
+        Ok(output::prepare_output(
+            frontend, rendered, messages, options, structured,
+        ))
     }
     #[cfg(feature = "server")]
     fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()> {

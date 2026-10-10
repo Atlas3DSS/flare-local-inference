@@ -10,7 +10,7 @@ use crate::{
 };
 pub(super) fn prepare_input(
     frontend: &Frontend,
-    processor: &ImageProcessor,
+    processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
     images: Vec<RgbImage>,
 ) -> Result<PreparedInput<PromptData>> {
@@ -34,6 +34,7 @@ pub(super) fn prepare_input(
             None,
         )
     } else {
+        let processor = processor.ok_or("image processing is unavailable")?;
         let processed = processor.process(&images)?;
         let expanded = processor.expand_prompt(frontend, &rendered.text, &processed)?;
         let positions = (0..expanded.token_ids.len())

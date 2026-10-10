@@ -335,7 +335,24 @@ The sampled continuations contain 18/18 tokens on TP2 and 18/26 tokens on TP4.
 Peers remain inside Rust throughout execution and coordinated drain; allocation
 and segment counters stay stable during replay. The rank-zero test harness
 submits uploads and inspects results in Python.
-Production GLM serving and HTTP integration are not implemented.
+The [GLM native contract](../native/src/model/glm5next.rs) selects init, restore,
+snapshot, resume, prefill, and decode graph capacities and packs request uploads.
+It uses 256-token page tables and broadcasts each pending decode token to every
+rank. Reset commands use source slot -1; exact restoration names the saved
+consumed endpoint and a private partial-page destination. Qwen and GLM share
+host admission staging for sampling parameters, prompt histograms, and grammar
+masks. The GLM catalog declares no vision graphs; native startup omits the image
+processor and rejects image inputs.
+
+Native GLM prompt preparation uses the checkpoint chat template and preserves
+exact instruction prefixes through the empty user header. Its output parser
+shares incremental think/tool envelopes with Qwen while interpreting GLM
+`<arg_key>/<arg_value>` payloads and preserving content whitespace. Tests compare
+rendered bytes, token IDs, instruction boundaries, assistant continuations, and
+parallel tool history against Transformers. GLM structured output with an open
+reasoning prefix is unsupported; the template does not honor Qwen's
+`enable_thinking=false` option. Production GLM bootstrap and HTTP execution
+remain unimplemented.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
@@ -448,8 +465,10 @@ terminate the whole failed rank group before reclaiming those resources.
 The native model scheduler owns either the local executor or this coordinator
 through [RankExecutor](../native/src/execution/ranks.rs), with no intervening
 execution-worker queue. Native server startup accepts prepared peer sockets.
-The Python server binding still selects the Qwen contract; GLM contract dispatch,
-rank-process supervision, and GLM HTTP integration remain unimplemented.
+The Python server binding selects Qwen or GLM from the prepared input schema
+once at startup. Both model runtimes use the same native rank coordinator and
+HTTP server. Rank-process supervision and GLM HTTP integration remain
+unimplemented.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
 
 The shared [tuning session](../flare/preparation/tuning.py) owns declaration

@@ -82,8 +82,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let body = json!({"model":config.model_id,"messages":case["messages"],"chat_template_kwargs":case["options"],"temperature":0});
-        let result =
-            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone());
+        let result = prepare_request::<Qwen4Exp>(
+            &frontend,
+            Some(&processor),
+            &compiler,
+            &config,
+            body.clone(),
+        );
         if let Some(expected) = case.get("error") {
             let expected = expected
                 .as_str()
@@ -128,8 +133,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if changed {
-                let roundtrip =
-                    prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, wire)?;
+                let roundtrip = prepare_request::<Qwen4Exp>(
+                    &frontend,
+                    Some(&processor),
+                    &compiler,
+                    &config,
+                    wire,
+                )?;
                 if roundtrip.prompt.tokens != prepared.prompt.tokens {
                     return Err((format!(
                         "{}: JSON-string tool arguments changed rendered tokens",
@@ -153,9 +163,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut plain = body.clone();
         plain.as_object_mut().unwrap().remove("stop");
         let expected =
-            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, plain)?;
+            prepare_request::<Qwen4Exp>(&frontend, Some(&processor), &compiler, &config, plain)?;
         let prepared =
-            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body)?;
+            prepare_request::<Qwen4Exp>(&frontend, Some(&processor), &compiler, &config, body)?;
         if prepared.prompt.tokens != expected.prompt.tokens
             || prepared.prompt.max_new_tokens != expected.prompt.max_new_tokens
         {
@@ -207,7 +217,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let prepared = prepare_request::<Qwen4Exp>(
             &frontend,
-            &processor,
+            Some(&processor),
             &compiler,
             &config,
             json!({"model":config.model_id,"messages":messages,"add_generation_prompt":true}),
@@ -237,8 +247,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         json!({"type":"json_object"}),
     ] {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."}],"response_format":format,"add_generation_prompt":true});
-        let mut prepared =
-            prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone())?;
+        let mut prepared = prepare_request::<Qwen4Exp>(
+            &frontend,
+            Some(&processor),
+            &compiler,
+            &config,
+            body.clone(),
+        )?;
         if prepared.output.reasoning || !prepared.output.verbatim {
             return Err("structured request entered reasoning mode".into());
         }
@@ -255,13 +270,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut conflict = body.clone();
         conflict["stop_token_ids"] = json!([90]);
-        if prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, conflict).is_ok()
+        if prepare_request::<Qwen4Exp>(&frontend, Some(&processor), &compiler, &config, conflict)
+            .is_ok()
         {
             return Err("structured request accepted custom token stop".into());
         }
         let mut conflict = body;
         conflict["continue_final_message"] = json!(true);
-        if prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, conflict).is_ok()
+        if prepare_request::<Qwen4Exp>(&frontend, Some(&processor), &compiler, &config, conflict)
+            .is_ok()
         {
             return Err("structured request accepted assistant continuation".into());
         }
@@ -279,7 +296,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .clone(),
         )?;
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."},{"role":"assistant","content":"{"}],"response_format":{"type":"json_object"}});
-        match prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, body.clone()) {
+        match prepare_request::<Qwen4Exp>(
+            &frontend,
+            Some(&processor),
+            &compiler,
+            &config,
+            body.clone(),
+        ) {
             Err(error)
                 if error.to_string()
                     == "structured output cannot continue an existing assistant message" => {}
@@ -304,8 +327,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .as_object_mut()
                 .unwrap()
                 .extend(overrides.as_object().unwrap().clone());
-            let mut prepared =
-                prepare_request::<Qwen4Exp>(&frontend, &processor, &compiler, &config, request)?;
+            let mut prepared = prepare_request::<Qwen4Exp>(
+                &frontend,
+                Some(&processor),
+                &compiler,
+                &config,
+                request,
+            )?;
             let grammar = prepared
                 .prompt
                 .grammar

@@ -91,7 +91,7 @@ pub(super) async fn generate<M: ModelContract>(
         let _ingress = preparation_ingress;
         let prepared = request::prepare::<M>(
             &preparation_state.frontend,
-            &preparation_state.images,
+            preparation_state.images.as_deref(),
             &preparation_state.grammar,
             preparation_state.model.config(),
             body,

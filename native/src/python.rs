@@ -445,9 +445,43 @@ mod binding_tests {
 }
 
 #[cfg(feature = "server")]
+enum ModelServer {
+    Qwen(crate::server::Server<crate::model::qwen4exp::Qwen4Exp>),
+    Glm(crate::server::Server<crate::model::glm5next::Glm5Next>),
+}
+
+#[cfg(feature = "server")]
+impl ModelServer {
+    fn address(&self) -> std::net::SocketAddr {
+        match self {
+            Self::Qwen(s) => s.address(),
+            Self::Glm(s) => s.address(),
+        }
+    }
+    fn healthy(&self) -> bool {
+        match self {
+            Self::Qwen(s) => s.healthy(),
+            Self::Glm(s) => s.healthy(),
+        }
+    }
+    fn wait(&self, timeout: Duration) -> bool {
+        match self {
+            Self::Qwen(s) => s.wait(timeout),
+            Self::Glm(s) => s.wait(timeout),
+        }
+    }
+    fn close(&self) -> crate::Shutdown {
+        match self {
+            Self::Qwen(s) => s.close(),
+            Self::Glm(s) => s.close(),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
 #[pyclass(name = "Server", module = "flare_native")]
 struct NativeServer {
-    server: crate::server::Server<crate::model::qwen4exp::Qwen4Exp>,
+    server: ModelServer,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
     drained: std::sync::atomic::AtomicBool,
 }
@@ -476,12 +510,29 @@ impl NativeServer {
                     .collect::<PyResult<Vec<_>>>()
             })
             .transpose()?;
+        let config: serde_json::Value = serde_json::from_str(config_json)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let schema = config["model_contract"]["schema"]
+            .as_str()
+            .ok_or_else(|| PyValueError::new_err("model_contract.schema is required"))?;
+        if schema == crate::model::glm5next::INPUT_SCHEMA
+            && !peers
+                .as_ref()
+                .is_some_and(|peers| matches!(peers.len(), 1 | 3))
+        {
+            return Err(PyValueError::new_err(
+                "GLM serving requires a prepared TP2 or TP4 rank group",
+            ));
+        }
         let bootstrap = py
-            .detach(|| {
-                crate::server::Bootstrap::load::<crate::model::qwen4exp::Qwen4Exp>(
-                    config_json,
-                    &manifest,
-                )
+            .detach(|| match schema {
+                crate::model::qwen4exp::INPUT_SCHEMA => crate::server::Bootstrap::load::<
+                    crate::model::qwen4exp::Qwen4Exp,
+                >(config_json, &manifest),
+                crate::model::glm5next::INPUT_SCHEMA => crate::server::Bootstrap::load::<
+                    crate::model::glm5next::Glm5Next,
+                >(config_json, &manifest),
+                _ => Err(format!("unsupported prepared model contract {schema:?}").into()),
             })
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let server = match py.detach(|| {
@@ -490,14 +541,31 @@ impl NativeServer {
             // It stays live across startup, is retained on an undrained failure,
             // and is otherwise transferred into OwnerLease until confirmed drain.
             unsafe {
-                crate::server::Server::<crate::model::qwen4exp::Qwen4Exp>::start(
-                    manifest,
-                    bootstrap.model,
-                    bootstrap.frontend,
-                    bootstrap.images,
-                    bootstrap.server,
-                    peers,
-                )
+                match schema {
+                    crate::model::qwen4exp::INPUT_SCHEMA => {
+                        crate::server::Server::<crate::model::qwen4exp::Qwen4Exp>::start(
+                            manifest,
+                            bootstrap.model,
+                            bootstrap.frontend,
+                            bootstrap.images,
+                            bootstrap.server,
+                            peers,
+                        )
+                        .map(ModelServer::Qwen)
+                    }
+                    crate::model::glm5next::INPUT_SCHEMA => {
+                        crate::server::Server::<crate::model::glm5next::Glm5Next>::start(
+                            manifest,
+                            bootstrap.model,
+                            bootstrap.frontend,
+                            bootstrap.images,
+                            bootstrap.server,
+                            peers,
+                        )
+                        .map(ModelServer::Glm)
+                    }
+                    _ => unreachable!("bootstrap validated the model contract"),
+                }
             }
         }) {
             Ok(server) => server,
