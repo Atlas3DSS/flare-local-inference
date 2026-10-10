@@ -55,6 +55,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
     from flare.preparation.checkpoint import inspect_indexed_checkpoint
     from flare.preparation.collectives import (
         CollectivePreparation,
+        create_all_gather_runtime,
         create_all_reduce_runtime,
     )
     from flare.preparation.compilation import compile_forward
@@ -91,12 +92,14 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
     manifest = inspect_indexed_checkpoint(Path(snapshot))
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress)
     assert len(weights.layers) == 45
-    assert weights.tree.lm_head.weight.is_meta == (rank != 0)
+    assert weights.tree.lm_head.weight.shape == (154880 // world, 4096)
+    assert not weights.tree.lm_head.weight.is_meta
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=world,
                             timeout=timedelta(minutes=15))
     group = dist.group.WORLD
     coordinator = CollectivePreparation(group, timeout=timedelta(minutes=15))
     runtime = create_all_reduce_runtime(group, device, max_tokens=capacity, hidden_size=4096)
+    vocabulary_runtime = create_all_gather_runtime(group, device, max_rows=1, columns=154880)
     worker = None
     graphs = {mode: torch.cuda.CUDAGraph() for mode in ("prefill", "decode")}
     try:
@@ -119,7 +122,8 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                 metadata[mode] = DecoderMetadata.allocate(tokens, 1, 64, device)
                 scratch[mode] = DecoderScratch.allocate(tokens, 64, mode, device, shard=shard, sample_rows=1)
                 decoders[mode] = PreparedDecoder(weights, scratch[mode], state, metadata[mode], mode=mode,
-                    runtime=runtime, coordinator=coordinator, session=session, name=mode, workspace=arena,
+                    runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator,
+                    session=session, name=mode, workspace=arena,
                     progress=progress)
                 forwards[mode] = decoders[mode]
                 if generate:
@@ -128,7 +132,8 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                         pool=pool, runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.generation")
             if checkpoint:
                 forwards["resume"] = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
-                    rows=1, runtime=runtime, coordinator=coordinator, session=session, name="resume")
+                    rows=1, runtime=runtime, vocabulary_runtime=vocabulary_runtime,
+                    coordinator=coordinator, session=session, name="resume")
                 for mode in ("init", "restore", "snapshot"):
                     forwards[mode] = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
                         runtime=runtime, coordinator=coordinator, session=session, name=mode, admission_buffers=admission)
@@ -306,6 +311,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
             worker.close()
         for graph in graphs.values():
             graph.reset()
+        vocabulary_runtime.close()
         runtime.close()
         dist.destroy_process_group()
         for pair in sockets:

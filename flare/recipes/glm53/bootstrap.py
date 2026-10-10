@@ -14,6 +14,7 @@ from flare.preparation.capture import capture_forwards
 from flare.preparation.checkpoint import inspect_indexed_checkpoint
 from flare.preparation.collectives import (
     CollectivePreparation,
+    create_all_gather_runtime,
     create_all_reduce_runtime,
 )
 from flare.preparation.execution import GraphSignature
@@ -113,6 +114,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
     coordinator = CollectivePreparation(group)
     collective = create_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size, hidden_size=4096)
+    vocabulary_collective = create_all_gather_runtime(group, device,
+        max_rows=max(config.batch_capacities), columns=154880)
     identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
         "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
         "contract": "glm5next.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -143,7 +146,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
             scratch[name] = decoder_storage.rows(capacity, mode, sample_rows=rows)
             decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                runtime=collective, coordinator=coordinator, session=session, name=name, workspace=arena)
+                runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                session=session, name=name, workspace=arena)
             batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages)
             forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
                 pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation")
@@ -153,7 +157,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     for capacity in config.batch_capacities:
         name = f"resume{capacity}"
         resume = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
-            rows=capacity, runtime=collective, coordinator=coordinator, session=session, name=name)
+            rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
+            coordinator=coordinator, session=session, name=name)
         add(name, resume, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"))
         for mode in ("init", "restore", "snapshot"):
             name = f"{mode}{capacity}"
@@ -195,7 +200,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "model_contract": {"schema": "glm5next.graph-inputs.v1", "vocabulary": 154880,
             "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []}}}
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
-        decoder_storage, scratch, metadata, compiled, stream, graph_pool, session, collective, coordinator)
+        decoder_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
+        vocabulary_collective, coordinator)
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
-        max_active=config.max_active, resources=resources, session=session, close_resources=(collective,),
+        max_active=config.max_active, resources=resources, session=session,
+        close_resources=(vocabulary_collective, collective),
         server_config=server_config, memory_report=memory)

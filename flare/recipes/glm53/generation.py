@@ -30,7 +30,7 @@ class PreparedGeneration:
         b, rows = batch.inputs, batch.rows
         arguments = (batch.requests, b.row_slot_ids[:rows], b.row_generations[:rows], b.live_rows,
                      completion_records, frame_index, submission_sequence)
-        self.completion = PreparedCompletion(*arguments) if decoder.scratch.logits is None else PreparedSampling(
+        self.completion = PreparedCompletion(*arguments) if decoder.weights.shard.rank != 0 else PreparedSampling(
             decoder.scratch.logits, *arguments, sample_enabled=b.sample_enabled[:rows])
         self.completion.prepare()
 

@@ -1,14 +1,14 @@
-"""Complete GLM text forwards with shared layer scratch and rank-zero logits."""
+"""Complete GLM text forwards with shared layer scratch and sharded vocabulary weights."""
 
 from dataclasses import dataclass
 
 import torch
 
 from flare.components.embedding import PreparedEmbedding
-from flare.components.linear import UnquantizedProjection
 from flare.components.mhc import MHCScratch
 from flare.components.mlp import MLPScratch
 from flare.components.parallel import TensorParallelShard
+from flare.components.vocabulary import PreparedVocabularyProjection
 
 from .decoder import LayerScratch, PreparedGlmLayer
 from .kda import KDAScratch
@@ -24,7 +24,8 @@ class DecoderScratch:
     residual: torch.Tensor
     selected_residual: torch.Tensor
     hidden: torch.Tensor
-    logits: torch.Tensor | None
+    local_logits: torch.Tensor
+    logits: torch.Tensor
     attention_hc: MHCScratch
     mlp_hc: MHCScratch
     kda: KDAScratch
@@ -41,7 +42,7 @@ class DecoderScratch:
         def buffer(*shape):
             return torch.zeros(shape, dtype=torch.bfloat16, device=device)
         return cls(buffer(tokens, 4096), buffer(tokens, 4, 4096), buffer(sample_rows, 4, 4096),
-            buffer(sample_rows, 4096), buffer(sample_rows, 154880) if shard.rank == 0 else None,
+            buffer(sample_rows, 4096), buffer(sample_rows, 154880 // shard.world_size), buffer(sample_rows, 154880),
             MHCScratch.allocate(tokens, 4096, device), MHCScratch.allocate(tokens, 4096, device),
             KDAScratch.allocate(tokens, 64 // shard.world_size, device),
             MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device),
@@ -56,7 +57,7 @@ class DecoderScratch:
             raise ValueError("GLM sample rows exceed scratch capacity")
         return DecoderScratch(self.embedding[:tokens], self.residual[:tokens],
             self.selected_residual[:sample_rows], self.hidden[:sample_rows],
-            None if self.logits is None else self.logits[:sample_rows],
+            self.local_logits[:sample_rows], self.logits[:sample_rows],
             self.attention_hc.rows(tokens), self.mlp_hc.rows(tokens), self.kda.rows(tokens),
             self.mla.rows(tokens, mode), self.dense.rows(tokens), self.moe.rows(tokens),
             self.attention_output[:tokens], self.mlp_output[:tokens])
@@ -74,13 +75,13 @@ class PreparedDecoder:
 
     Layers reuse residual, mHC, attention and MLP intermediates. Each layer's
     cache and recurrent state have separate owners. Canonical final stream
-    averaging and RMSNorm operate only on selected output rows; rank zero
-    projects those rows to vocabulary logits. This object executes in Python
-    only during preparation and CUDA graph capture.
+    averaging and RMSNorm operate only on selected output rows. Vocabulary
+    projection shards run on every rank before gathering logits for sampling.
+    This object executes in Python only during preparation and CUDA graph capture.
     """
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
-                 metadata: DecoderMetadata, *, mode, runtime, coordinator, session, name,
+                 metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
                  workspace, progress=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
@@ -89,8 +90,6 @@ class PreparedDecoder:
             raise ValueError("GLM token metadata and scratch capacities differ")
         if metadata.sample_indices.shape != scratch.hidden.shape[:1]:
             raise ValueError("GLM sample indices and hidden-output capacities differ")
-        if (scratch.logits is not None) != (weights.shard.rank == 0):
-            raise ValueError("only GLM rank zero owns vocabulary outputs")
         self.weights, self.scratch, self.state, self.metadata = weights, scratch, state, metadata
         self.embedding = PreparedEmbedding(language.embed_tokens.weight, metadata.token_ids, scratch.embedding,
             num_rows=metadata.recurrent.num_tokens, session=session, name=f"{name}.embedding")
@@ -106,10 +105,9 @@ class PreparedDecoder:
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")
-        self.lm_head = None
-        if scratch.logits is not None:
-            self.lm_head = UnquantizedProjection(scratch.hidden, weights.tree.lm_head.weight, scratch.logits,
-                session=session, name=f"{name}.lm_head")
+        self.lm_head = PreparedVocabularyProjection(scratch.hidden, weights.tree.lm_head.weight,
+            scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator,
+            session=session, name=f"{name}.lm_head")
 
     def __call__(self):
         s, language = self.scratch, self.weights.tree.model.language_model
@@ -119,6 +117,5 @@ class PreparedDecoder:
         torch.index_select(s.residual, 0, self.metadata.sample_indices, out=s.selected_residual)
         collapsed = language.hc_head(s.selected_residual[:, None]).squeeze(1)
         s.hidden.copy_(language.norm(collapsed))
-        if self.lm_head is not None:
-            self.lm_head(s.hidden)
+        self.lm_head(s.hidden)
         return s.hidden

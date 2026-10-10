@@ -22,6 +22,18 @@ def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size):
                                          max_size=nbytes, eager_buffer_bytes=nbytes)
 
 
+def create_all_gather_runtime(group, device, *, max_rows, columns):
+    """Allocate b12x staging for serial BF16 column gathers in prepared graphs."""
+    from b12x.comm.pcie import DcpAllToAll
+
+    world_size = dist.get_world_size(group)
+    if (world_size not in (2, 4) or type(max_rows) is not int or max_rows <= 0
+            or type(columns) is not int or columns <= 0 or columns % (world_size * 64)):
+        raise ValueError("column gathers require positive rows and 64-column-aligned TP2 or TP4 partitions")
+    return DcpAllToAll.from_exchange_group(exchange_group=group, device=device,
+        max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False)
+
+
 class CollectivePreparation:
     """Authorize matching collective declarations and synchronize kernel entry.
 

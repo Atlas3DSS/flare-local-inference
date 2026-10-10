@@ -36,9 +36,9 @@ class LayerWeights:
 class ModelWeights:
     """One text rank's canonical modules and all packed decoder weights.
 
-    Embeddings and normalization are replicated. Rank zero owns the vocabulary
-    projection. Routed layers share one scale-expansion workspace and execute
-    serially. Vision and MTP weights are outside this text stack.
+    Embeddings and normalization are replicated. Vocabulary weights partition
+    their output rows. Routed layers share one scale-expansion workspace and
+    execute serially. Vision and MTP weights are outside this text stack.
     """
 
     tree: torch.nn.Module
@@ -64,12 +64,13 @@ class ModelWeights:
         layers = []
         with GlmWeightLoader(manifest, device, shard=shard) as loader:
             names = [f"{TEXT_PREFIX}.embed_tokens.weight", f"{TEXT_PREFIX}.norm.weight"]
-            if shard.rank == 0:
-                names.append("lm_head.weight")
             for name in names:
                 path, attribute = name.rsplit(".", 1)
                 setattr(tree.get_submodule(path), attribute,
                         torch.nn.Parameter(loader.load_tensor(name), requires_grad=False))
+            tree.lm_head.weight = torch.nn.Parameter(loader.load_tensor("lm_head.weight",
+                extent=slice(*shard.partition(tree.lm_head.out_features, alignment=64))), requires_grad=False)
+            tree.lm_head.out_features = tree.lm_head.weight.shape[0]
             scales = loader.allocate_expert_scale_scratch()
             for index in range(len(tree.model.language_model.layers)):
                 layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),

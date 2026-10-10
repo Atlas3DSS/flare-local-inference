@@ -296,19 +296,19 @@ attention, router logits, selected experts, routing weights, shared-expert outpu
 and replicated rank outputs exactly, but differs from the eager residual in
 0.1% of elements under that pointwise check (maximum absolute error 0.0048828125).
 The [complete text stack](../flare/recipes/glm53/stack.py) composes all 45 layers,
-canonical token embeddings, final stream averaging and RMSNorm, and a rank-zero
-vocabulary projection. Each graph capacity owns one residual buffer and one set
+canonical token embeddings, final stream averaging and RMSNorm, and a sharded
+vocabulary projection. Each graph capacity uses one residual buffer and one set
 of mHC, KDA, MLA, dense-MLP, and MoE intermediates reused across serialized layers.
 Every layer owns separate recurrent or cache state; graph variants share that
 persistent state and the tuned operator arena. Embeddings and final normalization
-are replicated, while only rank zero loads the vocabulary projection.
-The [full-checkpoint TP test](../tests/recipes/test_glm53_stack_tp_cuda.py) passed
-4096-token prefill and three teacher-forced decode steps on TP2 and TP4.
-Replicated hidden outputs matched exactly across ranks, outputs and recurrent
-state remained finite, and CUDA allocation and segment counters stayed stable.
-Rank-zero weight allocations occupied 89,184,592,384 bytes on TP2 and
-46,148,968,960 bytes on TP4. The selected operator arenas occupied 161,084,160
-and 161,031,936 bytes, respectively.
+are replicated. Every rank loads a contiguous vocabulary weight partition.
+The shared [vocabulary component](../flare/components/vocabulary.py) projects
+replicated hidden rows locally and gathers BF16 logits with b12x PCIe kernels.
+Rank zero samples from the complete vocabulary. Local and gathered logit buffers
+are caller-owned and shared across serial graph variants.
+The [full-checkpoint TP test](../tests/recipes/test_glm53_stack_tp_cuda.py) exercises
+prefill, decode, rank agreement, finite outputs and recurrent state, and stable
+CUDA allocation counters through native replay.
 Sampled generation through the Rust rank coordinator also passed on TP2 and TP4.
 A 24-token chat prompt used a 128-token prefill graph, all 45 decoder layers,
 and FlashInfer sampling. TP2 reached the requested 32-token budget; TP4 produced
@@ -351,9 +351,10 @@ coordinate rank submissions to native replay workers.
 
 The shared [resume state](../flare/components/resume.py) validates consumed
 endpoints, pending samples, epochs, and rank participation before gathering saved
-normalized hidden outputs. [GLM resume](../flare/recipes/glm53/resume.py) then runs
-the vocabulary projection and FlashInfer sampling on rank zero; peers record
-completion without consuming tokens or changing continuation state.
+normalized hidden outputs. [GLM resume](../flare/recipes/glm53/resume.py) projects
+the saved rows across vocabulary shards and gathers logits on every rank.
+Rank zero performs FlashInfer sampling; peers record completion without
+consuming tokens or changing continuation state.
 Complete-checkpoint TP2/TP4 tests run native init, 267 live tokens in a compiled
 512-token prefill graph, snapshot, two branch restores, resume, and decode through
 the Rust rank coordinator. Each branch shares the full 256-token page and owns

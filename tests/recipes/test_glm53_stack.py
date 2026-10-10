@@ -44,7 +44,8 @@ def test_serial_graph_variants_share_storage_with_exact_shapes(world, rank):
         assert view.mla.index.active_width.item() == 8 * 64
         view.residual.fill_(tokens)
         assert torch.all(base.residual[:tokens] == tokens)
-        assert (view.logits is not None) == (rank == 0)
+        assert view.local_logits.shape == (rows, 154880 // world)
+        assert view.logits.shape == (rows, 154880)
 
 
 def test_scratch_views_reject_unavailable_token_sample_and_request_capacity():
@@ -78,7 +79,8 @@ def test_canonical_layers_share_intermediates_and_own_distinct_state(world, rank
         assert layer.attention_output is scratch.attention_output and layer.mlp_output is scratch.mlp_output
         assert layer.attention is (scratch.mla if module.block_type == "indexed_attention" else scratch.kda)
         assert layer.mlp is (scratch.dense if index < 3 else scratch.moe)
-    assert (scratch.logits is not None) == (rank == 0)
+    assert scratch.local_logits.shape == (1, 154880 // world)
+    assert scratch.logits.shape == (1, 154880)
     assert not metadata.recurrent.num_tokens.count_nonzero()
     assert not metadata.recurrent.num_seqs.count_nonzero()
     assert (metadata.indexed.positions == -1).all()
