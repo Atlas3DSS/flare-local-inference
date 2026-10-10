@@ -1,0 +1,35 @@
+"""Compile prepared text forwards and capture one native executable per shape."""
+
+from contextlib import nullcontext
+
+import torch
+
+from .compilation import compile_forward
+
+
+def capture_forwards(functions, signatures, *, session, device, stream, pool,
+                     collective=None, compile_decoder=True, progress=None):
+    """Retain compiled callables and capture with an optional b12x IPC runtime.
+
+    Persistent state and graph outputs must live in caller-owned storage.
+    Only graph-local intermediates may use the shared graph memory pool;
+    serving replays variants serially and may choose them in any order.
+    """
+    graphs, compiled = {}, {}
+    for name, function in functions.items():
+        if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative"):
+            if progress is not None:
+                progress(f"compiling {name}")
+            function = compile_forward(function)
+            compiled[name] = function
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            function()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        communication = nullcontext() if collective is None else collective.capture(stream=stream)
+        with communication, session.capture(), torch.cuda.graph(graph, pool=pool, stream=stream):
+            function()
+        graphs[name] = graph
+    torch.cuda.synchronize(device)
+    return graphs, compiled

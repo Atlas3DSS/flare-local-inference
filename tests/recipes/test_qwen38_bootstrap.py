@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import gc
 import sys
+import weakref
 from threading import Event, Thread
 from types import SimpleNamespace
-import weakref
 
 import pytest
 
 from flare.preparation.execution import GraphSignature
-from flare.recipes.qwen38.bootstrap import PreparedModel
+from flare.preparation.model import PreparedModel
 
 
 class Resource:
@@ -38,7 +38,7 @@ def model_fixture(monkeypatch, *, synchronize=None, server=None):
         server_config={},
         memory_report={},
         session=Resource("session", events),
-        table=Resource("table", events),
+        close_resources=(Resource("table", events),),
     )
     monkeypatch.setattr(model, "manifest", lambda: {"test_manifest": True})
     monkeypatch.setattr("torch.cuda.synchronize", synchronize or (lambda device: events.append("synchronize")))
@@ -54,7 +54,7 @@ def thread_call(call, *, entered=None):
             entered.set()
         try:
             call()
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - Propagate worker failures to the test thread.
             errors.append(error)
 
     thread = Thread(target=run, daemon=True)
@@ -231,9 +231,8 @@ def test_context_manager_preserves_primary_failure_when_cleanup_is_undrained(mon
     model, events, weights = model_fixture(monkeypatch)
     model._startup_undrained = True
     primary = ValueError("preparation consumer failed")
-    with pytest.raises(ValueError) as raised:
-        with model:
-            raise primary
+    with pytest.raises(ValueError) as raised, model:
+        raise primary
     assert raised.value is primary
     assert any("cleanup failed" in note and "remain retained" in note for note in primary.__notes__)
     assert not events and weights() is not None and not model.closed
@@ -268,6 +267,30 @@ def test_drained_owner_can_retry_incomplete_resource_cleanup(monkeypatch):
     assert not model.resources and not model.graphs and not model.buffers
     gc.collect()
     assert weights() is None
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_peer_resources_release_only_after_native_rank_drains(monkeypatch, fails):
+    def serve_rank(owner, socket, *, rank, world):
+        owner._consumed = True
+        assert (socket, rank, world) == ("peer socket", 1, 2)
+        if fails:
+            raise RuntimeError("peer drain failed")
+
+    monkeypatch.setattr("flare.preparation.execution.PreparedExecution.serve_rank", serve_rank)
+    model, events, weights = model_fixture(monkeypatch)
+    if fails:
+        with pytest.raises(RuntimeError, match="peer drain failed"):
+            model.serve_rank("peer socket", rank=1, world=2)
+        with pytest.raises(RuntimeError, match="must retain"):
+            model.close()
+        assert not events and not model.closed and weights() is not None
+    else:
+        model.serve_rank("peer socket", rank=1, world=2)
+        model.close()
+        assert model.closed and events == ["synchronize", "graph", "session", "table"]
+        gc.collect()
+        assert weights() is None
 
 
 @pytest.mark.parametrize("proposal", ["mtp", "copy"])

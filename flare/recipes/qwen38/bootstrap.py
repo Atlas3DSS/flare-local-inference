@@ -6,16 +6,16 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from threading import get_ident
 from time import monotonic
-from types import MappingProxyType
 
 import torch
 
 from flare.components.sampling import AdmissionBuffers
 from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.execution import GraphSignature, PreparedExecution
+from flare.preparation.capture import capture_forwards
+from flare.preparation.execution import GraphSignature
 from flare.preparation.fixtures.recurrent import register_benchmark_state
+from flare.preparation.model import PreparedModel
 from flare.preparation.qwen38 import (
     CONFIG_SHA256,
     FRONTEND_SHA256,
@@ -120,88 +120,6 @@ class PreparationConfig:
         return (*capacities, self.prefill_chunk_size)
 
 
-class PreparedModel(PreparedExecution):
-    """Own frozen preparation resources until the native server drains."""
-
-    def __init__(self, *, server_config, memory_report, session, table, **kwargs):
-        super().__init__(**kwargs)
-        self.server_config = server_config
-        self.memory_report = memory_report
-        self.session, self.table = session, table
-        self.runtime = None
-        self.closed = False
-        self._startup_undrained = False
-        self._preparation_thread = get_ident()
-
-    def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None):
-        import flare_native
-
-        with self._handoff_lock:
-            if self._consumed or self.closed:
-                raise RuntimeError("prepared model has already been consumed or closed")
-            config = {**self.server_config, "bind": bind,
-                      "template_defaults": {} if template_defaults is None else template_defaults}
-            manifest = self.manifest()
-            torch.cuda.synchronize(self.device)
-            try:
-                server = flare_native.Server(self, manifest, json.dumps(config))
-            except BaseException as error:
-                if getattr(error, "resources_retained", False):
-                    self._startup_undrained = True
-                    self._consumed = True
-                raise
-            self.runtime = server
-            self._consumed = True
-            return server
-
-    def close(self):
-        with self._handoff_lock:
-            self._close_locked()
-
-    def _close_locked(self):
-        if self.closed:
-            return
-        if get_ident() != self._preparation_thread:
-            raise RuntimeError("prepared model cleanup must run on its preparation thread")
-        if self._startup_undrained:
-            raise RuntimeError("native startup could not confirm stream drain; prepared resources remain retained")
-        shutdown_error = None
-        if self.runtime is not None:
-            try:
-                self.runtime.close()
-            except BaseException as error:
-                if not self.runtime.drained:
-                    raise
-                shutdown_error = error
-            if not self.runtime.drained:
-                raise RuntimeError("native streams did not drain; prepared resources remain retained")
-        elif self._consumed:
-            raise RuntimeError("externally started executor must retain this model until its own shutdown")
-        torch.cuda.synchronize(self.device)
-        for graph in self.graphs.values():
-            graph.reset()
-        self.session.close()
-        self.table.close()
-        self._resources = ()
-        self._buffers = MappingProxyType({})
-        self._graphs = MappingProxyType({})
-        self.session = self.table = None
-        self.runtime = None
-        self.closed = True
-        if shutdown_error is not None:
-            raise shutdown_error
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, kind, value, traceback):
-        try:
-            self.close()
-        except BaseException as error:
-            if value is None:
-                raise
-            value.add_note(f"prepared model cleanup failed: {error!r}")
-
 
 def _identity(manifest):
     sources = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -215,7 +133,7 @@ def _identity(manifest):
 
 
 @torch.no_grad()
-def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(), *, progress=None,
+def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, progress=None,
                   compile_decoder: bool = True) -> PreparedModel:
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
@@ -230,6 +148,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         if progress is not None:
             progress(message)
 
+    config = PreparationConfig() if config is None else config
     device = torch.device("cuda", config.device)
     torch.cuda.set_device(device)
     manifest = inspect_qwen38_checkpoint(snapshot)
@@ -395,23 +314,11 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         graph_pool = torch.cuda.graph_pool_handle()
         compiled_functions = {}
         def capture_catalog():
+            captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
+                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=report)
+            graphs.update(captured)
             compiled_functions.clear()
-            for name, function in functions.items():
-                if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative"):
-                    from flare.preparation.compilation import compile_forward
-
-                    report(f"compiling {name}")
-                    function = compile_forward(function)
-                    compiled_functions[name] = function
-                stream.wait_stream(torch.cuda.current_stream(device))
-                with torch.cuda.stream(stream):
-                    function()
-                stream.synchronize()
-                graph = torch.cuda.CUDAGraph()
-                with session.capture(), torch.cuda.graph(graph, pool=graph_pool, stream=stream):
-                    function()
-                graphs[name] = graph
-            torch.cuda.synchronize(device)
+            compiled_functions.update(compiled)
 
         capture_catalog()
         report("measured complete graph catalog memory")
@@ -484,7 +391,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)
         report(f"prepared {len(graphs)} graphs and {page_capacity * 64} cached-token capacity")
         return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
-            resources=resources, server_config=server_config, memory_report=memory, session=session, table=table)
+            resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table,))
     except BaseException:
         torch.cuda.synchronize(device)
         for graph in graphs.values():
