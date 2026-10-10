@@ -14,6 +14,7 @@ from safetensors import safe_open
 
 from flare.components.linear import UnquantizedProjection
 from flare.preparation.checkpoint import CheckpointManifest
+from flare.progress import phase
 from flare.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
 from flare.preparation.scratch import planned_scratch, prime_owners
 from flare.preparation.tuning import declare, register_finalizer
@@ -128,7 +129,7 @@ class MappedPLETable:
     storage: ple_embedding.TableStorage
 
     @classmethod
-    def load(cls, manifest: CheckpointManifest, device) -> MappedPLETable:
+    def load(cls, manifest: CheckpointManifest, device, *, progress=None) -> MappedPLETable:
         config, layout = table_layout(manifest, device)
         required = TABLE_BYTES + (1 << 30)
         available = _available_host_bytes()
@@ -143,27 +144,30 @@ class MappedPLETable:
             or not bool(torch.isfinite(scale).all() & (scale > 0).all())
         ):
             raise ValueError("PLE global scale must be a finite positive FP32 scalar")
-        storage = ple_embedding.allocate_storage(layout)
-        try:
-            for plane in range(128):
-                start, stop = plane * ROWS_PER_PLANE, (plane + 1) * ROWS_PER_PLANE
-                prefix = f"{PLE_PREFIX}.ngram_embedding.shard_{plane}"
-                _copy_plane(
-                    manifest, f"{prefix}.weight", storage.weight_load_view[start:stop]
+        with phase(progress, "Load PLE table", total=128) as stage:
+            stage.update("allocating mapped host storage")
+            storage = ple_embedding.allocate_storage(layout)
+            try:
+                for plane in range(128):
+                    start, stop = plane * ROWS_PER_PLANE, (plane + 1) * ROWS_PER_PLANE
+                    prefix = f"{PLE_PREFIX}.ngram_embedding.shard_{plane}"
+                    _copy_plane(
+                        manifest, f"{prefix}.weight", storage.weight_load_view[start:stop]
+                    )
+                    _copy_plane(
+                        manifest,
+                        f"{prefix}.weight_scale",
+                        storage.weight_scale_load_view[start:stop],
+                    )
+                    stage.update(f"plane {plane + 1}", advance=1)
+                storage.weight_scale_2_load_view.copy_(scale)
+                geometry = ple_embedding.allocate_geometry(
+                    layout.geometry, device=layout.caps.device
                 )
-                _copy_plane(
-                    manifest,
-                    f"{prefix}.weight_scale",
-                    storage.weight_scale_load_view[start:stop],
-                )
-            storage.weight_scale_2_load_view.copy_(scale)
-            geometry = ple_embedding.allocate_geometry(
-                layout.geometry, device=layout.caps.device
-            )
-            return cls(config, layout, geometry, storage)
-        except BaseException:
-            storage.close()
-            raise
+                return cls(config, layout, geometry, storage)
+            except BaseException:
+                storage.close()
+                raise
 
     def close(self) -> None:
         self.storage.close()

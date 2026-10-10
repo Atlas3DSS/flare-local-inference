@@ -12,6 +12,8 @@ from time import monotonic
 
 def main(argv=None):
     started = monotonic()
+    from flare.progress import StartupProgress, phase
+
     from flare.preparation.qwen38 import MODEL_ID, REVISION
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -43,20 +45,21 @@ def main(argv=None):
     parser.add_argument("--memory-report", type=Path)
     parser.add_argument("--prepare-only", action="store_true", help="validate the graph catalog and release it without binding HTTP")
     args = parser.parse_args(argv)
+    progress = StartupProgress()
     defaults = {}
     if args.template_defaults is not None:
         defaults = json.loads(args.template_defaults.read_text())
         if not isinstance(defaults, dict):
             parser.error("template defaults must be a JSON object")
     architecture = json.loads((args.snapshot / "config.json").read_text()).get("model_type")
-    progress = lambda text: print(f"{monotonic() - started:6.1f}s {text}", file=sys.stderr, flush=True)
     budgets = {"snapshot_budget_bytes": int(args.snapshot_budget_gib * (1 << 30)),
                "headroom_bytes": int(args.headroom_gib * (1 << 30))}
     if architecture == "glm5_next":
         if args.tp not in (2, 4) or args.mtp:
             parser.error("GLM requires --tp 2 or --tp 4 and has no prepared MTP catalog")
-        from flare.preparation.rank_group import prepare_group
-        from flare.recipes.glm53.bootstrap import PreparationConfig, prepare_rank
+        with phase(progress, "Initialize model runtime"):
+            from flare.preparation.rank_group import prepare_group
+            from flare.recipes.glm53.bootstrap import PreparationConfig, prepare_rank
 
         config = PreparationConfig(devices=tuple(range(args.device, args.device + args.tp)),
             context=args.context, pages=args.pages, prefill_chunk_size=args.prefill_chunk_size,
@@ -65,7 +68,8 @@ def main(argv=None):
     elif architecture == "qwen4_exp":
         if args.tp != 1 or args.max_active != 4:
             parser.error("Qwen requires --tp 1 and --max-active 4")
-        from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+        with phase(progress, "Initialize model runtime"):
+            from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
         config = PreparationConfig(device=args.device, context=args.context, pages=args.pages,
             prefill_chunk_size=args.prefill_chunk_size,
@@ -82,7 +86,8 @@ def main(argv=None):
             model.manifest()
             progress("preparation complete")
             return 0
-        server = model.start_server(bind=args.bind, template_defaults=defaults)
+        with phase(progress, "Start Helios"):
+            server = model.start_server(bind=args.bind, template_defaults=defaults)
         print(f"Listening on {server.address}; startup {monotonic() - started:.2f}s", file=sys.stderr, flush=True)
         def stop(signum, frame):
             raise KeyboardInterrupt

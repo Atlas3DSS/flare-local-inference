@@ -21,6 +21,7 @@ from flare.preparation.execution import GraphSignature
 from flare.preparation.fixtures.recurrent import register_benchmark_state
 from flare.preparation.model import PreparedModel
 from flare.preparation.scratch import ScratchArena
+from flare.progress import phase
 from flare.preparation.tuning import RecordedPreparationSession
 
 from .batch import BatchInputs, PreparedBatch
@@ -96,84 +97,88 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     shard = TensorParallelShard(rank, len(config.devices))
     device = torch.device("cuda", config.devices[rank])
     torch.cuda.set_device(device)
-    manifest = inspect_indexed_checkpoint(snapshot)
+    with phase(progress, "Inspect checkpoint"):
+        manifest = inspect_indexed_checkpoint(snapshot)
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress)
-    layer_types = weights.tree.config.text_config.layer_types
-    layout = continuation_layout(layer_types, shard.world_size)
-    snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
-    if snapshots < 1:
-        raise ValueError("GLM snapshot budget must hold at least one continuation row")
-    pages, blocks = config.page_capacity, config.context // 256
-    pool = ContinuationPool.allocate(layer_types, shard.world_size, 5 + snapshots, pages, device)
-    requests = DeviceRequestState.allocate(device, vocab_size=154880, consumed_tokens=pool.consumed_tokens[1:5, 0])
-    inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device)
-    admission = AdmissionBuffers.allocate(device, vocab_size=154880)
-    commands = StateCommands.allocate(device)
-    frame = torch.zeros(1, dtype=torch.int32, device=device)
-    sequence = torch.zeros(1, dtype=torch.int64, device=device)
-    records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
-    coordinator = CollectivePreparation(group)
-    collective = create_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size, hidden_size=4096)
-    vocabulary_collective = create_all_gather_runtime(group, device,
-        max_rows=max(config.batch_capacities), columns=154880)
-    identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
-        "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
-        "contract": "glm5next.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
-    session = RecordedPreparationSession(device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
-        numerical_policy="default", coordinator=coordinator)
-    session.__enter__()
-    register_benchmark_state(session, pool.decoder.layers[0].recurrent,
-        storage=pool.backing, restore=pool.clear_for_preparation)
-    arena = ScratchArena(device)
-    session.register_scratch(arena)
-    forwards, signatures, decoders, scratch, metadata = {}, {}, {}, {}, {}
-    buffers = dict(inputs.buffers(), **commands.buffers(), **{
-        name: getattr(admission, name) for name in admission.__dataclass_fields__},
-        sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
-        submission_sequence=sequence, completion_records=records)
-    forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
-    decoder_storage = DecoderScratch.allocate(config.prefill_chunk_size, blocks, "decode", device,
-        shard=shard, sample_rows=max(config.batch_capacities))
+    with phase(progress, "Allocate model state and collectives"):
+        layer_types = weights.tree.config.text_config.layer_types
+        layout = continuation_layout(layer_types, shard.world_size)
+        snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
+        if snapshots < 1:
+            raise ValueError("GLM snapshot budget must hold at least one continuation row")
+        pages, blocks = config.page_capacity, config.context // 256
+        pool = ContinuationPool.allocate(layer_types, shard.world_size, 5 + snapshots, pages, device)
+        requests = DeviceRequestState.allocate(device, vocab_size=154880, consumed_tokens=pool.consumed_tokens[1:5, 0])
+        inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device)
+        admission = AdmissionBuffers.allocate(device, vocab_size=154880)
+        commands = StateCommands.allocate(device)
+        frame = torch.zeros(1, dtype=torch.int32, device=device)
+        sequence = torch.zeros(1, dtype=torch.int64, device=device)
+        records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
+        coordinator = CollectivePreparation(group)
+        collective = create_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size, hidden_size=4096)
+        vocabulary_collective = create_all_gather_runtime(group, device,
+            max_rows=max(config.batch_capacities), columns=154880)
+        identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
+            "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
+            "contract": "glm5next.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
+        session = RecordedPreparationSession(device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
+            numerical_policy="default", coordinator=coordinator)
+        session.__enter__()
+        register_benchmark_state(session, pool.decoder.layers[0].recurrent,
+            storage=pool.backing, restore=pool.clear_for_preparation)
+        arena = ScratchArena(device)
+        session.register_scratch(arena)
+        forwards, signatures, decoders, scratch, metadata = {}, {}, {}, {}, {}
+        buffers = dict(inputs.buffers(), **commands.buffers(), **{
+            name: getattr(admission, name) for name in admission.__dataclass_fields__},
+            sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
+            submission_sequence=sequence, completion_records=records)
+        forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
+        decoder_storage = DecoderScratch.allocate(config.prefill_chunk_size, blocks, "decode", device,
+            shard=shard, sample_rows=max(config.batch_capacities))
 
-    def add(name, function, kind, rows, tokens, fields):
-        forwards[name] = function
-        signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields))
+    graph_count = len(config.prefill_capacities) + 5 * len(config.batch_capacities)
+    with phase(progress, "Construct graph catalog", total=graph_count) as stage:
+        def add(name, function, kind, rows, tokens, fields):
+            forwards[name] = function
+            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields))
+            stage.update(name, advance=1)
 
-    for mode, capacities in (("prefill", reversed(config.prefill_capacities)), ("decode", config.batch_capacities)):
-        for capacity in capacities:
-            rows = 1 if mode == "prefill" else capacity
-            name = f"{mode}{capacity}"
-            metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
-            scratch[name] = decoder_storage.rows(capacity, mode, sample_rows=rows)
-            decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-                session=session, name=name, workspace=arena)
-            batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages)
-            forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
-                pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation")
-            add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs)
-            report(f"declared {name}")
-    row_inputs = ("row_slot_ids", "row_generations", "live_rows")
-    for capacity in config.batch_capacities:
-        name = f"resume{capacity}"
-        resume = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
-            rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
-            coordinator=coordinator, session=session, name=name)
-        add(name, resume, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"))
-        for mode in ("init", "restore", "snapshot"):
-            name = f"{mode}{capacity}"
-            operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
-                runtime=collective, coordinator=coordinator, session=session, name=name,
-                capacity=capacity, admission_buffers=admission)
-            fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
-            add(name, operation, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()))
+        for mode, capacities in (("prefill", reversed(config.prefill_capacities)), ("decode", config.batch_capacities)):
+            for capacity in capacities:
+                rows = 1 if mode == "prefill" else capacity
+                name = f"{mode}{capacity}"
+                metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
+                scratch[name] = decoder_storage.rows(capacity, mode, sample_rows=rows)
+                decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
+                    runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                    session=session, name=name, workspace=arena)
+                batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages)
+                forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
+                    pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation")
+                add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs)
+        row_inputs = ("row_slot_ids", "row_generations", "live_rows")
+        for capacity in config.batch_capacities:
+            name = f"resume{capacity}"
+            resume = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
+                rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
+                coordinator=coordinator, session=session, name=name)
+            add(name, resume, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"))
+            for mode in ("init", "restore", "snapshot"):
+                name = f"{mode}{capacity}"
+                operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                    runtime=collective, coordinator=coordinator, session=session, name=name,
+                    capacity=capacity, admission_buffers=admission)
+                fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
+                add(name, operation, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()))
     report("preparing weight kernels, then cache-state kernels")
     tuning = session.tune(show_progress=progress is not None and rank == 0)
     report(f"selected kernels: {tuning['selection_counts']}")
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle()
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
-        stream=stream, pool=graph_pool, collective=collective, progress=report)
+        stream=stream, pool=graph_pool, collective=collective, progress=progress)
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)

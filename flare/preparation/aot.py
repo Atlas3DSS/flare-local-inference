@@ -301,26 +301,35 @@ class ForwardCache:
         root = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
         self.root = root / 'flare' / 'forwards' / key.hexdigest()
 
-    def prepare(self, forward, *, name, signature):
+    def prepare(self, forward, *, name, signature, progress=None):
         """Bind and warm one callable on the caller's preparation stream."""
         with _guard_code_cache(self.root / 'guards'):
-            return self._prepare(forward, name=name, signature=signature)
+            return self._prepare(forward, name=name, signature=signature, progress=progress)
 
-    def _prepare(self, forward, *, name, signature):
+    def _prepare(self, forward, *, name, signature, progress=None):
+        def report(operation):
+            if progress is not None:
+                progress.update(f"{name} · {operation}")
         identity = (type(forward).__module__, type(forward).__qualname__, name, signature)
         path = self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
         if path.is_file():
+            report("restoring compiled forward")
             with path.open('rb') as file:
                 artifact = torch.compiler.load_compiled_function(file)
+            report("checking compiled bindings")
             if artifact.guard_check(forward):
                 try:
+                    report("warming restored forward")
                     artifact(forward)
                 except BindingMismatch:
                     pass
                 else:
                     return BoundForward(artifact, forward, True)
+        report("tracing and compiling forward")
         artifact = aot_forward(forward)
+        report("warming compiled forward")
         artifact(forward)
         path.parent.mkdir(parents=True, exist_ok=True)
+        report("saving compiled forward")
         artifact.save_compiled_function(str(path))
         return BoundForward(artifact, forward, False)

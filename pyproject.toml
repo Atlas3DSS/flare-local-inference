@@ -27,6 +27,7 @@ prepare = [
     "accelerate==1.14.0",
     "Pillow==12.3.0",
     "flare-helios",
+    "rich>=13",
 ]
 
 [[tool.uv.index]]

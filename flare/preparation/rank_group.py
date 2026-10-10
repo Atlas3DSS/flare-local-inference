@@ -10,6 +10,8 @@ from tempfile import TemporaryDirectory
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from flare.progress import phase
+
 
 def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare):
     import flare_helios
@@ -130,11 +132,17 @@ def prepare_group(snapshot, config, prepare, *, progress=None):
         rendezvous.cleanup()
         raise
     try:
-        dist.init_process_group("gloo", init_method=address, rank=0, world_size=len(config.devices),
-                                timeout=timedelta(minutes=15))
+        with phase(progress, "Connect tensor-parallel ranks"):
+            dist.init_process_group("gloo", init_method=address, rank=0, world_size=len(config.devices),
+                                    timeout=timedelta(minutes=15))
         model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress)
         model.manifest()
-        reports = [control.recv() for control in controls]
+        with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
+            reports = []
+            for rank, control in enumerate(controls, 1):
+                stage.update(f"rank {rank}")
+                reports.append(control.recv())
+                stage.update(advance=1)
         return PreparedRankGroup(model, processes, connections, controls, supervisor, rendezvous, reports)
     except BaseException:  # noqa: BLE001 - Preparation interruption must terminate every rank.
         traceback.print_exc()

@@ -120,7 +120,12 @@ def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_
     monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
     cache = ForwardCache(namespace={'model': 'buffer'}, device='cuda:0')
     signature = GraphSignature('decode', 1, 1)
-    first = cache.prepare(BufferForward(0), name='decode', signature=signature)
+    from types import SimpleNamespace
+
+    events = []
+    progress = SimpleNamespace(update=events.append)
+    first = cache.prepare(BufferForward(0), name='decode', signature=signature, progress=progress)
+    assert any("tracing and compiling" in event for event in events)
     assert not first.cache_hit
 
     def forbid_trace(*args, **kwargs):
@@ -131,7 +136,11 @@ def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_
         patch.setattr(aot, 'aot_forward', forbid_trace)
         patch.setattr(aot, 'make_fx', forbid_trace)
         patch.setattr(PyExprCSEPass, 'count', forbid_trace)
-        restored = cache.prepare(fresh, name='decode', signature=signature)
+        events.clear()
+        restored = cache.prepare(fresh, name='decode', signature=signature, progress=progress)
+        assert any("restoring compiled" in event for event in events)
+        assert any("warming restored" in event for event in events)
+        assert not any("tracing and compiling" in event for event in events)
         assert restored.cache_hit
         torch.testing.assert_close(fresh.output, fresh.source + 73.25)
 

@@ -6,7 +6,6 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
 
 import torch
 
@@ -25,6 +24,7 @@ from flare.preparation.qwen38 import (
     REVISION,
 )
 from flare.preparation.scratch import ScratchArena
+from flare.progress import phase
 
 from .attention import QSAState, RotaryTables
 from .decoder import DecoderScratch, ModelWeights, PreparedDecoder
@@ -151,9 +151,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     config = PreparationConfig() if config is None else config
     device = torch.device("cuda", config.device)
     torch.cuda.set_device(device)
-    started = monotonic()
-    manifest = inspect_qwen38_checkpoint(snapshot)
-    report(f"inspected checkpoint metadata in {monotonic() - started:.2f}s")
+    with phase(progress, "Inspect checkpoint"):
+        manifest = inspect_qwen38_checkpoint(snapshot)
     weights = ModelWeights.load(manifest, device, progress=progress)
     mtp_weights = None
     has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
@@ -163,140 +162,138 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         mtp_weights = MTPWeights.load(manifest, device,
             embedding_weight=weights.tree.model.language_model.embed_tokens.weight,
             lm_head_weight=weights.tree.lm_head.weight, progress=progress)
-    started = monotonic()
-    table = MappedPLETable.load(manifest, device)
-    report(f"loaded mapped PLE table in {monotonic() - started:.2f}s")
+    table = MappedPLETable.load(manifest, device, progress=progress)
     session = preparation_session(device=device, checkpoint=REVISION,
         namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
     session.__enter__()
     graphs = {}
     try:
-        speculative_tokens = 7 if config.mtp else 0
-        layout = HybridStateLayout.build(speculative_tokens=speculative_tokens)
-        snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
-        extra_base = SNAPSHOT_BASE + snapshots
-        state = HybridStatePool.allocate(extra_base + (28 if config.mtp else 0), device,
-                                         speculative_tokens=speculative_tokens)
-        register_benchmark_state(
-            session, next(iter(state.gdn.values())).recurrent,
-            storage=state.backing, restore=state.reset_for_preparation,
-        )
-        requests = DeviceRequestState.allocate(device,
-            consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5])
-        inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size)
-        scratch = DecoderScratch.allocate(config.prefill_chunk_size, device, sample_rows=8 if config.mtp else 4)
-        workspaces = ScratchArena(device)
-        rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
-        cache = {index: QSAState.allocate(pages=1, slots=5, device=device, draft_tokens=speculative_tokens)
-                 for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}
-        page_bytes = sum(sum(getattr(value, name).nbytes for name in
-            ("main_k_cache", "main_v_cache", "compressed_k_cache")) for value in cache.values())
-        planned_pages = torch.cuda.mem_get_info(device)[1] // page_bytes
-        admission = AdmissionBuffers.allocate(device, vocab_size=248320)
-        transfer = StateTransferMetadata.allocate(4, device)
-        frame = torch.zeros(1, dtype=torch.int32, device=device)
-        sequence = torch.zeros(1, dtype=torch.int64, device=device)
-        completion = torch.zeros((2, 4, 24 if config.mtp else 8), dtype=torch.int64, device=device)
-        features = VisionFeatureState.allocate(device)
-        vision_inputs = VisionInputs.allocate(device)
-        vision_scratch = VisionScratch.allocate(16384, device)
-        buffers = {**inputs.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
-            **{f"state_{name}": getattr(transfer, name) for name in transfer.__dataclass_fields__},
-            **{name: getattr(vision_inputs, name) for name in vision_inputs.__dataclass_fields__},
-            "frame_index": frame, "submission_sequence": sequence, "completion_records": completion,
-            "sampling_grammar_mask": requests.grammar_mask}
-        functions, signatures, decoders, owners = {}, {}, [], []
-        speculation = None
-        if config.mtp:
-            from .speculative_model import SpeculativePreparation
+        with phase(progress, "Allocate model state"):
+            speculative_tokens = 7 if config.mtp else 0
+            layout = HybridStateLayout.build(speculative_tokens=speculative_tokens)
+            snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
+            extra_base = SNAPSHOT_BASE + snapshots
+            state = HybridStatePool.allocate(extra_base + (28 if config.mtp else 0), device,
+                                             speculative_tokens=speculative_tokens)
+            register_benchmark_state(
+                session, next(iter(state.gdn.values())).recurrent,
+                storage=state.backing, restore=state.reset_for_preparation,
+            )
+            requests = DeviceRequestState.allocate(device,
+                consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5])
+            inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size)
+            scratch = DecoderScratch.allocate(config.prefill_chunk_size, device, sample_rows=8 if config.mtp else 4)
+            workspaces = ScratchArena(device)
+            rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
+            cache = {index: QSAState.allocate(pages=1, slots=5, device=device, draft_tokens=speculative_tokens)
+                     for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}
+            page_bytes = sum(sum(getattr(value, name).nbytes for name in
+                ("main_k_cache", "main_v_cache", "compressed_k_cache")) for value in cache.values())
+            planned_pages = torch.cuda.mem_get_info(device)[1] // page_bytes
+            admission = AdmissionBuffers.allocate(device, vocab_size=248320)
+            transfer = StateTransferMetadata.allocate(4, device)
+            frame = torch.zeros(1, dtype=torch.int32, device=device)
+            sequence = torch.zeros(1, dtype=torch.int64, device=device)
+            completion = torch.zeros((2, 4, 24 if config.mtp else 8), dtype=torch.int64, device=device)
+            features = VisionFeatureState.allocate(device)
+            vision_inputs = VisionInputs.allocate(device)
+            vision_scratch = VisionScratch.allocate(16384, device)
+            buffers = {**inputs.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
+                **{f"state_{name}": getattr(transfer, name) for name in transfer.__dataclass_fields__},
+                **{name: getattr(vision_inputs, name) for name in vision_inputs.__dataclass_fields__},
+                "frame_index": frame, "submission_sequence": sequence, "completion_records": completion,
+                "sampling_grammar_mask": requests.grammar_mask}
+            functions, signatures, decoders, owners = {}, {}, [], []
+            speculation = None
+            if config.mtp:
+                from .speculative_model import SpeculativePreparation
 
-            speculation = SpeculativePreparation(weights=weights, mtp_weights=mtp_weights,
-                pool=state, requests=requests, inputs=inputs, scratch=scratch, workspaces=workspaces,
-                rotary=rotary, cache=cache, table=table, session=session, completion=completion,
-                frame=frame, sequence=sequence, extra_base=extra_base, context=config.context,
-                prefill_capacity=config.prefill_chunk_size, max_cache_pages=planned_pages,
-                proposal_source=config.speculative_proposal_source)
-            buffers.update(speculation.buffers())
-        def add(name, function, kind, batch, tokens, fields):
-            functions[name] = function
-            signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields))
+                speculation = SpeculativePreparation(weights=weights, mtp_weights=mtp_weights,
+                    pool=state, requests=requests, inputs=inputs, scratch=scratch, workspaces=workspaces,
+                    rotary=rotary, cache=cache, table=table, session=session, completion=completion,
+                    frame=frame, sequence=sequence, extra_base=extra_base, context=config.context,
+                    prefill_capacity=config.prefill_chunk_size, max_cache_pages=planned_pages,
+                    proposal_source=config.speculative_proposal_source)
+                buffers.update(speculation.buffers())
+        graph_count = 4 + len(config.prefill_capacities) + (len(config.speculative_shapes) if config.mtp else 3) + 12
+        with phase(progress, "Construct graph catalog", total=graph_count) as stage:
+            def add(name, function, kind, batch, tokens, fields):
+                functions[name] = function
+                signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields))
+                stage.update(name, advance=1)
 
-        vision_fields = tuple(vision_inputs.__dataclass_fields__)
-        for capacity in (16384, 4096, 1024, 256):
-            s = vision_scratch.rows(capacity)
-            handoff = PreparedVisionHandoff(vision_inputs, features, requests, s.output, completion, frame, sequence)
-            handoff.prepare()
-            with torch.device("meta"):
-                module = Qwen4ExpVisionModel(weights.tree.config.vision_config)
-            module.eval().requires_grad_(False)
-            encoder = PreparedVision(module, s, handoff.metadata, weights.vision, session=session,
-                name=f"vision{capacity}", projection_workspace=workspaces,
-                attention_workspace=workspaces)
-            def vision(handoff=handoff, encoder=encoder):
-                handoff.begin()
-                encoder(handoff.pixels)
-                handoff.finish()
-            add(f"vision{capacity}", vision, "vision", 1, capacity, vision_fields)
-            owners.extend((handoff, encoder))
-            report(f"declared vision capacity {capacity}")
+            vision_fields = tuple(vision_inputs.__dataclass_fields__)
+            for capacity in (16384, 4096, 1024, 256):
+                s = vision_scratch.rows(capacity)
+                handoff = PreparedVisionHandoff(vision_inputs, features, requests, s.output, completion, frame, sequence)
+                handoff.prepare()
+                with torch.device("meta"):
+                    module = Qwen4ExpVisionModel(weights.tree.config.vision_config)
+                module.eval().requires_grad_(False)
+                encoder = PreparedVision(module, s, handoff.metadata, weights.vision, session=session,
+                    name=f"vision{capacity}", projection_workspace=workspaces,
+                    attention_workspace=workspaces)
+                def vision(handoff=handoff, encoder=encoder):
+                    handoff.begin()
+                    encoder(handoff.pixels)
+                    handoff.finish()
+                add(f"vision{capacity}", vision, "vision", 1, capacity, vision_fields)
+                owners.extend((handoff, encoder))
 
-        forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
-                          *(("draft_page_tables",) if has_mtp else ()))
-        modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
-        if not config.mtp:
-            modes += (("decode", (4, 2, 1)),)
-        report("declaring graph shapes before kernel autotuning")
-        for mode, capacities in modes:
-            for capacity in capacities:
-                rows = 1 if mode == "prefill" else capacity
-                metadata = PreparedDecoderState(inputs, requests, state, tokens=capacity, rows=rows, mode=mode)
-                s = scratch.rows(capacity, rows)
-                injection = None
-                if mode == "prefill":
-                    injection = PreparedEmbeddingInjection(features, requests, inputs.vision_token_indices[:capacity],
-                        inputs.row_slot_ids, inputs.row_generations, inputs.query_lengths, inputs.live_rows,
-                        s.embedding, rows=rows)
-                    injection.prepare()
-                decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
-                    completion, frame, sequence, session=session, name=f"{mode}{capacity}",
-                    embedding_injection=injection, max_cache_pages=planned_pages)
-                forward = decoder if speculation is None else speculation.prefill(decoder, f"{mode}{capacity}")
-                add(f"{mode}{capacity}", forward, mode, rows,
-                    capacity if mode == "prefill" else 1, forward_fields)
-                decoders.append(decoder)
-                report(f"declared {mode} capacity {capacity}")
+            forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
+                              *(("draft_page_tables",) if has_mtp else ()))
+            modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
+            if not config.mtp:
+                modes += (("decode", (4, 2, 1)),)
+            for mode, capacities in modes:
+                for capacity in capacities:
+                    rows = 1 if mode == "prefill" else capacity
+                    metadata = PreparedDecoderState(inputs, requests, state, tokens=capacity, rows=rows, mode=mode)
+                    s = scratch.rows(capacity, rows)
+                    injection = None
+                    if mode == "prefill":
+                        injection = PreparedEmbeddingInjection(features, requests, inputs.vision_token_indices[:capacity],
+                            inputs.row_slot_ids, inputs.row_generations, inputs.query_lengths, inputs.live_rows,
+                            s.embedding, rows=rows)
+                        injection.prepare()
+                    decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
+                        completion, frame, sequence, session=session, name=f"{mode}{capacity}",
+                        embedding_injection=injection, max_cache_pages=planned_pages)
+                    forward = decoder if speculation is None else speculation.prefill(decoder, f"{mode}{capacity}")
+                    add(f"{mode}{capacity}", forward, mode, rows,
+                        capacity if mode == "prefill" else 1, forward_fields)
+                    decoders.append(decoder)
 
-        if speculation is not None:
-            fields = (*forward_fields, *(name for name in speculation.buffers() if name != "draft_page_tables"))
-            for batch, width in config.speculative_shapes:
-                name = f"speculative{batch}x{width}"
-                operation = speculation.round(batch, width, name)
-                operation.prepare()
-                add(name, operation, "speculative", batch, width, fields)
-                report(f"declared speculative batch={batch}, verification_width={width}")
-            decoders.extend(speculation.decoders)
-            owners.append(speculation)
+            if speculation is not None:
+                fields = (*forward_fields, *(name for name in speculation.buffers() if name != "draft_page_tables"))
+                for batch, width in config.speculative_shapes:
+                    name = f"speculative{batch}x{width}"
+                    operation = speculation.round(batch, width, name)
+                    operation.prepare()
+                    add(name, operation, "speculative", batch, width, fields)
+                decoders.extend(speculation.decoders)
+                owners.append(speculation)
 
-        state_fields = tuple(f"state_{name}" for name in transfer.__dataclass_fields__ if name != "errors")
-        admission_fields = tuple(admission.__dataclass_fields__)
-        for capacity in (4, 2, 1):
-            resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
-                scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
-                session=session, name=f"resume{capacity}")
-            forward = resume if speculation is None else speculation.resume(resume)
-            add(f"resume{capacity}", forward, "resume", capacity, 1, forward_fields)
-            owners.append(resume)
-            for mode in ("init", "restore", "snapshot"):
-                maintenance = PreparedMaintenance(mode, requests, state, transfer, completion, frame, sequence,
-                    admission_buffers=admission, forward_inputs=inputs,
-                    qsa_states=tuple(value for index, value in cache.items() if index < 48), capacity=capacity,
-                    speculation=speculation)
-                maintenance.prepare()
-                fields = state_fields + (forward_fields if mode == "snapshot" else admission_fields)
-                if mode == "restore":
-                    fields += ("page_tables", *(("draft_page_tables",) if has_mtp else ()))
-                add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
-                owners.append(maintenance)
+            state_fields = tuple(f"state_{name}" for name in transfer.__dataclass_fields__ if name != "errors")
+            admission_fields = tuple(admission.__dataclass_fields__)
+            for capacity in (4, 2, 1):
+                resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
+                    scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
+                    session=session, name=f"resume{capacity}")
+                forward = resume if speculation is None else speculation.resume(resume)
+                add(f"resume{capacity}", forward, "resume", capacity, 1, forward_fields)
+                owners.append(resume)
+                for mode in ("init", "restore", "snapshot"):
+                    maintenance = PreparedMaintenance(mode, requests, state, transfer, completion, frame, sequence,
+                        admission_buffers=admission, forward_inputs=inputs,
+                        qsa_states=tuple(value for index, value in cache.items() if index < 48), capacity=capacity,
+                        speculation=speculation)
+                    maintenance.prepare()
+                    fields = state_fields + (forward_fields if mode == "snapshot" else admission_fields)
+                    if mode == "restore":
+                        fields += ("page_tables", *(("draft_page_tables",) if has_mtp else ()))
+                    add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
+                    owners.append(maintenance)
         session.register_scratch(workspaces)
         report("preparing weight kernels, then cache-state kernels")
         tuning = session.tune(show_progress=progress is not None)
@@ -308,35 +305,35 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         compiled_functions = {}
         def capture_catalog(*, compile_decoder):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
-                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=report)
+                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
 
         capture_catalog(compile_decoder=False)
-        report("measured uncompiled graph catalog memory")
-        free, total = torch.cuda.mem_get_info(device)
-        available = free - config.headroom_bytes - _KV_ALLOCATION_MARGIN
-        page_capacity = available // page_bytes if config.pages is None else config.pages
-        if page_capacity <= 0 or page_capacity * page_bytes > available:
-            raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
-        report(f"KV sizing: free={free}, allocated={torch.cuda.memory_allocated(device)}, "
-               f"reserved={torch.cuda.memory_reserved(device)}, pages={page_capacity}, "
-               f"page_bytes={page_bytes}, headroom={config.headroom_bytes}")
-        final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
-            device=device, headroom_bytes=config.headroom_bytes, automatic=config.pages is None, report=report)
-        for decoder in decoders:
-            for index in range(3, 48, 4):
-                decoder.layers[index][1].rebind_pages_for_preparation(final_cache[index])
-            decoder.qsa_states = final_cache
-        if speculation is not None:
-            speculation.rebind_pages_for_preparation(final_cache)
-        for owner in owners:
-            if isinstance(owner, PreparedMaintenance):
-                owner.rebind_pages_for_preparation(final_cache)
-        for graph in graphs.values():
-            graph.reset()
-        graphs.clear()
+        with phase(progress, "Allocate KV cache"):
+            free, total = torch.cuda.mem_get_info(device)
+            available = free - config.headroom_bytes - _KV_ALLOCATION_MARGIN
+            page_capacity = available // page_bytes if config.pages is None else config.pages
+            if page_capacity <= 0 or page_capacity * page_bytes > available:
+                raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
+            report(f"KV sizing: free={free}, allocated={torch.cuda.memory_allocated(device)}, "
+                   f"reserved={torch.cuda.memory_reserved(device)}, pages={page_capacity}, "
+                   f"page_bytes={page_bytes}, headroom={config.headroom_bytes}")
+            final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
+                device=device, headroom_bytes=config.headroom_bytes, automatic=config.pages is None, report=report)
+            for decoder in decoders:
+                for index in range(3, 48, 4):
+                    decoder.layers[index][1].rebind_pages_for_preparation(final_cache[index])
+                decoder.qsa_states = final_cache
+            if speculation is not None:
+                speculation.rebind_pages_for_preparation(final_cache)
+            for owner in owners:
+                if isinstance(owner, PreparedMaintenance):
+                    owner.rebind_pages_for_preparation(final_cache)
+            for graph in graphs.values():
+                graph.reset()
+            graphs.clear()
         capture_catalog(compile_decoder=compile_decoder)
         session.freeze()
         free, total = torch.cuda.mem_get_info(device)

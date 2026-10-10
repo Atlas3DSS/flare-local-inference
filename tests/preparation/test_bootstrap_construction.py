@@ -558,7 +558,7 @@ def _install_boundaries(monkeypatch, checkpoint):
     monkeypatch.setattr(loader, "load_experts", experts)
     monkeypatch.setattr(mtp_weights.MTPWeightLoader, "load_experts", experts)
 
-    def load_table(cls, manifest, device):
+    def load_table(cls, manifest, device, *, progress=None):
         geometry = ple.ple_embedding.allocate_geometry(
             table_layout.geometry, device=device
         )
