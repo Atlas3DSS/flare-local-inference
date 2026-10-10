@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from contextlib import contextmanager
 import gc
+from collections import Counter
+from collections.abc import Hashable
+from contextlib import contextmanager
 from threading import get_ident
-from typing import Hashable
 
 import torch
 from b12x.preparation import MemoryRequirements, PreparationSession
@@ -23,7 +23,8 @@ class RecordedPreparationSession(PreparationSession):
     """
 
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
-                 numerical_policy: str, search_limits=None, namespace=None, race_budget=None):
+                 numerical_policy: str, search_limits=None, namespace=None, race_budget=None,
+                 coordinator=None):
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
         if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
@@ -35,7 +36,9 @@ class RecordedPreparationSession(PreparationSession):
         identity.update(checkpoint=checkpoint, workload_schema=workload_schema,
                         numerical_policy=numerical_policy)
         super().__init__(device=device, autotune=False, compile_workers=0,
-                         namespace=identity, race_budget=race_budget)
+                         namespace=identity, race_budget=race_budget,
+                         collective_barrier=None if coordinator is None else coordinator.barrier)
+        self._coordinator = coordinator
         self._recorded_requests = {}
         self._finalizers = []
         self._scratch_arena = None
@@ -55,16 +58,23 @@ class RecordedPreparationSession(PreparationSession):
     def prepare(self, requests, *, coordinator=None, progress=None, autotune=None):
         self._require_collecting()
         requests = tuple(requests)
-        if (autotune is not None and autotune is not False) or coordinator is not None:
+        if autotune is not None and autotune is not False:
             raise ValueError("recorded preparation uses default local priming before tune()")
+        if coordinator is not None and coordinator is not self._coordinator:
+            raise ValueError("collective declarations must use the session's bootstrap coordinator")
         names = [request.name for request in requests]
         if len(set(names)) != len(names) or any(name in self._recorded_requests for name in names):
             raise ValueError("preparation request names must be unique across the model")
         if any(request.retain_benchmark_call for request in requests):
             raise ValueError("serving preparation cannot retain benchmark calls after tuning")
-        result = super().prepare(requests, progress=progress, autotune=False)
+        result = self._prepare_job(requests, progress=progress, autotune=False)
         self._recorded_requests.update(zip(names, requests))
         return result
+
+    def _prepare_job(self, requests, *, progress, autotune):
+        if self._coordinator is None:
+            return super().prepare(requests, progress=progress, autotune=autotune)
+        return self._coordinator.prepare(self, requests, progress=progress, autotune=autotune)
 
     def register_finalizer(self, callback):
         self._require_collecting()
@@ -148,7 +158,7 @@ class RecordedPreparationSession(PreparationSession):
             requests = tuple(self._recorded_requests.values())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
-            result = super().prepare(requests, progress=progress, autotune=True)
+            result = self._prepare_job(requests, progress=progress, autotune=True)
             if self._stop.is_set():
                 raise RuntimeError("b12x tuning was cancelled before serving preparation completed")
             selections = []

@@ -36,6 +36,61 @@ class CollectivePreparation:
             raise ValueError("collective preparation requires the complete control group")
         return key
 
+    def prepare(self, session, requests, *, progress=None, autotune=None):
+        """Drive a mixed local/collective job until every rank has finished.
+
+        A finished rank must still exchange readiness while its peers compile
+        or finish local work. Returning on local completion can strand peers in
+        their next control-group exchange.
+        """
+        job = None
+        state = None
+        error = None
+        key = None
+        try:
+            while True:
+                try:
+                    if job is None:
+                        job = session.begin(requests, autotune=autotune)
+                    if state is None or not state.done:
+                        state = job.advance(collective_key=key)
+                        if progress is not None:
+                            progress(state)
+                    if state.ready_cache is not None or state.ready_tuning:
+                        raise ValueError("collective preparation does not shard tuning candidates")
+                except Exception as exc:  # noqa: BLE001 - Every rank must receive preparation failures.
+                    error = exc
+                pending = () if state is None else tuple((item.key, item.ranks) for item in state.ready_collectives)
+                local = (state is not None and state.done, pending,
+                         None if error is None else f"{type(error).__name__}: {error}")
+                states = [None] * len(self.ranks)
+                dist.all_gather_object(states, local, group=self.group)
+                failures = [(rank, item[2]) for rank, item in zip(self.ranks, states, strict=True) if item[2] is not None]
+                if failures:
+                    raise RuntimeError(f"rank preparation failed: {failures}") from error
+                if all(item[0] for item in states):
+                    return job.result()
+                if any(item[0] for item in states) and any(item[1] for item in states):
+                    raise RuntimeError("a rank finished before its peer's collective declaration")
+                ready = [item[1] for item in states]
+                key = None
+                if all(ready):
+                    if any(item != ready[0] for item in ready[1:]):
+                        raise RuntimeError(f"collective preparation declarations differ across ranks: {ready}")
+                    key, ranks = ready[0][0]
+                    if tuple(ranks) != self.ranks:
+                        raise ValueError("collective preparation requires the complete control group")
+        except BaseException as failure:
+            try:
+                if job is not None:
+                    if state is not None and state.done:
+                        job.result().close()
+                    else:
+                        job.close()
+            except BaseException as cleanup:  # noqa: BLE001 - Preserve the distributed failure.
+                failure.add_note(f"preparation cleanup failed: {cleanup!r}")
+            raise
+
     def barrier(self, key, ranks):
         if tuple(ranks) != self.ranks:
             raise ValueError(f"collective {key!r} does not span its control group")

@@ -226,7 +226,10 @@ complete decoder-layer replacement, and serving are not implemented.
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
 A [Gloo bootstrap coordinator](../flare/preparation/collectives.py) matches
-collective declarations and barriers before kernel preparation. Per-rank native
+collective declarations and barriers before kernel preparation. Completed ranks
+continue exchanging readiness until all peers finish local preparation. Kernel
+preparation failures propagate through the control group before job cleanup.
+Per-rank native
 workers can replay the captured reductions without Python between iterations.
 Production multi-rank scheduling and failure coordination are not implemented.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
@@ -235,9 +238,10 @@ The shared [tuning session](../flare/preparation/tuning.py) owns declaration
 collection, candidate scratch reservation, autotuning, and binding finalization.
 Recipes supply the workload schema, numerical policy, and search-limit metadata;
 the [Qwen policy](../flare/recipes/qwen38/tuning.py) defines those values for its
-operator catalog. Collective preparation uses b12x sessions directly; integrating
-collective coordination into the batched tuning lifecycle remains required for
-multi-rank model preparation.
+operator catalog. Multi-rank sessions accept a bootstrap coordinator and use it
+for default priming and the mixed local/collective tuning batch. Each rank tunes
+its local operators, reserves and trims its scratch arena, and finalizes bindings
+before graph capture. Candidate sharding across ranks is not supported.
 
 | Model region | Prepared execution |
 |---|---|

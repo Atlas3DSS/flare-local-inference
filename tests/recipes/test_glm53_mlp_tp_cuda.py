@@ -15,7 +15,6 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 
 def _rank(rank, world_size, rendezvous, snapshot, rows):
     from b12x.comm.pcie import AllReduce
-    from b12x.preparation import PreparationSession
 
     from flare.components.collectives import PreparedAllReduce
     from flare.components.mlp import PreparedMLP
@@ -26,6 +25,7 @@ def _rank(rank, world_size, rendezvous, snapshot, rows):
     from flare.preparation.compilation import compile_forward
     from flare.preparation.graphs import PreparedGraphBundle
     from flare.preparation.scratch import ScratchArena
+    from flare.preparation.tuning import RecordedPreparationSession
     from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
     torch.cuda.set_device(rank)
@@ -59,8 +59,10 @@ def _rank(rank, world_size, rendezvous, snapshot, rows):
         intermediate = torch.empty((rows, 12288 // world_size), device=device, dtype=torch.bfloat16)
         counter = torch.zeros(1, device=device, dtype=torch.int32)
         arena = ScratchArena(device)
-        with PreparationSession(device=device, autotune=True, compile_workers=0,
-                                collective_barrier=coordinator.barrier) as session:
+        with RecordedPreparationSession(device=device, checkpoint="GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
+                                        workload_schema="glm-mlp-tp-v1", numerical_policy="default",
+                                        coordinator=coordinator) as session:
+            session.register_scratch(arena)
             dense = PreparedMLP(source, dense_weights, gate_up, intermediate, partial_output,
                                 session=session, name="dense", workspace=arena, swiglu_limit=10.0)
             dense_reduce = PreparedAllReduce(partial_output, dense_output, runtime=runtime, session=session,
@@ -71,8 +73,7 @@ def _rank(rank, world_size, rendezvous, snapshot, rows):
                                  session=session, name="shared", workspace=arena, swiglu_limit=10.0)
             shared_reduce = PreparedAllReduce(partial_output, output, runtime=runtime, session=session,
                                               coordinator=coordinator, name="shared.reduce")
-            arena.freeze()
-            arena.finalize()
+            session.tune()
 
             def forward():
                 dense_reduce(dense(source))

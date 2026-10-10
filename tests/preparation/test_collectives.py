@@ -54,4 +54,72 @@ def test_entry_barrier_preserves_timeout_and_waits_for_every_rank(monkeypatch):
     calls = []
     monkeypatch.setattr(dist, "monitored_barrier", lambda **kwargs: calls.append(kwargs))
     owner.barrier("reduce", (4, 7))
-    assert calls == [dict(group=owner.group, timeout=owner.timeout, wait_all_ranks=True)]
+    assert calls == [{"group": owner.group, "timeout": owner.timeout, "wait_all_ranks": True}]
+
+
+def test_finished_rank_keeps_participating_until_peers_finish(monkeypatch):
+    owner = coordinator(monkeypatch)
+    result = object()
+    advances, exchanges = [], []
+    done = SimpleNamespace(done=True, ready_cache=None, ready_tuning=(), ready_collectives=())
+    job = SimpleNamespace(advance=lambda **kwargs: advances.append(kwargs) or done, result=lambda: result)
+    session = SimpleNamespace(begin=lambda requests, **kwargs: job)
+    peers = [(False, (), None), (False, (), None), (True, (), None)]
+
+    def gather(states, local, *, group):
+        exchanges.append(local)
+        states[:] = [local, peers.pop(0)]
+
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    assert owner.prepare(session, ()) is result
+    assert len(advances) == 1 and len(exchanges) == 3
+
+
+def test_mixed_job_authorizes_collective_only_after_every_rank_is_ready(monkeypatch):
+    owner = coordinator(monkeypatch)
+    ready = progress()
+    ready.done = False
+    done = SimpleNamespace(done=True, ready_cache=None, ready_tuning=(), ready_collectives=())
+    local_states = [ready, ready, done]
+    peers = [(False, (), None), (False, (("reduce", (4, 7)),), None),
+             (False, (), None), (True, (), None)]
+    keys = []
+    job = SimpleNamespace(advance=lambda collective_key: keys.append(collective_key) or local_states.pop(0),
+                          result=lambda: "prepared")
+    monkeypatch.setattr(dist, "all_gather_object", lambda states, local, **kwargs: states.__setitem__(slice(None), [local, peers.pop(0)]))
+    assert owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ()) == "prepared"
+    assert keys == [None, None, "reduce"]
+
+
+@pytest.mark.parametrize("peer", [(False, (("reduce", (4, 7)),), None),
+                                  (False, (), "ValueError: bad weight geometry")])
+def test_finished_rank_releases_trial_resources_on_peer_failure(monkeypatch, peer):
+    owner = coordinator(monkeypatch)
+    closed = []
+    result = SimpleNamespace(close=lambda: closed.append(True))
+    done = SimpleNamespace(done=True, ready_cache=None, ready_tuning=(), ready_collectives=())
+    job = SimpleNamespace(advance=lambda **kwargs: done, result=lambda: result)
+    monkeypatch.setattr(dist, "all_gather_object", lambda states, local, **kwargs: states.__setitem__(slice(None), [local, peer]))
+    with pytest.raises(RuntimeError, match="rank (finished|preparation failed)"):
+        owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ())
+    assert closed == [True]
+
+
+def test_local_preparation_failure_is_exchanged_before_cleanup(monkeypatch):
+    owner = coordinator(monkeypatch)
+    closed, exchanged = [], []
+
+    def advance(**kwargs):
+        raise ValueError("bad weight geometry")
+
+    def gather(states, local, **kwargs):
+        exchanged.append(local)
+        states[:] = [local, (False, (), None)]
+
+    job = SimpleNamespace(advance=advance, close=lambda: closed.append(True))
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    with pytest.raises(RuntimeError, match="bad weight geometry") as failure:
+        owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ())
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert exchanged == [(False, (), "ValueError: bad weight geometry")]
+    assert closed == [True]
