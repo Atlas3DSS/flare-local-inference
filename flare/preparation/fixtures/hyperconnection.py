@@ -8,7 +8,8 @@ class HyperconnectionBenchmarkInputs:
     """Private finite activations with the canonical RMS normalization gain."""
 
     def __init__(self, operation, arguments):
-        weight_index = 1 if operation == "grouped_rmsnorm" else None
+        weight_index = {"grouped_rmsnorm": 1, "combine_norm": 3}.get(operation)
+        output_count = 2 if operation == "combine_norm" else 1
         self.arguments = tuple(
             value if index == weight_index else torch.empty_strided(
                 value.shape, value.stride(), dtype=value.dtype, device=value.device)
@@ -16,12 +17,14 @@ class HyperconnectionBenchmarkInputs:
         )
         generator = torch.Generator(device="cpu").manual_seed(65537)
         self.inputs = []
-        for index, target in enumerate(self.arguments[:-1]):
+        for index, target in enumerate(self.arguments[:-output_count]):
             if index == weight_index:
                 continue
             fixture = torch.randn(target.shape, generator=generator)
             self.inputs.append((target, fixture.to(device=target.device, dtype=target.dtype)))
-        self.arguments[-1].zero_()
+        for output in self.arguments[-output_count:]:
+            output.zero_()
+        self.output = self.arguments[-output_count:] if output_count == 2 else self.arguments[-1]
 
     def produce(self):
         for target, fixture in self.inputs:
@@ -32,7 +35,7 @@ def benchmark_call(state, operation, arguments, kwargs):
     operands = HyperconnectionBenchmarkInputs(operation, arguments)
     return PreparedCall(
         run=lambda: state.launch(*operands.arguments, **kwargs),
-        output=operands.arguments[-1],
+        output=operands.output,
         produce=operands.produce,
         owners=(operands,),
     )

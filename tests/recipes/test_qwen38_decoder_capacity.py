@@ -53,7 +53,8 @@ def test_large_scratch_shapes_and_smaller_views_share_storage(tokens):
         assert view.embedding.shape == (rows, 2560)
         assert view.logits.shape == (sequences, 248320)
         for original, sliced in zip(tensors(scratch), tensors(view), strict=True):
-            assert sliced._base is original
+            assert sliced._base is (original if original._base is None else original._base)
+            assert sliced.storage_offset() == original.storage_offset()
             assert sliced.stride() == original.stride()
             assert sliced.dtype == original.dtype
     with pytest.raises(ValueError, match="capacity"):

@@ -218,8 +218,14 @@ module tree and replaces its forwards with prepared operations.
 | Request metadata, state maintenance, sampling | Captured server operations |
 
 Ordinary tensor composition may remain expressed in PyTorch during capture.
-Operators that allocate their outputs per call, including the hyperconnection
-combine and the BF16 vocabulary projection, are acceptable inside capture
+Decoder hyperconnections fuse residual injection with the following mixer's
+RMSNorm using FP32 gains, an in-place BF16 residual, and caller-owned normalized
+scratch. The PLE injection boundary requires a separate normalization. MTP
+fuses the attention-to-MLP boundary; its inactive-row mask precedes the final
+standalone normalization.
+
+Operators that allocate their outputs per call, including standalone
+hyperconnection combine, are acceptable inside capture
 because the allocation resolves into the graph memory pool. Graph variants share
 one pool only for intermediates whose lifetime ends within their graph. Values
 that survive a graph boundary live in caller-owned persistent storage outside

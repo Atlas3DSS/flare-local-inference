@@ -26,10 +26,13 @@ def qualify(snapshot: Path) -> list[dict]:
     tree = create_model_tree(manifest)
     prefix = "model.language_model.layers.0.attn_hyper_connection"
     module = tree.get_submodule(prefix)
-    with QwenWeightLoader(manifest, device, prefixes=(prefix,)) as loader:
-        for name in ("hc_norm", "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
-            child = module.get_submodule(name)
-            child.weight = torch.nn.Parameter(loader.load_tensor(f"{prefix}.{name}.weight"), requires_grad=False)
+    following_prefix = "model.language_model.layers.0.mlp_hyper_connection"
+    following_module = tree.get_submodule(following_prefix)
+    with QwenWeightLoader(manifest, device, prefixes=(prefix, following_prefix)) as loader:
+        for path, mixer in ((prefix, module), (following_prefix, following_module)):
+            for name in ("hc_norm", "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
+                child = mixer.get_submodule(name)
+                child.weight = torch.nn.Parameter(loader.load_tensor(f"{path}.{name}.weight"), requires_grad=False)
     generator = torch.Generator().manual_seed(1607)
     reports = []
     with torch.inference_mode(), PreparationSession(device=device, autotune=True, compile_workers=0) as session:
@@ -38,27 +41,52 @@ def qualify(snapshot: Path) -> list[dict]:
             source = torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
             prepared = PreparedHyperconnection(module, scratch, priming_state=source,
                 session=session, name=f"hyperconnection_{tokens}")
+            following = PreparedHyperconnection(following_module, scratch, priming_state=source,
+                session=session, name=f"following_{tokens}")
+            prepared.prepare_combine_norm(following, priming_state=source,
+                session=session, name=f"combine_norm_{tokens}")
             for projection in (prepared.down, prepared.up):
                 assert projection.plan.selection.source in ("tuned", "cached")
             block = torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device)
             mixed = torch.empty_like(block)
             combined = torch.empty_like(source)
+            normalized = torch.empty_like(source)
+            following_mixed = torch.empty_like(block)
+            unfused_combined = torch.empty_like(source)
+            unfused_normalized = torch.empty_like(source)
+            unfused_following = torch.empty_like(block)
+
+            def run_unfused():
+                prepared.mix(source)
+                unfused_combined.copy_(prepared.combine(source, block))
+                unfused_following.copy_(following.mix(unfused_combined))
+                unfused_normalized.copy_(scratch.normalized)
 
             def run():
                 mixed.copy_(prepared.mix(source))
-                combined.copy_(prepared.combine(source, block))
+                prepared.combine_norm(source, block)
+                combined.copy_(source)
+                normalized.copy_(scratch.normalized)
+                following_mixed.copy_(following.mix(source, pre_normalized=True))
 
             stream = torch.cuda.Stream(device=device)
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
+                run_unfused()
                 run()
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
                 run()
-            bundle = PreparedGraphBundle(device=0, graphs={"hyperconnection": graph},
-                buffers={"source": source, "block": block, "mixed": mixed, "combined": combined},
-                resources=(module, prepared, session, stream))
+            unfused_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(unfused_graph, stream=stream):
+                run_unfused()
+            bundle = PreparedGraphBundle(device=0, graphs={"unfused": unfused_graph, "hyperconnection": graph},
+                buffers={"source": source, "block": block, "mixed": mixed, "combined": combined,
+                         "normalized": normalized, "following_mixed": following_mixed,
+                         "unfused_combined": unfused_combined, "unfused_normalized": unfused_normalized,
+                         "unfused_following": unfused_following},
+                resources=(module, prepared, following, session, stream))
             worker = bundle.start_worker()
             try:
                 for iteration in range(2):
@@ -66,20 +94,38 @@ def qualify(snapshot: Path) -> list[dict]:
                     block.copy_(torch.randn(block.shape, dtype=torch.bfloat16, generator=generator).to(device) * .25)
                     expected_mixed, residual, injection = module(source)
                     expected_combined = residual + (block[:, None, :] * injection[:, :, None]).flatten(1)
+                    expected_following, _, _ = following_module(expected_combined)
                     torch.cuda.synchronize(device)
                     allocated = torch.cuda.memory_allocated(device)
                     ticket = worker.submit(0)
                     completion = worker.poll(timeout_ms=30000)
                     assert completion is not None and completion.ticket == ticket and completion.error is None
+                    ticket = worker.submit(1)
+                    completion = worker.poll(timeout_ms=30000)
+                    assert completion is not None and completion.ticket == ticket and completion.error is None
                     assert torch.cuda.memory_allocated(device) == allocated
-                    for name, actual, expected in (("mix", mixed, expected_mixed), ("combine", combined, expected_combined)):
-                        torch.testing.assert_close(actual, expected, rtol=.02, atol=.02)
+                    expected_normalized = following_module.hc_norm(combined)
+                    expected_following_component, _, _ = following_module(combined)
+                    for name, actual, expected in (("mix", mixed, expected_mixed), ("combine", combined, expected_combined),
+                            ("normalized", normalized, expected_normalized),
+                            ("following_mix", following_mixed, expected_following_component),
+                            ("unfused_combine", combined, unfused_combined),
+                            ("unfused_normalized", normalized, unfused_normalized),
+                            ("unfused_following_mix", following_mixed, unfused_following)):
+                        torch.testing.assert_close(actual, expected, rtol=.02, atol=.02,
+                            msg=lambda error: f"{tokens=} {iteration=} {name=}\n{error}")
                         difference = (actual.float() - expected.float())
                         reports.append({"tokens": tokens, "iteration": iteration, "operation": name,
                             "down_backend": prepared.down.plan.selection.config.backend,
                             "up_backend": prepared.up.plan.selection.config.backend,
                             "max_absolute_error": difference.abs().max().item(),
                             "relative_l2_error": (difference.norm() / expected.float().norm().clamp_min(1e-12)).item()})
+                    for label, values in (("fused", following_mixed), ("unfused", unfused_following)):
+                        delta = values.float() - expected_following.float()
+                        reports.append({"tokens": tokens, "iteration": iteration,
+                            "operation": f"{label}_chained_canonical_mix", "diagnostic": True,
+                            "max_absolute_error": delta.abs().max().item(),
+                            "relative_l2_error": (delta.norm() / expected_following.float().norm().clamp_min(1e-12)).item()})
             finally:
                 worker.close()
     return reports

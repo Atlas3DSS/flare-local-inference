@@ -178,6 +178,26 @@ def test_combine_priming_reuses_disjoint_existing_storage():
         assert all(not tensor.count_nonzero() for tensor in arguments[:-1])
 
 
+def test_combine_norm_fixture_retains_fp32_gain_and_owns_both_outputs():
+    scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"))
+    source = torch.zeros_like(scratch.normalized)
+    gain = torch.linspace(.5, 1.5, 10240)
+    arguments = (source, scratch.block_input, scratch.injection_logits, gain,
+                 scratch.gate_logits, scratch.normalized)
+    fixture = HyperconnectionBenchmarkInputs("combine_norm", arguments)
+    fixture.produce()
+    assert fixture.arguments[3] is gain
+    assert len(fixture.inputs) == 3
+    assert fixture.output == fixture.arguments[-2:]
+    for actual, original in zip(fixture.arguments, arguments):
+        assert actual.stride() == original.stride()
+        if original is not gain:
+            assert actual.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+    for output in fixture.output:
+        assert not output.count_nonzero()
+    assert not source.count_nonzero()
+
+
 def test_combine_uses_public_prepared_plan_and_functional_output(monkeypatch):
     operator = hyperconnection.PreparedHyperconnection.__new__(hyperconnection.PreparedHyperconnection)
     operator.scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"))

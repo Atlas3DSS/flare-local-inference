@@ -143,9 +143,30 @@ class PreparedHyperconnection:
         self.up = BF16Projection(scratch.bottleneck, module.input_mix_weight_up.weight,
             scratch.gate_logits, session=session, name=f"{name}.up")
 
-    def mix(self, residual: torch.Tensor) -> torch.Tensor:
-        normalized = hc.run_grouped_rmsnorm(residual, self.norm_gain, eps=self.eps,
-            zero_centered=False, binding=self.bindings["grouped_rmsnorm"])
+    def prepare_combine_norm(self, following: PreparedHyperconnection, *,
+                             priming_state: torch.Tensor, session: PreparationSession,
+                             name: str) -> None:
+        if self.injection is None:
+            raise ValueError("the final hyperconnection mixer has no residual injection")
+        self.following = following
+        caps = hc.Caps(device=self.scratch.normalized.device, max_tokens=self.tokens,
+                       hidden_size=2560, streams=4, lowrank=320)
+        plan = hc.plan(caps, invocation=FrozenMapping({"operation": "combine_norm",
+            "eps": following.eps, "zero_centered": False, "weight_dtype": "float32",
+            "output_mode": "provided"}))
+        arguments = (priming_state, self.scratch.block_input, self.scratch.injection_logits,
+                     following.norm_gain, self.scratch.gate_logits, following.scratch.normalized)
+        kwargs = {"eps": following.eps}
+        session.prepare((plan.request(name=name,
+            prepare_call=lambda state: PreparedCall(run=lambda: state.launch(*arguments, **kwargs)),
+            benchmark_call=partial(hc_fixtures.benchmark_call, operation="combine_norm",
+                                   arguments=arguments, kwargs=kwargs)),))
+        self.plans["combine_norm"] = plan
+
+    def mix(self, residual: torch.Tensor, *, pre_normalized: bool = False) -> torch.Tensor:
+        normalized = self.scratch.normalized if pre_normalized else hc.run_grouped_rmsnorm(
+            residual, self.norm_gain, eps=self.eps, zero_centered=False,
+            binding=self.bindings["grouped_rmsnorm"])
         self.down(normalized)
         bottleneck = hc.run_scaled_silu(self.scratch.projected_down, binding=self.bindings["scaled_silu"])
         gate_logits = self.up(bottleneck)
@@ -158,3 +179,10 @@ class PreparedHyperconnection:
             raise ValueError("the final hyperconnection mixer has no residual injection")
         return hc.run_combine(residual, block_output, self.scratch.injection_logits,
                               plan=self.plans["combine"])
+
+    def combine_norm(self, residual: torch.Tensor, block_output: torch.Tensor) -> torch.Tensor:
+        """Update the residual in place and prepare the following mixer's input."""
+        combined, _ = hc.run_combine_norm(residual, block_output, self.scratch.injection_logits,
+            self.following.norm_gain, eps=self.following.eps, zero_centered=False,
+            plan=self.plans["combine_norm"], out=(residual, self.following.scratch.normalized))
+        return combined

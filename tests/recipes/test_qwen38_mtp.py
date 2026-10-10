@@ -106,12 +106,22 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
         def __init__(self, module, buffers, **kwargs):
             self.buffers = buffers
 
-        def mix(self, source):
+        def prepare_combine_norm(self, following, **kwargs):
+            self.following = following
+
+        def mix(self, source, *, pre_normalized=False):
+            if pre_normalized:
+                source = self.buffers.normalized
             self.buffers.block_input.copy_(source.view(-1, 4, 2560).mean(1))
             return self.buffers.block_input
 
         def combine(self, source, block):
             return (source.view(-1, 4, 2560) + block[:, None]).flatten(1)
+
+        def combine_norm(self, source, block):
+            source.copy_(self.combine(source, block))
+            self.following.buffers.normalized.copy_(source)
+            return source
 
     class Attention:
         def __init__(self, module, weights, source, buffers, state, meta, rotary, **kwargs):

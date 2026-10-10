@@ -91,8 +91,9 @@ class StageTrace:
                 self.record(f'{prefix}_mix', result)
             self.wrap(hc, 'mix', after=mix)
             if hc.injection is not None:
-                self.wrap(hc, 'combine', after=lambda args, kwargs, result, prefix=prefix:
-                          self.record(f'{prefix}_residual', result))
+                for method in ('combine', 'combine_norm'):
+                    self.wrap(hc, method, after=lambda args, kwargs, result, prefix=prefix:
+                              self.record(f'{prefix}_residual', result))
         def attention(args, kwargs, result):
             self.record('attn_output', result)
             for name, value in (('qsa_query', op.scratch.qsa.query), ('qsa_key', op.scratch.qsa.key),

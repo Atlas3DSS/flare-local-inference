@@ -160,6 +160,8 @@ class PreparedMTP:
             scratch=scratch.moe, workspace=workspace, projection_workspace=workspace)
         self.final_mixer = PreparedHyperconnection(weights.module.hyper_connection_mixer, scratch.hyperconnection,
             priming_state=scratch.residual, session=session, name=f"{name}.final_mixer")
+        self.attn_hc.prepare_combine_norm(self.mlp_hc, priming_state=scratch.residual,
+            session=session, name=f"{name}.attn_combine_norm")
         self.lm_head = BF16Projection(scratch.selected_hidden, weights.lm_head, scratch.logits,
                                      session=session, name=f"{name}.lm_head")
 
@@ -176,8 +178,8 @@ class PreparedMTP:
         s.residual.masked_fill_(~active[:, None], 0)
         mixed = self.attn_hc.mix(s.residual)
         block = self.attention(mixed)
-        s.residual.copy_(self.attn_hc.combine(s.residual, block))
-        mixed = self.mlp_hc.mix(s.residual)
+        self.attn_hc.combine_norm(s.residual, block)
+        mixed = self.mlp_hc.mix(s.residual, pre_normalized=True)
         block = self.moe(mixed)
         s.residual.copy_(self.mlp_hc.combine(s.residual, block))
         s.residual.masked_fill_(~active[:, None], 0)

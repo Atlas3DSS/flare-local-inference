@@ -243,6 +243,13 @@ class PreparedDecoder:
         self.final_mixer = PreparedHyperconnection(language.hyper_connection_mixer,
             scratch.hyperconnection, priming_state=scratch.residual,
             session=session, name=f"{name}.final_mixer")
+        for index, (attn_hc, _, mlp_hc, _) in enumerate(self.layers):
+            attn_hc.prepare_combine_norm(mlp_hc, priming_state=scratch.residual,
+                session=session, name=f"{name}.layer{index}.attn_combine_norm")
+            if index != 0:
+                following = self.layers[index + 1][0] if index + 1 < len(self.layers) else self.final_mixer
+                mlp_hc.prepare_combine_norm(following, priming_state=scratch.residual,
+                    session=session, name=f"{name}.layer{index}.mlp_combine_norm")
         state.prepare_hidden(scratch.hidden, scratch.sample_hidden)
         state.prepare_residual(scratch.residual)
         self.lm_head = BF16Projection(scratch.sample_hidden, weights.tree.lm_head.weight,
@@ -279,7 +286,7 @@ class PreparedDecoder:
         for index, (attn_hc, attention, mlp_hc, moe) in enumerate(self.layers):
             if index == 1:
                 s.residual.add_(self.ple(s.residual))
-            mixed = attn_hc.mix(s.residual)
+            mixed = attn_hc.mix(s.residual, pre_normalized=index not in (0, 1))
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["attn_mix"].copy_(mixed)
                 for field in ("normalized", "projected_down", "bottleneck", "gate_logits", "injection_logits"):
@@ -289,10 +296,10 @@ class PreparedDecoder:
                 self.stage_outputs["attn_output"].copy_(block)
                 for field in ("projected_qkv", "convolved_qkv", "recurrence", "gated"):
                     self.stage_outputs[f"gdn_{field}"].copy_(getattr(s.gdn, field))
-            s.residual.copy_(attn_hc.combine(s.residual, block))
+            attn_hc.combine_norm(s.residual, block)
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["attn_residual"].copy_(s.residual)
-            mixed = mlp_hc.mix(s.residual)
+            mixed = mlp_hc.mix(s.residual, pre_normalized=True)
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["mlp_mix"].copy_(mixed)
                 for field in ("normalized", "projected_down", "bottleneck", "gate_logits", "injection_logits"):
@@ -305,14 +312,17 @@ class PreparedDecoder:
                 self.stage_outputs["moe_weights"].copy_(moe.router.weights)
                 self.stage_outputs["moe_shared"].copy_(moe.shared.output)
                 self.stage_outputs["moe_routed"].copy_(moe.routed_output)
-            s.residual.copy_(mlp_hc.combine(s.residual, block))
+            if index == 0:
+                s.residual.copy_(mlp_hc.combine(s.residual, block))
+            else:
+                mlp_hc.combine_norm(s.residual, block)
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["mlp_residual"].copy_(s.residual)
             if self.layer_outputs is not None:
                 self.layer_outputs[index].copy_(s.residual)
         if self.residual_output is not None:
             self.residual_output.copy_(s.residual)
-        s.hidden.copy_(self.final_mixer.mix(s.residual))
+        s.hidden.copy_(self.final_mixer.mix(s.residual, pre_normalized=True))
         self.state.finish()
         self.lm_head(s.sample_hidden)
         if sampler is not None:
