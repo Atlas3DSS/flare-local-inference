@@ -5,10 +5,12 @@ in Python, then transfers captured CUDA graphs and their resource owners to a
 Rust serving core. The execution contract targets NVIDIA SM120/121. See [the core design](docs/core-design.md)
 for model, cache, runtime, and acceptance requirements.
 
-The preparation path validates and loads the pinned Qwen3.8 checkpoint,
-constructs its canonical module tree, and captures text, vision, sampling, and
-state-maintenance graphs. Rust owns HTTP/SSE, tokenization, chat templates, image
-preprocessing, grammar constraints, prefix caching, and request scheduling.
+Preparation loads Qwen3.8 or GLM 5.3 Flash into canonical module trees and
+captures sampling, state-maintenance, and model-forward graphs. Qwen runs on one
+GPU with text and vision support; GLM runs text on two or four GPUs using b12x
+collectives. Rust owns HTTP/SSE, tokenization, chat templates, image preprocessing,
+grammar constraints, prefix caching, and request scheduling through a shared
+serving lifecycle.
 
 | Acceptance area | State | Evidence |
 |---|---|---|
@@ -113,7 +115,27 @@ CUDA_VISIBLE_DEVICES=<GPU-UUID> CUDA_HOME=/opt/cuda \
 ```
 
 The default snapshot is the pinned Qwen3.8 model in the Hugging Face cache;
-`--snapshot` selects its local path. Preparation loads weights and mapped PLE
+`--snapshot` selects a local supported checkpoint. For GLM text serving:
+
+```sh
+CUDA_VISIBLE_DEVICES=<GPU-UUID-0>,<GPU-UUID-1> CUDA_HOME=/opt/cuda \
+  .venv/bin/flare --snapshot /path/to/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD \
+  --tp 2 --context 16384 --prefill-chunk-size 4096 --pages 256 \
+  --snapshot-budget-gib 1 --bind 127.0.0.1:8000
+```
+
+Use four assigned GPU UUIDs and `--tp 4` for four ranks. GLM prepares 24 graphs
+at the default four-request capacity: nine prefill, three decode, three resume,
+and nine state-maintenance variants per rank. Serialized decoder variants share
+activation storage sized for the largest prefill. Each rank completes loading,
+autotuning, compilation, and capture before Rust opens the HTTP listener and
+owns rank coordination. Native supervision terminates the rank group if a peer
+exits unexpectedly. GLM's catalog supports text; image and MTP requests are
+unsupported. `--max-active` selects one through four active request slots.
+Without `--pages`, GLM reserves context capacity for every active request;
+configured pages, snapshot storage, graphs, and headroom must fit each GPU.
+
+Qwen preparation loads weights and mapped PLE
 tables, primes default plans, and submits all declarations to one batched b12x
 tuning pass. One `ScratchArena` supplies the maximum candidate workspace needed
 by serialized dense, GDN, QSA, MoE, PLE, and vision operations. Its
@@ -135,7 +157,7 @@ selection prevents capture and startup.
 `--prefill-chunk-size` defaults to 4,096 tokens. It accepts multiples of 64 from
 64 through the configured context limit. Prefill capacities include 1, 16,
 every power of two from 64 through the configured chunk size, and that exact
-chunk size; tails use the smallest capacity that holds them. The default catalog has
+chunk size; tails use the smallest capacity that holds them. The default Qwen catalog has
 28 ordinary graphs or 39 speculative graphs. A 512-token chunk limit reduces
 either count by three. Startup compiles complete text forwards with Inductor,
 including MTP absorption and speculative rounds, before CUDA graph capture.

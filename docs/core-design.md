@@ -380,7 +380,11 @@ shares incremental think/tool envelopes with Qwen while interpreting GLM
 rendered bytes, token IDs, instruction boundaries, assistant continuations, and
 parallel tool history against Transformers. GLM structured output with an open
 reasoning prefix is unsupported; the template does not honor Qwen's
-`enable_thinking=false` option. GLM HTTP execution has not been qualified.
+`enable_thinking=false` option. Native TP2 HTTP checks cover repeated-prompt
+cache reuse, four concurrent requests, SSE, a 6,639-token prompt spanning
+4096-token prefill chunks, and parsed tool calls. These checks exercise the
+Python CLI handoff and the shared Rust server; independent full-model numerical
+qualification remains incomplete.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
