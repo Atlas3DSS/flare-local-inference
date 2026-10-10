@@ -1,18 +1,21 @@
 """Compile prepared forwards with explicit storage mutation boundaries."""
 
-import itertools
+import hashlib
 import math
 import operator
-import weakref
+import pickle
+from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch._higher_order_ops.triton_kernel_wrap import get_mutated_tensors
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
-_INVOCATIONS = weakref.WeakValueDictionary()
-_HANDLES = itertools.count()
+_INVOCATIONS = ContextVar('flare_storage_invocations')
+_OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
+            'triton.cudagraphs': False, 'compile_threads': 4}
 
 
 @dataclass
@@ -36,7 +39,7 @@ class _Invocation:
 
 @torch.library.custom_op('flare::storage_call', mutates_args=('writes',))
 def _storage_call(reads: list[torch.Tensor], writes: list[torch.Tensor], handle: int) -> None:
-    _INVOCATIONS[handle].run(reads, writes)
+    _INVOCATIONS.get()[handle].run(reads, writes)
 
 
 @_storage_call.register_fake
@@ -96,6 +99,77 @@ def _returned_alias(node, index):
     return None
 
 
+@dataclass
+class CompiledForward:
+    artifact: object
+    inputs: list
+    invocations: list
+    owner: object
+    wrapped_output: bool
+    cache_hit: bool
+
+    def __call__(self):
+        token = _INVOCATIONS.set(self.invocations)
+        try:
+            result = self.artifact(*self.inputs)
+            return result[0] if self.wrapped_output else result
+        finally:
+            _INVOCATIONS.reset(token)
+
+
+def _compile_module(module, calls, owner):
+    from torch._inductor import standalone_compile
+    from torch._inductor.codecache import torch_key
+    from torch._inductor.runtime.cache_dir_utils import cache_dir
+    from torch._inductor.standalone_compile import CompiledArtifact
+
+    graph = module.graph
+    inputs = []
+    for node in list(graph.nodes):
+        if node.op != 'get_attr':
+            continue
+        tensor = operator.attrgetter(node.target)(module)
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f'compiled forward constant must be a tensor: {node.target}')
+        with graph.inserting_before(next(iter(graph.nodes))):
+            argument = graph.placeholder(f'buffer_{len(inputs)}')
+        argument.meta = node.meta.copy()
+        node.replace_all_uses_with(argument)
+        graph.erase_node(node)
+        inputs.append(tensor)
+    # Placeholders and runtime operands must retain the same order.
+    inputs.reverse()
+    output = next(node for node in graph.nodes if node.op == 'output')
+    wrapped_output = not isinstance(output.args[0], (tuple, list))
+    if wrapped_output:
+        output.args = ((output.args[0],),)
+    module = torch.fx.GraphModule({}, graph)
+    storages = {}
+    metadata = []
+    for tensor in inputs:
+        storage = tensor.untyped_storage()._cdata
+        alias = storages.setdefault(storage, len(storages))
+        metadata.append((tuple(tensor.shape), tensor.stride(), tensor.storage_offset(),
+                         tensor.untyped_storage().nbytes(), tensor.dtype, tensor.device,
+                         tensor.requires_grad, alias))
+    key = hashlib.sha256(pickle.dumps((module.code, metadata, _OPTIONS, torch_key(),
+        torch.cuda.get_device_capability(), torch.cuda.get_device_name()))).hexdigest()
+    path = Path(cache_dir()) / 'flare' / (key + '.bin')
+    cache_hit = path.is_file()
+    if cache_hit:
+        artifact = CompiledArtifact.load(path=str(path))
+    else:
+        token = _INVOCATIONS.set(calls)
+        try:
+            artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
+                options={'config_patches': _OPTIONS}, aot=True, donate_graph_module=True)
+        finally:
+            _INVOCATIONS.reset(token)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        artifact.save(path=str(path))
+    return CompiledForward(artifact, inputs, calls, owner, wrapped_output, cache_hit)
+
+
 def compile_forward(fn):
     """Trace and compile one fixed-buffer forward before CUDA graph capture.
 
@@ -105,7 +179,9 @@ def compile_forward(fn):
     Inductor can preserve mutations without cloning strided state regions.
     Pointwise tensor operations remain visible to ordinary Inductor compilation.
     Mean reductions, FP32 sigmoid and LayerNorm retain ATen's rounding.
-    The compiled module retains the forward and its prepared kernel owners.
+    Compiled artifacts take persistent tensors as inputs and are cached without
+    weight payloads or process-local kernel handles. Each callable retains its
+    own prepared invocations, buffers, and forward owner.
     """
     module = make_fx(lambda: fn(), tracing_mode='real')()
     graph = module.graph
@@ -237,8 +313,7 @@ def compile_forward(fn):
             operands.append((position, mutable, indices[identity], descriptor))
             leaves[position] = None
         invocation = _Invocation(target, leaves, tree, operands)
-        handle = next(_HANDLES)
-        _INVOCATIONS[handle] = invocation
+        handle = len(calls)
         calls.append(invocation)
         with graph.inserting_before(node):
             graph.call_function(torch.ops.flare.storage_call.default, (reads, writes, handle))
@@ -276,8 +351,4 @@ def compile_forward(fn):
     graph.eliminate_dead_code()
     graph.lint()
     module.recompile()
-    module._storage_invocations = calls
-    module._forward_owner = fn
-    return torch.compile(module, fullgraph=True, dynamic=False,
-        options={'max_autotune': True, 'emulate_precision_casts': True,
-                 'triton.cudagraphs': False, 'compile_threads': 4})
+    return _compile_module(module, calls, fn)

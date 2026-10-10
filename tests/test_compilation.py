@@ -1,6 +1,8 @@
 """Ordering of writes through typed aliases in captured inference forwards."""
 
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -140,6 +142,76 @@ def _fill_output(out: torch.Tensor, value: float) -> None:
 @_fill_output.register_fake
 def _fake_fill_output(out, value):
     pass
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatch):
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))
+
+    def prepare(value):
+        source = torch.empty(64, device="cuda")
+        output = torch.empty_like(source)
+
+        def forward():
+            _fill_output(source, value)
+            output.copy_(source + 1)
+
+        return compile_forward(forward), output
+
+    first, first_output = prepare(2.)
+    second, second_output = prepare(8.)
+    assert not first.cache_hit
+    assert second.cache_hit
+    for compiled, output, value in ((first, first_output, 3.), (second, second_output, 9.)):
+        compiled()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            compiled()
+        output.zero_()
+        graph.replay()
+        torch.testing.assert_close(output, torch.full_like(output, value), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+def test_compilation_cache_survives_process_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))
+    program = '''
+import sys
+from unittest.mock import patch
+import torch
+from flare.preparation.compilation import compile_forward
+
+@torch.library.custom_op("flare_cache_test::fill", mutates_args=("out",))
+def fill(out: torch.Tensor, value: float) -> None:
+    out.fill_(value)
+@fill.register_fake
+def fake_fill(out, value):
+    pass
+
+warm = sys.argv[1] == "warm"
+source = torch.empty(64, device="cuda")
+output = torch.empty_like(source)
+def forward():
+    fill(source, 7. if warm else 3.)
+    output.copy_(source * 2)
+with torch.no_grad():
+    if warm:
+        with patch("torch._inductor.standalone_compile", side_effect=AssertionError("cache miss")):
+            compiled = compile_forward(forward)
+    else:
+        compiled = compile_forward(forward)
+    assert compiled.cache_hit == warm
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    output.zero_()
+    graph.replay()
+    torch.testing.assert_close(output, torch.full_like(output, 14. if warm else 6.), rtol=0, atol=0)
+'''
+    for mode in ("cold", "warm"):
+        subprocess.run([sys.executable, "-c", program, mode], check=True)
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
