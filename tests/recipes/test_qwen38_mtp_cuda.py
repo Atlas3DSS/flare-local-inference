@@ -80,7 +80,8 @@ def test_exact_weight_feedback_matches_published_operator_reference(weights):
             stream.synchronize(); graph.reset()
 
 
-def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs(weights):
+@pytest.mark.parametrize("compiled", [False, True])
+def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs(weights, compiled):
     from b12x.preparation import PreparationSession
 
     host_hidden, host_tokens = inputs()
@@ -97,14 +98,19 @@ def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs
         op = PreparedMTP(weights, scratch, tokens, hidden, state, metadata, rotary, arena,
             output_indices=selected, session=session, name="mtp", max_cache_pages=2)
         arena.finalize(); arena.freeze()
+        forward = op
+        if compiled:
+            from flare.preparation.compilation import compile_forward
+
+            forward = compile_forward(op)
         stream = torch.cuda.Stream(); stream.wait_stream(torch.cuda.current_stream())
         graph = torch.cuda.CUDAGraph()
         try:
             with torch.cuda.stream(stream):
-                op()
+                forward()
             stream.synchronize()
             with session.capture(), torch.cuda.graph(graph, stream=stream):
-                op()
+                forward()
             session.freeze()
             hidden[:live].copy_(host_hidden); tokens[:live].copy_(host_tokens)
             metadata.main_block_table[0].copy_(torch.tensor([1, 0], device="cuda", dtype=torch.int32))

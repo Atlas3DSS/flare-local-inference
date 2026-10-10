@@ -215,7 +215,7 @@ def _identity(manifest):
 
 @torch.no_grad()
 def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(), *, progress=None,
-                  compile_decoder: bool = False) -> PreparedModel:
+                  compile_decoder: bool = True) -> PreparedModel:
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
     from .vision_state import (
@@ -224,9 +224,6 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         VisionFeatureState,
         VisionInputs,
     )
-
-    if compile_decoder and config.mtp:
-        raise ValueError("compiled decoder qualification requires ordinary decoding")
 
     def report(message):
         if progress is not None:
@@ -399,7 +396,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         def capture_catalog():
             compiled_functions.clear()
             for name, function in functions.items():
-                if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume"):
+                if compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative"):
                     from flare.preparation.compilation import compile_forward
 
                     report(f"compiling {name}")

@@ -136,10 +136,11 @@ selection prevents capture and startup.
 64 through the configured context limit. Prefill capacities include 1, 16,
 every power of two from 64 through the configured chunk size, and that exact
 chunk size; tails use the smallest capacity that holds them. The default catalog has
-43 graphs, covered by [configured-chunk HTTP checks](docs/validation/prefill-capacity.md).
-Its [complete-catalog replay receipt](docs/validation/graph-execution-parity-prefill4096.md)
-covers all 43 variants. `--prefill-chunk-size 512` selects the separately qualified
-37-graph geometry.
+28 ordinary graphs or 39 speculative graphs. A 512-token chunk limit reduces
+either count by three. Startup compiles complete text forwards with Inductor,
+including MTP absorption and speculative rounds, before CUDA graph capture.
+Prepared b12x calls preserve their selected kernels while surrounding PyTorch
+operations can fuse. Native serving only replays the resulting graphs.
 Available GPU memory and kernel workspace constraints can reject an otherwise
 valid chunk size during preparation. Startup fails rather than reducing the
 declared capacity or selecting an execution fallback.

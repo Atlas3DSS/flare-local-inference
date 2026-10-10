@@ -462,6 +462,14 @@ Every branch rejoins before dependent outputs or reused scratch are consumed.
 Python captures these dependencies inside one CUDA graph; Rust submits that
 graph without calling Python or managing the internal streams.
 
+Startup compiles complete text forwards with Inductor before capture, including
+prefill absorption, ordinary decode, resume sampling, and speculative rounds.
+Prepared b12x operations remain opaque calls; pointwise PyTorch work is visible
+to fusion and autotuning. Compilation preserves shared-storage mutations and
+retains prepared owners until graph teardown. Qualification callers can set
+`compile_decoder=False` to capture the same prepared operations without Inductor.
+Serving never executes either Python forward after native handoff.
+
 b12x retains priming `PreparedCall.owners` with prepared plans. Priming calls use
 `prime_owners(arena, ...)` to retain the arena object without retaining obsolete
 views or bindings from a larger allocation. Serving components own their
