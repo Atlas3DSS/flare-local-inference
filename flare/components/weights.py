@@ -125,6 +125,140 @@ class DirectWeightLoader:
         self._session.flush()
         return target
 
+    def load_mxfp8_group(self, prefixes, *, row_ranges=None, column_range=None):
+        """Pack selected MXFP8 projection rows directly into one GPU matrix."""
+        import torch
+        from b12x.gemm.blockscaled import pack_weight
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        if not prefixes:
+            raise ValueError("MXFP8 projection group must be nonempty")
+        if row_ranges is None:
+            row_ranges = (None,) * len(prefixes)
+        weights, block_scales = [], []
+        for prefix, row_range in zip(prefixes, row_ranges, strict=True):
+            weight = self._sources[f"{prefix}.weight"]
+            scale = self._sources[f"{prefix}.weight_scale"]
+            if weight.ndim != 2 or weight.dtype != torch.float8_e4m3fn:
+                raise ValueError(f"{prefix}: MXFP8 weight must be an FP8 matrix")
+            rows, columns = weight.shape
+            r0, r1 = _aligned_range(row_range, rows, 1)
+            c0, c1 = _aligned_range(column_range, columns, 32)
+            if (scale.ndim != 2 or scale.element_size() != 1
+                    or scale.shape[0] < rows or scale.shape[1] < columns // 32):
+                raise ValueError(f"{prefix}: MXFP8 block scale geometry mismatch")
+            weights.append(weight[r0:r1, c0:c1])
+            block_scales.append(scale[r0:r1, c0 // 32:c1 // 32].view(torch.uint8))
+        columns = weights[0].shape[1]
+        if any(weight.shape[1] != columns for weight in weights):
+            raise ValueError("packed MXFP8 projections must share input width")
+        rows = sum(weight.shape[0] for weight in weights)
+        values = torch.empty((rows, columns), dtype=torch.float8_e4m3fn, device=self.device)
+        scales = torch.empty((rows, columns // 32), dtype=torch.uint8, device=self.device)
+        offset = 0
+        for weight, scale in zip(weights, block_scales, strict=True):
+            end = offset + weight.shape[0]
+            self._copy(values[offset:end], weight)
+            self._copy(scales[offset:end], scale)
+            offset = end
+        self._session.flush()
+        return pack_weight(values, scales, recipe="mxfp8")
+
+    def load_nvfp4_experts(
+        self, prefixes, *, hidden_size, intermediate_size, scale_vectors,
+        intermediate_range=None, scale_scratch=None, swiglu_limit=None,
+    ):
+        """Prepare routed A4 experts from packed rank-local checkpoint views.
+
+        ``scale_vectors`` supplies up/gate and down global multipliers followed
+        by their activation reciprocal scales. Gate/up scalar compatibility is
+        the recipe's responsibility. Scale scratch can be shared by serialized
+        layers; both buffers remain caller-owned through replay.
+        """
+        import torch
+        from b12x.loader._nvfp4_csf import slice_nvfp4_csf_plane
+        from b12x.moe import fused_moe as moe
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        if not prefixes or hidden_size <= 0 or hidden_size % 128:
+            raise ValueError("NVFP4 experts require nonempty prefixes and 128-aligned hidden width")
+        first, last = _aligned_range(intermediate_range, intermediate_size, 128)
+        local = last - first
+        count = len(prefixes)
+        shapes = ((count, 2 * local, hidden_size // 16), (count, hidden_size, local // 16))
+        if scale_scratch is None:
+            scale_scratch = tuple(torch.empty(shape, dtype=torch.float8_e4m3fn, device=self.device)
+                                  for shape in shapes)
+        for scratch, shape in zip(scale_scratch, shapes, strict=True):
+            if (scratch.device != self.device or scratch.dtype != torch.float8_e4m3fn
+                    or tuple(scratch.shape) != shape or not scratch.is_contiguous()):
+                raise ValueError("expert scale scratch shape, dtype, device, or layout mismatch")
+        if len(scale_vectors) != 4 or any(
+            scale.device.type != "cpu" or scale.dtype != torch.float32 or scale.shape != (count,)
+            or not bool((torch.isfinite(scale) & (scale > 0)).all()) for scale in scale_vectors
+        ):
+            raise ValueError("expert scales require four positive finite CPU float32 vectors")
+
+        w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((count, hidden_size, local // 2), dtype=torch.uint8, device=self.device)
+        fixed13, exceptions13, fixed2, exceptions2 = [], [], [], []
+        staged_bytes = 0
+        for index, prefix in enumerate(prefixes):
+            planes = {}
+            for projection, destination, rows, columns, rr, cr in (
+                ("up_proj", w13[index, :local], intermediate_size, hidden_size, (first, last), None),
+                ("gate_proj", w13[index, local:], intermediate_size, hidden_size, (first, last), None),
+                ("down_proj", w2[index], hidden_size, intermediate_size, None, (first, last)),
+            ):
+                source = self._sources[f"{prefix}.{projection}.weight"]
+                if source.dtype != torch.uint8 or source.shape != (rows, columns // 2):
+                    raise ValueError(f"{prefix}.{projection}: packed NVFP4 weight geometry mismatch")
+                r0, r1 = (0, rows) if rr is None else rr
+                c0, c1 = (0, columns) if cr is None else cr
+                self._copy(destination, source[r0:r1, c0 // 2:c1 // 2])
+                names = [f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"
+                         for suffix in ("fixed", "exceptions")]
+                incoming_bytes = sum(self.manifest.tensors[name].nbytes for name in names)
+                if staged_bytes + 2 * incoming_bytes > self.csf_byte_budget:
+                    raise ValueError("expert CSF planes exceed the CPU staging budget")
+                fixed, exceptions = slice_nvfp4_csf_plane(
+                    *(self._cpu_csf(name) for name in names), rows=rows, columns=columns // 16,
+                    row_range=rr, column_range=None if cr is None else (c0 // 16, c1 // 16),
+                )
+                staged_bytes += fixed.nbytes + exceptions.nbytes
+                planes[projection] = fixed, exceptions
+            fixed, exceptions = join_nvfp4_csf(
+                *planes["up_proj"], *planes["gate_proj"], rows=local, columns=hidden_size // 16,
+            )
+            fixed13.append(fixed)
+            exceptions13.append(exceptions)
+            fixed2.append(planes["down_proj"][0])
+            exceptions2.append(planes["down_proj"][1])
+        device_scales = []
+        for scale in scale_vectors:
+            target = torch.empty_like(scale, device=self.device)
+            self._copy(target, scale)
+            device_scales.append(target)
+        self._session.flush()
+        plan = moe.plan_weights(
+            source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
+            activation=moe.ActivationSpec(mode="a4", nonlinearity="silu", io_dtype=torch.bfloat16,
+                                          swiglu_limit=swiglu_limit),
+            geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local),
+        )
+        packed = moe.PackedWeights(
+            w13=w13, w2=w2, w13_block_scales=scale_scratch[0], w2_block_scales=scale_scratch[1],
+            w13_global_scales=device_scales[0], w2_global_scales=device_scales[1],
+            input_scale=device_scales[2], intermediate_scale=device_scales[3],
+            immutable_input_scales=True,
+        )
+        return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
+            packed=packed, w13_scales=moe.CsfScalePlanes(tuple(fixed13), tuple(exceptions13)),
+            w2_scales=moe.CsfScalePlanes(tuple(fixed2), tuple(exceptions2)),
+        ))
+
     def _cpu_csf(self, name):
         from safetensors import safe_open
 
@@ -138,4 +272,12 @@ class DirectWeightLoader:
                 str(self.manifest.snapshot / metadata.shard), framework="pt", device="cpu",
             ))
         return self._csf_files[metadata.shard].get_tensor(name).clone()
+
+
+def _aligned_range(selected, extent, alignment):
+    start, end = (0, extent) if selected is None else selected
+    if (type(start) is not int or type(end) is not int or not 0 <= start < end <= extent
+            or start % alignment or end % alignment):
+        raise ValueError("weight partition must be aligned, nonempty and in range")
+    return start, end
 

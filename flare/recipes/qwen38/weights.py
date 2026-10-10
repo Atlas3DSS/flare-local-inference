@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from flare.components.weights import DirectWeightLoader, join_nvfp4_csf
+from flare.components.weights import DirectWeightLoader
 from flare.preparation.checkpoint import CheckpointManifest
 from flare.preparation.qwen38 import TEXT_PREFIX, expected_quantization
 
@@ -157,33 +157,12 @@ class QwenWeightLoader(DirectWeightLoader):
 
     def load_mxfp8_group(self, prefixes: Sequence[str]) -> Weight:
         """Pack serialized projections along output rows before scale swizzling."""
-        import torch
-        from b12x.gemm.blockscaled import pack_weight
-
-        self._require_open()
         recipes = expected_quantization()
         if not prefixes or any(
             recipes.get(prefix, {}).get("quant_algo") != "MXFP8" for prefix in prefixes
         ):
             raise ValueError("projection packing requires declared MXFP8 weights")
-        sources = [self._sources[f"{prefix}.weight"] for prefix in prefixes]
-        if any(source.ndim != 2 or source.dtype != torch.float8_e4m3fn for source in sources):
-            raise ValueError("packed MXFP8 projections must be FP8 matrices")
-        columns = sources[0].shape[1]
-        if any(source.shape[1] != columns for source in sources):
-            raise ValueError("packed MXFP8 projections must share input width")
-        rows = sum(source.shape[0] for source in sources)
-        values = torch.empty((rows, columns), dtype=torch.float8_e4m3fn, device=self.device)
-        scales = torch.empty((rows, columns // 32), dtype=torch.uint8, device=self.device)
-        offset = 0
-        for prefix, source in zip(prefixes, sources, strict=True):
-            end = offset + source.shape[0]
-            self._copy(values[offset:end], source)
-            scale_rows = self._sources[f"{prefix}.weight_scale"][:source.shape[0], :columns // 32]
-            self._copy(scales[offset:end], scale_rows.view(torch.uint8))
-            offset = end
-        self._session.flush()
-        return pack_weight(values, scales, recipe="mxfp8")
+        return super().load_mxfp8_group(prefixes)
 
     def load_gdn_projections(self, prefix: str) -> dict[str, Weight]:
         return {
@@ -208,61 +187,14 @@ class QwenWeightLoader(DirectWeightLoader):
         Complete model layers require all 512 experts. Reusing ``scale_scratch``
         across layers requires serialized execution on one CUDA stream.
         """
-        import torch
-        from b12x.moe import fused_moe as moe
-
         self._require_open()
         memory = expert_memory_plan(self.manifest, layer, expert_ids)
         if memory.csf_bytes > self.csf_byte_budget:
             raise ValueError(f"layer CSF planes require {memory.csf_bytes} bytes, exceeding the CPU staging budget")
         ids = memory.expert_ids
-        scales = _expert_scale_vectors(self._sources, layer, ids)
-        count = len(ids)
-        if scale_scratch is None:
-            scale_scratch = allocate_expert_scale_scratch(self.device, count)
-        for scratch, shape in zip(scale_scratch, ((count, 1280, 160), (count, 2560, 40)), strict=True):
-            if scratch.device != self.device or scratch.dtype != torch.float8_e4m3fn or tuple(scratch.shape) != shape or not scratch.is_contiguous():
-                raise ValueError("expert scale scratch shape, dtype, device, or layout mismatch")
-        w13 = torch.empty((count, 1280, 1280), dtype=torch.uint8, device=self.device)
-        w2 = torch.empty((count, 2560, 320), dtype=torch.uint8, device=self.device)
-        fixed13, exceptions13, fixed2, exceptions2 = [], [], [], []
-        for local, expert in enumerate(ids):
-            prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}"
-            planes = {}
-            for projection, destination in (
-                ("up_proj", w13[local, :640]),
-                ("gate_proj", w13[local, 640:]),
-                ("down_proj", w2[local]),
-            ):
-                self._copy(destination, self._sources[f"{prefix}.{projection}.weight"])
-                planes[projection] = tuple(self._cpu_csf(
-                    f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"
-                ) for suffix in ("fixed", "exceptions"))
-            fixed, exceptions = join_nvfp4_csf(*planes["up_proj"], *planes["gate_proj"], rows=640, columns=160)
-            fixed13.append(fixed)
-            exceptions13.append(exceptions)
-            fixed2.append(planes["down_proj"][0])
-            exceptions2.append(planes["down_proj"][1])
-        device_scales = []
-        for scale in scales:
-            target = torch.empty_like(scale, device=self.device)
-            self._copy(target, scale)
-            device_scales.append(target)
-        self._session.flush()
-        plan = moe.plan_weights(
-            source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
-            activation=moe.ActivationSpec(mode="a4", nonlinearity="silu", io_dtype=torch.bfloat16),
-            geometry=moe.MoEGeometry(num_experts=count, hidden_size=2560, intermediate_size=640),
+        return self.load_nvfp4_experts(
+            tuple(f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}" for expert in ids),
+            hidden_size=2560, intermediate_size=640,
+            scale_vectors=_expert_scale_vectors(self._sources, layer, ids),
+            scale_scratch=scale_scratch,
         )
-        packed = moe.PackedWeights(
-            w13=w13, w2=w2,
-            w13_block_scales=scale_scratch[0], w2_block_scales=scale_scratch[1],
-            w13_global_scales=device_scales[0], w2_global_scales=device_scales[1],
-            input_scale=device_scales[2], intermediate_scale=device_scales[3],
-            immutable_input_scales=True,
-        )
-        return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
-            packed=packed,
-            w13_scales=moe.CsfScalePlanes(tuple(fixed13), tuple(exceptions13)),
-            w2_scales=moe.CsfScalePlanes(tuple(fixed2), tuple(exceptions2)),
-        ))
