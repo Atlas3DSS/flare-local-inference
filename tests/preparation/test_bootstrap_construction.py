@@ -634,13 +634,15 @@ def _install_boundaries(monkeypatch, checkpoint):
     return session, signatures, constructors
 
 
+@pytest.mark.parametrize("concurrency", [4, 9])
 @pytest.mark.parametrize("proposal,fixed", [("ordinary", None), ("copy", None), ("mtp", None), ("mtp", 4), ("copy", 4)])
 def test_prepare_model_constructs_real_catalog_on_meta(
-    monkeypatch, checkpoint, proposal, fixed
+    monkeypatch, checkpoint, proposal, fixed, concurrency
 ):
     assert not torch.cuda.is_initialized()
     session, signatures, constructors = _install_boundaries(monkeypatch, checkpoint)
     config = bootstrap.PreparationConfig(
+        max_active=concurrency,
         mtp=proposal != "ordinary",
         speculative_fixed_width=fixed,
         speculative_proposal_source="copy" if proposal == "copy" else "mtp",
@@ -656,12 +658,12 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     expected = {
         "vision": 4,
         "prefill": 6,
-        "resume": 3,
-        "init": 3,
-        "restore": 3,
-        "snapshot": 3,
+        "resume": len(config.batch_capacities),
+        "init": len(config.batch_capacities),
+        "restore": len(config.batch_capacities),
+        "snapshot": len(config.batch_capacities),
     }
-    expected.update({"decode": 3} if proposal == "ordinary" else {"speculative": len(config.speculative_shapes)})
+    expected.update({"decode": len(config.batch_capacities)} if proposal == "ordinary" else {"speculative": len(config.speculative_shapes)})
     assert Counter(signature.kind for signature in signatures) == expected
     assert {
         signature.token_capacity
@@ -685,10 +687,10 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         if signature.kind in ("prefill", "resume", "speculative")
     )
     decoders = constructors["PreparedDecoder"]
-    assert len(decoders) == (9 if proposal == "ordinary" else 6 + len(config.speculative_shapes))
+    assert len(decoders) == (6 + len(config.batch_capacities) if proposal == "ordinary" else 6 + len(config.speculative_shapes))
     assert len(constructors["PreparedVision"]) == 4
-    assert len(constructors["PreparedMaintenance"]) == 9
-    assert len(constructors["PreparedResume"]) == 3
+    assert len(constructors["PreparedMaintenance"]) == 3 * len(config.batch_capacities)
+    assert len(constructors["PreparedResume"]) == len(config.batch_capacities)
     assert len(constructors["PreparedGDN"]) == 36 * len(decoders)
     assert len(constructors["PreparedPLE"]) == len(decoders)
     for decoder, args in decoders:
@@ -696,13 +698,13 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         assert args["workspaces"] is session.arena
         assert args["completion_records"].shape == (
             2,
-            4,
+            config.request_capacity,
             8 if proposal == "ordinary" else 24,
         )
         assert args["completion_records"].dtype == torch.int64
         pool = args["state"].pool
         assert pool.backing.dtype == torch.uint8
-        assert pool.backing.shape[0] == 5 + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else 28)
+        assert pool.backing.shape[0] == 1 + config.request_capacity + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else 7 * config.request_capacity)
         assert decoder.scratch.residual.dtype == torch.bfloat16
         assert decoder.scratch.logits.dtype == torch.bfloat16
         assert pool.layout.speculative_tokens == (0 if proposal == "ordinary" else 7)
@@ -717,7 +719,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
     assert len(constructors["PreparedMTP"]) == ((6 + len(config.speculative_shapes) + sum(width > 1 for _, width in config.speculative_shapes)) if proposal == "mtp" else 0)
-    assert len(constructors["PreparedCheckpointCaches"]) == 9
+    assert len(constructors["PreparedCheckpointCaches"]) == 3 * len(config.batch_capacities)
     for owner, _ in constructors["PreparedMaintenance"]:
         assert owner.transfers.exact.pool is owner.pool
         assert owner.transfers.exact.tables is owner.forward_inputs.page_tables

@@ -6,10 +6,7 @@ use crate::{
     cuda::{Event, PinnedHost, Stream},
 };
 
-use super::{
-    COMPLETION_BYTES, ExecutionManifest, GraphKind, MAX_OUTPUT_TOKENS, REQUEST_LANES,
-    VECTOR_RECORD_FIELDS,
-};
+use super::{ExecutionManifest, GraphKind, MAX_OUTPUT_TOKENS, REQUEST_LANES, VECTOR_RECORD_FIELDS};
 
 pub struct Upload<'a> {
     pub buffer: &'a str,
@@ -119,12 +116,39 @@ impl CompletionRecord {
         values
     }
 }
+/// Inline completion storage bounded by the largest supported request capacity.
+#[derive(Debug, Clone, Copy)]
+pub struct CompletionRecords {
+    records: [CompletionRecord; REQUEST_LANES],
+    len: usize,
+}
+
+impl std::ops::Deref for CompletionRecords {
+    type Target = [CompletionRecord];
+    fn deref(&self) -> &Self::Target {
+        &self.records[..self.len]
+    }
+}
+impl std::ops::DerefMut for CompletionRecords {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.records[..self.len]
+    }
+}
+impl<const N: usize> From<[CompletionRecord; N]> for CompletionRecords {
+    fn from(values: [CompletionRecord; N]) -> Self {
+        assert!(N <= REQUEST_LANES);
+        let mut records = [CompletionRecord::default(); REQUEST_LANES];
+        records[..N].copy_from_slice(&values);
+        Self { records, len: N }
+    }
+}
+
 #[derive(Debug)]
 pub struct FrameCompletion {
     pub fence: Fence,
     pub graph_index: usize,
     pub elapsed_ns: Option<u64>,
-    pub records: [CompletionRecord; REQUEST_LANES],
+    pub records: CompletionRecords,
 }
 
 #[derive(Clone, Copy)]
@@ -176,7 +200,7 @@ impl GraphExecutor {
             .map(|graph| graph.input_bindings.len())
             .max()
             .unwrap_or(0)
-            .saturating_mul(REQUEST_LANES);
+            .saturating_mul(manifest.request_capacity());
         let model = Stream::open(manifest.context, manifest.device)?;
         let copy = Stream::open(manifest.context, manifest.device)?;
         let timed = manifest
@@ -426,7 +450,12 @@ impl GraphExecutor {
         }
         let pending = frame.pending.take().unwrap();
         self.completed = pending.fence;
-        let records = match decode_records(frame.output.bytes(), pending.fence) {
+        let records = match decode_records(
+            frame.output.bytes(),
+            pending.fence,
+            self.manifest.request_capacity(),
+            self.manifest.completion_fields(),
+        ) {
             Ok(records) => records,
             Err(error) => {
                 self.poison = Some(error.clone());
@@ -613,15 +642,23 @@ pub(super) fn validate_uploads<'uploads, 'bytes, 'storage>(
 pub(super) fn decode_records(
     bytes: &[u8],
     fence: Fence,
-) -> Result<[CompletionRecord; REQUEST_LANES]> {
-    let vector = bytes.len() == REQUEST_LANES * VECTOR_RECORD_FIELDS * 8;
-    if !vector && bytes.len() != COMPLETION_BYTES {
+    capacity: usize,
+    fields: usize,
+) -> Result<CompletionRecords> {
+    let vector = fields == VECTOR_RECORD_FIELDS;
+    if !(1..=REQUEST_LANES).contains(&capacity)
+        || ![8, VECTOR_RECORD_FIELDS].contains(&fields)
+        || bytes.len() != capacity * fields * 8
+    {
         return Err(Error::execution(
             ExecutionError::Completion,
             "completion extent mismatch",
         ));
     }
-    let mut records = [CompletionRecord::default(); REQUEST_LANES];
+    let mut records = CompletionRecords {
+        records: [CompletionRecord::default(); REQUEST_LANES],
+        len: capacity,
+    };
     for (record, bytes) in records.iter_mut().zip(bytes.chunks_exact(if vector {
         VECTOR_RECORD_FIELDS * 8
     } else {

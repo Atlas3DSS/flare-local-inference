@@ -6,9 +6,9 @@ pub const ABI_VERSION: u32 = 2;
 pub const SPECULATIVE_ABI_VERSION: u32 = 3;
 pub const VECTOR_RECORD_FIELDS: usize = 24;
 pub const MAX_OUTPUT_TOKENS: usize = 8;
-pub const REQUEST_LANES: usize = 4;
+pub const REQUEST_LANES: usize = 64;
 pub const RECORD_FIELDS: usize = 8;
-pub const COMPLETION_BYTES: usize = REQUEST_LANES * RECORD_FIELDS * 8;
+pub const BATCH_CAPACITIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Dtype {
@@ -158,8 +158,12 @@ impl ExecutionManifest {
             RECORD_FIELDS
         }
     }
+    pub fn request_capacity(&self) -> usize {
+        self.max_active.next_power_of_two()
+    }
+
     pub fn completion_bytes(&self) -> usize {
-        REQUEST_LANES * self.completion_fields() * 8
+        self.request_capacity() * self.completion_fields() * 8
     }
 
     pub fn buffer(&self, name: &str) -> Result<&BufferDescriptor> {
@@ -181,7 +185,7 @@ impl ExecutionManifest {
         if !(1..=REQUEST_LANES).contains(&self.max_active) {
             return Err(Error::execution(
                 ExecutionError::Manifest,
-                "max_active must be 1 through 4",
+                "max_active must be 1 through 64",
             ));
         }
         if self.input_frame_bytes == 0
@@ -266,7 +270,7 @@ impl ExecutionManifest {
             (
                 "completion_records",
                 Dtype::Int64,
-                vec![2, 4, self.completion_fields()],
+                vec![2, self.request_capacity(), self.completion_fields()],
             ),
         ] {
             let buffer = self.buffer(name)?;
@@ -289,7 +293,8 @@ impl ExecutionManifest {
             let valid = match graph.kind {
                 GraphKind::Speculative => {
                     self.abi_version == SPECULATIVE_ABI_VERSION
-                        && [1, 2, 4].contains(&graph.batch_capacity)
+                        && BATCH_CAPACITIES.contains(&graph.batch_capacity)
+                        && graph.batch_capacity <= self.request_capacity()
                         && (1..=8).contains(&graph.token_capacity)
                 }
                 GraphKind::Prefill => {
@@ -299,7 +304,11 @@ impl ExecutionManifest {
                                 && graph.token_capacity.is_multiple_of(64)))
                 }
                 GraphKind::Vision => graph.batch_capacity == 1 && graph.token_capacity > 0,
-                _ => [1, 2, 4].contains(&graph.batch_capacity) && graph.token_capacity == 1,
+                _ => {
+                    BATCH_CAPACITIES.contains(&graph.batch_capacity)
+                        && graph.batch_capacity <= self.request_capacity()
+                        && graph.token_capacity == 1
+                }
             };
             if !valid {
                 return Err(Error::execution(

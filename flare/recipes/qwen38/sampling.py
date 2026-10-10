@@ -7,7 +7,6 @@ from dataclasses import dataclass, fields
 import torch
 
 from flare.components.sampling import (
-    SLOTS,
     _check_tensor,
 )
 from flare.components.sampling import (
@@ -35,12 +34,12 @@ class DeviceRequestState(SamplingState):
     @classmethod
     def allocate(cls, device, *, vocab_size: int = VOCAB_SIZE,
                  consumed_tokens: torch.Tensor | None = None,
-                 ple_history: torch.Tensor | None = None) -> DeviceRequestState:
+                 ple_history: torch.Tensor | None = None, capacity: int = 4) -> DeviceRequestState:
         if type(vocab_size) is not int or not 1 <= vocab_size <= VOCAB_SIZE:
             raise ValueError("vocab_size must be in [1, 248320]")
-        state = SamplingState.allocate(device, vocab_size=vocab_size, consumed_tokens=consumed_tokens)
-        history = torch.full((SLOTS, 2), 248044, dtype=torch.int64, device=device) if ple_history is None else ple_history
-        _check_tensor(history, (SLOTS, 2), torch.int64, state.generation.device, "ple_history", contiguous=False)
+        state = SamplingState.allocate(device, vocab_size=vocab_size, consumed_tokens=consumed_tokens, capacity=capacity)
+        history = torch.full((state.capacity, 2), 248044, dtype=torch.int64, device=device) if ple_history is None else ple_history
+        _check_tensor(history, (state.capacity, 2), torch.int64, state.generation.device, "ple_history", contiguous=False)
         if history.stride(0) <= 0 or history.stride(1) != 1:
             raise ValueError("ple_history requires positive row stride and contiguous history columns")
         return cls(**{field.name: getattr(state, field.name) for field in fields(SamplingState)}, ple_history=history)

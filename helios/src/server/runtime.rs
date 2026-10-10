@@ -472,8 +472,8 @@ struct Worker<'a, M: ModelContract> {
     receiver: mpsc::Receiver<Incoming<M>>,
     scheduler: RequestScheduler,
     pending: VecDeque<Incoming<M>>,
-    active: [Option<Active<'a, M>>; 4],
-    admissions: [Option<crate::model::Admission<M>>; 4],
+    active: Vec<Option<Active<'a, M>>>,
+    admissions: Vec<Option<crate::model::Admission<M>>>,
     inputs: Option<M::Inputs>,
     queue_capacity: usize,
 }
@@ -497,8 +497,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             receiver,
             queue_capacity,
             pending: VecDeque::with_capacity(queue_capacity),
-            active: std::array::from_fn(|_| None),
-            admissions: std::array::from_fn(|_| None),
+            active: (0..config.limits.max_active).map(|_| None).collect(),
+            admissions: (0..config.limits.max_active).map(|_| None).collect(),
             inputs: None,
         }
     }
@@ -568,7 +568,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 }
             }
         }
-        for slot in 0..4 {
+        for slot in 0..self.active.len() {
             if self.active[slot]
                 .as_ref()
                 .is_some_and(|a| a.incoming.cancelled.load(Ordering::Acquire))
@@ -658,7 +658,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         kind: GraphKind,
         completion: crate::execution::FrameCompletion,
     ) -> Result<()> {
-        for record in &completion.records {
+        for record in completion.records.iter() {
             if record.status != 0 {
                 M::validate_completion(self.config, kind, record)?;
             }
@@ -773,7 +773,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
 
     fn publish(&mut self) -> Result<bool> {
         let mut progress = false;
-        for slot in 0..4 {
+        for slot in 0..self.active.len() {
             if let Some(request) = &mut self.active[slot] {
                 let live = self.scheduler.request(request.request)?;
                 if live.phase == RequestPhase::Finishing
@@ -1008,8 +1008,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
 fn cancel_stopped<M: ModelContract>(
     stopped: &[RequestHandle],
     scheduler: &mut RequestScheduler,
-    active: &mut [Option<Active<'_, M>>; 4],
-    admissions: &mut [Option<crate::model::Admission<M>>; 4],
+    active: &mut [Option<Active<'_, M>>],
+    admissions: &mut [Option<crate::model::Admission<M>>],
 ) -> Result<()> {
     for (index, &handle) in stopped.iter().enumerate() {
         // Several tokens from one completion can encounter the same poisoned grammar.
@@ -1056,7 +1056,7 @@ fn prepare_copy_proposal(
 
 fn validate_sampling_admissions<M: ModelContract>(
     step: &ScheduledStep,
-    admissions: &[Option<crate::model::Admission<M>>; 4],
+    admissions: &[Option<crate::model::Admission<M>>],
 ) -> Result<()> {
     if !step.kind.samples() {
         return Ok(());
@@ -1624,7 +1624,7 @@ mod tests {
         let free_pages = scheduler.free_page_count();
         let free_snapshots = scheduler.free_snapshot_count();
         let mut active: [Option<Active<'_, Qwen4Exp>>; 4] = std::array::from_fn(|_| None);
-        let mut admissions = std::array::from_fn(|_| None);
+        let mut admissions: [_; 4] = std::array::from_fn(|_| None);
         cancel_stopped::<Qwen4Exp>(
             &[handle, handle],
             &mut scheduler,
@@ -1662,7 +1662,7 @@ mod tests {
             ..first
         };
         let mut active: [Option<Active<'_, Qwen4Exp>>; 4] = std::array::from_fn(|_| None);
-        let mut admissions = std::array::from_fn(|_| None);
+        let mut admissions: [_; 4] = std::array::from_fn(|_| None);
         let error = cancel_stopped::<Qwen4Exp>(
             &[first, first, different_epoch, second],
             &mut scheduler,

@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+from flare.components.capacity import BATCH_CAPACITIES
 from flare.components.recurrent import DeltaMetadata
 from flare.components.token_state import PreparedTokenState
 from flare.preparation.triton import prepare_triton
@@ -25,9 +26,9 @@ def compile_kernel(kernel, args, grid):
 @triton.jit
 def _validate(Slots, Epochs, Live, Lengths, Generation, Status, Error, Pending, Consumed,
               ROWS: tl.constexpr, TOKENS: tl.constexpr, CONTEXT: tl.constexpr,
-              CONSUMED_STRIDE: tl.constexpr, PREFILL: tl.constexpr):
+              CONSUMED_STRIDE: tl.constexpr, PREFILL: tl.constexpr, SLOTS: tl.constexpr = 4):
     slot = tl.program_id(0)
-    rows = tl.arange(0, 4)
+    rows = tl.arange(0, SLOTS)
     match = (rows < ROWS) & (rows < tl.load(Live))
     match &= tl.load(Slots + rows, rows < ROWS, other=-1) == slot
     match &= tl.load(Epochs + rows, rows < ROWS, other=-1) == tl.load(Generation + slot)
@@ -60,19 +61,21 @@ class DecoderInputs:
     vision_token_indices: torch.Tensor
 
     @classmethod
-    def allocate(cls, device, *, context: int, tokens: int = 512):
+    def allocate(cls, device, *, context: int, tokens: int = 512, capacity: int = 4):
+        if capacity not in BATCH_CAPACITIES:
+            raise ValueError("decoder request capacity must be a power of two through 64")
         if (type(context) is not int or type(tokens) is not int
                 or context <= 0 or context % 64 or tokens <= 0):
             raise ValueError("decoder capacities require positive tokens and a 64-aligned context")
         return cls(
-            torch.full((4,), -1, dtype=torch.int32, device=device),
-            torch.zeros(4, dtype=torch.int64, device=device),
+            torch.full((capacity,), -1, dtype=torch.int32, device=device),
+            torch.zeros(capacity, dtype=torch.int64, device=device),
             torch.zeros(1, dtype=torch.int32, device=device),
-            torch.zeros(4, dtype=torch.int32, device=device),
+            torch.zeros(capacity, dtype=torch.int32, device=device),
             torch.full((tokens,), 248044, dtype=torch.int64, device=device),
             torch.zeros((tokens, 3), dtype=torch.int64, device=device),
-            torch.full((4, context // 64), -1, dtype=torch.int32, device=device),
-            torch.zeros(4, dtype=torch.int32, device=device),
+            torch.full((capacity, context // 64), -1, dtype=torch.int32, device=device),
+            torch.zeros(capacity, dtype=torch.int32, device=device),
             torch.full((tokens,), -1, dtype=torch.int32, device=device),
         )
 
@@ -86,18 +89,18 @@ def _metadata(Slots, Live, Lengths, Pending, Positions, Active, Delta, Tokens, I
               NumSeqs, NumTokens, RequestIds, QueryPositions, Rope, SequenceLengths,
               SlotMapping, PhysicalPages, PackedPages, IsPrefilling,
               ROWS: tl.constexpr, TOKENS: tl.constexpr, PAGES: tl.constexpr,
-              DELTA_STRIDE: tl.constexpr, PREFILL: tl.constexpr, BLOCK: tl.constexpr):
+              DELTA_STRIDE: tl.constexpr, PREFILL: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
-    rows = tl.arange(0, 4)
+    rows = tl.arange(0, SLOTS)
     live = tl.minimum(tl.load(Live), ROWS)
     active = tl.load(Active + rows, rows < ROWS, other=0) != 0
-    lengths = tl.load(Lengths + rows, rows < ROWS, other=0) if PREFILL else tl.full((4,), 1, tl.int32)
+    lengths = tl.load(Lengths + rows, rows < ROWS, other=0) if PREFILL else tl.full((SLOTS,), 1, tl.int32)
     lengths = tl.where((rows < live) & active, lengths, 0)
     begin = tl.sum(tl.where(rows < row, lengths, 0), 0)
     length = tl.sum(tl.where(rows == row, lengths, 0), 0)
     total = tl.sum(lengths, 0)
     slot = tl.load(Slots + row)
-    valid = (row < live) & (length > 0) & (slot >= 0) & (slot < 4)
+    valid = (row < live) & (length > 0) & (slot >= 0) & (slot < SLOTS)
     position = tl.load(Positions + row)
     model_slot = tl.where(valid, slot + 1, -1)
     end = position + length
@@ -138,12 +141,12 @@ def _metadata(Slots, Live, Lengths, Pending, Positions, Active, Delta, Tokens, I
 
 @triton.jit
 def _residual_checkpoint(Source, Saved, Rope, SavedRope, Slots, Active, Cu,
-                         SAVED_STRIDE: tl.constexpr, ROPE_STRIDE: tl.constexpr, BLOCK: tl.constexpr):
+                         SAVED_STRIDE: tl.constexpr, ROPE_STRIDE: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row, tile = tl.program_id(0), tl.program_id(1)
     channel = tile * BLOCK + tl.arange(0, BLOCK)
     slot = tl.load(Slots + row)
     begin, end = tl.load(Cu + row), tl.load(Cu + row + 1)
-    active = (tl.load(Active + row) != 0) & (slot >= 0) & (slot < 4) & (end > begin)
+    active = (tl.load(Active + row) != 0) & (slot >= 0) & (slot < SLOTS) & (end > begin)
     value = tl.load(Source + (end - 1) * 10240 + channel, active & (channel < 10240), other=0)
     tl.store(Saved + (slot + 1) * SAVED_STRIDE + channel, value, active & (channel < 10240))
     if tile == 0:
@@ -156,11 +159,11 @@ def _residual_checkpoint(Source, Saved, Rope, SavedRope, Slots, Active, Cu,
 @triton.jit
 def _hidden_checkpoint(Hidden, Saved, Delta, Sample, Slots, Active, Cu, Positions, Rope,
                        SAVED_STRIDE: tl.constexpr, DELTA_STRIDE: tl.constexpr,
-                       PREFILL: tl.constexpr, POSITION_BLOCK: tl.constexpr, BLOCK: tl.constexpr):
+                       PREFILL: tl.constexpr, POSITION_BLOCK: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     channel = tl.arange(0, BLOCK)
     slot = tl.load(Slots + row)
-    valid = (tl.load(Active + row) != 0) & (slot >= 0) & (slot < 4)
+    valid = (tl.load(Active + row) != 0) & (slot >= 0) & (slot < SLOTS)
     begin, end = tl.load(Cu + row), tl.load(Cu + row + 1)
     valid &= end > begin
     value = tl.load(Hidden + (end - 1) * 2560 + channel, valid & (channel < 2560), other=0)
@@ -178,11 +181,11 @@ def _hidden_checkpoint(Hidden, Saved, Delta, Sample, Slots, Active, Cu, Position
 
 @triton.jit
 def _resume_hidden(Saved, Sample, Slots, Epochs, Live, Generation, Status, Error, Consumed, Pending,
-                   SAVED_STRIDE: tl.constexpr, CONSUMED_STRIDE: tl.constexpr, BLOCK: tl.constexpr):
+                   SAVED_STRIDE: tl.constexpr, CONSUMED_STRIDE: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     channel = tl.arange(0, BLOCK)
     slot = tl.load(Slots + row)
-    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < 4)
+    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < SLOTS)
     valid &= tl.load(Generation + slot, valid, other=-1) == tl.load(Epochs + row)
     valid &= tl.load(Status + slot, valid, other=0) == 1
     consumed = tl.load(Consumed + slot * CONSUMED_STRIDE, valid, other=0)
@@ -200,15 +203,15 @@ class PreparedDecoderState:
     """Derive model metadata from persistent generation state inside each graph.
 
     Prefill has one sequence and consumes explicit token/position uploads.
-    Decode packs the pending GPU samples from up to four physical slots. Epoch
+    Decode packs the pending GPU samples from physical request slots. Epoch
     and terminal-state checks precede any model-state mutation. The scheduler
     validates lengths, vocabulary IDs, context bounds and physical page IDs.
     """
 
     def __init__(self, inputs: DecoderInputs, requests: DeviceRequestState, pool: HybridStatePool,
                  *, tokens: int, rows: int, mode: str):
-        if mode not in ("prefill", "decode") or type(rows) is not int or not 1 <= rows <= 4:
-            raise ValueError("decoder mode requires prefill/decode and one through four rows")
+        if mode not in ("prefill", "decode") or type(rows) is not int or not 1 <= rows <= inputs.row_slot_ids.numel():
+            raise ValueError("decoder mode requires prefill/decode and rows within request capacity")
         if (type(tokens) is not int or tokens <= 0
                 or any(tokens > tensor.shape[0] for tensor in
                        (inputs.token_ids, inputs.prefill_positions, inputs.vision_token_indices))):
@@ -232,7 +235,7 @@ class PreparedDecoderState:
             (inputs.row_slot_ids, inputs.row_generations, inputs.live_rows, inputs.query_lengths,
              requests.generation, requests.status, requests.error_code, requests.pending_token,
              requests.consumed_tokens, rows, tokens, inputs.page_tables.shape[1] * 64,
-             requests.consumed_tokens.stride(0), mode == "prefill"), (4, 1, 1))
+             requests.consumed_tokens.stride(0), mode == "prefill", requests.capacity), (requests.capacity, 1, 1))
         self.ple = PLEMetadata(inputs.token_ids[:tokens], self.gdn.query_start_loc,
             self.token_state.history, self.gdn.convolution_slots, self.gdn.fresh,
             self.gdn.accepted_tokens, self.gdn.num_seqs, self.gdn.num_tokens)
@@ -243,7 +246,7 @@ class PreparedDecoderState:
             g.final_state_indices, g.checkpoint_state_indices, g.checkpoint_offsets, g.num_seqs, g.num_tokens,
             q.request_ids, q.query_positions, q.rope_positions, q.sequence_lengths, q.slot_mapping,
             inputs.page_tables, q.main_block_table, q.is_prefilling,
-            rows, tokens, inputs.page_tables.shape[1], pool.rope_delta.stride(0), mode == "prefill", 128)
+            rows, tokens, inputs.page_tables.shape[1], pool.rope_delta.stride(0), mode == "prefill", 128, requests.capacity)
         self._metadata = compile_kernel(_metadata, args, (rows, 1, 1))
         self._residual = None
 
@@ -252,7 +255,7 @@ class PreparedDecoderState:
             (hidden, self.pool.last_hidden, self.pool.rope_delta, sample, self.inputs.row_slot_ids,
              self.token_state.active, self.gdn.query_start_loc, self.token_state.positions, self.qsa.rope_positions,
              self.pool.last_hidden.stride(0), self.pool.rope_delta.stride(0),
-             self.mode == "prefill", triton.next_power_of_2(self.tokens * 3), 4096), (self.rows, 1, 1))
+             self.mode == "prefill", triton.next_power_of_2(self.tokens * 3), 4096, self.requests.capacity), (self.rows, 1, 1))
 
     def prepare_residual(self, residual):
         if self.pool.layout.speculative_tokens:
@@ -260,7 +263,7 @@ class PreparedDecoderState:
             rope = self.pool.region("target_residual_position")
             self._residual = compile_kernel(_residual_checkpoint,
                 (residual, saved, self.qsa.rope_positions, rope, self.inputs.row_slot_ids, self.token_state.active,
-                 self.gdn.query_start_loc, saved.stride(0), rope.stride(0), 1024), (self.rows, 10, 1))
+                 self.gdn.query_start_loc, saved.stride(0), rope.stride(0), 1024, self.requests.capacity), (self.rows, 10, 1))
 
     def begin(self):
         self._validate()
@@ -287,12 +290,12 @@ class PreparedResume:
         from flare.components.sampling import PreparedSampling
 
         rows = sample_hidden.shape[0]
-        if not 1 <= rows <= 4 or logits.shape != (rows, requests.vocab_size):
+        if not 1 <= rows <= requests.capacity or logits.shape != (rows, requests.vocab_size):
             raise ValueError("resume hidden/logit row capacities must agree")
         self._gather = compile_kernel(_resume_hidden,
             (pool.last_hidden, sample_hidden, inputs.row_slot_ids, inputs.row_generations, inputs.live_rows,
              requests.generation, requests.status, requests.error_code, requests.consumed_tokens,
-             requests.pending_token, pool.last_hidden.stride(0), requests.consumed_tokens.stride(0), 4096),
+             requests.pending_token, pool.last_hidden.stride(0), requests.consumed_tokens.stride(0), 4096, requests.capacity),
             (rows, 1, 1))
         self.sample_hidden = sample_hidden
         self.projection = UnquantizedProjection(sample_hidden, lm_head_weight, logits, session=session, name=name)

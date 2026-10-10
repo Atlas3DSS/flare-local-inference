@@ -1,5 +1,52 @@
 use super::*;
 
+#[test]
+fn admission_and_completion_cover_configured_concurrency() {
+    for active in [1, 3, 5, 9, 33, 64] {
+        let mut scheduler = scheduler(active, 512, 128);
+        let handles = (0..active)
+            .map(|_| scheduler.admit(spec(65, 32)).unwrap())
+            .collect::<Vec<_>>();
+        assert!(scheduler.admit(spec(65, 32)).is_err());
+        let step = scheduler.next_step().unwrap();
+        assert_eq!(step.kind, GraphKind::Init);
+        assert_eq!(step.lanes.len(), active);
+        assert_eq!(step.batch_capacity, active.next_power_of_two());
+        scheduler.record_submission(&step, Fence(1)).unwrap();
+        let mut records = vec![CompletionRecord::default(); active.next_power_of_two()];
+        for handle in &handles {
+            records[handle.slot as usize] = CompletionRecord {
+                generation: handle.generation as i64,
+                submission_sequence: 1,
+                status: 1,
+                token_id: -1,
+                ..Default::default()
+            };
+        }
+        assert!(
+            scheduler
+                .complete(Fence(1), &records[..active - 1])
+                .is_err()
+        );
+        scheduler.complete(Fence(1), &records).unwrap();
+        for handle in handles {
+            assert_eq!(
+                scheduler.request(handle).unwrap().phase,
+                RequestPhase::Prefill
+            );
+        }
+    }
+}
+
+#[test]
+fn graph_budget_reserves_all_prepared_concurrencies_through_64() {
+    let catalog = speculation::graph_catalog(&[1, 2, 3, 4], None, 8, 64);
+    assert_eq!(catalog[0], [3, 4]);
+    assert!(catalog[1..].iter().all(|widths| widths == &[1]));
+    let fixed = speculation::graph_catalog(&[1, 2, 3, 4], Some(4), 8, 64);
+    assert!(fixed.iter().all(|widths| widths == &[4]));
+}
+
 fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
     RequestScheduler::new(
         [9; 32],
@@ -1307,15 +1354,15 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
 fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
     use speculation::graph_catalog;
     assert_eq!(
-        graph_catalog(&[1, 2, 3, 4], None, 4),
+        graph_catalog(&[1, 2, 3, 4], None, 4, 4)[..3],
         [vec![3, 4], vec![1], vec![1]]
     );
     assert_eq!(
-        graph_catalog(&[1, 2, 3, 4], None, 8),
+        graph_catalog(&[1, 2, 3, 4], None, 8, 4)[..3],
         [vec![1, 2, 3, 4], vec![2, 3, 4], vec![1]]
     );
     assert_eq!(
-        graph_catalog(&[1, 2, 3, 4], Some(4), 4),
+        graph_catalog(&[1, 2, 3, 4], Some(4), 4, 4)[..3],
         [vec![4], vec![4], vec![4]]
     );
     for active in [1, 2, 3, 4] {
@@ -1336,7 +1383,7 @@ fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
             retain_prompt(&mut s, fence + 1);
         }
         let step = s.next_step().unwrap();
-        assert_eq!(step.token_capacity, if active == 1 { 3 } else { 1 });
+        assert_eq!(step.token_capacity, 1);
         assert_eq!(step.kind, GraphKind::Speculative);
         s.record_submission(&step, Fence(12)).unwrap();
         let mut complete = [CompletionRecord::default(); 4];
@@ -1349,7 +1396,16 @@ fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
         for h in handles.iter().skip(1) {
             s.cancel(*h).unwrap();
         }
-        assert_eq!(s.next_step().unwrap().token_capacity, 3);
+        assert_eq!(
+            s.next_step().unwrap().token_capacity,
+            if active == 1 {
+                1
+            } else if active == 2 {
+                2
+            } else {
+                3
+            }
+        );
         assert_eq!(s.request(handles[0]).unwrap().consumed_tokens, 66);
     }
 }

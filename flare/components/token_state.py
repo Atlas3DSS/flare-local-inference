@@ -4,15 +4,15 @@ import torch
 import triton
 import triton.language as tl
 
-from flare.components.sampling import SLOTS, DeviceRequestState, _check_tensor, _compile
+from flare.components.sampling import DeviceRequestState, _check_tensor, _compile
 
 
 @triton.jit
 def _gather(Slots, Epochs, Live, Generation, Status, Pending, Consumed, History,
-            PackedPending, PackedPositions, PackedHistory, PackedActive, ROWS: tl.constexpr, CS: tl.constexpr, HS: tl.constexpr, HISTORY: tl.constexpr, PAD: tl.constexpr):
+            PackedPending, PackedPositions, PackedHistory, PackedActive, ROWS: tl.constexpr, CS: tl.constexpr, HS: tl.constexpr, HISTORY: tl.constexpr, PAD: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     slot = tl.load(Slots + row)
-    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < 4)
+    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < SLOTS)
     valid &= tl.load(Generation + slot, valid, other=-1) == tl.load(Epochs + row)
     valid &= tl.load(Status + slot, valid, other=0) == 1
     tl.store(PackedPending + row, tl.load(Pending + slot, valid, other=-1))
@@ -26,9 +26,9 @@ def _gather(Slots, Epochs, Live, Generation, Status, Pending, Consumed, History,
 
 @triton.jit
 def _consume(Tokens, CuSeq, Slots, Epochs, Live, Generation, Status, Error, Pending, Consumed,
-             History, ROWS: tl.constexpr, CAPACITY: tl.constexpr, CS: tl.constexpr, HS: tl.constexpr, HISTORY: tl.constexpr):
+             History, ROWS: tl.constexpr, CAPACITY: tl.constexpr, CS: tl.constexpr, HS: tl.constexpr, HISTORY: tl.constexpr, SLOTS: tl.constexpr = 4):
     slot = tl.program_id(0)
-    rows = tl.arange(0, 4)
+    rows = tl.arange(0, SLOTS)
     matches = (rows < ROWS) & (rows < tl.load(Live))
     matches &= tl.load(Slots + rows, rows < ROWS, other=-1) == slot
     matches &= tl.load(Epochs + rows, rows < ROWS, other=-1) == tl.load(Generation + slot)
@@ -77,15 +77,15 @@ class PreparedTokenState:
     def __init__(self, state: DeviceRequestState, token_ids, cu_seqlens, row_slot_ids, row_generations, live_rows,
                  *, history: torch.Tensor | None = None, history_pad_id: int = 0):
         rows, device = row_slot_ids.numel(), state.generation.device
-        if device.type != "cuda" or not 1 <= rows <= SLOTS or token_ids.ndim != 1 or not token_ids.numel():
-            raise ValueError("token state requires CUDA storage, 1..4 rows and a nonempty packed token capacity")
+        if device.type != "cuda" or not 1 <= rows <= state.capacity or token_ids.ndim != 1 or not token_ids.numel():
+            raise ValueError("token state requires CUDA storage, rows within request capacity and a nonempty packed token capacity")
         for tensor, shape, dtype, name in ((row_slot_ids, (rows,), torch.int32, "row_slot_ids"),
                 (row_generations, (rows,), torch.int64, "row_generations"), (live_rows, (1,), torch.int32, "live_rows"),
                 (token_ids, (token_ids.numel(),), torch.int64, "token_ids"),
                 (cu_seqlens, (rows + 1,), torch.int32, "cu_seqlens")):
             _check_tensor(tensor, shape, dtype, device, name)
         if history is not None:
-            _check_tensor(history, (SLOTS, 2), torch.int64, device, "history", contiguous=False)
+            _check_tensor(history, (state.capacity, 2), torch.int64, device, "history", contiguous=False)
             if history.stride(0) <= 0 or history.stride(1) != 1:
                 raise ValueError("history requires positive row stride and contiguous columns")
         self.state = state
@@ -96,17 +96,17 @@ class PreparedTokenState:
         self._gather_args = (row_slot_ids, row_generations, live_rows, state.generation, state.status,
             state.pending_token, state.consumed_tokens, history,
             self.pending_tokens, self.positions, self.history, self.active, rows,
-            state.consumed_tokens.stride(0), 0 if history is None else history.stride(0), history is not None, history_pad_id)
+            state.consumed_tokens.stride(0), 0 if history is None else history.stride(0), history is not None, history_pad_id, state.capacity)
         self._consume_args = (token_ids, cu_seqlens, row_slot_ids, row_generations, live_rows, state.generation,
             state.status, state.error_code, state.pending_token, state.consumed_tokens,
             history, rows, token_ids.numel(),
-            state.consumed_tokens.stride(0), 0 if history is None else history.stride(0), history is not None)
+            state.consumed_tokens.stride(0), 0 if history is None else history.stride(0), history is not None, state.capacity)
         self._rows = rows
         self._prepared = False
 
     def prepare(self) -> None:
         self._gather = _compile(_gather, self._gather_args, (self._rows, 1, 1))
-        self._consume = _compile(_consume, self._consume_args, (SLOTS, 1, 1))
+        self._consume = _compile(_consume, self._consume_args, (self.state.capacity, 1, 1))
         self._prepared = True
 
     def gather(self) -> None:

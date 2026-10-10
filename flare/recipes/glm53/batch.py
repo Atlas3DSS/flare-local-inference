@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from flare.components.parallel import TensorParallelShard
-from flare.components.sampling import ERROR, RUNNING, SLOTS, DeviceRequestState
+from flare.components.sampling import ERROR, RUNNING, DeviceRequestState
 from flare.components.token_state import PreparedTokenState
 
 from .state import DecoderMetadata
@@ -22,14 +22,14 @@ class BatchInputs:
     sample_enabled: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, blocks, device):
+    def allocate(cls, tokens, blocks, device, *, capacity=4):
         if any(type(value) is not int or value <= 0 for value in (tokens, blocks)):
             raise ValueError("GLM upload capacities require positive token and page counts")
-        return cls(torch.full((SLOTS,), -1, dtype=torch.int32, device=device),
-            torch.zeros(SLOTS, dtype=torch.int64, device=device), torch.zeros(1, dtype=torch.int32, device=device),
-            torch.zeros(SLOTS, dtype=torch.int32, device=device), torch.zeros(tokens, dtype=torch.int64, device=device),
-            torch.full((SLOTS, blocks), -1, dtype=torch.int32, device=device),
-            torch.zeros(SLOTS, dtype=torch.int32, device=device))
+        return cls(torch.full((capacity,), -1, dtype=torch.int32, device=device),
+            torch.zeros(capacity, dtype=torch.int64, device=device), torch.zeros(1, dtype=torch.int32, device=device),
+            torch.zeros(capacity, dtype=torch.int32, device=device), torch.zeros(tokens, dtype=torch.int64, device=device),
+            torch.full((capacity, blocks), -1, dtype=torch.int32, device=device),
+            torch.zeros(capacity, dtype=torch.int32, device=device))
 
     def buffers(self):
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
@@ -48,8 +48,9 @@ class PreparedBatch:
     def __init__(self, inputs: BatchInputs, requests: DeviceRequestState, metadata: DecoderMetadata,
                  *, mode, shard: TensorParallelShard, pages):
         rows, tokens = metadata.sample_indices.numel(), metadata.token_ids.numel()
-        if mode not in ("prefill", "decode") or not 1 <= rows <= SLOTS:
-            raise ValueError("GLM batches require prefill/decode and one through four rows")
+        self.capacity = requests.capacity
+        if mode not in ("prefill", "decode") or not 1 <= rows <= self.capacity:
+            raise ValueError("GLM batches require prefill/decode and rows within request capacity")
         if (mode == "prefill" and rows != 1) or (mode == "decode" and tokens != rows):
             raise ValueError("GLM prefill has one sequence; decode has one token per row")
         if tokens > inputs.token_ids.numel() or inputs.page_tables.shape[1] != metadata.indexed.block_table.shape[1]:
@@ -60,12 +61,12 @@ class PreparedBatch:
         self.rows, self.tokens, self.pages, self.mode, self.shard = rows, tokens, pages, mode, shard
         device = metadata.token_ids.device
         self.row_ids = torch.arange(rows, device=device)
-        self.slot_ids = torch.arange(SLOTS, device=device)
+        self.slot_ids = torch.arange(self.capacity, device=device)
         self.token_offsets = torch.arange(tokens, device=device)
         self.block_ids = torch.arange(inputs.page_tables.shape[1], device=device)
-        self.validation_input = torch.zeros((1, 8), dtype=torch.bfloat16, device=device)
+        self.validation_input = torch.zeros((1, 2 * self.capacity), dtype=torch.bfloat16, device=device)
         self.validation_sum = torch.zeros_like(self.validation_input)
-        self.present = torch.zeros(SLOTS, dtype=torch.bool, device=device)
+        self.present = torch.zeros(self.capacity, dtype=torch.bool, device=device)
         self.token_state = PreparedTokenState(requests, metadata.token_ids, metadata.recurrent.query_start_loc,
             inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows)
         self.token_state.prepare()
@@ -73,8 +74,8 @@ class PreparedBatch:
     def validate(self):
         b, r = self.inputs, self.requests
         slots = b.row_slot_ids[:self.rows].long()
-        safe_slots = slots.clamp(0, SLOTS - 1)
-        resident = (self.row_ids < b.live_rows) & (slots >= 0) & (slots < SLOTS)
+        safe_slots = slots.clamp(0, self.capacity - 1)
+        resident = (self.row_ids < b.live_rows) & (slots >= 0) & (slots < self.capacity)
         resident &= b.row_generations[:self.rows] == r.generation[safe_slots]
         duplicate = ((slots[:, None] == slots[None, :]) & resident[:, None] & resident[None, :]).sum(1) > 1
         lengths = b.query_lengths[:self.rows] if self.mode == "prefill" else torch.ones_like(safe_slots)
@@ -96,14 +97,14 @@ class PreparedBatch:
         bad = present & ~valid
         bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & bad[None, :]).any(1)
         self.present.copy_(((self.slot_ids[:, None] == slots[None, :]) & present[None, :]).any(1))
-        self.validation_input[0, :SLOTS].copy_(bad_slots)
-        self.validation_input[0, SLOTS:].copy_(self.present)
+        self.validation_input[0, :self.capacity].copy_(bad_slots)
+        self.validation_input[0, self.capacity:].copy_(self.present)
         return self.validation_input
 
     def begin(self, validation_sum):
-        participants = validation_sum[0, SLOTS:]
+        participants = validation_sum[0, self.capacity:]
         mismatch = (participants > 0) & (participants < self.shard.world_size)
-        bad_slots = self.present & ((validation_sum[0, :SLOTS] > 0) | mismatch)
+        bad_slots = self.present & ((validation_sum[0, :self.capacity] > 0) | mismatch)
         self.requests.status.copy_(torch.where(bad_slots, ERROR, self.requests.status))
         self.requests.error_code.copy_(torch.where(bad_slots, 32, self.requests.error_code))
         self.token_state.gather()
@@ -130,7 +131,7 @@ class PreparedBatch:
         m.sample_indices.copy_((ends - 1).clamp(min=0))
         index.query_start_loc.copy_(g.query_start_loc)
         index.state_slots.copy_(g.convolution_slots)
-        index.block_table.copy_(torch.where(active[:, None], b.page_tables[slots.clamp(0, SLOTS - 1)], -1))
+        index.block_table.copy_(torch.where(active[:, None], b.page_tables[slots.clamp(0, self.capacity - 1)], -1))
         request = (self.token_offsets[:, None] >= ends[None, :]).sum(1).clamp(max=self.rows - 1)
         live_token = self.token_offsets < ends[-1]
         position = t.positions[request] + self.token_offsets - starts[request]

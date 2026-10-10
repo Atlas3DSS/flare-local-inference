@@ -278,8 +278,10 @@ def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
         state.grammar_enabled[3] = 1
         live[0] = 3
         replay()
-        assert not op.valid[0].any() and not op.valid[3].any()
-        assert op.probabilities[0, :, 0].eq(1).all() and op.probabilities[3, :, 0].eq(1).all()
+        assert op.valid[0].tolist() == [True] + [False] * 7
+        assert not op.valid[3].any()
+        torch.testing.assert_close(op.probabilities[0, 0].cpu(), probabilities[0, 0], rtol=0, atol=0)
+        assert op.probabilities[0, 1:, 0].eq(1).all() and op.probabilities[3, :, 0].eq(1).all()
 
 
 @pytest.mark.parametrize("width", range(1, 9))

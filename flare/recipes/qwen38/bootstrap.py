@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 
+from flare.components.capacity import batch_capacities, request_capacity
 from flare.components.sampling import AdmissionBuffers
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.capture import capture_forwards
@@ -33,7 +34,6 @@ from .maintenance import PreparedMaintenance
 from .ple import MappedPLETable
 from .sampling import DeviceRequestState
 from .state import (
-    SNAPSHOT_BASE,
     HybridStateLayout,
     HybridStatePool,
     StateTransferMetadata,
@@ -68,6 +68,7 @@ def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes,
 @dataclass(frozen=True)
 class PreparationConfig:
     device: int = 0
+    max_active: int = 4
     context: int = 262144
     prefill_chunk_size: int = 4096
     snapshot_budget_bytes: int = 4 << 30
@@ -81,6 +82,7 @@ class PreparationConfig:
     history_drafts: bool = False
 
     def __post_init__(self):
+        request_capacity(self.max_active)
         for name in ("device", "context", "prefill_chunk_size", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an integer")
@@ -97,8 +99,8 @@ class PreparationConfig:
             raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
         if self.speculative_proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
-        if type(self.speculative_graph_budget) is not int or not 3 <= self.speculative_graph_budget <= 24:
-            raise ValueError("speculative graph budget must be between 3 and 24")
+        if type(self.speculative_graph_budget) is not int or not len(self.batch_capacities) <= self.speculative_graph_budget <= 56:
+            raise ValueError("speculative graph budget must cover every batch capacity and be at most 56")
         widths = self.speculative_widths
         if (not isinstance(widths, tuple) or not widths or widths[0] != 1
                 or any(type(width) is not int or not 1 <= width <= 8 for width in widths)
@@ -109,12 +111,25 @@ class PreparationConfig:
             raise ValueError("fixed verification width must belong to the prepared catalog")
 
     @property
+    def request_capacity(self):
+        return request_capacity(self.max_active)
+
+    @property
+    def batch_capacities(self):
+        return batch_capacities(self.max_active)
+
+    @property
+    def token_capacity(self):
+        return max(self.prefill_chunk_size, max((b * w for b, w in self.speculative_shapes), default=0)
+                   if self.mtp else self.request_capacity)
+
+    @property
     def speculative_shapes(self) -> tuple[tuple[int, int], ...]:
         widths = ((self.speculative_fixed_width,) if self.speculative_fixed_width is not None
                   else tuple(reversed(self.speculative_widths)))
         remaining, exhausted, shapes = self.speculative_graph_budget, False, []
-        for index, batch in enumerate((1, 2, 4)):
-            available = remaining - (2 - index)
+        for index, batch in enumerate(self.batch_capacities):
+            available = remaining - (len(self.batch_capacities) - 1 - index)
             selected = (1,) if exhausted else widths[:available]
             exhausted |= len(selected) < len(widths)
             shapes.extend((batch, width) for width in selected)
@@ -183,30 +198,31 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             speculative_tokens = 7 if config.mtp else 0
             layout = HybridStateLayout.build(speculative_tokens=speculative_tokens)
             snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
-            extra_base = SNAPSHOT_BASE + snapshots
-            state = HybridStatePool.allocate(extra_base + (28 if config.mtp else 0), device,
+            slots = config.request_capacity
+            extra_base = 1 + slots + snapshots
+            state = HybridStatePool.allocate(extra_base + (slots * 7 if config.mtp else 0), device,
                                              speculative_tokens=speculative_tokens)
             register_benchmark_state(
                 session, next(iter(state.gdn.values())).recurrent,
                 storage=state.backing, restore=state.reset_for_preparation,
             )
-            requests = DeviceRequestState.allocate(device,
-                consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5])
-            inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size)
-            scratch = DecoderScratch.allocate(config.prefill_chunk_size, device, sample_rows=max(batch * width for batch, width in config.speculative_shapes) if config.mtp else 4)
+            requests = DeviceRequestState.allocate(device, capacity=slots,
+                consumed_tokens=state.consumed_tokens[1:1 + slots, 0], ple_history=state.ple_history[1:1 + slots])
+            inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size, capacity=slots)
+            scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=max(batch * width for batch, width in config.speculative_shapes) if config.mtp else slots)
             workspaces = ScratchArena(device)
             rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
-            cache = {index: QSAState.allocate(pages=1, slots=5, device=device, draft_tokens=speculative_tokens)
+            cache = {index: QSAState.allocate(pages=1, slots=slots + 1, device=device, draft_tokens=speculative_tokens)
                      for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}
             page_bytes = sum(sum(getattr(value, name).nbytes for name in
                 ("main_k_cache", "main_v_cache", "compressed_k_cache")) for value in cache.values())
             planned_pages = torch.cuda.mem_get_info(device)[1] // page_bytes
-            admission = AdmissionBuffers.allocate(device, vocab_size=248320)
-            transfer = StateTransferMetadata.allocate(4, device)
+            admission = AdmissionBuffers.allocate(device, vocab_size=248320, capacity=slots)
+            transfer = StateTransferMetadata.allocate(slots, device)
             frame = torch.zeros(1, dtype=torch.int32, device=device)
             sequence = torch.zeros(1, dtype=torch.int64, device=device)
-            completion = torch.zeros((2, 4, 24 if config.mtp else 8), dtype=torch.int64, device=device)
-            features = VisionFeatureState.allocate(device)
+            completion = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
+            features = VisionFeatureState.allocate(device, capacity=slots)
             vision_inputs = VisionInputs.allocate(device)
             vision_scratch = VisionScratch.allocate(16384, device)
             buffers = {**inputs.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
@@ -223,10 +239,10 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     pool=state, requests=requests, inputs=inputs, scratch=scratch, workspaces=workspaces,
                     rotary=rotary, cache=cache, table=table, session=session, completion=completion,
                     frame=frame, sequence=sequence, extra_base=extra_base, context=config.context,
-                    prefill_capacity=config.prefill_chunk_size, max_cache_pages=planned_pages,
+                    prefill_capacity=config.token_capacity, max_cache_pages=planned_pages,
                     proposal_source=config.speculative_proposal_source)
                 buffers.update(speculation.buffers())
-        graph_count = 4 + len(config.prefill_capacities) + (len(config.speculative_shapes) if config.mtp else 3) + 12
+        graph_count = 4 + len(config.prefill_capacities) + (len(config.speculative_shapes) if config.mtp else len(config.batch_capacities)) + 4 * len(config.batch_capacities)
         with phase(progress, "Construct graph catalog", total=graph_count) as stage:
             def add(name, function, kind, batch, tokens, fields):
                 functions[name] = function
@@ -255,7 +271,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                               *(("draft_page_tables",) if has_mtp else ()))
             modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
             if not config.mtp:
-                modes += (("decode", (4, 2, 1)),)
+                modes += (("decode", reversed(config.batch_capacities)),)
             for mode, capacities in modes:
                 for capacity in capacities:
                     rows = 1 if mode == "prefill" else capacity
@@ -287,7 +303,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
 
             state_fields = tuple(f"state_{name}" for name in transfer.__dataclass_fields__ if name != "errors")
             admission_fields = tuple(admission.__dataclass_fields__)
-            for capacity in (4, 2, 1):
+            for capacity in reversed(config.batch_capacities):
                 resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
                     scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
                     session=session, name=f"resume{capacity}")
@@ -393,7 +409,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)
         report(f"prepared {len(graphs)} graphs and {page_capacity * 64} cached-token capacity")
-        return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
+        return PreparedModel(device=config.device, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
             resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table,))
     except BaseException:
         torch.cuda.synchronize(device)

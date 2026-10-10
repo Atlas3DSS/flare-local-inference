@@ -179,7 +179,7 @@ fn completion(
         fence: Fence(sequence),
         graph_index: 0,
         elapsed_ns: None,
-        records,
+        records: records.into(),
     }
 }
 

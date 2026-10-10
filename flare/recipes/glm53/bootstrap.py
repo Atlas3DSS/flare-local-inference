@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 
+from flare.components.capacity import batch_capacities, request_capacity
 from flare.components.parallel import TensorParallelShard
 from flare.components.sampling import AdmissionBuffers, DeviceRequestState
 from flare.components.state_transfer import StateCommands
@@ -59,8 +60,7 @@ class PreparationConfig:
             raise ValueError("GLM context must be 256-aligned in [256,1048576]")
         if not 64 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
-        if not 1 <= self.max_active <= 4:
-            raise ValueError("GLM supports one through four active requests")
+        request_capacity(self.max_active)
         if self.pages is not None and (type(self.pages) is not int or not 0 < self.pages <= 2147483647):
             raise ValueError("page capacity must be a positive signed 32-bit integer")
         if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
@@ -76,8 +76,11 @@ class PreparationConfig:
 
     @property
     def batch_capacities(self):
-        ceiling = 1 << (self.max_active - 1).bit_length()
-        return tuple(b for b in (4, 2, 1) if b <= ceiling)
+        return tuple(reversed(batch_capacities(self.max_active)))
+
+    @property
+    def request_capacity(self):
+        return request_capacity(self.max_active)
 
     @property
     def page_capacity(self):
@@ -110,14 +113,15 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         if snapshots < 1:
             raise ValueError("GLM snapshot budget must hold at least one continuation row")
         pages, blocks = config.page_capacity, config.context // 256
-        pool = ContinuationPool.allocate(layer_types, shard.world_size, 5 + snapshots, pages, device)
-        requests = DeviceRequestState.allocate(device, vocab_size=154880, consumed_tokens=pool.consumed_tokens[1:5, 0])
-        inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device)
-        admission = AdmissionBuffers.allocate(device, vocab_size=154880)
-        commands = StateCommands.allocate(device)
+        slots = config.request_capacity
+        pool = ContinuationPool.allocate(layer_types, shard.world_size, slots + 1 + snapshots, pages, device)
+        requests = DeviceRequestState.allocate(device, vocab_size=154880, capacity=slots, consumed_tokens=pool.consumed_tokens[1:1 + slots, 0])
+        inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
+        admission = AdmissionBuffers.allocate(device, vocab_size=154880, capacity=slots)
+        commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
-        records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
+        records = torch.zeros((2, slots, 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
         collective = create_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size, hidden_size=4096)
         vocabulary_collective = create_all_gather_runtime(group, device,

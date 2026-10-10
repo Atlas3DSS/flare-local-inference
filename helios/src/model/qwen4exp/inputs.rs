@@ -1,6 +1,6 @@
 use crate::{
     Result,
-    execution::{GraphKind, Upload},
+    execution::{GraphKind, REQUEST_LANES, Upload},
     model::{
         InputStep,
         inputs::{UploadBatch, append_pages},
@@ -14,8 +14,8 @@ pub type Admission = crate::model::Admission<super::Qwen4Exp>;
 /// Reusable host upload storage; GraphExecutor copies these bytes before submit returns.
 pub struct Inputs {
     staging: UploadBatch,
-    page_counts: [(u64, usize); 4],
-    draft_page_counts: [(u64, usize); 4],
+    page_counts: [(u64, usize); REQUEST_LANES],
+    draft_page_counts: [(u64, usize); REQUEST_LANES],
 }
 
 impl Default for Inputs {
@@ -28,8 +28,8 @@ impl Inputs {
     pub fn new() -> Self {
         Self {
             staging: UploadBatch::default(),
-            page_counts: [(0, 0); 4],
-            draft_page_counts: [(0, 0); 4],
+            page_counts: [(0, 0); REQUEST_LANES],
+            draft_page_counts: [(0, 0); REQUEST_LANES],
         }
     }
 
@@ -48,10 +48,13 @@ impl Inputs {
             lengths,
             samples,
         } = *frame;
+        let capacity = config.limits.request_capacity();
         self.staging.clear();
         if !matches!(step.kind, GraphKind::Init | GraphKind::Restore) {
-            self.staging.i32("row_slot_ids", 0, slots);
-            self.staging.i64("row_generations", 0, generations);
+            self.staging
+                .i32("row_slot_ids", 0, slots.into_iter().take(capacity));
+            self.staging
+                .i64("row_generations", 0, generations.into_iter().take(capacity));
             self.staging.i32("live_rows", 0, [step.lanes.len() as i32]);
         }
         if matches!(
@@ -64,7 +67,8 @@ impl Inputs {
                 | GraphKind::Snapshot
         ) {
             if !matches!(step.kind, GraphKind::Restore | GraphKind::Snapshot) {
-                self.staging.i32("sample_enabled", 0, samples);
+                self.staging
+                    .i32("sample_enabled", 0, samples.into_iter().take(capacity));
             }
             for lane in &step.lanes {
                 if !matches!(step.kind, GraphKind::Restore | GraphKind::Snapshot)
@@ -101,12 +105,13 @@ impl Inputs {
             }
         }
         if step.kind == GraphKind::Speculative {
-            self.staging.i32("query_lengths", 0, lengths);
-            let mut ids = [-1i64; 28];
-            let mut counts = [0; 4];
-            let mut expected = [-1i64; 4];
-            let mut copy_generations = [0i64; 4];
-            let mut mask_counts = [0i32; 4];
+            self.staging
+                .i32("query_lengths", 0, lengths.into_iter().take(capacity));
+            let mut ids = [-1i64; 7 * REQUEST_LANES];
+            let mut counts = [0; REQUEST_LANES];
+            let mut expected = [-1i64; REQUEST_LANES];
+            let mut copy_generations = [0i64; REQUEST_LANES];
+            let mut mask_counts = [0i32; REQUEST_LANES];
             for lane in &step.lanes {
                 let slot = lane.request.slot as usize;
                 let live = scheduler.request(lane.request)?;
@@ -148,14 +153,28 @@ impl Inputs {
                     copy_generations[slot] = lane.request.generation as i64;
                 }
             }
-            self.staging.i64("copy_token_ids", 0, ids);
-            self.staging.i32("copy_token_count", 0, counts);
-            self.staging.i64("copy_expected_consumed", 0, expected);
-            self.staging.i64("copy_generation", 0, copy_generations);
+            self.staging
+                .i64("copy_token_ids", 0, ids.into_iter().take(capacity * 7));
+            self.staging
+                .i32("copy_token_count", 0, counts.into_iter().take(capacity));
+            self.staging.i64(
+                "copy_expected_consumed",
+                0,
+                expected.into_iter().take(capacity),
+            );
+            self.staging.i64(
+                "copy_generation",
+                0,
+                copy_generations.into_iter().take(capacity),
+            );
             if config.speculative_proposal_source
                 == crate::scheduler::speculation::ProposalSource::Copy
             {
-                self.staging.i32("copy_grammar_mask_count", 0, mask_counts);
+                self.staging.i32(
+                    "copy_grammar_mask_count",
+                    0,
+                    mask_counts.into_iter().take(capacity),
+                );
             }
         }
         if step.kind == GraphKind::Prefill {
@@ -182,7 +201,8 @@ impl Inputs {
                 .positions
                 .get(range)
                 .ok_or("prefill exceeds positions")?;
-            self.staging.i32("query_lengths", 0, lengths);
+            self.staging
+                .i32("query_lengths", 0, lengths.into_iter().take(capacity));
             self.staging
                 .i64("token_ids", 0, tokens.iter().map(|token| *token as i64));
             self.staging
@@ -200,20 +220,21 @@ impl Inputs {
             step.kind,
             GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot
         ) {
-            let mut source = [0; 4];
-            let mut destination = [0; 4];
-            let mut operation = [0; 4];
-            let mut qsa = [-1; 4];
-            let mut expected = [-1; 4];
+            let mut source = [0; REQUEST_LANES];
+            let mut destination = [0; REQUEST_LANES];
+            let mut operation = [0; REQUEST_LANES];
+            let mut qsa = [-1; REQUEST_LANES];
+            let mut expected = [-1; REQUEST_LANES];
             for (row, lane) in step.lanes.iter().enumerate() {
                 let request = scheduler.request(lane.request)?;
                 if step.kind == GraphKind::Snapshot {
                     source[row] = request.state_slot.0 as i64;
-                    destination[row] = 5 + request.snapshot_destination().0 as i64;
+                    destination[row] =
+                        (capacity + 1) as i64 + request.snapshot_destination().0 as i64;
                     expected[row] = request.snapshot_consumed() as i64;
                 } else {
                     source[row] = if let Some(snapshot) = request.prefix_snapshot() {
-                        5 + snapshot.0 as i64
+                        (capacity + 1) as i64 + snapshot.0 as i64
                     } else {
                         request.state_slot.0 as i64
                     };
@@ -223,15 +244,26 @@ impl Inputs {
                     expected[row] = request.consumed_tokens as i64;
                 }
             }
-            self.staging.i64("state_expected_consumed", 0, expected);
-            self.staging.i64("state_source_slots", 0, source);
-            self.staging.i64("state_destination_slots", 0, destination);
-            self.staging.i32("state_operation", 0, operation);
-            self.staging.i64("state_qsa_slots", 0, qsa);
+            self.staging.i64(
+                "state_expected_consumed",
+                0,
+                expected.into_iter().take(capacity),
+            );
+            self.staging
+                .i64("state_source_slots", 0, source.into_iter().take(capacity));
+            self.staging.i64(
+                "state_destination_slots",
+                0,
+                destination.into_iter().take(capacity),
+            );
+            self.staging
+                .i32("state_operation", 0, operation.into_iter().take(capacity));
+            self.staging
+                .i64("state_qsa_slots", 0, qsa.into_iter().take(capacity));
             self.staging.i32(
                 "state_accepted_tokens",
                 0,
-                (0..4).map(|row| {
+                (0..capacity).map(|row| {
                     i32::from(step.kind != GraphKind::Snapshot && row < step.lanes.len())
                 }),
             );
@@ -241,8 +273,13 @@ impl Inputs {
         if matches!(step.kind, GraphKind::Init | GraphKind::Restore) {
             self.staging
                 .i32("admission_count", 0, [step.lanes.len() as i32]);
-            self.staging.i32("admission_slots", 0, slots);
-            self.staging.i64("admission_generations", 0, generations);
+            self.staging
+                .i32("admission_slots", 0, slots.into_iter().take(capacity));
+            self.staging.i64(
+                "admission_generations",
+                0,
+                generations.into_iter().take(capacity),
+            );
             for (row, lane) in step.lanes.iter().enumerate() {
                 let admission = admissions[lane.request.slot as usize].as_ref().unwrap();
                 self.staging.admission(config, row, admission.sampling())?;
@@ -279,7 +316,7 @@ impl Inputs {
                     .ok_or("missing vision capacities")?
             || end / config.contract.vision.patches_per_feature
                 > config.contract.vision.features_per_request
-            || handle.slot >= 4
+            || handle.slot as usize >= config.limits.max_active
             || handle.generation == 0
             || handle.generation > i64::MAX as u64
         {

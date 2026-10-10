@@ -21,7 +21,7 @@ class PreparedGeneration:
             raise ValueError("GLM generation requires the decoder's metadata and rank")
         if decoder.state is not pool.decoder:
             raise ValueError("GLM generation requires the decoder's continuation pool")
-        counts = pool.consumed_tokens[1:5, 0]
+        counts = pool.consumed_tokens[1:1 + batch.requests.capacity, 0]
         if batch.requests.consumed_tokens.data_ptr() != counts.data_ptr() or batch.requests.consumed_tokens.stride() != counts.stride():
             raise ValueError("GLM request counts must alias the continuation pool live rows")
         self.decoder, self.batch, self.pool = decoder, batch, pool
@@ -37,7 +37,7 @@ class PreparedGeneration:
     def __call__(self):
         self.batch.begin(self.validation(self.batch.validate()))
         self.decoder()
-        save_hidden(self.decoder.scratch.hidden, self.pool.last_hidden[1:5],
+        save_hidden(self.decoder.scratch.hidden, self.pool.last_hidden[1:1 + self.batch.requests.capacity],
                     self.batch.inputs.row_slot_ids[:self.batch.rows], self.batch.token_state.active)
         self.batch.finish()
         self.completion()

@@ -12,7 +12,7 @@ The Python representation is a dictionary with these fields:
     "abi_version": 2,
     "context": int,                 # Existing CUcontext handle.
     "device": int,                  # Visible device ordinal.
-    "max_active": int,              # 1 through 4.
+    "max_active": int,              # 1 through 64.
     "input_frame_bytes": int,       # Positive, multiple of 8.
     "buffers": [
         {
@@ -53,10 +53,9 @@ spans do not overlap; captured weights and scratch need not appear in this I/O
 manifest but must remain in the resource owner.
 
 Graph kinds are `init`, `restore`, `snapshot`, `prefill`, `decode`, `resume`,
-`vision`, and, in ABI3, `speculative`. Decode capacities are 1, 2, or 4,
-with one token per packed lane. Speculative graphs have batch capacity 1, 2,
-or 4 and an integer verification width from 1 through 8 in `token_capacity`.
-Batch capacity times verification width must not exceed eight.
+`vision`, and, in ABI3, `speculative`. Decode and speculative batch capacities are powers of two through 64.
+Decode has one token per packed lane. Speculative graphs have an integer
+verification width from 1 through 8 in `token_capacity`.
 Prefill has batch capacity 1. Token capacities are 1, 16, or a multiple of 64
 within 64..=262144. The model configuration separately requires the captured
 catalog for its `prefill_chunk_size`; transport validation does not infer a
@@ -64,7 +63,9 @@ scheduling policy or substitute a missing graph.
 State operations
 and resume use batch capacities 1, 2, or 4. Vision batch capacity is 1, and its
 token capacity is one of 256, 1024, 4096, or 16384 patches. Batch capacity can
-exceed `max_active` for padding, but must not exceed 4.
+exceed `max_active` for padding, but must not exceed its next power of two.
+Request storage capacity is `max_active.next_power_of_two()`; immutable
+state slots follow the null slot and this many live slots.
 
 The sampling mode is `general` for every graph. Temperature zero is represented
 by a one-hot distribution in the same stochastic sampling executable used for
@@ -77,7 +78,7 @@ Two graph inputs are reserved and required in every executable's bindings:
 |---|---|---|---|
 | `frame_index` | int32 | `[1]` | Native executor |
 | `submission_sequence` | int64 | `[1]` | Native executor |
-| `completion_records` | int64 | ABI2 `[2,4,8]`; ABI3 `[2,4,24]` | Captured graph finalizer |
+| `completion_records` | int64 | ABI2 `[2,capacity,8]`; ABI3 `[2,capacity,24]` | Captured graph finalizer |
 
 `completion_records` is an output and cannot appear in input bindings. Each
 buffer has one fixed host offset shared across all graph bindings that name
@@ -123,9 +124,9 @@ The executor validates vector bounds, padding, epochs and transport-reserved
 fields before delivering records. The model contract validates field 12 before
 request state advances.
 
-The lane index is the physical request slot 0–3. A captured finalizer scatters
+The lane index is the physical request slot within the configured capacity. A captured finalizer scatters
 packed model rows through the request-slot mapping. Every launch writes the
-selected frame's four records, marking unused lanes inactive. Records for
+selected frame's records, marking unused lanes inactive. Records for
 active lanes carry the submitted sequence and the corresponding request
 generation. Finished requests suppress further mutation inside subsequent
 graphs. The model scheduler requires an active completion for every submitted

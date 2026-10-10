@@ -1,7 +1,7 @@
 use super::PAGE_TOKENS;
 use crate::{
     Result,
-    execution::{GraphKind, Upload},
+    execution::{GraphKind, REQUEST_LANES, Upload},
     model::{
         InputStep,
         inputs::{UploadBatch, append_pages},
@@ -10,10 +10,18 @@ use crate::{
 
 pub type Admission = crate::model::Admission<super::Glm5Next>;
 
-#[derive(Default)]
 pub struct Inputs {
     staging: UploadBatch,
-    page_counts: [(u64, usize); 4],
+    page_counts: [(u64, usize); REQUEST_LANES],
+}
+
+impl Default for Inputs {
+    fn default() -> Self {
+        Self {
+            staging: UploadBatch::default(),
+            page_counts: [(0, 0); REQUEST_LANES],
+        }
+    }
 }
 
 impl Inputs {
@@ -32,14 +40,17 @@ impl Inputs {
             lengths,
             samples,
         } = *frame;
+        let capacity = config.limits.request_capacity();
         self.staging.clear();
         if matches!(step.kind, GraphKind::Vision | GraphKind::Speculative) {
             return Err("unsupported GLM graph kind".into());
         }
         let admit = matches!(step.kind, GraphKind::Init | GraphKind::Restore);
         if !admit {
-            self.staging.i32("row_slot_ids", 0, slots);
-            self.staging.i64("row_generations", 0, epochs);
+            self.staging
+                .i32("row_slot_ids", 0, slots.into_iter().take(capacity));
+            self.staging
+                .i64("row_generations", 0, epochs.into_iter().take(capacity));
             self.staging.i32("live_rows", 0, [step.lanes.len() as i32]);
         }
         if step.kind != GraphKind::Resume {
@@ -58,8 +69,10 @@ impl Inputs {
         }
         if step.kind.samples() {
             if step.kind != GraphKind::Resume {
-                self.staging.i32("sample_enabled", 0, samples);
-                self.staging.i32("query_lengths", 0, lengths);
+                self.staging
+                    .i32("sample_enabled", 0, samples.into_iter().take(capacity));
+                self.staging
+                    .i32("query_lengths", 0, lengths.into_iter().take(capacity));
             }
             for lane in &step.lanes {
                 if let Some(mask) = &admissions[lane.request.slot as usize]
@@ -99,7 +112,7 @@ impl Inputs {
             self.staging
                 .i64("token_ids", 0, tokens.iter().map(|t| *t as i64));
         } else if step.kind == GraphKind::Decode {
-            let mut tokens = [0; 4];
+            let mut tokens = [0; REQUEST_LANES];
             for (row, lane) in step.lanes.iter().enumerate() {
                 let live = scheduler.request(lane.request)?;
                 if lane.tokens != 1 || live.generated_tokens == 0 {
@@ -115,10 +128,10 @@ impl Inputs {
                 .i64("token_ids", 0, tokens.into_iter().take(step.batch_capacity));
         }
         if admit || step.kind == GraphKind::Snapshot {
-            let mut source = [-1; 4];
-            let mut destination = [-1; 4];
-            let mut operation = [0; 4];
-            let mut expected = [-1; 4];
+            let mut source = [-1; REQUEST_LANES];
+            let mut destination = [-1; REQUEST_LANES];
+            let mut operation = [0; REQUEST_LANES];
+            let mut expected = [-1; REQUEST_LANES];
             for (row, lane) in step.lanes.iter().enumerate() {
                 let live = scheduler.request(lane.request)?;
                 match step.kind {
@@ -128,33 +141,50 @@ impl Inputs {
                         expected[row] = 0;
                     }
                     GraphKind::Restore => {
-                        source[row] = 5 + live
-                            .prefix_snapshot()
-                            .ok_or("restore requires a GLM checkpoint")?
-                            .0 as i64;
+                        source[row] = (capacity + 1) as i64
+                            + live
+                                .prefix_snapshot()
+                                .ok_or("restore requires a GLM checkpoint")?
+                                .0 as i64;
                         destination[row] = live.state_slot.0 as i64;
                         expected[row] = live.consumed_tokens as i64;
                     }
                     GraphKind::Snapshot => {
                         source[row] = live.state_slot.0 as i64;
-                        destination[row] = 5 + live.snapshot_destination().0 as i64;
+                        destination[row] =
+                            (capacity + 1) as i64 + live.snapshot_destination().0 as i64;
                         expected[row] = live.snapshot_consumed() as i64;
                     }
                     _ => unreachable!(),
                 }
             }
-            self.staging.i64("state_source_slots", 0, source);
-            self.staging.i64("state_destination_slots", 0, destination);
-            self.staging.i64("state_expected_consumed", 0, expected);
-            self.staging.i32("state_operation", 0, operation);
+            self.staging
+                .i64("state_source_slots", 0, source.into_iter().take(capacity));
+            self.staging.i64(
+                "state_destination_slots",
+                0,
+                destination.into_iter().take(capacity),
+            );
+            self.staging.i64(
+                "state_expected_consumed",
+                0,
+                expected.into_iter().take(capacity),
+            );
+            self.staging
+                .i32("state_operation", 0, operation.into_iter().take(capacity));
             self.staging
                 .i32("state_num_ops", 0, [step.lanes.len() as i32]);
         }
         if admit {
             self.staging
                 .i32("admission_count", 0, [step.lanes.len() as i32]);
-            self.staging.i32("admission_slots", 0, slots);
-            self.staging.i64("admission_generations", 0, epochs);
+            self.staging
+                .i32("admission_slots", 0, slots.into_iter().take(capacity));
+            self.staging.i64(
+                "admission_generations",
+                0,
+                epochs.into_iter().take(capacity),
+            );
             for (row, lane) in step.lanes.iter().enumerate() {
                 let admission = admissions[lane.request.slot as usize].as_ref().unwrap();
                 self.staging.admission(config, row, admission.sampling())?;

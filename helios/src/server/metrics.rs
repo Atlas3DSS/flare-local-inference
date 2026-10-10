@@ -46,7 +46,7 @@ pub(super) struct Metrics {
     pub failed: AtomicU64,
     launches: [AtomicU64; 8],
     sampling_launches: [AtomicU64; 4],
-    speculative: [[RoundMetrics; 8]; 3],
+    speculative: [[RoundMetrics; 8]; 7],
     draft_sources: [[[AtomicU64; 2]; 2]; 7],
     mixed_grammar_decode_steps: AtomicU64,
     constrained_max_inflight: AtomicU64,
@@ -136,7 +136,7 @@ impl Metrics {
         batch: usize,
         width: usize,
         elapsed_ns: u64,
-        records: &[CompletionRecord; 4],
+        records: &[CompletionRecord],
     ) {
         let counters = &self.speculative[batch.trailing_zeros() as usize][width - 1];
         counters.rounds.fetch_add(1, Ordering::Relaxed);
@@ -234,7 +234,10 @@ impl Metrics {
                 text,
                 "# HELP flare_speculative_{metric} {help}\n# TYPE flare_speculative_{metric} counter"
             );
-            for (batch, widths) in [1, 2, 4].into_iter().zip(&self.speculative) {
+            for (batch, widths) in crate::execution::BATCH_CAPACITIES
+                .into_iter()
+                .zip(&self.speculative)
+            {
                 for (width, counts) in (1..=8).zip(widths) {
                     let value = match metric {
                         "rounds_total" => &counts.rounds,

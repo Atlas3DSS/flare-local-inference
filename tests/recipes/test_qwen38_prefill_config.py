@@ -38,8 +38,9 @@ def test_prefill_chunk_must_fit_explicit_context():
 
 
 @pytest.mark.parametrize("arguments, expected", [([], 4096), (["--prefill-chunk-size", "3072"], 3072)])
+@pytest.mark.parametrize("concurrency", [1, 5, 64])
 @pytest.mark.parametrize("no_compile", [False, True])
-def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expected, no_compile):
+def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expected, no_compile, concurrency):
     from flare.__main__ import main
 
     configurations = []
@@ -62,9 +63,10 @@ def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expecte
         return Model()
 
     monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare)
-    assert main(["--prepare-only", *arguments, *(["--no-compile"] if no_compile else [])]) == 0
+    assert main(["--prepare-only", "--concurrency", str(concurrency), *arguments, *(["--no-compile"] if no_compile else [])]) == 0
     assert len(configurations) == 1
     assert configurations[0].prefill_chunk_size == expected
+    assert configurations[0].max_active == concurrency
 
 
 @pytest.mark.parametrize("widths,fixed", [((1, 9), None), ((2, 4), None), ((1, 4, 2), None),
@@ -168,7 +170,7 @@ def test_fixed_drafting_captures_exactly_one_graph_per_batch(drafts):
         GraphSignature("speculative", batch, width)
 
 
-@pytest.mark.parametrize("budget", [0, 2, 25, True, 4.0])
+@pytest.mark.parametrize("budget", [0, 2, 57, True, 4.0])
 def test_speculative_graph_budget_requires_a_capture_for_each_batch(budget):
     with pytest.raises(ValueError, match="graph budget"):
         PreparationConfig(mtp=True, speculative_graph_budget=budget)

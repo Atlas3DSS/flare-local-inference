@@ -44,7 +44,7 @@ class DraftMetadata:
         m.sequence_lengths.copy_(torch.where(lengths > 0, starts + lengths, 0))
         m.num_accepted_tokens.fill_(1)
         m.is_prefilling.fill_(True)
-        safe_slots = slots.long().clamp(0, 3)
+        safe_slots = slots.long().clamp(0, tables.shape[0] - 1)
         m.main_block_table.copy_(tables[safe_slots])
         m.compressed_block_table.copy_(m.main_block_table)
         page = m.main_block_table[row, (logical // 64).clamp(0, tables.shape[1] - 1)]

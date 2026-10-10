@@ -105,7 +105,7 @@ fn completed(status: i64) -> FrameCompletion {
         fence: Fence(3),
         graph_index: 2,
         elapsed_ns: None,
-        records: [record; 4],
+        records: [record; 4].into(),
     }
 }
 
@@ -134,8 +134,8 @@ fn completion_wire_preserves_the_execution_abi() {
     let mut reader = Reader(&bytes);
     assert_eq!(reader.number().unwrap(), 3);
     assert_eq!(reader.number().unwrap(), 2);
-    let records = super::super::transport::decode_records(reader.0, Fence(3)).unwrap();
-    for (expected, actual) in root.records.iter().zip(records) {
+    let records = super::super::transport::decode_records(reader.0, Fence(3), 4, 8).unwrap();
+    for (expected, actual) in root.records.iter().zip(records.iter()) {
         assert_eq!(expected.fields(), actual.fields());
     }
 }

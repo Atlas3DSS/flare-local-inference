@@ -219,7 +219,7 @@ pub(super) fn completion(value: &FrameCompletion) -> Vec<u8> {
     let mut bytes = Vec::new();
     number(&mut bytes, value.fence.0 as usize);
     number(&mut bytes, value.graph_index);
-    for record in &value.records {
+    for record in value.records.iter() {
         for field in record.fields() {
             bytes.extend_from_slice(&field.to_le_bytes());
         }

@@ -2,7 +2,7 @@
 
 use crate::{
     Result,
-    execution::{GraphKind, OwnedUpload, Upload},
+    execution::{GraphKind, OwnedUpload, REQUEST_LANES, Upload},
     model::{Admission, ModelConfig, ModelContract, SamplingParameters},
     scheduler::{LiveRequest, RequestScheduler, ScheduledStep},
 };
@@ -11,11 +11,11 @@ pub struct InputStep<'a, M: ModelContract> {
     pub config: &'a ModelConfig,
     pub scheduler: &'a RequestScheduler,
     pub step: &'a ScheduledStep,
-    pub admissions: &'a [Option<Admission<M>>; 4],
-    pub slots: [i32; 4],
-    pub generations: [i64; 4],
-    pub lengths: [i32; 4],
-    pub samples: [i32; 4],
+    pub admissions: &'a [Option<Admission<M>>],
+    pub slots: [i32; REQUEST_LANES],
+    pub generations: [i64; REQUEST_LANES],
+    pub lengths: [i32; REQUEST_LANES],
+    pub samples: [i32; REQUEST_LANES],
 }
 
 /// Pack after the scheduler reserves every page referenced by the submission.
@@ -24,9 +24,12 @@ pub fn pack_inputs<M: ModelContract>(
     config: &ModelConfig,
     scheduler: &RequestScheduler,
     step: &ScheduledStep,
-    admissions: &[Option<Admission<M>>; 4],
+    admissions: &[Option<Admission<M>>],
 ) -> Result<()> {
-    if step.lanes.is_empty() || step.lanes.len() > step.batch_capacity || step.batch_capacity > 4 {
+    if step.lanes.is_empty()
+        || step.lanes.len() > step.batch_capacity
+        || step.batch_capacity > config.limits.request_capacity()
+    {
         return Err("invalid model lane count".into());
     }
     let mut frame = InputStep {
@@ -34,15 +37,18 @@ pub fn pack_inputs<M: ModelContract>(
         scheduler,
         step,
         admissions,
-        slots: [-1; 4],
-        generations: [0; 4],
-        lengths: [0; 4],
-        samples: [0; 4],
+        slots: [-1; REQUEST_LANES],
+        generations: [0; REQUEST_LANES],
+        lengths: [0; REQUEST_LANES],
+        samples: [0; REQUEST_LANES],
     };
-    let mut seen = [false; 4];
+    let mut seen = [false; REQUEST_LANES];
     for (row, lane) in step.lanes.iter().enumerate() {
         let slot = lane.request.slot as usize;
-        if slot >= 4 || std::mem::replace(&mut seen[slot], true) {
+        if slot >= config.limits.max_active
+            || slot >= admissions.len()
+            || std::mem::replace(&mut seen[slot], true)
+        {
             return Err("model rows require unique physical slots".into());
         }
         admissions[slot]
@@ -65,7 +71,7 @@ pub fn pack_inputs<M: ModelContract>(
 
 pub fn append_pages(
     staging: &mut UploadBatch,
-    counts: &mut [(u64, usize); 4],
+    counts: &mut [(u64, usize)],
     name: &str,
     request: &LiveRequest,
     capacity: usize,

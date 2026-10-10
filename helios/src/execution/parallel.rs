@@ -211,7 +211,12 @@ impl TensorParallelExecutor {
                     fence,
                     graph_index: graph,
                     elapsed_ns: None,
-                    records: super::transport::decode_records(reader.0, fence)?,
+                    records: super::transport::decode_records(
+                        reader.0,
+                        fence,
+                        self.local.manifest().request_capacity(),
+                        self.local.manifest().completion_fields(),
+                    )?,
                 });
             }
         }
@@ -281,7 +286,7 @@ fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()> {
     if root.fence != peer.fence || root.graph_index != peer.graph_index {
         return Err(invalid("rank completion identity differs"));
     }
-    for (root, peer) in root.records.iter().zip(&peer.records) {
+    for (root, peer) in root.records.iter().zip(peer.records.iter()) {
         if root.generation != peer.generation
             || root.submission_sequence != peer.submission_sequence
             || root.consumed_tokens != peer.consumed_tokens

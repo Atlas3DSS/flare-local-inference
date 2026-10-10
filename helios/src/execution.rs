@@ -14,7 +14,7 @@ pub use worker::{ExecutionWorker, OwnedUpload};
 mod tests;
 
 pub use manifest::{
-    ABI_VERSION, BufferDescriptor, COMPLETION_BYTES, Dtype, ExecutionManifest, GraphDescriptor,
+    ABI_VERSION, BATCH_CAPACITIES, BufferDescriptor, Dtype, ExecutionManifest, GraphDescriptor,
     GraphKind, InputBinding, MAX_OUTPUT_TOKENS, RECORD_FIELDS, REQUEST_LANES,
     SPECULATIVE_ABI_VERSION, SamplingMode, VECTOR_RECORD_FIELDS,
 };

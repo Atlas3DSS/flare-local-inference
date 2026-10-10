@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from flare.components.capacity import BATCH_CAPACITIES, request_capacity
+
 from .graphs import PreparedGraphBundle
 
 
@@ -26,8 +28,8 @@ class GraphSignature:
         if any(type(value) is not int or value <= 0 for value in (self.batch_capacity, self.token_capacity)):
             raise ValueError("graph capacities must be positive integers")
         if self.kind == "speculative" and (
-                self.batch_capacity not in (1, 2, 4) or not 1 <= self.token_capacity <= 8):
-            raise ValueError("speculative graphs require batch 1/2/4 and width 1 through 8")
+                self.batch_capacity not in BATCH_CAPACITIES or not 1 <= self.token_capacity <= 8):
+            raise ValueError("speculative graphs require power-of-two batch capacities through 64 and width 1 through 8")
         object.__setattr__(self, "inputs", tuple(self.inputs))
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("graph input names must be unique")
@@ -46,8 +48,7 @@ class PreparedExecution(PreparedGraphBundle):
 
     def __init__(self, *, signatures: Mapping[str, GraphSignature], max_active: int = 4, **kwargs):
         super().__init__(**kwargs)
-        if type(max_active) is not int or not 1 <= max_active <= 4:
-            raise ValueError("max_active must be an integer from one through four")
+        request_capacity(max_active)
         if signatures.keys() != self.graphs.keys():
             raise ValueError("every prepared graph requires exactly one signature")
         if any(not isinstance(value, GraphSignature) for value in signatures.values()):

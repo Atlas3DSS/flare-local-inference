@@ -20,8 +20,8 @@ def main(argv=None):
     parser.add_argument("--device", type=int, default=0, help="process-local CUDA ordinal")
     parser.add_argument("--tp", type=int, choices=(1, 2, 4), default=1,
         help="tensor-parallel ranks on consecutive CUDA ordinals beginning at --device; GLM requires 2 or 4")
-    parser.add_argument("--max-active", type=int, choices=(1, 2, 3, 4), default=4,
-        help="active request capacity for GLM graph preparation (default: 4)")
+    parser.add_argument("--concurrency", type=int, choices=range(1, 65), default=4,
+        help="maximum concurrent requests (default: 4)")
     parser.add_argument("--context", type=int, default=262144)
     parser.add_argument("--prefill-chunk-size", type=int, default=4096,
         help="maximum tokens per captured prefill graph; 64-aligned and no larger than context (default: 4096)")
@@ -37,7 +37,7 @@ def main(argv=None):
         help="explicit increasing draft-token counts including zero; overrides the default draft limit")
     parser.add_argument("--mtp-fixed-draft-tokens", type=int, choices=range(8),
         help="fixed draft-token count instead of adaptive selection; expands the default limit if necessary")
-    parser.add_argument("--mtp-graph-budget", type=int, choices=range(3, 25), default=8,
+    parser.add_argument("--mtp-graph-budget", type=int, choices=range(1, 57), default=8,
         help="maximum speculative graph captures; prioritize smaller batches and larger draft counts (default: 8)")
     parser.add_argument("--history-drafts", action="store_true",
         help="enable draft continuations from request history during speculation (default: disabled)")
@@ -89,15 +89,15 @@ def _run(args, parser, started):
 
         config = PreparationConfig(devices=tuple(range(args.device, args.device + args.tp)),
             context=args.context, pages=args.pages, prefill_chunk_size=args.prefill_chunk_size,
-            max_active=args.max_active, compile_decoder=not args.no_compile, **budgets)
+            max_active=args.concurrency, compile_decoder=not args.no_compile, **budgets)
         model = prepare_group(args.snapshot, config, prepare_rank, progress=progress)
     elif architecture == "qwen4_exp":
-        if args.tp != 1 or args.max_active != 4:
-            parser.error("Qwen requires --tp 1 and --max-active 4")
+        if args.tp != 1:
+            parser.error("Qwen tensor parallel preparation is not yet configured")
         with phase(progress, "Initialize model runtime"):
             from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
-        config = PreparationConfig(device=args.device, context=args.context, pages=args.pages,
+        config = PreparationConfig(device=args.device, max_active=args.concurrency, context=args.context, pages=args.pages,
             prefill_chunk_size=args.prefill_chunk_size,
             mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
             speculative_proposal_source=args.mtp_proposal_source,

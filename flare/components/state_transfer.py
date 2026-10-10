@@ -7,13 +7,14 @@ import torch
 import triton
 import triton.language as tl
 
+from .capacity import BATCH_CAPACITIES
 from .sampling import _check_tensor, _compile
 from .state import StateStorage
 
 
 @dataclass(frozen=True)
 class StateCommands:
-    """Copy (0) or reset (1) commands for live slots 1–4 and snapshots 5 onward.
+    """Copy (0) or reset (1) commands for live slots and immutable snapshots.
 
     Copy requires one live and one immutable slot, and a positive exact consumed
     endpoint. Reset requires source -1 and endpoint zero. Errors are 1=operation,
@@ -29,13 +30,15 @@ class StateCommands:
     errors: torch.Tensor
 
     @classmethod
-    def allocate(cls, device):
-        return cls(torch.full((4,), -1, dtype=torch.int64, device=device),
-                   torch.full((4,), -1, dtype=torch.int64, device=device),
-                   torch.zeros(4, dtype=torch.int32, device=device),
-                   torch.full((4,), -1, dtype=torch.int64, device=device),
+    def allocate(cls, device, *, capacity=4):
+        if capacity not in BATCH_CAPACITIES:
+            raise ValueError("state command capacity must be a power of two through 64")
+        return cls(torch.full((capacity,), -1, dtype=torch.int64, device=device),
+                   torch.full((capacity,), -1, dtype=torch.int64, device=device),
+                   torch.zeros(capacity, dtype=torch.int32, device=device),
+                   torch.full((capacity,), -1, dtype=torch.int64, device=device),
                    torch.zeros(1, dtype=torch.int32, device=device),
-                   torch.zeros(4, dtype=torch.int32, device=device))
+                   torch.zeros(capacity, dtype=torch.int32, device=device))
 
     def buffers(self):
         """Fixed native upload names; validation errors are device-owned output."""
@@ -45,15 +48,15 @@ class StateCommands:
 @triton.jit
 def _validate(Sources, Destinations, Operations, Expected, Count, Errors, Consumed, Tables,
               SLOTS: tl.constexpr, CS: tl.constexpr, WIDTH: tl.constexpr,
-              PAGES: tl.constexpr, PAGE_TOKENS: tl.constexpr):
+              PAGES: tl.constexpr, PAGE_TOKENS: tl.constexpr, LIVE: tl.constexpr = 4):
     row = tl.program_id(0)
     count = tl.load(Count)
     source, destination = tl.load(Sources + row), tl.load(Destinations + row)
     operation, endpoint = tl.load(Operations + row), tl.load(Expected + row)
     live = row < count
-    snapshot = (source >= 1) & (source < 5) & (destination >= 5) & (destination < SLOTS)
-    restore = (source >= 5) & (source < SLOTS) & (destination >= 1) & (destination < 5)
-    reset = (operation == 1) & (source == -1) & (destination >= 1) & (destination < 5)
+    snapshot = (source >= 1) & (source < LIVE + 1) & (destination >= LIVE + 1) & (destination < SLOTS)
+    restore = (source >= LIVE + 1) & (source < SLOTS) & (destination >= 1) & (destination < LIVE + 1)
+    reset = (operation == 1) & (source == -1) & (destination >= 1) & (destination < LIVE + 1)
     copying = operation == 0
     valid_slots = (copying & (snapshot | restore)) | reset
     consumed = tl.load(Consumed + source * CS, live & copying & (source > 0) & (source < SLOTS), other=-1)
@@ -65,18 +68,18 @@ def _validate(Sources, Destinations, Operations, Expected, Count, Errors, Consum
     page = tl.load(Tables + slot * WIDTH + logical,
                    live & tail & valid_slots & (logical >= 0) & (logical < WIDTH), other=-1)
 
-    others = tl.arange(0, 4)
+    others = tl.arange(0, LIVE)
     other_sources, other_destinations = tl.load(Sources + others), tl.load(Destinations + others)
     other_operations, other_endpoints = tl.load(Operations + others), tl.load(Expected + others)
     other_copy = other_operations == 0
-    other_snapshot = other_copy & (other_sources >= 1) & (other_sources < 5) & (other_destinations >= 5)
-    other_restore = other_copy & (other_sources >= 5) & (other_destinations >= 1) & (other_destinations < 5)
+    other_snapshot = other_copy & (other_sources >= 1) & (other_sources < LIVE + 1) & (other_destinations >= LIVE + 1)
+    other_restore = other_copy & (other_sources >= LIVE + 1) & (other_destinations >= 1) & (other_destinations < LIVE + 1)
     other_slots = tl.where(other_snapshot, other_sources, other_destinations) - 1
     other_tail = (other_snapshot | other_restore) & (other_endpoints > 0) & (other_endpoints % PAGE_TOKENS != 0)
     other_logical = other_endpoints // PAGE_TOKENS
     other_live = (others < count) & (others != row)
     other_pages = tl.load(Tables + other_slots * WIDTH + other_logical,
-        other_live & other_tail & (other_slots >= 0) & (other_slots < 4)
+        other_live & other_tail & (other_slots >= 0) & (other_slots < LIVE)
         & (other_logical >= 0) & (other_logical < WIDTH), other=-1)
     conflict = destination == other_destinations
     conflict |= copying & (source == other_destinations)
@@ -89,7 +92,7 @@ def _validate(Sources, Destinations, Operations, Expected, Count, Errors, Consum
     error = tl.where(live & ~valid_endpoint, 3, error)
     error = tl.where(live & ~valid_slots, 2, error)
     error = tl.where(live & ((operation < 0) | (operation > 1)), 1, error)
-    error = tl.where((count < 0) | (count > 4), 5, error)
+    error = tl.where((count < 0) | (count > LIVE), 5, error)
     tl.store(Errors + row, error)
 
 
@@ -108,11 +111,11 @@ def _copy_rows(Backing, Sources, Destinations, Operations, Count, Errors,
 @triton.jit
 def _copy_pages(Pointers, Backing, Tables, Sources, Destinations, Operations, Expected, Count, Errors,
                 ROW_BYTES: tl.constexpr, PAGE_BYTES: tl.constexpr, WIDTH: tl.constexpr,
-                PAGE_TOKENS: tl.constexpr, BLOCK: tl.constexpr):
+                PAGE_TOKENS: tl.constexpr, BLOCK: tl.constexpr, LIVE: tl.constexpr = 4):
     row, region, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     source, destination = tl.load(Sources + row), tl.load(Destinations + row)
     endpoint = tl.load(Expected + row)
-    snapshot = source < 5
+    snapshot = source < LIVE + 1
     active = (row < tl.load(Count)) & (tl.load(Errors + row) == 0)
     active &= (tl.load(Operations + row) == 0) & (endpoint % PAGE_TOKENS != 0)
     slot = tl.where(snapshot, source, destination) - 1
@@ -142,16 +145,17 @@ class PreparedStateTransfer:
     """
 
     def __init__(self, pool: StateStorage, commands: StateCommands, tables, *, pages, page_tokens):
+        self.capacity = commands.source_slots.numel()
         device = pool.backing.device
-        if device.type != "cuda" or pool.backing.shape[0] < 6:
+        if device.type != "cuda" or pool.backing.shape[0] < self.capacity + 2:
             raise ValueError("state transfers require CUDA null/live/snapshot storage")
         if type(page_tokens) is not int or page_tokens <= 0:
             raise ValueError("state transfers require positive physical page size")
         for name in commands.__dataclass_fields__:
             dtype = torch.int32 if name in ("operation", "num_ops", "errors") else torch.int64
-            _check_tensor(getattr(commands, name), (1,) if name == "num_ops" else (4,), dtype, device, name)
-        if tables.ndim != 2 or tables.shape[0] != 4 or tables.shape[1] <= 0:
-            raise ValueError("state transfers require four physical request page tables")
+            _check_tensor(getattr(commands, name), (1,) if name == "num_ops" else (self.capacity,), dtype, device, name)
+        if tables.ndim != 2 or tables.shape[0] != self.capacity or tables.shape[1] <= 0:
+            raise ValueError("state transfers require one page table per physical request slot")
         _check_tensor(tables, tables.shape, torch.int32, device, "page_tables")
         consumed = pool.region("consumed_tokens")
         if consumed.shape != (pool.backing.shape[0], 1) or consumed.dtype != torch.int64:
@@ -174,21 +178,21 @@ class PreparedStateTransfer:
         self.pointers = {size: torch.tensor(values, dtype=torch.int64, device=device) for size, values in groups.items()}
         c = commands
         self.validate_args = (c.source_slots, c.destination_slots, c.operation, c.expected_consumed, c.num_ops,
-            c.errors, consumed, tables, pool.backing.shape[0], consumed.stride(0), tables.shape[1], page_count, page_tokens)
+            c.errors, consumed, tables, pool.backing.shape[0], consumed.stride(0), tables.shape[1], page_count, page_tokens, self.capacity)
         self.row_args = (pool.backing, c.source_slots, c.destination_slots, c.operation, c.num_ops, c.errors,
                          pool.layout.row_bytes, 4096)
         self.page_args = [(pointer, pool.backing, tables, c.source_slots, c.destination_slots, c.operation,
-            c.expected_consumed, c.num_ops, c.errors, pool.layout.row_bytes, size, tables.shape[1], page_tokens, 1024)
+            c.expected_consumed, c.num_ops, c.errors, pool.layout.row_bytes, size, tables.shape[1], page_tokens, 1024, self.capacity)
             for size, pointer in self.pointers.items()]
         self._validate, self._copies = None, []
 
     def prepare(self):
         if self.commands.num_ops.item() != 0:
             raise ValueError("state transfer preparation requires zero live commands")
-        self._validate = _compile(_validate, self.validate_args, (4, 1, 1))
-        self._copies = [_compile(_copy_rows, self.row_args, (4, triton.cdiv(self.pool.layout.row_bytes, 4096), 1))]
+        self._validate = _compile(_validate, self.validate_args, (self.capacity, 1, 1))
+        self._copies = [_compile(_copy_rows, self.row_args, (self.capacity, triton.cdiv(self.pool.layout.row_bytes, 4096), 1))]
         for args in self.page_args:
-            self._copies.append(_compile(_copy_pages, args, (4, args[0].shape[0], triton.cdiv(args[10], 1024))))
+            self._copies.append(_compile(_copy_pages, args, (self.capacity, args[0].shape[0], triton.cdiv(args[10], 1024))))
 
     def validate(self):
         if self._validate is None:

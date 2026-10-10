@@ -11,10 +11,10 @@ from flare.components.vocabulary import PreparedVocabularyProjection
 class PreparedResume:
     def __init__(self, weights, requests, pool, inputs, records, frame, sequence, *, rows,
                  runtime, vocabulary_runtime, coordinator, session, name):
-        counts = pool.consumed_tokens[1:5, 0]
+        counts = pool.consumed_tokens[1:1 + requests.capacity, 0]
         if requests.consumed_tokens.data_ptr() != counts.data_ptr() or requests.consumed_tokens.stride() != counts.stride():
             raise ValueError("GLM resume counts must alias continuation storage live rows")
-        self.state = PreparedResumeState(requests, pool.last_hidden[1:5], inputs.row_slot_ids[:rows],
+        self.state = PreparedResumeState(requests, pool.last_hidden[1:1 + requests.capacity], inputs.row_slot_ids[:rows],
             inputs.row_generations[:rows], inputs.live_rows, world_size=weights.shard.world_size)
         self.validation = PreparedAllReduce(self.state.validation_input, self.state.validation_sum,
             runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.validation")

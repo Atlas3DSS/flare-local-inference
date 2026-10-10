@@ -18,7 +18,7 @@ def test_default_catalog_covers_4096_prefill_and_four_requests():
 @pytest.mark.parametrize("values", [
     {"devices": (0,)}, {"devices": (0, 0)}, {"devices": (0, 1, 2)}, {"devices": (-1, 0)},
     {"context": 513}, {"context": 2097152}, {"prefill_chunk_size": 4097},
-    {"context": 256, "prefill_chunk_size": 512}, {"max_active": 5}, {"pages": 0},
+    {"context": 256, "prefill_chunk_size": 512}, {"max_active": 65}, {"pages": 0},
     {"snapshot_budget_bytes": 0}, {"headroom_bytes": -1},
 ])
 def test_invalid_prepared_geometry_rejects_before_gpu_use(values):
@@ -26,8 +26,9 @@ def test_invalid_prepared_geometry_rejects_before_gpu_use(values):
         PreparationConfig(**values)
 
 
+@pytest.mark.parametrize("concurrency", [1, 5, 64])
 @pytest.mark.parametrize("no_compile", [False, True])
-def test_cli_passes_compile_policy_to_rank_group(monkeypatch, tmp_path, no_compile):
+def test_cli_passes_compile_policy_to_rank_group(monkeypatch, tmp_path, no_compile, concurrency):
     from flare.__main__ import main
 
     (tmp_path / "config.json").write_text('{"model_type":"glm5_next"}')
@@ -48,6 +49,7 @@ def test_cli_passes_compile_policy_to_rank_group(monkeypatch, tmp_path, no_compi
         return Model()
 
     monkeypatch.setattr("flare.preparation.rank_group.prepare_group", prepare_group)
-    assert main(["--snapshot", str(tmp_path), "--tp", "2", "--prepare-only",
+    assert main(["--snapshot", str(tmp_path), "--tp", "2", "--prepare-only", "--concurrency", str(concurrency),
                  *(["--no-compile"] if no_compile else [])]) == 0
     assert configs[0].compile_decoder is not no_compile
+    assert configs[0].max_active == concurrency

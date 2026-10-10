@@ -2,7 +2,10 @@
 
 use crate::{
     Result,
-    execution::{Dtype, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION, SamplingMode},
+    execution::{
+        BATCH_CAPACITIES, Dtype, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION,
+        SamplingMode,
+    },
     model::{ModelConfig, ModelContract},
     scheduler::{prefill_capacities, speculation},
 };
@@ -40,7 +43,7 @@ fn validate_inner<M: ModelContract>(
         || config.limits.pages == 0
         || config.limits.pages > i32::MAX as u32
         || config.limits.snapshots == 0
-        || config.limits.snapshots > i32::MAX as u32 - 5
+        || config.limits.snapshots > i32::MAX as u32 - (config.limits.request_capacity() + 1) as u32
         || config.max_new_tokens == 0
         || config.max_new_tokens > i32::MAX as u32
         || config.sampling_defaults.top_k > config.contract.vocabulary as i32
@@ -53,8 +56,12 @@ fn validate_inner<M: ModelContract>(
         return Err("invalid prepared model configuration".into());
     }
     speculation::validate_widths(&config.speculative_widths)?;
-    if !(3..=24).contains(&config.speculative_graph_budget) {
-        return Err("speculative graph budget must be between 3 and 24".into());
+    if !(config.limits.request_capacity().ilog2() as usize + 1..=56)
+        .contains(&config.speculative_graph_budget)
+    {
+        return Err(
+            "speculative graph budget must cover every batch capacity and be at most 56".into(),
+        );
     }
     if config
         .speculative_fixed_width
@@ -145,13 +152,14 @@ fn speculative_shape(config: &ModelConfig, batch: usize, tokens: usize) -> bool 
             &config.speculative_widths,
             config.speculative_fixed_width,
             config.speculative_graph_budget,
+            config.limits.request_capacity(),
         )[index]
             & (1 << (tokens - 1))
             != 0
 }
 
 fn batches(config: &ModelConfig) -> impl Iterator<Item = usize> {
-    [1, 2, 4]
+    BATCH_CAPACITIES
         .into_iter()
         .filter(|batch| *batch <= config.limits.max_active.next_power_of_two())
 }

@@ -1,6 +1,6 @@
 //! Bounded width selection from completed graph costs and emitted progress.
 
-use crate::Result;
+use crate::{Result, execution::BATCH_CAPACITIES};
 
 pub const WIDTHS: [usize; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -30,18 +30,24 @@ pub struct CopyProposal {
     pub grammar_masks: Vec<i32>,
 }
 
-pub fn graph_width_masks(widths: &[usize], fixed: Option<usize>, budget: usize) -> [u8; 3] {
+pub fn graph_width_masks(
+    widths: &[usize],
+    fixed: Option<usize>,
+    budget: usize,
+    capacity: usize,
+) -> [u8; 7] {
+    let batches = capacity.ilog2() as usize + 1;
     let count = if fixed.is_some() { 1 } else { widths.len() };
     let mut remaining = budget;
     let mut exhausted = false;
     std::array::from_fn(|index| {
-        if count == 0 {
+        if count == 0 || index >= batches {
             return 0;
         }
         let take = if exhausted {
             1
         } else {
-            count.min(remaining.saturating_sub(2 - index))
+            count.min(remaining.saturating_sub(batches - 1 - index))
         };
         let mask = if exhausted {
             1
@@ -60,8 +66,13 @@ pub fn graph_width_masks(widths: &[usize], fixed: Option<usize>, budget: usize) 
     })
 }
 
-pub fn graph_catalog(widths: &[usize], fixed: Option<usize>, budget: usize) -> [Vec<usize>; 3] {
-    graph_width_masks(widths, fixed, budget)
+pub fn graph_catalog(
+    widths: &[usize],
+    fixed: Option<usize>,
+    budget: usize,
+    capacity: usize,
+) -> [Vec<usize>; 7] {
+    graph_width_masks(widths, fixed, budget, capacity)
         .map(|mask| (1..=8).filter(|w| mask & (1 << (w - 1)) != 0).collect())
 }
 
@@ -87,7 +98,7 @@ struct Cost {
 
 #[derive(Default)]
 pub struct WidthController {
-    costs: [[[Cost; 8]; 3]; 3],
+    costs: [[[Cost; 8]; 3]; 7],
     completed: u64,
 }
 impl WidthController {
@@ -110,7 +121,7 @@ impl WidthController {
         context: u64,
         maximum: usize,
     ) -> Option<usize> {
-        if ![1, 2, 4].contains(&batch) {
+        if !BATCH_CAPACITIES.contains(&batch) {
             return None;
         }
         let (b, c) = Self::coordinates(batch, context);
@@ -142,7 +153,7 @@ impl WidthController {
         nanos: u64,
         emitted: usize,
     ) -> Result<()> {
-        if ![1, 2, 4].contains(&batch)
+        if !BATCH_CAPACITIES.contains(&batch)
             || !WIDTHS.contains(&width)
             || nanos == 0
             || emitted > batch * width

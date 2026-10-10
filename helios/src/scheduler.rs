@@ -30,6 +30,10 @@ pub struct SchedulerLimits {
 }
 
 impl SchedulerLimits {
+    pub fn request_capacity(&self) -> usize {
+        self.max_active.next_power_of_two()
+    }
+
     pub(crate) fn validate_prefill(&self) -> Result<()> {
         if self.prefill_chunk_size < 64
             || !self.prefill_chunk_size.is_multiple_of(64)
@@ -239,7 +243,7 @@ pub struct RequestScheduler {
     speculative_widths: Vec<usize>,
     speculative_fixed_width: Option<usize>,
     speculative_graph_budget: usize,
-    speculative_catalog: [Vec<usize>; 3],
+    speculative_catalog: [Vec<usize>; 7],
     proposal_source: speculation::ProposalSource,
     controller: speculation::WidthController,
 }
@@ -257,7 +261,7 @@ impl RequestScheduler {
             || capabilities.vocabulary > i32::MAX as usize
             || capabilities
                 .live_state_base
-                .checked_add(REQUEST_LANES as u32)
+                .checked_add(limits.request_capacity() as u32)
                 .is_none()
         {
             return Err("invalid model scheduling capabilities".into());
@@ -299,7 +303,7 @@ impl RequestScheduler {
             stats: SchedulerStats::default(),
             speculative_widths: Vec::new(),
             speculative_fixed_width: None,
-            speculative_graph_budget: 24,
+            speculative_graph_budget: 56,
             speculative_catalog: Default::default(),
             proposal_source: speculation::ProposalSource::Mtp,
             controller: speculation::WidthController::default(),
@@ -332,15 +336,16 @@ impl RequestScheduler {
             &self.speculative_widths,
             self.speculative_fixed_width,
             self.speculative_graph_budget,
+            self.limits.request_capacity(),
         );
     }
     pub fn speculative_graph_budget(&mut self, budget: usize) -> Result<()> {
-        if !(3..=24).contains(&budget)
+        if !(self.limits.request_capacity().ilog2() as usize + 1..=56).contains(&budget)
             || self.submitted != Fence(0)
             || self.slots.iter().any(|s| s.request.is_some())
         {
             return Err(
-                "speculative graph budget must be in 3..=24 and set before admission".into(),
+                "speculative graph budget must cover every batch capacity and be at most 56 and set before admission".into(),
             );
         }
         self.speculative_graph_budget = budget;
@@ -876,8 +881,11 @@ impl RequestScheduler {
     pub fn complete(
         &mut self,
         fence: Fence,
-        records: &[CompletionRecord; REQUEST_LANES],
+        records: &[CompletionRecord],
     ) -> Result<Vec<GeneratedToken>> {
+        if records.len() < self.limits.request_capacity() || records.len() > REQUEST_LANES {
+            return Err("completion does not cover the prepared request capacity".into());
+        }
         if self.submissions.first_key_value().map(|(next, _)| *next) != Some(fence) {
             return Err("completion fence must match the oldest submitted step".into());
         }

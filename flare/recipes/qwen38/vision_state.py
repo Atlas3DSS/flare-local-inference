@@ -36,11 +36,11 @@ class VisionFeatureState:
     count: torch.Tensor
 
     @classmethod
-    def allocate(cls, device):
+    def allocate(cls, device, *, capacity=4):
         return cls(
-            torch.empty((4, FEATURES, WIDTH), dtype=torch.bfloat16, device=device),
-            torch.zeros(4, dtype=torch.int64, device=device),
-            torch.zeros(4, dtype=torch.int32, device=device),
+            torch.empty((capacity, FEATURES, WIDTH), dtype=torch.bfloat16, device=device),
+            torch.zeros(capacity, dtype=torch.int64, device=device),
+            torch.zeros(capacity, dtype=torch.int32, device=device),
         )
 
 
@@ -109,6 +109,7 @@ def _vision_validate(
     Errors,
     CAPACITY: tl.constexpr,
     BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
 ):
     index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     slot, epoch, count, offset = (
@@ -118,7 +119,7 @@ def _vision_validate(
         tl.load(Offset),
     )
     active = (slot != -1) | (count != 0)
-    slot_valid = (slot >= 0) & (slot < 4)
+    slot_valid = (slot >= 0) & (slot < SLOTS)
     epoch_valid = (epoch > 0) & (
         tl.load(Generation + slot, slot_valid, other=0) == epoch
     )
@@ -205,6 +206,7 @@ def _feature_copy(
     Errors,
     CAPACITY: tl.constexpr,
     BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
 ):
     index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     slot, count, offset = (
@@ -215,7 +217,7 @@ def _feature_copy(
     valid = (
         (tl.load(Errors) == 0)
         & (slot >= 0)
-        & (slot < 4)
+        & (slot < SLOTS)
         & (index < count // 4 * _JIT_WIDTH)
     )
     value = tl.load(Output + index, valid, other=0)
@@ -241,6 +243,7 @@ def _vision_finish(
     Sequence,
     CS: tl.constexpr,
     RECORD_FIELDS: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
 ):
     slot = tl.program_id(0)
     active = tl.load(Slot) == slot
@@ -261,7 +264,7 @@ def _vision_finish(
     consumed = tl.load(Consumed + slot * CS, current, other=0)
     generated = tl.load(Generated + slot, current, other=0)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
-                      -1, status, code, active, RECORD_FIELDS)
+                      -1, status, code, active, RECORD_FIELDS, SLOTS)
 
 
 class PreparedVisionHandoff:
@@ -301,13 +304,13 @@ class PreparedVisionHandoff:
             )
         _require(
             features.arena,
-            (4, FEATURES, WIDTH),
+            (requests.capacity, FEATURES, WIDTH),
             torch.bfloat16,
             device,
             "feature arena",
         )
-        _require(features.generation, (4,), torch.int64, device, "feature generation")
-        _require(features.count, (4,), torch.int32, device, "feature count")
+        _require(features.generation, (requests.capacity,), torch.int64, device, "feature generation")
+        _require(features.count, (requests.capacity,), torch.int32, device, "feature count")
         _require(
             output, (capacity // 4, WIDTH), torch.bfloat16, device, "vision output"
         )
@@ -326,7 +329,7 @@ class PreparedVisionHandoff:
             inputs.buffers().items(), shapes, strict=True
         ):
             _require(tensor, shape, dtype, device, name)
-        record_fields = _completion_fields(completion_records, device)
+        record_fields = _completion_fields(completion_records, device, requests.capacity)
         for tensor, shape, dtype, name in (
             (frame_index, (1,), torch.int32, "frame index"),
             (submission_sequence, (1,), torch.int64, "submission sequence"),
@@ -427,12 +430,14 @@ class PreparedVisionHandoff:
                     r.consumed_tokens.stride(0),
                     record_fields,
                 ),
-                (4, 1, 1),
+                (requests.capacity, 1, 1),
             ),
         ]
 
     def prepare(self):
-        self._calls = tuple(_compile(*kernel) for kernel in self._kernels)
+        self._calls = tuple(_compile(kernel, (*args, self.requests.capacity)
+            if kernel in (_vision_validate, _feature_copy, _vision_finish) else args, grid)
+            for kernel, args, grid in self._kernels)
         self._prepared = True
 
     def begin(self):
@@ -464,6 +469,7 @@ def _injection_validate(
     Errors,
     TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
 ):
     slot, epoch, length, live = (
         tl.load(Slots),
@@ -471,7 +477,7 @@ def _injection_validate(
         tl.load(Lengths),
         tl.load(Live),
     )
-    physical = (slot >= 0) & (slot < 4)
+    physical = (slot >= 0) & (slot < SLOTS)
     current = (
         physical
         & (tl.load(Generation + slot, physical, other=0) == epoch)
@@ -512,10 +518,11 @@ def _inject(
     Errors,
     TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
 ):
     row, tile = tl.program_id(0), tl.program_id(1)
     slot, epoch = tl.load(Slots), tl.load(Epochs)
-    physical = (slot >= 0) & (slot < 4)
+    physical = (slot >= 0) & (slot < SLOTS)
     valid = (
         physical
         & (tl.load(Live) == 1)
@@ -612,6 +619,7 @@ class PreparedEmbeddingInjection:
             self.errors,
             tokens,
             triton.next_power_of_2(tokens),
+            requests.capacity,
         )
         self._inject_args = (
             embedding,
@@ -628,6 +636,7 @@ class PreparedEmbeddingInjection:
             self.errors,
             tokens,
             512,
+            requests.capacity,
         )
         self._grid = (tokens, triton.cdiv(WIDTH, 512), 1)
 

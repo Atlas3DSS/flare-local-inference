@@ -14,6 +14,7 @@ import torch
 
 from flare.components.flashinfer_sampling import filter_probabilities, verify_chain
 
+from flare.components.capacity import BATCH_CAPACITIES
 from flare.components.sampling import (
     DUPLICATE_SLOT,
     ERROR,
@@ -36,8 +37,8 @@ def _tensor(value, shape, dtype, device, name):
 
 
 def _geometry(batch, width):
-    if type(batch) is not int or batch not in (1, 2, 4) or type(width) is not int or width not in WIDTHS:
-        raise ValueError("speculation requires batch capacity 1/2/4 and width 1 through 8")
+    if type(batch) is not int or batch not in BATCH_CAPACITIES or type(width) is not int or width not in WIDTHS:
+        raise ValueError("speculation requires power-of-two batch capacity through 64 and width 1 through 8")
 
 
 def _metadata(state, slots, generations, live_rows, batch, device):
@@ -49,9 +50,9 @@ def _metadata(state, slots, generations, live_rows, batch, device):
 
 
 def _live(state, slots, generations, live_rows, rows):
-    safe = slots.long().clamp(0, 3)
+    safe = slots.long().clamp(0, state.capacity - 1)
     selected = (rows < live_rows[0]) & (live_rows[0] >= 0) & (live_rows[0] <= slots.numel())
-    selected &= (slots >= 0) & (slots < 4) & (state.generation[safe] == generations)
+    selected &= (slots >= 0) & (slots < state.capacity) & (state.generation[safe] == generations)
     duplicates = ((slots[:, None] == slots[None, :]) & selected[None, :]).sum(-1) > 1
     return safe, selected & ~duplicates & (state.status[safe] == RUNNING)
 
@@ -91,9 +92,9 @@ class SpeculativeRngState:
     target_offset: torch.Tensor
 
     @classmethod
-    def allocate(cls, device):
-        return cls(torch.zeros(4, dtype=torch.int64, device=device),
-                   torch.zeros(4, dtype=torch.int64, device=device))
+    def allocate(cls, device, *, capacity=4):
+        return cls(torch.zeros(capacity, dtype=torch.int64, device=device),
+                   torch.zeros(capacity, dtype=torch.int64, device=device))
 
 
 class PreparedCopyProposals:
@@ -112,17 +113,17 @@ class PreparedCopyProposals:
         device = draft_ids.device
         _metadata(requests, slots, generations, live_rows, batch, device)
         for value, shape, dtype, name in (
-                (copy_ids, (4, 7), torch.int64, "copy_ids"),
-                (copy_count, (4,), torch.int32, "copy_count"),
-                (copy_expected, (4,), torch.int64, "copy_expected"),
-                (copy_generation, (4,), torch.int64, "copy_generation"),
-                (grammar_mask_count, (4,), torch.int32, "grammar_mask_count"),
+                (copy_ids, (requests.capacity, 7), torch.int64, "copy_ids"),
+                (copy_count, (requests.capacity,), torch.int32, "copy_count"),
+                (copy_expected, (requests.capacity,), torch.int64, "copy_expected"),
+                (copy_generation, (requests.capacity,), torch.int64, "copy_generation"),
+                (grammar_mask_count, (requests.capacity,), torch.int32, "grammar_mask_count"),
                 (draft_ids, (batch, drafts), torch.int64, "draft_ids"),
                 (draft_probabilities, (batch, drafts, requests.vocab_size), torch.float32, "draft_probabilities"),
                 (draft_valid, (batch, drafts), torch.bool, "draft_valid"),
                 (copy_mask, (batch,), torch.int64, "copy_mask"),
-                (previous_accepted, (4,), torch.int32, "previous_accepted"),
-                (accepted_generation, (4,), torch.int64, "accepted_generation")):
+                (previous_accepted, (requests.capacity,), torch.int32, "previous_accepted"),
+                (accepted_generation, (requests.capacity,), torch.int64, "accepted_generation")):
             _tensor(value, shape, dtype, device, name)
         self.state, self.slots, self.generations, self.live = requests, slots, generations, live_rows
         self.ids, self.count, self.expected, self.generation = copy_ids, copy_count, copy_expected, copy_generation
@@ -151,7 +152,7 @@ class PreparedCopyProposals:
             (self.mask_count[safe] >= required + 1) & (self.mask_count[safe] <= 8),
             self.mask_count[safe] == 0)
         self.active.copy_(live & valid)
-        for slot in range(4):
+        for slot in range(state.capacity):
             failed = (live & ~valid & (self.slots == slot)).any()
             state.status[slot].copy_(torch.where(failed, ERROR, state.status[slot]))
             state.error_code[slot].copy_(torch.where(failed, INVALID_SPECULATION, state.error_code[slot]))
@@ -192,8 +193,8 @@ class PreparedSpeculativeDistributions:
         if (grammar_masks is None) != (grammar_mask_count is None):
             raise ValueError("conditional grammar masks and counts must be provided together")
         if grammar_masks is not None:
-            _tensor(grammar_masks, (4, 8, (vocab + 31) // 32), torch.int32, device, "grammar_masks")
-            _tensor(grammar_mask_count, (4,), torch.int32, device, "grammar_mask_count")
+            _tensor(grammar_masks, (requests.capacity, 8, (vocab + 31) // 32), torch.int32, device, "grammar_masks")
+            _tensor(grammar_mask_count, (requests.capacity,), torch.int32, device, "grammar_mask_count")
             if width + prefix_offset > 8:
                 raise ValueError("conditional grammar prefix exceeds eight mask rows")
         self.grammar_masks, self.grammar_mask_count = grammar_masks, grammar_mask_count
@@ -304,7 +305,7 @@ class PreparedStochasticVerification:
         if vocab != requests.vocab_size:
             raise ValueError("verification vocabulary must match request state")
         for name in ("generation", "target_offset"):
-            _tensor(getattr(rng, name), (4,), torch.int64, device, f"rng.{name}")
+            _tensor(getattr(rng, name), (requests.capacity,), torch.int64, device, f"rng.{name}")
         self.draft_probs, self.drafts, self.target_probs = draft_probs, draft_token_ids, target_probs
         self.state, self.slots, self.generations, self.live_rows, self.rng = requests, slots, generations, live_rows, rng
         self.draft_valid = torch.ones((batch, width - 1), dtype=torch.bool, device=device) if draft_valid is None else draft_valid
@@ -402,14 +403,14 @@ class PreparedSpeculativeCommit:
         _tensor(input_ids, (batch, width), torch.int64, device, "input_ids")
         _metadata(requests, slots, generations, live_rows, batch, device)
         acceptance.validate(batch, width, device)
-        _tensor(completion_records, (2, 4, 24), torch.int64, device, "completion_records")
+        _tensor(completion_records, (2, requests.capacity, 24), torch.int64, device, "completion_records")
         _tensor(frame_index, (1,), torch.int32, device, "frame_index")
         _tensor(submission_sequence, (1,), torch.int64, device, "submission_sequence")
         self.copy_offered_mask = torch.zeros(batch, dtype=torch.int64, device=device) if copy_offered_mask is None else copy_offered_mask
         _tensor(self.copy_offered_mask, (batch,), torch.int64, device, "copy_offered_mask")
         if rng is not None:
             for name in ("generation", "target_offset"):
-                _tensor(getattr(rng, name), (4,), torch.int64, device, f"rng.{name}")
+                _tensor(getattr(rng, name), (requests.capacity,), torch.int64, device, f"rng.{name}")
         self.state, self.acceptance, self.inputs, self.slots = requests, acceptance, input_ids, slots
         self.generations, self.live, self.records, self.frame, self.sequence = generations, live_rows, completion_records, frame_index, submission_sequence
         self.rng = rng
@@ -425,15 +426,15 @@ class PreparedSpeculativeCommit:
         self.consumed_before = torch.zeros(batch, dtype=torch.int64, device=device)
         self.generated_before = torch.zeros_like(self.consumed_before)
         self.history_before = torch.zeros((batch, 2), dtype=torch.int64, device=device)
-        self.consumed_after = torch.empty(4, dtype=torch.int64, device=device)
-        self.history_after = torch.empty((4, 2), dtype=torch.int64, device=device)
-        self._records = torch.zeros((4, 24), dtype=torch.int64, device=device)
+        self.consumed_after = torch.empty(requests.capacity, dtype=torch.int64, device=device)
+        self.history_after = torch.empty((requests.capacity, 2), dtype=torch.int64, device=device)
+        self._records = torch.zeros((requests.capacity, 24), dtype=torch.int64, device=device)
 
     def __call__(self):
         state, acceptance, columns = self.state, self.acceptance, self.columns
-        safe = self.slots.long().clamp(0, 3)
+        safe = self.slots.long().clamp(0, state.capacity - 1)
         selected = ((self.rows < self.live[0]) & (self.live[0] >= 0) & (self.live[0] <= self.rows.numel())
-            & (self.slots >= 0) & (self.slots < 4) & (state.generation[safe] == self.generations))
+            & (self.slots >= 0) & (self.slots < state.capacity) & (state.generation[safe] == self.generations))
         self.consumed_before.copy_(state.consumed_tokens[safe])
         self.generated_before.copy_(state.generated_tokens[safe])
         self.history_before.copy_(state.ple_history[safe])
@@ -448,7 +449,7 @@ class PreparedSpeculativeCommit:
         self._records[:, 12].fill_(-1)
         self._records[:, 16:].fill_(-1)
 
-        for slot in range(4):
+        for slot in range(state.capacity):
             matches = selected & (self.slots == slot)
             count = matches.sum()
             row = torch.where(matches, self.rows, 0).amax().view(1)

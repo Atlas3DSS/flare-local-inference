@@ -13,9 +13,9 @@ import torch
 import triton
 import triton.language as tl
 
+from .capacity import BATCH_CAPACITIES
 from .flashinfer_sampling import filter_probabilities, sample_probabilities
 
-SLOTS = 4
 EOS_CAPACITY = 8
 INACTIVE, RUNNING, FINISHED, ERROR = 0, 1, 2, 3
 INVALID_DISTRIBUTION, UNCONSUMED_PENDING, INVALID_CONSUMPTION, DUPLICATE_SLOT = 1, 2, 3, 4
@@ -75,8 +75,8 @@ class DeviceRequestState:
 
     @classmethod
     def allocate(cls, device, *, vocab_size: int,
-                 consumed_tokens: torch.Tensor | None = None) -> DeviceRequestState:
-        """Allocate four physical slots for the supplied vocabulary.
+                 consumed_tokens: torch.Tensor | None = None, capacity: int = 4) -> DeviceRequestState:
+        """Allocate physical request slots for the supplied vocabulary.
 
         ``parameters`` columns are temperature, top-p, min-p, repetition,
         presence and frequency. Grammar words are little-bit-order int32 words:
@@ -87,21 +87,27 @@ class DeviceRequestState:
             raise ValueError("vocab_size must be a positive int32 value")
         def zeros(shape, dtype=torch.int64):
             return torch.zeros(shape, dtype=dtype, device=device)
-        consumed = zeros(SLOTS) if consumed_tokens is None else consumed_tokens
+        if capacity not in BATCH_CAPACITIES:
+            raise ValueError("request capacity must be a power of two through 64")
+        consumed = zeros(capacity) if consumed_tokens is None else consumed_tokens
         actual_device = torch.empty(0, device=device).device
-        _check_tensor(consumed, (SLOTS,), torch.int64, actual_device, "consumed_tokens", contiguous=False)
+        _check_tensor(consumed, (capacity,), torch.int64, actual_device, "consumed_tokens", contiguous=False)
         if consumed.stride(0) <= 0:
             raise ValueError("consumed_tokens requires positive row stride")
-        return cls(zeros(SLOTS), consumed, zeros(SLOTS),
-            torch.full((SLOTS,), -1, dtype=torch.int64, device=device),
-            zeros(SLOTS, torch.int32), zeros(SLOTS, torch.int32),
-            zeros(SLOTS, torch.uint64), zeros(SLOTS, torch.uint64),
-            zeros((SLOTS, vocab_size), torch.int32), zeros((SLOTS, 6), torch.float32),
-            zeros(SLOTS, torch.int32), zeros(SLOTS),
-            torch.full((SLOTS, EOS_CAPACITY), -1, dtype=torch.int64, device=device),
-            zeros(SLOTS, torch.int32),
-            torch.full((SLOTS, triton.cdiv(vocab_size, 32)), -1, dtype=torch.int32, device=device),
-            zeros(SLOTS, torch.int32))
+        return cls(zeros(capacity), consumed, zeros(capacity),
+            torch.full((capacity,), -1, dtype=torch.int64, device=device),
+            zeros(capacity, torch.int32), zeros(capacity, torch.int32),
+            zeros(capacity, torch.uint64), zeros(capacity, torch.uint64),
+            zeros((capacity, vocab_size), torch.int32), zeros((capacity, 6), torch.float32),
+            zeros(capacity, torch.int32), zeros(capacity),
+            torch.full((capacity, EOS_CAPACITY), -1, dtype=torch.int64, device=device),
+            zeros(capacity, torch.int32),
+            torch.full((capacity, triton.cdiv(vocab_size, 32)), -1, dtype=torch.int32, device=device),
+            zeros(capacity, torch.int32))
+
+    @property
+    def capacity(self) -> int:
+        return self.generation.numel()
 
     @property
     def vocab_size(self) -> int:
@@ -115,8 +121,8 @@ class DeviceRequestState:
         slot allocator. No hidden Python state participates in admission.
         """
         admission.validate(self.vocab_size)
-        if type(slot) is not int or not 0 <= slot < SLOTS:
-            raise ValueError("slot must be an integer in [0, 4)")
+        if type(slot) is not int or not 0 <= slot < self.capacity:
+            raise ValueError("slot must be within request capacity")
         ids = torch.as_tensor(prompt_ids, dtype=torch.int64, device="cpu")
         if ids.ndim != 1 or bool(((ids < 0) | (ids >= self.vocab_size)).any()):
             raise ValueError("prompt_ids must be a one-dimensional vocabulary token list")
@@ -145,7 +151,7 @@ class DeviceRequestState:
 
 @dataclass(frozen=True)
 class AdmissionBuffers:
-    """Contiguous staging for four packed admissions uploaded by Rust.
+    """Contiguous staging for packed admissions uploaded by Rust.
 
     Each active packed row identifies one physical request slot. The native
     worker orders uploads, hybrid-state reset/restore, this initialization
@@ -167,17 +173,19 @@ class AdmissionBuffers:
     admission_grammar_enabled: torch.Tensor
 
     @classmethod
-    def allocate(cls, device, *, vocab_size: int) -> AdmissionBuffers:
+    def allocate(cls, device, *, vocab_size: int, capacity: int = 4) -> AdmissionBuffers:
         if type(vocab_size) is not int or not 1 <= vocab_size <= 2**31 - 1:
             raise ValueError("vocab_size must be a positive int32 value")
+        if capacity not in BATCH_CAPACITIES:
+            raise ValueError("admission capacity must be a power of two through 64")
         def zeros(shape, dtype=torch.int32):
             return torch.zeros(shape, dtype=dtype, device=device)
-        return cls(zeros(1), torch.full((4,), -1, dtype=torch.int32, device=device),
-            zeros(4, torch.int64), zeros(4, torch.int64), zeros((4, 6), torch.float32),
-            zeros(4), zeros(4, torch.int64),
-            torch.full((4, 8), -1, dtype=torch.int64, device=device), zeros(4),
-            zeros((4, vocab_size)),
-            torch.full((4, triton.cdiv(vocab_size, 32)), -1, dtype=torch.int32, device=device), zeros(4))
+        return cls(zeros(1), torch.full((capacity,), -1, dtype=torch.int32, device=device),
+            zeros(capacity, torch.int64), zeros(capacity, torch.int64), zeros((capacity, 6), torch.float32),
+            zeros(capacity), zeros(capacity, torch.int64),
+            torch.full((capacity, 8), -1, dtype=torch.int64, device=device), zeros(capacity),
+            zeros((capacity, vocab_size)),
+            torch.full((capacity, triton.cdiv(vocab_size, 32)), -1, dtype=torch.int32, device=device), zeros(capacity))
 
     def stage(self, row: int, slot: int, admission: RequestAdmission, prompt_ids) -> None:
         """Populate one row for qualification; production uses native H2D uploads.
@@ -187,8 +195,8 @@ class AdmissionBuffers:
         """
         vocab = self.admission_histogram.shape[1]
         admission.validate(vocab)
-        if type(row) is not int or not 0 <= row < 4 or type(slot) is not int or not 0 <= slot < 4:
-            raise ValueError("admission row and physical slot must be in [0, 4)")
+        if type(row) is not int or not 0 <= row < self.admission_slots.numel() or type(slot) is not int or not 0 <= slot < self.admission_slots.numel():
+            raise ValueError("admission row and slot must be within request capacity")
         ids = torch.as_tensor(prompt_ids, dtype=torch.int64, device="cpu")
         if ids.ndim != 1 or bool(((ids < 0) | (ids >= vocab)).any()):
             raise ValueError("prompt_ids must be a one-dimensional vocabulary token list")
@@ -233,11 +241,11 @@ def _compile(kernel, args, grid):
 
 @triton.jit
 def _scores(Logits, Scores, Slots, Epochs, Live, Generation, Status, Counts, Params, Grammar, GrammarEnabled,
-            V: tl.constexpr, WORDS: tl.constexpr, BLOCK: tl.constexpr):
+            V: tl.constexpr, WORDS: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row, block = tl.program_id(0), tl.program_id(1)
     token = block * BLOCK + tl.arange(0, BLOCK)
     slot = tl.load(Slots + row)
-    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < 4)
+    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < SLOTS)
     valid &= tl.load(Generation + slot, valid, other=-1) == tl.load(Epochs + row)
     valid &= tl.load(Status + slot, valid, other=0) == 1
     counts = tl.load(Counts + slot * V + token, valid & (token < V), other=0)
@@ -257,10 +265,10 @@ def _scores(Logits, Scores, Slots, Epochs, Live, Generation, Status, Counts, Par
 
 @triton.jit
 def _sampling_metadata(Slots, Epochs, Live, Generation, Status, Params, TopK, Seed, Counter,
-                       PackedK, PackedP, PackedMinP, PackedSeed, PackedOffset, V: tl.constexpr):
+                       PackedK, PackedP, PackedMinP, PackedSeed, PackedOffset, V: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     slot = tl.load(Slots + row)
-    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < 4)
+    valid = (row < tl.load(Live)) & (slot >= 0) & (slot < SLOTS)
     valid &= tl.load(Generation + slot, valid, other=-1) == tl.load(Epochs + row)
     valid &= tl.load(Status + slot, valid, other=0) == 1
     k = tl.load(TopK + slot, valid, other=0)
@@ -293,14 +301,14 @@ def _mask_min_p(Input, Output, Maximum, MinP, V: tl.constexpr, BLOCK: tl.constex
 
 @triton.jit
 def _normalize_probs(Probability, Mass, Slots, Params, PointMassIds,
-                     V: tl.constexpr, BLOCK: tl.constexpr):
+                     V: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row, block = tl.program_id(0), tl.program_id(1)
     token = block * BLOCK + tl.arange(0, BLOCK)
     mass = tl.load(Mass + row)
     valid = (mass > 0.) & (mass != float("inf"))
     value = tl.load(Probability + row * V + token, token < V, other=0.)
     value = tl.where(valid, value / mass, (token == 0).to(tl.float32))
-    slot = tl.minimum(tl.maximum(tl.load(Slots + row), 0), 3)
+    slot = tl.minimum(tl.maximum(tl.load(Slots + row), 0), SLOTS - 1)
     point_mass = tl.load(Params + slot * 6) == 0.
     point_mass_id = tl.load(PointMassIds + row)
     value = tl.where(point_mass, (token == point_mass_id).to(tl.float32), value)
@@ -310,7 +318,7 @@ def _normalize_probs(Probability, Mass, Slots, Params, PointMassIds,
 @triton.jit
 def _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
                       token, status, error, active,
-                      RECORD_FIELDS: tl.constexpr):
+                      RECORD_FIELDS: tl.constexpr, SLOTS: tl.constexpr = 4):
     fields = tl.arange(0, triton.next_power_of_2(RECORD_FIELDS))
     value = tl.full((triton.next_power_of_2(RECORD_FIELDS),), 0, tl.int64)
     value = tl.where(fields == 0, tl.where(active, epoch, 0), value)
@@ -327,7 +335,7 @@ def _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated
         value = tl.where(fields == 15, 1, value)
         value = tl.where(fields >= 16, -1, value)
         value = tl.where(fields == 16, tl.where(active, token, -1), value)
-    tl.store(Records + (tl.load(Frame) * 4 + slot) * RECORD_FIELDS + fields,
+    tl.store(Records + (tl.load(Frame) * SLOTS + slot) * RECORD_FIELDS + fields,
              value, fields < RECORD_FIELDS)
 
 
@@ -335,9 +343,9 @@ def _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated
 def _complete(Maximum, Sampled, SampleValid, Mass, Slots, Epochs, Live, SampleEnabled, Generation, Consumed, Generated, Pending, Status, Error,
               Counter, Counts, Budget, Eos, EosCount, Records, Frame, Sequence,
               V: tl.constexpr, ROWS: tl.constexpr, CS: tl.constexpr,
-              RECORD_FIELDS: tl.constexpr, SAMPLE: tl.constexpr):
+              RECORD_FIELDS: tl.constexpr, SAMPLE: tl.constexpr, SLOTS: tl.constexpr = 4):
     slot = tl.program_id(0)
-    rows = tl.arange(0, 4)
+    rows = tl.arange(0, SLOTS)
     matches = (rows < ROWS) & (rows < tl.load(Live))
     matches &= tl.load(Slots + rows, rows < ROWS, other=-1) == slot
     epoch = tl.load(Generation + slot)
@@ -386,7 +394,7 @@ def _complete(Maximum, Sampled, SampleValid, Mass, Slots, Epochs, Live, SampleEn
             tl.store(Error + slot, code)
     consumed = tl.load(Consumed + slot * CS)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
-                      token, state, code, matches_count > 0, RECORD_FIELDS)
+                      token, state, code, matches_count > 0, RECORD_FIELDS, SLOTS)
 
 
 def _check_tensor(tensor, shape, dtype, device, name, *, contiguous=True):
@@ -394,9 +402,9 @@ def _check_tensor(tensor, shape, dtype, device, name, *, contiguous=True):
         raise ValueError(f"{name} requires contiguous {dtype} {tuple(shape)} on {device}")
 
 
-def _completion_fields(records, device):
-    if records.ndim != 3 or records.shape[:2] != (2, 4) or records.shape[2] not in (8, 24):
-        raise ValueError("completion_records requires ABI2 [2,4,8] or ABI3 [2,4,24]")
+def _completion_fields(records, device, capacity=4):
+    if records.ndim != 3 or records.shape[:2] != (2, capacity) or records.shape[2] not in (8, 24):
+        raise ValueError("completion_records requires ABI2 [2,capacity,8] or ABI3 [2,capacity,24]")
     _check_tensor(records, records.shape, torch.int64, device, "completion_records")
     return records.shape[2]
 
@@ -407,9 +415,9 @@ class PreparedCompletion:
     def __init__(self, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
                  completion_records, frame_index, submission_sequence):
         rows, device = row_slot_ids.numel(), state.generation.device
-        if device.type != "cuda" or not 1 <= rows <= SLOTS:
-            raise ValueError("completion requires CUDA state and one through four rows")
-        fields = _completion_fields(completion_records, device)
+        if device.type != "cuda" or not 1 <= rows <= state.capacity:
+            raise ValueError("completion requires CUDA state and rows within request capacity")
+        fields = _completion_fields(completion_records, device, state.capacity)
         for tensor, shape, dtype, name in ((row_slot_ids, (rows,), torch.int32, "row_slot_ids"),
                 (row_generations, (rows,), torch.int64, "row_generations"),
                 (live_rows, (1,), torch.int32, "live_rows"), (frame_index, (1,), torch.int32, "frame_index"),
@@ -419,11 +427,12 @@ class PreparedCompletion:
             state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
             state.error_code, state.rng_counter, state.histogram, state.max_new_tokens, state.eos_token_ids,
             state.eos_count, completion_records, frame_index, submission_sequence,
-            state.vocab_size, rows, state.consumed_tokens.stride(0), fields, False)
+            state.vocab_size, rows, state.consumed_tokens.stride(0), fields, False, state.capacity)
+        self.capacity = state.capacity
         self._record = None
 
     def prepare(self):
-        self._record = _compile(_complete, self._args, (SLOTS, 1, 1))
+        self._record = _compile(_complete, self._args, (self.capacity, 1, 1))
 
     def __call__(self):
         if self._record is None:
@@ -450,12 +459,12 @@ class PreparedSampling:
     def __init__(self, logits, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
                  completion_records, frame_index, submission_sequence, *, sample_enabled: torch.Tensor | None = None):
         rows, vocab = logits.shape
-        if not 1 <= rows <= SLOTS or vocab != state.vocab_size or logits.dtype not in (torch.float32, torch.bfloat16):
-            raise ValueError("sampling logits require 1..4 rows and the state vocabulary in FP32 or BF16")
+        if not 1 <= rows <= state.capacity or vocab != state.vocab_size or logits.dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError("sampling logits require rows within request capacity and the state vocabulary in FP32 or BF16")
         device = logits.device
         if device.type != "cuda" or not logits.is_contiguous() or state.generation.device != device:
             raise ValueError("sampling requires contiguous CUDA logits on the state device")
-        record_fields = _completion_fields(completion_records, device)
+        record_fields = _completion_fields(completion_records, device, state.capacity)
         for tensor, shape, dtype, name in ((row_slot_ids, (rows,), torch.int32, "row_slot_ids"),
                 (row_generations, (rows,), torch.int64, "row_generations"), (live_rows, (1,), torch.int32, "live_rows"),
                 (frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
@@ -476,7 +485,7 @@ class PreparedSampling:
         self._grid = (rows, triton.cdiv(vocab, 1024), 1)
         self._score_args = (logits, self.scores, row_slot_ids, row_generations, live_rows, state.generation,
             state.status, state.histogram, state.parameters, state.grammar_mask, state.grammar_enabled,
-            vocab, state.grammar_mask.shape[1], 1024)
+            vocab, state.grammar_mask.shape[1], 1024, state.capacity)
         from flashinfer import sampling
         self._flashinfer = sampling
         scratch("probabilities", (rows, vocab), torch.float32)
@@ -488,10 +497,10 @@ class PreparedSampling:
             scratch(name, (rows,), dtype)
         self._metadata_args = (row_slot_ids, row_generations, live_rows, state.generation, state.status,
             state.parameters, state.top_k, state.seed, state.rng_counter, self.packed_top_k,
-            self.packed_top_p, self.packed_min_p, self.packed_seed, self.packed_offset, vocab)
+            self.packed_top_p, self.packed_min_p, self.packed_seed, self.packed_offset, vocab, state.capacity)
         self._sanitize_args = (self.scores, self.maximum, vocab, 1024)
         self._normalize_args = (self.probabilities, self.probability_mass, self.slots,
-            state.parameters, self.point_mass_ids, vocab, 1024)
+            state.parameters, self.point_mass_ids, vocab, 1024, state.capacity)
         # The top-p output address is graph-private and supplied during capture.
         self._min_p_kernel = None
         sampled, valid, mass = self.sampled_tokens, self.sample_valid, self.probability_mass
@@ -500,14 +509,14 @@ class PreparedSampling:
             state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
             state.error_code, state.rng_counter, state.histogram, state.max_new_tokens,
             state.eos_token_ids, state.eos_count, completion_records, frame_index, submission_sequence,
-            vocab, rows, state.consumed_tokens.stride(0), record_fields, True)
+            vocab, rows, state.consumed_tokens.stride(0), record_fields, True, state.capacity)
         self._prepared = False
 
     def prepare(self) -> None:
         """Compile and warm all operators before CUDA graph capture."""
         self._scores = _compile(_scores, self._score_args, self._grid)
-        self._complete = _compile(_complete, self._complete_args, (SLOTS, 1, 1))
-        self._record = _compile(_complete, (*self._complete_args[:-1], False), (SLOTS, 1, 1))
+        self._complete = _compile(_complete, self._complete_args, (self.state.capacity, 1, 1))
+        self._record = _compile(_complete, (*self._complete_args[:-2], False, self.state.capacity), (self.state.capacity, 1, 1))
         self._metadata = _compile(_sampling_metadata, self._metadata_args, (self._rows, 1, 1))
         self._sanitize = _compile(_sanitize_scores, self._sanitize_args, self._grid)
         self._normalize = _compile(_normalize_probs, self._normalize_args, self._grid)
@@ -563,13 +572,13 @@ class PreparedSampling:
 
 @triton.jit
 def _admission_validate(Count, Slots, Epochs, Params, TopK, Budget, Eos, EosCount, Histogram, GrammarEnabled,
-                        Generation, Errors, V: tl.constexpr, CAPACITY: tl.constexpr, BLOCK: tl.constexpr):
+                        Generation, Errors, V: tl.constexpr, CAPACITY: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row, block = tl.program_id(0), tl.program_id(1)
     count = tl.load(Count)
     if row < count:
         slot = tl.load(Slots + row)
         epoch = tl.load(Epochs + row)
-        slot_valid = (slot >= 0) & (slot < 4)
+        slot_valid = (slot >= 0) & (slot < SLOTS)
         scalar_valid = slot_valid & (count <= CAPACITY) & (epoch > 0)
         scalar_valid &= epoch > tl.load(Generation + slot, slot_valid, other=0)
         pindex = tl.arange(0, 8)
@@ -589,7 +598,7 @@ def _admission_validate(Count, Slots, Epochs, Params, TopK, Budget, Eos, EosCoun
         scalar_valid &= tl.sum(((pindex < eos_count) & ((eos < 0) | (eos >= V))).to(tl.int32), 0) == 0
         enabled = tl.load(GrammarEnabled + row)
         scalar_valid &= (enabled == 0) | (enabled == 1)
-        other_rows = tl.arange(0, 4)
+        other_rows = tl.arange(0, SLOTS)
         other_slots = tl.load(Slots + other_rows)
         duplicates = tl.sum(((other_rows < count) & (other_rows < CAPACITY) & (other_slots == slot)).to(tl.int32), 0) > 1
         tokens = block * BLOCK + tl.arange(0, BLOCK)
@@ -616,12 +625,12 @@ def _admission_copy(Count, Slots, Errors, InputHistogram, InputGrammar, Histogra
 def _admission_finish(Count, Slots, Epochs, InputSeed, InputParams, InputTopK, InputBudget, InputEos, InputEosCount,
                       InputGrammarEnabled, Errors, Generation, Seed, Counter, Params, TopK, Budget, Eos, EosCount,
                       GrammarEnabled, Generated, Pending, Status, Error, Consumed, Records, Frame, Sequence,
-                      CAPACITY: tl.constexpr, CS: tl.constexpr, RECORD_FIELDS: tl.constexpr):
+                      CAPACITY: tl.constexpr, CS: tl.constexpr, RECORD_FIELDS: tl.constexpr, SLOTS: tl.constexpr = 4):
     slot = tl.program_id(0)
-    rows = tl.arange(0, 4)
+    rows = tl.arange(0, SLOTS)
     matches = (rows < tl.load(Count)) & (rows < CAPACITY) & (tl.load(Slots + rows) == slot)
     active = tl.sum(matches.to(tl.int32), 0) > 0
-    row = tl.min(tl.where(matches, rows, 4), 0)
+    row = tl.min(tl.where(matches, rows, SLOTS), 0)
     epoch, consumed = tl.full((), 0, tl.int64), tl.full((), 0, tl.int64)
     status, code = tl.full((), 0, tl.int32), tl.full((), 0, tl.int32)
     if active:
@@ -651,7 +660,7 @@ def _admission_finish(Count, Slots, Epochs, InputSeed, InputParams, InputTopK, I
             code = tl.where(errors & 2 != 0, 4, 5)
             code = tl.where(errors >> 8 != 0, 64 + (errors >> 8), code)
     _write_completion(Records, Frame, Sequence, slot, epoch, consumed, 0,
-                      -1, status, code, active, RECORD_FIELDS)
+                      -1, status, code, active, RECORD_FIELDS, SLOTS)
 
 
 class PreparedAdmission:
@@ -664,26 +673,27 @@ class PreparedAdmission:
 
     def __init__(self, state: DeviceRequestState, buffers: AdmissionBuffers,
                  completion_records, frame_index, submission_sequence, *, capacity: int = 4):
-        if capacity not in (1, 2, 4):
-            raise ValueError("admission capacity must be1,2 or4")
+        if capacity not in BATCH_CAPACITIES or capacity > state.capacity:
+            raise ValueError("admission graph capacity must fit request storage")
         device, vocab = state.generation.device, state.vocab_size
         if device.type != "cuda":
             raise ValueError("prepared admission requires CUDA request state")
-        shapes = ((1,), (4,), (4,), (4,), (4, 6), (4,), (4,), (4, 8), (4,),
-                  (4, vocab), (4, triton.cdiv(vocab, 32)), (4,))
+        slots = state.capacity
+        shapes = ((1,), (slots,), (slots,), (slots,), (slots, 6), (slots,), (slots,), (slots, 8), (slots,),
+                  (slots, vocab), (slots, triton.cdiv(vocab, 32)), (slots,))
         dtypes = (torch.int32, torch.int32, torch.int64, torch.int64, torch.float32, torch.int32, torch.int64,
                   torch.int64, torch.int32, torch.int32, torch.int32, torch.int32)
         for field, shape, dtype in zip(buffers.__dataclass_fields__, shapes, dtypes, strict=True):
             _check_tensor(getattr(buffers, field), shape, dtype, device, field)
-        record_fields = _completion_fields(completion_records, device)
+        record_fields = _completion_fields(completion_records, device, state.capacity)
         for tensor, shape, dtype, name in ((frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
             _check_tensor(tensor, shape, dtype, device, name)
         self.state, self.buffers = state, buffers
-        self.errors = torch.zeros(4, dtype=torch.int32, device=device)
+        self.errors = torch.zeros(slots, dtype=torch.int32, device=device)
         b = buffers
         self._validate_args = (b.admission_count, b.admission_slots, b.admission_generations, b.admission_parameters,
             b.admission_top_k, b.admission_max_new_tokens, b.admission_eos_token_ids, b.admission_eos_count,
-            b.admission_histogram, b.admission_grammar_enabled, state.generation, self.errors, vocab, capacity, 1024)
+            b.admission_histogram, b.admission_grammar_enabled, state.generation, self.errors, vocab, capacity, 1024, slots)
         self._copy_args = (b.admission_count, b.admission_slots, self.errors, b.admission_histogram, b.admission_grammar_mask,
             state.histogram, state.grammar_mask, vocab, state.grammar_mask.shape[1], 1024)
         self._finish_args = (b.admission_count, b.admission_slots, b.admission_generations, b.admission_seed_bits,
@@ -691,14 +701,14 @@ class PreparedAdmission:
             b.admission_eos_count, b.admission_grammar_enabled, self.errors, state.generation, state.seed, state.rng_counter,
             state.parameters, state.top_k, state.max_new_tokens, state.eos_token_ids, state.eos_count, state.grammar_enabled,
             state.generated_tokens, state.pending_token, state.status, state.error_code, state.consumed_tokens,
-            completion_records, frame_index, submission_sequence, capacity, state.consumed_tokens.stride(0), record_fields)
+            completion_records, frame_index, submission_sequence, capacity, state.consumed_tokens.stride(0), record_fields, slots)
         self._grid = (capacity, triton.cdiv(vocab, 1024), 1)
         self._prepared = False
 
     def prepare(self) -> None:
         self._validate = _compile(_admission_validate, self._validate_args, self._grid)
         self._copy = _compile(_admission_copy, self._copy_args, self._grid)
-        self._finish = _compile(_admission_finish, self._finish_args, (SLOTS, 1, 1))
+        self._finish = _compile(_admission_finish, self._finish_args, (self.state.capacity, 1, 1))
         self._prepared = True
 
     def __call__(self) -> None:

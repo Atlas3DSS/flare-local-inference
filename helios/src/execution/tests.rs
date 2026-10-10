@@ -1,4 +1,35 @@
 use super::*;
+
+#[test]
+fn completion_wire_decodes_every_configured_lane() {
+    for capacity in [1, 2, 8, 64] {
+        for fields in [8, 24] {
+            let mut bytes = vec![0u8; capacity * fields * 8];
+            let last = (capacity - 1) * fields * 8;
+            for (field, value) in [(0, 7i64), (1, 9), (4, -1), (5, 1)] {
+                bytes[last + field * 8..last + (field + 1) * 8]
+                    .copy_from_slice(&value.to_le_bytes());
+            }
+            if fields == 24 {
+                for (field, value) in [(12, -1i64), (15, 1)] {
+                    bytes[last + field * 8..last + (field + 1) * 8]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                for field in 16..24 {
+                    bytes[last + field * 8..last + (field + 1) * 8]
+                        .copy_from_slice(&(-1i64).to_le_bytes());
+                }
+            }
+            let records = transport::decode_records(&bytes, Fence(9), capacity, fields).unwrap();
+            assert_eq!(records.len(), capacity);
+            assert_eq!(records[capacity - 1].generation, 7);
+            assert!(
+                transport::decode_records(&bytes[..bytes.len() - 8], Fence(9), capacity, fields)
+                    .is_err()
+            );
+        }
+    }
+}
 use crate::cache::Fence;
 use crate::{Error, ExecutionError};
 
@@ -256,7 +287,7 @@ fn upload_and_completion_failures_keep_distinct_domains() {
     );
     assert!(storage.is_empty());
 
-    let error = transport::decode_records(&[0; 8], Fence(1)).unwrap_err();
+    let error = transport::decode_records(&[0; 8], Fence(1), 4, 8).unwrap_err();
     assert!(matches!(
         error,
         Error::Execution(ExecutionError::Completion(_))
@@ -275,15 +306,15 @@ fn physical_lane_records_reject_stale_sequences_and_impossible_status() {
             .flat_map(i64::to_le_bytes)
             .collect::<Vec<_>>()
     };
-    let decoded = transport::decode_records(&bytes(records), Fence(9)).unwrap();
+    let decoded = transport::decode_records(&bytes(records), Fence(9), 4, 8).unwrap();
     assert_eq!(decoded[3].generation, 7);
     assert_eq!(decoded[3].token_id, 88);
     assert_eq!(decoded[0].status, 0);
-    assert!(transport::decode_records(&bytes(records), Fence(10)).is_err());
+    assert!(transport::decode_records(&bytes(records), Fence(10), 4, 8).is_err());
     records[3][0] = 0;
-    assert!(transport::decode_records(&bytes(records), Fence(9)).is_err());
+    assert!(transport::decode_records(&bytes(records), Fence(9), 4, 8).is_err());
     records[3] = [7, 9, 65, 2, -1, 2, 1, 0];
-    assert!(transport::decode_records(&bytes(records), Fence(9)).is_err());
+    assert!(transport::decode_records(&bytes(records), Fence(9), 4, 8).is_err());
 }
 
 #[test]
@@ -334,7 +365,7 @@ fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
         ..Default::default()
     };
     let encoded = |row: CompletionRecord| {
-        let mut bytes = vec![0; REQUEST_LANES * VECTOR_RECORD_FIELDS * 8];
+        let mut bytes = vec![0; 4 * VECTOR_RECORD_FIELDS * 8];
         for (dst, field) in bytes[..VECTOR_RECORD_FIELDS * 8]
             .chunks_exact_mut(8)
             .zip(row.fields())
@@ -344,7 +375,7 @@ fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
         bytes
     };
     assert_eq!(
-        transport::decode_records(&encoded(good), Fence(9)).unwrap()[0],
+        transport::decode_records(&encoded(good), Fence(9), 4, VECTOR_RECORD_FIELDS).unwrap()[0],
         good
     );
     for change in 0..8 {
@@ -361,7 +392,7 @@ fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
             _ => row.submission_sequence = 8,
         }
         assert!(
-            transport::decode_records(&encoded(row), Fence(9)).is_err(),
+            transport::decode_records(&encoded(row), Fence(9), 4, VECTOR_RECORD_FIELDS).is_err(),
             "change{change}"
         );
     }

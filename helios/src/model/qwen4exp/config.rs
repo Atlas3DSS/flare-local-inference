@@ -14,23 +14,24 @@ pub(super) fn validate_config(config: &ModelConfig, _: &ExecutionManifest) -> Re
 }
 
 pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype, Vec<usize>)> {
+    let slots = config.limits.request_capacity();
     use Dtype::{Float32 as F32, Int32 as I32, Int64 as I64};
     let context = config.limits.max_sequence_tokens;
     let prefill_chunk_size = config.limits.prefill_chunk_size;
     let patch_capacity = *config.contract.vision.patch_capacities.last().unwrap();
     let mut buffers = vec![
-        ("row_slot_ids", I32, vec![4]),
-        ("row_generations", I64, vec![4]),
+        ("row_slot_ids", I32, vec![slots]),
+        ("row_generations", I64, vec![slots]),
         ("live_rows", I32, vec![1]),
-        ("query_lengths", I32, vec![4]),
+        ("query_lengths", I32, vec![slots]),
         ("token_ids", I64, vec![prefill_chunk_size]),
         ("prefill_positions", I64, vec![prefill_chunk_size, 3]),
-        ("page_tables", I32, vec![4, context / 64]),
-        ("sample_enabled", I32, vec![4]),
+        ("page_tables", I32, vec![slots, context / 64]),
+        ("sample_enabled", I32, vec![slots]),
         (
             "sampling_grammar_mask",
             I32,
-            vec![4, config.contract.vocabulary.div_ceil(32)],
+            vec![slots, config.contract.vocabulary.div_ceil(32)],
         ),
         ("vision_token_indices", I32, vec![prefill_chunk_size]),
         ("vision_pixel_values", F32, vec![patch_capacity, 1536]),
@@ -43,50 +44,50 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         ("vision_generation", I64, vec![1]),
         ("vision_feature_offset", I32, vec![1]),
         ("admission_count", I32, vec![1]),
-        ("admission_slots", I32, vec![4]),
-        ("admission_generations", I64, vec![4]),
-        ("admission_seed_bits", I64, vec![4]),
-        ("admission_parameters", F32, vec![4, 6]),
-        ("admission_top_k", I32, vec![4]),
-        ("admission_max_new_tokens", I64, vec![4]),
-        ("admission_eos_token_ids", I64, vec![4, 8]),
-        ("admission_eos_count", I32, vec![4]),
+        ("admission_slots", I32, vec![slots]),
+        ("admission_generations", I64, vec![slots]),
+        ("admission_seed_bits", I64, vec![slots]),
+        ("admission_parameters", F32, vec![slots, 6]),
+        ("admission_top_k", I32, vec![slots]),
+        ("admission_max_new_tokens", I64, vec![slots]),
+        ("admission_eos_token_ids", I64, vec![slots, 8]),
+        ("admission_eos_count", I32, vec![slots]),
         (
             "admission_histogram",
             I32,
-            vec![4, config.contract.vocabulary],
+            vec![slots, config.contract.vocabulary],
         ),
         (
             "admission_grammar_mask",
             I32,
-            vec![4, config.contract.vocabulary.div_ceil(32)],
+            vec![slots, config.contract.vocabulary.div_ceil(32)],
         ),
-        ("admission_grammar_enabled", I32, vec![4]),
-        ("state_expected_consumed", I64, vec![4]),
-        ("state_source_slots", I64, vec![4]),
-        ("state_destination_slots", I64, vec![4]),
-        ("state_operation", I32, vec![4]),
-        ("state_qsa_slots", I64, vec![4]),
-        ("state_accepted_tokens", I32, vec![4]),
+        ("admission_grammar_enabled", I32, vec![slots]),
+        ("state_expected_consumed", I64, vec![slots]),
+        ("state_source_slots", I64, vec![slots]),
+        ("state_destination_slots", I64, vec![slots]),
+        ("state_operation", I32, vec![slots]),
+        ("state_qsa_slots", I64, vec![slots]),
+        ("state_accepted_tokens", I32, vec![slots]),
         ("state_num_ops", I32, vec![1]),
     ];
     if !config.speculative_widths.is_empty() {
         buffers.extend([
-            ("copy_token_ids", I64, vec![4, 7]),
-            ("copy_token_count", I32, vec![4]),
-            ("copy_expected_consumed", I64, vec![4]),
-            ("copy_generation", I64, vec![4]),
+            ("copy_token_ids", I64, vec![slots, 7]),
+            ("copy_token_count", I32, vec![slots]),
+            ("copy_expected_consumed", I64, vec![slots]),
+            ("copy_generation", I64, vec![slots]),
         ]);
         if config.has_draft_cache() {
-            buffers.push(("draft_page_tables", I32, vec![4, context / 64]));
+            buffers.push(("draft_page_tables", I32, vec![slots, context / 64]));
         } else {
             buffers.extend([
                 (
                     "copy_grammar_mask",
                     I32,
-                    vec![4, 8, config.contract.vocabulary.div_ceil(32)],
+                    vec![slots, 8, config.contract.vocabulary.div_ceil(32)],
                 ),
-                ("copy_grammar_mask_count", I32, vec![4]),
+                ("copy_grammar_mask_count", I32, vec![slots]),
             ]);
         }
     }

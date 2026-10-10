@@ -113,6 +113,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                                 &config.speculative_widths,
                                 config.speculative_fixed_width,
                                 config.speculative_graph_budget,
+                                config.limits.request_capacity(),
                             )[batch.trailing_zeros() as usize]
                                 & (1 << (width - 1))
                                 != 0
@@ -1334,7 +1335,7 @@ fn state_transfer_and_resume_upload_fixture() {
                 host_stops: false,
             })
             .unwrap();
-        let mut admissions = std::array::from_fn(|_| None);
+        let mut admissions: [_; 4] = std::array::from_fn(|_| None);
         admissions[handle.slot as usize] = Some(Admission {
             handle,
             sampling: SamplingParameters::default(),
@@ -1611,7 +1612,7 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
             let step = scheduler.next_step().unwrap();
             assert_eq!(step.kind, GraphKind::Restore);
             scheduler.record_submission(&step, Fence(fence)).unwrap();
-            let mut admissions = std::array::from_fn(|_| None);
+            let mut admissions: [_; 4] = std::array::from_fn(|_| None);
             admissions[1] = Some(Admission {
                 handle: restored,
                 sampling: SamplingParameters::default(),

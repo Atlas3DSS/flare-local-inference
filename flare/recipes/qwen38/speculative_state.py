@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
+from flare.components.capacity import BATCH_CAPACITIES
 from flare.components.recurrent import DeltaMetadata
 from flare.components.token_state import PreparedTokenState
 
@@ -18,9 +19,9 @@ from .ple import PLEMetadata
 def _validate_round(Slots, Epochs, Live, Generation, Status, Error, Pending, Consumed,
                     Limits, LIMITED: tl.constexpr,
                     ROWS: tl.constexpr, WIDTH: tl.constexpr, CONTEXT: tl.constexpr,
-                    CONSUMED_STRIDE: tl.constexpr):
+                    CONSUMED_STRIDE: tl.constexpr, SLOTS: tl.constexpr = 4):
     slot = tl.program_id(0)
-    rows = tl.arange(0, 4)
+    rows = tl.arange(0, SLOTS)
     match = (rows < ROWS) & (rows < tl.load(Live))
     match &= tl.load(Slots + rows, rows < ROWS, other=-1) == slot
     match &= tl.load(Epochs + rows, rows < ROWS, other=-1) == tl.load(Generation + slot)
@@ -45,11 +46,11 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
                            SlotMapping, PhysicalPages, PackedPages, Limits, LIMITED: tl.constexpr,
                            ROWS: tl.constexpr, WIDTH: tl.constexpr, CANDIDATE_STRIDE: tl.constexpr,
                            PAGES: tl.constexpr, DELTA_STRIDE: tl.constexpr, EXTRA_BASE: tl.constexpr,
-                           BLOCK: tl.constexpr):
+                           BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     slot = tl.load(Slots + row)
     live = tl.minimum(tl.load(Live), ROWS)
-    active = (row < live) & (tl.load(Active + row) != 0) & (slot >= 0) & (slot < 4)
+    active = (row < live) & (tl.load(Active + row) != 0) & (slot >= 0) & (slot < SLOTS)
     start = row * WIDTH
     position = tl.load(Positions + row)
     model_slot = tl.where(active, slot + 1, -1)
@@ -92,10 +93,10 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
 @triton.jit
 def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope, Slots, Count,
                    PreviousAccepted, WIDTH: tl.constexpr, HS: tl.constexpr, RS: tl.constexpr,
-                   RPS: tl.constexpr, BLOCK: tl.constexpr):
+                   RPS: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row, tile = tl.program_id(0), tl.program_id(1)
     slot, count = tl.load(Slots + row), tl.load(Count + row)
-    active = (count > 0) & (slot >= 0) & (slot < 4)
+    active = (count > 0) & (slot >= 0) & (slot < SLOTS)
     channel = tile * BLOCK + tl.arange(0, BLOCK)
     offset = row * WIDTH + count - 1
     residual = tl.load(Residual + offset * 10240 + channel, active & (channel < 10240), other=0)
@@ -119,12 +120,12 @@ class PreparedVerificationState:
 
     def __init__(self, inputs, requests, pool, candidates, previous_accepted,
                  *, width: int, rows: int, extra_base: int, token_limits=None):
-        if type(width) is not int or not 1 <= width <= 8 or rows not in (1, 2, 4):
-            raise ValueError("verification requires width 1 through 8 and batch 1/2/4")
-        if pool.layout.speculative_tokens != 7 or extra_base < 6 or extra_base + 28 > pool.backing.shape[0]:
-            raise ValueError("verification requires a seven-draft pool and 28 private state rows")
-        if candidates.dtype != torch.int64 or candidates.shape != (4, 8):
-            raise ValueError("verification candidates require int64 [4,8]")
+        if type(width) is not int or not 1 <= width <= 8 or (rows not in BATCH_CAPACITIES or rows > requests.capacity):
+            raise ValueError("verification requires width 1 through 8 and a power-of-two batch within request capacity")
+        if pool.layout.speculative_tokens != 7 or extra_base < requests.capacity + 2 or extra_base + requests.capacity * 7 > pool.backing.shape[0]:
+            raise ValueError("verification requires a seven-draft pool and seven private state rows per request")
+        if candidates.dtype != torch.int64 or candidates.shape != (requests.capacity, 8):
+            raise ValueError("verification candidates require int64 [capacity,8]")
         self.inputs, self.requests, self.pool = inputs, requests, pool
         self.tokens, self.rows, self.mode, self.width = rows * width, rows, "decode", width
         self.previous_accepted = previous_accepted
@@ -147,7 +148,7 @@ class PreparedVerificationState:
             (inputs.row_slot_ids, inputs.row_generations, inputs.live_rows, requests.generation,
              requests.status, requests.error_code, requests.pending_token, requests.consumed_tokens,
              inputs.query_lengths if token_limits is None else token_limits, token_limits is not None,
-             rows, width, inputs.page_tables.shape[1] * 64, requests.consumed_tokens.stride(0)), (4, 1, 1))
+             rows, width, inputs.page_tables.shape[1] * 64, requests.consumed_tokens.stride(0), requests.capacity), (requests.capacity, 1, 1))
         g, q, t = self.gdn, self.qsa, self.token_state
         self._metadata = compile_kernel(_verification_metadata,
             (inputs.row_slot_ids, inputs.live_rows, t.active, t.positions, t.pending_tokens,
@@ -157,7 +158,7 @@ class PreparedVerificationState:
              inputs.page_tables, q.main_block_table,
              inputs.query_lengths if token_limits is None else token_limits, token_limits is not None,
              rows, width, candidates.stride(0),
-             inputs.page_tables.shape[1], pool.rope_delta.stride(0), extra_base, 128), (rows, 1, 1))
+             inputs.page_tables.shape[1], pool.rope_delta.stride(0), extra_base, 128, requests.capacity), (rows, 1, 1))
 
     def prepare_hidden(self, hidden, sample):
         if hidden.shape != sample.shape:
@@ -183,7 +184,7 @@ class PreparedVerificationState:
         self._commit.append(compile_kernel(_commit_hidden,
             (hidden, residual, pool.last_hidden, saved_residual, self.qsa.rope_positions, saved_rope, slots,
              emitted_count, self.previous_accepted, self.width,
-             pool.last_hidden.stride(0), saved_residual.stride(0), saved_rope.stride(0), 1024),
+             pool.last_hidden.stride(0), saved_residual.stride(0), saved_rope.stride(0), 1024, self.requests.capacity),
             (self.rows, 10, 1)))
 
     def commit(self):
