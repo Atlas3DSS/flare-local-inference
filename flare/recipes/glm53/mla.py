@@ -90,7 +90,7 @@ class PreparedGlmMLA:
             ("o_proj", scratch.expanded.view(rows, -1), scratch.output),
         ):
             self.projections[key] = QuantizedProjection(input, weights[key], output,
-                session=session, name=f"{name}.{key}", workspace=workspace)
+                session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
         packed = weights["kv_b_proj"].weight
         values, scales = packed.values.view(heads, 512, 512), packed.scale_rows.view(heads, 512, 16)
         self.query_absorption = BatchedQuantizedProjection(scratch.query.transpose(0, 1),

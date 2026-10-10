@@ -38,7 +38,8 @@ class PreparedMLP:
     """
 
     def __init__(self, source, weights: MLPWeights, gate_up, intermediate, output, *,
-                 session, name, workspace, swiglu_limit=float("inf"), round_silu=True):
+                 session, name, workspace, swiglu_limit=float("inf"), round_silu=True,
+                 activation_mode="auto"):
         self.gate_up, self.intermediate, self.output = gate_up, intermediate, output
         self.swiglu_limit, self.round_silu = swiglu_limit, round_silu
         if source.ndim != 2 or intermediate.ndim != 2:
@@ -55,7 +56,8 @@ class PreparedMLP:
             if isinstance(weight, torch.Tensor):
                 return UnquantizedProjection(input, weight, out, session=session, name=f"{name}.{suffix}")
             return QuantizedProjection(input, weight, out, session=session,
-                                       name=f"{name}.{suffix}", workspace=workspace)
+                                       name=f"{name}.{suffix}", workspace=workspace,
+                                       activation_mode=activation_mode)
 
         self.up_projection = projection(source, weights.gate_up, gate_up, "gate_up")
         self.down_projection = projection(intermediate, weights.down, output, "down")

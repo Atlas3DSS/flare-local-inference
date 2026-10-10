@@ -87,7 +87,7 @@ class PreparedGlmKDA:
             ("o_proj", scratch.gated, scratch.output),
         ):
             self.projections[key] = QuantizedProjection(input, weights[key], output,
-                session=session, name=f"{name}.{key}", workspace=workspace)
+                session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
         conv_args = {
             "x": scratch.projected_qkv, "conv_weight": weights["conv1d.weight"],
             "query_start_loc": metadata.query_start_loc, "state_slot_ids": metadata.convolution_slots,

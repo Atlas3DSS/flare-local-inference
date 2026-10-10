@@ -119,11 +119,11 @@ class PreparedGlmIndexer:
         module.k_norm.bias = torch.nn.Parameter(weights["indexer.k_norm.bias"], requires_grad=False)
         self.ape = weights["indexer.index_kpool_compress_ape"]
         self.query_projection = QuantizedProjection(query_residual, weights["indexer.wq_b"], scratch.query,
-            session=session, name=f"{name}.query", workspace=workspace)
+            session=session, name=f"{name}.query", workspace=workspace, activation_mode="auto")
         self.key_projection = QuantizedProjection(source, weights["indexer.wk"], scratch.key,
-            session=session, name=f"{name}.key", workspace=workspace)
+            session=session, name=f"{name}.key", workspace=workspace, activation_mode="auto")
         self.weight_projection = QuantizedProjection(source, weights["indexer.weights_proj"], scratch.projected_weights,
-            session=session, name=f"{name}.weights", workspace=workspace)
+            session=session, name=f"{name}.weights", workspace=workspace, activation_mode="auto")
         self.gate_projection = UnquantizedProjection(source, weights["indexer.index_kpool_compress_gate"], scratch.gate,
             session=session, name=f"{name}.gate")
         self.query_arguments = (scratch.query.view(-1, 128), scratch.query_fp8.view(-1, 128),
