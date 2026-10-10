@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from flare.components.linear import UnquantizedProjection
 from flare.components.expert_overlap import ConcurrentSharedExpert
+from flare.components.linear import UnquantizedProjection
 from flare.components.mlp import MLPScratch, PreparedMLP
 from flare.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
 
@@ -65,15 +65,15 @@ class PreparedGlmMoe:
         self.concurrent_shared = None
         if source.shape[0] <= 256:
             self.concurrent_shared = ConcurrentSharedExpert(self.shared,
-                parallel_plans=(self.router_projection.plan, self.routing.plan, self.experts.plan),
+                parallel_plans=(self.routing.plan, self.experts.plan),
                 session=session, workspace=workspace)
 
     def __call__(self, source):
         if source is not self.source and (source.data_ptr() != self.source.data_ptr() or source.shape != self.source.shape):
             raise ValueError("prepared GLM MoE requires its fixed source storage")
+        self.router_projection(source)
         if self.concurrent_shared is not None:
             self.concurrent_shared.start(source)
-        self.router_projection(source)
         self.routing(self.scratch.router_logits)
         routed = self.experts()
         shared = (self.shared(source) if self.concurrent_shared is None
