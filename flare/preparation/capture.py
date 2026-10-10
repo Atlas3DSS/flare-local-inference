@@ -34,6 +34,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
             function()
         graphs[name] = graph
         if progress is not None:
-            progress(f"captured {name} in {monotonic() - started:.2f}s")
+            cache = " (compiled cache hit)" if name in compiled and compiled[name].cache_hit else ""
+            progress(f"captured {name} in {monotonic() - started:.2f}s{cache}")
     torch.cuda.synchronize(device)
     return graphs, compiled

@@ -7,9 +7,11 @@ import json
 import signal
 import sys
 from pathlib import Path
+from time import monotonic
 
 
 def main(argv=None):
+    started = monotonic()
     from flare.preparation.qwen38 import MODEL_ID, REVISION
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -82,7 +84,7 @@ def main(argv=None):
             model.manifest()
             return 0
         server = model.start_server(bind=args.bind, template_defaults=defaults)
-        print(f"Listening on {server.address}", file=sys.stderr, flush=True)
+        print(f"Listening on {server.address}; startup {monotonic() - started:.2f}s", file=sys.stderr, flush=True)
         def stop(signum, frame):
             raise KeyboardInterrupt
         previous = signal.signal(signal.SIGTERM, stop)
