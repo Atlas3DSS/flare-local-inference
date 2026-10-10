@@ -22,7 +22,7 @@ VOCAB = 248320
 
 
 class CapturedSampler:
-    def __init__(self, rows):
+    def __init__(self, rows, *, compile_forward=False):
         assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
         self.rows = rows
         self.state = DeviceRequestState.allocate("cuda", vocab_size=VOCAB)
@@ -39,14 +39,20 @@ class CapturedSampler:
         self.sampler = PreparedSampling(self.logits, self.state, self.slots, self.epochs,
             self.live, self.records, self.frame, self.sequence, sample_enabled=self.enabled)
         self.sampler.prepare()
+        self.call = self.sampler
+        if compile_forward:
+            from flare.preparation.compilation import compile_forward as compile_model
+
+            self.call = compile_model(self.sampler)
+            self.call()
         self.probabilities_pointer = self.sampler.probabilities.data_ptr()
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph):
-            self.sampler()
+            self.call()
         self.bundle = PreparedGraphBundle(device=0, graphs={"sample": self.graph},
             buffers={"logits": self.logits, "records": self.records,
                      "probabilities": self.sampler.probabilities},
-            resources=(self.state, self.sampler, self.slots, self.epochs, self.live,
+            resources=(self.state, self.sampler, self.call, self.slots, self.epochs, self.live,
                        self.frame, self.sequence, self.enabled))
 
     def admit(self, slot, *, counter=0, seed=2**64 - 97, **parameters):
@@ -68,8 +74,8 @@ class CapturedSampler:
 
 
 @contextmanager
-def captured(rows):
-    owner = CapturedSampler(rows)
+def captured(rows, *, compile_forward=False):
+    owner = CapturedSampler(rows, compile_forward=compile_forward)
     owner.worker = owner.bundle.start_worker()
     try:
         yield owner
@@ -81,7 +87,8 @@ def snapshot(state):
     return {name: getattr(state, name).cpu().clone() for name in state.__dataclass_fields__}
 
 
-def test_native_flashinfer_cutoff_ties_and_device_parameter_changes():
+@pytest.mark.parametrize("compile_forward", [False, True])
+def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forward):
     cases = (
         # Threshold top-k retains every tie, including more than k tokens.
         ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
@@ -93,7 +100,7 @@ def test_native_flashinfer_cutoff_ties_and_device_parameter_changes():
         ([4., 3., 3., 1.], VOCAB, 1., 0., [0, 1, 2, 3]),
         ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
     )
-    with captured(1) as owner:
+    with captured(1, compile_forward=compile_forward) as owner:
         owner.slots.fill_(2)
         owner.live.fill_(1)
         for iteration, (values, top_k, top_p, min_p, support) in enumerate(cases):
@@ -120,7 +127,8 @@ def test_native_flashinfer_cutoff_ties_and_device_parameter_changes():
 
 def test_native_flashinfer_rng_is_invariant_to_capacity_packing_and_physical_slot():
     with ExitStack() as stack:
-        owners = [stack.enter_context(captured(rows)) for rows in (1, 2, 4)]
+        owners = [stack.enter_context(captured(rows, compile_forward=compiled))
+                  for compiled in (False, True) for rows in (1, 2, 4)]
         for seed, counter in ((17, 0), (2**64 - 79, 2**32 - 1), (2**63 + 19, 2**32 + 7)):
             sampled = []
             for owner in owners:

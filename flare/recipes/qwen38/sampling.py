@@ -505,8 +505,12 @@ class PreparedSampling:
         probabilities = self._flashinfer.top_p_renorm_probs(probabilities, self.packed_top_p,
             is_deterministic=True)
         torch.amax(probabilities, dim=-1, out=self.probability_maximum)
-        self._min_p_kernel[self._grid](probabilities, self.probabilities, self.probability_maximum,
-            self.packed_min_p, self.state.vocab_size, 1024)
+        from flare.preparation.triton import launch_triton
+
+        launch_triton(_mask_min_p, self._min_p_kernel,
+            (probabilities, self.probabilities, self.probability_maximum,
+             self.packed_min_p, self.state.vocab_size, 1024), self._grid,
+            num_warps=4, enable_fp_fusion=False)
         torch.sum(self.probabilities, dim=-1, keepdim=True, out=self.probability_mass)
         self._normalize()
         temperature = self.state.parameters[self.slots.long().clamp(0, 3), 0]
