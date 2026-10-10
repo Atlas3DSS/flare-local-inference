@@ -1,10 +1,107 @@
-//! Reusable host staging for the shared request-admission ABI.
+//! Shared request-row validation and host staging for captured graph inputs.
 
 use crate::{
     Result,
-    execution::{OwnedUpload, Upload},
-    model::{ModelConfig, SamplingParameters},
+    execution::{GraphKind, OwnedUpload, Upload},
+    model::{Admission, ModelConfig, ModelContract, SamplingParameters},
+    scheduler::{LiveRequest, RequestScheduler, ScheduledStep},
 };
+
+pub struct InputStep<'a, M: ModelContract> {
+    pub config: &'a ModelConfig,
+    pub scheduler: &'a RequestScheduler,
+    pub step: &'a ScheduledStep,
+    pub admissions: &'a [Option<Admission<M>>; 4],
+    pub slots: [i32; 4],
+    pub generations: [i64; 4],
+    pub lengths: [i32; 4],
+    pub samples: [i32; 4],
+}
+
+/// Pack after the scheduler reserves every page referenced by the submission.
+pub fn pack_inputs<M: ModelContract>(
+    inputs: &mut M::Inputs,
+    config: &ModelConfig,
+    scheduler: &RequestScheduler,
+    step: &ScheduledStep,
+    admissions: &[Option<Admission<M>>; 4],
+) -> Result<()> {
+    if step.lanes.is_empty() || step.lanes.len() > step.batch_capacity || step.batch_capacity > 4 {
+        return Err("invalid model lane count".into());
+    }
+    let mut frame = InputStep {
+        config,
+        scheduler,
+        step,
+        admissions,
+        slots: [-1; 4],
+        generations: [0; 4],
+        lengths: [0; 4],
+        samples: [0; 4],
+    };
+    let mut seen = [false; 4];
+    for (row, lane) in step.lanes.iter().enumerate() {
+        let slot = lane.request.slot as usize;
+        if slot >= 4 || std::mem::replace(&mut seen[slot], true) {
+            return Err("model rows require unique physical slots".into());
+        }
+        admissions[slot]
+            .as_ref()
+            .filter(|admission| admission.handle == lane.request)
+            .ok_or("missing or stale native request admission")?;
+        let live = scheduler.request(lane.request)?;
+        frame.slots[row] = slot as i32;
+        frame.generations[row] = lane.request.generation as i64;
+        frame.lengths[row] =
+            i32::try_from(lane.tokens).map_err(|_| "model row exceeds token capacity")?;
+        frame.samples[row] = i32::from(
+            step.kind != GraphKind::Prefill
+                || lane.start_position.checked_add(lane.tokens as u64)
+                    == Some(live.prompt_tokens as u64),
+        );
+    }
+    M::pack(inputs, &frame)
+}
+
+pub fn append_pages(
+    staging: &mut UploadBatch,
+    counts: &mut [(u64, usize); 4],
+    name: &str,
+    request: &LiveRequest,
+    capacity: usize,
+    pages: std::ops::Range<usize>,
+) -> Result<()> {
+    let slot = request.handle.slot as usize;
+    let previous = counts[slot];
+    let count = if previous.0 == request.handle.generation {
+        previous.1
+    } else {
+        0
+    };
+    let available = pages
+        .end
+        .checked_sub(pages.start)
+        .ok_or("invalid page-table window")?;
+    if available > capacity || available < count {
+        return Err("page table does not match its request capacity".into());
+    }
+    if available > count {
+        if pages.end > request.pages().count() {
+            return Err("page-table window exceeds reserved pages".into());
+        }
+        staging.i32(
+            name,
+            (slot * capacity + count) * 4,
+            request
+                .pages()
+                .skip(pages.start + count)
+                .take(available - count)
+                .map(|page| page.0 as i32),
+        );
+        counts[slot] = (request.handle.generation, available);
+    }
+    Ok(())
+}
 
 pub struct SamplingAdmission<'a> {
     pub sampling: &'a SamplingParameters,

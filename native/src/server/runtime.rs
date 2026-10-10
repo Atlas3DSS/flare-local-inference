@@ -917,7 +917,13 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             )?;
             request.next_image += 1;
         } else {
-            M::pack(inputs, self.config, &self.scheduler, step, &self.admissions)?;
+            crate::model::pack_inputs::<M>(
+                inputs,
+                self.config,
+                &self.scheduler,
+                step,
+                &self.admissions,
+            )?;
         }
         Ok(())
     }

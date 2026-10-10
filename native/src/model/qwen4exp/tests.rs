@@ -429,8 +429,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
     for (fence, consumed, generated, token) in [(1, 0, 0, -1), (2, 65, 1, 7)] {
         let step = scheduler.next_step().unwrap();
         scheduler.record_submission(&step, Fence(fence)).unwrap();
-        inputs
-            .pack(&config, &scheduler, &step, &admissions)
+        crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         wire_fixture.observe(&inputs.uploads());
         if fence == 2 {
@@ -460,8 +459,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         let step = scheduler.next_step().unwrap();
         assert_eq!(step.token_capacity, 8);
         scheduler.record_submission(&step, Fence(fence)).unwrap();
-        inputs
-            .pack(&config, &scheduler, &step, &admissions)
+        crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
@@ -489,8 +487,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         );
         assert!(generation.bytes[8..].iter().all(|byte| *byte == 0));
         config.speculative_copy = false;
-        inputs
-            .pack(&config, &scheduler, &step, &admissions)
+        crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
@@ -715,8 +712,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     let mut inputs = Inputs::new();
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(1)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
@@ -735,8 +731,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     );
     for ignore_eos in [false, true, false] {
         admissions[0].as_mut().unwrap().ignore_eos = ignore_eos;
-        inputs
-            .pack(&config, &scheduler, &step, &admissions)
+        crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
@@ -769,8 +764,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     scheduler.complete(Fence(1), &initialized).unwrap();
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     wire_fixture.observe(&inputs.uploads());
     assert_eq!(
@@ -797,8 +791,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     retain_prompt(&mut scheduler, 3);
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(4)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     wire_fixture.observe(&inputs.uploads());
     assert!(!inputs.uploads().iter().any(|u| u.buffer == "page_tables"));
@@ -871,8 +864,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
             (count, capacity)
         );
         scheduler.record_submission(&step, Fence(sequence)).unwrap();
-        inputs
-            .pack(&config, &scheduler, &step, &admissions)
+        crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
@@ -1055,8 +1047,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     let mut inputs = Inputs::new();
     let step = scheduler.next_step().unwrap();
     scheduler.record_submission(&step, Fence(2)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     wire_fixture.observe(&inputs.uploads());
     assert!(
@@ -1092,8 +1083,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.token_capacity, 3);
     scheduler.record_submission(&step, Fence(4)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
@@ -1159,8 +1149,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.token_capacity, 1);
     scheduler.record_submission(&step, Fence(5)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
@@ -1364,9 +1353,14 @@ fn state_transfer_and_resume_upload_fixture() {
             let step = scheduler.next_step().unwrap();
             assert_eq!(step.kind, kind);
             scheduler.record_submission(&step, fence).unwrap();
-            inputs
-                .pack(&config, &scheduler, &step, &admissions)
-                .unwrap();
+            crate::model::pack_inputs::<Qwen4Exp>(
+                &mut inputs,
+                &config,
+                &scheduler,
+                &step,
+                &admissions,
+            )
+            .unwrap();
             wire_fixture.observe(&inputs.uploads());
             assert!(!inputs.uploads().is_empty());
             if matches!(
@@ -1617,9 +1611,14 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
                 ignore_eos: false,
             });
             let mut inputs = Inputs::new();
-            inputs
-                .pack(&config, &scheduler, &step, &admissions)
-                .unwrap();
+            crate::model::pack_inputs::<Qwen4Exp>(
+                &mut inputs,
+                &config,
+                &scheduler,
+                &step,
+                &admissions,
+            )
+            .unwrap();
             let uploads = inputs.uploads();
             let i64s = |name| {
                 uploads

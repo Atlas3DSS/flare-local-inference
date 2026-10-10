@@ -6,7 +6,9 @@ use crate::{
     cache::Fence,
     execution::{ABI_VERSION, BufferDescriptor, Dtype, GraphDescriptor, InputBinding},
     model::SamplingParameters,
-    scheduler::{RequestHandle, RequestSpec, SchedulerLimits, prefill_capacities},
+    scheduler::{
+        RequestHandle, RequestScheduler, RequestSpec, SchedulerLimits, prefill_capacities,
+    },
 };
 
 pub(super) fn config() -> ModelConfig {
@@ -285,8 +287,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         let step = scheduler.next_step().unwrap();
         fence += 1;
         scheduler.record_submission(&step, Fence(fence)).unwrap();
-        inputs
-            .pack(&config, &scheduler, &step, &admissions)
+        crate::model::pack_inputs::<Glm5Next>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         let index = select::<Glm5Next>(
             &config,
@@ -371,8 +372,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
     assert_eq!(step.kind, GraphKind::Restore);
     fence += 1;
     scheduler.record_submission(&step, Fence(fence)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Glm5Next>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert_eq!(values(&inputs, "state_source_slots")[0], source);
     assert_eq!(
@@ -411,8 +411,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
     assert_eq!(step.kind, GraphKind::Resume);
     fence += 1;
     scheduler.record_submission(&step, Fence(fence)).unwrap();
-    inputs
-        .pack(&config, &scheduler, &step, &admissions)
+    crate::model::pack_inputs::<Glm5Next>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert!(inputs.uploads().iter().all(|u| {
         [

@@ -1,11 +1,13 @@
-#[cfg(feature = "images")]
-use crate::scheduler::RequestHandle;
 use crate::{
     Result,
     execution::{GraphKind, Upload},
-    model::{ModelConfig, inputs::UploadBatch},
-    scheduler::{RequestScheduler, ScheduledStep},
+    model::{
+        InputStep,
+        inputs::{UploadBatch, append_pages},
+    },
 };
+#[cfg(feature = "images")]
+use crate::{model::ModelConfig, scheduler::RequestHandle};
 
 pub type Admission = crate::model::Admission<super::Qwen4Exp>;
 
@@ -35,51 +37,18 @@ impl Inputs {
         self.staging.uploads()
     }
 
-    /// Packs after record_submission has reserved every page referenced by the step.
-    pub fn pack(
-        &mut self,
-        config: &ModelConfig,
-        scheduler: &RequestScheduler,
-        step: &ScheduledStep,
-        admissions: &[Option<Admission>; 4],
-    ) -> Result<()> {
+    pub fn pack(&mut self, frame: &InputStep<'_, super::Qwen4Exp>) -> Result<()> {
+        let InputStep {
+            config,
+            scheduler,
+            step,
+            admissions,
+            slots,
+            generations,
+            lengths,
+            samples,
+        } = *frame;
         self.staging.clear();
-        if step.lanes.is_empty()
-            || step.lanes.len() > step.batch_capacity
-            || step.batch_capacity > 4
-        {
-            return Err("invalid model lane count".into());
-        }
-        let mut seen = [false; 4];
-        for lane in &step.lanes {
-            if lane.request.slot >= 4
-                || std::mem::replace(&mut seen[lane.request.slot as usize], true)
-            {
-                return Err("model rows require unique physical slots".into());
-            }
-            let admission = admissions[lane.request.slot as usize]
-                .as_ref()
-                .filter(|a| a.handle == lane.request)
-                .ok_or("missing native request admission")?;
-            if admission.handle != lane.request {
-                return Err("stale native request admission".into());
-            }
-            scheduler.request(lane.request)?;
-        }
-        let mut slots = [-1; 4];
-        let mut generations = [0; 4];
-        let mut lengths = [0; 4];
-        let mut samples = [0; 4];
-        for (row, lane) in step.lanes.iter().enumerate() {
-            slots[row] = lane.request.slot as i32;
-            generations[row] = lane.request.generation as i64;
-            lengths[row] = lane.tokens as i32;
-            samples[row] = i32::from(
-                step.kind != GraphKind::Prefill
-                    || lane.start_position + lane.tokens as u64
-                        == scheduler.request(lane.request)?.prompt_tokens as u64,
-            );
-        }
         if !matches!(step.kind, GraphKind::Init | GraphKind::Restore) {
             self.staging.i32("row_slot_ids", 0, slots);
             self.staging.i64("row_generations", 0, generations);
@@ -110,38 +79,24 @@ impl Inputs {
                         mask.iter().copied(),
                     );
                 }
-                let slot = lane.request.slot as usize;
                 let capacity = config.limits.max_sequence_tokens / 64;
                 let live = scheduler.request(lane.request)?;
-                for (name, skip, previous) in [
-                    ("page_tables", 0, self.page_counts[slot]),
-                    ("draft_page_tables", 1, self.draft_page_counts[slot]),
+                for (name, skip, counts) in [
+                    ("page_tables", 0, &mut self.page_counts),
+                    ("draft_page_tables", 1, &mut self.draft_page_counts),
                 ] {
                     if skip == 1 && !config.has_draft_cache() {
                         continue;
                     }
-                    let count = if previous.0 == lane.request.generation {
-                        previous.1
-                    } else {
-                        0
-                    };
                     let available = live.pages().count().saturating_sub(skip).min(capacity);
-                    if available <= count {
-                        continue;
-                    }
-                    self.staging.i32(
+                    append_pages(
+                        &mut self.staging,
+                        counts,
                         name,
-                        (slot * capacity + count) * 4,
-                        live.pages()
-                            .skip(skip + count)
-                            .take(available - count)
-                            .map(|page| page.0 as i32),
-                    );
-                    if skip == 0 {
-                        self.page_counts[slot] = (lane.request.generation, available);
-                    } else {
-                        self.draft_page_counts[slot] = (lane.request.generation, available);
-                    }
+                        live,
+                        capacity,
+                        skip..skip + available,
+                    )?;
                 }
             }
         }

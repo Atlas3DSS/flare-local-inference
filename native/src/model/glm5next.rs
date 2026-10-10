@@ -13,9 +13,9 @@ mod tests;
 use crate::scheduler::RequestHandle;
 use crate::{
     Result,
-    execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
+    execution::{CompletionRecord, ExecutionManifest, GraphKind, Upload},
     model::{ContractMetadata, ModelConfig, ModelContract, VisionCapabilities},
-    scheduler::{RequestScheduler, ScheduledStep, SchedulerCapabilities},
+    scheduler::SchedulerCapabilities,
 };
 
 pub struct Glm5Next;
@@ -55,16 +55,9 @@ impl ModelContract for Glm5Next {
         }
     }
 
-    fn pack(
-        inputs: &mut Self::Inputs,
-        config: &ModelConfig,
-        scheduler: &RequestScheduler,
-        step: &ScheduledStep,
-        admissions: &[Option<crate::model::Admission<Self>>; REQUEST_LANES],
-    ) -> Result<()> {
-        inputs.pack(config, scheduler, step, admissions)
+    fn pack(inputs: &mut Self::Inputs, step: &crate::model::InputStep<'_, Self>) -> Result<()> {
+        inputs.pack(step)
     }
-
     fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>> {
         inputs.uploads()
     }

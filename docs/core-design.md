@@ -222,6 +222,10 @@ sampling parameters, prompt tokens, output budgets, and grammar masks. The core
 validates prompt limits and constructs admissions for every model. Model adapters
 supply additional prompt metadata and validate its layout; Qwen includes rotary
 positions and vision-feature indices, while GLM text requires no extra metadata.
+The core validates scheduled rows and their admission generations before model
+input packing. It computes row identities, query lengths, and final-prefill
+sampling eligibility once. Both adapters use shared incremental page-table
+uploads, with explicit page windows for target and shifted draft caches.
 
 [Prepared projection components](../flare/components/linear.py) provide BF16,
 FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,

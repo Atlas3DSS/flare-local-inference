@@ -2,8 +2,10 @@ use super::PAGE_TOKENS;
 use crate::{
     Result,
     execution::{GraphKind, Upload},
-    model::{ModelConfig, inputs::UploadBatch},
-    scheduler::{RequestScheduler, ScheduledStep},
+    model::{
+        InputStep,
+        inputs::{UploadBatch, append_pages},
+    },
 };
 
 pub type Admission = crate::model::Admission<super::Glm5Next>;
@@ -19,44 +21,20 @@ impl Inputs {
         self.staging.uploads()
     }
 
-    /// Pack after the scheduler reserves every page needed by this submission.
-    pub fn pack(
-        &mut self,
-        config: &ModelConfig,
-        scheduler: &RequestScheduler,
-        step: &ScheduledStep,
-        admissions: &[Option<Admission>; 4],
-    ) -> Result<()> {
+    pub fn pack(&mut self, frame: &InputStep<'_, super::Glm5Next>) -> Result<()> {
+        let InputStep {
+            config,
+            scheduler,
+            step,
+            admissions,
+            slots,
+            generations: epochs,
+            lengths,
+            samples,
+        } = *frame;
         self.staging.clear();
-        if matches!(step.kind, GraphKind::Vision | GraphKind::Speculative)
-            || step.lanes.is_empty()
-            || step.lanes.len() > step.batch_capacity
-            || step.batch_capacity > 4
-        {
-            return Err("unsupported GLM graph kind or lane count".into());
-        }
-        let mut seen = [false; 4];
-        let mut slots = [-1; 4];
-        let mut epochs = [0; 4];
-        let mut lengths = [0; 4];
-        let mut samples = [0; 4];
-        for (row, lane) in step.lanes.iter().enumerate() {
-            let slot = lane.request.slot as usize;
-            if slot >= 4 || std::mem::replace(&mut seen[slot], true) {
-                return Err("GLM rows require unique physical slots".into());
-            }
-            admissions[slot]
-                .as_ref()
-                .filter(|a| a.handle == lane.request)
-                .ok_or("missing or stale native GLM admission")?;
-            let live = scheduler.request(lane.request)?;
-            slots[row] = slot as i32;
-            epochs[row] = lane.request.generation as i64;
-            lengths[row] = lane.tokens as i32;
-            samples[row] = i32::from(
-                step.kind != GraphKind::Prefill
-                    || lane.start_position + lane.tokens as u64 == live.prompt_tokens as u64,
-            );
+        if matches!(step.kind, GraphKind::Vision | GraphKind::Speculative) {
+            return Err("unsupported GLM graph kind".into());
         }
         let admit = matches!(step.kind, GraphKind::Init | GraphKind::Restore);
         if !admit {
@@ -67,26 +45,15 @@ impl Inputs {
         if step.kind != GraphKind::Resume {
             let capacity = config.limits.max_sequence_tokens / PAGE_TOKENS;
             for lane in &step.lanes {
-                let slot = lane.request.slot as usize;
                 let live = scheduler.request(lane.request)?;
-                let previous = self.page_counts[slot];
-                let count = if previous.0 == lane.request.generation {
-                    previous.1
-                } else {
-                    0
-                };
-                let available = live.pages().count();
-                if available > capacity || available < count {
-                    return Err("GLM page table does not match its request capacity".into());
-                }
-                if available > count {
-                    self.staging.i32(
-                        "page_tables",
-                        (slot * capacity + count) * 4,
-                        live.pages().skip(count).map(|page| page.0 as i32),
-                    );
-                    self.page_counts[slot] = (lane.request.generation, available);
-                }
+                append_pages(
+                    &mut self.staging,
+                    &mut self.page_counts,
+                    "page_tables",
+                    live,
+                    capacity,
+                    0..live.pages().count(),
+                )?;
             }
         }
         if step.kind.samples() {

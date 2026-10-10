@@ -9,10 +9,11 @@ pub mod qwen4exp;
 use crate::scheduler::RequestHandle;
 use crate::{
     Result,
-    execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
-    scheduler::{RequestScheduler, ScheduledStep, SchedulerCapabilities, SchedulerLimits},
+    execution::{CompletionRecord, ExecutionManifest, GraphKind, Upload},
+    scheduler::{SchedulerCapabilities, SchedulerLimits},
 };
 pub use admission::Admission;
+pub use inputs::{InputStep, pack_inputs};
 
 #[cfg_attr(feature = "server", derive(serde::Deserialize))]
 #[cfg_attr(feature = "server", serde(deny_unknown_fields))]
@@ -156,13 +157,7 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
     fn required_inputs(config: &ModelConfig, kind: GraphKind)
     -> impl Iterator<Item = &'static str>;
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities;
-    fn pack(
-        inputs: &mut Self::Inputs,
-        config: &ModelConfig,
-        scheduler: &RequestScheduler,
-        step: &ScheduledStep,
-        admissions: &[Option<Admission<Self>>; REQUEST_LANES],
-    ) -> Result<()>;
+    fn pack(inputs: &mut Self::Inputs, step: &InputStep<'_, Self>) -> Result<()>;
     fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>>;
     fn validate_completion(
         config: &ModelConfig,
