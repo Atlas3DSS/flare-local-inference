@@ -121,11 +121,13 @@ class PreparedMTP:
     accepted-history alignment and all cache commit/rollback transitions.
     ``output_indices`` selects vocabulary rows without allocating prefill-sized
     logits. Returned residuals precede the final mixer and retain all streams.
+    Cache-only instances prepare and execute feedback and attention cache writes,
+    omitting selection, attention output, experts, and vocabulary projection.
     """
 
     def __init__(self, weights: MTPWeights, scratch: MTPScratch, token_ids, target_hidden,
                  qsa_state, metadata, rotary, workspace: ScratchArena, *, output_indices,
-                 session, name: str, draft_tokens: int = 7, max_cache_pages=None):
+                 session, name: str, draft_tokens: int = 7, max_cache_pages=None, cache_only: bool = False):
         tokens, device = scratch.residual.shape[0], scratch.residual.device
         if (target_hidden.shape != (tokens, 10240) or target_hidden.dtype != torch.bfloat16
                 or target_hidden.device != device or not target_hidden.is_contiguous()):
@@ -140,6 +142,7 @@ class PreparedMTP:
             raise ValueError("MTP QSA row metadata must match feedback capacity and device")
         if torch._C._overlaps(target_hidden, scratch.residual):
             raise ValueError("MTP feedback input must not alias its residual output")
+        self.cache_only = cache_only
         self.weights, self.scratch, self.token_ids = weights, scratch, token_ids
         self.target_hidden, self.metadata, self.output_indices = target_hidden, metadata, output_indices
         self.workspace = workspace
@@ -154,7 +157,10 @@ class PreparedMTP:
             priming_state=scratch.residual, session=session, name=f"{name}.attn_hc")
         self.attention = PreparedAttention(layer.self_attn, weights.attention, source, scratch.qsa,
             qsa_state, metadata, rotary, session=session, name=f"{name}.qsa", draft_tokens=draft_tokens,
-            workspace=workspace, projection_workspace=workspace, max_cache_pages=max_cache_pages)
+            workspace=workspace, projection_workspace=workspace, max_cache_pages=max_cache_pages,
+            cache_only=cache_only)
+        if cache_only:
+            return
         self.mlp_hc = PreparedHyperconnection(layer.mlp_hyper_connection, scratch.hyperconnection,
             priming_state=scratch.residual, session=session, name=f"{name}.mlp_hc")
         self.moe = PreparedQwenMoe(source, weights.moe, session=session, name=f"{name}.moe",
@@ -179,6 +185,8 @@ class PreparedMTP:
         s.residual.masked_fill_(~active[:, None], 0)
         mixed = self.attn_hc.mix(s.residual)
         block = self.attention(mixed)
+        if self.cache_only:
+            return None
         self.attn_hc.combine_norm(s.residual, block)
         mixed = self.mlp_hc.mix(s.residual, pre_normalized=True)
         block = self.moe(mixed)

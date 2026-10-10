@@ -150,3 +150,90 @@ def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs
                 assert torch.equal(first.view(torch.uint8), second.view(torch.uint8))
         finally:
             stream.synchronize(); graph.reset()
+
+
+@pytest.mark.parametrize("compiled", [False, "aot"])
+def test_cache_only_absorption_matches_full_mtp_cache_under_replay(weights, compiled):
+    from b12x.preparation import PreparationSession
+
+    host_hidden, host_tokens = inputs()
+    device = torch.device("cuda:0")
+    capacity = 8
+    scratch = MTPScratch.allocate(capacity, 1, device)
+    hidden = host_hidden.repeat((capacity + len(host_tokens) - 1) // len(host_tokens), 1)[:capacity].to(device)
+    tokens = host_tokens.repeat((capacity + len(host_tokens) - 1) // len(host_tokens))[:capacity].to(device)
+    selected = torch.zeros(1, dtype=torch.int64, device=device)
+    metadata = QSAMetadata.allocate(tokens=capacity, batch=1, context=128, device=device)
+    state = QSAState.allocate(pages=2, slots=1, device=device, draft_tokens=7)
+    rotary = RotaryTables.allocate(weights.module.config, 128, device)
+    arena = ScratchArena(device)
+    graphs = []
+    with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+        operators = [PreparedMTP(weights, scratch, tokens, hidden, state, metadata, rotary, arena,
+            output_indices=selected, session=session, name=f"mtp.cache_only.{cache_only}",
+            max_cache_pages=2, cache_only=cache_only) for cache_only in (False, True)]
+        assert not hasattr(operators[1], "moe") and not hasattr(operators[1], "lm_head")
+        arena.finalize(); arena.freeze()
+        stream = torch.cuda.Stream(); stream.wait_stream(torch.cuda.current_stream())
+        try:
+            for op in operators:
+                forward = op
+                if compiled:
+                    import io
+                    from flare.preparation.aot import aot_forward
+
+                    artifact = aot_forward(op)
+                    artifact(op)
+                    data = type(artifact).serialize(artifact).serialized_data
+                    restored = torch.compiler.load_compiled_function(io.BytesIO(data))
+                    forward = lambda op=op, restored=restored: restored(op)
+                with torch.cuda.stream(stream):
+                    forward()
+                stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                graphs.append(graph)
+                with session.capture(), torch.cuda.graph(graph, stream=stream):
+                    forward()
+            session.freeze()
+            metadata.main_block_table[0].copy_(torch.tensor([1, 0], device=device, dtype=torch.int32))
+            metadata.compressed_block_table.copy_(metadata.main_block_table)
+            metadata.raw_state_slot_ids.fill_(0)
+            for field in state.__dataclass_fields__:
+                value = getattr(state, field)
+                value.fill_(-1 if value.dtype == torch.int64 else 0)
+            # Partial intervals, raw-ring wrap, rejected suffix replacement and page crossing.
+            intervals = [(0, 6), (6, 7), (13, 8), (15, 1), (16, 7), (23, 8),
+                         (31, 7), (38, 8), (46, 8), (54, 7), (61, 8), (69, 0)]
+            for step, (start, live) in enumerate(intervals):
+                positions = torch.arange(start, start + live, device=device)
+                metadata.request_ids.fill_(-1); metadata.request_ids[:live].fill_(0)
+                metadata.query_positions.fill_(-1); metadata.query_positions[:live].copy_(positions)
+                metadata.rope_positions.fill_(-1)
+                metadata.rope_positions[:live].copy_(positions[:, None].expand(live, 3))
+                metadata.slot_mapping.fill_(-1)
+                metadata.slot_mapping[:live].copy_(torch.where(positions < 64, positions + 64, positions - 64))
+                metadata.sequence_lengths.fill_(start + live)
+                metadata.query_start_loc[-1] = live
+                metadata.num_accepted_tokens.fill_(2 if start == 15 else 1)
+                metadata.is_prefilling.fill_(step == 0)
+                initial = {field: getattr(state, field).clone() for field in state.__dataclass_fields__}
+                graphs[0].replay()
+                expected = {field: getattr(state, field).clone() for field in state.__dataclass_fields__}
+                for field, value in initial.items():
+                    getattr(state, field).copy_(value)
+                scratch.hidden.fill_(19); scratch.logits.fill_(23)
+                scratch.qsa.attended.fill_(29); scratch.qsa.selected_positions.fill_(-17)
+                arena.tensor.fill_(0xA5 if step % 2 else 0x5A)
+                torch.cuda.synchronize()
+                allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+                graphs[1].replay(); torch.cuda.synchronize()
+                assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+                for field, value in expected.items():
+                    assert torch.equal(getattr(state, field), value), (compiled, start, field)
+                assert (scratch.hidden == 19).all() and (scratch.logits == 23).all()
+                assert (scratch.qsa.attended == 29).all() and (scratch.qsa.selected_positions == -17).all()
+            assert torch.count_nonzero(state.compressed_k_cache) > 0
+        finally:
+            stream.synchronize()
+            for graph in graphs:
+                graph.reset()

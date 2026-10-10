@@ -161,7 +161,8 @@ class PreparedAttention:
                  rotary: RotaryTables, *, session: PreparationSession, name: str,
                  draft_tokens: int = 0, workspace: ScratchArena | torch.Tensor | None = None,
                  projection_workspace: ScratchArena | torch.Tensor | None = None,
-                 max_cache_pages: int | None = None) -> None:
+                 max_cache_pages: int | None = None, cache_only: bool = False) -> None:
+        self.cache_only = cache_only
         self.module, self.scratch, self.state = module, scratch, state
         self.metadata, self.rotary = metadata, rotary
         self.tokens = source.shape[0]
@@ -197,7 +198,8 @@ class PreparedAttention:
         for key, output in (("qkv_proj", scratch.projected_qkv),
                             ("indexer.index_qk_proj", scratch.projected_index)):
             self.projections[key] = projection(source, weights[key], output, key)
-        self.projections["o_proj"] = projection(scratch.gated, weights["o_proj"], scratch.output, "o_proj")
+        if not cache_only:
+            self.projections["o_proj"] = projection(scratch.gated, weights["o_proj"], scratch.output, "o_proj")
         self.index_query = scratch.projected_index[:, :512].view(self.tokens, 4, 128)
         self.index_key = scratch.projected_index[:, 512:]
         self.binding_kwargs = {
@@ -236,7 +238,7 @@ class PreparedAttention:
         declare(session, (self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
             PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),), stage="state")
         self.concurrent = None
-        if (self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
+        if (not cache_only and self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
                 and workspace is projection_workspace
                 and all(isinstance(self.projections[key], QuantizedProjection)
                         for key in ("qkv_proj", "indexer.index_qk_proj"))):
@@ -266,7 +268,7 @@ class PreparedAttention:
         self.write_kwargs.update(k_cache=state.main_k_cache, v_cache=state.main_v_cache)
         self.state = state
 
-    def __call__(self, source: torch.Tensor) -> torch.Tensor:
+    def __call__(self, source: torch.Tensor) -> torch.Tensor | None:
         s = self.scratch
         if self.concurrent is None:
             self.projections["indexer.index_qk_proj"](source)
@@ -282,6 +284,9 @@ class PreparedAttention:
         s.query.copy_(query)
         s.key.copy_(key)
         paged_kv_write.run(self.writer, **self.write_kwargs)
+        if self.cache_only:
+            qsa.run(self.binding, **self.dynamic(), cache_only=True)
+            return None
         attention = qsa.run(self.binding, **self.dynamic()) if self.concurrent is None else self.concurrent.attend(source)
         s.gated.copy_(attention.flatten(1) * torch.sigmoid(gate.reshape(self.tokens, 6144)))
         output = self.projections["o_proj"](s.gated)

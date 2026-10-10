@@ -57,13 +57,13 @@ class SpeculativePreparation:
             buffers["draft_page_tables"] = self.draft_tables
         return buffers
 
-    def mtp(self, metadata, name):
+    def mtp(self, metadata, name, *, cache_only=False):
         if self.proposal_source != "mtp":
             raise RuntimeError("copy proposals do not construct an MTP module")
         module = PreparedMTP(self.mtp_weights, self.mtp_scratch.rows(metadata.tokens, metadata.rows),
             metadata.token_ids, metadata.hidden, self.cache[48], metadata.qsa, self.rotary,
             self.workspaces, output_indices=metadata.output_indices, session=self.session,
-            name=name, draft_tokens=7, max_cache_pages=self.max_cache_pages)
+            name=name, draft_tokens=7, max_cache_pages=self.max_cache_pages, cache_only=cache_only)
         self.mtp_modules.append(module)
         return module
 
@@ -95,7 +95,7 @@ class PreparedPrefillAbsorption:
         self.owner, self.decoder = owner, decoder
         tokens, device = decoder.state.tokens, owner.pool.backing.device
         self.metadata = DraftMetadata(tokens=tokens, rows=1, context=owner.context, device=device)
-        self.mtp = owner.mtp(self.metadata, f"{name}.mtp_absorb")
+        self.mtp = owner.mtp(self.metadata, f"{name}.mtp_absorb", cache_only=True)
         self.target_residual = torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
         decoder.residual_output = self.target_residual
         self.previous = torch.zeros((1, 10240), dtype=torch.bfloat16, device=device)
@@ -148,7 +148,7 @@ class PreparedSpeculativeRound:
         self.draft = owner.mtp(self.draft_metadata, f"{name}.draft") if width > 1 and not self.copy_only else None
         self.absorb_metadata = (DraftMetadata(tokens=batch * width, rows=batch, context=owner.context, device=device)
                                 if not self.copy_only else None)
-        self.absorb = owner.mtp(self.absorb_metadata, f"{name}.absorb") if not self.copy_only else None
+        self.absorb = owner.mtp(self.absorb_metadata, f"{name}.absorb", cache_only=True) if not self.copy_only else None
         self.before = torch.zeros(batch, dtype=torch.int64, device=device)
         self.pending = torch.zeros(batch, dtype=torch.int64, device=device)
         self.previous = torch.zeros((batch, 10240), dtype=torch.bfloat16, device=device)
