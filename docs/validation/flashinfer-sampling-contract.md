@@ -194,7 +194,7 @@ with scalar calls. `tests/utils/test_sampling.py:950`, `:983`, and `:1144`
 exercise deterministic renormalization and mixed enabled/disabled top-k.
 
 Flare's
-[focused native replay tests](../../tests/recipes/test_qwen38_sampling_flashinfer.py)
+[focused native replay tests](../../tests/components/test_sampling_flashinfer.py)
 cover full-vocabulary threshold ties, device parameter changes, capacity and
 slot invariance, invalid/grammar-masked distributions, duplicate and stale
 rows, greedy ties, EOS and budget termination, persistent output addresses, and

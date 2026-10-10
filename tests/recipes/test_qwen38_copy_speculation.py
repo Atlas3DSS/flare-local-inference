@@ -5,9 +5,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, ERROR
+from flare.components.sampling import ERROR, RUNNING
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from flare.recipes.qwen38.speculation import (
-    INVALID_SPECULATION, PreparedCopyProposals, PreparedSpeculativeDistributions,
+    INVALID_SPECULATION,
+    PreparedCopyProposals,
+    PreparedSpeculativeDistributions,
 )
 
 

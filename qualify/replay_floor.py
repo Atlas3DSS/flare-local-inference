@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
 import hashlib
 import time
+from dataclasses import fields
 
 from .provenance import write_json
 
@@ -49,9 +49,11 @@ def _hash(tensor):
 class ReplayCase:
     def __init__(self, model):
         import torch
-        from flare.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState
+
+        from flare.components.sampling import AdmissionBuffers
+        from flare.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
+        from flare.recipes.qwen38.sampling import DeviceRequestState
         from flare.recipes.qwen38.state import HybridStatePool
-        from flare.recipes.qwen38.decoder import PreparedDecoder, DecoderScratch
 
         self.model = model
         self.state = next(value for value in model.resources if isinstance(value, HybridStatePool))
@@ -107,6 +109,7 @@ class ReplayCase:
 
     def prepare(self, cases):
         import torch
+
         from flare.recipes.qwen38.sampling import RequestAdmission
 
         self.batch = len(cases)
@@ -231,6 +234,7 @@ class ReplayCase:
 def measure(model, corpus, output):
     """Compare isolated and queued replay, then retain the model for native serving."""
     import torch
+
     from flare.preparation.graphs import PreparedGraphBundle
 
     output.mkdir(parents=True, exist_ok=False)

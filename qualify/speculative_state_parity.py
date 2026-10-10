@@ -9,14 +9,14 @@ does not exercise the MTP draft model or establish cross-width model equivalence
 from __future__ import annotations
 
 import argparse
-from collections import Counter
-from dataclasses import fields, is_dataclass
 import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import time
+from collections import Counter
+from dataclasses import fields, is_dataclass
+from pathlib import Path
 
 from qualify.provenance import digest, file_record, write_json
 
@@ -88,7 +88,8 @@ class Commands:
 
     def __init__(self, model, fixture, artifacts):
         import torch
-        from flare.recipes.qwen38.sampling import AdmissionBuffers
+
+        from flare.components.sampling import AdmissionBuffers
 
         self.model, self.fixture, self.artifacts = model, fixture, artifacts
         self.host = {name: tensor.detach().cpu().clone() for name, tensor in model.buffers.items()}
@@ -291,6 +292,7 @@ class MutableState:
 
     def __init__(self, model, owner):
         import torch
+
         from flare.preparation.scratch import ScratchArena
         from flare.recipes.qwen38.decoder import DecoderScratch, ModelWeights
         from flare.recipes.qwen38.vision import VisionScratch
@@ -463,6 +465,7 @@ def _require(evidence, name, passed, **details):
 
 def compare(model, owner, fixture, evidence, artifacts, progress):
     import torch
+
     from qualify.graph_execution import verify_prepared_hybrid_state
 
     verify_prepared_hybrid_state(owner.pool, evidence)
@@ -634,6 +637,7 @@ def main(argv=None):
         parser.error("fresh output and artifact paths are required")
     import torch
     from transformers import AutoTokenizer
+
     from flare.preparation.qwen38 import MODEL_ID, REVISION
 
     snapshot = args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
@@ -654,12 +658,13 @@ def main(argv=None):
         return 0
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
-    import flashinfer
     import b12x
     import flare_native
-    from qualify.graph_execution import Evidence
+    import flashinfer
+
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from flare.recipes.qwen38.speculative_model import SpeculativePreparation
+    from qualify.graph_execution import Evidence
 
     source_paths = {Path(__file__), ROOT / "qualify/graph_execution.py", ROOT / "qualify/provenance.py"}
     for directory, suffix in ((ROOT / "flare", "*.py"), (ROOT / "native/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):

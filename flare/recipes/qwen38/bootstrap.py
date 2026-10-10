@@ -12,6 +12,7 @@ from types import MappingProxyType
 
 import torch
 
+from flare.components.sampling import AdmissionBuffers
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.execution import GraphSignature, PreparedExecution
 from flare.preparation.fixtures.recurrent import register_benchmark_state
@@ -30,7 +31,7 @@ from .decoder import DecoderScratch, ModelWeights, PreparedDecoder
 from .decoder_state import DecoderInputs, PreparedDecoderState, PreparedResume
 from .maintenance import PreparedMaintenance
 from .ple import MappedPLETable
-from .sampling import AdmissionBuffers, DeviceRequestState
+from .sampling import DeviceRequestState
 from .state import (
     SNAPSHOT_BASE,
     HybridStateLayout,
@@ -269,7 +270,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
         page_bytes = sum(sum(getattr(value, name).nbytes for name in
             ("main_k_cache", "main_v_cache", "compressed_k_cache")) for value in cache.values())
         planned_pages = torch.cuda.mem_get_info(device)[1] // page_bytes
-        admission = AdmissionBuffers.allocate(device)
+        admission = AdmissionBuffers.allocate(device, vocab_size=248320)
         transfer = StateTransferMetadata.allocate(4, device)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)

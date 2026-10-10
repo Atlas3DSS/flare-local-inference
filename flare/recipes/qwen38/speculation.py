@@ -12,7 +12,15 @@ from dataclasses import dataclass
 
 import torch
 
-from .sampling import DeviceRequestState, RUNNING, FINISHED, ERROR, INVALID_DISTRIBUTION, DUPLICATE_SLOT
+from flare.components.sampling import (
+    DUPLICATE_SLOT,
+    ERROR,
+    FINISHED,
+    INVALID_DISTRIBUTION,
+    RUNNING,
+)
+
+from .sampling import DeviceRequestState
 
 INVALID_SPECULATION = 6
 TARGET_RNG_DOMAIN = 0x4D54505F56455249

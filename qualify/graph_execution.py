@@ -470,7 +470,7 @@ class Scenario:
     def __init__(self, model, tokenizer, image, artifacts):
         import torch
 
-        from flare.recipes.qwen38.sampling import AdmissionBuffers
+        from flare.components.sampling import AdmissionBuffers
 
         self.model, self.tokenizer, self.image, self.artifacts = model, tokenizer, image, artifacts
         self.host = {name: tensor.cpu().clone() for name, tensor in model.buffers.items()}

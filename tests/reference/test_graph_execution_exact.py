@@ -5,15 +5,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from qualify.graph_execution import Scenario
+from flare.components.sampling import AdmissionBuffers
 from flare.preparation.execution import GraphSignature
 from flare.recipes.qwen38.decoder_state import DecoderInputs
-from flare.recipes.qwen38.sampling import AdmissionBuffers
+from qualify.graph_execution import Scenario
 
 
 def make_scenario(tmp_path, cap=512):
     inputs = DecoderInputs.allocate('cpu', context=8192, tokens=cap)
-    admission = AdmissionBuffers.allocate('cpu')
+    admission = AdmissionBuffers.allocate('cpu', vocab_size=248320)
     buffers = {**inputs.buffers(), **{f.name: getattr(admission, f.name) for f in fields(admission)}}
     for name in ('source_slots', 'destination_slots', 'qsa_slots', 'expected_consumed'):
         buffers['state_' + name] = torch.zeros(4, dtype=torch.int64)

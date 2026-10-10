@@ -29,12 +29,13 @@ def test_init_stages_exact_empty_endpoint_before_first_replay(batch):
     from dataclasses import fields
     from types import SimpleNamespace
 
-    from qualify.replay_floor import ReplayCase
-    from flare.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState
+    from flare.components.sampling import AdmissionBuffers
+    from flare.recipes.qwen38.sampling import DeviceRequestState
     from flare.recipes.qwen38.state import StateTransferMetadata
+    from qualify.replay_floor import ReplayCase
 
     runner = ReplayCase.__new__(ReplayCase)
-    admission = AdmissionBuffers.allocate('cpu')
+    admission = AdmissionBuffers.allocate('cpu', vocab_size=248320)
     metadata = StateTransferMetadata.allocate(4, 'cpu')
     runner.host = {field.name: getattr(admission, field.name) for field in fields(admission)}
     runner.host.update({'state_' + field.name: getattr(metadata, field.name) for field in fields(metadata)})

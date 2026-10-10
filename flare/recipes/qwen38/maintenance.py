@@ -6,8 +6,22 @@ import torch
 import triton
 import triton.language as tl
 
-from .sampling import AdmissionBuffers, DeviceRequestState, PreparedAdmission, _check_tensor, _compile, _completion_fields, _write_completion
-from .state import HybridStatePool, PreparedStateTransfers, PreparedCheckpointCaches, StateTransferMetadata
+from flare.components.sampling import (
+    AdmissionBuffers,
+    PreparedAdmission,
+    _check_tensor,
+    _compile,
+    _completion_fields,
+    _write_completion,
+)
+
+from .sampling import DeviceRequestState
+from .state import (
+    HybridStatePool,
+    PreparedCheckpointCaches,
+    PreparedStateTransfers,
+    StateTransferMetadata,
+)
 
 TRANSFER_ERROR_BASE = 64
 INVALID_COMMAND = 8

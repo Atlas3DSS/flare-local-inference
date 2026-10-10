@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from dataclasses import replace
-import os
 
 import pytest
 import torch
 
+from flare.components.sampling import FINISHED
 from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, FINISHED
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from flare.recipes.qwen38.speculation import (
-    PreparedCopyProposals, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
-    PreparedStochasticVerification, SpeculativeRngState, TARGET_RNG_DOMAIN,
+    TARGET_RNG_DOMAIN,
+    PreparedCopyProposals,
+    PreparedSpeculativeCommit,
+    PreparedSpeculativeDistributions,
+    PreparedStochasticVerification,
+    SpeculativeRngState,
 )
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",

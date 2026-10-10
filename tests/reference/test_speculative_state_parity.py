@@ -1,17 +1,17 @@
 """CPU command contracts for actual-checkpoint speculative replay qualification."""
 
-from dataclasses import fields
 import hashlib
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from qualify.speculative_state_parity import Commands, LEGAL_SHAPES, _mask, command_plan
+from flare.components.sampling import AdmissionBuffers
 from flare.preparation.execution import GraphSignature
 from flare.recipes.qwen38.decoder_state import DecoderInputs
-from flare.recipes.qwen38.sampling import AdmissionBuffers
 from flare.recipes.qwen38.state import StateTransferMetadata
+from qualify.speculative_state_parity import LEGAL_SHAPES, Commands, _mask, command_plan
 
 
 def fixture():
@@ -20,7 +20,7 @@ def fixture():
 
 def model():
     inputs = DecoderInputs.allocate("cpu", context=1024, tokens=128)
-    admission = AdmissionBuffers.allocate("cpu")
+    admission = AdmissionBuffers.allocate("cpu", vocab_size=248320)
     transfer = StateTransferMetadata.allocate(4, "cpu")
     buffers = {**inputs.buffers(), **{f.name: getattr(admission, f.name) for f in fields(admission)},
         **{"state_" + f.name: getattr(transfer, f.name) for f in fields(transfer)},
@@ -52,8 +52,8 @@ def make_builder(tmp_path):
 
 
 def test_compare_clones_native_upload_defaults_after_reset_before_handoff(tmp_path, monkeypatch):
-    import qualify.speculative_state_parity as parity
     import qualify.graph_execution as graph_qualification
+    import qualify.speculative_state_parity as parity
 
     runtime = model()
     runtime.device, runtime.graphs = "cpu", {}

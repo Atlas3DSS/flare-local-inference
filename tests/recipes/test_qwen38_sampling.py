@@ -1,19 +1,30 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import os
+from dataclasses import replace
 
 import pytest
 import torch
 import triton
 import triton.language as tl
 
+from flare.components.sampling import (
+    DUPLICATE_SLOT,
+    ERROR,
+    FINISHED,
+    INVALID_ADMISSION,
+    INVALID_DISTRIBUTION,
+    UNCONSUMED_PENDING,
+    AdmissionBuffers,
+    PreparedAdmission,
+    PreparedSampling,
+    philox4x32_reference,
+)
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.recipes.qwen38.sampling import (
-    DeviceRequestState, RequestAdmission, PreparedSampling, PreparedTokenState,
-    AdmissionBuffers, PreparedAdmission,
-    philox4x32_reference, FINISHED, ERROR, INVALID_DISTRIBUTION, UNCONSUMED_PENDING,
-    INVALID_ADMISSION, DUPLICATE_SLOT,
+    DeviceRequestState,
+    PreparedTokenState,
+    RequestAdmission,
 )
 
 

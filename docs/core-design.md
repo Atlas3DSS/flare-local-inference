@@ -211,6 +211,11 @@ b12x lookup into fixed output storage. Token IDs and live counts remain device
 inputs; counted lookup zeros inactive rows. Qwen text and MTP use this component,
 and checkpoint tests cover Qwen and GLM embeddings through native 4096-row
 replay with exact outputs and stable allocation counters.
+The shared [sampling component](../flare/components/sampling.py) owns request
+epochs, Philox state, penalties, grammar masks, admission, FlashInfer sampling,
+and completion records. Vocabulary size and EOS tokens come from the recipe.
+Qwen extends request state with its PLE token history; the shared sampler has no
+model-history dependency. Admission and sampling remain captured device work.
 Shared [routing and expert components](../flare/components/moe.py) retain FP32
 route weights, configurable scoring and correction bias, fixed output buffers,
 and b12x's default expert execution policy. Autotuning uses private activation

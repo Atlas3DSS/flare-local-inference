@@ -8,9 +8,10 @@ import torch
 import triton
 import triton.language as tl
 
+from flare.components.sampling import _completion_fields, _write_completion
 from flare.preparation.triton import prepare_triton
 
-from .sampling import DeviceRequestState, _completion_fields, _write_completion
+from .sampling import DeviceRequestState
 from .vision import VisionMetadata
 
 FEATURES = 16384

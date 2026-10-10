@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
-from contextlib import nullcontext
 import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import sys
 import time
+from contextlib import nullcontext
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -101,6 +101,7 @@ class Layer3QSARecorder:
 
     def __enter__(self):
         import torch
+
         from flare.recipes.qwen38.attention import PreparedAttention
 
         self.attention_type = PreparedAttention
@@ -227,18 +228,20 @@ def main():
     if args.output.exists() or args.tensor_output.exists():
         parser.error("diagnostic output files must not already exist")
 
-    import torch
-    import b12x.sequence.gdn_prefill._impl as gdn_implementation
-    import b12x.attention.qsa._contract as qsa_contract
     import b12x.attention.paged._selected_forward as selected_attention
+    import b12x.attention.qsa._contract as qsa_contract
     import b12x.attention.varlen._preparation as varlen_preparation
+    import b12x.sequence.gdn_prefill._impl as gdn_implementation
     import flare_native
+    import torch
     from transformers import AutoTokenizer
+
+    from flare.components.sampling import AdmissionBuffers
     from flare.preparation.qwen38 import MODEL_ID, REVISION
-    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from flare.recipes.qwen38.attention import PreparedAttention
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from flare.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
-    from flare.recipes.qwen38.sampling import AdmissionBuffers, RequestAdmission
+    from flare.recipes.qwen38.sampling import RequestAdmission
     from flare.recipes.qwen38.state import HybridStatePool
 
     torch.set_grad_enabled(False)

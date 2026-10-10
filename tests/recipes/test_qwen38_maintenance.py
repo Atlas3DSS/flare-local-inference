@@ -1,15 +1,16 @@
 """Complete hybrid-row transitions and admission ordering through native replay."""
 
-from types import SimpleNamespace
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from flare.components.sampling import AdmissionBuffers
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.recipes.qwen38.attention import QSAState
 from flare.recipes.qwen38.maintenance import PreparedMaintenance
-from flare.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState, RequestAdmission
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from flare.recipes.qwen38.state import HybridStatePool, StateTransferMetadata
 
 

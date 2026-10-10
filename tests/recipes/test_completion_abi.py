@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import torch
 
-from flare.recipes.qwen38.sampling import _completion_fields
+from flare.components.sampling import _completion_fields
 
 
 @pytest.mark.parametrize("fields", [8, 24])
@@ -40,11 +40,10 @@ def test_actual_completion_kernels_cuda(fields):
 
 
 def _kernel_cases(fields, device="cpu"):
-    from flare.recipes.qwen38.sampling import (
-        DeviceRequestState, AdmissionBuffers, RequestAdmission, _complete, _admission_finish,
-    )
-    from flare.recipes.qwen38.maintenance import _snapshot_complete
+    from flare.components.sampling import AdmissionBuffers, _admission_finish, _complete
     from flare.recipes.qwen38 import vision_state
+    from flare.recipes.qwen38.maintenance import _snapshot_complete
+    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
     from flare.recipes.qwen38.vision_state import _vision_finish
     if os.environ.get("TRITON_INTERPRET") == "1":
         # The interpreter cannot add a global tl.constexpr to its tensor wrapper.

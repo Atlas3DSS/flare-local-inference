@@ -250,7 +250,7 @@ class PreparedDecoder:
             scratch.logits, session=session, name=f"{name}.lm_head")
         self.sampler = None
         if not verification:
-            from .sampling import PreparedSampling
+            from flare.components.sampling import PreparedSampling
 
             state, inputs = self.state, self.state.inputs
             self.sampler = PreparedSampling(self.scratch.logits, state.requests,

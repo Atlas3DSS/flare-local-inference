@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
-from datetime import datetime, timezone
 import hashlib
 import importlib.machinery
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
 import traceback
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -68,7 +68,9 @@ def load_inputs(receipt_path, artifact_path):
 
 def cpu_case(artifact, rows, block_steps, policy, *, one_sample=False):
     import torch
-    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, philox4x32_reference
+
+    from flare.components.sampling import philox4x32_reference
+    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 
     steps = 1 if one_sample else block_steps
     initial = DeviceRequestState.allocate("cpu")
@@ -145,7 +147,9 @@ def cpu_case(artifact, rows, block_steps, policy, *, one_sample=False):
 class CapturedCase:
     def __init__(self, case, artifact, stream):
         import torch
-        from flare.recipes.qwen38.sampling import DeviceRequestState, PreparedSampling, PreparedTokenState
+
+        from flare.components.sampling import PreparedSampling
+        from flare.recipes.qwen38.sampling import DeviceRequestState, PreparedTokenState
 
         self.case = case
         self.name = case["name"]
@@ -239,8 +243,9 @@ def check_outputs(expected, observed, artifacts, label):
 
 
 def measure(args, artifact, cases, receipt):
-    import torch
     import flare_native
+    import torch
+
     from flare.preparation.graphs import PreparedGraphBundle
 
     if not args.gpu_uuid or os.environ.get("CUDA_VISIBLE_DEVICES") != args.gpu_uuid:

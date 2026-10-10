@@ -3,11 +3,17 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, FINISHED, ERROR
+from flare.components.sampling import ERROR, FINISHED, RUNNING
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from flare.recipes.qwen38.speculation import (
-    PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
-    PreparedStochasticVerification, SpeculativeAcceptance, SpeculativeRngState,
-    INVALID_SPECULATION, TARGET_RNG_DOMAIN, DRAFT_RNG_DOMAIN,
+    DRAFT_RNG_DOMAIN,
+    INVALID_SPECULATION,
+    TARGET_RNG_DOMAIN,
+    PreparedSpeculativeCommit,
+    PreparedSpeculativeDistributions,
+    PreparedStochasticVerification,
+    SpeculativeAcceptance,
+    SpeculativeRngState,
 )
 
 

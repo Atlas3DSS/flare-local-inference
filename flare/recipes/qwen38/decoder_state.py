@@ -283,8 +283,7 @@ class PreparedResume:
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
                  completion_records, frame_index, submission_sequence, *, session, name):
         from flare.components.linear import UnquantizedProjection
-
-        from .sampling import PreparedSampling
+        from flare.components.sampling import PreparedSampling
 
         rows = sample_hidden.shape[0]
         if not 1 <= rows <= 4 or logits.shape != (rows, requests.vocab_size):

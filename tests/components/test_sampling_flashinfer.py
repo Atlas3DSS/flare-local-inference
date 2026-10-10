@@ -1,32 +1,39 @@
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
 import math
 import os
+from contextlib import ExitStack, contextmanager
 
 import pytest
 import torch
 
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.sampling import (
-    DeviceRequestState, RequestAdmission, PreparedSampling,
-    RUNNING, FINISHED, ERROR, INVALID_DISTRIBUTION, DUPLICATE_SLOT,
+from flare.components.sampling import (
+    DUPLICATE_SLOT,
+    ERROR,
+    FINISHED,
+    INVALID_DISTRIBUTION,
+    RUNNING,
+    DeviceRequestState,
+    PreparedSampling,
+    RequestAdmission,
 )
-
+from flare.preparation.graphs import PreparedGraphBundle
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires FLARE_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
 )
-VOCAB = 248320
+@pytest.fixture(params=[154880, 248320], ids=["glm", "qwen"])
+def vocab_size(request):
+    return request.param
 
 
 class CapturedSampler:
-    def __init__(self, rows, *, compile_forward=False):
+    def __init__(self, rows, *, vocab_size, compile_forward=False):
         assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
         self.rows = rows
-        self.state = DeviceRequestState.allocate("cuda", vocab_size=VOCAB)
-        self.logits = torch.zeros((rows, VOCAB), device="cuda", dtype=torch.float32)
+        self.state = DeviceRequestState.allocate("cuda", vocab_size=vocab_size)
+        self.logits = torch.zeros((rows, vocab_size), device="cuda", dtype=torch.float32)
         self.slots = torch.arange(rows, device="cuda", dtype=torch.int32)
         self.epochs = torch.ones(rows, device="cuda", dtype=torch.int64)
         self.live = torch.zeros(1, device="cuda", dtype=torch.int32)
@@ -56,8 +63,8 @@ class CapturedSampler:
                        self.frame, self.sequence, self.enabled))
 
     def admit(self, slot, *, counter=0, seed=2**64 - 97, **parameters):
-        values = dict(generation=1, seed=seed, max_new_tokens=100,
-                      temperature=1., top_k=0, top_p=1., eos_token_ids=())
+        values = {"generation": 1, "seed": seed, "max_new_tokens": 100,
+                  "temperature": 1., "top_k": 0, "top_p": 1., "eos_token_ids": ()}
         values.update(parameters)
         self.state.admit(slot, RequestAdmission(**values), [])
         self.state.rng_counter[slot] = counter
@@ -74,8 +81,8 @@ class CapturedSampler:
 
 
 @contextmanager
-def captured(rows, *, compile_forward=False):
-    owner = CapturedSampler(rows, compile_forward=compile_forward)
+def captured(rows, *, vocab_size, compile_forward=False):
+    owner = CapturedSampler(rows, vocab_size=vocab_size, compile_forward=compile_forward)
     owner.worker = owner.bundle.start_worker()
     try:
         yield owner
@@ -88,7 +95,7 @@ def snapshot(state):
 
 
 @pytest.mark.parametrize("compile_forward", [False, True])
-def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forward):
+def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forward, vocab_size):
     cases = (
         # Threshold top-k retains every tie, including more than k tokens.
         ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
@@ -97,10 +104,10 @@ def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forw
         ([math.log(2.), 0., 0.], -1, 1., .6, [0]),
         ([0., 0., 0.], 0, 1., 1., [0, 1, 2]),
         ([0., 0., 0.], 1, 1., 0., [0, 1, 2]),
-        ([4., 3., 3., 1.], VOCAB, 1., 0., [0, 1, 2, 3]),
+        ([4., 3., 3., 1.], vocab_size, 1., 0., [0, 1, 2, 3]),
         ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
     )
-    with captured(1, compile_forward=compile_forward) as owner:
+    with captured(1, vocab_size=vocab_size, compile_forward=compile_forward) as owner:
         owner.slots.fill_(2)
         owner.live.fill_(1)
         for iteration, (values, top_k, top_p, min_p, support) in enumerate(cases):
@@ -125,9 +132,9 @@ def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forw
             assert records[[0, 1, 3], 5].sum() == 0
 
 
-def test_native_flashinfer_rng_is_invariant_to_capacity_packing_and_physical_slot():
+def test_native_flashinfer_rng_is_invariant_to_capacity_packing_and_physical_slot(vocab_size):
     with ExitStack() as stack:
-        owners = [stack.enter_context(captured(rows, compile_forward=compiled))
+        owners = [stack.enter_context(captured(rows, vocab_size=vocab_size, compile_forward=compiled))
                   for compiled in (False, True) for rows in (1, 2, 4)]
         for seed, counter in ((17, 0), (2**64 - 79, 2**32 - 1), (2**63 + 19, 2**32 + 7)):
             sampled = []
@@ -150,8 +157,8 @@ def test_native_flashinfer_rng_is_invariant_to_capacity_packing_and_physical_slo
             assert 0 <= sampled[0] < 16
 
 
-def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan():
-    with captured(4) as owner:
+def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan(vocab_size):
+    with captured(4, vocab_size=vocab_size) as owner:
         owner.live.fill_(4)
         owner.logits.zero_()
         owner.logits[0, 5] = torch.nan
@@ -183,8 +190,8 @@ def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan():
         assert owner.state.rng_counter[2].item() == 0
 
 
-def test_native_flashinfer_stale_duplicate_and_disabled_rows_do_not_sample():
-    with captured(4) as owner:
+def test_native_flashinfer_stale_duplicate_and_disabled_rows_do_not_sample(vocab_size):
+    with captured(4, vocab_size=vocab_size) as owner:
         owner.slots.copy_(torch.tensor([0, 0, 2, 3], dtype=torch.int32))
         owner.epochs[2] = 99
         owner.enabled[3] = 0
@@ -205,8 +212,8 @@ def test_native_flashinfer_stale_duplicate_and_disabled_rows_do_not_sample():
             assert torch.equal(expected, after[name]), name
 
 
-def test_native_flashinfer_mixed_temperatures_eos_and_budget_stop_are_terminal():
-    with captured(4) as owner:
+def test_native_flashinfer_mixed_temperatures_eos_and_budget_stop_are_terminal(vocab_size):
+    with captured(4, vocab_size=vocab_size) as owner:
         owner.admit(0, temperature=0., top_k=1, max_new_tokens=1)
         owner.admit(1, eos_token_ids=(7,))
         owner.admit(2, max_new_tokens=1)
