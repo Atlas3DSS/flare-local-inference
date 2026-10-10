@@ -131,7 +131,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                     compiled[mode]()
                 torch.cuda.synchronize(device)
             session.freeze()
-            buffers = dict(state.named_tensors())
+            buffers = dict(pool.partial_pages(), continuation=pool.backing)
             buffers.update({mode + ".hidden": value.hidden for mode, value in scratch.items()})
             resources = (weights, compiled, decoders, forwards, pool, metadata, scratch, session, arena, runtime, stream)
             if generate:

@@ -209,7 +209,8 @@ def test_native_full_state_copy_reset_restore_and_metadata_replay():
             assert torch.all(state.raw_k_ring == 9)
             assert torch.all(state.raw_logical_positions[[0, 2]] == -1)
             assert torch.all(state.raw_rope_positions[[0, 2]] == -1)
-            assert torch.all(state.raw_logical_positions[[1, 3]] == 1617)
+            assert torch.all(state.raw_logical_positions[[1, 3]] == 777)
+            assert torch.all(state.raw_rope_positions[[1, 3]] == 888)
             assert torch.equal(
                 state.raw_interval_start_positions.cpu(),
                 torch.tensor([63, 999, -1, 999]),
@@ -268,7 +269,7 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
     from b12x.preparation import PreparationSession
     from b12x.sequence import short_conv
 
-    from flare.components.recurrent import DeltaMetadata
+    from flare.components.recurrent import DeltaMetadata, prepare_sequence_binding
     from flare.preparation.graphs import PreparedGraphBundle
     from flare.recipes.qwen38.gdn import GDNScratch, PreparedGDN
     from flare.recipes.qwen38.ple import PLE_LAYER_PREFIX
@@ -354,13 +355,18 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
                 ),
                 invocation=short_conv.invocation_from_tensors(**args),
             )
-            convolution_bindings[mode] = PreparedGDN._prepare_binding(
+            def set_convolution(binding, mode=mode):
+                convolution_bindings[mode] = binding
+
+            prepare_sequence_binding(
                 plan,
                 args,
                 session=session,
                 name=f"strided.ple.conv.{mode}",
                 public_bind=short_conv.bind,
                 bind_plan=True,
+                mode=mode,
+                set_binding=set_convolution,
             )
             adapters[mode](value)
             short_conv.run(convolution_bindings[mode])
