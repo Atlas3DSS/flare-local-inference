@@ -68,3 +68,7 @@ caller-owned scratch, and allocation-stable replay are required.
    simultaneous use across branches, then reuse it across serial layers.
    Verify the graph retains overlap after compilation and measure complete
    graph latency, including synchronization and resource contention.
+6. TODO: Design a [TP-sliceable compressed checkpoint layout](tp-checkpoint-layout.md)
+   for TP=1, TP=2, and TP=4, with export-time exception indexes and direct loading
+   of partition views. Resolve native-tile boundary handling before implementing
+   the storage format and b12x readers.
