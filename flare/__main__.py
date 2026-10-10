@@ -58,6 +58,8 @@ def main(argv=None):
         if args.tp not in (2, 4) or args.mtp:
             parser.error("GLM requires --tp 2 or --tp 4 and has no prepared MTP catalog")
         with phase(progress, "Initialize model runtime"):
+            # Retain the native runtime before lengthy preparation can overlap a rebuild.
+            import flare_helios
             from flare.preparation.rank_group import prepare_group
             from flare.recipes.glm53.bootstrap import PreparationConfig, prepare_rank
 
@@ -69,6 +71,7 @@ def main(argv=None):
         if args.tp != 1 or args.max_active != 4:
             parser.error("Qwen requires --tp 1 and --max-active 4")
         with phase(progress, "Initialize model runtime"):
+            import flare_helios
             from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
         config = PreparationConfig(device=args.device, context=args.context, pages=args.pages,
