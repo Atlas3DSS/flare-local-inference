@@ -75,6 +75,30 @@ def test_compiled_bf16_gate_rounding(rows):
         torch.testing.assert_close(probabilities, expected_probabilities, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_fp32_sigmoid_preserves_bf16_gate_rounding():
+    gate = torch.tensor([[-0.0296630859375]], dtype=torch.bfloat16, device="cuda")
+    normalized = torch.tensor([[-0.23046875]], dtype=torch.bfloat16, device="cuda")
+    output = torch.empty_like(normalized)
+
+    def forward():
+        output.copy_((normalized * torch.sigmoid(gate.float())).bfloat16())
+
+    compiled = compile_forward(forward)
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    for value in (-0.0296630859375, 0., 1.):
+        gate.fill_(value)
+        forward()
+        expected = output.clone()
+        output.fill_(float("nan"))
+        graph.replay()
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 @torch.library.custom_op("test_compilation::fill_output", mutates_args=("out",))
 def _fill_output(out: torch.Tensor, value: float) -> None:
     out.fill_(value)

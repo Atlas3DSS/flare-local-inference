@@ -55,6 +55,16 @@ def _fake_mean(source, dim, keepdim=False, dtype=None):
     return torch.mean(source, dim, keepdim, dtype=dtype)
 
 
+@torch.library.custom_op('flare::sigmoid', mutates_args=())
+def _sigmoid(source: torch.Tensor) -> torch.Tensor:
+    return torch.sigmoid(source)
+
+
+@_sigmoid.register_fake
+def _fake_sigmoid(source):
+    return torch.sigmoid(source)
+
+
 def _byte_storage(tensor):
     storage = tensor.untyped_storage()
     return tensor.new_empty(0, dtype=torch.uint8).set_(storage, 0, (storage.nbytes(),), (1,))
@@ -83,15 +93,18 @@ def compile_forward(fn):
     Their typed views are reconstructed inside each opaque invocation so
     Inductor can preserve mutations without cloning strided state regions.
     Pointwise tensor operations remain visible to ordinary Inductor compilation.
-    Mean reductions retain ATen's FP32 accumulation order.
+    Mean reductions and FP32 sigmoid retain ATen's rounding.
     The compiled module retains the forward and its prepared kernel owners.
     """
     module = make_fx(lambda: fn(), tracing_mode='real')()
     graph = module.graph
-    # A one-ULP reduction difference can cross a BF16 rounding boundary.
+    # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
         if node.op == 'call_function' and node.target is torch.ops.aten.mean.dim:
             node.target = torch.ops.flare.mean.default
+        elif (node.op == 'call_function' and node.target is torch.ops.aten.sigmoid.default
+                and node.meta['val'].dtype == torch.float32):
+            node.target = torch.ops.flare.sigmoid.default
     for node in reversed(list(graph.nodes)):
         if (node.op == 'call_function' and isinstance(node.target, torch._ops.OpOverload)
                 and node.target._schema.name in (

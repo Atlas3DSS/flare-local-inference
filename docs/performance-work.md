@@ -22,12 +22,16 @@ caller-owned scratch, and allocation-stable replay are required.
    normal Inductor functionalization. Use byte storage for mixed-dtype views and
    typed storage for aliases of one dtype. Preserve BF16 intermediate rounding
    and ATen mean-reduction order, including FP32 normalization statistics.
+   Preserve ATen FP32 sigmoid results before multiplication and BF16 rounding.
    `scripts/qualify_decoder.py --tune --compile` checks decoder correctness.
    `qualify.gpu_replay flare --compile` measures compiled prefill, decode, and
    resume forwards through model bootstrap. Bootstrap recompiles these forwards
    after binding the final KV pools and retains their operator owners until
    execution drains. Vision, maintenance, and speculative rounds require
    separate compilation qualification before enabling compilation by default.
+   After profiling stops, the replay qualification compares all 256 steps'
+   logits and completion records, plus final request, hybrid, and KV state,
+   against uncompiled graphs using the same prepared model and buffers.
 4. Evaluate MoE kernel selection against the runtime's deterministic-output
    contract and identical-input numerical checks.
 5. Overlap independent graph branches where separate scratch and explicit

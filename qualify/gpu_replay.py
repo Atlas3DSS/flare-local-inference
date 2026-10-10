@@ -93,6 +93,16 @@ def flare(args, corpus):
             if profiling:
                 torch.cuda.profiler.stop()
             runner.stream.synchronize()
+        if args.compile:
+            from qualify.compiled_replay import check_compiled_replay
+
+            try:
+                result['compiled_validation'] = check_compiled_replay(model, corpus['groups'], args.output)
+            except Exception as error:
+                result['compiled_validation'] = {'status': 'failed', 'error': str(error)}
+                save(args.output / 'results.json', result)
+                raise
+            save(args.output / 'results.json', result)
 
 
 def vllm(args, corpus):
