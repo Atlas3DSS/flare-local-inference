@@ -144,7 +144,7 @@ class ReplayCase:
         for slot, case in enumerate(cases):
             request = case['request']
             admission = RequestAdmission(generation=1, seed=request.get('seed', 0),
-                max_new_tokens=256, temperature=0,
+                max_new_tokens=case['output_tokens'], temperature=request.get('temperature', 0),
                 top_k=request.get('top_k', 20), top_p=request.get('top_p', .95),
                 min_p=request.get('min_p', 0),
                 repetition_penalty=request.get('repetition_penalty', 1),
