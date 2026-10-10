@@ -1,6 +1,7 @@
 """GLM KDA state continuation through compiled graphs and native replay."""
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from flare.components.parallel import TensorParallelShard
 from flare.components.recurrent import DeltaMetadata, DeltaState
 from flare.preparation.checkpoint import inspect_indexed_checkpoint
 from flare.preparation.compilation import compile_forward
-from flare.preparation.graphs import PreparedGraphBundle
+from flare.preparation.execution import GraphSignature, PreparedExecution
 from flare.preparation.scratch import ScratchArena
 from flare.preparation.tuning import RecordedPreparationSession
 from flare.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
@@ -31,9 +32,9 @@ def test_rank_state_and_scratch_geometry(world):
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                    reason="requires an explicitly assigned CUDA device and FLARE_RUN_CUDA_TESTS=1")
-@pytest.mark.parametrize("world,tokens", [(2, 65), (4, 129), (4, 4096)])
+@pytest.mark.parametrize("world,tokens,decode_capacity", [(2, 65, 2), (2, 65, 1), (4, 129, 2), (4, 4096, 2)])
 @torch.no_grad()
-def test_actual_kda_native_prefill_and_decode(world, tokens):
+def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity):
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
         "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
@@ -50,15 +51,17 @@ def test_actual_kda_native_prefill_and_decode(world, tokens):
     state = DeltaState.allocate(6, device, heads=heads, channels=3 * heads * 128)
     arena = ScratchArena(device)
     metadata = {mode: DeltaMetadata.allocate(2, device) for mode in ("prefill", "decode")}
+    prefill_capacity = 1 << (tokens - 1).bit_length()
     inputs = {mode: torch.zeros((capacity, 4096), dtype=torch.bfloat16, device=device)
-              for mode, capacity in (("prefill", tokens), ("decode", 2))}
+              for mode, capacity in (("prefill", prefill_capacity), ("decode", decode_capacity))}
+    working = {mode: torch.zeros_like(source) for mode, source in inputs.items()}
     scratch = {mode: KDAScratch.allocate(source.shape[0], heads, device) for mode, source in inputs.items()}
     graphs, operators, compiled = {}, {}, {}
     worker = None
     with RecordedPreparationSession(device=device, checkpoint="GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
                                     workload_schema="glm-kda-v1", numerical_policy="default") as session:
         session.register_scratch(arena)
-        for mode, source in inputs.items():
+        for mode, source in working.items():
             operators[mode] = PreparedGlmKDA(module, weights, source, scratch[mode], state, metadata[mode],
                 mode=mode, session=session, name=f"kda.{mode}", workspace=arena, checkpoint_export=mode == "prefill")
         session.tune()
@@ -66,8 +69,11 @@ def test_actual_kda_native_prefill_and_decode(world, tokens):
             for mode, operator in operators.items():
                 source = inputs[mode]
 
-                def forward(operator=operator, source=source):
-                    operator(source)
+                def forward(operator=operator, source=source, active=working[mode]):
+                    active.copy_(source)
+                    operator(active)
+                    arena.tensor.fill_(255)
+                    active.zero_()
 
                 compiled[mode] = compile_forward(forward)
                 compiled[mode]()
@@ -77,10 +83,14 @@ def test_actual_kda_native_prefill_and_decode(world, tokens):
                     compiled[mode]()
                 torch.cuda.synchronize()
             session.freeze()
-            bundle = PreparedGraphBundle(device=0, graphs=graphs,
-                buffers={"convolution": state.convolution, "recurrent": state.recurrent},
-                resources=(compiled, operators, arena, session, inputs, metadata, scratch))
-            worker = bundle.start_worker()
+            control = {"frame_index": torch.zeros(1, dtype=torch.int32, device=device),
+                       "submission_sequence": torch.zeros(1, dtype=torch.int64, device=device),
+                       "completion_records": torch.zeros((2, 4, 8), dtype=torch.int64, device=device)}
+            bundle = PreparedExecution(device=0, graphs=graphs, buffers=control,
+                signatures={"prefill": GraphSignature("prefill", 1, prefill_capacity),
+                            "decode": GraphSignature("decode", decode_capacity, 1)},
+                resources=(compiled, operators, arena, session, inputs, working, metadata, scratch))
+            worker = bundle.start_executor()
             generator = torch.Generator().manual_seed(53)
             for mode, count, repetitions in (("prefill", tokens, 1), ("decode", 1, 8), ("prefill", 3, 1)):
                 source, meta = inputs[mode], metadata[mode]
@@ -104,9 +114,15 @@ def test_actual_kda_native_prefill_and_decode(world, tokens):
                 state.recurrent.copy_(initial[1])
                 torch.cuda.synchronize()
                 before = torch.cuda.memory_stats()
-                ticket = worker.submit(bundle.graph_indices[mode], repetitions=repetitions)
-                completion = worker.poll(timeout_ms=120000)
-                assert completion is not None and completion.ticket == ticket and completion.error is None
+                for _ in range(repetitions):
+                    ticket = worker.submit(bundle.graph_indices[mode], [])
+                    assert ticket is not None
+                    deadline = time.monotonic() + 120
+                    completion = worker.poll()
+                    while completion is None and time.monotonic() < deadline:
+                        time.sleep(.001)
+                        completion = worker.poll()
+                    assert completion is not None and completion.fence == ticket
                 after = torch.cuda.memory_stats()
                 for key in ("allocation.all.allocated", "allocation.all.freed", "segment.all.allocated", "segment.all.freed"):
                     assert before[key] == after[key]

@@ -156,11 +156,10 @@ class GlmWeightLoader(DirectWeightLoader):
         heads = self.shard.partition(64)
         result = {name: self._projection(f"{prefix}.{name}", rows=channels)
                   for name in ("f_b_proj", "g_b_proj")}
-        result["qkv_proj"] = self.load_mxfp8_group(
-            tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj")),
-            row_ranges=(channels,) * 3)
-        result.update({name: self._projection(f"{prefix}.{name}") for name in ("f_a_proj", "g_a_proj")})
-        result["b_proj"] = self._projection(f"{prefix}.b_proj", rows=heads)
+        result["input_proj"] = self.load_mxfp8_group(
+            tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj")),
+            row_ranges=(channels,) * 3 + (heads, None))
+        result["g_a_proj"] = self._projection(f"{prefix}.g_a_proj")
         result["o_proj"] = self._projection(f"{prefix}.o_proj", columns=channels)
         result["A_log"] = self.load_tensor(f"{prefix}.A_log", extent=slice(*heads))
         result["dt_bias"] = self.load_tensor(f"{prefix}.dt_bias", extent=slice(*channels))

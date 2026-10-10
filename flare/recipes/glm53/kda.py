@@ -6,6 +6,7 @@ import torch
 from b12x.sequence import gdn_decode, kda_prefill, short_conv
 
 from flare.components.linear import QuantizedProjection
+from flare.components.projection_overlap import ConcurrentProjectionChain
 from flare.components.recurrent import (
     DeltaMetadata,
     DeltaState,
@@ -15,6 +16,7 @@ from flare.components.recurrent import (
 
 @dataclass(frozen=True)
 class KDAScratch:
+    projected_input: torch.Tensor
     projected_qkv: torch.Tensor
     convolved_qkv: torch.Tensor
     forget_input: torch.Tensor
@@ -31,14 +33,22 @@ class KDAScratch:
         if type(tokens) is not int or tokens <= 0 or heads not in (16, 32):
             raise ValueError("GLM KDA scratch requires positive capacity and TP2/TP4 head counts")
         width = heads * 128
-        return cls(*(torch.zeros((tokens, channels), dtype=torch.bfloat16, device=device)
-                     for channels in (3 * width, 3 * width, 128, 128, width, heads,
-                                      width, width, width, 4096)))
+        def buffer(channels):
+            return torch.zeros((tokens, channels), dtype=torch.bfloat16, device=device)
+        projected = buffer(3 * width + heads + 128)
+        qkv, beta, forget = projected.split((3 * width, heads, 128), dim=-1)
+        if tokens > 1:
+            forget = buffer(128)
+        return cls(projected, qkv, buffer(3 * width), forget, buffer(128), buffer(width), beta,
+                   buffer(width), buffer(width), buffer(width), buffer(4096))
 
     def rows(self, tokens):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
             raise ValueError("KDA rows exceed scratch capacity")
-        return KDAScratch(*(getattr(self, field.name)[:tokens] for field in fields(self)))
+        views = {field.name: getattr(self, field.name)[:tokens] for field in fields(self)}
+        if tokens == 1:
+            views["forget_input"] = views["projected_input"][:, -128:]
+        return KDAScratch(**views)
 
 
 class PreparedGlmKDA:
@@ -78,16 +88,18 @@ class PreparedGlmKDA:
         module.o_norm.weight = torch.nn.Parameter(weights["o_norm.weight"], requires_grad=False)
         self.projections = {}
         for key, input, output in (
-            ("qkv_proj", source, scratch.projected_qkv),
-            ("f_a_proj", source, scratch.forget_input),
+            ("input_proj", source, scratch.projected_input),
             ("f_b_proj", scratch.forget_input, scratch.raw_g),
             ("g_a_proj", source, scratch.gate_input),
             ("g_b_proj", scratch.gate_input, scratch.z),
-            ("b_proj", source, scratch.raw_beta),
             ("o_proj", scratch.gated, scratch.output),
         ):
             self.projections[key] = QuantizedProjection(input, weights[key], output,
                 session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
+        self.gate_overlap = ConcurrentProjectionChain(
+            (self.projections["g_a_proj"], self.projections["g_b_proj"]),
+            parallel_plans=(self.projections["input_proj"].plan, self.projections["f_b_proj"].plan),
+            session=session, workspace=workspace)
         conv_args = {
             "x": scratch.projected_qkv, "conv_weight": weights["conv1d.weight"],
             "query_start_loc": metadata.query_start_loc, "state_slot_ids": metadata.convolution_slots,
@@ -139,12 +151,12 @@ class PreparedGlmKDA:
 
     def __call__(self, source):
         s, p = self.scratch, self.projections
-        p["qkv_proj"](source)
-        p["f_a_proj"](source)
+        self.gate_overlap.start(source)
+        p["input_proj"](source)
+        if self.tokens > 1:
+            s.forget_input.copy_(s.projected_input[:, -128:])
         p["f_b_proj"](s.forget_input)
-        p["g_a_proj"](source)
-        p["g_b_proj"](s.gate_input)
-        p["b_proj"](source)
+        self.gate_overlap.finish(source, s.raw_g)
         short_conv.run(self.conv_binding)
         if self.mode == "decode":
             gdn_decode.run_kda(self.recurrent_binding, **self.run_options)

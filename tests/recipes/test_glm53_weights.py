@@ -100,14 +100,17 @@ def test_actual_dense_and_attention_shards(manifest, world, rank):
     prefix = f"{TEXT_PREFIX}.layers.0.self_attn"
     width = channels[1] - channels[0]
     for index, name in enumerate(("q_proj", "k_proj", "v_proj")):
-        assert_mxfp8(manifest, kda["qkv_proj"], f"{prefix}.{name}", rows=channels,
+        assert_mxfp8(manifest, kda["input_proj"], f"{prefix}.{name}", rows=channels,
                      output_rows=(index * width, (index + 1) * width))
     for name in ("f_b_proj", "g_b_proj"):
         assert_mxfp8(manifest, kda[name], f"{prefix}.{name}", rows=channels)
-    assert_mxfp8(manifest, kda["b_proj"], f"{prefix}.b_proj", rows=shard.partition(64))
+    heads = 64 // world
+    assert_mxfp8(manifest, kda["input_proj"], f"{prefix}.b_proj", rows=shard.partition(64),
+                 output_rows=(3 * width, 3 * width + heads))
+    assert_mxfp8(manifest, kda["input_proj"], f"{prefix}.f_a_proj",
+                 output_rows=(3 * width + heads, 3 * width + heads + 128))
     assert_mxfp8(manifest, kda["o_proj"], f"{prefix}.o_proj", columns=channels)
-    for name in ("f_a_proj", "g_a_proj"):
-        assert_mxfp8(manifest, kda[name], f"{prefix}.{name}")
+    assert_mxfp8(manifest, kda["g_a_proj"], f"{prefix}.g_a_proj")
     expected_conv = torch.cat([read(manifest, f"{prefix}.{name}_conv1d.weight", slice(*channels))
                                for name in ("q", "k", "v")]).squeeze(1)
     assert torch.equal(kda["conv1d.weight"].cpu(), expected_conv)

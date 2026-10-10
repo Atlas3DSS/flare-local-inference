@@ -270,8 +270,15 @@ PyTorch CPU thread for small compressed-scale planes and restore the caller's
 thread count on exit. The shared
 [prepared MLP](../flare/components/mlp.py) executes BF16 dense and MXFP8 shared
 experts with the checkpoint's SwiGLU clamp and caller-owned intermediates.
-The [KDA branch](../flare/recipes/glm53/kda.py) uses packed MXFP8 QKV projections,
-b12x convolution and recurrence, and head-sharded FP32 recurrent state. Shared
+The [KDA branch](../flare/recipes/glm53/kda.py) packs Q/K/V, beta, and the
+forget-gate input into one MXFP8 projection. A shared
+[projection-chain component](../flare/components/projection_overlap.py) runs
+the two output-gate projections on an auxiliary stream, overlapping the fused
+input and forget-gate output projections. The branches use disjoint regions of
+the planned scratch arena and join before convolution and recurrence. Batch-one
+forget-gate input aliases the fused output; multirow graphs copy that slice into
+caller-owned contiguous storage required by b12x GEMM. Convolution and recurrence
+use b12x kernels and head-sharded FP32 recurrent state. Shared
 [recurrent components](../flare/components/recurrent.py) provide state allocation,
 device metadata, checkpoint export, and prepared bindings for Qwen GDN and GLM
 KDA. Compiled KDA prefill graphs support chunks through 4096 tokens. KDA decode,

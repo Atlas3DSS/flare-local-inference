@@ -39,7 +39,8 @@ def test_serial_graph_variants_share_storage_with_exact_shapes(world, rank):
             assert tensor.shape == expected[name].shape, name
             assert tensor.stride() == expected[name].stride(), name
             assert tensor.dtype == expected[name].dtype, name
-            assert tensor.data_ptr() == storage[name].data_ptr(), name
+            backing = base.kda.projected_input[:, -128:] if name == "kda.forget_input" and tokens == 1 else storage[name]
+            assert tensor.data_ptr() == backing.data_ptr(), name
         assert view.mla.index.active_width is base.mla.index.active_width
         assert view.mla.index.active_width.item() == 8 * 64
         view.residual.fill_(tokens)
