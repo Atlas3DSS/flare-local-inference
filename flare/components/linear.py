@@ -1,4 +1,4 @@
-"""Prepared native BF16 projections with caller-owned output storage."""
+"""Prepared b12x projections with caller-owned output and scratch storage."""
 
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ class BF16Projection:
         bias: torch.Tensor | None = None,
     ) -> None:
         if source.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
-            raise TypeError("Qwen BF16 projections require BF16 source and weight")
+            raise TypeError("BF16 projections require BF16 source and weight")
         if output.dtype != torch.bfloat16:
-            raise TypeError("Qwen BF16 projections require BF16 output")
+            raise TypeError("BF16 projections require BF16 output")
         query = bf16_gemv.query_from_call(source, weight, out=output, bias=bias)
         self.plan = bf16_gemv.plan(query)
         self.weight = weight

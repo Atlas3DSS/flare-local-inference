@@ -10,11 +10,11 @@ from b12x.attention import paged_kv_write, qsa
 from b12x.preparation import PreparationSession, PreparedCall
 from transformers.models.qwen4_exp.modeling_qwen4_exp import apply_rotary_pos_emb
 
+from flare.components.linear import BF16Projection, QuantizedProjection
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
 
 from .attention_overlap import ConcurrentAttention
-from .linear import BF16Projection, QuantizedProjection
 
 
 @dataclass(frozen=True)

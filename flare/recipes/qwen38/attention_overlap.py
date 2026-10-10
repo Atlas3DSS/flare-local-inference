@@ -6,9 +6,8 @@ import weakref
 import torch
 from b12x.attention import qsa
 
+from flare.components.linear import _parallel_mxfp8_projections
 from flare.preparation.tuning import register_finalizer
-
-from .linear import _parallel_mxfp8_projections
 
 _CONTEXTS = weakref.WeakValueDictionary()
 _HANDLES = itertools.count()

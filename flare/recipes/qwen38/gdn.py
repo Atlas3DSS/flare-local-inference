@@ -10,11 +10,10 @@ from b12x.gemm.blockscaled import Weight
 from b12x.preparation import PreparationSession, PreparedCall
 from b12x.sequence import gdn_decode, gdn_prefill, short_conv
 
+from flare.components.linear import QuantizedProjection
 from flare.preparation.fixtures import gdn as gdn_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
-
-from .linear import QuantizedProjection
 
 
 @dataclass(frozen=True)
@@ -294,7 +293,7 @@ class PreparedGDN:
         )
         self.parallel_projections = None
         if mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena):
-            from .linear import ParallelProjections
+            from flare.components.linear import ParallelProjections
 
             self.parallel_projections = ParallelProjections(
                 self.projections["in_proj_qkvz"], self.projections["in_proj_ba"],

@@ -12,18 +12,26 @@ import torch
 import torch.nn.functional as F
 from b12x.preparation import PreparationSession
 
+from flare.components.linear import BF16Projection
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
-from flare.recipes.qwen38.linear import BF16Projection
 from flare.preparation.scratch import ScratchArena
 from flare.recipes.qwen38.moe import (
-    PreparedQwenMoe, PreparedRoutedExperts, PreparedSharedExpert, QwenMoeWeights,
-    RouterScratch, SharedExpertWeights, QwenMoeScratch,
+    PreparedQwenMoe,
+    PreparedRoutedExperts,
+    PreparedSharedExpert,
+    QwenMoeScratch,
+    QwenMoeWeights,
+    RouterScratch,
+    SharedExpertWeights,
 )
 from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
 from flare.reference.qwen38_quant import (
-    CheckpointTensors, mxfp8_linear_reference, nvfp4_expert_reference, read_nvfp4_projection,
+    CheckpointTensors,
+    mxfp8_linear_reference,
+    nvfp4_expert_reference,
+    read_nvfp4_projection,
 )
 
 pytestmark = pytest.mark.skipif(

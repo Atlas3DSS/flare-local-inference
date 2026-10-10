@@ -8,13 +8,13 @@ import torch
 from b12x.preparation import PreparedCall
 from b12x.sequence import embedding, mtp_feedback
 
+from flare.components.linear import BF16Projection
 from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
 
 from .attention import PreparedAttention, QSAScratch
 from .hyperconnection import HyperconnectionScratch, PreparedHyperconnection
-from .linear import BF16Projection
 from .moe import PreparedQwenMoe, QwenMoeScratch
 from .mtp_weights import MTPWeights
 

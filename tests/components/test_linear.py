@@ -1,11 +1,12 @@
+"""Prepared projection tuning fixtures and scratch finalization."""
+
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
-
 import torch
 
-from flare.recipes.qwen38 import linear
+from flare.components import linear
 from flare.preparation.scratch import ScratchArena
 
 

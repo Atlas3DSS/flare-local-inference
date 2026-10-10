@@ -11,8 +11,8 @@ from flare.preparation.checkpoint import CheckpointManifest
 from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
 
-from .model import create_model_tree
 from .hyperconnection import packed_down_projection
+from .model import create_model_tree
 from .moe import QwenMoeWeights
 from .vision import VisionWeights
 from .weights import QwenWeightLoader, allocate_expert_scale_scratch
@@ -181,10 +181,11 @@ class PreparedDecoder:
         from b12x.preparation import PreparedCall
         from b12x.sequence import embedding
 
+        from flare.components.linear import BF16Projection
+
         from .attention import PreparedAttention
         from .gdn import PreparedGDN
         from .hyperconnection import PreparedHyperconnection
-        from .linear import BF16Projection
         from .moe import PreparedQwenMoe
         from .ple import PreparedPLE
 

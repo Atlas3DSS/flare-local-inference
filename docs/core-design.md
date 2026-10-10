@@ -202,6 +202,11 @@ host.
 The [Qwen3.8 recipe](../flare/recipes/qwen38/model.py) keeps the Transformers
 module tree and replaces its forwards with prepared operations.
 
+[Prepared projection components](../flare/components/linear.py) provide BF16
+and block-scaled b12x execution, tuning declarations, caller-owned outputs,
+shared scratch, and captured projection overlap. Recipes supply weights and
+geometry; the components have no Qwen-specific dimensions or state layout.
+
 | Model region | Prepared execution |
 |---|---|
 | Quantized linear projections | b12x MXFP8 and NVFP4 operators |

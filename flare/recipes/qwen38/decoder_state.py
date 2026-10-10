@@ -282,7 +282,8 @@ class PreparedResume:
 
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
                  completion_records, frame_index, submission_sequence, *, session, name):
-        from .linear import BF16Projection
+        from flare.components.linear import BF16Projection
+
         from .sampling import PreparedSampling
 
         rows = sample_hidden.shape[0]

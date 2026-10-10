@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
-from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import sys
 import time
+from collections import Counter
+from dataclasses import dataclass, fields, is_dataclass
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -161,7 +161,7 @@ class _ScratchArenaAudit:
                 self.plan_owners(f"{name}.variant.{capacity}", child)
 
     def projection(self, name, projection):
-        from flare.recipes.qwen38.linear import BF16Projection, QuantizedProjection
+        from flare.components.linear import BF16Projection, QuantizedProjection
 
         memory = projection.plan.memory_requirements()
         if isinstance(projection, QuantizedProjection):
@@ -319,6 +319,7 @@ def verify_prepared_scratch_arena(model, decoders, owners, evidence):
 def verify_prepared_hybrid_state(state, evidence):
     """Check benchmark restoration before the parity reset overwrites model state."""
     import torch
+
     from flare.recipes.qwen38.state import EOS_TOKEN_ID
 
     history = state.ple_history.cpu()
@@ -340,11 +341,15 @@ class MutableReset:
 
     def __init__(self, model, state, requests, decoders, owners, cache):
         import torch
-        from flare.recipes.qwen38.decoder import DecoderScratch, ModelWeights
+
         from flare.preparation.scratch import ScratchArena
+        from flare.recipes.qwen38.decoder import DecoderScratch, ModelWeights
         from flare.recipes.qwen38.maintenance import PreparedMaintenance
-        from flare.recipes.qwen38.vision import VisionScratch, PreparedVision
-        from flare.recipes.qwen38.vision_state import VisionFeatureState, PreparedVisionHandoff
+        from flare.recipes.qwen38.vision import PreparedVision, VisionScratch
+        from flare.recipes.qwen38.vision_state import (
+            PreparedVisionHandoff,
+            VisionFeatureState,
+        )
 
         self.model, self.state, self.requests, self.cache = model, state, requests, cache
         self.features = next(item for item in model._resources if isinstance(item, VisionFeatureState))
@@ -464,6 +469,7 @@ class Request:
 class Scenario:
     def __init__(self, model, tokenizer, image, artifacts):
         import torch
+
         from flare.recipes.qwen38.sampling import AdmissionBuffers
 
         self.model, self.tokenizer, self.image, self.artifacts = model, tokenizer, image, artifacts
@@ -1002,14 +1008,18 @@ def run_comparison(model, state, requests, scratch, cache, reset, scenario, evid
 
 
 def image_fixture(snapshot):
-    import torch
+    from types import MethodType, SimpleNamespace
+
     import numpy as np
+    import torch
     from PIL import Image
-    from transformers import AutoProcessor
-    from transformers.vision_utils import get_vision_cu_seqlens, get_vision_position_ids, get_vision_interpolation_indices_and_weights
-    from types import SimpleNamespace, MethodType
+    from transformers import AutoConfig, AutoProcessor
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpModel
-    from transformers import AutoConfig
+    from transformers.vision_utils import (
+        get_vision_cu_seqlens,
+        get_vision_interpolation_indices_and_weights,
+        get_vision_position_ids,
+    )
 
     fixture = json.loads((ROOT / "tests/frontend/qwen38_images.json").read_text())
     case = next(case for case in fixture["cases"] if case["name"] == "identity")
@@ -1065,17 +1075,18 @@ def main():
     (args.artifacts / "uploads").mkdir()
     (args.artifacts / "qualify_graph_execution.py").write_bytes(Path(__file__).read_bytes())
 
-    import torch
-    import flashinfer
-    import flare_native
     import b12x.attention.qsa._contract as contract
+    import flare_native
+    import flashinfer
+    import torch
     from transformers import AutoTokenizer
+
     from flare.preparation.qwen38 import MODEL_ID, REVISION
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from flare.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
+    from flare.recipes.qwen38.maintenance import PreparedMaintenance
     from flare.recipes.qwen38.sampling import DeviceRequestState
     from flare.recipes.qwen38.state import HybridStatePool
-    from flare.recipes.qwen38.maintenance import PreparedMaintenance
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)

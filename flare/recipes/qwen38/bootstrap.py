@@ -2,32 +2,43 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from threading import get_ident
 from time import monotonic
+from types import MappingProxyType
 
 import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.execution import GraphSignature, PreparedExecution
 from flare.preparation.fixtures.gdn import register_benchmark_state
-from flare.preparation.tuning import RecordedPreparationSession
+from flare.preparation.qwen38 import (
+    CONFIG_SHA256,
+    FRONTEND_SHA256,
+    GENERATION_SHA256,
+    HEADERS_SHA256,
+    MODEL_ID,
+    REVISION,
+)
 from flare.preparation.scratch import ScratchArena
-from flare.preparation.qwen38 import CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, HEADERS_SHA256, MODEL_ID, REVISION
+from flare.preparation.tuning import RecordedPreparationSession
 
 from .attention import QSAState, RotaryTables
-from .decoder import ModelWeights, DecoderScratch, PreparedDecoder
+from .decoder import DecoderScratch, ModelWeights, PreparedDecoder
 from .decoder_state import DecoderInputs, PreparedDecoderState, PreparedResume
 from .maintenance import PreparedMaintenance
 from .ple import MappedPLETable
 from .sampling import AdmissionBuffers, DeviceRequestState
-from .state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool, StateTransferMetadata
+from .state import (
+    SNAPSHOT_BASE,
+    HybridStateLayout,
+    HybridStatePool,
+    StateTransferMetadata,
+)
 from .vision import PreparedVision, VisionScratch
-
 
 _KV_ALLOCATION_MARGIN = 64 << 20
 
@@ -194,6 +205,9 @@ class PreparedModel(PreparedExecution):
 def _identity(manifest):
     sources = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                for path in sorted(Path(__file__).parent.glob("*.py"))}
+    components = Path(__file__).parents[2] / "components"
+    sources.update({f"components/{path.name}": hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in sorted(components.glob("*.py"))})
     value = {"checkpoint": REVISION, "headers": HEADERS_SHA256,
              "config": CONFIG_SHA256, "recipe": sources, "kv_dtype": "bfloat16", "page_size": 64}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -203,7 +217,13 @@ def _identity(manifest):
 def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(), *, progress=None,
                   compile_decoder: bool = False) -> PreparedModel:
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
-    from .vision_state import VisionFeatureState, VisionInputs, PreparedVisionHandoff, PreparedEmbeddingInjection
+
+    from .vision_state import (
+        PreparedEmbeddingInjection,
+        PreparedVisionHandoff,
+        VisionFeatureState,
+        VisionInputs,
+    )
 
     if compile_decoder and config.mtp:
         raise ValueError("compiled decoder qualification requires ordinary decoding")

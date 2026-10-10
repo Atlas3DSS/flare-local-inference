@@ -255,6 +255,16 @@ def _install_boundaries(monkeypatch, checkpoint):
         ),
     )
     monkeypatch.setattr(device, "detect_device", lambda *args: detected)
+
+    class DeclaredStream:
+        def __init__(self, device):
+            self.device = torch.device(device)
+            self.cuda_stream = 0
+
+    class DeclaredEvent:
+        def record(self, stream):
+            self.device = stream.device
+
     for name, replacement in {
         "set_device": lambda *a: None,
         "synchronize": lambda *a: None,
@@ -272,6 +282,8 @@ def _install_boundaries(monkeypatch, checkpoint):
         "mem_get_info": lambda *a: (96 << 30, 96 << 30),
         "memory_allocated": lambda *a: 0,
         "device": lambda *a: nullcontext(),
+        "Stream": DeclaredStream,
+        "Event": DeclaredEvent,
     }.items():
         monkeypatch.setattr(torch.cuda, name, replacement)
 
@@ -585,7 +597,6 @@ def _install_boundaries(monkeypatch, checkpoint):
         "decoder_state",
         "gdn",
         "hyperconnection",
-        "linear",
         "maintenance",
         "mtp",
         "ple",
@@ -598,8 +609,8 @@ def _install_boundaries(monkeypatch, checkpoint):
         "vision",
         "vision_state",
     )
-    for name in modules:
-        module = importlib.import_module("flare.recipes.qwen38." + name)
+    for name in ("flare.components.linear", *("flare.recipes.qwen38." + name for name in modules)):
+        module = importlib.import_module(name)
         for cls in vars(module).values():
             if not inspect.isclass(cls) or cls.__module__ != module.__name__:
                 continue

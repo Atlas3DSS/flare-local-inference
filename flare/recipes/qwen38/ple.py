@@ -12,12 +12,11 @@ from b12x.preparation import PreparationSession, PreparedCall
 from b12x.sequence import ple_embedding, short_conv
 from safetensors import safe_open
 
+from flare.components.linear import BF16Projection
 from flare.preparation.checkpoint import CheckpointManifest
 from flare.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
 from flare.preparation.scratch import planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
-
-from .linear import BF16Projection
 
 PLE_LAYER_PREFIX = f"{TEXT_PREFIX}.layers.1.ple"
 TABLE_ROWS = 320001536

@@ -11,12 +11,12 @@ from b12x.moe import fused_moe
 from b12x.norm import hyperconnection
 from b12x.preparation import PreparationSession, PreparedCall
 
+from flare.components.linear import BF16Projection, QuantizedProjection
 from flare.preparation.fixtures import fused_moe as moe_fixtures
 from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
 
-from .linear import BF16Projection, QuantizedProjection
 from .weights import QwenWeightLoader
 
 

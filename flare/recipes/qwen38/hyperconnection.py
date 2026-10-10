@@ -9,10 +9,9 @@ import torch
 from b12x.norm import hyperconnection as hc
 from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
-from flare.preparation.tuning import register_finalizer
+from flare.components.linear import BF16Projection
 from flare.preparation.fixtures import hyperconnection as hc_fixtures
-
-from .linear import BF16Projection
+from flare.preparation.tuning import register_finalizer
 
 
 def packed_down_projection(module: torch.nn.Module) -> torch.Tensor:

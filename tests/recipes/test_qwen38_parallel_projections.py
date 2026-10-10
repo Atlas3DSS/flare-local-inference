@@ -8,13 +8,12 @@ import torch
 from b12x.preparation import PreparationSession
 from cuda.bindings import driver as cuda
 
+from flare.components.linear import ParallelProjections, QuantizedProjection
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.compilation import compile_forward
 from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38.linear import ParallelProjections, QuantizedProjection
 from flare.recipes.qwen38.weights import QwenWeightLoader
-
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
