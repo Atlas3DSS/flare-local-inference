@@ -797,13 +797,17 @@ graph without calling Python or managing the internal streams.
 Startup compiles complete text forwards with Inductor before capture, including
 prefill absorption, ordinary decode, resume sampling, and speculative rounds.
 Prepared b12x operations remain opaque calls; pointwise PyTorch work is visible
-to fusion and autotuning. Compilation preserves shared-storage mutations and
+to fusion and autotuning. Forward tracing uses tensor metadata without launching
+kernels. Prepared MoE calls expose the complete native operation, including
+route packing and caller-owned scratch/output mutations. Structured return
+values are flattened into tensor outputs for compilation and reconstructed by
+the preparation callable. Compilation preserves shared-storage mutations and
 retains prepared owners until graph teardown. Serialized Inductor callables
 receive persistent tensors as runtime inputs; native call indices refer to each
 forward's retained invocation table. Compiled forwards reside under
 `$XDG_CACHE_HOME/flare/compiled`, defaulting to `~/.cache/flare/compiled`.
-The cache stores compiled code without
-checkpoint payloads or process-local kernel handles. Cache misses autotune with
+The cache stores compiled code without checkpoint payloads or process-local
+kernel handles. Cache misses autotune with
 the bound buffers before capture and serialization. Tests can set
 `compile_decoder=False` to capture the same prepared operations without Inductor.
 Serving never executes either Python forward after native handoff.
