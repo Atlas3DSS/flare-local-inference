@@ -230,7 +230,6 @@ def _install_boundaries(monkeypatch, checkpoint):
     from b12x.gemm.blockscaled._linear import MXFP8LinearWeight
     from b12x.preparation import device
     from b12x.preparation.types import DeviceIdentity
-    from flashinfer import sampling
     from triton.runtime.jit import JITFunction
 
     from flare.preparation import tuning
@@ -280,6 +279,8 @@ def _install_boundaries(monkeypatch, checkpoint):
         raise AssertionError("constructor smoke must not initialize CUDA")
 
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    from flashinfer import sampling
+
     old_storage_pointer = torch.UntypedStorage.data_ptr
     monkeypatch.setattr(
         torch.UntypedStorage,
