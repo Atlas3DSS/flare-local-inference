@@ -6,8 +6,9 @@ from dataclasses import dataclass
 
 import torch
 from b12x.preparation import PreparedCall
-from b12x.sequence import embedding, mtp_feedback
+from b12x.sequence import mtp_feedback
 
+from flare.components.embedding import PreparedEmbedding
 from flare.components.linear import UnquantizedProjection
 from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
@@ -141,10 +142,8 @@ class PreparedMTP:
         self.target_hidden, self.metadata, self.output_indices = target_hidden, metadata, output_indices
         self.workspace = workspace
         self.output = MTPOutput(scratch.residual, scratch.hidden, scratch.logits)
-        self.embedding_plan = embedding.plan(embedding.query_from_call(weights.embedding,
-            scratch.embedding_ids, out=scratch.embedding), device=device)
-        session.prepare((self.embedding_plan.request(name=f"{name}.embedding", prepare_call=lambda state:
-            PreparedCall(run=lambda: state.run(weights.embedding, scratch.embedding_ids, out=scratch.embedding))),))
+        self.embedding = PreparedEmbedding(weights.embedding, scratch.embedding_ids, scratch.embedding,
+            session=session, name=f"{name}.embedding")
         self.feedback = PreparedMTPFeedback(weights.module, scratch.embedding, target_hidden,
             scratch.residual, workspace, session=session, name=f"{name}.feedback")
         layer = weights.module.layers[0]
@@ -173,7 +172,7 @@ class PreparedMTP:
         active = self.metadata.request_ids >= 0
         s.embedding_ids.copy_(self.token_ids)
         s.embedding_ids.masked_fill_(~active, 0)
-        embedding.run(self.weights.embedding, s.embedding_ids, out=s.embedding, plan=self.embedding_plan)
+        self.embedding()
         self.feedback()
         s.residual.masked_fill_(~active[:, None], 0)
         mixed = self.attn_hc.mix(s.residual)

@@ -206,6 +206,11 @@ module tree and replaces its forwards with prepared operations.
 FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,
 shared scratch, and captured projection overlap. Recipes supply weights and
 geometry; the components have no Qwen-specific dimensions or state layout.
+The shared [embedding component](../flare/components/embedding.py) prepares
+b12x lookup into fixed output storage. Token IDs and live counts remain device
+inputs; counted lookup zeros inactive rows. Qwen text and MTP use this component,
+and checkpoint tests cover Qwen and GLM embeddings through native 4096-row
+replay with exact outputs and stable allocation counters.
 Shared [routing and expert components](../flare/components/moe.py) retain FP32
 route weights, configurable scoring and correction bias, fixed output buffers,
 and b12x's default expert execution policy. Autotuning uses private activation

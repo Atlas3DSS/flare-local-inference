@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 
@@ -178,9 +178,7 @@ class PreparedDecoder:
                  stage_outputs: dict[str, torch.Tensor] | None = None,
                  max_cache_pages: int | None = None,
                  residual_output: torch.Tensor | None = None, verification: bool = False):
-        from b12x.preparation import PreparedCall
-        from b12x.sequence import embedding
-
+        from flare.components.embedding import PreparedEmbedding
         from flare.components.linear import UnquantizedProjection
 
         from .attention import PreparedAttention
@@ -206,13 +204,8 @@ class PreparedDecoder:
         self.workspaces, self.ple_table, self.qsa_states = workspaces, ple_table, qsa_states
         source = scratch.hyperconnection.block_input
         language = weights.tree.model.language_model
-        self.embedding_weight = language.embed_tokens.weight
-        self.embedding_args = dict(out=scratch.embedding, num_rows=state.gdn.num_tokens)
-        self.embedding_plan = embedding.plan(embedding.query_from_call(self.embedding_weight,
-            state.ple.token_ids, **self.embedding_args), device=source.device)
-        session.prepare((self.embedding_plan.request(name=f"{name}.embedding", prepare_call=lambda materialized:
-            PreparedCall(run=lambda: materialized.run(self.embedding_weight, state.ple.token_ids,
-                                                       **self.embedding_args))),))
+        self.embedding = PreparedEmbedding(language.embed_tokens.weight, state.ple.token_ids,
+            scratch.embedding, num_rows=state.gdn.num_tokens, session=session, name=f"{name}.embedding")
         self.layers = []
         for index, (module, layer_weights) in enumerate(zip(language.layers, weights.layers, strict=True)):
             prefix = f"{name}.layer{index}"
@@ -267,16 +260,12 @@ class PreparedDecoder:
             self.sampler.prepare()
 
     def __call__(self):
-        from b12x.sequence import embedding
-
         sampler = self.sampler
         s = self.scratch
         if self.embedding_injection is not None:
             self.embedding_injection.validate()
         self.state.begin()
-        s.embedding.zero_()
-        embedding.run(self.embedding_weight, self.state.ple.token_ids, plan=self.embedding_plan,
-                      **self.embedding_args)
+        self.embedding()
         if self.embedding_injection is not None:
             self.embedding_injection.inject()
         if self.stage_outputs:
