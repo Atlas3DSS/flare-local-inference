@@ -4,25 +4,24 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from flare.components.parallel import TensorParallelShard
-from flare.components.weights import DirectWeightLoader
+from flare.components.weights import DirectWeightLoader, MLPWeights
 from flare.preparation.checkpoint import IndexedCheckpoint
+
+if TYPE_CHECKING:
+    import torch
+    from b12x.moe.fused_moe import PreparedExperts
 
 TEXT_PREFIX = "model.language_model"
 
 
 @dataclass(frozen=True)
-class MLPWeights:
-    gate_up: object
-    down: object
-
-
-@dataclass(frozen=True)
 class MoEWeights:
-    router: object
-    correction: object
-    experts: object
+    router: torch.Tensor
+    correction: torch.Tensor
+    experts: PreparedExperts
     shared: MLPWeights
 
 

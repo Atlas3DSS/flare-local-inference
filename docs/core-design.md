@@ -217,8 +217,11 @@ replicated. Dense MLPs retain BF16 checkpoint precision; attention and shared
 experts retain MXFP8. b12x slices compressed NVFP4 scales and rebases exceptions
 before preparing GPU weights. Packed weight slices transfer directly through the
 shared [weight loader](../flare/components/weights.py); scale expansion uses
-caller-owned buffers that serialized layers can share. GLM prepared layer
-replacement and serving are not implemented.
+caller-owned buffers that serialized layers can share. The shared
+[prepared MLP](../flare/components/mlp.py) executes BF16 dense and MXFP8 shared
+experts with the checkpoint's SwiGLU clamp and caller-owned intermediates.
+Compiled MLP and all-reduce graphs support per-rank native replay. GLM attention,
+complete decoder-layer replacement, and serving are not implemented.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.

@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from flare.preparation.checkpoint import IndexedCheckpoint
 
 if TYPE_CHECKING:
     import torch
+    from b12x.gemm.blockscaled import Weight
+
+
+@dataclass(frozen=True)
+class MLPWeights:
+    gate_up: Weight | torch.Tensor
+    down: Weight | torch.Tensor
 
 
 def join_nvfp4_csf(up_fixed, up_exceptions, gate_fixed, gate_exceptions, *, rows, columns):
