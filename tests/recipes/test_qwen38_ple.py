@@ -121,8 +121,10 @@ def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
         .view(dtype)
     )
     save_file({"plane": source}, tmp_path / "part.safetensors")
+    with (tmp_path / "part.safetensors").open("rb") as stream:
+        offset = 8 + int.from_bytes(stream.read(8), "little")
     entry = TensorMetadata(
-        "plane", "part.safetensors", 0, source.numel(), shape, stored
+        "plane", "part.safetensors", offset, source.numel(), shape, stored
     )
     manifest = SimpleNamespace(snapshot=tmp_path, tensors={"plane": entry})
     destination = torch.empty_like(source)
@@ -130,6 +132,10 @@ def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
     assert torch.equal(source.view(torch.uint8), destination.view(torch.uint8))
     with pytest.raises(ValueError, match="checkpoint shape"):
         _copy_plane(manifest, "plane", destination[:-1])
+    with (tmp_path / "part.safetensors").open("r+b") as stream:
+        stream.truncate(offset + source.numel() - 1)
+    with pytest.raises(OSError, match="truncated checkpoint payload"):
+        _copy_plane(manifest, "plane", destination)
 
 
 def test_ple_mapping_checks_available_host_memory_before_allocation(

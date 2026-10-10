@@ -93,18 +93,17 @@ def _copy_plane(
     expected_dtype = {"U8": torch.uint8, "F8_E4M3": torch.float8_e4m3fn}[metadata.dtype]
     if destination.dtype != expected_dtype:
         raise ValueError(f"{name} loading view has the wrong dtype")
-    with safe_open(
-        manifest.snapshot / metadata.shard, framework="pt", device="cpu"
-    ) as source:
-        view = source.get_slice(name)
-        if (
-            tuple(view.get_shape()) != metadata.shape
-            or view.get_dtype() != metadata.dtype
-        ):
-            raise ValueError(f"{name} metadata changed after checkpoint inspection")
-        for start in range(0, metadata.shape[0], 65536):
-            stop = min(start + 65536, metadata.shape[0])
-            destination[start:stop].copy_(view[start:stop])
+    if not destination.is_contiguous() or destination.nbytes != metadata.nbytes:
+        raise ValueError(f"{name} loading view must cover the contiguous checkpoint bytes")
+    target = memoryview(destination.view(torch.uint8).numpy()).cast("B")
+    with (manifest.snapshot / metadata.shard).open("rb", buffering=0) as source:
+        source.seek(metadata.offset)
+        offset = 0
+        while offset < target.nbytes:
+            count = source.readinto(target[offset:])
+            if not count:
+                raise OSError(f"{name}: truncated checkpoint payload")
+            offset += count
 
 
 def _available_host_bytes() -> int:

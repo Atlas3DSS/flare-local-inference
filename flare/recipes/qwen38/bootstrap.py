@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
 import torch
 
@@ -150,7 +151,9 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     config = PreparationConfig() if config is None else config
     device = torch.device("cuda", config.device)
     torch.cuda.set_device(device)
+    started = monotonic()
     manifest = inspect_qwen38_checkpoint(snapshot)
+    report(f"inspected checkpoint metadata in {monotonic() - started:.2f}s")
     weights = ModelWeights.load(manifest, device, progress=progress)
     mtp_weights = None
     has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
@@ -160,7 +163,9 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         mtp_weights = MTPWeights.load(manifest, device,
             embedding_weight=weights.tree.model.language_model.embed_tokens.weight,
             lm_head_weight=weights.tree.lm_head.weight, progress=progress)
+    started = monotonic()
     table = MappedPLETable.load(manifest, device)
+    report(f"loaded mapped PLE table in {monotonic() - started:.2f}s")
     session = preparation_session(device=device, checkpoint=REVISION,
         namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
     session.__enter__()
