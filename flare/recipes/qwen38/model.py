@@ -29,12 +29,9 @@ def create_model_tree(manifest: CheckpointManifest) -> Qwen4ExpForConditionalGen
     if hashlib.sha256(raw).hexdigest() != CONFIG_SHA256:
         raise CheckpointError("config.json changed after checkpoint inspection")
 
-    import torch
     from transformers import Qwen4ExpConfig, Qwen4ExpForConditionalGeneration
 
-    config = Qwen4ExpConfig.from_dict(json.loads(raw))
-    config._attn_implementation = "eager"
-    with torch.device("meta"):
-        model = Qwen4ExpForConditionalGeneration(config)
-    model.eval().requires_grad_(False)
-    return model
+    from flare.components.model import canonical_tree
+
+    return canonical_tree(Qwen4ExpForConditionalGeneration,
+                          Qwen4ExpConfig.from_dict(json.loads(raw)))
