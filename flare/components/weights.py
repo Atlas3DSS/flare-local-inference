@@ -70,6 +70,7 @@ class DirectWeightLoader:
         self._sources = {}
         self._stack = None
         self._csf_files = {}
+        self._source_stats = {}
 
     def _selected_names(self):
         return {name for name in self.manifest.tensors
@@ -156,6 +157,7 @@ class DirectWeightLoader:
             self._display = self._load_stats = None
             self._sources.clear()
             self._csf_files.clear()
+            self._source_stats.clear()
 
     def _require_open(self):
         if self._session is None:
@@ -258,6 +260,8 @@ class DirectWeightLoader:
 
         w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
         w2 = torch.empty((count, hidden_size, local // 2), dtype=torch.uint8, device=self.device)
+        scale_path = self._scale_cache_path(prefixes, hidden_size, intermediate_size, first, last)
+        cached = scale_path.is_file()
         fixed13, exceptions13, fixed2, exceptions2 = [], [], [], []
         staged_bytes = 0
         for index, prefix in enumerate(prefixes):
@@ -273,6 +277,8 @@ class DirectWeightLoader:
                 r0, r1 = (0, rows) if rr is None else rr
                 c0, c1 = (0, columns) if cr is None else cr
                 self._copy(destination, source[r0:r1, c0 // 2:c1 // 2])
+                if cached:
+                    continue
                 names = [f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"
                          for suffix in ("fixed", "exceptions")]
                 incoming_bytes = sum(self.manifest.tensors[name].nbytes for name in names)
@@ -284,13 +290,14 @@ class DirectWeightLoader:
                 )
                 staged_bytes += fixed.nbytes + exceptions.nbytes
                 planes[projection] = fixed, exceptions
-            fixed, exceptions = join_nvfp4_csf(
-                *planes["up_proj"], *planes["gate_proj"], rows=local, columns=hidden_size // 16,
-            )
-            fixed13.append(fixed)
-            exceptions13.append(exceptions)
-            fixed2.append(planes["down_proj"][0])
-            exceptions2.append(planes["down_proj"][1])
+            if not cached:
+                fixed, exceptions = join_nvfp4_csf(
+                    *planes["up_proj"], *planes["gate_proj"], rows=local, columns=hidden_size // 16,
+                )
+                fixed13.append(fixed)
+                exceptions13.append(exceptions)
+                fixed2.append(planes["down_proj"][0])
+                exceptions2.append(planes["down_proj"][1])
         device_scales = []
         for scale in scale_vectors:
             target = torch.empty_like(scale, device=self.device)
@@ -309,10 +316,76 @@ class DirectWeightLoader:
             input_scale=device_scales[2], intermediate_scale=device_scales[3],
             immutable_input_scales=True,
         )
+        geometry = ((2 * local, hidden_size // 16), (hidden_size, local // 16))
+        if cached:
+            planes = self._load_scale_cache(scale_path, geometry)
+        else:
+            from b12x._lib.quant.nvfp4_csf import make_nvfp4_csf_batch
+
+            planes = tuple(make_nvfp4_csf_batch(fixed, exceptions,
+                rows=rows, columns=columns, device=self.device)
+                for fixed, exceptions, (rows, columns) in zip(
+                    (fixed13, fixed2), (exceptions13, exceptions2), geometry, strict=True))
+            self._save_scale_cache(scale_path, planes)
         return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
-            packed=packed, w13_scales=moe.CsfScalePlanes(tuple(fixed13), tuple(exceptions13)),
-            w2_scales=moe.CsfScalePlanes(tuple(fixed2), tuple(exceptions2)),
-        ))
+            packed=packed, w13_scales=planes[0], w2_scales=planes[1]))
+
+    def _scale_cache_path(self, prefixes, hidden_size, intermediate_size, first, last):
+        import hashlib
+        import os
+        import pickle
+        from pathlib import Path
+        from b12x._lib.compiler import b12x_package_fingerprint
+
+        sources = []
+        for prefix in prefixes:
+            for projection in ("up_proj", "gate_proj", "down_proj"):
+                for suffix in ("fixed", "exceptions"):
+                    tensor = self.manifest.tensors[f"{prefix}.{projection}.weight_scale.nvfp4_csf_{suffix}"]
+                    if tensor.shard not in self._source_stats:
+                        source = (self.manifest.snapshot / tensor.shard).resolve()
+                        stat = source.stat()
+                        self._source_stats[tensor.shard] = (str(source), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                    sources.append((self._source_stats[tensor.shard], tensor.offset, tensor.nbytes, tensor.shape))
+        key = hashlib.sha256(pickle.dumps((sources, hidden_size, intermediate_size, first, last,
+                                          b12x_package_fingerprint()))).hexdigest()
+        root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        return root / "flare" / "nvfp4-scales" / (key + ".safetensors")
+
+    def _load_scale_cache(self, path, geometry):
+        import torch
+        from b12x._lib.quant.nvfp4_csf import Nvfp4CsfBatch
+
+        tensors = {}
+        for name, source in self._session.weights((path,)):
+            target = torch.empty(source.shape, dtype=source.dtype, device=self.device)
+            self._copy(target, source)
+            tensors[name] = target
+        self._session.flush()
+        planes = tuple(Nvfp4CsfBatch(*(tensors[f"{index}.{name}"] for name in
+            ("fixed", "exceptions", "task_offsets")), rows, columns)
+            for index, (rows, columns) in enumerate(geometry))
+        for plane in planes:
+            plane.validate()
+        return planes
+
+    @staticmethod
+    def _save_scale_cache(path, planes):
+        import os
+        import tempfile
+        from safetensors.torch import save_file
+
+        tensors = {f"{index}.{name}": getattr(plane, name).cpu().contiguous()
+            for index, plane in enumerate(planes) for name in ("fixed", "exceptions", "task_offsets")}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        os.close(descriptor)
+        try:
+            save_file(tensors, temporary)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def _cpu_csf(self, name):
         import math

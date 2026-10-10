@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 import torch
@@ -148,3 +149,44 @@ def test_mapped_scale_planes_match_checkpoint_and_own_storage(manifest):
             assert torch.equal(tensor, reader.read(prefix + suffix))
             tensor.zero_()
             assert torch.count_nonzero(reader.read(prefix + suffix).view(torch.uint8)) > 0
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_cached_scale_layout_replays_exactly(manifest, scale_cache):
+    prepared, outputs = [], []
+    prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts."
+    for warm in (False, True):
+        scratch = allocate_expert_scale_scratch("cuda:0")
+        with QwenWeightLoader(manifest, "cuda:0", prefixes=(prefix,)) as loader:
+            if warm:
+                def unexpected_read(name):
+                    raise AssertionError("cached scales must bypass checkpoint conversion")
+                loader._cpu_csf = unexpected_read
+            prepared.append(loader.load_experts(0, scale_scratch=scratch))
+            outputs.append(scratch)
+    routes = torch.tensor([0, 511, 7], dtype=torch.int32, device="cuda")
+    graphs = []
+    for value, scratch in zip(prepared, outputs, strict=True):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            value._impl.nvfp4_csf.decode(routes, *scratch)
+        graphs.append(graph)
+    for selected in ((0, 511, 7), (99, 3, 501)):
+        routes.copy_(torch.tensor(selected, dtype=torch.int32, device="cuda"))
+        for scratch in outputs:
+            for tensor in scratch:
+                tensor.view(torch.uint8).fill_(0xD6)
+        for graph in graphs:
+            graph.replay()
+        torch.cuda.synchronize()
+        for first, second in zip(*outputs, strict=True):
+            assert torch.equal(first.view(torch.uint8), second.view(torch.uint8))
+
+
+@pytest.fixture
+def scale_cache(monkeypatch):
+    # GDS requires disk storage rather than tmpfs.
+    with TemporaryDirectory(prefix="flare-scales-test-", dir=Path.home() / ".cache") as directory:
+        monkeypatch.setenv("XDG_CACHE_HOME", directory)
+        yield Path(directory)
