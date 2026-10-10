@@ -83,16 +83,16 @@ class ModelWeights:
                 hyperconnection(f"{prefix}.mlp_hyper_connection")
                 if layer % 4 == 3:
                     attention_prefix = f"{prefix}.self_attn"
-                    projections = ("q_proj", "k_proj", "v_proj", "o_proj", "indexer.index_qk_proj")
+                    load_projections = loader.load_qsa_projections
                     parameters = ("q_norm.weight", "k_norm.weight", "indexer.q_layernorm.weight",
                                   "indexer.k_layernorm.weight")
                 else:
                     attention_prefix = f"{prefix}.linear_attn"
-                    projections = ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj")
+                    load_projections = loader.load_gdn_projections
                     parameters = ("A_log", "dt_bias", "conv1d.weight", "norm.weight")
                 for name in parameters:
                     parameter(f"{attention_prefix}.{name}")
-                attention = {name: loader.load_linear(f"{attention_prefix}.{name}") for name in projections}
+                attention = load_projections(attention_prefix)
                 moe = QwenMoeWeights.load(loader, layer, scale_scratch=scale_scratch)
                 module = tree.get_submodule(f"{prefix}.mlp")
                 module.gate.weight = torch.nn.Parameter(moe.router, requires_grad=False)

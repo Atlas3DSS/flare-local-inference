@@ -20,4 +20,11 @@ caller-owned scratch, and allocation-stable replay are required.
 4. Evaluate MoE kernel selection against the runtime's deterministic-output
    contract and identical-input numerical checks.
 5. Overlap independent graph branches where separate scratch and explicit
-   stream dependencies permit concurrent execution.
+   stream dependencies permit concurrent execution. Evaluate QSA indexing
+   alongside QKV projection and shared experts alongside routed experts, with
+   joins captured before dependent operators consume their outputs. Fork and
+   rejoin auxiliary streams within Python's capture of a single CUDA graph;
+   Rust continues to launch one graph per replay. Allocate workspace by
+   simultaneous use across branches, then reuse it across serial layers.
+   Verify the graph retains overlap after compilation and measure complete
+   graph latency, including synchronization and resource contention.

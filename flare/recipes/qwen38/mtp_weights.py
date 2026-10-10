@@ -164,8 +164,14 @@ class MTPWeights:
             shared = loader.load_shared()
             moe = QwenMoeWeights(loader.load_tensor("mtp.layers.0.mlp.gate.weight"),
                                 loader.load_experts(), shared)
-        attention = {name: module.layers[0].self_attn.get_submodule(name).weight
-                     for name in ("q_proj", "k_proj", "v_proj", "o_proj", "indexer.index_qk_proj")}
+        attention_module = module.layers[0].self_attn
+        qkv = torch.cat([attention_module.get_submodule(name).weight.detach()
+                         for name in ("q_proj", "k_proj", "v_proj")])
+        for name, value in zip(("q_proj", "k_proj", "v_proj"), qkv.split((12288, 512, 512)), strict=True):
+            attention_module.get_submodule(name).weight = torch.nn.Parameter(value, requires_grad=False)
+        attention_module.register_buffer("packed_qkv", qkv, persistent=False)
+        attention = {"qkv_proj": qkv, **{name: attention_module.get_submodule(name).weight
+                     for name in ("o_proj", "indexer.index_qk_proj")}}
         torch.cuda.synchronize(device)
         return cls(module, attention, moe, embedding_weight, lm_head_weight,
                    stored, torch.cuda.memory_allocated(device) - before)

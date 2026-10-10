@@ -224,6 +224,13 @@ scratch. The PLE injection boundary requires a separate normalization. MTP
 fuses the attention-to-MLP boundary; its inactive-row mask precedes the final
 standalone normalization.
 
+GDN combines QKV/Z and B/A weights into two MXFP8 projections. Sparse attention
+combines Q/K/V into one projection and keeps the indexer independent. MTP uses
+the same Q/K/V grouping with BF16 weights. Loading concatenates serialized
+values and scale rows before b12x packs the scales; it does not requantize
+weights. Output slices share persistent packed scratch. The b12x convolution,
+recurrence, and KV writer consume row-strided views without unpacking copies.
+
 Operators that allocate their outputs per call, including standalone
 hyperconnection combine, are acceptable inside capture
 because the allocation resolves into the graph memory pool. Graph variants share

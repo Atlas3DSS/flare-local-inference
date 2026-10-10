@@ -130,6 +130,7 @@ class QSAScratch:
     selected_positions: torch.Tensor
     gated: torch.Tensor
     output: torch.Tensor
+    projected_qkv: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens: int, device: torch.device) -> QSAScratch:
@@ -137,11 +138,12 @@ class QSAScratch:
             raise ValueError("QSA token capacity must be positive")
         def zeros(*shape):
             return torch.zeros(shape, device=device, dtype=torch.bfloat16)
-        return cls(zeros(tokens, 12288), zeros(tokens, 512), zeros(tokens, 512),
+        qkv = zeros(tokens, 13312)
+        return cls(qkv[:, :12288], qkv[:, 12288:12800], qkv[:, 12800:],
                    zeros(tokens, 640), zeros(tokens, 24, 256), zeros(tokens, 2, 256),
                    zeros(tokens, 24, 256),
                    torch.full((tokens, 2051), -1, device=device, dtype=torch.int32),
-                   zeros(tokens, 6144), zeros(tokens, 2560))
+                   zeros(tokens, 6144), zeros(tokens, 2560), qkv)
 
 
 class PreparedAttention:
@@ -191,8 +193,8 @@ class PreparedAttention:
             return QuantizedProjection(source, weight, output, session=session,
                                        name=f"{name}.{key}", workspace=projection_workspace)
 
-        for key, output in (("q_proj", scratch.projected_q), ("k_proj", scratch.projected_k),
-                            ("v_proj", scratch.projected_v), ("indexer.index_qk_proj", scratch.projected_index)):
+        for key, output in (("qkv_proj", scratch.projected_qkv),
+                            ("indexer.index_qk_proj", scratch.projected_index)):
             self.projections[key] = projection(source, weights[key], output, key)
         self.projections["o_proj"] = projection(scratch.gated, weights["o_proj"], scratch.output, "o_proj")
         self.index_query = scratch.projected_index[:, :512].view(self.tokens, 4, 128)
@@ -261,10 +263,10 @@ class PreparedAttention:
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         s = self.scratch
         self.projections["indexer.index_qk_proj"](source)
-        projected = self.projections["q_proj"](source).view(self.tokens, 24, 512)
+        self.projections["qkv_proj"](source)
+        projected = s.projected_q.view(self.tokens, 24, 512)
         query, gate = projected[..., :256], projected[..., 256:]
-        key = self.projections["k_proj"](source).view(self.tokens, 2, 256)
-        self.projections["v_proj"](source)
+        key = s.projected_k.view(self.tokens, 2, 256)
         cos, sin = self.rotary.gather(self.metadata.rope_positions)
         query, key = apply_rotary_pos_emb(self.module.q_norm(query), self.module.k_norm(key), cos, sin,
                                          unsqueeze_dim=1)

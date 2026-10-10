@@ -13,7 +13,6 @@ from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
 from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
 from flare.reference.qwen38_quant import (
     CheckpointTensors,
-    decode_csf_scales,
     mxfp8_linear_reference,
     nvfp4_expert_reference,
     nvfp4_linear_reference,
@@ -159,3 +158,27 @@ def test_actual_csf_experts_prepared_graph_replay(manifest):
             assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
             expected = torch.cat([nvfp4_expert_reference(cpu_input[row:row + 1], *projections[expert]).down for row, expert in enumerate(order)])
             _assert_numerical(output, expected)
+
+
+@pytest.mark.parametrize("layer,region,names", [
+    (0, "linear_attn", ("in_proj_qkv", "in_proj_z")),
+    (0, "linear_attn", ("in_proj_b", "in_proj_a")),
+    (3, "self_attn", ("q_proj", "k_proj", "v_proj")),
+])
+def test_packed_mxfp8_projections_preserve_serialized_rows(manifest, layer, region, names):
+    prefixes = tuple(f"{TEXT_PREFIX}.layers.{layer}.{region}.{name}" for name in names)
+    with QwenWeightLoader(manifest, "cuda:0", prefixes=prefixes) as loader:
+        packed = loader.load_mxfp8_group(prefixes)
+        assert loader._session.torch_copy_bytes == 0
+    values = packed.weight.values.view(torch.uint8).cpu().reshape(packed.out_features, packed.padded_in_features)
+    scales = packed.weight.scale_rows.view(torch.uint8).cpu().reshape(packed.out_features, -1)
+    offset = 0
+    with CheckpointTensors(manifest, byte_budget=128 << 20) as reader:
+        for prefix in prefixes:
+            original = reader.read(prefix + ".weight").view(torch.uint8)
+            original_scales = reader.read(prefix + ".weight_scale").view(torch.uint8)
+            rows, columns = original.shape
+            assert torch.equal(values[offset:offset + rows, :columns], original)
+            assert torch.equal(scales[offset:offset + rows, :columns // 32], original_scales[:rows, :columns // 32])
+            offset += rows
+    assert offset == packed.out_features

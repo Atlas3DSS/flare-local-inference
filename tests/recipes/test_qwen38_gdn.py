@@ -204,9 +204,7 @@ def _load_cuda(manifest):
     module = _module(manifest)
     with QwenWeightLoader(manifest, "cuda:0", prefixes=(PREFIX + ".",)) as loader:
         _parameters(module, loader.load_tensor)
-        projections = {
-            name: loader.load_linear(f"{PREFIX}.{name}") for name in PROJECTIONS
-        }
+        projections = loader.load_gdn_projections(PREFIX)
     return module, projections
 
 

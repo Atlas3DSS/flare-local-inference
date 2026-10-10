@@ -252,6 +252,50 @@ class QwenWeightLoader:
         )
         return replace(packed, in_features=logical_columns)
 
+    def load_mxfp8_group(self, prefixes: Sequence[str]) -> Weight:
+        """Pack serialized projections along output rows before scale swizzling."""
+        import torch
+        from b12x.gemm.blockscaled import pack_weight
+
+        self._require_open()
+        recipes = expected_quantization()
+        if not prefixes or any(
+            recipes.get(prefix, {}).get("quant_algo") != "MXFP8" for prefix in prefixes
+        ):
+            raise ValueError("projection packing requires declared MXFP8 weights")
+        sources = [self._sources[f"{prefix}.weight"] for prefix in prefixes]
+        if any(source.ndim != 2 or source.dtype != torch.float8_e4m3fn for source in sources):
+            raise ValueError("packed MXFP8 projections must be FP8 matrices")
+        columns = sources[0].shape[1]
+        if any(source.shape[1] != columns for source in sources):
+            raise ValueError("packed MXFP8 projections must share input width")
+        rows = sum(source.shape[0] for source in sources)
+        values = torch.empty((rows, columns), dtype=torch.float8_e4m3fn, device=self.device)
+        scales = torch.empty((rows, columns // 32), dtype=torch.uint8, device=self.device)
+        offset = 0
+        for prefix, source in zip(prefixes, sources, strict=True):
+            end = offset + source.shape[0]
+            self._copy(values[offset:end], source)
+            scale_rows = self._sources[f"{prefix}.weight_scale"][:source.shape[0], :columns // 32]
+            self._copy(scales[offset:end], scale_rows.view(torch.uint8))
+            offset = end
+        self._session.flush()
+        return pack_weight(values, scales, recipe="mxfp8")
+
+    def load_gdn_projections(self, prefix: str) -> dict[str, Weight]:
+        return {
+            "in_proj_qkvz": self.load_mxfp8_group(tuple(f"{prefix}.{name}" for name in ("in_proj_qkv", "in_proj_z"))),
+            "in_proj_ba": self.load_mxfp8_group(tuple(f"{prefix}.{name}" for name in ("in_proj_b", "in_proj_a"))),
+            "out_proj": self.load_linear(f"{prefix}.out_proj"),
+        }
+
+    def load_qsa_projections(self, prefix: str) -> dict[str, Weight]:
+        return {
+            "qkv_proj": self.load_mxfp8_group(tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj"))),
+            "o_proj": self.load_linear(f"{prefix}.o_proj"),
+            "indexer.index_qk_proj": self.load_linear(f"{prefix}.indexer.index_qk_proj"),
+        }
+
     def _cpu_csf(self, name):
         from safetensors import safe_open
 

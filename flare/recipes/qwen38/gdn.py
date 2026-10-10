@@ -113,17 +113,20 @@ class GDNScratch:
     recurrence: torch.Tensor
     gated: torch.Tensor
     output: torch.Tensor
+    projected_qkvz: torch.Tensor
+    projected_ba: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens: int, device: torch.device) -> GDNScratch:
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("GDN token capacity must be positive")
-        return cls(
-            *(
-                torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
-                for width in (10240, 10240, 6144, 48, 48, 6144, 6144, 2560)
-            )
-        )
+        qkvz = torch.zeros((tokens, 16384), device=device, dtype=torch.bfloat16)
+        ba = torch.zeros((tokens, 96), device=device, dtype=torch.bfloat16)
+        convolved, recurrence, gated, output = (
+            torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
+            for width in (10240, 6144, 6144, 2560))
+        return cls(qkvz[:, :10240], convolved, qkvz[:, 10240:], ba[:, 48:], ba[:, :48],
+                   recurrence, gated, output, qkvz, ba)
 
     def rows(self, tokens: int) -> GDNScratch:
         if type(tokens) is not int or not 0 < tokens <= self.projected_qkv.shape[0]:
@@ -157,7 +160,7 @@ class PreparedGDN:
     """One fixed-capacity decode or prefill pipeline over a canonical GDN module.
 
     The module supplies geometry and exact unquantized parameters. The projection
-    mapping supplies the checkpoint's five packed MXFP8 weights. Preparation
+    mapping supplies packed MXFP8 QKV/Z, B/A, and output weights. Preparation
     requires zero live counts and must finish before graph capture. All plans,
     buffers, weights, and canonical norm parameters remain strongly owned.
 
@@ -207,14 +210,15 @@ class PreparedGDN:
             raise ValueError("GDN source must be BF16 [token_capacity, 2560]")
         if self.device.type != "cuda":
             raise ValueError("prepared GDN requires CUDA")
-        widths = (10240, 10240, 6144, 48, 48, 6144, 6144, 2560)
-        for field, width in zip(fields(scratch), widths):
+        widths = (10240, 10240, 6144, 48, 48, 6144, 6144, 2560, 16384, 96)
+        strides = (16384, 10240, 16384, 96, 96, 6144, 6144, 2560, 16384, 96)
+        for field, width, stride in zip(fields(scratch), widths, strides, strict=True):
             tensor = getattr(scratch, field.name)
             if (
                 tensor.device != self.device
                 or tensor.dtype != torch.bfloat16
                 or tuple(tensor.shape) != (self.tokens, width)
-                or not tensor.is_contiguous()
+                or tensor.stride() != (stride, 1)
             ):
                 raise ValueError(
                     f"GDN scratch {field.name} has incompatible shape, dtype, or layout"
@@ -263,9 +267,9 @@ class PreparedGDN:
             raise ValueError(
                 "GDN preparation requires zero live token and sequence counts"
             )
-        expected = {"in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"}
+        expected = {"in_proj_qkvz", "in_proj_ba", "out_proj"}
         if set(projections) != expected:
-            raise ValueError("GDN requires its five named packed projection weights")
+            raise ValueError("GDN requires packed QKV/Z, B/A, and output projection weights")
         self.projections = {
             projection: QuantizedProjection(
                 source,
@@ -276,10 +280,8 @@ class PreparedGDN:
                 workspace=projection_workspace,
             )
             for projection, output in (
-                ("in_proj_qkv", scratch.projected_qkv),
-                ("in_proj_z", scratch.z),
-                ("in_proj_a", scratch.a),
-                ("in_proj_b", scratch.b),
+                ("in_proj_qkvz", scratch.projected_qkvz),
+                ("in_proj_ba", scratch.projected_ba),
             )
         }
         self.projections["out_proj"] = QuantizedProjection(
@@ -458,10 +460,8 @@ class PreparedGDN:
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         scratch = self.scratch
-        self.projections["in_proj_qkv"](source)
-        self.projections["in_proj_z"](source)
-        self.projections["in_proj_a"](source)
-        self.projections["in_proj_b"](source)
+        self.projections["in_proj_qkvz"](source)
+        self.projections["in_proj_ba"](source)
         short_conv.run(self.conv_binding)
         if self.mode == "decode":
             gdn_decode.run(
@@ -472,7 +472,7 @@ class PreparedGDN:
             scratch.recurrence.zero_()
             gdn_prefill.run(self.recurrent_binding)
             normalized = self.module.norm(
-                scratch.recurrence.view(-1, 128), scratch.z.view(-1, 128)
+                scratch.recurrence.view(self.tokens, 48, 128), scratch.z.view(self.tokens, 48, 128)
             )
             scratch.gated.copy_(normalized.view(self.tokens, 6144))
             torch.ge(self.row_ids, self.metadata.num_tokens, out=self.inactive_rows)

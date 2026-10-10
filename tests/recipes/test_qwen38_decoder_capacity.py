@@ -108,6 +108,7 @@ def test_one_arena_follows_actual_public_plan_extents(metadata_device, tokens):
     plans = [recurrence]
     for input_width, output_width in ((2560, 48), (2560, 512), (2560, 640),
             (2560, 1280), (2560, 6144), (2560, 10240), (2560, 12288),
+            (2560, 96), (2560, 13312), (2560, 16384),
             (6144, 2560), (640, 2560)):
         query = blockscaled.BlockscaledQuery(recipe="mxfp8", num_tokens=tokens,
             in_features=input_width, padded_in_features=input_width, out_features=output_width,

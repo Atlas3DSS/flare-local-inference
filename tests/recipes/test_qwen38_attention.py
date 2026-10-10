@@ -130,7 +130,7 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest):
     with QwenWeightLoader(manifest, device, prefixes=(PREFIX + ".",)) as loader:
         for name in NORMS:
             module.get_submodule(name).weight = torch.nn.Parameter(loader.load_tensor(f"{PREFIX}.{name}.weight"), requires_grad=False)
-        weights = {name: loader.load_linear(f"{PREFIX}.{name}") for name in PROJECTIONS}
+        weights = loader.load_qsa_projections(PREFIX)
     reference = _load_reference(manifest)
     reference_rotary = Qwen4ExpTextRotaryEmbedding(module.config)
     rotary = RotaryTables.allocate(module.config, 128, device)

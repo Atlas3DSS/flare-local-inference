@@ -132,7 +132,8 @@ def _run(operations, rows, *, capture):
             run = invoke
         torch.cuda.synchronize()
         before = torch.cuda.memory_stats()['allocation.all.allocated']
-        run(); torch.cuda.synchronize()
+        run()
+        torch.cuda.synchronize()
         after = torch.cuda.memory_stats()['allocation.all.allocated']
         second = {name: value[:rows].cpu().clone() for name, value in buffers.items()}
         repeat = {name: _measure(second[name], first[name]) for name in first}
@@ -204,9 +205,9 @@ def run_flare(args, owners, cases):
                 'hc_up': lambda: mixer.up(x['attn_bottleneck']),
                 'hc_gate': lambda: hc.run_gate_mean(x['attn_normalized'], x['attn_gate_logits'],
                                                    binding=mixer.bindings['gate_mean']),
-                'q_projection': lambda: attention.projections['q_proj'](x['attn_mix']),
-                'k_projection': lambda: attention.projections['k_proj'](x['attn_mix']),
-                'v_projection': lambda: attention.projections['v_proj'](x['attn_mix']),
+                'q_projection': lambda: attention.projections['qkv_proj'](x['attn_mix'])[:, :12288],
+                'k_projection': lambda: attention.projections['qkv_proj'](x['attn_mix'])[:, 12288:12800],
+                'v_projection': lambda: attention.projections['qkv_proj'](x['attn_mix'])[:, 12800:],
                 'q_norm': lambda: attention.module.q_norm(x['query_raw']),
                 'k_norm': lambda: attention.module.k_norm(x['key_raw']),
                 'q_norm_rope': lambda: rope(attention.module.q_norm(x['query_raw']), attention.module.k_norm(x['key_raw']))[0],
@@ -224,7 +225,10 @@ def run_flare(args, owners, cases):
     return _save(args, 'flare', results, records, plans, {
         'hc_down': tensor_record(mixer.down.weight[:320]), 'hc_up': tensor_record(mixer.up.weight),
         'hc_gain': tensor_record(mixer.norm_gain),
-        **{name: tensor_record(projection.weight) for name, projection in attention.projections.items()}})
+        **{name: tensor_record(projection.weight) for name, projection in attention.projections.items()
+           if name != 'qkv_proj'},
+        **{name: tensor_record(value) for name, value in zip(('q_proj', 'k_proj', 'v_proj'),
+           attention.projections['qkv_proj'].weight.split((12288, 512, 512)), strict=True)}})
 
 
 def run_vllm(args, model, cases):
