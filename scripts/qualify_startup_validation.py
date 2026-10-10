@@ -226,7 +226,7 @@ def run(args):
     args.artifacts.mkdir(parents=True, exist_ok=False)
     extension = next(Path(flare_helios.__file__).parent.glob("*.so"))
     sources = [Path(__file__).resolve(), ROOT / "flare/preparation/qwen38.py",
-        *sorted((ROOT / "native/src").rglob("*.rs")), ROOT / "native/Cargo.toml", ROOT / "native/Cargo.lock"]
+        *sorted((ROOT / "helios/src").rglob("*.rs")), ROOT / "helios/Cargo.toml", ROOT / "helios/Cargo.lock"]
     receipt = {"schema": "flare-helios-startup-validation-v1", "scope":
         "Installed constructor rejects invalid synthetic manifest/config metadata before CUDA or networking; no prepared model or GPU graph is created.",
         "extension": {"path": str(extension), "sha256": digest(extension)},

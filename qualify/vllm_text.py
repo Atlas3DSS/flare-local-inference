@@ -25,8 +25,8 @@ REVISION = 'dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2'
 VOCABULARY = 248320
 
 
-def checkpoint_identity(plan):
-    reference = json.loads((ROOT / 'docs/validation/exact-serving-reference.json').read_text())['checkpoint']
+def checkpoint_identity(plan, reference_path):
+    reference = json.loads(reference_path.read_text())['checkpoint']
     if plan['checkpoint'] != reference['served_path'] or reference['declared_revision'] != REVISION:
         raise ValueError('oracle checkpoint differs from the recorded model artifact')
     root = Path(plan['checkpoint'])
@@ -255,7 +255,7 @@ def parent(args):
     import torch
 
     plan = json.loads(args.plan.read_text())
-    receipt = json.loads((ROOT / 'docs/validation/decoder-autotuned.json').read_text())
+    receipt = json.loads(args.decoder_reference.read_text())
     expected = {'flare': receipt['artifacts']['tensors/native-sequential-k1.pt']['sha256'],
                 'canonical': receipt['artifacts']['tensors/canonical-reference.pt']['sha256']}
     paths = {'flare': args.flare_trace, 'canonical': args.canonical_trace}
@@ -287,7 +287,7 @@ def parent(args):
             raise ValueError(f'reference launch dependency changed: {path}')
     for path, pin in plan['sources'].items():
         checkout_record(path, pin)
-    checkpoint = checkpoint_identity(plan)
+    checkpoint = checkpoint_identity(plan, args.checkpoint_reference)
     args.output.mkdir(parents=True, exist_ok=False)
     for name, path in paths.items():
         shutil.copyfile(path, args.output / f'{name}.pt')
@@ -353,7 +353,7 @@ def parent(args):
         for signum, handler in previous.items():
             signal.signal(signum, handler)
         changed = {path: digest(path) for path, value in frozen.items() if digest(path) != value}
-        checkpoint_after = checkpoint_identity(plan)
+        checkpoint_after = checkpoint_identity(plan, args.checkpoint_reference)
         write_json(args.output / 'checkpoint-after.json', checkpoint_after)
         gpu = subprocess.run(['nvidia-smi', '-i', GPU, '--query-gpu=memory.used', '--format=csv,noheader'], capture_output=True, text=True)
         write_json(args.output / 'exit.json', {'started_utc': started, 'finished_utc': utc(),
@@ -375,6 +375,8 @@ def main():
     parser.add_argument('--flare-trace', type=Path, default=Path('/tmp/sparkgap-decoder-sequential-k1.pt'))
     parser.add_argument('--canonical-trace', type=Path, default=Path('/tmp/sparkgap-canonical-text-short.pt'))
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--checkpoint-reference', type=Path)
+    parser.add_argument('--decoder-reference', type=Path)
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--repetitions', type=int, choices=(1, 2), default=1,
@@ -384,6 +386,8 @@ def main():
     parser.add_argument('--baseline-vllm-trace', type=Path,
                         help='Completed full-vocabulary vLLM artifact required by --layer-trace')
     args = parser.parse_args()
+    if not args.worker and (args.checkpoint_reference is None or args.decoder_reference is None):
+        parser.error('--checkpoint-reference and --decoder-reference are required')
     args.plan, args.output = args.plan.resolve(), args.output.resolve()
     try:
         (worker if args.worker else parent)(args)

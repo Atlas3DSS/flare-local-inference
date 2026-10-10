@@ -82,7 +82,7 @@ def quantiles(values):
 def load_inputs(args):
     if sha(args.artifact) != ARTIFACT_SHA:
         raise ValueError("saved QSA input artifact SHA256 does not match the fixed provenance")
-    reference_receipt = json.loads((ROOT / "docs/validation/qsa-capacity-isolation.json").read_text())
+    reference_receipt = json.loads(args.reference_receipt.read_text())
     if reference_receipt["input_sha256"] != ARTIFACT_SHA:
         raise ValueError("durable QSA baseline receipt identifies another input artifact")
     if sha(args.reference) != REFERENCE_SHA or reference_receipt["tensor_sha256"] != REFERENCE_SHA:
@@ -352,8 +352,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=Path, default=Path("/tmp/sparkgap-prefix-qsa-recording.pt"))
     parser.add_argument("--reference", type=Path, default=Path("/tmp/sparkgap-qsa-capacity-isolation.pt"))
+    parser.add_argument("--reference-receipt", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, default=Path("/tmp/sparkgap-qsa-fixed-partitions"))
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/validation/qsa-fixed-partitions.json")
+    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repetitions", type=int, default=20)
     parser.add_argument("--validate-only", action="store_true")
@@ -378,7 +379,7 @@ def main():
         "script": {"path": str(Path(__file__).resolve()), "sha256": sha(__file__)},
         "command": sys.argv, "input_artifact": {"path": str(args.artifact), "sha256": ARTIFACT_SHA},
         "reference_artifact": {"path": str(args.reference), "sha256": REFERENCE_SHA},
-        "reference_receipt": {"path": "docs/validation/qsa-capacity-isolation.json", "sha256": sha(ROOT / "docs/validation/qsa-capacity-isolation.json")},
+        "reference_receipt": {"path": str(args.reference_receipt), "sha256": sha(args.reference_receipt)},
         "gpu_uuid": GPU, "warmups": args.warmups, "repetitions": args.repetitions,
         "inputs": inventory, "scope": "Attention-only recorded layer3 QSA: selected positions, query, and main KV pages held immutable. No selector, projections, model state, cache writer, HTTP, or Python replay timing.",
         "timing_scope": "CUDA events captured around all attention launches needed for each complete saved workload; consecutive groups share one split workspace. Native driver replay; readbacks and preparation excluded.",

@@ -344,7 +344,7 @@ def measure(args, artifact, cases, receipt):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--receipt", type=Path, default=ROOT / "docs/validation/decoder-execution.json")
+    parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--logits-artifact", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, required=True)

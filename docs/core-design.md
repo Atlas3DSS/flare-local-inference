@@ -66,7 +66,7 @@ policy in section 3, and MTP follows base serving.
   grammar masks, and the per-request RNG contract.
 - **Native runtime value.** At decode batch 1 the model's weight traffic sets a
   floor near 4 ms per token; section 5 gives the breakdown. The
-  [native executor](../native/src/execution/transport.rs) stages metadata in
+  [native executor](../helios/src/execution/transport.rs) stages metadata in
   pinned buffers and keeps up to two submissions in flight. Rust also renders
   chat templates and tokenizes inputs without Python's global interpreter lock.
   Profile graph replay, completion frames, device request state, and metadata
@@ -217,11 +217,11 @@ Every adapter participates in the same native lifecycle. Model differences are
 expressed as capabilities, buffer layouts, and semantic checks; adapters do not
 implement separate admission, scheduling, cache-ownership, replay, or shutdown
 loops.
-The shared [graph catalog](../native/src/model/catalog.rs) validates model limits,
+The shared [graph catalog](../helios/src/model/catalog.rs) validates model limits,
 buffer layouts, declared capacities, required operations, and every supplied
 graph's input bindings. Native startup and graph selection use this common
 implementation; adapters supply declarations and model-specific constraints.
-Shared [request admission](../native/src/model/admission.rs) owns request epochs,
+Shared [request admission](../helios/src/model/admission.rs) owns request epochs,
 sampling parameters, prompt tokens, output budgets, and grammar masks. The core
 validates prompt limits and constructs admissions for every model. Model adapters
 supply additional prompt metadata and validate its layout; Qwen includes rotary
@@ -364,7 +364,7 @@ The sampled continuations contain 18/18 tokens on TP2 and 18/26 tokens on TP4.
 Peers remain inside Rust throughout execution and coordinated drain; allocation
 and segment counters stay stable during replay. The rank-zero test harness
 submits uploads and inspects results in Python.
-The [GLM native contract](../native/src/model/glm5next.rs) selects init, restore,
+The [GLM native contract](../helios/src/model/glm5next.rs) selects init, restore,
 snapshot, resume, prefill, and decode graph capacities and packs request uploads.
 It uses 256-token page tables and broadcasts each pending decode token to every
 rank. Reset commands use source slot -1; exact restoration names the saved
@@ -488,7 +488,7 @@ continue exchanging readiness until all peers finish local preparation. Kernel
 preparation failures propagate through the control group before job cleanup.
 Per-rank native
 workers can replay the captured reductions without Python between iterations.
-The [native rank coordinator](../native/src/execution/parallel.rs) owns rank-zero
+The [native rank coordinator](../helios/src/execution/parallel.rs) owns rank-zero
 execution and Unix control sockets to peer processes. Each peer enters Rust once
 after Python prepares its graph bundle. Startup compares rank identities and
 logical graph I/O schemas; CUDA handles and addresses stay process-local.
@@ -503,11 +503,11 @@ Disconnected ranks or graph-completion timeouts retain resources without
 synchronizing a potentially stranded collective. Process supervision must
 terminate the whole failed rank group before reclaiming those resources.
 The native model scheduler owns either the local executor or this coordinator
-through [RankExecutor](../native/src/execution/ranks.rs), with no intervening
+through [RankExecutor](../helios/src/execution/ranks.rs), with no intervening
 execution-worker queue. Native server startup accepts prepared peer sockets.
 The Python server binding selects Qwen or GLM from the prepared input schema
 once at startup. Both model runtimes use the same native rank coordinator and
-HTTP server. The [Rust rank supervisor](../native/src/processes.rs) watches
+HTTP server. The [Rust rank supervisor](../helios/src/processes.rs) watches
 owned children through Linux pidfds. Unexpected peer exit or an expired drain
 deadline terminates the rank group without running CUDA destructors. Peer
 processes receive a parent-death signal if their root exits. Coordinated shutdown
@@ -725,8 +725,7 @@ prevents capture and freeze.
 Hyperconnection default priming borrows the decoder's zero-initialized residual
 storage through capacity views. Priming only reads that source; normalized and
 projected outputs occupy separate scratch. Autotuning retains private seeded
-fixtures. [Shared-priming qualification](validation/hyperconnection-priming.md)
-accounts for 15.08 GiB of removed duplicate allocations at the 4,096-token limit.
+fixtures.
 
 One `flare.preparation.scratch.ScratchArena` supplies byte storage to quantized
 projections, GDN, QSA, routed MoE, PLE, and vision attention across serialized
@@ -863,13 +862,13 @@ native GPU worker. Python completes bootstrap and invokes native server startup;
 Rust binds the listening sockets and owns the server lifetime and request paths.
 
 `Server<M>` and `ModelRuntime<M>` statically select the
-[`ModelContract`](../native/src/model.rs). Shared core code validates graph
+[`ModelContract`](../helios/src/model.rs). Shared core code validates graph
 geometry, constructs admissions, schedules work, and retires completions. The
 contract supplies prepared-buffer declarations, model-specific constraints,
 input encoding, and completion checks. Its associated output protocol composes
 separate reasoning and tool parsers. The Python entrypoint selects
-[`Qwen4Exp`](../native/src/model/qwen4exp.rs) or
-[`Glm5Next`](../native/src/model/glm5next.rs) from the prepared input schema;
+[`Qwen4Exp`](../helios/src/model/qwen4exp.rs) or
+[`Glm5Next`](../helios/src/model/glm5next.rs) from the prepared input schema;
 there is no runtime backend registry or dynamic model dispatch per token.
 Unknown schema versions, fields, or capabilities fail before asset loading and
 CUDA worker construction.
@@ -956,7 +955,7 @@ completion is processed. Submission reserves scheduler ownership before model
 input packing and graph enqueue. The executor remains outside the worker's
 unwind boundary, and reusable inputs remain owned until stream drain completes.
 
-Native [`Error`](../native/src/error.rs) distinguishes admission, execution,
+Native [`Error`](../helios/src/error.rs) distinguishes admission, execution,
 and frontend failures. Cloneable failures retain their underlying source chain;
 CUDA failures retain the operation, numeric code, name, and description. Dispatch
 and error assertions use variants rather than message substrings. Request
@@ -1145,7 +1144,7 @@ Bounded per-request output storage prevents an unresponsive consumer from
 blocking unrelated requests. Native health reporting reflects worker readiness
 and failure state without querying Python.
 
-EOS and output-length enforcement belong to native/device request state.
+EOS and output-length enforcement belong to helios/device request state.
 Token-sequence stopping also belongs to the core; presentation-level text
 trimming must not mutate cached model history.
 
@@ -1158,7 +1157,7 @@ instruction boundary, final prompt boundary, and terminal consumed boundary.
 Equal endpoints share one checkpoint. Parent-linked complete-page chains,
 ancestor pinning, and eviction preserve ownership across active branches.
 
-The [Rust prefix cache](../native/src/cache.rs) manages ownership, readiness,
+The [Rust prefix cache](../helios/src/cache.rs) manages ownership, readiness,
 pinning, and eviction. Python allocates backing storage during preparation;
 [captured maintenance operations](../flare/recipes/qwen38/maintenance.py)
 reset, restore, and snapshot its contents.
@@ -1395,8 +1394,8 @@ to recover either resource.
    adaptive proposal budgets, draft-history caching, verification, and commit.
 
 The model-independent bundle contract is exercised by small captured graphs
-and the complete Qwen catalog. The [Rust scheduler](../native/src/scheduler.rs)
-owns request policy; the [native executor](../native/src/execution/transport.rs)
+and the complete Qwen catalog. The [Rust scheduler](../helios/src/scheduler.rs)
+owns request policy; the [native executor](../helios/src/execution/transport.rs)
 owns metadata submission and replay. [Python graph preparation](../flare/preparation/graphs.py)
 retains captured resources until native shutdown drains all work.
 
@@ -1449,12 +1448,6 @@ engines; compare token agreement with the vLLM-versus-vLLM floor. Its
 temperature-zero requests use the common probability sampler. Complete-model
 logit and encoder relative L2 remain diagnostics rather than acceptance gates.
 Canonical eager execution remains a separate diagnostic reference.
-
-### Qualification status
-
-The [validation index](validation/README.md) records measured results, input and
-source identities, retained failures and requirements that remain open. A
-component or graph-parity result does not establish full serving qualification.
 
 ### Graph and lifetime acceptance
 

@@ -21,7 +21,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() != 4 {
         return Err(
-            "usage: qualify_requests ABSOLUTE_SNAPSHOT TEXT_FIXTURES IMAGE_FIXTURES".into(),
+            "usage: test_requests ABSOLUTE_SNAPSHOT TEXT_FIXTURES IMAGE_FIXTURES".into(),
         );
     }
     let snapshot = PathBuf::from(&args[1]);

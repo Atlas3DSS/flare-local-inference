@@ -1,5 +1,5 @@
 // Coefficient generation follows PyTorch's uint8 antialiased bicubic kernel.
-// See native/licenses/PyTorch.txt and native/README.md for source attribution.
+// See helios/licenses/PyTorch.txt and helios/README.md for source attribution.
 
 use super::RgbImage;
 

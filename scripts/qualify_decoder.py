@@ -50,7 +50,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--extension", type=Path)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/validation/decoder-execution.json")
+    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--tensor-output", type=Path, default=Path("/tmp/sparkgap-decoder-execution.pt"))
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--steps", type=int, default=4)

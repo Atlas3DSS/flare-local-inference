@@ -14,8 +14,8 @@ condition under which the item is closed.
 
 | Item | Closed by |
 |---|---|
-| 1.1 Serving-path oracle | [text-serving-oracle.md](validation/text-serving-oracle.md), [text-layer-comparison.md](validation/text-layer-comparison.md); the result amends the acceptance criteria in section 2 below |
-| 3.1 Performance measurement set | [serving-performance.md](validation/serving-performance.md); the result amends section 3 below |
+| 1.1 Serving-path oracle | text-serving-oracle.md, text-layer-comparison.md; the result amends the acceptance criteria in section 2 below |
+| 3.1 Performance measurement set | serving-performance.md; the result amends section 3 below |
 | 4.3 FlashInfer as editable install | `pyproject.toml` points at `../flashinfer` with `editable = true`; `patches/` and `.build-sources` removed; the clone and patches are archived under `/data/sparkgap-artifacts/flashinfer-source-migration`. One step remains, item 4.3 below |
 | 6.1 Superseded serving stack | `serve/engine`, `serve/model`, `serve/cache`, `serve/kernels`, `serve/api`, `serve/tp`, `serve/cli.py`, `serve/logging.py`, `tests/serve` removed |
 | 6.7 Package rename | The Python package is `flare` |
@@ -57,7 +57,7 @@ flight remains a measured option, not the default.
 ### 1.2 Build copy proposals before MTP drafting
 
 **Current state.** The dependency list loads MTP weights at step 2 and adds
-copy proposals at step 4. `native/src/scheduler/speculation.rs` already
+copy proposals at step 4. `helios/src/scheduler/speculation.rs` already
 contains `copy_proposal`.
 
 **Required change.** Swap the order. Implement the chain transaction, the
@@ -186,7 +186,7 @@ document is unsatisfiable by construction.
 - Greedy agreement over the 82-prompt corpus against vLLM, with vLLM-versus-vLLM
   agreement on the same corpus as the floor. The corpus manifest and tooling
   exist (`qualify/generation_corpus.py`, `qualify/generation_agreement.py`,
-  the `qualify_generation_corpus` native example); the run has not happened.
+  the `test_generation_corpus` test driver); the run has not happened.
 - Per-component equality on identical operands, which already passes at 0.02
   to 0.5 percent in the layer-0 stage trace, extended to every operator.
 - A recorded reference variance floor from repeated vLLM runs.
@@ -341,11 +341,11 @@ receipts.
 
 ### 5.1 JPEG and EXIF orientation
 
-Unchanged from the first set. No JPEG decoder is present in `native/Cargo.toml`.
+Unchanged from the first set. No JPEG decoder is present in `helios/Cargo.toml`.
 
 ### 5.2 Tool calls combined with structured output
 
-**Current state.** `native/src/server/request.rs` still rejects nonempty tools
+**Current state.** `helios/src/server/request.rs` still rejects nonempty tools
 with a structured-output grammar and rejects forced tool selection.
 
 **Required change.** Unchanged from the first set: a union grammar of the
@@ -362,7 +362,7 @@ general-path cost of 120 to 170 µs per step.
 
 ### 6.1 Make the Rust model layer an explicit per-model contract
 
-**Current state.** `native/src/model.rs` still declares `VOCABULARY` and
+**Current state.** `helios/src/model.rs` still declares `VOCABULARY` and
 Qwen4Exp buffer semantics. Speculation adds more model-specific packing to
 the same module, which makes the trait boundary more urgent, not less.
 
@@ -379,7 +379,7 @@ in `runtime.rs`.
 
 ### 6.3 Split the server loop
 
-**Current state.** `native/src/server/runtime.rs` is 1,202 lines and
+**Current state.** `helios/src/server/runtime.rs` is 1,202 lines and
 `run_loop` is 343 lines, both larger than at the first set.
 
 **Required change.** Unchanged from the first set's item 6.4. Do it before the
@@ -403,7 +403,7 @@ script to an entrypoint. Start with `qualify_server.py` and
 
 ### 6.6 Smaller items
 
-- Add `SAFETY` comments to the `unsafe` blocks outside `native/src/cuda.rs`.
+- Add `SAFETY` comments to the `unsafe` blocks outside `helios/src/cuda.rs`.
 - Return resolved bindings from `validate_uploads` in `execution/transport.rs`.
 - Replace the `FLARE_GRAMMAR_TRACE` environment switch with a debug
   configuration field.

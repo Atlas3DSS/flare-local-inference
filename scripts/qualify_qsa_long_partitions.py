@@ -26,8 +26,7 @@ WORKLOADS = (('prefill504', 'last_prefill512', 504), ('decode1', 'last_decode1',
 BASELINES = ('prefill504-capacity512-direct1', 'decode1-capacity1-split64')
 
 
-def load_inputs(path):
-    receipt_path = ROOT / 'docs/validation/qsa-long-context-operands.json'
+def load_inputs(path, receipt_path):
     provenance = json.loads(receipt_path.read_text())
     if sha(path) != ARTIFACT_SHA or provenance['tensor_artifact']['sha256'] != ARTIFACT_SHA:
         raise ValueError('long-context operand SHA does not match its durable capture receipt')
@@ -238,11 +237,12 @@ def execute(args, records, capture_receipt, receipt):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--artifact', type=Path, default=Path('/tmp/sparkgap-qsa-long-context/attention-operands.pt'))
+    parser.add_argument('--input-receipt', type=Path, required=True)
     parser.add_argument('--artifacts', type=Path, default=Path('/tmp/sparkgap-qsa-long-partitions'))
     parser.add_argument('--output', type=Path, default=Path('/tmp/sparkgap-qsa-long-partitions/receipt.json'))
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
-    records, inventory, capture_receipt = load_inputs(args.artifact)
+    records, inventory, capture_receipt = load_inputs(args.artifact, args.input_receipt)
     if args.validate_only:
         print(json.dumps({'inputs': {key: {'rows': value['active_rows'], 'full_2051_rows': value['full_2051_rows'],
             'pages': len(value['used_physical_pages'])} for key, value in inventory.items()}, 'cases': 56,
@@ -259,7 +259,7 @@ def main():
         'script': {'path': str(Path(__file__).resolve()), 'sha256': sha(__file__)},
         'shared_capture_helper': {'path': str(base), 'sha256': sha(base)}, 'command': sys.argv,
         'input_artifact': {'path': str(args.artifact), 'sha256': ARTIFACT_SHA},
-        'input_receipt': {'path': 'docs/validation/qsa-long-context-operands.json', 'sha256': sha(ROOT / 'docs/validation/qsa-long-context-operands.json')},
+        'input_receipt': {'path': str(args.input_receipt), 'sha256': sha(args.input_receipt)},
         'gpu_uuid': GPU, 'warmups': 3, 'repetitions': 20, 'inputs': inventory,
         'scope': 'Attention only on actual layer3 queries, selected positions and referenced main KV pages; no selector, projections, cache writes, model, or HTTP.',
         'timing_scope': 'Captured CUDA events bracket all attention groups for the complete saved workload. Native driver replay. Preparation, CPU readback and reference excluded.',

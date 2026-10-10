@@ -188,7 +188,7 @@ def main():
     args.artifacts.mkdir(parents=True, exist_ok=False)
     extension = next(Path(flare_helios.__file__).parent.glob("*.so"))
     sources = [Path(__file__).resolve(), Path(__file__).with_name("qualify_startup_validation.py"),
-        *sorted((ROOT / "native/src").rglob("*.rs")), ROOT / "native/Cargo.toml", ROOT / "native/Cargo.lock"]
+        *sorted((ROOT / "helios/src").rglob("*.rs")), ROOT / "helios/Cargo.toml", ROOT / "helios/Cargo.lock"]
     value = {"schema": "flare-helios-worker-failure-v1", "plan": plan(), "checks": [],
         "extension": {"path": str(extension), "sha256": digest(extension)}, "device_uuid": actual_uuid,
         "assigned_device_uuid": args.device_uuid,

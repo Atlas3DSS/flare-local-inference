@@ -43,8 +43,8 @@ independent atomics and may span concurrent worker updates. Per-request deltas
 require terminal responses followed by model quiescence, with no other traffic.
 
 ```sh
-cargo test --manifest-path native/Cargo.toml --offline
-cargo build --manifest-path native/Cargo.toml --features extension-module
+cargo test --manifest-path helios/Cargo.toml --offline
+cargo build --manifest-path helios/Cargo.toml --features extension-module
 ```
 
 The `images` and `server` features require native **libturbojpeg >= 3.0** and
@@ -121,9 +121,9 @@ created or destroyed by this crate.
 Qualify real PyTorch-to-Rust graph replay on an explicitly assigned idle GPU:
 
 ```sh
-PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml --features extension-module,qualification
-CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python native/tests/test_cuda_graph_replay.py \
-  --extension native/target/debug/libflare_helios.so
+PYO3_PYTHON=/path/to/python cargo build --manifest-path helios/Cargo.toml --features extension-module,qualification
+CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python helios/tests/test_cuda_graph_replay.py \
+  --extension helios/target/debug/libflare_helios.so
 ```
 
 The integration cases capture real PyTorch graphs, change device inputs between
@@ -177,10 +177,10 @@ reenter `close`. Production request processing belongs in Rust; Python control
 methods provide a qualification surface.
 
 ```bash
-PYO3_PYTHON=/path/to/python cargo build --manifest-path native/Cargo.toml \
+PYO3_PYTHON=/path/to/python cargo build --manifest-path helios/Cargo.toml \
   --features extension-module --offline
 timeout 60s env CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python \
-  native/tests/test_execution.py --extension native/target/debug/libflare_helios.so
+  helios/tests/test_execution.py --extension helios/target/debug/libflare_helios.so
 ```
 
 The four CUDA integration cases cover physical-slot scatter, different graph
@@ -272,7 +272,7 @@ at completion. It does not parse reasoning or tool-call events.
 Run exact-checkpoint CPU parity qualification:
 
 ```sh
-cargo run --manifest-path native/Cargo.toml --features frontend --example qualify_frontend -- \
+cargo run --manifest-path helios/Cargo.toml --features frontend,test-tools --bin test_frontend -- \
   /absolute/path/to/model/snapshot tests/frontend/qwen38.json
 ```
 
@@ -383,9 +383,9 @@ boundary, half-even rounding, independent-axis resize, PNG color modes, and
 mixed/repeated image batches.
 
 ```bash
-cargo test --manifest-path native/Cargo.toml --features images --offline
-cargo run --manifest-path native/Cargo.toml --features images --offline \
-  --example qualify_images -- "$SNAPSHOT" tests/frontend/qwen38_images.json
+cargo test --manifest-path helios/Cargo.toml --features images --offline
+cargo run --manifest-path helios/Cargo.toml --features images,test-tools --offline \
+  --bin test_images -- "$SNAPSHOT" tests/frontend/qwen38_images.json
 .venv/bin/python tests/frontend/generate_image_fixtures.py \
   "$SNAPSHOT" tests/frontend/qwen38_images.json \
   --binary-dir /tmp/flare-image-reference

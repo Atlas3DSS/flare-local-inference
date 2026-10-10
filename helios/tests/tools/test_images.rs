@@ -49,7 +49,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if !(3..=4).contains(&arguments.len()) {
         return Err(
-            "usage: qualify_images ABSOLUTE_SNAPSHOT FIXTURE_JSON [MISMATCH_BINARY_DIRECTORY]"
+            "usage: test_images ABSOLUTE_SNAPSHOT FIXTURE_JSON [MISMATCH_BINARY_DIRECTORY]"
                 .into(),
         );
     }

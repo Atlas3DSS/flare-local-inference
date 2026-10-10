@@ -49,7 +49,7 @@ def main():
     if not mappings or any(int(line.split()[4]) != extension.stat().st_ino for line in mappings):
         raise ValueError("server native extension mapping differs from the installed file")
     sources = {str(path.relative_to(ROOT)): digest(path)
-        for directory in (ROOT / "native/src", ROOT / "flare/preparation", ROOT / "flare/recipes")
+        for directory in (ROOT / "helios/src", ROOT / "flare/preparation", ROOT / "flare/recipes")
         for path in sorted(directory.rglob("*")) if path.suffix in (".rs", ".py")}
     sources.update({name: digest(ROOT / name) for name in (
         "flare/__main__.py", "scripts/qualify_prefill_capacity.py", "qualify/server.py")})

@@ -38,7 +38,7 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 flashinfer-python = { path = "../flashinfer", editable = true }
-flare-helios = { path = "native" }
+flare-helios = { path = "helios" }
 
 [tool.flare.source-revisions]
 flashinfer = "d019c06357ba22009f8112c2f8606b1edd174fcc"

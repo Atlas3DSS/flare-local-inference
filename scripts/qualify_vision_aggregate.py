@@ -222,7 +222,7 @@ def main():
         "fixture": {"path": str((args.artifacts / "canonical-fixture.json").resolve()),
             "sha256": digest(args.artifacts / "canonical-fixture.json"), "content": fixture},
         "script_sha256": digest(Path(__file__)), "http_helper_sha256": digest(ROOT / "qualify/server.py"),
-        "native_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "native/src").rglob("*.rs"))},
+        "native_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "helios/src").rglob("*.rs"))},
         "recipe_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "flare").rglob("*.py"))},
         "absolute_http_deadline_seconds": args.timeout, "command": sys.argv}
     run = BoundedRun(args, provenance)

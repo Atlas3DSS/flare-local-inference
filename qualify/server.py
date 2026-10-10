@@ -505,8 +505,8 @@ def main() -> int:
     provenance = {"model_id": model_id, "revision": revision, "snapshot": str(snapshot), "assets_sha256": assets,
         "transformers_version": transformers.__version__, "transformers_origin": origin, "tokenizers_version": tokenizers.__version__,
         "python": sys.version, "script_sha256": digest(Path(__file__)), "extension": str(extension), "extension_sha256": digest(extension),
-        "native_source_sha256": {str(path.relative_to(ROOT)): digest(path) for path in sorted((ROOT / "native/src").rglob("*.rs"))},
-        "cargo_sha256": {name: digest(ROOT / "native" / name) for name in ("Cargo.toml", "Cargo.lock")},
+        "native_source_sha256": {str(path.relative_to(ROOT)): digest(path) for path in sorted((ROOT / "helios/src").rglob("*.rs"))},
+        "cargo_sha256": {name: digest(ROOT / "helios" / name) for name in ("Cargo.toml", "Cargo.lock")},
         "gdn_intermediate_dtype": args.gdn_intermediate_dtype, "command": sys.argv}
     if args.memory_report:
         provenance["memory_report"] = {"path": str(args.memory_report.resolve()), "sha256": digest(args.memory_report), "content": json.loads(args.memory_report.read_text())}

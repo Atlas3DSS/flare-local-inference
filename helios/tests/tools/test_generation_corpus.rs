@@ -22,7 +22,7 @@ fn main() -> Result<(), String> {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if arguments.len() != 3 {
-        return Err("usage: qualify_generation_corpus ABSOLUTE_SNAPSHOT CORPUS_JSON".into());
+        return Err("usage: test_generation_corpus ABSOLUTE_SNAPSHOT CORPUS_JSON".into());
     }
     let snapshot = PathBuf::from(&arguments[1]);
     let bytes = fs::read(&arguments[2]).map_err(|error| error.to_string())?;

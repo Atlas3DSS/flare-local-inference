@@ -143,7 +143,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     source_paths = [Path(__file__)]
     source_paths += sorted((root / "flare").rglob("*.py"))
-    source_paths += sorted((root / "native" / "src").rglob("*.rs"))
+    source_paths += sorted((root / "helios" / "src").rglob("*.rs"))
     source_paths += sorted(Path(flare_helios.__file__).parent.glob("*.so"))
     source_paths += sorted((Path(flashinfer.__file__).parent / "experimental" / "b12x").rglob("*.py"))
     source_paths += [Path(flashinfer.__file__).parent / "sampling.py",

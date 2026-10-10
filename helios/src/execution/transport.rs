@@ -165,7 +165,7 @@ pub struct GraphExecutor {
 impl GraphExecutor {
     /// # Safety
     /// All manifest handles and allocations must belong to the given context,
-    /// remain stable, and obey native/manifest.md. The caller retains the owner
+    /// remain stable, and obey helios/manifest.md. The caller retains the owner
     /// until close confirms both streams drained. No other executor may mutate
     /// these inputs, graph executables, scratch or completion rows concurrently.
     pub unsafe fn new(manifest: ExecutionManifest) -> Result<Self> {

@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 python = ["dep:pyo3"]
 qualification = ["python"]
+test-tools = []
 extension-module = ["python", "pyo3/extension-module"]
 frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg"]
@@ -40,18 +41,30 @@ async-stream = { version = "0.3.6", optional = true }
 base64 = { version = "0.22.1", optional = true }
 llguidance = { version = "=1.9.1", default-features = false, features = ["lark", "referencing", "ahash", "jsonschema_validation"], optional = true }
 
-[[example]]
-name = "qualify_frontend"
-required-features = ["frontend"]
+[[bin]]
+name = "test_frontend"
+path = "tests/tools/test_frontend.rs"
+required-features = ["frontend", "test-tools"]
+test = false
+bench = false
 
-[[example]]
-name = "qualify_images"
-required-features = ["images"]
+[[bin]]
+name = "test_images"
+path = "tests/tools/test_images.rs"
+required-features = ["images", "test-tools"]
+test = false
+bench = false
 
-[[example]]
-name = "qualify_requests"
-required-features = ["server"]
+[[bin]]
+name = "test_requests"
+path = "tests/tools/test_requests.rs"
+required-features = ["server", "test-tools"]
+test = false
+bench = false
 
-[[example]]
-name = "qualify_generation_corpus"
-required-features = ["server"]
+[[bin]]
+name = "test_generation_corpus"
+path = "tests/tools/test_generation_corpus.rs"
+required-features = ["server", "test-tools"]
+test = false
+bench = false

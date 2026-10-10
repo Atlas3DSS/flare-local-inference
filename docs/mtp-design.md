@@ -51,11 +51,7 @@ and has no MTP module. The executable model reference is vLLM
 `64fc1eec593397cbd765cc082e9ec90fbeb5ea66` at
 `/home/luke/projects/vllm-lunar-leviathan`, principally
 `vllm/models/qwen4_exp/nvidia/mtp.py` and
-`vllm/v1/spec_decode/utils.py`. The
-[exact-checkpoint serving receipt](validation/exact-serving-reference.md)
-records a three-token MTP launch. That launch's TP2, FP8 KV, automatic MXFP8
-activation mode and runtime-quantized draft head are separate configuration
-choices, not numerical defaults for this design.
+`vllm/v1/spec_decode/utils.py`.
 
 For a consumed target token `x[i]`, let `h[i]` be the target's 10,240-wide
 residual **before its final mixer**. One teacher-forced MTP row receives

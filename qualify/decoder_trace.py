@@ -22,8 +22,8 @@ GPU = 'GPU-afd4b1ad-8a64-7057-4bde-241822724c7f'
 CHECKPOINT = Path('/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD')
 
 
-def checkpoint_identity():
-    expected = json.loads((ROOT / 'docs/validation/exact-serving-reference.json').read_text())['checkpoint']
+def checkpoint_identity(reference):
+    expected = json.loads(reference.read_text())['checkpoint']
     if str(CHECKPOINT) != expected['served_path']:
         raise ValueError('decoder trace checkpoint differs from the serving reference')
     assets = []
@@ -46,11 +46,11 @@ def checkpoint_identity():
 def source_paths():
     paths = {Path(__file__), ROOT / 'qualify/provenance.py',
              ROOT / 'qualify/vllm_observation.py', ROOT / 'scripts/qualify_decoder.py'}
-    for directory in ('flare/preparation', 'flare/recipes', 'native/src'):
+    for directory in ('flare/preparation', 'flare/recipes', 'helios/src'):
         paths.update(path for path in (ROOT / directory).rglob('*')
                      if path.suffix in ('.py', '.rs'))
     paths.update(ROOT / name for name in ('pyproject.toml', 'uv.lock',
-        'native/Cargo.toml', 'native/Cargo.lock'))
+        'helios/Cargo.toml', 'helios/Cargo.lock'))
     for name in ('b12x', 'flashinfer', 'flare_helios'):
         spec = importlib.util.find_spec(name)
         if spec is None or spec.origin is None:
@@ -85,8 +85,8 @@ def worker(output):
             'command': sys.argv})
 
 
-def parent(output):
-    checkpoint = checkpoint_identity()
+def parent(output, reference):
+    checkpoint = checkpoint_identity(reference)
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / 'checkpoint-before.json', checkpoint)
     sources = {}
@@ -136,7 +136,7 @@ def parent(output):
             signal.signal(signum, handler)
         changed = [path for path, entry in sources.items()
                    if not Path(path).is_file() or digest(path) != entry['sha256']]
-        checkpoint_after = checkpoint_identity()
+        checkpoint_after = checkpoint_identity(reference)
         write_json(output / 'checkpoint-after.json', checkpoint_after)
         gpu = subprocess.run(['nvidia-smi', '-i', GPU, '--query-gpu=memory.used',
                               '--format=csv,noheader'], capture_output=True, text=True)
@@ -155,9 +155,15 @@ def parent(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--checkpoint-reference', type=Path)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    (worker if args.worker else parent)(args.output.resolve())
+    if args.worker:
+        worker(args.output.resolve())
+    else:
+        if args.checkpoint_reference is None:
+            parser.error('--checkpoint-reference is required')
+        parent(args.output.resolve(), args.checkpoint_reference.resolve())
 
 
 if __name__ == '__main__':

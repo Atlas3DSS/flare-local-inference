@@ -40,14 +40,14 @@ The reference is vLLM `64fc1eec593397cbd765cc082e9ec90fbeb5ea66` with FlashInfer
 
 Copy speculation is implemented with ABI 3 completions, one round in flight,
 all 14 shapes satisfying batch × width ≤ 8, and cloned per-candidate grammar
-states. The [native HTTP transaction receipt](validation/speculative-copy-serving.md)
+states. The native HTTP transaction receipt
 exercises all shapes with forced literal output. The
-[24-context agentic run](validation/speculative-agentic-serving.md) records
+24-context agentic run records
 23 successful HTTP admissions, 18 automatic semantic passes, and 16 manual
 passes. Its eight failures remain in the evidence. Learned MTP serving and
 paired speculative speedup are unqualified.
 
-The [copy-state replay comparison](validation/copy-state-replay.md) passes all
+The copy-state replay comparison passes all
 30 commands through Python and Rust under `qwen4exp.graph-inputs.v2` and typed
 native errors: 2,852 checks pass with zero state mismatches and unchanged replay
 allocations, including an exact 72-token snapshot and private partial-page restore.
@@ -56,18 +56,18 @@ all 14 shapes and produce 44,640 bitwise-equal state comparisons for all-accepte
 literal copies. The ordinary-decoder arm, complete accepted-prefix coverage,
 and calibrated cross-capacity numerics remain open.
 
-The [native output-protocol HTTP checks](validation/output-protocol-http.md)
+The native output-protocol HTTP checks
 pass JSON/SSE literal-marker preservation and string stops. The unchanged
 `code-docstrings-stop` workload completes within its original budget with all
 eight function bodies preserved. The complete agentic workload rerun remains open.
 
-The [FlashInfer chain acceptance correction](validation/flashinfer-chain-endpoint.md)
+The FlashInfer chain acceptance correction
 passes its endpoint and sampler regressions. The
-[identical-input MTP operator measurements](validation/mtp-operators.md) isolate
+identical-input MTP operator measurements isolate
 projection arithmetic differences and show b12x closer to the rounded mathematical
 dot on those operands. Neither result closes complete-model numerical acceptance.
 
-The [serving performance receipt](validation/serving-performance.md) establishes
+The serving performance receipt establishes
 the historical ordinary-decoding host overhead and graph durations. It contains
 GPU graph timing, but no named per-kernel GPU breakdown. Those measurements do
 not establish the overhead of the speculative sequence or the unified stochastic
@@ -84,7 +84,7 @@ checkpoint admission and all 26 valid-image HTTP admissions; two constrained
 outputs reach their explicit budget in whitespace loops. Typed native errors
 preserve source chains, driver codes, and status mapping; all 22 installed fatal
 completion HTTP/SSE checks pass. Private worker phases preserve transaction
-ordering and pass CPU phase tests and [full-model checkpoint HTTP checks](validation/exact-checkpoint-http.md).
+ordering and pass CPU phase tests and full-model checkpoint HTTP checks.
 Tool-plus-schema grammar and the upstream AIR submission remain open. Preparation, recipes, the native
 runtime, and qualification tooling have separate source commits. The completed items in correction section 0 remain
 closed, subject to their original measurement scopes.
@@ -139,7 +139,7 @@ close a serving or performance requirement.
 
 | Item | Status and evidence | Work required to close |
 |---|---|---|
-| 1.1 One speculative round in flight | Implemented in [scheduler.rs](../native/src/scheduler.rs); speculative submission installs a barrier. | Measure native overhead against a replay of the same useful speculative graph sequence, including required uploads and actual committed outputs. Require ≤5%; retain graph gaps and timing distributions. |
+| 1.1 One speculative round in flight | Implemented in [scheduler.rs](../helios/src/scheduler.rs); speculative submission installs a barrier. | Measure native overhead against a replay of the same useful speculative graph sequence, including required uploads and actual committed outputs. Require ≤5%; retain graph gaps and timing distributions. |
 | 1.2 Copy before learned MTP | Copy-only preparation excludes MTP weights/cache. Same-graph Python/native replay and independent W1/Wn comparisons pass the recorded all-accepted literal cases across all 14 shapes. Agentic acceptance remains open. | Complete ordinary-decoder, rejected-prefix, and changed-catalog comparisons, then rerun the unchanged agentic corpus. Separate engine defects, unsupported API behavior, and model-output failures using ordinary/reference arms. Qualify learned MTP only after transaction qualification. |
 | 1.3 Widths follow kernel bands | All B1 widths 1–8, B2 widths 1–4, and B4 widths 1–2 exist. | Record repeated fixed-shape round-cost distributions for all 14 shapes. Measure the grouped-path transition with diagnostic B2×4/5 and B4×2/3 comparisons. Shapes beyond eight total rows stay outside the serving catalog until measured and qualified. |
 | 1.4 State-write cost | The design records 108 MiB recurrent state per verified row. Measured write cost remains open. | Report logical bytes written per graph and measured GDN/state-selection time. Separate compulsory checkpoint-column writes, commit/copy traffic, and total round duration. Do not present a bandwidth-derived lower bound as measured time. |
@@ -162,7 +162,7 @@ independent W1 or learned-draft-cache comparisons.
 | 2.1 Numerical acceptance | Specification amended; implementation incomplete. GDN 0.015 and vision 0.03 eager limits remain. The 82-prompt corpus/tools exist without a completed agreement receipt. | Remove whole-logit/encoder relative-L2 gates; retain diagnostic values. Replace the GDN 0.015 component assertion and associated pointwise bound with independently measured component tolerances. Run Flare and two independent pinned-vLLM continuations on all 82 prompts; publish first divergence, median agreement, full-64 agreement fraction, and the reference repeatability floor. Extend identical-input coverage to all target, vision, and MTP operator families. |
 | 2.2 Determinism | Runtime and correctness contracts require identical graph inputs, persistent state, and explicit RNG state to produce bitwise-identical logits and transitions. The validation index records pinned-vLLM variance. Updated speculative-catalog evidence remains open. | Qualify repeated identical inputs across the admitted catalog. Preserve reference-variance evidence and distinguish determinism from differences between capacities, plans, or sampling algorithms. |
 | 3.1 Measured position | Historical baseline closed at its recorded revisions and sampling configuration. | Preserve its raw results. Establish the matching baseline for changed stochastic code before using it in any new performance comparison. Do not inherit historical timing claims after kernel or sampling changes. |
-| 3.2 Per-kernel GPU timeline | Open. The [graph-node attribution probe](validation/graph-node-attribution.md) maps a two-operation graph through explicit CUPTI/Nsight node relationships. Ordinary Qwen B1/B4 kernel measurements remain pending. | Apply node tracing to the actual ordinary operator sequence. Report kernel names/counts, layer/operator attribution, summed kernel time, graph span, and gaps. Verify outputs and quantify instrumentation overhead against uninstrumented replay. |
+| 3.2 Per-kernel GPU timeline | Open. The graph-node attribution probe maps a two-operation graph through explicit CUPTI/Nsight node relationships. Ordinary Qwen B1/B4 kernel measurements remain pending. | Apply node tracing to the actual ordinary operator sequence. Report kernel names/counts, layer/operator attribution, summed kernel time, graph span, and gaps. Verify outputs and quantify instrumentation overhead against uninstrumented replay. |
 | 3.3 Free autotuning and policy A/B | Open. [gdn.py](../flare/recipes/qwen38/gdn.py) pins sequential_k1; [attention.py](../flare/recipes/qwen38/attention.py) pins 16 splits. Prefix qualification lacks the required tolerance gate. | Calibrate and freeze cross-capacity floating-state/component predicates with exact metadata; keep same-capacity checks bitwise. Complete logits remain diagnostic under item 2.1; generation uses the reference floor. Expose pinned choices as explicit debug configuration. A/B GDN splits, QSA partitions, MoE reduction/fast-math policy, and hyperconnection composition separately, each with correctness and before/after timelines. Then allow ordinary preparation to select qualified plans freely. |
 | 3.4 Kernel-count workstream | Bandwidth-bound wording is corrected; kernel attribution/fusion work remains open. | Use the timeline to rank adjacent small-operator fusion opportunities, especially hyperconnection normalization/projection. Implement reusable compute changes in main-tree b12x, preserving scratch planning, tuning, capture, and numerical contracts. Report kernel count and full-graph benefit, not only isolated-kernel speed. |
 
@@ -200,8 +200,8 @@ clean-checkout claim.
 
 | Item | Status and evidence | Work required to close |
 |---|---|---|
-| 5.1 JPEG and EXIF | Implemented with native libjpeg-turbo and all eight orientations. All 26 CPU fixtures match Pillow RGB exactly under the unchanged tolerance of 2, and all 26 pass [installed HTTP admission](validation/jpeg-exif-http.md); four invalid image requests are rejected. | Preserve decoder, preprocessing, resource-limit, and HTTP admission coverage. Investigate the two constrained-output whitespace loops separately: PNG orientations 2 and 5 exhaust the unchanged 64-token budget. Semantic vision accuracy remains open. |
-| 5.2 Tools plus structured output | Open. [request.rs](../native/src/server/request.rs) rejects tool-plus-grammar and forced selections. | Compose checkpoint tool-call envelopes, admitted per-tool argument schemas, and final-content schema in llguidance. `auto` admits the union, `required` only tool alternatives, a named choice only that tool, and `none` only content. Share this grammar with speculative cloned-prefix masks. Require correct JSON/SSE presentation and no committed tokens outside the selected language. |
+| 5.1 JPEG and EXIF | Implemented with native libjpeg-turbo and all eight orientations. All 26 CPU fixtures match Pillow RGB exactly under the unchanged tolerance of 2, and all 26 pass installed HTTP admission; four invalid image requests are rejected. | Preserve decoder, preprocessing, resource-limit, and HTTP admission coverage. Investigate the two constrained-output whitespace loops separately: PNG orientations 2 and 5 exhaust the unchanged 64-token budget. Semantic vision accuracy remains open. |
+| 5.2 Tools plus structured output | Open. [request.rs](../helios/src/server/request.rs) rejects tool-plus-grammar and forced selections. | Compose checkpoint tool-call envelopes, admitted per-tool argument schemas, and final-content schema in llguidance. `auto` admits the union, `required` only tool alternatives, a named choice only that tool, and `none` only content. Share this grammar with speculative cloned-prefix masks. Require correct JSON/SSE presentation and no committed tokens outside the selected language. |
 | 5.3 Bounded top-k | Closed as an explicit deferral in [core-design.md](core-design.md). | Keep historical 120–170 µs component cost labeled by its measurement scope. No custom bounded-top-k implementation is required for correction closure. |
 
 If a supported JPEG fixture exceeds the required RGB bound, retain that failure
@@ -225,8 +225,8 @@ options, forced/named selections, and subsequent tool-result turns.
 | Item | Status and evidence | Work required to close |
 |---|---|---|
 | 6.1 Per-model Rust contract | Implemented: `ModelContract` statically dispatches Qwen admission, packing, prompt/output interpretation, and completion checks. Required preparation metadata declares the schema, vocabulary, and vision capabilities. All 26 packed-upload fixtures match; invalid metadata is rejected before asset loading or CUDA. Rust/Python tests and six installed HTTP parsing/stop checks pass. All image fixtures are admitted, with the structured-output limitation described above. | Preserve generic transport ABI/fence validation and model-owned geometry during checkpoint changes. |
-| 6.2 Typed errors | Implemented in [error.rs](../native/src/error.rs): admission, execution, and frontend variants preserve source chains and numeric CUDA codes. CPU cause/status tests, installed startup rejection, all 22 [fatal-completion HTTP/SSE checks](validation/native-worker-failure.md), and full-model JSON/SSE capacity rejection pass. | Preserve variant-based status dispatch, first failure, terminal error events, and owner retention after failed drain. |
-| 6.3 Worker phases | Implemented in [runtime.rs](../native/src/server/runtime.rs) as private admit/plan/submit/complete/publish/retire methods. Exact instruction/prompt publication remains atomic in scheduler completion; stopped requests retire before another completion. Five CPU phase tests, installed fatal-completion checks, and [full-model HTTP checks](validation/exact-checkpoint-http.md) pass. | Preserve observation-before-presentation, stop-before-next-submit, reserve-before-pack ordering, and fence-protected release. Raw graph replay passes its unchanged executor path. |
+| 6.2 Typed errors | Implemented in [error.rs](../helios/src/error.rs): admission, execution, and frontend variants preserve source chains and numeric CUDA codes. CPU cause/status tests, installed startup rejection, all 22 fatal-completion HTTP/SSE checks, and full-model JSON/SSE capacity rejection pass. | Preserve variant-based status dispatch, first failure, terminal error events, and owner retention after failed drain. |
+| 6.3 Worker phases | Implemented in [runtime.rs](../helios/src/server/runtime.rs) as private admit/plan/submit/complete/publish/retire methods. Exact instruction/prompt publication remains atomic in scheduler completion; stopped requests retire before another completion. Five CPU phase tests, installed fatal-completion checks, and full-model HTTP checks pass. | Preserve observation-before-presentation, stop-before-next-submit, reserve-before-pack ordering, and fence-protected release. Raw graph replay passes its unchanged executor path. |
 | 6.4 Tuning fixtures | Implemented in [preparation/fixtures](../flare/preparation/fixtures/), with six operator families. CPU comparison preserves complete ordinary/copy/MTP constructor contracts, graph signatures, scratch requirements, and 250 benchmark tensors across 38 producer/reset observations. All 501 CPU tests pass; 103 CUDA tests are skipped. Actual fixture-owner release and failed-finalizer cleanup are covered. | Preserve checkpoint operands, plan keys, scratch envelopes, serialized tuning identity, and cleanup. GPU capture/numerical tests were not rerun for this source move. |
 | 6.5 Qualification package | Partial: HTTP and graph-execution implementations live in `qualify.server` and `qualify.graph_execution`; script entrypoints and dependent callers preserve their CLI and request contracts. CPU regression suites pass. | Move remaining diagnosis/trace/qualification scripts and the test-tree qualifier. Share existing HTTP/SSE and fixture helpers where duplication remains; preserve request bytes, assertions, and result semantics. |
 | 6.6 Unsafe safety proofs | Closed: unsafe calls outside cuda.rs state allocation, context/thread, and drain/lifetime obligations locally; ownership/failure tests pass. | Preserve the proofs when changing native ownership. |
@@ -287,12 +287,12 @@ Raw token observation and usage remain independent. If a stop occurs inside one
 token, presentation parsers receive only the visible text span; the hidden suffix
 and its control markers are suppressed.
 
-[Qwen parsers and their composer](../native/src/model/qwen4exp/output.rs) implement
-[the neutral interfaces](../native/src/output.rs). The
-[shared renderer](../native/src/server/output.rs) handles JSON/SSE presentation.
+[Qwen parsers and their composer](../helios/src/model/qwen4exp/output.rs) implement
+[the neutral interfaces](../helios/src/output.rs). The
+[shared renderer](../helios/src/server/output.rs) handles JSON/SSE presentation.
 CPU tests cover UTF-8/marker partitions, continuation state, literal markers,
 reasoning and tools, parameter types, and partial-call termination.
-[Installed HTTP checks](validation/output-protocol-http.md) cover literal markers,
+Installed HTTP checks cover literal markers,
 string stops, a tool call, and the unchanged stopped code-edit request. Combined
 tool/final-content grammars and the complete agentic workload remain open.
 
@@ -373,7 +373,7 @@ Calibrated operator acceptance for arbitrary partitions remains open.
 Actual-model selected-column snapshot and continuation pass all 14 supported
 batch/width shapes at endpoints 65–72. Restores use different physical slots and
 private tail pages; immutable snapshots and replay allocations remain unchanged.
-[Installed HTTP checks](validation/exact-checkpoint-http.md) pass short instruction
+Installed HTTP checks pass short instruction
 reuse, changed user/tool identity, exact prompt retries, image conditioning,
 snapshot/conversation/KV pressure, and cancellation. The combined run retains one
 fixture-construction error; the corrected system/tool case passes separately.

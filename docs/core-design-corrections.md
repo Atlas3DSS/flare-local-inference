@@ -18,11 +18,11 @@ the item is closed. Items are ordered by priority within each section.
 Transformers eager model running unquantized activations over dequantized
 weights (`serve/reference/qwen38_decoder.py`, `serve/reference/qwen38_quant.py`).
 The recorded result is logit relative L2 of 0.159 to 0.244 over four steps
-([decoder-autotuned.md](validation/decoder-autotuned.md)). The layer-0 stage
-trace ([decoder-stage-comparison.json](validation/decoder-stage-comparison.json))
+(decoder-autotuned.md). The layer-0 stage
+trace (decoder-stage-comparison.json)
 shows every operator agreeing with the reference when fed identical inputs:
 MXFP8 projection 0.0002, routed MoE 0.004 to 0.005, GDN gated output 0.004.
-The vision comparison ([vision-serving-reference.md](validation/vision-serving-reference.md))
+The vision comparison (vision-serving-reference.md)
 shows vLLM's b12x path missing the same 3 percent eager limit by more than
 Flare does:
 
@@ -81,13 +81,13 @@ the floor.
 the 3 percent vision and 1.5 percent GDN limits as acceptance criteria.
 Replace them with per-component tolerances derived from the measured
 precision gap: the GDN FP32-intermediate variant reaches 0.0015 where the
-BF16-intermediate serving kernel reaches 0.0143 ([gdn-fp32.json](validation/gdn-fp32.json),
-[gdn-normalization-factors.md](validation/gdn-normalization-factors.md)), so the
+BF16-intermediate serving kernel reaches 0.0143 (gdn-fp32.json,
+gdn-normalization-factors.md), so the
 BF16 kernel's tolerance is set at its measured value with margin, not at an
 arbitrary limit it cannot meet.
 
 **Required change.** Stop the compensated-BF16 and normalization-reorder
-kernel work ([gdn-compensated-bf16.md](validation/gdn-compensated-bf16.md))
+kernel work (gdn-compensated-bf16.md)
 until item 1.1 has a result. Those diagnostics improve the precision of a
 kernel that vLLM ships unchanged; they are only worth pursuing if 1.1 shows
 Flare further from vLLM than vLLM is from eager.
@@ -100,7 +100,7 @@ Flare further from vLLM than vLLM is from eager.
 match a cold run bitwise, where the cold run computes the suffix inside a
 large-capacity prefill graph and the restored run computes it in a small
 capacity tail graph. Under free autotuning, 83 of 595 predicates failed
-([prefix-replay-autotuned.md](validation/prefix-replay-autotuned.md)). The
+(prefix-replay-autotuned.md). The
 recipe now pins `recurrence_policy="sequential_k1"` for every GDN prefill
 capacity (`serve/recipes/qwen38/gdn.py:547`) and `attention_splits=16` for
 every QSA capacity (`serve/recipes/qwen38/attention.py`), and the design doc
@@ -173,7 +173,7 @@ Python and Rust, the patches, and the documentation are untracked.
 **Required change.** Commit in logical groups after applying item 4.2:
 packaging and environment (`pyproject.toml`, `uv.lock`, `.gitignore`,
 `.python-version`, `scripts/setup_preparation.py`, `patches/`); preparation,
-recipes, reference, and their tests; `native/`; qualification scripts; and
+recipes, reference, and their tests; `helios/`; qualification scripts; and
 documentation. Imperfect state is acceptable; an untracked tree is not.
 
 ### 4.2 Move validation archives out of the tree
@@ -280,7 +280,7 @@ Implement the eight EXIF orientations as a pre-resize transform.
 
 **Current state.** Request preparation rejects nonempty tools with a structured
 output grammar, `tool_choice=required`, and named tool selection
-(`native/src/server/request.rs`). Four of the 69 workload scenarios fail on
+(`helios/src/server/request.rs`). Four of the 69 workload scenarios fail on
 this.
 
 **Required change.** Build the constraint as a union grammar in llguidance:
@@ -305,7 +305,7 @@ design's sampling section, with the measured general-path cost as the reason.
 `serve/kernels`, `serve/api`, `serve/tp`, `serve/cli.py`, `serve/logging.py`,
 and `tests/serve` total about 18,000 lines. No module under
 `serve/preparation`, `serve/recipes`, `serve/reference`, `scripts/`, or
-`native/` imports any of them.
+`helios/` imports any of them.
 
 **Required change.** Delete them. Where the design doc cites the old
 scheduler, graph, and prefix-cache modules as policy and test references,
@@ -317,8 +317,8 @@ moves to `tests/preparation`.
 
 ### 6.2 Make the Rust model layer an explicit per-model contract
 
-**Current state.** `native/src/model.rs` declares `VOCABULARY = 248_320`,
-requires `vision_features_per_request == 16384`, and `native/src/model/inputs.rs`
+**Current state.** `helios/src/model.rs` declares `VOCABULARY = 248_320`,
+requires `vision_features_per_request == 16384`, and `helios/src/model/inputs.rs`
 packs about 38 named buffers with `admission_`, `state_`, and `vision_`
 semantics specific to Qwen4Exp. The design states that Rust sees only page
 IDs, state-slot IDs, capacities, and graph entries, and that the bundle
@@ -329,7 +329,7 @@ defensible placement, since input packing must happen off the Python path,
 but the design's model-independence claim and the plan to qualify the
 contract with a second prepared model are not true as written.
 
-**Required change.** Introduce a model-contract trait in `native/src/model.rs`
+**Required change.** Introduce a model-contract trait in `helios/src/model.rs`
 covering admission packing, prefill and decode lane packing, state-operation
 packing, vision packing, and completion interpretation. Move the current
 implementation to a `qwen4exp` module implementing it. Vocabulary size,
@@ -343,10 +343,10 @@ declared by preparation.
 
 ### 6.3 Replace string errors with typed errors
 
-**Current state.** `native/src/lib.rs` defines
+**Current state.** `helios/src/lib.rs` defines
 `pub type Result<T> = std::result::Result<T, String>`. The HTTP layer and the
 runtime tests classify failures by substring, for example
-`.contains("matching admission")` in `native/src/server/runtime.rs`.
+`.contains("matching admission")` in `helios/src/server/runtime.rs`.
 
 **Defect.** The design requires admission to fail with a concrete capacity or
 feature error. A string cannot be matched by kind, so status-code mapping and
@@ -362,7 +362,7 @@ production or test code.
 
 ### 6.4 Split the server loop
 
-**Current state.** `native/src/server/runtime.rs` is 1,030 lines, and
+**Current state.** `helios/src/server/runtime.rs` is 1,030 lines, and
 `run_loop` is one 307-line function covering admission, planning,
 submission, completion handling, checkpoint publication, and metrics. Its
 tests assert against rendered Prometheus text.
@@ -418,7 +418,7 @@ than as a disclaimer on each sentence.
 
 ### 6.9 Smaller items
 
-- Add a `SAFETY` comment to each `unsafe` block outside `native/src/cuda.rs`:
+- Add a `SAFETY` comment to each `unsafe` block outside `helios/src/cuda.rs`:
   two each in `server.rs` and `server/runtime.rs`, two in
   `execution/worker.rs`, four in `execution/transport.rs`, three in
   `python.rs`.
@@ -429,7 +429,7 @@ than as a disclaimer on each sentence.
 - Feature-gate the `ReplayWorker` Python binding as a qualification primitive,
   since production uses `GraphExecutor` through the server.
 - Change the README test command to
-  `cargo test --manifest-path native/Cargo.toml --features server --offline`;
+  `cargo test --manifest-path helios/Cargo.toml --features server --offline`;
   without the feature it runs 58 of 91 tests.
 - Record the scratch, metadata, and state dataclass convention used across the
   recipe modules once, in the `serve/recipes/qwen38/__init__.py` docstring.

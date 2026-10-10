@@ -1,8 +1,7 @@
 """Compare exact-checkpoint vision modules across isolated Python environments.
 
 Run fixtures and flare with Flare's preparation environment. Run vllm
-with the source-isolated serving environment recorded in
-docs/validation/exact-serving-reference.json. Only the vision tower is loaded;
+with an isolated serving environment. Only the vision tower is loaded;
 the vLLM encoder retains its own weight hooks, preparation policy and forward.
 The complementary serving comparison does not replace the canonical 3% gate.
 """

@@ -400,9 +400,9 @@ def generate(snapshot, output, native_frontend, baseline_fixture):
     root = Path(__file__).resolve().parents[1]
     paths = [Path(__file__), root / "tests/reference/test_speculative_workload.py",
              root / "qualify/provenance.py", root / "flare/preparation/qwen38.py",
-             root / "native/examples/qualify_frontend.rs", root / "native/src/frontend/mod.rs",
-             root / "native/src/frontend/json.rs", root / "native/src/server/request.rs",
-             root / "native/Cargo.toml", root / "native/Cargo.lock", baseline_fixture, native_frontend]
+             root / "helios/tests/tools/test_frontend.rs", root / "helios/src/frontend/mod.rs",
+             root / "helios/src/frontend/json.rs", root / "helios/src/server/request.rs",
+             root / "helios/Cargo.toml", root / "helios/Cargo.lock", baseline_fixture, native_frontend]
     paths += [snapshot / name for name in ASSETS]
     workload["sources"] = {str(p.resolve()): digest(p) for p in paths}
     workload["tokenizer"] = {"assets": {name: file_record(snapshot / name) for name in ASSETS},
@@ -454,7 +454,7 @@ def main():
     build = sub.add_parser("generate")
     build.add_argument("--snapshot", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
-    build.add_argument("--native-frontend", type=Path, default=Path("native/target/debug/examples/qualify_frontend"))
+    build.add_argument("--native-frontend", type=Path, default=Path("helios/target/debug/test_frontend"))
     build.add_argument("--frontend-fixture", type=Path, default=Path("tests/frontend/qwen38.json"))
     check = sub.add_parser("validate")
     check.add_argument("path", type=Path)

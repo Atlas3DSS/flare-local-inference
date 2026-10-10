@@ -259,7 +259,7 @@ def execute(args, tokenizer, plan, body):
     memory = json.loads(args.memory_report.read_text())
     if memory["cached_token_capacity"] != memory["pages"] * PAGE_TOKENS or memory["pages"] < plan["reserved_pages"]:
         raise ValueError("memory report cannot represent the full requested context")
-    sources = {str(path.relative_to(ROOT)): digest(path) for root in (ROOT / "native/src", ROOT / "flare")
+    sources = {str(path.relative_to(ROOT)): digest(path) for root in (ROOT / "helios/src", ROOT / "flare")
         for path in sorted(root.rglob("*")) if path.suffix in (".rs", ".py")}
     sources["scripts/qualify_context_limit.py"] = digest(Path(__file__))
     sources["qualify/server.py"] = digest(ROOT / "qualify/server.py")

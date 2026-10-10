@@ -1103,7 +1103,7 @@ def main():
     )]
     source_paths = [Path(__file__).with_name("checkpoint_state.py"),
         *sorted((ROOT / "flare/recipes/qwen38").glob("*.py")), *sorted((ROOT / "flare/preparation").rglob("*.py")),
-        *sorted((ROOT / "native/src").rglob("*.rs")), *sorted(b12x_root.rglob("*.py")), *sampling_sources]
+        *sorted((ROOT / "helios/src").rglob("*.rs")), *sorted(b12x_root.rglob("*.py")), *sampling_sources]
     provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot)},
         "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),
         "native_extension": str(extension),

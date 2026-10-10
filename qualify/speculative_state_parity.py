@@ -667,7 +667,7 @@ def main(argv=None):
     from qualify.graph_execution import Evidence
 
     source_paths = {Path(__file__), ROOT / "qualify/graph_execution.py", ROOT / "qualify/provenance.py"}
-    for directory, suffix in ((ROOT / "flare", "*.py"), (ROOT / "native/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):
+    for directory, suffix in ((ROOT / "flare", "*.py"), (ROOT / "helios/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):
         source_paths.update(directory.rglob(suffix))
     fi = Path(flashinfer.__file__).resolve().parent
     source_paths.update(fi / path for path in ("sampling.py", "utils.py", "jit/sampling.py",

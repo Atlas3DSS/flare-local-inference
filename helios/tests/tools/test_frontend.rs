@@ -11,7 +11,7 @@ fn main() -> Result<(), String> {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if arguments.len() != 3 {
-        return Err("usage: qualify_frontend ABSOLUTE_SNAPSHOT FIXTURES_JSON".into());
+        return Err("usage: test_frontend ABSOLUTE_SNAPSHOT FIXTURES_JSON".into());
     }
     let snapshot = PathBuf::from(&arguments[1]);
     let fixture: Value =
