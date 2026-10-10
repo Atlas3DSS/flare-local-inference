@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `41527912aa0e8def6ded8ee675417d733837fd01`, including the CuTe DSL operators
+  `cc45b75e7dd8dedb9bce9cd446765fe65c915927`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -260,8 +260,24 @@ bindings after tuning. Fixed-shape compiled graphs with 32-head decode and
 16-head 4096-token prefill run through the native replay worker with exact cache
 and output agreement against uncompiled execution and no allocator changes.
 b12x owns the sparse kernels, latent-record encoding, and pooled-selection
-expansion. GLM index projections, C4 pool production, and absorbed query/value
-projections still need composition into the recipe.
+expansion. The shared [sparse indexer](../flare/components/indexer.py) prepares
+FP8 selection with private finite tuning operands, logical or physical output
+indices, device visibility lengths, and shared scratch. Prefill uses one shared
+page table; decode accepts a page table per query row. The prepared b12x call
+exposes tensor dependencies to compilation, resets fused merge counters before
+arena reuse, and retains unused score outputs in planned storage. Tuned decode
+and 4096-row prefill graphs run through the Rust replay worker without allocator
+activity. Selected IDs and scores match uncompiled execution, allowing either
+candidate at an exactly equal-score cutoff tie.
+
+b12x also provides prepared GLM C4 pooling and FP8 query rotation using the
+vLLM pooling kernels. Caller-owned BF16 key/gate tails carry incomplete pools
+between chunks. Nine consecutive 65-token chunks crossing physical pages produce
+the same cache and tail as ordered decode over the combined input. The strict
+4096-token PyTorch pooling comparison remains failing at two FP8 bytes, each
+one representable step apart; prepared execution matches the original vLLM
+kernel exactly on those inputs. GLM index projections, pooling, selection, and
+absorbed query/value projections still need composition into the recipe.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
