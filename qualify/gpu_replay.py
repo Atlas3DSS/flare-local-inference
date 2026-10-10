@@ -7,9 +7,17 @@ Run each engine under Nsight with ``--trace=cuda-sw,nvtx``,
 ``--capture-range-end=stop`` and ``--export=sqlite``. Name the reports
 ``flare-trace`` and ``vllm-trace`` beside their respective output directories,
 then run ``python -m qualify.gpu_replay_analysis DIRECTORY``.
+
+For kernel timings, pass ``--ncu`` to either engine and collect with Nsight
+Compute's ``--nvtx --nvtx-include kernel.b1/ --graph-profiling node
+--metrics gpu__time_duration.sum --cache-control none --clock-control none``.
+The range selects one warmed decode at position 575, including sampling.
+Use the whole-graph Nsight Systems measurement for end-to-end GPU time;
+Nsight Compute serializes the individual kernel measurements.
 """
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -46,7 +54,8 @@ def flare(args, corpus):
     result = {'engine': 'flare', 'groups': []}
     with prepare_model(args.snapshot, PreparationConfig(prefill_chunk_size=4096),
                        progress=lambda message: print(message, flush=True)) as model:
-        save(args.output / 'graphs.json', prepared_graph_map(model.manifest()))
+        if not args.ncu:
+            save(args.output / 'graphs.json', prepared_graph_map(model.manifest()))
         runner = ReplayCase(model)
         profiling = False
         try:
@@ -60,8 +69,11 @@ def flare(args, corpus):
                 before = torch.cuda.memory_stats()
                 with torch.cuda.stream(runner.stream):
                     with torch.cuda.nvtx.range(f'flare.decode.b{batch}.r{repeat}'):
-                        for _ in range(255):
-                            graph.replay()
+                        for step in range(255):
+                            selected = args.ncu and repeat == 1 and step == 63
+                            scope = torch.cuda.nvtx.range(f'kernel.b{batch}') if selected else nullcontext()
+                            with scope:
+                                graph.replay()
                 runner.stream.synchronize()
                 after = torch.cuda.memory_stats()
                 _, records = runner.snapshot(group['cases'])
@@ -99,6 +111,8 @@ def vllm(args, corpus):
     if engine.speculative_config is not None or engine.enforce_eager:
         raise ValueError('require ordinary graph-enabled vLLM')
     os.environ['FLARE_GPU_REPLAY_OUTPUT'] = str(args.output.resolve())
+    if args.ncu:
+        os.environ['FLARE_GPU_REPLAY_NCU'] = '1'
     llm = LLM.from_engine_args(engine)
     profiling = False
     result = {'engine': 'vllm', 'groups': []}
@@ -137,6 +151,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--corpus', type=Path)
     parser.add_argument('--plan', type=Path)
+    parser.add_argument('--ncu', action='store_true',
+        help='annotate one warmed decode at context position 575 per batch for Nsight Compute')
     args = parser.parse_args()
     if args.output.exists():
         parser.error('output must be fresh')

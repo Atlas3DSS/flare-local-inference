@@ -16,12 +16,37 @@ class GraphTimingWorker(Worker):
         self._timing_steps = []
         runner = self.model_runner
         execute, sample = runner.execute_model, runner.sample
+        prepare_inputs = runner.prepare_inputs
+        profile_nodes = os.environ.get('FLARE_GPU_REPLAY_NCU') == '1'
+        profiled_batches = set()
+        kernel_scope_open = False
+        sampling_batch = None
+
+        def measured_prepare(*args, **kwargs):
+            nonlocal kernel_scope_open, sampling_batch
+            batch = prepare_inputs(*args, **kwargs)
+            if (profile_nodes and self._timing_active and not batch.has_prefill
+                    and batch.num_reqs not in profiled_batches
+                    and batch.num_reqs in (1, 2, 4)
+                    and batch.num_tokens == batch.num_reqs
+                    and max(batch.num_computed_tokens_np) == 575):
+                profiled_batches.add(batch.num_reqs)
+                sampling_batch = batch.num_reqs
+                torch.cuda.nvtx.range_push(f'kernel.b{batch.num_reqs}')
+                kernel_scope_open = True
+            return batch
 
         def measured_execute(*args, **kwargs):
+            nonlocal kernel_scope_open
             index = len(self._timing_steps)
             scope = torch.cuda.nvtx.range(f'vllm.forward.{index}') if self._timing_active else nullcontext()
             with scope:
-                output = execute(*args, **kwargs)
+                try:
+                    output = execute(*args, **kwargs)
+                finally:
+                    if kernel_scope_open:
+                        torch.cuda.nvtx.range_pop()
+                        kernel_scope_open = False
             state = runner.execute_model_state
             if self._timing_active and state is not None:
                 batch = state.input_batch
@@ -33,12 +58,19 @@ class GraphTimingWorker(Worker):
             return output
 
         def measured_sample(*args, **kwargs):
+            nonlocal sampling_batch
             index = len(self._timing_steps) - 1
             scope = torch.cuda.nvtx.range(f'vllm.sample.{index}') if self._timing_active else nullcontext()
             with scope:
-                return sample(*args, **kwargs)
+                kernels = torch.cuda.nvtx.range(f'kernel.b{sampling_batch}') if sampling_batch is not None else nullcontext()
+                try:
+                    with kernels:
+                        return sample(*args, **kwargs)
+                finally:
+                    sampling_batch = None
 
         runner.execute_model, runner.sample = measured_execute, measured_sample
+        runner.prepare_inputs = measured_prepare
 
     def profile(self, is_start=True, *args, **kwargs):
         if not is_start:
