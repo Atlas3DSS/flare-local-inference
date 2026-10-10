@@ -48,6 +48,19 @@ class DecoderScratch:
             MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
             MoeScratch.allocate(tokens, shard.world_size, device), buffer(tokens, 4096), buffer(tokens, 4096))
 
+    def rows(self, tokens, mode, *, sample_rows):
+        """Bind a graph variant to storage shared by serial decoder replays."""
+        if type(tokens) is not int or not 0 < tokens <= self.embedding.shape[0]:
+            raise ValueError("GLM decoder rows exceed scratch capacity")
+        if type(sample_rows) is not int or not 0 < sample_rows <= min(tokens, self.hidden.shape[0]):
+            raise ValueError("GLM sample rows exceed scratch capacity")
+        return DecoderScratch(self.embedding[:tokens], self.residual[:tokens],
+            self.selected_residual[:sample_rows], self.hidden[:sample_rows],
+            None if self.logits is None else self.logits[:sample_rows],
+            self.attention_hc.rows(tokens), self.mlp_hc.rows(tokens), self.kda.rows(tokens),
+            self.mla.rows(tokens, mode), self.dense.rows(tokens), self.moe.rows(tokens),
+            self.attention_output[:tokens], self.mlp_output[:tokens])
+
     def layer(self, kind, *, sparse):
         if kind not in ("linear_attention", "indexed_attention"):
             raise ValueError(f"unsupported canonical GLM attention type: {kind}")

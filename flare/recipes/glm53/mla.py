@@ -47,6 +47,13 @@ class MLAScratch:
             buffer(heads, 256), buffer(heads, 512), buffer(heads, 512), buffer(heads, 256),
             buffer(4096), torch.zeros(tokens, dtype=torch.int32, device=device), index)
 
+    def rows(self, tokens, mode):
+        if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
+            raise ValueError("GLM MLA rows exceed scratch capacity")
+        return MLAScratch(self.query_input[:tokens], self.query_residual[:tokens], self.latent_input[:tokens],
+            self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
+            self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode))
+
 
 class PreparedGlmMLA:
     """One rank's sparse attention before the row-parallel output reduction.

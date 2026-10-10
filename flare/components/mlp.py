@@ -23,6 +23,11 @@ class MLPScratch:
         return cls(*(torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
                      for width in (2 * intermediate, intermediate, hidden)))
 
+    def rows(self, tokens):
+        if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
+            raise ValueError("MLP rows exceed scratch capacity")
+        return MLPScratch(self.gate_up[:tokens], self.intermediate[:tokens], self.output[:tokens])
+
 
 class PreparedMLP:
     """Dense or shared-expert MLP, including rank-local intermediate partitions.

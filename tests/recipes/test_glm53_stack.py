@@ -1,6 +1,7 @@
 """Shared scratch and persistent state ownership for complete GLM text stacks."""
 
 import os
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,48 @@ from flare.components.parallel import TensorParallelShard
 from flare.recipes.glm53.model import create_model_tree
 from flare.recipes.glm53.stack import DecoderScratch
 from flare.recipes.glm53.state import DecoderMetadata, DecoderState
+
+
+def scratch_tensors(scratch, prefix=""):
+    for field in fields(scratch):
+        value = getattr(scratch, field.name)
+        name = f"{prefix}{field.name}"
+        if isinstance(value, torch.Tensor):
+            yield name, value
+        elif value is not None:
+            yield from scratch_tensors(value, f"{name}.")
+
+
+@pytest.mark.parametrize("world,rank", [(2, 0), (4, 3)])
+def test_serial_graph_variants_share_storage_with_exact_shapes(world, rank):
+    shard = TensorParallelShard(rank, world)
+    base = DecoderScratch.allocate(64, 8, "decode", "cpu", shard=shard, sample_rows=4)
+    storage = dict(scratch_tensors(base))
+    for mode, tokens, rows in (("prefill", 64, 1), ("prefill", 16, 1), ("prefill", 1, 1),
+                              ("decode", 4, 4), ("decode", 2, 2), ("decode", 1, 1)):
+        view = base.rows(tokens, mode, sample_rows=rows)
+        expected = dict(scratch_tensors(DecoderScratch.allocate(tokens, 8, mode, "meta",
+            shard=shard, sample_rows=rows)))
+        actual = dict(scratch_tensors(view))
+        assert actual.keys() == expected.keys()
+        for name, tensor in actual.items():
+            assert tensor.shape == expected[name].shape, name
+            assert tensor.stride() == expected[name].stride(), name
+            assert tensor.dtype == expected[name].dtype, name
+            assert tensor.data_ptr() == storage[name].data_ptr(), name
+        assert view.mla.index.active_width is base.mla.index.active_width
+        assert view.mla.index.active_width.item() == 8 * 64
+        view.residual.fill_(tokens)
+        assert torch.all(base.residual[:tokens] == tokens)
+        assert (view.logits is not None) == (rank == 0)
+
+
+def test_scratch_views_reject_unavailable_token_sample_and_request_capacity():
+    base = DecoderScratch.allocate(64, 8, "prefill", "meta", shard=TensorParallelShard(0, 2), sample_rows=4)
+    for tokens, mode, rows in ((0, "prefill", 1), (65, "prefill", 1), (16, "prefill", 5),
+                               (1, "prefill", 2), (4, "decode", 4), (4, "invalid", 1)):
+        with pytest.raises(ValueError):
+            base.rows(tokens, mode, sample_rows=rows)
 
 
 @pytest.mark.parametrize("world,rank", [(2, 0), (4, 3)])

@@ -27,6 +27,12 @@ class MoeScratch:
                    torch.zeros((tokens, 4096), dtype=torch.bfloat16, device=device),
                    torch.zeros((tokens, 4096), dtype=torch.bfloat16, device=device))
 
+    def rows(self, tokens):
+        if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
+            raise ValueError("GLM MoE rows exceed scratch capacity")
+        return MoeScratch(self.router_logits[:tokens], self.router.rows(tokens), self.shared.rows(tokens),
+                          self.routed[:tokens], self.output[:tokens])
+
 
 class PreparedGlmMoe:
     """One rank's intermediate-sharded expert contribution before all-reduce."""

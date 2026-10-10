@@ -75,6 +75,18 @@ class IndexScratch:
             tensor(2051, torch.int32), torch.zeros(tokens, dtype=torch.int32, device=device),
             torch.zeros((tokens if mode == "decode" else 1, blocks), dtype=torch.int32, device=device))
 
+    def rows(self, tokens, mode):
+        if type(tokens) is not int or not 0 < tokens <= self.query.shape[0] or mode not in ("decode", "prefill"):
+            raise ValueError("GLM index rows require valid capacity and decode/prefill mode")
+        sequences = tokens if mode == "decode" else 1
+        if sequences > self.page_table.shape[0]:
+            raise ValueError("GLM index request rows exceed page-table capacity")
+        return IndexScratch(self.query[:tokens], self.query_fp8[:tokens], self.query_scales[:tokens],
+            self.key[:tokens], self.normalized_key[:tokens], self.gate[:tokens],
+            self.projected_weights[:tokens], self.weights[:tokens], self.pool_lengths[:tokens],
+            self.active_width, self.pools[:tokens], self.physical[:tokens], self.selected_lengths[:tokens],
+            self.page_table[:sequences])
+
 
 class PreparedGlmIndexer:
     """Replicated C4 selection for GLM sparse MLA with 256-token model pages.

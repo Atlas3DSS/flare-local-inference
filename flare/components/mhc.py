@@ -38,6 +38,11 @@ class MHCScratch:
     def bind_args(self):
         return {"out": self.residual, "post": self.post, "comb": self.comb, "y": self.normalized}
 
+    def rows(self, tokens):
+        if type(tokens) is not int or not 0 < tokens <= self.residual.shape[0]:
+            raise ValueError("mHC rows exceed scratch capacity")
+        return MHCScratch(*(getattr(self, name)[:tokens] for name in self.__dataclass_fields__))
+
 
 class _BenchmarkInputs:
     def __init__(self, residual, operation):
