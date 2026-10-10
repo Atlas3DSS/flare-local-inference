@@ -37,6 +37,8 @@ def main(argv=None):
         help="explicit increasing draft-token counts including zero; overrides the default draft limit")
     parser.add_argument("--mtp-fixed-draft-tokens", type=int, choices=range(8),
         help="fixed draft-token count instead of adaptive selection; expands the default limit if necessary")
+    parser.add_argument("--mtp-graph-budget", type=int, choices=range(3, 25), default=8,
+        help="maximum speculative graph captures; prioritize smaller batches and larger draft counts (default: 8)")
     parser.add_argument("--history-drafts", action="store_true",
         help="enable draft continuations from request history during speculation (default: disabled)")
     parser.add_argument("--snapshot-budget-gib", type=float, default=4)
@@ -99,7 +101,8 @@ def _run(args, parser, started):
             prefill_chunk_size=args.prefill_chunk_size,
             mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
             speculative_proposal_source=args.mtp_proposal_source,
-            speculative_fixed_width=args.mtp_fixed_width, history_drafts=args.history_drafts, **budgets)
+            speculative_fixed_width=args.mtp_fixed_width, speculative_graph_budget=args.mtp_graph_budget,
+            history_drafts=args.history_drafts, **budgets)
         model = prepare_model(args.snapshot, config, progress=progress, compile_decoder=not args.no_compile)
     else:
         parser.error(f"unsupported checkpoint model_type {architecture!r}")

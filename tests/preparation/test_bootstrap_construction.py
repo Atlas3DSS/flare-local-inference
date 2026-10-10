@@ -634,14 +634,15 @@ def _install_boundaries(monkeypatch, checkpoint):
     return session, signatures, constructors
 
 
-@pytest.mark.parametrize("proposal", ["ordinary", "copy", "mtp"])
+@pytest.mark.parametrize("proposal,fixed", [("ordinary", None), ("copy", None), ("mtp", None), ("mtp", 4), ("copy", 4)])
 def test_prepare_model_constructs_real_catalog_on_meta(
-    monkeypatch, checkpoint, proposal
+    monkeypatch, checkpoint, proposal, fixed
 ):
     assert not torch.cuda.is_initialized()
     session, signatures, constructors = _install_boundaries(monkeypatch, checkpoint)
     config = bootstrap.PreparationConfig(
         mtp=proposal != "ordinary",
+        speculative_fixed_width=fixed,
         speculative_proposal_source="copy" if proposal == "copy" else "mtp",
         history_drafts=proposal == "copy",
     )
@@ -660,7 +661,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         "restore": 3,
         "snapshot": 3,
     }
-    expected.update({"decode": 3} if proposal == "ordinary" else {"speculative": 10})
+    expected.update({"decode": 3} if proposal == "ordinary" else {"speculative": len(config.speculative_shapes)})
     assert Counter(signature.kind for signature in signatures) == expected
     assert {
         signature.token_capacity
@@ -684,7 +685,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         if signature.kind in ("prefill", "resume", "speculative")
     )
     decoders = constructors["PreparedDecoder"]
-    assert len(decoders) == (9 if proposal == "ordinary" else 16)
+    assert len(decoders) == (9 if proposal == "ordinary" else 6 + len(config.speculative_shapes))
     assert len(constructors["PreparedVision"]) == 4
     assert len(constructors["PreparedMaintenance"]) == 9
     assert len(constructors["PreparedResume"]) == 3
@@ -715,17 +716,17 @@ def test_prepare_model_constructs_real_catalog_on_meta(
             assert type(layer[1]).__name__ == (
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
-    assert len(constructors["PreparedMTP"]) == (23 if proposal == "mtp" else 0)
+    assert len(constructors["PreparedMTP"]) == ((6 + len(config.speculative_shapes) + sum(width > 1 for _, width in config.speculative_shapes)) if proposal == "mtp" else 0)
     assert len(constructors["PreparedCheckpointCaches"]) == 9
     for owner, _ in constructors["PreparedMaintenance"]:
         assert owner.transfers.exact.pool is owner.pool
         assert owner.transfers.exact.tables is owner.forward_inputs.page_tables
         assert (owner.transfers.exact.draft is not None) == (proposal == "mtp")
     assert len(constructors["PreparedStochasticVerification"]) == (
-        0 if proposal == "ordinary" else 10
+        0 if proposal == "ordinary" else len(config.speculative_shapes)
     )
     assert len(constructors["PreparedCopyProposals"]) == (
-        10 if proposal == "copy" else 0
+        len(config.speculative_shapes) if proposal == "copy" else 0
     )
     for _, args in constructors["PreparedMTP"]:
         assert args["workspace"] is session.arena

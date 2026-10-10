@@ -79,6 +79,7 @@ impl Fixture {
                 max_new_tokens: 16,
                 speculative_widths: vec![],
                 speculative_fixed_width: None,
+                speculative_graph_budget: 24,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
             },

@@ -133,8 +133,9 @@ class PreparedSpeculativeRound:
     def __init__(self, owner, batch, width, name):
         self.owner, self.batch, self.width = owner, batch, width
         device = owner.pool.backing.device
+        self.token_limits = owner.inputs.query_lengths[:batch]
         self.state = PreparedVerificationState(owner.inputs, owner.requests, owner.pool,
-            owner.candidates, owner.previous_accepted, width=width, rows=batch, extra_base=owner.extra_base)
+            owner.candidates, owner.previous_accepted, width=width, rows=batch, extra_base=owner.extra_base, token_limits=self.token_limits)
         scratch = owner.scratch.rows(batch * width, batch * width)
         self.target_residual = torch.zeros((batch * width, 10240), dtype=torch.bfloat16, device=device)
         self.decoder = PreparedDecoder(owner.weights, scratch, self.state, owner.cache, owner.rotary,
@@ -173,7 +174,7 @@ class PreparedSpeculativeRound:
             copy_generation=owner.copy_generation, grammar_mask_count=owner.copy_grammar_mask_count,
             draft_ids=self.drafts, draft_probabilities=self.draft_probabilities, draft_valid=self.draft_valid,
             copy_mask=self.copy_mask, previous_accepted=owner.previous_accepted,
-            accepted_generation=owner.accepted_generation) if self.copy_only else None)
+            accepted_generation=owner.accepted_generation, token_limits=self.token_limits) if self.copy_only else None)
         self.operations = None
 
     def prepare(self):
@@ -193,7 +194,7 @@ class PreparedSpeculativeRound:
             proposal.prepare()
         verify = PreparedStochasticVerification(self.draft_probabilities, self.drafts, target.probabilities,
             o.requests, slots, epochs, o.inputs.live_rows, rng=o.rng,
-            draft_valid=self.draft_valid, target_valid=target.valid)
+            draft_valid=self.draft_valid, target_valid=target.valid, token_limits=self.token_limits)
         verify.prepare()
         if not self.copy_only:
             from flashinfer import sampling
@@ -202,7 +203,7 @@ class PreparedSpeculativeRound:
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,
             o.completion, o.frame, o.sequence, rng=o.rng, copy_offered_mask=self.copy_mask,
-            draft_cache_available=not self.copy_only)
+            draft_cache_available=not self.copy_only, token_limits=self.token_limits)
         self.state.prepare_commit(commit.emitted_count, commit.consumed_before,
                                   self.target_residual, self.decoder.scratch.sample_hidden)
         model_commit = tuple(self.state._commit)
@@ -248,7 +249,10 @@ class PreparedSpeculativeRound:
             hidden = self.previous if index == 0 else self.draft.scratch.residual[self.draft_metadata.output_indices]
             tokens = self.pending if index == 0 else self.drafts[:, index - 1]
             rope = self.previous_rope if index == 0 else (self.before + index - 1 + delta)[:, None].expand(-1, 3)
-            self.draft_metadata.set(slots, self.active.long(), self.before - 1 + index,
+            draft_active = self.active
+            if self.token_limits is not None:
+                draft_active = draft_active & (index < self.token_limits)
+            self.draft_metadata.set(slots, draft_active.long(), self.before - 1 + index,
                 tokens, hidden, rope, o.draft_tables, capacity=1)
             self.draft()
             proposal()
@@ -270,6 +274,8 @@ class PreparedSpeculativeRound:
                 base = torch.where(match, self.base_offset, 0).sum()
                 o.draft_rng_offset[slot].copy_(torch.where(match.any(), base + 4 * (w - 1), o.draft_rng_offset[slot]))
                 o.draft_rng_generation[slot].copy_(torch.where(match.any(), o.requests.generation[slot], o.draft_rng_generation[slot]))
+        if self.token_limits is not None:
+            self.drafts.masked_fill_(self.columns[None, :-1] >= self.token_limits[:, None] - 1, 0)
         o.candidates[:b, 0].copy_(self.pending)
         o.candidates[:b, 1:w].copy_(self.drafts)
         self.decoder()

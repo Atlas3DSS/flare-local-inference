@@ -56,6 +56,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         max_new_tokens: 64,
         speculative_widths: vec![],
         speculative_fixed_width: None,
+        speculative_graph_budget: 24,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };

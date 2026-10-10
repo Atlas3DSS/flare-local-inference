@@ -47,6 +47,8 @@ class Replay:
         h['vision_token_indices'].fill_(-1)
 
     def execute(self, name, *, timed=False, profile=False):
+        if self.model.signatures[name].kind == "speculative":
+            self.host['query_lengths'][0] = self.model.signatures[name].token_capacity
         self.sequence += 1
         for field in self.model.signatures[name].inputs:
             self.model.buffers[field].copy_(self.host[field])
@@ -120,7 +122,7 @@ def main():
         raise ValueError('profiling requires a 512-token prompt')
     started = monotonic()
     progress = lambda message: print(f'{monotonic() - started:.1f}s {message}', flush=True)
-    with prepare_model(args.snapshot, PreparationConfig(mtp=True, speculative_widths=tuple(range(1, 9))),
+    with prepare_model(args.snapshot, PreparationConfig(mtp=True, speculative_widths=tuple(range(1, 9)), speculative_graph_budget=24),
                        progress=progress) as model:
         replay = Replay(model, tokens)
         selected = False

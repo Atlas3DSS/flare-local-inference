@@ -26,9 +26,8 @@ class GraphSignature:
         if any(type(value) is not int or value <= 0 for value in (self.batch_capacity, self.token_capacity)):
             raise ValueError("graph capacities must be positive integers")
         if self.kind == "speculative" and (
-                self.batch_capacity not in (1, 2, 4) or not 1 <= self.token_capacity <= 8
-                or self.batch_capacity * self.token_capacity > 8):
-            raise ValueError("speculative graphs require batch 1/2/4, width 1 through 8, and at most eight rows")
+                self.batch_capacity not in (1, 2, 4) or not 1 <= self.token_capacity <= 8):
+            raise ValueError("speculative graphs require batch 1/2/4 and width 1 through 8")
         object.__setattr__(self, "inputs", tuple(self.inputs))
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("graph input names must be unique")

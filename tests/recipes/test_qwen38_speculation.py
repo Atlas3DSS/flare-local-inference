@@ -169,7 +169,7 @@ def test_conditional_penalties_include_only_prior_drafts():
     assert op.scores[0, :, 4].tolist() == [8., .5, 0., 0.]
     state.grammar_enabled[2] = 1
     op.prepare_scores()
-    assert not op.valid.any()
+    assert op.valid.tolist() == [[True, False, False, False]]
 
 
 def test_invalid_conditional_id_does_not_index_histogram_out_of_bounds():

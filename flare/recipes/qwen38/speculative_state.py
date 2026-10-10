@@ -16,6 +16,7 @@ from .ple import PLEMetadata
 
 @triton.jit
 def _validate_round(Slots, Epochs, Live, Generation, Status, Error, Pending, Consumed,
+                    Limits, LIMITED: tl.constexpr,
                     ROWS: tl.constexpr, WIDTH: tl.constexpr, CONTEXT: tl.constexpr,
                     CONSUMED_STRIDE: tl.constexpr):
     slot = tl.program_id(0)
@@ -27,7 +28,11 @@ def _validate_round(Slots, Epochs, Live, Generation, Status, Error, Pending, Con
     if (count > 0) & (tl.load(Status + slot) == 1):
         position = tl.load(Consumed + slot * CONSUMED_STRIDE)
         valid = (count == 1) & (tl.load(Live) <= ROWS)
-        valid &= (position >= 0) & (position + WIDTH <= CONTEXT) & (tl.load(Pending + slot) >= 0)
+        length = WIDTH
+        if LIMITED:
+            length = tl.sum(tl.where(match, tl.load(Limits + rows, rows < ROWS, other=0), 0), 0)
+        valid &= (length >= 1) & (length <= WIDTH)
+        valid &= (position >= 0) & (position + length <= CONTEXT) & (tl.load(Pending + slot) >= 0)
         if not valid:
             tl.store(Status + slot, 3)
             tl.store(Error + slot, 34)
@@ -37,7 +42,7 @@ def _validate_round(Slots, Epochs, Live, Generation, Status, Error, Pending, Con
 def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, PreviousAccepted,
                            Delta, Tokens, Cu, ConvSlots, Fresh, StateIndices, Accepted,
                            NumSeqs, NumTokens, RequestIds, QueryPositions, Rope, SequenceLengths,
-                           SlotMapping, PhysicalPages, PackedPages,
+                           SlotMapping, PhysicalPages, PackedPages, Limits, LIMITED: tl.constexpr,
                            ROWS: tl.constexpr, WIDTH: tl.constexpr, CANDIDATE_STRIDE: tl.constexpr,
                            PAGES: tl.constexpr, DELTA_STRIDE: tl.constexpr, EXTRA_BASE: tl.constexpr,
                            BLOCK: tl.constexpr):
@@ -60,20 +65,24 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
     columns = tl.arange(0, 8)
     indices = tl.where(columns == 0, slot + 1, EXTRA_BASE + slot * 7 + columns - 1)
     tl.store(StateIndices + row * 8 + columns, tl.where(active, indices, 0))
-    tl.store(SequenceLengths + row, tl.where(active, position + WIDTH, 0))
+    length = WIDTH
+    if LIMITED:
+        length = tl.load(Limits + row)
+    tl.store(SequenceLengths + row, tl.where(active, position + length, 0))
     offsets = tl.arange(0, triton.next_power_of_2(WIDTH))
     valid = offsets < WIDTH
     token = tl.load(Candidates + row * CANDIDATE_STRIDE + offsets, active & valid, other=248044)
     token = tl.where(offsets == 0, tl.load(Pending + row), token)
     tl.store(Tokens + start + offsets, tl.where(active, token, 248044), valid)
     logical = position + offsets
-    page = tl.load(PhysicalPages + slot * PAGES + logical // 64, active & valid, other=-1)
-    tl.store(RequestIds + start + offsets, tl.where(active, row, -1), valid)
-    tl.store(QueryPositions + start + offsets, tl.where(active, logical, -1), valid)
-    tl.store(SlotMapping + start + offsets, tl.where(active, page * 64 + logical % 64, -1), valid)
+    in_context = active & (offsets < length)
+    page = tl.load(PhysicalPages + slot * PAGES + logical // 64, in_context & valid, other=-1)
+    tl.store(RequestIds + start + offsets, tl.where(in_context, row, -1), valid)
+    tl.store(QueryPositions + start + offsets, tl.where(in_context, logical, -1), valid)
+    tl.store(SlotMapping + start + offsets, tl.where(in_context, page * 64 + logical % 64, -1), valid)
     delta = tl.load(Delta + (slot + 1) * DELTA_STRIDE, active, other=0)
     for axis in tl.static_range(3):
-        tl.store(Rope + (start + offsets) * 3 + axis, tl.where(active, logical + delta, -1), valid)
+        tl.store(Rope + (start + offsets) * 3 + axis, tl.where(in_context, logical + delta, -1), valid)
     for block in range(tl.cdiv(PAGES, BLOCK)):
         page_indices = block * BLOCK + tl.arange(0, BLOCK)
         pages = tl.load(PhysicalPages + slot * PAGES + page_indices, active & (page_indices < PAGES), other=-1)
@@ -109,7 +118,7 @@ class PreparedVerificationState:
     """
 
     def __init__(self, inputs, requests, pool, candidates, previous_accepted,
-                 *, width: int, rows: int, extra_base: int):
+                 *, width: int, rows: int, extra_base: int, token_limits=None):
         if type(width) is not int or not 1 <= width <= 8 or rows not in (1, 2, 4):
             raise ValueError("verification requires width 1 through 8 and batch 1/2/4")
         if pool.layout.speculative_tokens != 7 or extra_base < 6 or extra_base + 28 > pool.backing.shape[0]:
@@ -137,6 +146,7 @@ class PreparedVerificationState:
         self._validate = compile_kernel(_validate_round,
             (inputs.row_slot_ids, inputs.row_generations, inputs.live_rows, requests.generation,
              requests.status, requests.error_code, requests.pending_token, requests.consumed_tokens,
+             inputs.query_lengths if token_limits is None else token_limits, token_limits is not None,
              rows, width, inputs.page_tables.shape[1] * 64, requests.consumed_tokens.stride(0)), (4, 1, 1))
         g, q, t = self.gdn, self.qsa, self.token_state
         self._metadata = compile_kernel(_verification_metadata,
@@ -144,7 +154,9 @@ class PreparedVerificationState:
              candidates, previous_accepted, pool.rope_delta, self.token_ids, g.query_start_loc,
              g.convolution_slots, g.fresh, g.state_indices, g.accepted_tokens, g.num_seqs, g.num_tokens,
              q.request_ids, q.query_positions, q.rope_positions, q.sequence_lengths, q.slot_mapping,
-             inputs.page_tables, q.main_block_table, rows, width, candidates.stride(0),
+             inputs.page_tables, q.main_block_table,
+             inputs.query_lengths if token_limits is None else token_limits, token_limits is not None,
+             rows, width, candidates.stride(0),
              inputs.page_tables.shape[1], pool.rope_delta.stride(0), extra_base, 128), (rows, 1, 1))
 
     def prepare_hidden(self, hidden, sample):

@@ -68,6 +68,7 @@ impl Fixture {
             max_new_tokens: 64,
             speculative_widths: vec![],
             speculative_fixed_width: None,
+            speculative_graph_budget: 24,
             history_drafts: false,
             speculative_proposal_source: Default::default(),
         };
@@ -125,8 +126,10 @@ fn omitted_output_limit_fills_context_after_chat_tokenization() {
         json!([{"role":"user","content":"Write a long explanation."}]),
         json!({"enable_thinking":false,"add_generation_prompt":true}),
     );
-    assert_eq!(prepared.prompt.tokens.len() + prepared.prompt.max_new_tokens as usize,
-        fixture.config.limits.max_sequence_tokens);
+    assert_eq!(
+        prepared.prompt.tokens.len() + prepared.prompt.max_new_tokens as usize,
+        fixture.config.limits.max_sequence_tokens
+    );
     assert!(prepared.prompt.max_new_tokens > 256);
 }
 

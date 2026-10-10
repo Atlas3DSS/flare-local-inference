@@ -33,6 +33,7 @@ fn config() -> ModelConfig {
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
+        speculative_graph_budget: 24,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     }
@@ -105,9 +106,17 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 .speculative_widths
                 .iter()
                 .flat_map(|&width| {
-                    [1, 2, 4]
+                    [1usize, 2, 4]
                         .into_iter()
-                        .filter(move |batch| batch * width <= 8)
+                        .filter(move |batch| {
+                            crate::scheduler::speculation::graph_width_masks(
+                                &config.speculative_widths,
+                                config.speculative_fixed_width,
+                                config.speculative_graph_budget,
+                            )[batch.trailing_zeros() as usize]
+                                & (1 << (width - 1))
+                                != 0
+                        })
                         .map(move |batch| (batch, width))
                 })
                 .collect(),
@@ -254,13 +263,13 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
     config.speculative_widths = (1..=8).collect();
     let original = manifest(&config);
     validate::<Qwen4Exp>(&config, &original).unwrap();
-    assert_eq!(original.graphs.len(), 33);
+    assert_eq!(original.graphs.len(), 43);
     assert!(
         original
             .graphs
             .iter()
             .filter(|g| g.kind == GraphKind::Speculative)
-            .all(|g| g.batch_capacity * g.token_capacity <= 8)
+            .all(|g| g.token_capacity <= 8)
     );
     assert!(!original.graphs.iter().any(|g| g.kind == GraphKind::Decode));
     for index in original
@@ -315,8 +324,17 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
         validate::<Qwen4Exp>(&config, &original).unwrap_err(),
         crate::Error::Execution(crate::ExecutionError::Manifest(_))
     ));
-    config.speculative_fixed_width = Some(8);
-    validate::<Qwen4Exp>(&config, &original).unwrap();
+    config.speculative_fixed_width = Some(4);
+    let fixed = manifest(&config);
+    validate::<Qwen4Exp>(&config, &fixed).unwrap();
+    let shapes: Vec<_> = fixed
+        .graphs
+        .iter()
+        .filter(|g| g.kind == GraphKind::Speculative)
+        .map(|g| (g.batch_capacity, g.token_capacity))
+        .collect();
+    assert_eq!(shapes, [(1, 4), (2, 4), (4, 4)]);
+    assert!(validate::<Qwen4Exp>(&config, &original).is_err());
 }
 
 #[test]
@@ -326,17 +344,19 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     use serde_json::json;
     let mut config = config();
     config.speculative_widths = vec![1, 2, 4, 8];
-    let manifest = manifest(&config);
+    let adaptive = manifest(&config);
     let body = json!({"model_contract":metadata_json(),"model_id":"qwen38","identity":"01".repeat(32),
         "max_sequence_tokens":2048,"prefill_chunk_size":512,"pages":64,"snapshots":8,
-        "eos_token_ids":[],"speculative_widths":[1,2,4,8]});
+        "eos_token_ids":[],"speculative_widths":[1,2,4,8],"speculative_graph_budget":24});
     for width in [json!(null), json!(1), json!(2), json!(4), json!(8)] {
         for copy in [true, false] {
+            config.speculative_fixed_width = width.as_u64().map(|w| w as usize);
+            let prepared = manifest(&config);
             let mut body = body.clone();
             body["speculative_fixed_width"] = width.clone();
             body["history_drafts"] = json!(copy);
             assert_eq!(
-                Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
+                Bootstrap::load::<Qwen4Exp>(&body.to_string(), &prepared)
                     .err()
                     .unwrap()
                     .to_string(),
@@ -356,7 +376,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     ] {
         let mut body = body.clone();
         body[key] = value;
-        let error = Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
+        let error = Bootstrap::load::<Qwen4Exp>(&body.to_string(), &adaptive)
             .err()
             .unwrap();
         assert!(
@@ -367,6 +387,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
             "{error}"
         );
     }
+    config.speculative_fixed_width = None;
     config.speculative_proposal_source = crate::scheduler::speculation::ProposalSource::Copy;
     let copy_manifest = self::manifest(&config);
     let mut body = body;
@@ -382,9 +403,6 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
 
 #[test]
 fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_guards() {
-    let mut wire_fixture = WireFixture::new(
-        "mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_guards",
-    );
     let mut config = config();
     config.speculative_widths = vec![1, 2, 4, 8];
     let mut scheduler = RequestScheduler::new(
@@ -431,7 +449,6 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         scheduler.record_submission(&step, Fence(fence)).unwrap();
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
-        wire_fixture.observe(&inputs.uploads());
         if fence == 2 {
             let uploads = inputs.uploads();
             let target = uploads.iter().find(|u| u.buffer == "page_tables").unwrap();
@@ -461,7 +478,6 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         scheduler.record_submission(&step, Fence(fence)).unwrap();
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
-        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         assert!(!uploads.iter().any(|u| u.buffer.ends_with("page_tables")));
         let expected = uploads
@@ -489,7 +505,6 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         config.history_drafts = false;
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
-        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         assert!(
             uploads
@@ -981,11 +996,10 @@ fn copy_catalog_requires_masks_and_epoch_but_no_draft_cache_bindings() {
 
 #[test]
 fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
-    let mut wire_fixture =
-        WireFixture::new("copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask");
     use crate::scheduler::speculation::{CopyProposal, ProposalSource};
     let mut config = config();
     config.speculative_widths = (1..=8).collect();
+    config.speculative_fixed_width = Some(8);
     config.speculative_proposal_source = ProposalSource::Copy;
     let mut scheduler = RequestScheduler::new(
         config.identity,
@@ -1049,7 +1063,6 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     scheduler.record_submission(&step, Fence(2)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
-    wire_fixture.observe(&inputs.uploads());
     assert!(
         !inputs
             .uploads()
@@ -1081,11 +1094,11 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         )
         .unwrap();
     let step = scheduler.next_step().unwrap();
-    assert_eq!(step.token_capacity, 3);
+    assert_eq!(step.token_capacity, 8);
+    assert_eq!(step.lanes[0].tokens, 3);
     scheduler.record_submission(&step, Fence(4)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
-    wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
     let bytes = |name| uploads.iter().find(|u| u.buffer == name).unwrap().bytes;
     let i64s = |name| {
@@ -1102,6 +1115,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     };
     assert_eq!(i64s("copy_generation"), [0, 0, handle.generation as i64, 0]);
     assert_eq!(i64s("copy_expected_consumed"), [-1, -1, 65, -1]);
+    assert_eq!(i32s("query_lengths"), [3, 0, 0, 0]);
     assert_eq!(i32s("copy_token_count"), [0, 0, 2, 0]);
     assert_eq!(i32s("copy_grammar_mask_count"), [0, 0, 3, 0]);
     assert_eq!(&i64s("copy_token_ids")[14..21], &[8, 9, -1, -1, -1, -1, -1]);
@@ -1128,7 +1142,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
             accepted_drafts: 0,
             copy_offered_mask: 3,
             draft_cache_consumed: -1,
-            verification_width: 3,
+            verification_width: 8,
             tokens: [10, -1, -1, -1, -1, -1, -1, -1],
             ..Default::default()
         }),
@@ -1147,11 +1161,11 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         )
         .unwrap();
     let step = scheduler.next_step().unwrap();
-    assert_eq!(step.token_capacity, 1);
+    assert_eq!(step.token_capacity, 8);
+    assert_eq!(step.lanes[0].tokens, 1);
     scheduler.record_submission(&step, Fence(5)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
-    wire_fixture.observe(&inputs.uploads());
     let uploads = inputs.uploads();
     let counts = uploads
         .iter()

@@ -128,7 +128,8 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
                "target_residual_position": torch.zeros((5, 3), dtype=torch.int64)}
     pool = SimpleNamespace(backing=torch.zeros(1, dtype=torch.uint8), region=regions.__getitem__,
                            rope_delta=torch.zeros((5, 1), dtype=torch.int64))
-    inputs = SimpleNamespace(row_slot_ids=slots, row_generations=epochs, live_rows=live)
+    inputs = SimpleNamespace(row_slot_ids=slots, row_generations=epochs, live_rows=live,
+        query_lengths=torch.full((batch,), width, dtype=torch.int32))
     scratch = SimpleNamespace(logits=torch.zeros((batch * width, vocab)),
                               sample_hidden=torch.zeros((batch * width, 2560), dtype=torch.bfloat16))
     observed = []
@@ -173,8 +174,12 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
 
     def prepare_cpu(operator):
         operator._flashinfer = OneHotLibrary
+        operator.library_scratch = ()
         operator._prepared = True
 
+    monkeypatch.setattr("flare.recipes.qwen38.speculation.filter_probabilities",
+                        lambda scores, *args: torch.softmax(scores, -1))
+    monkeypatch.setattr("flare.recipes.qwen38.speculation.verify_chain", OneHotLibrary.chain_speculative_sampling)
     monkeypatch.setattr(module.PreparedSpeculativeDistributions, "prepare", prepare_cpu)
     monkeypatch.setattr(module.PreparedStochasticVerification, "prepare", prepare_cpu)
     records = torch.full((2, 4, 24), -99, dtype=torch.int64)

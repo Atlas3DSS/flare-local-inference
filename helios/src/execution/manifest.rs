@@ -291,7 +291,6 @@ impl ExecutionManifest {
                     self.abi_version == SPECULATIVE_ABI_VERSION
                         && [1, 2, 4].contains(&graph.batch_capacity)
                         && (1..=8).contains(&graph.token_capacity)
-                        && graph.batch_capacity * graph.token_capacity <= 8
                 }
                 GraphKind::Prefill => {
                     graph.batch_capacity == 1

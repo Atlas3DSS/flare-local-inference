@@ -141,6 +141,11 @@ impl Bootstrap {
                         .ok_or("speculative_fixed_width must be an integer or null")
                 })
                 .transpose()?,
+            speculative_graph_budget: usize::try_from(integer(
+                "speculative_graph_budget",
+                Some(8),
+            )?)
+            .map_err(|_| "speculative graph budget exceeds usize")?,
             history_drafts: match object.get("history_drafts") {
                 None => false,
                 Some(Value::Bool(value)) => *value,

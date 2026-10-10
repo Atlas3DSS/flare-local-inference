@@ -30,6 +30,41 @@ pub struct CopyProposal {
     pub grammar_masks: Vec<i32>,
 }
 
+pub fn graph_width_masks(widths: &[usize], fixed: Option<usize>, budget: usize) -> [u8; 3] {
+    let count = if fixed.is_some() { 1 } else { widths.len() };
+    let mut remaining = budget;
+    let mut exhausted = false;
+    std::array::from_fn(|index| {
+        if count == 0 {
+            return 0;
+        }
+        let take = if exhausted {
+            1
+        } else {
+            count.min(remaining.saturating_sub(2 - index))
+        };
+        let mask = if exhausted {
+            1
+        } else if let Some(width) = fixed {
+            1 << (width - 1)
+        } else {
+            widths
+                .iter()
+                .rev()
+                .take(take)
+                .fold(0, |mask, width| mask | (1 << (width - 1)))
+        };
+        exhausted |= take < count;
+        remaining = remaining.saturating_sub(take);
+        mask
+    })
+}
+
+pub fn graph_catalog(widths: &[usize], fixed: Option<usize>, budget: usize) -> [Vec<usize>; 3] {
+    graph_width_masks(widths, fixed, budget)
+        .map(|mask| (1..=8).filter(|w| mask & (1 << (w - 1)) != 0).collect())
+}
+
 pub fn validate_widths(widths: &[usize]) -> Result<()> {
     if !widths.is_empty()
         && (widths[0] != 1
@@ -79,7 +114,6 @@ impl WidthController {
             return None;
         }
         let (b, c) = Self::coordinates(batch, context);
-        let maximum = maximum.min(8 / batch);
         let legal = || widths.iter().copied().filter(|w| *w <= maximum);
         if let Some(width) = legal().find(|w| self.costs[b][c][*w - 1].rounds == 0) {
             return Some(width);
@@ -110,7 +144,6 @@ impl WidthController {
     ) -> Result<()> {
         if ![1, 2, 4].contains(&batch)
             || !WIDTHS.contains(&width)
-            || batch * width > 8
             || nanos == 0
             || emitted > batch * width
         {

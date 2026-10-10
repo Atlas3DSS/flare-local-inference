@@ -180,24 +180,31 @@ rerunning the model.
 ## Graph catalog, control and scheduling
 
 The chain catalog has request capacities `B ∈ {1,2,4}` and integer verification
-widths `1 <= W <= min(K_max + 1, 8/B)`, where `K=W-1`.
-`--mtp-max-draft-tokens` sets `K_max` and defaults to three for Qwen. Batch one
-and batch two therefore capture widths one through four; batch four captures
-one and two. A limit of five permits batch-one widths through six. Only the
-selected widths are prepared and handed to the native adaptive controller,
-which may choose fewer drafts but cannot exceed the limit.
+widths `1 <= W <= K_max + 1`, where `K=W-1`.
+`--mtp-max-draft-tokens` sets `K_max` and defaults to three for Qwen.
+`--mtp-graph-budget` limits the total number of speculative captures, including
+zero-draft fallbacks, and defaults to eight. Preparation visits batch capacities
+one, two, and four in order. It reserves one fallback capture for each remaining
+batch, then selects the largest requested draft counts first. If a batch gets
+only part of its requested width catalog, subsequent batches use zero drafts.
+The default three-draft maximum and eight-graph budget capture draft counts
+`{3,2,1,0}` at batch one, `{3,2,1}` at batch two, and `{0}` at batch four.
+The zero-draft path continues absorbing target feedback into the MTP cache so
+requests can resume drafting when concurrency falls. The native adaptive
+controller chooses only among that batch's captured counts.
 `--mtp-draft-tokens` selects an explicit increasing set of draft counts, including
 zero, instead of a draft-token limit; the options are mutually exclusive.
-`--mtp-fixed-draft-tokens 3` selects three drafts rather than adapting the count.
-An explicit fixed count expands the default limit when necessary, but must fit
-an explicit maximum or count catalog. Batch capacity, context limits and host
-constraints can reduce the selected count. Verification widths include the
-pending input and remain an internal graph-layout detail. All shapes stay within
-the eight-row MoE direct-micro band.
-Grouped-path shapes require measured round costs before entering the catalog. Width one consumes the
-pending input and emits one target token, with no draft proposals; MTP history
-still absorbs the committed feedback pair. All shapes are prepared, tuned,
-warmed and captured before handoff.
+`--mtp-fixed-draft-tokens 3` captures exactly three speculative graphs: one for
+each batch capacity, each evaluating three drafts plus the pending input. An
+explicit fixed count expands the default limit when necessary, but must fit an
+explicit maximum or count catalog. Fixed drafting has no aggregate row cap;
+batch four with three drafts evaluates sixteen target rows. Context tails,
+host stop boundaries, and grammar constraints limit each request's valid prefix
+inside that same graph. Masked positions cannot write KV or commit request state.
+Verification widths include the pending input and remain an internal graph-layout
+detail. A zero-draft graph consumes the pending input and emits one target token;
+MTP history still absorbs the committed feedback pair. All shapes are prepared,
+tuned, warmed and captured before handoff.
 The Qwen metadata contract declares at least:
 
 ```text

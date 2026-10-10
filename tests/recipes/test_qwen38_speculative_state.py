@@ -137,6 +137,7 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     operation = PreparedSpeculativeRound.__new__(PreparedSpeculativeRound)
     operation.owner, operation.batch, operation.width = owner, batch, width
     operation.copy_only = False
+    operation.token_limits = None
     operation.state = SimpleNamespace(_validate=lambda: None, token_ids=torch.zeros(batch * width, dtype=torch.int64),
         qsa=SimpleNamespace(rope_positions=torch.zeros((batch * width, 3), dtype=torch.int64)))
     for name in ("before", "pending", "seed", "offset", "base_offset", "sampled", "copy_mask"):
@@ -194,3 +195,36 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     assert operation.draft.inputs[2][0].eq(101).all()
     assert owner.draft_rng_offset.tolist() == [0, 0, 0, 12]
     assert owner.draft_rng_generation.tolist() == [0, 0, 0, 13]
+
+
+@CUDA
+@torch.no_grad()
+def test_fixed_verification_masks_context_tail_without_changing_shape():
+    from flare.recipes.qwen38.decoder_state import DecoderInputs
+    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from flare.recipes.qwen38.speculative_state import PreparedVerificationState
+
+    pool = HybridStatePool.allocate(34, "cuda", speculative_tokens=7)
+    requests = DeviceRequestState.allocate("cuda", consumed_tokens=pool.consumed_tokens[1:5, 0],
+        ple_history=pool.ple_history[1:5])
+    inputs = DecoderInputs.allocate("cuda", context=64, tokens=64)
+    candidates = torch.zeros((4, 8), dtype=torch.int64, device="cuda")
+    accepted = torch.ones(4, dtype=torch.int32, device="cuda")
+    inputs.query_lengths.copy_(torch.tensor([2, 4, 1, 3], dtype=torch.int32, device="cuda"))
+    for slot, position in enumerate([62, 60, 63, 61]):
+        requests.admit(slot, RequestAdmission(1, 42), [7] * position, consumed_tokens=position)
+        requests.pending_token[slot] = 7
+    inputs.row_slot_ids.copy_(torch.arange(4, dtype=torch.int32, device="cuda"))
+    inputs.row_generations.fill_(1)
+    inputs.live_rows.fill_(4)
+    inputs.page_tables.fill_(0)
+    state = PreparedVerificationState(inputs, requests, pool, candidates, accepted,
+        width=4, rows=4, extra_base=6, token_limits=inputs.query_lengths)
+    state.begin()
+    assert requests.status.tolist() == [1] * 4
+    assert state.qsa.query_positions.reshape(4, 4).tolist() == [
+        [62, 63, -1, -1], [60, 61, 62, 63], [63, -1, -1, -1], [61, 62, 63, -1]]
+    assert state.qsa.sequence_lengths.tolist() == [64] * 4
+    assert state.gdn.query_start_loc.tolist() == [0, 4, 8, 12, 16]
+    assert state.qsa.slot_mapping.reshape(4, 4).tolist() == [
+        [62, 63, -1, -1], [60, 61, 62, 63], [63, -1, -1, -1], [61, 62, 63, -1]]

@@ -101,6 +101,7 @@ impl Inputs {
             }
         }
         if step.kind == GraphKind::Speculative {
+            self.staging.i32("query_lengths", 0, lengths);
             let mut ids = [-1i64; 28];
             let mut counts = [0; 4];
             let mut expected = [-1i64; 4];
@@ -115,8 +116,10 @@ impl Inputs {
                     let proposal = live
                         .copy_proposal()
                         .ok_or("missing copy plan for committed prefix")?;
-                    if proposal.count + 1 < step.token_capacity {
-                        return Err("copy plan is shorter than the selected graph width".into());
+                    if proposal.count + 1 < lane.tokens {
+                        return Err(
+                            "copy plan is shorter than the active verification prefix".into()
+                        );
                     }
                     ids[slot * 7..slot * 7 + 7].copy_from_slice(&proposal.tokens);
                     counts[slot] = proposal.count as i32;

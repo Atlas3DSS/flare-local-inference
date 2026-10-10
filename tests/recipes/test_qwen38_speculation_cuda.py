@@ -354,3 +354,47 @@ def test_native_chain_one_row_stream_is_invariant_to_packed_lane(compiled):
             assert torch.equal(many.output.token_ids[2], one.output.token_ids[0])
             assert many.output.proposed_count[2] == one.output.proposed_count[0]
             assert many.independent_accepted[2] == one.independent_accepted[0]
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+@torch.no_grad()
+def test_fixed_graph_commits_bounded_prefixes_at_batch_four(compiled):
+    args = tensors(4, 4)
+    state, slots, epochs, live, inputs, records, frame, sequence = args
+    limits = torch.tensor([4, 1, 2, 3], dtype=torch.int32, device="cuda")
+    columns = torch.arange(4, device="cuda")
+    inputs[:, 1:].masked_fill_(columns[None, :-1] >= limits[:, None] - 1, 0)
+    drafts = inputs[:, 1:].contiguous()
+    draft_probs = torch.zeros((4, 3, VOCAB), dtype=torch.float32, device="cuda")
+    draft_probs.scatter_(2, drafts[:, :, None], 1.)
+    target_probs = torch.zeros((4, 4, VOCAB), dtype=torch.float32, device="cuda")
+    for row in range(4):
+        length = int(limits[row])
+        for column in range(length):
+            target_probs[row, column, int(inputs[row, column + 1]) if column + 1 < length else 100] = 1
+        target_probs[row, length:] = torch.nan
+    target_valid = columns[None, :] < limits[:, None]
+    draft_valid = columns[None, :-1] < limits[:, None] - 1
+    rng = SpeculativeRngState.allocate("cuda")
+    verify = PreparedStochasticVerification(draft_probs, drafts, target_probs,
+        state, slots, epochs, live, rng=rng, draft_valid=draft_valid,
+        target_valid=target_valid, token_limits=limits)
+    verify.prepare()
+    commit = PreparedSpeculativeCommit(state, verify.output, inputs, slots, epochs, live,
+        records, frame, sequence, rng=rng, token_limits=limits)
+    restore = snapshot(state)
+
+    def run():
+        verify()
+        commit()
+
+    if compiled:
+        from flare.preparation.compilation import compile_forward
+        run = compile_forward(run)
+    with captured(run, (*args, limits, verify, commit, rng), {"records": records}, restore) as replay:
+        replay()
+        assert verify.output.valid.all()
+        assert commit.emitted_count.tolist() == [4, 1, 2, 3]
+        assert state.consumed_tokens.tolist() == [4, 3, 5, 6]
+        assert state.pending_token.tolist() == [100] * 4
+        assert records[0, :, 15].tolist() == [4] * 4

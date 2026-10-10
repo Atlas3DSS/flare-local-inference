@@ -53,6 +53,9 @@ fn validate_inner<M: ModelContract>(
         return Err("invalid prepared model configuration".into());
     }
     speculation::validate_widths(&config.speculative_widths)?;
+    if !(3..=24).contains(&config.speculative_graph_budget) {
+        return Err("speculative graph budget must be between 3 and 24".into());
+    }
     if config
         .speculative_fixed_width
         .is_some_and(|w| !config.speculative_widths.contains(&w))
@@ -121,7 +124,7 @@ fn validate_inner<M: ModelContract>(
         )?;
     }
     for &tokens in &config.speculative_widths {
-        for batch in batches(config).filter(|batch| batch * tokens <= 8) {
+        for batch in batches(config).filter(|batch| speculative_shape(config, *batch, tokens)) {
             select::<M>(
                 config,
                 manifest,
@@ -133,6 +136,18 @@ fn validate_inner<M: ModelContract>(
         }
     }
     Ok(())
+}
+
+fn speculative_shape(config: &ModelConfig, batch: usize, tokens: usize) -> bool {
+    let index = batch.trailing_zeros() as usize;
+    (1..=8).contains(&tokens)
+        && speculation::graph_width_masks(
+            &config.speculative_widths,
+            config.speculative_fixed_width,
+            config.speculative_graph_budget,
+        )[index]
+            & (1 << (tokens - 1))
+            != 0
 }
 
 fn batches(config: &ModelConfig) -> impl Iterator<Item = usize> {
@@ -158,9 +173,7 @@ pub fn select<M: ModelContract>(
             GraphKind::Vision => {
                 batch == 1 && config.contract.vision.patch_capacities.contains(&tokens)
             }
-            GraphKind::Speculative => {
-                config.speculative_widths.contains(&tokens) && batch * tokens <= 8
-            }
+            GraphKind::Speculative => speculative_shape(config, batch, tokens),
             _ => tokens == 1,
         };
     if !declared {

@@ -77,6 +77,7 @@ class PreparationConfig:
     speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
     speculative_fixed_width: int | None = None
+    speculative_graph_budget: int = 8
     history_drafts: bool = False
 
     def __post_init__(self):
@@ -96,6 +97,8 @@ class PreparationConfig:
             raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
         if self.speculative_proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
+        if type(self.speculative_graph_budget) is not int or not 3 <= self.speculative_graph_budget <= 24:
+            raise ValueError("speculative graph budget must be between 3 and 24")
         widths = self.speculative_widths
         if (not isinstance(widths, tuple) or not widths or widths[0] != 1
                 or any(type(width) is not int or not 1 <= width <= 8 for width in widths)
@@ -107,8 +110,16 @@ class PreparationConfig:
 
     @property
     def speculative_shapes(self) -> tuple[tuple[int, int], ...]:
-        return tuple((batch, width) for batch in (4, 2, 1)
-                     for width in reversed(self.speculative_widths) if batch * width <= 8)
+        widths = ((self.speculative_fixed_width,) if self.speculative_fixed_width is not None
+                  else tuple(reversed(self.speculative_widths)))
+        remaining, exhausted, shapes = self.speculative_graph_budget, False, []
+        for index, batch in enumerate((1, 2, 4)):
+            available = remaining - (2 - index)
+            selected = (1,) if exhausted else widths[:available]
+            exhausted |= len(selected) < len(widths)
+            shapes.extend((batch, width) for width in selected)
+            remaining -= len(selected)
+        return tuple(shapes)
 
     @property
     def prefill_capacities(self) -> tuple[int, ...]:
@@ -182,7 +193,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             requests = DeviceRequestState.allocate(device,
                 consumed_tokens=state.consumed_tokens[1:5, 0], ple_history=state.ple_history[1:5])
             inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size)
-            scratch = DecoderScratch.allocate(config.prefill_chunk_size, device, sample_rows=8 if config.mtp else 4)
+            scratch = DecoderScratch.allocate(config.prefill_chunk_size, device, sample_rows=max(batch * width for batch, width in config.speculative_shapes) if config.mtp else 4)
             workspaces = ScratchArena(device)
             rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
             cache = {index: QSAState.allocate(pages=1, slots=5, device=device, draft_tokens=speculative_tokens)
@@ -354,6 +365,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
                 speculative_widths=config.speculative_widths,
                 speculative_shapes=config.speculative_shapes,
+                speculative_graph_budget=config.speculative_graph_budget,
                 speculative_proposal_source=config.speculative_proposal_source,
                 speculative_state_columns=8, draft_raw_ring_capacity=layout.draft_ring_capacity if has_mtp else 0,
                 speculative_fixed_width=config.speculative_fixed_width,
@@ -375,7 +387,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         if speculation is not None:
             server_config.update(speculative_widths=config.speculative_widths,
                 speculative_proposal_source=config.speculative_proposal_source,
-                speculative_fixed_width=config.speculative_fixed_width, history_drafts=config.history_drafts)
+                speculative_fixed_width=config.speculative_fixed_width,
+                speculative_graph_budget=config.speculative_graph_budget, history_drafts=config.history_drafts)
         resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)

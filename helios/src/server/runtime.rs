@@ -241,6 +241,9 @@ impl<M: ModelContract> ModelRuntime<M> {
                     .and_then(|()| {
                         scheduler.fixed_speculative_width(worker_config.speculative_fixed_width)
                     })
+                    .and_then(|()| {
+                        scheduler.speculative_graph_budget(worker_config.speculative_graph_budget)
+                    })
                 {
                     let _ = ready_tx.send(Err(error.clone()));
                     let mut shutdown = executor.close();

@@ -106,7 +106,7 @@ class PreparedCopyProposals:
     def __init__(self, requests, slots, generations, live_rows, *, copy_ids,
                  copy_count, copy_expected, copy_generation, grammar_mask_count,
                  draft_ids, draft_probabilities, draft_valid, copy_mask,
-                 previous_accepted, accepted_generation):
+                 previous_accepted, accepted_generation, token_limits=None):
         batch, drafts = draft_ids.shape
         _geometry(batch, drafts + 1)
         device = draft_ids.device
@@ -127,6 +127,10 @@ class PreparedCopyProposals:
         self.state, self.slots, self.generations, self.live = requests, slots, generations, live_rows
         self.ids, self.count, self.expected, self.generation = copy_ids, copy_count, copy_expected, copy_generation
         self.mask_count = grammar_mask_count
+        if token_limits is not None:
+            _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
+        self.token_limits = token_limits
+        self.columns = torch.arange(drafts, device=device)
         self.drafts, self.probabilities, self.valid, self.copy_mask = draft_ids, draft_probabilities, draft_valid, copy_mask
         self.previous_accepted, self.accepted_generation = previous_accepted, accepted_generation
         self.rows = torch.arange(batch, device=device)
@@ -136,13 +140,15 @@ class PreparedCopyProposals:
         state, drafts = self.state, self.drafts.shape[1]
         safe, live = _live(state, self.slots, self.generations, self.live, self.rows)
         ids = self.ids[safe, :drafts]
+        required = drafts if self.token_limits is None else self.token_limits - 1
+        used = self.columns < required if self.token_limits is None else self.columns[None, :] < required[:, None]
         valid = ((self.generation[safe] == self.generations)
             & (self.expected[safe] == state.consumed_tokens[safe])
-            & (self.count[safe] >= drafts) & (self.count[safe] <= 7)
-            & ((ids >= 0) & (ids < state.vocab_size)).all(-1))
+            & (self.count[safe] >= required) & (self.count[safe] <= 7)
+            & (((ids >= 0) & (ids < state.vocab_size)) | ~used).all(-1))
         constrained = state.grammar_enabled[safe].bool()
         valid &= torch.where(constrained,
-            (self.mask_count[safe] >= drafts + 1) & (self.mask_count[safe] <= 8),
+            (self.mask_count[safe] >= required + 1) & (self.mask_count[safe] <= 8),
             self.mask_count[safe] == 0)
         self.active.copy_(live & valid)
         for slot in range(4):
@@ -152,11 +158,11 @@ class PreparedCopyProposals:
             reset = (self.active & (self.slots == slot)).any() & (self.accepted_generation[slot] != state.generation[slot])
             self.previous_accepted[slot].copy_(torch.where(reset, 1, self.previous_accepted[slot]))
             self.accepted_generation[slot].copy_(torch.where(reset, state.generation[slot], self.accepted_generation[slot]))
-        self.drafts.copy_(torch.where(self.active[:, None], ids, 0))
+        self.drafts.copy_(torch.where(self.active[:, None] & used, ids, 0))
         self.valid.copy_(self.active[:, None].expand_as(self.valid))
         self.probabilities.zero_()
         self.probabilities.scatter_(2, self.drafts[:, :, None], 1.)
-        self.copy_mask.copy_(torch.where(self.active, (1 << drafts) - 1, 0))
+        self.copy_mask.copy_(torch.where(self.active, (1 << required) - 1, 0))
         return self
 
 
@@ -239,7 +245,7 @@ class PreparedSpeculativeDistributions:
             self.valid.logical_and_(~state.grammar_enabled[safe, None].bool()
                                     | ((prefix[None, :] < count) & (count <= 8)))
         elif columns.numel() > 1:
-            self.valid.logical_and_(~state.grammar_enabled[safe, None].bool())
+            self.valid.logical_and_(~state.grammar_enabled[safe, None].bool() | (prefix[None, :] == 0))
         self.packed_top_k.copy_(torch.where(state.top_k[safe] > 0, state.top_k[safe], state.vocab_size)[:, None].expand_as(self.valid).reshape(-1))
         self.packed_top_p.copy_(params[:, 1:2].expand_as(self.valid).reshape(-1))
         return safe, params
@@ -286,7 +292,7 @@ class PreparedStochasticVerification:
     """
 
     def __init__(self, draft_probs, draft_token_ids, target_probs, requests, slots, generations,
-                 live_rows, *, rng, draft_valid=None, target_valid=None, output=None):
+                 live_rows, *, rng, draft_valid=None, target_valid=None, output=None, token_limits=None):
         batch, width, vocab = target_probs.shape
         _geometry(batch, width)
         device = target_probs.device
@@ -316,6 +322,9 @@ class PreparedStochasticVerification:
         self.independent_accepted = torch.zeros(batch, dtype=torch.int32, device=device)
         self.emitted_drafts = torch.zeros(batch, dtype=torch.int32, device=device)
         self.draw_reservation = 4 * ((width + 1 + 3) // 4)
+        if token_limits is not None:
+            _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
+        self.token_limits = token_limits
         self._prepared = False
 
     def prepare(self):
@@ -331,15 +340,26 @@ class PreparedStochasticVerification:
             raise RuntimeError("chain verification requires prepare() before capture")
         out = self.output
         safe, live = _live(self.state, self.slots, self.generations, self.live_rows, self.rows)
-        valid = live & self.draft_valid.all(-1) & self.target_valid.all(-1)
-        valid &= ((self.drafts >= 0) & (self.drafts < self.state.vocab_size)).all(-1)
-        for probabilities in (self.draft_probs, self.target_probs):
+        if self.token_limits is None:
+            valid = live & self.draft_valid.all(-1) & self.target_valid.all(-1)
+            valid &= ((self.drafts >= 0) & (self.drafts < self.state.vocab_size)).all(-1)
+            draft_probs, target_probs, ids = self.draft_probs, self.target_probs, self.drafts
+        else:
+            target_used = self.columns[None, :] < self.token_limits[:, None]
+            draft_used = self.columns[None, :-1] < self.token_limits[:, None] - 1
+            valid = live & (self.draft_valid | ~draft_used).all(-1) & (self.target_valid | ~target_used).all(-1)
+            valid &= (((self.drafts >= 0) & (self.drafts < self.state.vocab_size)) | ~draft_used).all(-1)
+            valid &= (self.token_limits >= 1) & (self.token_limits <= self.target_probs.shape[1])
+            draft_probs = torch.where(draft_used[:, :, None], self.draft_probs, self.dummy)
+            target_probs = torch.where(target_used[:, :, None], self.target_probs, self.dummy)
+            ids = torch.where(draft_used, self.drafts, 0)
+        for probabilities in (draft_probs, target_probs):
             valid &= (torch.isfinite(probabilities) & (probabilities >= 0)).all(dim=(-1, -2))
             mass = probabilities.sum(-1)
             valid &= (torch.isfinite(mass) & ((mass - 1).abs() <= 1e-4)).all(-1)
-        self.safe_draft_probs.copy_(torch.where(valid[:, None, None], self.draft_probs, self.dummy))
-        self.safe_target_probs.copy_(torch.where(valid[:, None, None], self.target_probs, self.dummy))
-        self.safe_ids.copy_(torch.where(valid[:, None], self.drafts, 0))
+        self.safe_draft_probs.copy_(torch.where(valid[:, None, None], draft_probs, self.dummy))
+        self.safe_target_probs.copy_(torch.where(valid[:, None, None], target_probs, self.dummy))
+        self.safe_ids.copy_(torch.where(valid[:, None], ids, 0))
         self.seed_bits.copy_(self.state.seed.view(torch.int64)[safe] ^ TARGET_RNG_DOMAIN)
         self.offset.copy_(torch.where(self.rng.generation[safe] == self.generations, self.rng.target_offset[safe], 0))
         self.independent_accepted.zero_()
@@ -369,13 +389,16 @@ class PreparedSpeculativeCommit:
 
     def __init__(self, requests: DeviceRequestState, acceptance: SpeculativeAcceptance,
                  input_ids, slots, generations, live_rows, completion_records, frame_index,
-                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_cache_available=True):
+                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_cache_available=True, token_limits=None):
         batch, width = input_ids.shape
         _geometry(batch, width)
         device = input_ids.device
         if type(draft_cache_available) is not bool:
             raise ValueError("draft_cache_available must be boolean")
         self.draft_cache_available = draft_cache_available
+        if token_limits is not None:
+            _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
+        self.token_limits = token_limits
         _tensor(input_ids, (batch, width), torch.int64, device, "input_ids")
         _metadata(requests, slots, generations, live_rows, batch, device)
         acceptance.validate(batch, width, device)
@@ -453,6 +476,8 @@ class PreparedSpeculativeCommit:
                 & (self.eos_columns < state.eos_count[slot])).any(-1)
             eos_position = torch.where(eos & (columns < proposed), columns + 1, columns.numel()).amin()
             emitted = torch.minimum(torch.minimum(proposed, remaining), eos_position)
+            if self.token_limits is not None:
+                emitted = torch.minimum(emitted, self.token_limits.index_select(0, row)[0])
             emitted = torch.where(enabled & valid, emitted, 0)
             emitted_drafts = torch.minimum(accepted.clamp_min(0), emitted)
             take = columns < emitted

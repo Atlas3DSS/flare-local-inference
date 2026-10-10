@@ -67,7 +67,6 @@ def test_speculative_manifest_exports_vector_abi(monkeypatch):
     lambda: GraphSignature("decode", 1, 1, sampling_mode="automatic"),
     lambda: GraphSignature("speculative", 3, 4),
     lambda: GraphSignature("speculative", 1, 9),
-    lambda: GraphSignature("speculative", 4, 3),
 ])
 def test_invalid_execution_signature_fails_before_cuda(signature):
     with pytest.raises(ValueError):

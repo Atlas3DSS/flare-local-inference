@@ -238,6 +238,8 @@ pub struct RequestScheduler {
     stats: SchedulerStats,
     speculative_widths: Vec<usize>,
     speculative_fixed_width: Option<usize>,
+    speculative_graph_budget: usize,
+    speculative_catalog: [Vec<usize>; 3],
     proposal_source: speculation::ProposalSource,
     controller: speculation::WidthController,
 }
@@ -297,6 +299,8 @@ impl RequestScheduler {
             stats: SchedulerStats::default(),
             speculative_widths: Vec::new(),
             speculative_fixed_width: None,
+            speculative_graph_budget: 24,
+            speculative_catalog: Default::default(),
             proposal_source: speculation::ProposalSource::Mtp,
             controller: speculation::WidthController::default(),
         })
@@ -308,6 +312,7 @@ impl RequestScheduler {
             return Err("speculation must be configured before admission".into());
         }
         self.speculative_widths = widths.to_vec();
+        self.refresh_speculative_catalog();
         Ok(())
     }
     pub fn fixed_speculative_width(&mut self, width: Option<usize>) -> Result<()> {
@@ -319,6 +324,27 @@ impl RequestScheduler {
             );
         }
         self.speculative_fixed_width = width;
+        self.refresh_speculative_catalog();
+        Ok(())
+    }
+    fn refresh_speculative_catalog(&mut self) {
+        self.speculative_catalog = speculation::graph_catalog(
+            &self.speculative_widths,
+            self.speculative_fixed_width,
+            self.speculative_graph_budget,
+        );
+    }
+    pub fn speculative_graph_budget(&mut self, budget: usize) -> Result<()> {
+        if !(3..=24).contains(&budget)
+            || self.submitted != Fence(0)
+            || self.slots.iter().any(|s| s.request.is_some())
+        {
+            return Err(
+                "speculative graph budget must be in 3..=24 and set before admission".into(),
+            );
+        }
+        self.speculative_graph_budget = budget;
+        self.refresh_speculative_catalog();
         Ok(())
     }
     pub fn proposal_source(&mut self, source: speculation::ProposalSource) -> Result<()> {
@@ -698,39 +724,20 @@ impl RequestScheduler {
             .iter()
             .any(|r| r.grammar_constrained || r.host_stops);
         let width = if kind == GraphKind::Speculative {
-            let mut remaining = selected
-                .iter()
-                .map(|r| self.limits.max_sequence_tokens - r.scheduled_consumed as usize)
-                .min()?
-                .min(8 / selected.len().next_power_of_two());
-            if self.proposal_source == speculation::ProposalSource::Copy {
-                remaining = remaining.min(
-                    selected
-                        .iter()
-                        .map(|r| r.copy_proposal().map_or(1, |p| p.count + 1))
-                        .min()?,
-                );
-            }
-            if selected.iter().any(|r| r.host_stops)
-                || (token_barrier && self.proposal_source == speculation::ProposalSource::Mtp)
-            {
-                1
-            } else if let Some(fixed) = self.speculative_fixed_width {
-                self.speculative_widths
-                    .iter()
-                    .copied()
-                    .rev()
-                    .find(|w| *w <= fixed.min(remaining))?
+            let batch = selected.len().next_power_of_two();
+            let widths = &self.speculative_catalog[batch.trailing_zeros() as usize];
+            if self.speculative_fixed_width.is_some() {
+                *widths.last()?
             } else {
                 self.controller.choose(
-                    &self.speculative_widths,
-                    selected.len().next_power_of_two(),
+                    widths,
+                    batch,
                     selected
                         .iter()
                         .map(|r| r.scheduled_consumed)
                         .max()
                         .unwrap_or(0),
-                    remaining,
+                    8,
                 )?
             }
         } else {
@@ -749,7 +756,21 @@ impl RequestScheduler {
                         - request.consumed_tokens as usize)
                         .min(self.limits.prefill_chunk_size),
                     GraphKind::Decode => 1,
-                    GraphKind::Speculative => width,
+                    GraphKind::Speculative => {
+                        let remaining =
+                            self.limits.max_sequence_tokens - request.scheduled_consumed as usize;
+                        let limit = if request.host_stops
+                            || (request.grammar_constrained
+                                && self.proposal_source == speculation::ProposalSource::Mtp)
+                        {
+                            1
+                        } else if self.proposal_source == speculation::ProposalSource::Copy {
+                            request.copy_proposal().map_or(1, |p| p.count + 1)
+                        } else {
+                            width
+                        };
+                        width.min(remaining).min(limit)
+                    }
                     _ => 0,
                 },
             })

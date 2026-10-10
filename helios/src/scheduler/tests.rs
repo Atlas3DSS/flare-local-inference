@@ -205,7 +205,8 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
 
 #[test]
 fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents() {
-    for (chunk_size, tail, tail_capacity) in [(4096, 17, 128), (3072, 2050, 3072), (8192, 513, 1024)]
+    for (chunk_size, tail, tail_capacity) in
+        [(4096, 17, 128), (3072, 2050, 3072), (8192, 513, 1024)]
     {
         let mut scheduler = RequestScheduler::new(
             [9; 32],
@@ -964,17 +965,19 @@ fn speculative_bad_vector_is_transactional_and_cancel_waits_for_round_fence() {
     assert_eq!(next.generation, h.generation + 1);
 }
 #[test]
-fn grammar_and_host_stops_force_one_token_and_one_outstanding_round() {
+fn fixed_graph_masks_grammar_and_host_stops_to_one_token() {
     for grammar in [false, true] {
         let (mut s, h) = speculative_scheduler(65, 32);
+        s.speculative_fixed_width = Some(8);
         s.request_mut(h).unwrap().grammar_constrained = grammar;
         s.request_mut(h).unwrap().host_stops = !grammar;
         let step = s.next_step().unwrap();
-        assert_eq!(step.token_capacity, 1);
+        assert_eq!(step.token_capacity, 8);
+        assert_eq!(step.lanes[0].tokens, 1);
         assert!(step.grammar_constrained);
         s.record_submission(&step, Fence(4)).unwrap();
         assert!(s.next_step().is_none());
-        s.complete(Fence(4), &vector_records(h, 4, 66, 2, &[10], 1, 1))
+        s.complete(Fence(4), &vector_records(h, 4, 66, 2, &[10], 8, 1))
             .unwrap();
         assert!(s.next_step().is_some());
     }
@@ -1042,7 +1045,7 @@ fn draft_boundary_page_remains_private_across_published_prefix_branches() {
 }
 
 #[test]
-fn fixed_width_shrinks_at_context_end_and_never_at_remaining_output_budget() {
+fn fixed_width_masks_context_end_without_changing_graph_capacity() {
     let mut scheduler = scheduler(1, 16, 4);
     scheduler.limits.max_sequence_tokens = 128;
     scheduler.enable_speculation(&[1, 2, 4, 8]).unwrap();
@@ -1056,12 +1059,13 @@ fn fixed_width_shrinks_at_context_end_and_never_at_remaining_output_budget() {
         .unwrap();
     retain_prompt(&mut scheduler, 3);
     let first = scheduler.next_step().unwrap();
-    assert_eq!(first.token_capacity, 2);
+    assert_eq!(first.token_capacity, 8);
+    assert_eq!(first.lanes[0].tokens, 3);
     scheduler.record_submission(&first, Fence(4)).unwrap();
     assert_eq!(scheduler.request(h).unwrap().pages().count(), 3);
     assert!(scheduler.next_step().is_none());
     scheduler
-        .complete(Fence(4), &vector_records(h, 4, 127, 3, &[10, 11], 2, 2))
+        .complete(Fence(4), &vector_records(h, 4, 127, 3, &[10, 11], 8, 2))
         .unwrap();
     freeze(&mut scheduler, h, 5);
     scheduler.finish(h).unwrap();
@@ -1084,7 +1088,7 @@ fn bad_intermediate_vector_token_does_not_partially_commit() {
 }
 
 #[test]
-fn speculative_fixed_and_adaptive_catalogs_stay_within_eight_total_rows() {
+fn fixed_and_adaptive_widths_are_independent_of_batch_capacity() {
     for active in [1, 2, 3, 4] {
         let mut s = scheduler(active, 64, 8);
         let widths = (1..=8).collect::<Vec<_>>();
@@ -1106,23 +1110,20 @@ fn speculative_fixed_and_adaptive_catalogs_stay_within_eight_total_rows() {
         }
         let step = s.next_step().unwrap();
         let batch = active.next_power_of_two();
-        let width = 7.min(8 / batch);
+        let width = 7;
         assert_eq!((step.batch_capacity, step.token_capacity), (batch, width));
         assert!(step.grammar_constrained);
         s.speculative_fixed_width = None;
+        s.refresh_speculative_catalog();
         s.controller = Default::default();
-        for w in 1..=8 / batch {
+        for w in 1..=8 {
             assert_eq!(s.next_step().unwrap().token_capacity, w);
             s.controller
                 .observe(batch, 65, w, 1000, w * active)
                 .unwrap();
         }
-        assert_eq!(s.next_step().unwrap().token_capacity, 8 / batch);
-        assert!(
-            s.controller
-                .observe(batch, 65, 8 / batch + 1, 1000, 1)
-                .is_err()
-        );
+        assert_eq!(s.next_step().unwrap().token_capacity, 8);
+        s.controller.observe(batch, 65, 7, 1000, 1).unwrap();
     }
 }
 
@@ -1144,9 +1145,9 @@ fn copied(consumed: u64, count: usize, grammar: bool) -> speculation::CopyPropos
 }
 
 #[test]
-fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() {
+fn fixed_copy_graph_masks_each_available_chain_independently() {
     for (available, grammar, expected) in
-        [(0, false, 1), (2, false, 3), (7, false, 4), (2, true, 3)]
+        [(0, false, 1), (2, false, 3), (7, false, 8), (2, true, 3)]
     {
         let mut s = scheduler(2, 32, 4);
         s.enable_speculation(&speculation::WIDTHS).unwrap();
@@ -1173,12 +1174,14 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
             .unwrap();
         s.set_copy_proposal(b, copied(65, 7, false)).unwrap();
         let step = s.next_step().unwrap();
-        assert_eq!((step.batch_capacity, step.token_capacity), (2, expected));
+        assert_eq!((step.batch_capacity, step.token_capacity), (2, 8));
+        assert_eq!(step.lanes[0].tokens, expected);
+        assert_eq!(step.lanes[1].tokens, 8);
         assert!(step.grammar_constrained);
         s.record_submission(&step, Fence(6)).unwrap();
         assert!(s.next_step().is_none());
-        let mut complete = vector_records(a, 6, 66, 2, &[40], expected as i64, 1);
-        let other = vector_records(b, 6, 66, 2, &[41], expected as i64, 1);
+        let mut complete = vector_records(a, 6, 66, 2, &[40], 8, 1);
+        let other = vector_records(b, 6, 66, 2, &[41], 8, 1);
         complete[b.slot as usize] = other[b.slot as usize];
         for h in [a, b] {
             complete[h.slot as usize]
@@ -1190,7 +1193,8 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
         let events = s.complete(Fence(6), &complete).unwrap();
         assert_eq!(events.len(), 2);
         assert!(s.request(a).unwrap().copy_proposal().is_none());
-        assert_eq!(s.next_step().unwrap().token_capacity, 1);
+        assert_eq!(s.next_step().unwrap().token_capacity, 8);
+        assert_eq!(s.next_step().unwrap().lanes[0].tokens, 1);
         assert!(s.set_copy_proposal(a, copied(65, 7, grammar)).is_err());
         s.cancel(a).unwrap();
         s.cancel(b).unwrap();
@@ -1199,7 +1203,7 @@ fn copy_width_is_limited_by_every_legal_chain_and_recomputed_after_completion() 
 }
 
 #[test]
-fn copy_source_uses_no_draft_page_and_host_stops_stay_width_one() {
+fn copy_source_uses_no_draft_page_and_fixed_graph_masks_host_stops() {
     let mut s = scheduler(1, 2, 2);
     s.limits.max_sequence_tokens = 128;
     s.enable_speculation(&speculation::WIDTHS).unwrap();
@@ -1217,7 +1221,8 @@ fn copy_source_uses_no_draft_page_and_host_stops_stay_width_one() {
     assert_eq!(s.request(h).unwrap().pages().count(), 1);
     assert!(s.set_copy_proposal(h, copied(64, 1, false)).is_err());
     s.set_copy_proposal(h, copied(64, 0, false)).unwrap();
-    assert_eq!(s.next_step().unwrap().token_capacity, 1);
+    assert_eq!(s.next_step().unwrap().token_capacity, 8);
+    assert_eq!(s.next_step().unwrap().lanes[0].tokens, 1);
     s.cancel(h).unwrap();
     assert_eq!(s.free_page_count(), 1);
     // MTP requires a private draft page in addition to these two target pages.
@@ -1295,5 +1300,56 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         },
     ] {
         assert!(RequestScheduler::new([1; 32], limits, bad).is_err());
+    }
+}
+
+#[test]
+fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
+    use speculation::graph_catalog;
+    assert_eq!(
+        graph_catalog(&[1, 2, 3, 4], None, 4),
+        [vec![3, 4], vec![1], vec![1]]
+    );
+    assert_eq!(
+        graph_catalog(&[1, 2, 3, 4], None, 8),
+        [vec![1, 2, 3, 4], vec![2, 3, 4], vec![1]]
+    );
+    assert_eq!(
+        graph_catalog(&[1, 2, 3, 4], Some(4), 4),
+        [vec![4], vec![4], vec![4]]
+    );
+    for active in [1, 2, 3, 4] {
+        let mut s = scheduler(active, 64, 8);
+        s.enable_speculation(&[1, 2, 3, 4]).unwrap();
+        s.speculative_graph_budget(4).unwrap();
+        let handles = (0..active)
+            .map(|_| s.admit(spec(65, 32)).unwrap())
+            .collect::<Vec<_>>();
+        init(&mut s, 1);
+        for (index, h) in handles.iter().enumerate() {
+            s.prefer_prefill = true;
+            let step = s.next_step().unwrap();
+            let fence = 2 + 2 * index as u64;
+            s.record_submission(&step, Fence(fence)).unwrap();
+            s.complete(Fence(fence), &records(*h, fence, 65, 1, 9, 1))
+                .unwrap();
+            retain_prompt(&mut s, fence + 1);
+        }
+        let step = s.next_step().unwrap();
+        assert_eq!(step.token_capacity, if active == 1 { 3 } else { 1 });
+        assert_eq!(step.kind, GraphKind::Speculative);
+        s.record_submission(&step, Fence(12)).unwrap();
+        let mut complete = [CompletionRecord::default(); 4];
+        for h in &handles {
+            complete[h.slot as usize] =
+                vector_records(*h, 12, 66, 2, &[10], step.token_capacity as i64, 1)
+                    [h.slot as usize];
+        }
+        s.complete(Fence(12), &complete).unwrap();
+        for h in handles.iter().skip(1) {
+            s.cancel(*h).unwrap();
+        }
+        assert_eq!(s.next_step().unwrap().token_capacity, 3);
+        assert_eq!(s.request(handles[0]).unwrap().consumed_tokens, 66);
     }
 }

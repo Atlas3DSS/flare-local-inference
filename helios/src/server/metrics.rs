@@ -236,9 +236,6 @@ impl Metrics {
             );
             for (batch, widths) in [1, 2, 4].into_iter().zip(&self.speculative) {
                 for (width, counts) in (1..=8).zip(widths) {
-                    if batch * width > 8 {
-                        continue;
-                    }
                     let value = match metric {
                         "rounds_total" => &counts.rounds,
                         "gpu_nanoseconds_total" => &counts.gpu_ns,
