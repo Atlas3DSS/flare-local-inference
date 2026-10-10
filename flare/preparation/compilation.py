@@ -3,6 +3,7 @@
 import hashlib
 import math
 import operator
+import os
 import pickle
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -121,7 +122,6 @@ class CompiledForward:
 def _compile_module(module, calls, owner):
     from torch._inductor import standalone_compile
     from torch._inductor.codecache import torch_key
-    from torch._inductor.runtime.cache_dir_utils import cache_dir
     from torch._inductor.standalone_compile import CompiledArtifact
 
     graph = module.graph
@@ -155,7 +155,8 @@ def _compile_module(module, calls, owner):
                          tensor.requires_grad, alias))
     key = hashlib.sha256(pickle.dumps((module.code, metadata, _OPTIONS, torch_key(),
         torch.cuda.get_device_capability(), torch.cuda.get_device_name()))).hexdigest()
-    path = Path(cache_dir()) / 'flare' / (key + '.bin')
+    root = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+    path = root / 'flare' / 'compiled' / (key + '.bin')
     cache_hit = path.is_file()
     if cache_hit:
         artifact = CompiledArtifact.load(path=str(path))

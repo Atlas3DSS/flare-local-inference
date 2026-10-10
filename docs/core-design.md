@@ -800,7 +800,9 @@ Prepared b12x operations remain opaque calls; pointwise PyTorch work is visible
 to fusion and autotuning. Compilation preserves shared-storage mutations and
 retains prepared owners until graph teardown. Serialized Inductor callables
 receive persistent tensors as runtime inputs; native call indices refer to each
-forward's retained invocation table. The cache stores compiled code without
+forward's retained invocation table. Compiled forwards reside under
+`$XDG_CACHE_HOME/flare/compiled`, defaulting to `~/.cache/flare/compiled`.
+The cache stores compiled code without
 checkpoint payloads or process-local kernel handles. Cache misses autotune with
 the bound buffers before capture and serialization. Tests can set
 `compile_decoder=False` to capture the same prepared operations without Inductor.

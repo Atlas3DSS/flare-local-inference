@@ -76,12 +76,11 @@ def main(argv=None):
     else:
         parser.error(f"unsupported checkpoint model_type {architecture!r}")
     with model:
-        report = json.dumps(model.memory_report, indent=2) + "\n"
         if args.memory_report is not None:
-            args.memory_report.write_text(report)
-        print(report, file=sys.stderr, end="", flush=True)
+            args.memory_report.write_text(json.dumps(model.memory_report, indent=2) + "\n")
         if args.prepare_only:
             model.manifest()
+            progress("preparation complete")
             return 0
         server = model.start_server(bind=args.bind, template_defaults=defaults)
         print(f"Listening on {server.address}; startup {monotonic() - started:.2f}s", file=sys.stderr, flush=True)

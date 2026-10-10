@@ -147,6 +147,7 @@ def _fake_fill_output(out, value):
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
 def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))
 
     def prepare(value):
@@ -175,7 +176,7 @@ def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatc
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 def test_compilation_cache_survives_process_restart(tmp_path, monkeypatch):
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     program = '''
 import sys
 from unittest.mock import patch
@@ -211,7 +212,8 @@ with torch.no_grad():
     torch.testing.assert_close(output, torch.full_like(output, 14. if warm else 6.), rtol=0, atol=0)
 '''
     for mode in ("cold", "warm"):
-        subprocess.run([sys.executable, "-c", program, mode], check=True)
+        environment = dict(os.environ, TORCHINDUCTOR_CACHE_DIR=str(tmp_path / (mode + "-inductor")))
+        subprocess.run([sys.executable, "-c", program, mode], env=environment, check=True)
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
