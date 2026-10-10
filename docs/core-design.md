@@ -730,8 +730,9 @@ RTX PRO 6000, preparation defaults to eight compiler workers;
 
 Qwen declares attention against bounded cache capacities and temporary page
 pools. Its selected plans support replacement page pools with the same layout.
-Bootstrap measures graph memory before allocating the final pools, rebinds
-attention to those pools, and captures the serving graphs. GLM's configured
+Bootstrap measures graph memory with uncompiled captures before allocating the
+final pools, rebinds attention to those pools, then compiles and captures the
+serving graphs. GLM's configured
 page pools are allocated before its cache-state batch.
 
 Searchable operations use deterministic finite fixtures with active metadata at
@@ -790,7 +791,11 @@ Startup compiles complete text forwards with Inductor before capture, including
 prefill absorption, ordinary decode, resume sampling, and speculative rounds.
 Prepared b12x operations remain opaque calls; pointwise PyTorch work is visible
 to fusion and autotuning. Compilation preserves shared-storage mutations and
-retains prepared owners until graph teardown. Qualification callers can set
+retains prepared owners until graph teardown. Serialized Inductor callables
+receive persistent tensors as runtime inputs; native call indices refer to each
+forward's retained invocation table. The cache stores compiled code without
+checkpoint payloads or process-local kernel handles. Cache misses autotune with
+the bound buffers before capture and serialization. Tests can set
 `compile_decoder=False` to capture the same prepared operations without Inductor.
 Serving never executes either Python forward after native handoff.
 
@@ -856,12 +861,12 @@ Preparation proceeds in a fixed order:
    freeze its retained extent, and refresh selected bindings and aliases.
    Release trial owners, restore borrowed state, synchronize, and release
    unused allocator cache. Retain the trimmed arena for graph execution.
-6. Warm and capture the complete catalog to measure graph memory, then size the
+6. Warm and capture the uncompiled catalog to measure graph memory, then size the
    KV pools while preserving configured GPU headroom. Check actual allocator
    consumption before rebinding. If automatic sizing consumes headroom, fence
    and release the unbound pools, reduce their capacity using the measured
    deficit, and allocate again. An explicit capacity that cannot fit fails.
-7. Rebind final KV storage, discard the sizing graphs, warm and capture the final
+7. Rebind final KV storage, discard the sizing graphs, compile, warm and capture the final
    forward, sampling, vision, and state-maintenance graphs, and freeze preparation.
 8. Validate catalog and frontend assets before native startup. Replay qualification
    checks changed inputs, allocation stability, and exclusive ownership separately.
