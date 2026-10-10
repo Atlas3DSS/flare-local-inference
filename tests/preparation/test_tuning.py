@@ -112,7 +112,11 @@ def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_si
         device=torch.device("cpu")),))
     plan = SimpleNamespace(component_id=component, bytes=size, source=source, selection=None,
         memory_requirements=lambda: requirement,
-        contract=SimpleNamespace(config_payload=lambda config: FrozenMapping(config)))
+        query=size, invocation=FrozenMapping(), override=None, _device=None,
+        contract=SimpleNamespace(component_id=component, query_schema_version=1,
+            config_schema_version=1, semantic_version=1, candidate_contract_version=1,
+            encode_query=lambda query: {"size": query},
+            config_payload=lambda config: FrozenMapping(config)))
     return SimpleNamespace(name=name, plan=plan, prepare_call=prepare, collective=None,
                            benchmark_call=benchmark, retain_benchmark_call=False)
 
@@ -580,6 +584,26 @@ def test_parallel_workspace_peak_is_reserved_then_trimmed_without_summing_serial
     assert one.eq(7).all() and two.eq(11).all()
     with pytest.raises(RuntimeError, match="frozen"):
         arena.register_parallel(main, auxiliary)
+
+
+def test_parallel_candidate_envelope_bounds_all_equivalent_bindings_once(backend):
+    events, _ = backend
+    session = make_session(device=0, checkpoint="revision")
+    arena = ScratchArena("cpu")
+    session.register_scratch(arena)
+    requests = [declaration("a", size=300), declaration("b", size=700),
+                declaration("c", size=100)]
+    for request in requests[:2]:
+        request.plan.query = "same workload"
+    session.declare(requests)
+    a, b, c = (request.plan for request in requests)
+    arena.register_parallel(a, c)
+    arena.register_parallel(b, c)
+    report = session.tune()["scratch_arena"]
+    assert report["parallel_candidate_scratch_bytes"] == 1024
+    assert events.count(("envelope", ("a", "b"))) == 1
+    assert ("envelope", ("a",)) not in events
+    assert ("envelope", ("b",)) not in events
 
 
 def test_default_storage_released_after_alias_rebind_and_trial_cleanup_before_report(backend, monkeypatch):

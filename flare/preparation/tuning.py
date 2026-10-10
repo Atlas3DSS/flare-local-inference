@@ -10,6 +10,7 @@ from threading import get_ident
 
 import torch
 from b12x.preparation import MemoryRequirements, PreparationDisplay, PreparationSession
+from b12x.preparation.session import _declaration_key
 
 from .scratch import ScratchArena
 
@@ -135,9 +136,20 @@ class RecordedPreparationSession(PreparationSession):
             return {}
         arena = self._scratch_arena
         envelope = self.candidate_memory_envelope(requests)
-        by_plan = {id(request.plan): request for request in requests}
-        parallel = arena.parallel_nbytes(lambda plan:
-            self.candidate_memory_envelope((by_plan[id(plan)],)).scratch_nbytes)
+        groups, keys, sizes = {}, {}, {}
+        for request in requests:
+            key = _declaration_key(request.plan)
+            keys[id(request.plan)] = key
+            groups.setdefault(key, []).append(request)
+
+        def scratch_bytes(plan):
+            key = keys[id(plan)]
+            if key not in sizes:
+                # Bound every binding in the group while enumerating configs once.
+                sizes[key] = self.candidate_memory_envelope(groups[key]).scratch_nbytes
+            return sizes[key]
+
+        parallel = arena.parallel_nbytes(scratch_bytes)
         before = arena.nbytes
         required = max(envelope.scratch_nbytes, parallel)
         arena.reserve(required)
