@@ -86,34 +86,34 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--corpus', type=Path, required=True)
-    parser.add_argument('--sparkgap', type=Path, required=True)
+    parser.add_argument('--flare', type=Path, required=True)
     parser.add_argument('--vllm', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
         parser.error('output already exists')
     corpus = load_corpus(args.corpus)
-    actual, actual_receipt = load_observations(args.sparkgap, repetitions=1)
+    actual, actual_receipt = load_observations(args.flare, repetitions=1)
     reference, reference_receipt = load_observations(args.vllm, repetitions=2)
-    for path, receipt in ((args.sparkgap, actual_receipt), (args.vllm, reference_receipt)):
+    for path, receipt in ((args.flare, actual_receipt), (args.vllm, reference_receipt)):
         captured = load_corpus(path.parent / 'corpus.json', expected_sha256=receipt['corpus']['sha256'])
         if captured != corpus:
             raise ValueError('captured corpus differs from comparison corpus')
     pairs = {'vllm_repeat': compare_cases(corpus['prompts'], reference[1], reference[0]),
-             'sparkgap_vs_vllm_0': compare_cases(corpus['prompts'], actual[0], reference[0]),
-             'sparkgap_vs_vllm_1': compare_cases(corpus['prompts'], actual[0], reference[1])}
+             'flare_vs_vllm_0': compare_cases(corpus['prompts'], actual[0], reference[0]),
+             'flare_vs_vllm_1': compare_cases(corpus['prompts'], actual[0], reference[1])}
     floor = pairs['vllm_repeat']['summary']
     measurements = ('median_agreement_length', 'full_64_token_agreement_fraction')
     write_json(args.output, {'schema_version': 1, 'corpus': file_record(args.corpus),
         'sources': {name: {'observations': file_record(path), 'capture': file_record(path.parent / 'capture.json')}
-                    for name, path in (('sparkgap', args.sparkgap), ('vllm', args.vllm))},
+                    for name, path in (('flare', args.flare), ('vllm', args.vllm))},
         'metric': 'Number of identical leading raw generated token IDs, from 0 through 64; larger is better.',
         'eos_policy': 'Exactly 64 generated tokens, including tokens produced after EOS; no teacher forcing.',
         'pairs': pairs,
         'observed_reference_floor': {name: floor[name] for name in measurements},
         'at_least_observed_reference_agreement': {
             pair: {name: pairs[pair]['summary'][name] >= floor[name] for name in measurements}
-            for pair in ('sparkgap_vs_vllm_0', 'sparkgap_vs_vllm_1')},
+            for pair in ('flare_vs_vllm_0', 'flare_vs_vllm_1')},
         'scope': 'Fixed prompt continuation agreement. Reference floor comes from two cold requests per prompt; task success is not measured.'})
 
 

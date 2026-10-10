@@ -203,7 +203,7 @@ impl<M: ModelContract> ModelRuntime<M> {
         let metrics = Arc::new(super::metrics::Metrics::default());
         let worker_metrics = metrics.clone();
         let thread = thread::Builder::new()
-            .name("sparkgap-model".into())
+            .name("flare-model".into())
             .spawn(move || {
                 // SAFETY: start's caller retains all prepared resources through
                 // confirmed drain. This thread exclusively owns the executor;
@@ -1261,7 +1261,7 @@ mod tests {
         assert!(
             metrics
                 .render()
-                .contains("sparkgap_mixed_grammar_decode_steps_total 0\n")
+                .contains("flare_mixed_grammar_decode_steps_total 0\n")
         );
 
         assert_eq!(
@@ -1274,7 +1274,7 @@ mod tests {
         assert!(
             metrics
                 .render()
-                .contains("sparkgap_mixed_grammar_decode_steps_total 1\n")
+                .contains("flare_mixed_grammar_decode_steps_total 1\n")
         );
         assert_eq!(
             submit(&mut scheduler, &metrics, 6, 1).kind,
@@ -1286,9 +1286,9 @@ mod tests {
         assert_eq!(unconstrained.lanes.len(), 2);
         assert!(!unconstrained.grammar_constrained);
         let text = metrics.render();
-        assert!(text.contains("sparkgap_mixed_grammar_decode_steps_total 1\n"));
-        assert!(text.contains("sparkgap_constrained_max_inflight 1\n"));
-        assert!(text.contains("sparkgap_graph_launches_total{kind=\"decode\"} 3\n"));
+        assert!(text.contains("flare_mixed_grammar_decode_steps_total 1\n"));
+        assert!(text.contains("flare_constrained_max_inflight 1\n"));
+        assert!(text.contains("flare_graph_launches_total{kind=\"decode\"} 3\n"));
     }
 
     fn stream(capacity: usize) -> (Incoming<Qwen4Exp>, Generation) {

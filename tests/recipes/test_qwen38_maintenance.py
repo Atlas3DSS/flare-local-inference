@@ -6,11 +6,11 @@ import os
 import pytest
 import torch
 
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.recipes.qwen38.attention import QSAState
-from sparkgap.recipes.qwen38.maintenance import PreparedMaintenance
-from sparkgap.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState, RequestAdmission
-from sparkgap.recipes.qwen38.state import HybridStatePool, StateTransferMetadata
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.recipes.qwen38.attention import QSAState
+from flare.recipes.qwen38.maintenance import PreparedMaintenance
+from flare.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState, RequestAdmission
+from flare.recipes.qwen38.state import HybridStatePool, StateTransferMetadata
 
 
 def test_maintenance_rejects_unknown_operation_before_allocation():
@@ -18,8 +18,8 @@ def test_maintenance_rejects_unknown_operation_before_allocation():
         PreparedMaintenance("copy-anywhere", None, None, None, None, None, None)
 
 
-CUDA = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires SPARKGAP_RUN_CUDA_TESTS=1 and explicitly assigned CUDA_VISIBLE_DEVICES")
+CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires FLARE_RUN_CUDA_TESTS=1 and explicitly assigned CUDA_VISIBLE_DEVICES")
 
 
 @pytest.fixture(scope="module")

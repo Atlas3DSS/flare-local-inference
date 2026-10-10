@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from qualify import graph_execution
-from sparkgap.recipes.qwen38.state import EOS_TOKEN_ID
+from flare.recipes.qwen38.state import EOS_TOKEN_ID
 
 
 @pytest.mark.parametrize("corruption", [None, "state", "null_history", "history"])

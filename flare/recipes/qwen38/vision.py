@@ -11,9 +11,9 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpVisionRotaryEmbedding, apply_rotary_pos_emb_vision,
 )
 
-from sparkgap.preparation.fixtures import varlen_attention as attention_fixtures
-from sparkgap.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from sparkgap.preparation.tuning import register_finalizer
+from flare.preparation.fixtures import varlen_attention as attention_fixtures
+from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
+from flare.preparation.tuning import register_finalizer
 
 from .linear import BF16Projection, QuantizedProjection
 

@@ -1,6 +1,6 @@
 # Corrections, second set: MTP design and remaining items
 
-This document lists required changes to the Sparkgap serving stack,
+This document lists required changes to the Flare serving stack,
 [the core design](core-design.md), and [the MTP design](mtp-design.md), based
 on the repository state on 2026-10-09 after the serving-path oracle, the
 performance measurements, the FlashInfer editable migration, the package
@@ -18,7 +18,7 @@ condition under which the item is closed.
 | 3.1 Performance measurement set | [serving-performance.md](validation/serving-performance.md); the result amends section 3 below |
 | 4.3 FlashInfer as editable install | `pyproject.toml` points at `../flashinfer` with `editable = true`; `patches/` and `.build-sources` removed; the clone and patches are archived under `/data/sparkgap-artifacts/flashinfer-source-migration`. One step remains, item 4.3 below |
 | 6.1 Superseded serving stack | `serve/engine`, `serve/model`, `serve/cache`, `serve/kernels`, `serve/api`, `serve/tp`, `serve/cli.py`, `serve/logging.py`, `tests/serve` removed |
-| 6.7 Package rename | The Python package is `sparkgap` |
+| 6.7 Package rename | The Python package is `flare` |
 | 6.9 README test command | `cargo test --features server --offline` |
 
 ## 1. MTP design
@@ -163,20 +163,20 @@ later state-representation extension.
 
 ### 2.1 Replace logit relative L2 as an acceptance metric
 
-**Current state.** The serving-path oracle measured Sparkgap against vLLM at
+**Current state.** The serving-path oracle measured Flare against vLLM at
 17.7 to 22.4 percent logit relative L2 with all argmaxes agreeing. Two identical
 requests to one vLLM engine differ from each other by 19 to 24 percent, with one
 argmax flipping on a tie. The first divergence between the two vLLM runs is the
 layer-0 MoE output, where vLLM's selected MoE plan accumulates in BF16 with
 atomic, arrival-ordered additions; a 0.3 percent layer-0 residual difference
 grows to 20 percent at the logits through 48 layers and four residual streams.
-Sparkgap versus vLLM first differs at the layer-0 hyperconnection norm at 0.02 to
-0.06 percent, because Sparkgap keeps the checkpoint's FP32 norm weights and vLLM
-loads them as BF16. Sparkgap's selected paths use deterministic reductions.
+Flare versus vLLM first differs at the layer-0 hyperconnection norm at 0.02 to
+0.06 percent, because Flare keeps the checkpoint's FP32 norm weights and vLLM
+loads them as BF16. Flare's selected paths use deterministic reductions.
 The 0.015 GDN limit remains in `tests/recipes/test_qwen38_gdn.py`.
 
-**Conclusion.** The reference's own variance floor exceeds the Sparkgap-to-vLLM
-gap, so there is no evidence of a Sparkgap defect. Logit relative L2 is not a
+**Conclusion.** The reference's own variance floor exceeds the Flare-to-vLLM
+gap, so there is no evidence of a Flare defect. Logit relative L2 is not a
 usable acceptance metric for this model because it amplifies sub-percent
 perturbations chaotically; the relative bound in the first corrections
 document is unsatisfiable by construction.
@@ -212,7 +212,7 @@ vLLM path does not have this property on this model.
 
 **Current state.** At the 4,096-token prefill limit, greedy, no speculation:
 
-| Measurement | Sparkgap | vLLM |
+| Measurement | Flare | vLLM |
 |---|---:|---:|
 | Decode tok/s at concurrency 1 / 2 / 4 | 78 / 128 / 201 | 111 / 197 / 353 |
 | Core inter-token latency median at 1 / 2 / 4, ms | 12.8 / 15.2 / 18.5 | 9.0 / 10.1 / 11.4 |
@@ -248,9 +248,9 @@ states the kernel count per decode graph.
 
 ### 3.3 Lift the determinism pins against the timeline
 
-**Current state.** `sparkgap/recipes/qwen38/gdn.py:547` pins
-`recurrence_policy="sequential_k1"`, `sparkgap/recipes/qwen38/attention.py:184`
-pins `attention_splits=16`, and `sparkgap/preparation/tuning.py` records both
+**Current state.** `flare/recipes/qwen38/gdn.py:547` pins
+`recurrence_policy="sequential_k1"`, `flare/recipes/qwen38/attention.py:184`
+pins `attention_splits=16`, and `flare/preparation/tuning.py` records both
 as fixed policy. The cross-capacity prefix gate still requires bitwise
 equality.
 
@@ -302,7 +302,7 @@ checkout, but `~/projects/flashinfer` is dirty at
 upstream revision.
 
 **Required change.** Commit the checkout's changes on a branch, update the pin
-in `[tool.sparkgap.source-revisions]`, and submit the `air_top_p` change
+in `[tool.flare.source-revisions]`, and submit the `air_top_p` change
 upstream separately.
 
 **Acceptance.** Setup passes on a clean checkout at the pinned SHA.
@@ -405,11 +405,11 @@ script to an entrypoint. Start with `qualify_server.py` and
 
 - Add `SAFETY` comments to the `unsafe` blocks outside `native/src/cuda.rs`.
 - Return resolved bindings from `validate_uploads` in `execution/transport.rs`.
-- Replace the `SPARKGAP_GRAMMAR_TRACE` environment switch with a debug
+- Replace the `FLARE_GRAMMAR_TRACE` environment switch with a debug
   configuration field.
 - Feature-gate the `ReplayWorker` Python binding as a qualification primitive.
 - Record the scratch, metadata, and state dataclass convention once in
-  `sparkgap/recipes/qwen38/__init__.py`.
+  `flare/recipes/qwen38/__init__.py`.
 
 ## 7. Corresponding document edits
 

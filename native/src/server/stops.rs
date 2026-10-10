@@ -250,7 +250,7 @@ pub(super) mod string_tests {
     pub(crate) fn frontend() -> Frontend {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "sparkgap-stop-tokenizer-{}-{}",
+            "flare-stop-tokenizer-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));

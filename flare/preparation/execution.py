@@ -94,13 +94,13 @@ class PreparedExecution(PreparedGraphBundle):
     def start_executor(self):
         """Synchronize preparation and consume the bundle into the native executor."""
         import torch
-        import sparkgap_native
+        import flare_native
 
         with self._handoff_lock:
             if self._consumed:
                 raise RuntimeError("graph bundle has already been consumed by a native worker")
             manifest = self.manifest()
             torch.cuda.synchronize(self.device)
-            executor = sparkgap_native.GraphExecutor(self, manifest)
+            executor = flare_native.GraphExecutor(self, manifest)
             self._consumed = True
             return executor

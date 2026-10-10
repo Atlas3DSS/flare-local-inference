@@ -1,6 +1,6 @@
-# Sparkgap
+# Flare
 
-Sparkgap prepares Transformers models with FlashInfer kernels, including b12x,
+Flare prepares Transformers models with FlashInfer kernels, including b12x,
 in Python, then transfers captured CUDA graphs and their resource owners to a
 Rust serving core. The execution contract targets NVIDIA SM120/121. See [the core design](docs/core-design.md)
 for model, cache, runtime, and acceptance requirements.
@@ -29,7 +29,7 @@ python scripts/setup_preparation.py
 
 The setup script requires `uv`, Rust, and the sibling `../flashinfer` Git
 checkout. FlashInfer is installed editable from that checkout. Setup requires
-its HEAD to match `[tool.sparkgap.source-revisions].flashinfer` in `pyproject.toml`
+its HEAD to match `[tool.flare.source-revisions].flashinfer` in `pyproject.toml`
 and rejects tracked, staged, or untracked worktree changes. It prints the verified
 checkout path, HEAD, and clean status before installing locked dependencies;
 it never clones, checks out, or applies patches to FlashInfer.
@@ -43,12 +43,12 @@ Historical patch and staged-source evidence is preserved in the
 
 Set `CUDA_HOME` to the toolkit root when it is not `/usr/local/cuda`; this host
 uses `CUDA_HOME=/opt/cuda`. GPU qualification commands require an explicit
-`CUDA_VISIBLE_DEVICES` assignment and `SPARKGAP_RUN_CUDA_TESTS=1`.
+`CUDA_VISIBLE_DEVICES` assignment and `FLARE_RUN_CUDA_TESTS=1`.
 
 Inspect a local checkpoint without initializing CUDA or reading tensor payloads:
 
 ```sh
-.venv/bin/sparkgap-inspect /path/to/checkpoint/snapshot
+.venv/bin/flare-inspect /path/to/checkpoint/snapshot
 ```
 
 Inspection checks the safetensors index and every tensor's name, shape, dtype,
@@ -63,7 +63,7 @@ Tensor transfer belongs to `b12x.loader.DirectWeightSession`; the manifest's
 
 ## Native handoff
 
-`sparkgap.preparation.graphs.PreparedGraphBundle` retains named instantiated graphs,
+`flare.preparation.graphs.PreparedGraphBundle` retains named instantiated graphs,
 persistent CUDA buffers, and additional owners such as modules, mapped memory,
 and streams. Its raw `start_worker()` helper is restricted to native builds with
 the `qualification` Cargo feature. Production hands the prepared model to
@@ -74,7 +74,7 @@ device RNG state. After handoff, graph re-instantiation, storage resizing, and
 concurrent external buffer mutation are forbidden. Values surviving graph
 boundaries require persistent storage outside recycled graph scratch.
 
-`sparkgap.preparation.execution.PreparedExecution` adds typed graph I/O and the
+`flare.preparation.execution.PreparedExecution` adds typed graph I/O and the
 native execution manifest. Its executor uses two pinned input/completion frames,
 a serialized compute stream, and an event-ordered copy stream. Grammar-constrained
 work allows one submission in flight. Both streams must drain before resource
@@ -89,7 +89,7 @@ cargo test --manifest-path native/Cargo.toml --features server --offline
 ```
 
 Exact-checkpoint tests use the local Hugging Face cache. The checkpoint validator
-also accepts `SPARKGAP_QWEN38_SNAPSHOT` for an explicitly selected snapshot path.
+also accepts `FLARE_QWEN38_SNAPSHOT` for an explicitly selected snapshot path.
 Missing cached weights cause those integration cases to skip.
 
 CUDA component tests using `PreparedGraphBundle.start_worker()` require a native
@@ -109,7 +109,7 @@ Use the locked environment and an explicitly assigned SM120/121 GPU:
 
 ```sh
 CUDA_VISIBLE_DEVICES=<GPU-UUID> CUDA_HOME=/opt/cuda \
-  .venv/bin/sparkgap --bind 127.0.0.1:8000 --memory-report /tmp/sparkgap-memory.json
+  .venv/bin/flare --bind 127.0.0.1:8000 --memory-report /tmp/flare-memory.json
 ```
 
 The default snapshot is the pinned Qwen3.8 model in the Hugging Face cache;

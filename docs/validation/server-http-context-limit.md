@@ -1,6 +1,6 @@
 # Full-context execution qualification
 
-The native Sparkgap server passed **18/18 checks** at its configured **262,144-token context limit** using the exact Qwen3.8 checkpoint. The valid request consumed a 262,136-token prompt and returned eight generated tokens with `finish_reason="length"`; HTTP usage reported 262,144 total tokens. The returned content was `x x x x x x x x`.
+The native Flare server passed **18/18 checks** at its configured **262,144-token context limit** using the exact Qwen3.8 checkpoint. The valid request consumed a 262,136-token prompt and returned eight generated tokens with `finish_reason="length"`; HTTP usage reported 262,144 total tokens. The returned content was `x x x x x x x x`.
 
 The prompt token IDs were generated with the pinned checkpoint tokenizer and chat template, serialized as little-endian uint32, and preserved with the rendered text and request bodies. Their SHA-256 is `baa27f12f1a737bbf0e9a954f538556c05192e001a057704c0be9db8cf7715ac`. The explicit Lark literal requires at least 129 ordinary checkpoint tokens under an exhaustive shortest-segmentation check, preventing EOS before the requested eight-token budget. This tests memory, indexing, and graph execution; repeated-marker input is not a long-context quality test.
 

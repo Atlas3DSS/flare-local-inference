@@ -230,8 +230,8 @@ def execute(args, records, references, receipt):
     if any(line.startswith(GPU) for line in processes.splitlines()):
         raise RuntimeError(f"assigned GPU is occupied before preparation: {processes}")
     import b12x.attention.paged._selected_forward as kernels
-    import sparkgap_native
-    from sparkgap.preparation.graphs import PreparedGraphBundle
+    import flare_native
+    from flare.preparation.graphs import PreparedGraphBundle
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     torch.cuda.set_device(0)
@@ -239,7 +239,7 @@ def execute(args, records, references, receipt):
     receipt["versions"] = {"torch": torch.__version__, "cuda": torch.version.cuda,
         "flashinfer": importlib.metadata.version("flashinfer-python"),
         "cutlass_dsl": importlib.metadata.version("nvidia-cutlass-dsl")}
-    native_path = next(Path(sparkgap_native.__file__).parent.glob("*.so"))
+    native_path = next(Path(flare_native.__file__).parent.glob("*.so"))
     source_root = Path(kernels.__file__).resolve().parents[2]
     receipt["installed_native"] = {"path": str(native_path), "sha256": sha(native_path)}
     receipt["b12x_source_root"] = str(source_root)
@@ -374,7 +374,7 @@ def main():
         parser.error("artifact output directory already contains tensor results")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(__file__, args.artifacts / Path(__file__).name)
-    receipt = {"schema": "sparkgap.qsa-fixed-partitions.v1", "passed": False,
+    receipt = {"schema": "flare.qsa-fixed-partitions.v1", "passed": False,
         "script": {"path": str(Path(__file__).resolve()), "sha256": sha(__file__)},
         "command": sys.argv, "input_artifact": {"path": str(args.artifact), "sha256": ARTIFACT_SHA},
         "reference_artifact": {"path": str(args.reference), "sha256": REFERENCE_SHA},

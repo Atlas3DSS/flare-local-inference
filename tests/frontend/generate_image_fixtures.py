@@ -20,7 +20,7 @@ from transformers.vision_utils import (
     get_vision_position_ids,
 )
 
-from sparkgap.preparation.qwen38 import FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION
+from flare.preparation.qwen38 import FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION
 
 
 TORCH_COMMIT = "cf30153c4c131c8164ee7798e5022d810682e2cb"

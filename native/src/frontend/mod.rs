@@ -415,7 +415,7 @@ mod tests {
 
         let asset = Asset {
             path: std::env::temp_dir()
-                .join(format!("sparkgap-missing-asset-{}", std::process::id()))
+                .join(format!("flare-missing-asset-{}", std::process::id()))
                 .join("tokenizer.json"),
             sha256: "0".repeat(64),
         };
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn verified_asset_rejects_content_changed_after_fingerprinting() {
-        let directory = std::env::temp_dir().join(format!("sparkgap-asset-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("flare-asset-{}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let path = directory.join("tokenizer_config.json");
         let original = b"{\"eos_token\":\"<eos>\"}";

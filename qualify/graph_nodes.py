@@ -121,7 +121,7 @@ class NodeScopes:
             raise RuntimeError('operator scopes are still active')
         nodes = self._nodes()
         unassigned = nodes.keys() - self.assigned.keys()
-        return {'schema': 'sparkgap-capture-node-map-v1', 'pid': os.getpid(),
+        return {'schema': 'flare-capture-node-map-v1', 'pid': os.getpid(),
                 'graph_id': self.graph_id, 'capture_id': self.capture_id,
                 'nodes': [self.assigned[key] for key in sorted(self.assigned)],
                 'calls': self.calls, 'unassigned_node_ids': sorted(unassigned),

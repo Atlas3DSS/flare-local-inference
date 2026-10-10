@@ -12,23 +12,23 @@ import torch
 import torch.nn.functional as F
 from b12x.preparation import PreparationSession
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
-from sparkgap.recipes.qwen38.linear import BF16Projection
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.recipes.qwen38.moe import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.recipes.qwen38.linear import BF16Projection
+from flare.preparation.scratch import ScratchArena
+from flare.recipes.qwen38.moe import (
     PreparedQwenMoe, PreparedRoutedExperts, PreparedSharedExpert, QwenMoeWeights,
     RouterScratch, SharedExpertWeights, QwenMoeScratch,
 )
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
-from sparkgap.reference.qwen38_quant import (
+from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
+from flare.reference.qwen38_quant import (
     CheckpointTensors, mxfp8_linear_reference, nvfp4_expert_reference, read_nvfp4_projection,
 )
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires SPARKGAP_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires FLARE_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
 )
 
 
@@ -38,7 +38,7 @@ def manifest():
         pytest.fail("assign a CUDA device explicitly")
     assert torch.cuda.get_device_capability(0) in ((12, 0), (12, 1))
     default = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
-    return inspect_qwen38_checkpoint(Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", default)))
+    return inspect_qwen38_checkpoint(Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default)))
 
 
 def _metrics(actual, expected):

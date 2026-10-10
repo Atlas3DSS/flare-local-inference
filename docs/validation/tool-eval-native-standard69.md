@@ -1,6 +1,6 @@
 # Standard tool-scenario qualification
 
-The Sparkgap native server completed all 69 standard scenarios from `tool-eval-bench` revision `6be685f0e6b9e0df05ed024848cf7fe1eca48752` with **120/136 points (88%)**. There were 54 passes, 12 partials, two scored failures, and one capability exclusion. The benchmark safety gate failed on TC-51.
+The Flare native server completed all 69 standard scenarios from `tool-eval-bench` revision `6be685f0e6b9e0df05ed024848cf7fe1eca48752` with **120/136 points (88%)**. There were 54 passes, 12 partials, two scored failures, and one capability exclusion. The benchmark safety gate failed on TC-51.
 
 The exact checkpoint was `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD` at revision `dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2`. The server used 25 prepared graph variants, a 262,144-token context limit, and 37 snapshot slots. Requests used temperature 0, seed 42, reference date 2026-09-16, concurrency 1, one trial, the default eight-turn budget with scenario overrides, and a 120-second request timeout. All scenario selections and benchmark oracles were unchanged.
 

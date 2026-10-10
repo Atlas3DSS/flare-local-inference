@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38 import hyperconnection
-from sparkgap.recipes.qwen38.hyperconnection import HyperconnectionScratch
-from sparkgap.preparation.fixtures.hyperconnection import HyperconnectionBenchmarkInputs, benchmark_call
+from flare.recipes.qwen38 import hyperconnection
+from flare.recipes.qwen38.hyperconnection import HyperconnectionScratch
+from flare.preparation.fixtures.hyperconnection import HyperconnectionBenchmarkInputs, benchmark_call
 
 
 def test_benchmark_call_retains_private_operands_gain_and_launch_options():

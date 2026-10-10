@@ -49,9 +49,9 @@ def _hash(tensor):
 class ReplayCase:
     def __init__(self, model):
         import torch
-        from sparkgap.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState
-        from sparkgap.recipes.qwen38.state import HybridStatePool
-        from sparkgap.recipes.qwen38.decoder import PreparedDecoder, DecoderScratch
+        from flare.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState
+        from flare.recipes.qwen38.state import HybridStatePool
+        from flare.recipes.qwen38.decoder import PreparedDecoder, DecoderScratch
 
         self.model = model
         self.state = next(value for value in model.resources if isinstance(value, HybridStatePool))
@@ -107,7 +107,7 @@ class ReplayCase:
 
     def prepare(self, cases):
         import torch
-        from sparkgap.recipes.qwen38.sampling import RequestAdmission
+        from flare.recipes.qwen38.sampling import RequestAdmission
 
         self.batch = len(cases)
         self.state.reset_for_preparation()
@@ -231,11 +231,11 @@ class ReplayCase:
 def measure(model, corpus, output):
     """Compare isolated and queued replay, then retain the model for native serving."""
     import torch
-    from sparkgap.preparation.graphs import PreparedGraphBundle
+    from flare.preparation.graphs import PreparedGraphBundle
 
     output.mkdir(parents=True, exist_ok=False)
     runner = ReplayCase(model)
-    report = {'schema': 'sparkgap-autoregressive-replay-floor-v1',
+    report = {'schema': 'flare-autoregressive-replay-floor-v1',
         'prefill_chunk_size': model.memory_report['prefill_chunk_size'],
         'timing': 'Native enqueue through synchronized completion of 255 decode graph launches; prefill and state readback excluded.',
         'scope': 'Preallocated pages and fixed packed lanes; scheduling, uploads, completion downloads, cache publication and frontend delivery excluded.',

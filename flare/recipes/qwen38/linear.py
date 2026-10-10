@@ -10,9 +10,9 @@ from b12x.gemm import bf16_gemv
 from b12x.gemm import blockscaled
 from b12x.preparation import PreparationSession, PreparedCall
 
-from sparkgap.preparation.scratch import ScratchArena, scratch_storage, prime_owners
-from sparkgap.preparation.tuning import register_finalizer
-from sparkgap.preparation.fixtures import blockscaled_gemm as gemm_fixtures
+from flare.preparation.scratch import ScratchArena, scratch_storage, prime_owners
+from flare.preparation.tuning import register_finalizer
+from flare.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 
 
 class BF16Projection:

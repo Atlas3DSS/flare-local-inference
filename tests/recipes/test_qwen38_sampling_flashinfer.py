@@ -7,16 +7,16 @@ import os
 import pytest
 import torch
 
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.recipes.qwen38.sampling import (
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.recipes.qwen38.sampling import (
     DeviceRequestState, RequestAdmission, PreparedSampling,
     RUNNING, FINISHED, ERROR, INVALID_DISTRIBUTION, DUPLICATE_SLOT,
 )
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires SPARKGAP_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires FLARE_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
 )
 VOCAB = 248320
 

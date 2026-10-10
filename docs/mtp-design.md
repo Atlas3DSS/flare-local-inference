@@ -1,6 +1,6 @@
 # Multi-token prediction and speculative execution
 
-Sparkgap's speculative engine targets the embedded MTP module in
+Flare's speculative engine targets the embedded MTP module in
 `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`, revision
 `dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2`, on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
@@ -42,8 +42,8 @@ The MTP decoder has no GDN or PLE layer. Target verification still executes all
 
 MTP expert preparation must preserve W4A16 arithmetic. The target expert loader
 uses activation-quantized NVFP4 with CSF scales and cannot be applied unchanged.
-The [checkpoint manifest](../sparkgap/preparation/qwen38.py) validates MTP
-headers; the [weight loader](../sparkgap/recipes/qwen38/weights.py) excludes them.
+The [checkpoint manifest](../flare/preparation/qwen38.py) validates MTP
+headers; the [weight loader](../flare/recipes/qwen38/weights.py) excludes them.
 Header validation does not verify tensor payload hashes or model execution.
 
 Pinned Transformers `4cc2aa84301c9aa210b5513dab9fefae03981f6e` ignores `mtp.*`
@@ -180,7 +180,7 @@ one committed recurrent matrix plus compact per-row K/V, normalization and gate
 records. The following round replays accepted updates before evaluating its
 speculative rows. Two sixteen-row record banks across 36 layers occupy about
 27.8 MiB, versus 1.688 GiB for sixteen full recurrent positions. These are
-layout sizes, not measured Sparkgap savings.
+layout sizes, not measured Flare savings.
 
 A Qwen-compatible b12x operation could implement this explicit deferred commit.
 It must reproduce b12x's recurrence arithmetic and materialize all accepted
@@ -316,7 +316,7 @@ to the ordinary single-token counter would reuse random draws.
 Distribution-preserving verification does **not** imply the same tokens for one
 fixed seed as ordinary sampling. TensorFold uses seed/absolute-position/token-ID
 keyed draws and target-match verification to obtain a stronger coupling under
-row-invariant arithmetic. Adopting that sampler would change Sparkgap's random
+row-invariant arithmetic. Adopting that sampler would change Flare's random
 contract; it is not required here. Numerical differences between verification
 widths also remain subject to the measured reference floor, including changes
 in the maximum-logit token near ties.

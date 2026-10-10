@@ -3,9 +3,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.preparation.fixtures import mtp_feedback as feedback_fixtures
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.recipes.qwen38 import mtp, moe
+from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
+from flare.preparation.scratch import ScratchArena
+from flare.recipes.qwen38 import mtp, moe
 
 
 @pytest.mark.parametrize("tokens,rows", [(0, 1), (2, 3), (True, 1), (2, 0)])

@@ -43,16 +43,16 @@ def main():
         if body["temperature"] != 0 or body["max_tokens"] != 1 or body["model"] != fixture["checkpoint"]:
             raise ValueError("fixtures require greedy single-token generation for the declared checkpoint")
         bodies[name] = body
-    extension, = (ROOT / ".venv").glob("lib/python*/site-packages/sparkgap_native/*.so")
+    extension, = (ROOT / ".venv").glob("lib/python*/site-packages/flare_native/*.so")
     maps = Path(f"/proc/{args.server_pid}/maps").read_text()
-    mappings = [line for line in maps.splitlines() if "sparkgap_native" in line and ".so" in line]
+    mappings = [line for line in maps.splitlines() if "flare_native" in line and ".so" in line]
     if not mappings or any(int(line.split()[4]) != extension.stat().st_ino for line in mappings):
         raise ValueError("server native extension mapping differs from the installed file")
     sources = {str(path.relative_to(ROOT)): digest(path)
-        for directory in (ROOT / "native/src", ROOT / "sparkgap/preparation", ROOT / "sparkgap/recipes")
+        for directory in (ROOT / "native/src", ROOT / "flare/preparation", ROOT / "flare/recipes")
         for path in sorted(directory.rglob("*")) if path.suffix in (".rs", ".py")}
     sources.update({name: digest(ROOT / name) for name in (
-        "sparkgap/__main__.py", "scripts/qualify_prefill_capacity.py", "qualify/server.py")})
+        "flare/__main__.py", "scripts/qualify_prefill_capacity.py", "qualify/server.py")})
     args.artifacts.mkdir(parents=True, exist_ok=True)
     (args.artifacts / "server-maps.txt").write_text(maps)
     args.require_metrics, args.cases = True, None
@@ -62,7 +62,7 @@ def main():
         "server_pid": args.server_pid, "native_mappings": mappings,
         "native_extension_sha256": digest(extension), "sources_sha256": sources, "command": sys.argv}
     run = Run(args, provenance)
-    run.receipt["schema"] = "sparkgap-prefill-capacity-qualification-v1"
+    run.receipt["schema"] = "flare-prefill-capacity-qualification-v1"
     run.receipt["limitations"] = [
         "Native counters establish configured chunk counts and restored prefixes; HTTP does not expose device state.",
         "Single-token output equivalence does not establish independent model numerical accuracy.",
@@ -70,7 +70,7 @@ def main():
     ]
 
     def graph(delta, kind):
-        return delta[f'sparkgap_graph_launches_total{{kind="{kind}"}}']
+        return delta[f'flare_graph_launches_total{{kind="{kind}"}}']
 
     def check_window(name, before, after, *, length, cached):
         delta = metric_delta(before, after)
@@ -82,11 +82,11 @@ def main():
             and graph(delta, "init") == int(not cached)
             and graph(delta, "resume") == int(cached and tail == 0)
             and graph(delta, "vision") == 0, delta=delta, expected_prefill=expected_prefill)
-        run.check(name + ".prefix_identity", delta["sparkgap_cache_hits_total"] == int(cached)
-            and delta["sparkgap_cache_reused_tokens_total"] == (boundary if cached else 0), delta=delta)
-        run.check(name + ".completed", delta["sparkgap_requests_admitted_total"] == 1
-            and delta["sparkgap_requests_completed_total"] == 1
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+        run.check(name + ".prefix_identity", delta["flare_cache_hits_total"] == int(cached)
+            and delta["flare_cache_reused_tokens_total"] == (boundary if cached else 0), delta=delta)
+        run.check(name + ".completed", delta["flare_requests_admitted_total"] == 1
+            and delta["flare_requests_completed_total"] == 1
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0,
             delta=delta)
         run.reclaimed(name, before, after)
 

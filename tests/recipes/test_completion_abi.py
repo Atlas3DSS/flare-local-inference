@@ -9,7 +9,7 @@ import sys
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.sampling import _completion_fields
+from flare.recipes.qwen38.sampling import _completion_fields
 
 
 @pytest.mark.parametrize("fields", [8, 24])
@@ -32,7 +32,7 @@ def test_actual_completion_kernels_with_cpu_interpreter(fields):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1", reason="requires an assigned CUDA device")
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires an assigned CUDA device")
 @pytest.mark.parametrize("fields", [8, 24])
 def test_actual_completion_kernels_cuda(fields):
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
@@ -40,12 +40,12 @@ def test_actual_completion_kernels_cuda(fields):
 
 
 def _kernel_cases(fields, device="cpu"):
-    from sparkgap.recipes.qwen38.sampling import (
+    from flare.recipes.qwen38.sampling import (
         DeviceRequestState, AdmissionBuffers, RequestAdmission, _complete, _admission_finish,
     )
-    from sparkgap.recipes.qwen38.maintenance import _snapshot_complete
-    from sparkgap.recipes.qwen38 import vision_state
-    from sparkgap.recipes.qwen38.vision_state import _vision_finish
+    from flare.recipes.qwen38.maintenance import _snapshot_complete
+    from flare.recipes.qwen38 import vision_state
+    from flare.recipes.qwen38.vision_state import _vision_finish
     if os.environ.get("TRITON_INTERPRET") == "1":
         # The interpreter cannot add a global tl.constexpr to its tensor wrapper.
         vision_state._JIT_VISION_ERROR_BASE = vision_state.VISION_ERROR_BASE

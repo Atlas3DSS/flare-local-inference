@@ -66,7 +66,7 @@ def process_identity(args):
     if memory_path != args.memory_report.resolve():
         raise ValueError("server PID memory-report argument differs from the selected report")
     mappings = [line.split(maxsplit=5) for line in (process / "maps").read_text().splitlines()
-                if "sparkgap_native" in line and ".so" in line]
+                if "flare_native" in line and ".so" in line]
     paths = {row[5] for row in mappings}
     if len(paths) != 1:
         raise ValueError("server must map exactly one identifiable native extension")
@@ -223,10 +223,10 @@ def main():
             "sha256": digest(args.artifacts / "canonical-fixture.json"), "content": fixture},
         "script_sha256": digest(Path(__file__)), "http_helper_sha256": digest(ROOT / "qualify/server.py"),
         "native_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "native/src").rglob("*.rs"))},
-        "recipe_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "sparkgap").rglob("*.py"))},
+        "recipe_source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted((ROOT / "flare").rglob("*.py"))},
         "absolute_http_deadline_seconds": args.timeout, "command": sys.argv}
     run = BoundedRun(args, provenance)
-    run.receipt["schema"] = "sparkgap-http-vision-aggregate-v1"
+    run.receipt["schema"] = "flare-http-vision-aggregate-v1"
     run.receipt["limitations"] = [
         "Coordinate-pattern images qualify full-capacity transport and indexing, with no caption-quality oracle.",
         "JSON usage is checked against canonical processor token IDs; native SSE does not expose usage.",
@@ -247,9 +247,9 @@ def main():
         before = run.metrics("aggregate-before")
         run.receipt["idle_before"] = before
         memory = provenance["memory_report"]["content"]
-        run.check("aggregate.idle_capacity", before["sparkgap_free_request_slots"] == 4
-            and before["sparkgap_free_kv_pages"] + before["sparkgap_cached_kv_pages"] == memory["pages"]
-            and before["sparkgap_free_snapshots"] + before["sparkgap_cached_checkpoints"] == memory["snapshot_capacity"])
+        run.check("aggregate.idle_capacity", before["flare_free_request_slots"] == 4
+            and before["flare_free_kv_pages"] + before["flare_cached_kv_pages"] == memory["pages"]
+            and before["flare_free_snapshots"] + before["flare_cached_checkpoints"] == memory["snapshot_capacity"])
         previous = before
         choices = []
         for index, stream in enumerate((False, False, True)):
@@ -273,13 +273,13 @@ def main():
             after = run.metrics(name + "-after")
             delta = metric_delta(previous, after)
             run.receipt.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
-            run.check(name + ".four_full_vision_graphs", delta['sparkgap_graph_launches_total{kind="vision"}'] == 4,
+            run.check(name + ".four_full_vision_graphs", delta['flare_graph_launches_total{kind="vision"}'] == 4,
                 delta=delta, expected_patches_each=16384, expected_feature_offsets=fixture["expected_feature_offsets"])
-            run.check(name + ".completed", delta["sparkgap_requests_admitted_total"] == delta["sparkgap_requests_completed_total"] == 1
-                and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
-            run.check(name + ".cache_path", delta["sparkgap_cache_hits_total"] == int(index > 0)
-                and delta["sparkgap_cache_misses_total"] == int(index == 0)
-                and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(index > 0), delta=delta)
+            run.check(name + ".completed", delta["flare_requests_admitted_total"] == delta["flare_requests_completed_total"] == 1
+                and delta["flare_requests_cancelled_total"] == delta["flare_requests_failed_total"] == 0, delta=delta)
+            run.check(name + ".cache_path", delta["flare_cache_hits_total"] == int(index > 0)
+                and delta["flare_cache_misses_total"] == int(index == 0)
+                and delta['flare_graph_launches_total{kind="restore"}'] == int(index > 0), delta=delta)
             run.reclaimed(name, before, after)
             previous = after
         for index in (1, 2):

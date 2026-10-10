@@ -110,7 +110,7 @@ def load_traces(args):
         elif pair["installed"]["sha256"] != pair["pinned_reference"]["sha256"]:
             raise ValueError(f"routing API/preparation differs from the pinned reference: {relative}")
         library.append(pair)
-    records += [file_record(Path(__file__)), file_record(ROOT / "sparkgap/recipes/qwen38/moe.py"),
+    records += [file_record(Path(__file__)), file_record(ROOT / "flare/recipes/qwen38/moe.py"),
                 file_record(ROOT / "qualify/provenance.py")]
     if torch.cuda.is_initialized():
         raise RuntimeError("CPU input validation initialized CUDA")
@@ -120,7 +120,7 @@ def load_traces(args):
 def run_gpu(args, traces, report, raw):
     import torch
     from b12x.preparation import PreparationSession
-    from sparkgap.recipes.qwen38.moe import PreparedRouter, RouterScratch
+    from flare.recipes.qwen38.moe import PreparedRouter, RouterScratch
 
     if not os.environ.get("CUDA_VISIBLE_DEVICES") or torch.cuda.device_count() != 1:
         raise ValueError("assign exactly one CUDA device")

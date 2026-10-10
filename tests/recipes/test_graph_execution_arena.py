@@ -10,7 +10,7 @@ from b12x.preparation import MemoryRequirements, Plan
 from b12x.preparation.types import _CompositePlan, _Prepared
 
 from qualify import graph_execution
-from sparkgap.preparation.scratch import ScratchArena
+from flare.preparation.scratch import ScratchArena
 
 
 @pytest.fixture
@@ -103,7 +103,7 @@ def test_arena_audit_checks_public_moe_views_but_excludes_weight_scales(audit_ty
 
 
 def test_arena_audit_rejects_projection_with_owned_scratch(audit_type):
-    from sparkgap.recipes.qwen38.linear import QuantizedProjection
+    from flare.recipes.qwen38.linear import QuantizedProjection
 
     arena = ScratchArena("cpu")
     arena.reserve(512)

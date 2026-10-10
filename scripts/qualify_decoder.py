@@ -64,29 +64,29 @@ def main():
     if args.steps < 1:
         parser.error("steps must be positive")
     if args.extension:
-        spec = importlib.util.spec_from_file_location("sparkgap_native", args.extension.resolve())
+        spec = importlib.util.spec_from_file_location("flare_native", args.extension.resolve())
         module = importlib.util.module_from_spec(spec)
-        sys.modules["sparkgap_native"] = module
+        sys.modules["flare_native"] = module
         spec.loader.exec_module(module)
 
     import torch
     from b12x.preparation import PreparationSession
     from transformers import AutoTokenizer
-    from sparkgap.preparation import inspect_qwen38_checkpoint
-    from sparkgap.preparation.execution import GraphSignature, PreparedExecution
-    from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
-    from sparkgap.recipes.qwen38.attention import QSAState, RotaryTables
-    from sparkgap.recipes.qwen38.decoder import ModelWeights, DecoderScratch, PreparedDecoder
-    from sparkgap.preparation.scratch import ScratchArena
-    from sparkgap.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
-    from sparkgap.recipes.qwen38.ple import MappedPLETable
-    from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from sparkgap.recipes.qwen38.state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool
+    from flare.preparation import inspect_qwen38_checkpoint
+    from flare.preparation.execution import GraphSignature, PreparedExecution
+    from flare.preparation.qwen38 import MODEL_ID, REVISION
+    from flare.recipes.qwen38.attention import QSAState, RotaryTables
+    from flare.recipes.qwen38.decoder import ModelWeights, DecoderScratch, PreparedDecoder
+    from flare.preparation.scratch import ScratchArena
+    from flare.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
+    from flare.recipes.qwen38.ple import MappedPLETable
+    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from flare.recipes.qwen38.state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool
 
     source_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py"))}
+        for path in sorted((ROOT / "flare/recipes/qwen38").glob("*.py"))}
     preparation_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted((ROOT / "sparkgap/preparation").rglob("*.py"))}
+        for path in sorted((ROOT / "flare/preparation").rglob("*.py"))}
 
     start = time.monotonic()
     def progress(message):
@@ -126,8 +126,8 @@ def main():
     buffers = {**inputs.buffers(), "frame_index": frame, "submission_sequence": sequence,
                "completion_records": completion}
     if args.tune:
-        from sparkgap.preparation.qwen38 import CONFIG_SHA256, HEADERS_SHA256
-        from sparkgap.preparation.tuning import RecordedPreparationSession
+        from flare.preparation.qwen38 import CONFIG_SHA256, HEADERS_SHA256
+        from flare.preparation.tuning import RecordedPreparationSession
         preparation = RecordedPreparationSession(device=device, checkpoint=REVISION,
             namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
     else:

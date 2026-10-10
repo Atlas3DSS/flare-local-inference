@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, FINISHED, ERROR
-from sparkgap.recipes.qwen38.speculation import (
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, FINISHED, ERROR
+from flare.recipes.qwen38.speculation import (
     PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
     PreparedStochasticVerification, SpeculativeAcceptance, SpeculativeRngState,
     INVALID_SPECULATION, TARGET_RNG_DOMAIN, DRAFT_RNG_DOMAIN,

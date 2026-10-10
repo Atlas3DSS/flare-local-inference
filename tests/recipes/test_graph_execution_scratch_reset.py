@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from qualify import graph_execution
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.recipes.qwen38.vision_state import VisionFeatureState
+from flare.preparation.scratch import ScratchArena
+from flare.recipes.qwen38.vision_state import VisionFeatureState
 
 
 @dataclass

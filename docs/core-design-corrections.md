@@ -4,7 +4,7 @@ Open items from this document are carried forward in
 [the second corrections set](core-design-corrections-2.md), which also covers
 the MTP design; closed items are listed in its section 0.
 
-This document lists required changes to the Sparkgap serving stack and to
+This document lists required changes to the Flare serving stack and to
 [the core design](core-design.md), based on the repository state on
 2026-10-09 with the untracked working tree. Each item states the current
 state, the defect or risk, the required change, and the condition under which
@@ -14,7 +14,7 @@ the item is closed. Items are ordered by priority within each section.
 
 ### 1.1 Replace the eager-reference gate with a serving-path oracle
 
-**Current state.** Text acceptance compares Sparkgap logits against the pinned
+**Current state.** Text acceptance compares Flare logits against the pinned
 Transformers eager model running unquantized activations over dequantized
 weights (`serve/reference/qwen38_decoder.py`, `serve/reference/qwen38_quant.py`).
 The recorded result is logit relative L2 of 0.159 to 0.244 over four steps
@@ -24,18 +24,18 @@ shows every operator agreeing with the reference when fed identical inputs:
 MXFP8 projection 0.0002, routed MoE 0.004 to 0.005, GDN gated output 0.004.
 The vision comparison ([vision-serving-reference.md](validation/vision-serving-reference.md))
 shows vLLM's b12x path missing the same 3 percent eager limit by more than
-Sparkgap does:
+Flare does:
 
 | Vision encoder comparison | Image 0 | Image 1 |
 |---|---:|---:|
-| Sparkgap vs eager | 0.078 | 0.069 |
+| Flare vs eager | 0.078 | 0.069 |
 | vLLM vs eager | 0.122 | 0.064 |
-| Sparkgap vs vLLM | 0.133 | 0.071 |
+| Flare vs vLLM | 0.133 | 0.071 |
 
 **Defect.** The serving arithmetic quantizes activations dynamically and keeps
 BF16 recurrence intermediates. The eager reference does neither. The comparison
 therefore cannot distinguish "serving arithmetic differs from eager" from
-"Sparkgap has a bug", and the 3 percent and 1.5 percent limits are not met by
+"Flare has a bug", and the 3 percent and 1.5 percent limits are not met by
 the same kernels under vLLM.
 
 **Required change.** Add a logit-level oracle built from the vLLM serving path
@@ -46,14 +46,14 @@ that already runs this checkpoint on this machine: vLLM
 `scripts/compare_vision_serving_reference.py`: load the vLLM Qwen4Exp model on
 one GPU through vLLM's loader, run the teacher-forced forward on the recorded
 prompt and continuation, retain full-vocabulary logits per step, and compare
-against Sparkgap's recorded tensors. Record both implementations' MXFP8
+against Flare's recorded tensors. Record both implementations' MXFP8
 activation-mode selections, because vLLM selects A16 for calls of at most
 eight rows and quantized activations otherwise. Run with BF16 KV cache and
 speculative decoding disabled so the target-model arithmetic matches
-Sparkgap's configuration.
+Flare's configuration.
 
 **Acceptance.** Per step: relative L2, top-10 overlap, and KL divergence of the
-FP32 softmax. Sparkgap-versus-vLLM relative L2 must not exceed
+FP32 softmax. Flare-versus-vLLM relative L2 must not exceed
 vLLM-versus-eager relative L2 on the same prompt. A result in the range of a
 few percent closes this item; a result comparable to the eager gap indicates a
 defect and reopens component qualification against vLLM's per-operator
@@ -90,7 +90,7 @@ arbitrary limit it cannot meet.
 kernel work ([gdn-compensated-bf16.md](validation/gdn-compensated-bf16.md))
 until item 1.1 has a result. Those diagnostics improve the precision of a
 kernel that vLLM ships unchanged; they are only worth pursuing if 1.1 shows
-Sparkgap further from vLLM than vLLM is from eager.
+Flare further from vLLM than vLLM is from eager.
 
 ## 2. Determinism constraints
 
@@ -207,12 +207,12 @@ from the checkout where b12x is actually developed.
 
 **Required change.** All FlashInfer and b12x work happens in the local
 checkout at `~/projects/flashinfer`, on a branch, as ordinary commits.
-Sparkgap consumes it as an editable install:
+Flare consumes it as an editable install:
 
 - In `pyproject.toml`, point `[tool.uv.sources] flashinfer-python` at
   `../flashinfer` with `editable = true`, so kernel edits take effect without
   reinstalling.
-- In `[tool.sparkgap.source-revisions]`, pin the branch's commit SHA.
+- In `[tool.flare.source-revisions]`, pin the branch's commit SHA.
   Preparation and qualification verify that the checkout's HEAD matches the
   pin and that the worktree is clean, and record both in the receipt, rather
   than cloning and patching.
@@ -400,10 +400,10 @@ an entrypoint over that package. Move the test-tree qualifier into it.
 
 ### 6.7 Rename the Python package
 
-**Current state.** The package is `serve`, the project is `sparkgap`, and the
+**Current state.** The package is `serve`, the project is `flare`, and the
 package no longer serves requests.
 
-**Required change.** Rename `serve` to `sparkgap` before the first commit of
+**Required change.** Rename `serve` to `flare` before the first commit of
 the new code, updating the entrypoints in `pyproject.toml`.
 
 ### 6.8 Remove meta-commentary from validation receipts
@@ -424,7 +424,7 @@ than as a disclaimer on each sentence.
   `python.rs`.
 - In `execution/transport.rs`, return resolved bindings from
   `validate_uploads` instead of repeating `.find(...).unwrap()` in `submit`.
-- Replace the `SPARKGAP_GRAMMAR_TRACE` environment switch in `grammar.rs` with
+- Replace the `FLARE_GRAMMAR_TRACE` environment switch in `grammar.rs` with
   an explicit debug configuration field.
 - Feature-gate the `ReplayWorker` Python binding as a qualification primitive,
   since production uses `GraphExecutor` through the server.

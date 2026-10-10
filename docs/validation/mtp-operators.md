@@ -1,8 +1,8 @@
 # MTP identical-input operator measurements
 
-The prefill key projection differs between Sparkgap and pinned vLLM on identical
+The prefill key projection differs between Flare and pinned vLLM on identical
 BF16 inputs and byte-identical checkpoint weights. For the measured prefill
-inputs, Sparkgap's key projection exactly equals the FP64 mathematical dot
+inputs, Flare's key projection exactly equals the FP64 mathematical dot
 rounded to BF16. The vLLM projection differs in 577 of 2,560 values. QK
 normalization produces identical values when given identical raw projections.
 
@@ -15,7 +15,7 @@ MTP prefill followed by two single-row teacher-forced continuations used by the
 `63b48403a3d81094169b94dc3effa8f2e52e94ad0074ee4873fa7896228b2a33`.
 
 Each operator receives both implementations' recorded operands independently.
-Sparkgap uses its prepared capacities 8 and 1 with CUDA graph replay. The reference
+Flare uses its prepared capacities 8 and 1 with CUDA graph replay. The reference
 uses actual eager vLLM operators from commit
 `64fc1eec593397cbd765cc082e9ec90fbeb5ea66` and FlashInfer
 `98fb87a461183f98d6a7049ca947fb136cc6fb59`, at live row counts 5 and 1. An additional
@@ -32,7 +32,7 @@ the measured outputs come from each implementation's actual rotary operator.
 
 Both implementations reproduce all 11 recorded operator boundaries at every
 step exactly: **66/66** comparisons. All **210** repeated operator outputs are
-value-bit identical. Sparkgap's six operator-graph replays and three module-graph
+value-bit identical. Flare's six operator-graph replays and three module-graph
 replays allocate zero. All **30** reference five-row versus padded eight-row
 operator comparisons are exact over the five live rows.
 
@@ -57,7 +57,7 @@ differences, without fitted acceptance thresholds.
 
 The first recorded difference is one of 51,200 prefill HC normalization values,
 with absolute difference `0.0009765625`; both continuation HC normalization
-outputs are exact. The MTP HC norm checkpoint weight is BF16. Sparkgap passes
+outputs are exact. The MTP HC norm checkpoint weight is BF16. Flare passes
 FP32 `1 + weight` through the public CuTe grouped-normalization implementation;
 vLLM passes the BF16 raw weight through the public zero-centered Triton
 implementation. The same-input projection measurements isolate further
@@ -65,9 +65,9 @@ differences independently of that preceding normalization difference.
 
 The CPU mathematical-dot diagnostic multiplies the exact saved BF16 inputs by
 the byte-matched checkpoint weights in FP64, then rounds the result to BF16.
-For the prefill inputs recorded by Sparkgap:
+For the prefill inputs recorded by Flare:
 
-| Projection | Output values | Sparkgap values differing from rounded dot | vLLM values differing from rounded dot |
+| Projection | Output values | Flare values differing from rounded dot | vLLM values differing from rounded dot |
 |---|---:|---:|---:|
 | HC down | 1,600 | 0 | 452 |
 | HC up | 51,200 | 1 | 8 |
@@ -76,7 +76,7 @@ For the prefill inputs recorded by Sparkgap:
 | V | 2,560 | 0 | 510 |
 | Attention output | 12,800 | 3 | 6 |
 
-Sparkgap executes public b12x BF16 SIMT projections at these capacities. The
+Flare executes public b12x BF16 SIMT projections at these capacities. The
 reference records actual `torch.nn.functional.linear` calls, with
 `VLLM_B12X_BF16_GEMV=False`, fused HC-down/injection and fused QKV projections.
 The reference's internal GEMM algorithm and accumulation precision were not
@@ -85,7 +85,7 @@ measured operator.
 
 The [module oracle](mtp-module.md) records subsequent amplification of prefill
 key differences by attention. Together, these measurements locate an independent
-source of that key drift in projection arithmetic and show that Sparkgap is
+source of that key drift in projection arithmetic and show that Flare is
 closer to the mathematical dot for these inputs. Whole-module logit relative L2
 remains diagnostic under [the numerical acceptance contract](../core-design-corrections-2.md#21-replace-logit-relative-l2-as-an-acceptance-metric).
 

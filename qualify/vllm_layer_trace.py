@@ -261,12 +261,12 @@ class LayerTrace:
 
 
 def reset_worker_trace(worker):
-    worker._sparkgap_layer_trace.reset()
+    worker._flare_layer_trace.reset()
     return {'reset': True, 'capture_before_profile': True}
 
 
 def save_worker_trace(worker, path):
-    trace = worker._sparkgap_layer_trace.snapshot()
+    trace = worker._flare_layer_trace.snapshot()
     target = Path(path)
     with target.open('xb') as handle:
         torch.save(trace, handle)

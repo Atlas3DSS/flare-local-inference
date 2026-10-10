@@ -12,10 +12,10 @@ from b12x.preparation import PreparationSession, PreparedCall
 from b12x.sequence import ple_embedding, short_conv
 from safetensors import safe_open
 
-from sparkgap.preparation.checkpoint import CheckpointManifest
-from sparkgap.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
-from sparkgap.preparation.scratch import planned_scratch, prime_owners
-from sparkgap.preparation.tuning import register_finalizer
+from flare.preparation.checkpoint import CheckpointManifest
+from flare.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
+from flare.preparation.scratch import planned_scratch, prime_owners
+from flare.preparation.tuning import register_finalizer
 
 from .linear import BF16Projection
 

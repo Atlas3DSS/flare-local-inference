@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.recipes.qwen38.mtp_weights import MTPWeightLoader, _global_scales, create_mtp_modules
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.recipes.qwen38.mtp_weights import MTPWeightLoader, _global_scales, create_mtp_modules
+from flare.recipes.qwen38.weights import QwenWeightLoader
 
 
 @pytest.fixture(scope="module")

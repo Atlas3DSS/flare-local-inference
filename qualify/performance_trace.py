@@ -85,7 +85,7 @@ def prepared_graph_map(manifest: dict) -> dict:
         rows[-1]['graph_exec_id'] = value.value
     if not rows:
         raise ValueError('graph catalog is empty')
-    return {'schema': 'sparkgap-nsys-graph-map-v1', 'pid': os.getpid(), 'created_at': utc(),
+    return {'schema': 'flare-nsys-graph-map-v1', 'pid': os.getpid(), 'created_at': utc(),
             'cupti_library': file_record(path),
             'loaded_cupti_libraries': [file_record(candidate) for candidate in candidates],
             'nsight_injectors': [file_record(injector) for injector in injectors],
@@ -149,7 +149,7 @@ def _pid(value):
 def _map_labels(graph_map):
     if graph_map is None:
         return {}
-    if graph_map.get('schema') != 'sparkgap-nsys-graph-map-v1' or type(graph_map.get('pid')) is not int:
+    if graph_map.get('schema') != 'flare-nsys-graph-map-v1' or type(graph_map.get('pid')) is not int:
         raise ValueError('graph map schema or PID is invalid')
     labels, names = {}, set()
     for graph in graph_map['graphs']:
@@ -362,7 +362,7 @@ def analyze(database: Path, *, graph_map=None, pid=None, device=None, start_ns=N
                     if row[type_column] != 1 or row['correlationId'] in dependency_correlations]
             else:
                 synchronization[table] = rows(table, where=scope, params=parameters)
-        return {'schema': 'sparkgap-nsys-performance-v1', 'created_at': utc(), 'database': file_record(database),
+        return {'schema': 'flare-nsys-performance-v1', 'created_at': utc(), 'database': file_record(database),
                 'graph_map': graph_map, 'selection': {'pid': pid, 'device': device, 'start_ns': start_ns, 'end_ns': end_ns},
                 'schema_columns': schema, 'activity_counts': dict(activity_counts), 'graph_executions': len(records),
                 'identity_complete': not errors['unmapped_graph_executions'],

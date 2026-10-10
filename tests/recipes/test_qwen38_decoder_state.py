@@ -5,10 +5,10 @@ import os
 import pytest
 import torch
 
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
-from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from sparkgap.recipes.qwen38.state import HybridStatePool
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from flare.recipes.qwen38.state import HybridStatePool
 
 
 def test_input_contract():
@@ -21,7 +21,7 @@ def test_input_contract():
         DecoderInputs.allocate("cpu", context=65)
 
 
-@pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
 def test_native_metadata_exact_endpoints_and_terminal_guards():
     assert os.environ.get("CUDA_VISIBLE_DEVICES")

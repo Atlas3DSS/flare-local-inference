@@ -1,8 +1,8 @@
-# Sparkgap core design: Python model preparation, Rust graph execution
+# Flare core design: Python model preparation, Rust graph execution
 
 ## Purpose and founding principles
 
-Sparkgap is a local inference server for NVIDIA SM120 and SM121 GPUs. It serves
+Flare is a local inference server for NVIDIA SM120 and SM121 GPUs. It serves
 one to a few concurrent users running agent workloads: long contexts, repeated
 turns with appended tool results, shared-prefix branches, and image inputs. It
 supports exactly one kernel library and has no backend abstraction.
@@ -199,7 +199,7 @@ onto the cache object every step, and the vision model loops over images on the
 host.
 [Transformers implementation](https://github.com/huggingface/transformers/blob/4cc2aa84301c9aa210b5513dab9fefae03981f6e/src/transformers/models/qwen4_exp/modeling_qwen4_exp.py)
 
-The [Qwen3.8 recipe](../sparkgap/recipes/qwen38/model.py) keeps the Transformers
+The [Qwen3.8 recipe](../flare/recipes/qwen38/model.py) keeps the Transformers
 module tree and replaces its forwards with prepared operations.
 
 | Model region | Prepared execution |
@@ -307,7 +307,7 @@ serving recipe consumes the prepared b12x operator directly.
 
 ### KV writes
 
-Sparkgap owns the cache-write contract: write projected K/V to the page and offset
+Flare owns the cache-write contract: write projected K/V to the page and offset
 identified by request metadata, then execute attention. QSA does not write the
 main cache; writes precede its call.
 
@@ -387,7 +387,7 @@ projected outputs occupy separate scratch. Autotuning retains private seeded
 fixtures. [Shared-priming qualification](validation/hyperconnection-priming.md)
 accounts for 15.08 GiB of removed duplicate allocations at the 4,096-token limit.
 
-One `sparkgap.preparation.scratch.ScratchArena` supplies byte storage to serialized
+One `flare.preparation.scratch.ScratchArena` supplies byte storage to serialized
 quantized projections, GDN, QSA, routed MoE, PLE, and vision attention across all
 layers and graph capacities. `arena.views(*shapes_and_dtypes)` returns contiguous
 typed views with 256-byte-aligned, nonoverlapping regions for buffers needed by
@@ -421,7 +421,7 @@ release memory if another owner still references its previous storage; ownership
 qualification checks those references as well as the reported arena extent.
 
 Operator benchmark operands and trial-state arenas live in
-[`preparation/fixtures`](../sparkgap/preparation/fixtures/). GDN, fused MoE,
+[`preparation/fixtures`](../flare/preparation/fixtures/). GDN, fused MoE,
 hyperconnection, variable-length attention, blockscaled GEMM, and MTP feedback
 each provide a concrete fixture factory. Recipes retain plan declarations,
 priming, selected bindings, and finalizers. Fixture factories preserve checkpoint
@@ -599,7 +599,7 @@ drain retains the graph and buffer owners.
 The vLLM Rust frontend at revision
 `cb4f016c5d02c9d483e6e3f1702d51da239b1a9b` implements native HTTP, chat rendering,
 tokenization, and output processing, then sends token requests to a Python
-engine through ZMQ. Sparkgap connects these responsibilities directly to the
+engine through ZMQ. Flare connects these responsibilities directly to the
 native graph worker. The vLLM engine transport and distributed routing are not
 part of this core.
 [vLLM Rust architecture](https://github.com/vllm-project/vllm/blob/cb4f016c5d02c9d483e6e3f1702d51da239b1a9b/rust/README.md)
@@ -789,7 +789,7 @@ ancestor pinning, and eviction preserve ownership across active branches.
 
 The [Rust prefix cache](../native/src/cache.rs) manages ownership, readiness,
 pinning, and eviction. Python allocates backing storage during preparation;
-[captured maintenance operations](../sparkgap/recipes/qwen38/maintenance.py)
+[captured maintenance operations](../flare/recipes/qwen38/maintenance.py)
 reset, restore, and snapshot its contents.
 
 Use one logical page allocation to identify the corresponding storage across all
@@ -1020,7 +1020,7 @@ to recover either resource.
 The model-independent bundle contract is exercised by small captured graphs
 and the complete Qwen catalog. The [Rust scheduler](../native/src/scheduler.rs)
 owns request policy; the [native executor](../native/src/execution/transport.rs)
-owns metadata submission and replay. [Python graph preparation](../sparkgap/preparation/graphs.py)
+owns metadata submission and replay. [Python graph preparation](../flare/preparation/graphs.py)
 retains captured resources until native shutdown drains all work.
 
 ### Correctness acceptance
@@ -1104,7 +1104,7 @@ unchanged warmup input is insufficient.
 
 Matching vLLM serving performance is the minimum acceptance bar. Compare the
 same checkpoint, GPU, precision, prompt corpus, sampling settings, output
-budgets, cache conditions, and concurrency. Sparkgap must match or improve
+budgets, cache conditions, and concurrency. Flare must match or improve
 end-to-end TTFT, inter-token latency, and completed-work throughput across the
 required local workloads at concurrency 1, 2, and 4. Report individual workloads
 and tail latency; an aggregate win does not erase a workload regression. Repeat
@@ -1116,7 +1116,7 @@ Measure three paths with matching model, inputs, precision, and generation
 behavior:
 
 1. Existing vLLM serving.
-2. The prepared Sparkgap graphs under a minimal replay harness.
+2. The prepared Flare graphs under a minimal replay harness.
 3. The complete Rust serving runtime.
 
 Report:

@@ -5,10 +5,10 @@ import pytest
 import torch
 from types import SimpleNamespace
 
-from sparkgap.preparation.fixtures import gdn as gdn_fixtures
-from sparkgap.preparation.fixtures.gdn import BenchmarkStateArena, GDNBenchmarkInputs
-from sparkgap.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
-from sparkgap.recipes.qwen38.moe import RouterScratch
+from flare.preparation.fixtures import gdn as gdn_fixtures
+from flare.preparation.fixtures.gdn import BenchmarkStateArena, GDNBenchmarkInputs
+from flare.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
+from flare.recipes.qwen38.moe import RouterScratch
 
 
 def _recurrent_args(mode, tokens, sequences):
@@ -174,7 +174,7 @@ def test_borrowed_arena_rejects_storage_contract_mismatch(kind):
 
 
 def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial_reset(monkeypatch):
-    from sparkgap.recipes.qwen38 import gdn
+    from flare.recipes.qwen38 import gdn
 
     args = _recurrent_args('prefill', 65, 1)
     resource_cache = {}
@@ -258,7 +258,7 @@ def test_moe_benchmark_covers_shared_routes_without_mutating_serving_operands():
 
 
 def test_prefill_benchmark_reuses_prepared_router_without_nested_preparation(monkeypatch):
-    from sparkgap.recipes.qwen38 import moe
+    from flare.recipes.qwen38 import moe
 
     source = torch.zeros(16, 32, dtype=torch.bfloat16)
     weight = torch.randn(512, 32, generator=torch.Generator().manual_seed(17)).bfloat16()

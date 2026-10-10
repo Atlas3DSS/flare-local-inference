@@ -39,7 +39,7 @@ def save_json(path, value):
 class Evidence:
     def __init__(self, output, artifacts, provenance):
         self.output, self.artifacts = output, artifacts
-        self.value = {"schema": "sparkgap-same-graph-execution-v1", "provenance": provenance,
+        self.value = {"schema": "flare-same-graph-execution-v1", "provenance": provenance,
             "checks": [], "commands": [], "observations": {}, "mismatches": []}
         self.baselines = {}
         self.bytes = 0
@@ -161,7 +161,7 @@ class _ScratchArenaAudit:
                 self.plan_owners(f"{name}.variant.{capacity}", child)
 
     def projection(self, name, projection):
-        from sparkgap.recipes.qwen38.linear import BF16Projection, QuantizedProjection
+        from flare.recipes.qwen38.linear import BF16Projection, QuantizedProjection
 
         memory = projection.plan.memory_requirements()
         if isinstance(projection, QuantizedProjection):
@@ -229,10 +229,10 @@ class _ScratchArenaAudit:
 
 def verify_prepared_scratch_arena(model, decoders, owners, evidence):
     """Check every Qwen operator's final scratch bindings before parity reset."""
-    from sparkgap.preparation.scratch import ScratchArena
-    from sparkgap.recipes.qwen38.attention import PreparedAttention
-    from sparkgap.recipes.qwen38.gdn import PreparedGDN
-    from sparkgap.recipes.qwen38.vision import PreparedVision
+    from flare.preparation.scratch import ScratchArena
+    from flare.recipes.qwen38.attention import PreparedAttention
+    from flare.recipes.qwen38.gdn import PreparedGDN
+    from flare.recipes.qwen38.vision import PreparedVision
 
     arenas = [owner for owner in model._resources if isinstance(owner, ScratchArena)]
     if len(arenas) != 1:
@@ -319,7 +319,7 @@ def verify_prepared_scratch_arena(model, decoders, owners, evidence):
 def verify_prepared_hybrid_state(state, evidence):
     """Check benchmark restoration before the parity reset overwrites model state."""
     import torch
-    from sparkgap.recipes.qwen38.state import EOS_TOKEN_ID
+    from flare.recipes.qwen38.state import EOS_TOKEN_ID
 
     history = state.ple_history.cpu()
     eos = torch.tensor([EOS_TOKEN_ID], dtype=torch.int64)
@@ -340,11 +340,11 @@ class MutableReset:
 
     def __init__(self, model, state, requests, decoders, owners, cache):
         import torch
-        from sparkgap.recipes.qwen38.decoder import DecoderScratch, ModelWeights
-        from sparkgap.preparation.scratch import ScratchArena
-        from sparkgap.recipes.qwen38.maintenance import PreparedMaintenance
-        from sparkgap.recipes.qwen38.vision import VisionScratch, PreparedVision
-        from sparkgap.recipes.qwen38.vision_state import VisionFeatureState, PreparedVisionHandoff
+        from flare.recipes.qwen38.decoder import DecoderScratch, ModelWeights
+        from flare.preparation.scratch import ScratchArena
+        from flare.recipes.qwen38.maintenance import PreparedMaintenance
+        from flare.recipes.qwen38.vision import VisionScratch, PreparedVision
+        from flare.recipes.qwen38.vision_state import VisionFeatureState, PreparedVisionHandoff
 
         self.model, self.state, self.requests, self.cache = model, state, requests, cache
         self.features = next(item for item in model._resources if isinstance(item, VisionFeatureState))
@@ -464,7 +464,7 @@ class Request:
 class Scenario:
     def __init__(self, model, tokenizer, image, artifacts):
         import torch
-        from sparkgap.recipes.qwen38.sampling import AdmissionBuffers
+        from flare.recipes.qwen38.sampling import AdmissionBuffers
 
         self.model, self.tokenizer, self.image, self.artifacts = model, tokenizer, image, artifacts
         self.host = {name: tensor.cpu().clone() for name, tensor in model.buffers.items()}
@@ -539,7 +539,7 @@ class Scenario:
             self.groups.append([command])
 
     def admit(self, kind, capacity, specifications, *, temperatures=None):
-        from sparkgap.recipes.qwen38.sampling import RequestAdmission
+        from flare.recipes.qwen38.sampling import RequestAdmission
 
         h = self.host
         h["admission_count"].fill_(len(specifications))
@@ -1067,20 +1067,20 @@ def main():
 
     import torch
     import flashinfer
-    import sparkgap_native
+    import flare_native
     import b12x.attention.qsa._contract as contract
     from transformers import AutoTokenizer
-    from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-    from sparkgap.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
-    from sparkgap.recipes.qwen38.sampling import DeviceRequestState
-    from sparkgap.recipes.qwen38.state import HybridStatePool
-    from sparkgap.recipes.qwen38.maintenance import PreparedMaintenance
+    from flare.preparation.qwen38 import MODEL_ID, REVISION
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from flare.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
+    from flare.recipes.qwen38.sampling import DeviceRequestState
+    from flare.recipes.qwen38.state import HybridStatePool
+    from flare.recipes.qwen38.maintenance import PreparedMaintenance
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     snapshot = args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
-    extension, = Path(sparkgap_native.__file__).parent.glob("*.so")
+    extension, = Path(flare_native.__file__).parent.glob("*.so")
     b12x_root = Path(contract.__file__).resolve().parents[2]
     flashinfer_root = Path(flashinfer.__file__).resolve().parent
     sampling_sources = [flashinfer_root / name for name in (
@@ -1091,7 +1091,7 @@ def main():
         "data/include/flashinfer/topk_common.cuh", "data/include/flashinfer/air_top_p.cuh",
     )]
     source_paths = [Path(__file__).with_name("checkpoint_state.py"),
-        *sorted((ROOT / "sparkgap/recipes/qwen38").glob("*.py")), *sorted((ROOT / "sparkgap/preparation").rglob("*.py")),
+        *sorted((ROOT / "flare/recipes/qwen38").glob("*.py")), *sorted((ROOT / "flare/preparation").rglob("*.py")),
         *sorted((ROOT / "native/src").rglob("*.rs")), *sorted(b12x_root.rglob("*.py")), *sampling_sources]
     provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot)},
         "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),

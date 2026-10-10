@@ -6,8 +6,8 @@ from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping, Sequence
 
-from sparkgap.preparation.checkpoint import CheckpointManifest
-from sparkgap.preparation.qwen38 import TEXT_PREFIX, expected_quantization
+from flare.preparation.checkpoint import CheckpointManifest
+from flare.preparation.qwen38 import TEXT_PREFIX, expected_quantization
 
 if TYPE_CHECKING:
     import torch

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparkgap.preparation.graphs import PreparedGraphBundle
+from flare.preparation.graphs import PreparedGraphBundle
 
 
 def bundle(**overrides):
@@ -20,8 +20,8 @@ def bundle(**overrides):
 def test_import_does_not_load_torch_or_native_extension():
     subprocess.run([
         sys.executable, "-c",
-        "import sys; import sparkgap.preparation.graphs; "
-        "assert 'torch' not in sys.modules; assert 'sparkgap_native' not in sys.modules",
+        "import sys; import flare.preparation.graphs; "
+        "assert 'torch' not in sys.modules; assert 'flare_native' not in sys.modules",
     ], check=True)
 
 
@@ -53,7 +53,7 @@ def test_registration_metadata_is_copied_and_read_only():
 
 def test_raw_replay_requires_qualification_binding_before_cuda(monkeypatch):
     prepared = bundle()
-    monkeypatch.setitem(sys.modules, "sparkgap_native", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "flare_native", SimpleNamespace())
 
     def forbidden():
         pytest.fail("qualification feature rejection must precede CUDA validation")

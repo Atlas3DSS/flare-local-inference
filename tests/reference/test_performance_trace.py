@@ -55,7 +55,7 @@ def database(path):
 
 
 def mapping():
-    return {'schema': 'sparkgap-nsys-graph-map-v1', 'pid': 111,
+    return {'schema': 'flare-nsys-graph-map-v1', 'pid': 111,
             'graphs': [{'name': 'decode1', 'kind': 'decode', 'graph_exec_id': 42,
                         'handle': 0x12340000}]}
 

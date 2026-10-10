@@ -9,8 +9,8 @@ import json
 
 import torch
 
-from sparkgap.preparation.checkpoint import CheckpointError, CheckpointManifest
-from sparkgap.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
+from flare.preparation.checkpoint import CheckpointError, CheckpointManifest
+from flare.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
 
 from .moe import QwenMoeWeights, SharedExpertWeights
 from .weights import QwenWeightLoader, _expert_ids

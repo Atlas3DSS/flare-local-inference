@@ -1,9 +1,9 @@
 use std::{fs, path::PathBuf};
 
+use flare_native::frontend::images::{ImageLimits, ImageProcessor, RgbImage};
+use flare_native::frontend::{Asset, Frontend, FrontendAssets};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sparkgap_native::frontend::images::{ImageLimits, ImageProcessor, RgbImage};
-use sparkgap_native::frontend::{Asset, Frontend, FrontendAssets};
 
 fn pattern(width: usize, height: usize, mut seed: u32) -> Vec<u8> {
     (0..width * height * 3)

@@ -2,7 +2,7 @@
 
 The fixed vision/grammar fixture passes **44/44 checks** across **eight model
 requests** and 23 total HTTP requests, with zero case errors. The server runs
-from the main Sparkgap source with the exact Qwen checkpoint at revision
+from the main Flare source with the exact Qwen checkpoint at revision
 `dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2`, sequential single-key-split BF16 GDN,
 16-way QSA, FlashInfer sampling and all 37 captured graph variants.
 

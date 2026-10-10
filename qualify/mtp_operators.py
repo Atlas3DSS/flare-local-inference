@@ -42,17 +42,17 @@ def load_inputs(directory, fixture):
         raise ValueError('operator operands require the identical immutable MTP fixture')
     cases = torch.load(fixture, map_location='cpu', weights_only=True)['cases']
     sources = {}
-    for backend in ('sparkgap', 'vllm'):
+    for backend in ('flare', 'vllm'):
         values = torch.load(directory / f'{backend}.pt', map_location='cpu', weights_only=True)
         validate_inputs(values, cases)
         sources[backend] = values
     for step in range(len(cases)):
         for name in ('q_norm', 'k_norm'):
-            left = sources['sparkgap'][step]['attention_constants'][name]
+            left = sources['flare'][step]['attention_constants'][name]
             right = sources['vllm'][step]['attention_constants'][name]
             if tensor_record(left) != tensor_record(right):
                 raise ValueError(f'{name}: recorded normalization weights differ')
-    return sources, [file_record(directory / name) for name in ('fixture.pt', 'sparkgap.pt', 'vllm.pt')]
+    return sources, [file_record(directory / name) for name in ('fixture.pt', 'flare.pt', 'vllm.pt')]
 
 
 def validate_inputs(values, cases):
@@ -99,7 +99,7 @@ def padded(value, capacity, device, *, stride=None):
 def _measure(actual, reference):
     from qualify.layer_comparison import _measurement
     result = _measurement(actual, reference)
-    result['actual_storage_dtype'] = result.pop('sparkgap_storage_dtype')
+    result['actual_storage_dtype'] = result.pop('flare_storage_dtype')
     result['reference_storage_dtype'] = result.pop('vllm_storage_dtype')
     return result
 
@@ -177,7 +177,7 @@ def _input_records(saved, case, *, eps):
     return values
 
 
-def run_sparkgap(args, owners, cases):
+def run_flare(args, owners, cases):
     from b12x.norm import hyperconnection as hc
     from transformers.models.qwen4_exp.modeling_qwen4_exp import apply_rotary_pos_emb
     sources, records = load_inputs(args.operator_inputs, args.output / 'fixture.pt')
@@ -220,8 +220,8 @@ def run_sparkgap(args, owners, cases):
                 'live_rows': rows, 'inputs': _input_records(saved, case, eps=eps),
                 'input_strides': {name: list(value.stride()) for name, value in x.items()},
                 'outputs': values, 'replay': replay})
-            _partial(args, 'sparkgap', results, records)
-    return _save(args, 'sparkgap', results, records, plans, {
+            _partial(args, 'flare', results, records)
+    return _save(args, 'flare', results, records, plans, {
         'hc_down': tensor_record(mixer.down.weight), 'hc_up': tensor_record(mixer.up.weight),
         'hc_gain': tensor_record(mixer.norm_gain),
         **{name: tensor_record(projection.weight) for name, projection in attention.projections.items()}})
@@ -308,17 +308,17 @@ def _save(args, backend, cases, records, plans, weights):
 
 def compare(directory, operands):
     directory, operands = Path(directory), Path(operands)
-    left = torch.load(directory / 'sparkgap-operators.pt', map_location='cpu', weights_only=True)
+    left = torch.load(directory / 'flare-operators.pt', map_location='cpu', weights_only=True)
     right = torch.load(directory / 'vllm-operators.pt', map_location='cpu', weights_only=True)
-    records = [file_record(operands / name) for name in ('fixture.pt', 'sparkgap.pt', 'vllm.pt')]
-    for name, payload in (('sparkgap', left), ('vllm', right)):
+    records = [file_record(operands / name) for name in ('fixture.pt', 'flare.pt', 'vllm.pt')]
+    for name, payload in (('flare', left), ('vllm', right)):
         if (payload.get('schema_version') != 1 or payload.get('backend') != name
                 or payload.get('completed') is not True or not payload.get('cases')):
             raise ValueError(f'{name}: incomplete operator probe')
         if payload['operand_sources'] != records:
             raise ValueError(f'{name}: recorded operator inputs changed')
     baseline = {name: torch.load(operands / f'{name}.pt', map_location='cpu', weights_only=True)
-                for name in ('sparkgap', 'vllm')}
+                for name in ('flare', 'vllm')}
     same_inputs, reproduction = [], []
     for actual in left['cases']:
         matches = [ref for ref in right['cases'] if ref['step'] == actual['step'] and ref['operand_source'] == actual['operand_source']]
@@ -330,10 +330,10 @@ def compare(directory, operands):
             if actual['outputs'].keys() != reference['outputs'].keys():
                 raise ValueError('operator output coverage differs')
             same_inputs.append({'step': actual['step'], 'operand_source': actual['operand_source'],
-                'live_rows': actual['live_rows'], 'sparkgap_capacity': actual['capacity'],
+                'live_rows': actual['live_rows'], 'flare_capacity': actual['capacity'],
                 'vllm_capacity': reference['capacity'], 'operators': {
                     name: _measure(value, reference['outputs'][name]) for name, value in actual['outputs'].items()}})
-    for backend, payload in (('sparkgap', left), ('vllm', right)):
+    for backend, payload in (('flare', left), ('vllm', right)):
         for case in payload['cases']:
             if case['operand_source'] != backend or (backend == 'vllm' and case['capacity'] != case['live_rows']):
                 continue
@@ -344,7 +344,7 @@ def compare(directory, operands):
             'recorded_own_input_reproduction': reproduction,
             'shared_weight_identity': {name: left['weights'][name] == right['weights'][name]
                 for name in left['weights'].keys() & right['weights'].keys()},
-            'sources': [file_record(directory / f'{name}-operators.pt') for name in ('sparkgap', 'vllm')],
+            'sources': [file_record(directory / f'{name}-operators.pt') for name in ('flare', 'vllm')],
             'operator_script': file_record(__file__)}
 
 

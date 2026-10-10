@@ -6,9 +6,9 @@ import pytest
 import torch
 from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
 
-from sparkgap.recipes.qwen38 import moe
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.preparation.fixtures import fused_moe as moe_fixtures
+from flare.recipes.qwen38 import moe
+from flare.preparation.scratch import ScratchArena
+from flare.preparation.fixtures import fused_moe as moe_fixtures
 
 
 @pytest.mark.parametrize("tokens", [4, 17])

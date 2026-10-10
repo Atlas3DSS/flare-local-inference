@@ -30,8 +30,8 @@ def test_init_stages_exact_empty_endpoint_before_first_replay(batch):
     from types import SimpleNamespace
 
     from qualify.replay_floor import ReplayCase
-    from sparkgap.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState
-    from sparkgap.recipes.qwen38.state import StateTransferMetadata
+    from flare.recipes.qwen38.sampling import AdmissionBuffers, DeviceRequestState
+    from flare.recipes.qwen38.state import StateTransferMetadata
 
     runner = ReplayCase.__new__(ReplayCase)
     admission = AdmissionBuffers.allocate('cpu')

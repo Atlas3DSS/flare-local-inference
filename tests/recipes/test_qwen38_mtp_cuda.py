@@ -6,16 +6,16 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import TEXT_PREFIX
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.recipes.qwen38.attention import QSAMetadata, QSAState, RotaryTables
-from sparkgap.recipes.qwen38.mtp import MTPScratch, PreparedMTP, PreparedMTPFeedback
-from sparkgap.recipes.qwen38.mtp_weights import MTPWeights
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import TEXT_PREFIX
+from flare.preparation.scratch import ScratchArena
+from flare.recipes.qwen38.attention import QSAMetadata, QSAState, RotaryTables
+from flare.recipes.qwen38.mtp import MTPScratch, PreparedMTP, PreparedMTPFeedback
+from flare.recipes.qwen38.mtp_weights import MTPWeights
+from flare.recipes.qwen38.weights import QwenWeightLoader
 
-pytestmark = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires an assigned CUDA_VISIBLE_DEVICES and SPARKGAP_RUN_CUDA_TESTS=1")
+pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires an assigned CUDA_VISIBLE_DEVICES and FLARE_RUN_CUDA_TESTS=1")
 
 TRACE = Path("/data/sparkgap-artifacts/text-layer-trace/vllm-moe-inprocess-repeat/vllm-layers.pt")
 

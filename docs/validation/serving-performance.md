@@ -2,17 +2,17 @@
 
 The pinned vLLM server records higher standalone decode throughput at both
 prefill limits. At limit 4,096, median delivered rates at requested concurrency
-1/2/4 are **78.329/128.105/200.651 tokens/s for Sparkgap** and
-**111.262/197.400/353.295 tokens/s for vLLM**. Sparkgap has lower short-prompt
+1/2/4 are **78.329/128.105/200.651 tokens/s for Flare** and
+**111.262/197.400/353.295 tokens/s for vLLM**. Flare has lower short-prompt
 and prefix-hit TTFT; vLLM has lower 4K/64K cold-prompt TTFT at limit 4,096.
-At limit 512, Sparkgap has lower TTFT for every measured single-output workload.
+At limit 512, Flare has lower TTFT for every measured single-output workload.
 All 35 measured 256-token sequences differ between implementations at each
 limit, so paired decode speed ratios are omitted. All 25 single-output token
 IDs match at each limit, including prefix seeds.
 
 The Qwen3.8 native server completes **64 requests in 41 groups at each prefill
 limit, 512 and 4,096**, with all 832 request predicates and all group checks
-passing in both runs. Every request paired between the two Sparkgap runs has identical bytes and
+passing in both runs. Every request paired between the two Flare runs has identical bytes and
 generates the same complete token sequence. At prefill limit 4,096 and requested concurrency
 1/2/4, median delivered decode throughput is **78.329/128.105/200.651 tokens/s**.
 Median native token-ready intervals are **12.763/15.163/18.507 ms**. Client
@@ -94,7 +94,7 @@ have separate origins; durations are computed within each clock domain.
 Percentiles use nearest rank `ceil(0.99 × n)`. Lower TTFT/ITL and higher token
 throughput are better.
 
-## Sparkgap and vLLM at prefill limit 512
+## Flare and vLLM at prefill limit 512
 
 Both backends pass all 64 requests and 41 groups in the frozen shape corpus.
 The comparator revalidates wire requests, rendered prompt IDs, raw SSE payloads,
@@ -119,7 +119,7 @@ workloads therefore retain standalone rates and timing distributions, but no
 paired decode speed ratios. Low native scheduling overhead does not establish
 that model execution matches vLLM throughput.
 
-| Requested concurrency | Sparkgap delivered decode median, tok/s | vLLM delivered decode median, tok/s | Sparkgap delivery ITL median / p99, ms | vLLM delivery ITL median / p99, ms |
+| Requested concurrency | Flare delivered decode median, tok/s | vLLM delivered decode median, tok/s | Flare delivery ITL median / p99, ms | vLLM delivery ITL median / p99, ms |
 |---|---:|---:|---:|---:|
 | 1 | 77.782 | 114.221 | 12.852 / 40.525 | 8.767 / 9.401 |
 | 2 | 128.216 | 199.772 | 15.139 / 40.736 | 9.953 / 10.823 |
@@ -128,7 +128,7 @@ that model execution matches vLLM throughput.
 Each throughput entry is the median of five group measurements; ITL entries
 pool 1,275/2,550/5,100 intervals. Both backends emit singleton token-ID chunks
 throughout, including the first chunk. No token timings are inferred from
-coalesced chunks. Sparkgap's observation path also timestamps tokens in the
+coalesced chunks. Flare's observation path also timestamps tokens in the
 native worker; vLLM receives only `return_token_ids=true`. Native core timings
 remain separate from these client delivery measurements.
 
@@ -136,31 +136,31 @@ For the following single-output measurements, all five repetitions produce the
 same output ID on both backends. Cold requests reuse zero tokens. Both prefix
 paths restore exactly 4,096 tokens and process the same 11-token suffix.
 
-| Single-request workload | Sparkgap delivery TTFT median / p99, ms | vLLM delivery TTFT median / p99, ms |
+| Single-request workload | Flare delivery TTFT median / p99, ms | vLLM delivery TTFT median / p99, ms |
 |---|---:|---:|
 | 512-token cold prompt | 105.852 / 106.037 | 142.965 / 153.484 |
 | 4,096-token cold prompt | 783.026 / 784.490 | 1,118.328 / 1,131.027 |
 | 65,536-token cold prompt | 12,054.800 / 12,067.749 | 17,886.788 / 17,996.643 |
 | 4,096 cached tokens plus 11-token suffix | 45.358 / 46.227 | 163.308 / 170.759 |
 
-The measured result is mixed: Sparkgap has lower prefill/prefix TTFT on these
+The measured result is mixed: Flare has lower prefill/prefix TTFT on these
 single-output inputs and lower standalone decode rates. Different generated
 sequences and the open numerical gate prevent complete performance acceptance.
 
-## Sparkgap and vLLM at prefill limit 4,096
+## Flare and vLLM at prefill limit 4,096
 
 Both backends pass all 64 requests and 41 groups. The comparator verifies all
 394 indexed artifacts, identical rendered inputs and semantic request settings,
 exact output counts, cache reuse and timing distributions. The vLLM scheduling
 budget is 4,096; its model and library revisions and state dtypes are the same
-as specified above. Selected backend algorithms need not match Sparkgap.
+as specified above. Selected backend algorithms need not match Flare.
 
 All 25 single-output IDs match. All 39 complete 256-token sequences differ,
 including the four warmups; first mismatches occur after 2–131 common tokens,
 median 52. The measured 35 decode sequences therefore retain standalone rates
 without paired speed ratios. Neither backend coalesces token-ID chunks.
 
-| Requested concurrency | Sparkgap delivered decode median, tok/s | vLLM delivered decode median, tok/s | Sparkgap delivery ITL median / p99, ms | vLLM delivery ITL median / p99, ms |
+| Requested concurrency | Flare delivered decode median, tok/s | vLLM delivered decode median, tok/s | Flare delivery ITL median / p99, ms | vLLM delivery ITL median / p99, ms |
 |---|---:|---:|---:|---:|
 | 1 | 78.329 | 111.262 | 12.763 / 40.503 | 9.001 / 9.670 |
 | 2 | 128.105 | 197.400 | 15.160 / 40.815 | 10.099 / 10.936 |
@@ -171,14 +171,14 @@ intervals. The single-output measurements below have equal output IDs for every
 repetition. Cold requests reuse zero tokens, and both prefix paths reuse exactly
 4,096 tokens before processing the same 11-token suffix.
 
-| Single-request workload | Sparkgap delivery TTFT median / p99, ms | vLLM delivery TTFT median / p99, ms |
+| Single-request workload | Flare delivery TTFT median / p99, ms | vLLM delivery TTFT median / p99, ms |
 |---|---:|---:|
 | 512-token cold prompt | 105.796 / 105.997 | 147.294 / 159.370 |
 | 4,096-token cold prompt | 511.713 / 512.668 | 281.197 / 281.669 |
 | 65,536-token cold prompt | 8,642.687 / 8,655.267 | 4,964.189 / 4,971.702 |
 | 4,096 cached tokens plus 11-token suffix | 45.293 / 45.645 | 177.144 / 179.176 |
 
-Sparkgap's small measured host overhead coexists with lower full-backend decode
+Flare's small measured host overhead coexists with lower full-backend decode
 throughput and slower long-prompt prefill at this scheduling budget. The timings
 do not isolate a specific kernel or arithmetic policy as the cause. Independent
 numerical acceptance remains open.
@@ -186,13 +186,13 @@ numerical acceptance remains open.
 
 ## Operator policies and selection evidence
 
-The 512-token source/selection audit verifies 17 Sparkgap/main-FlashInfer files
+The 512-token source/selection audit verifies 17 Flare/main-FlashInfer files
 against the launch manifest and reconstructs 13 vLLM cache keys using the pinned
-library API. Sparkgap configurations come directly from its measured selection
+library API. Flare configurations come directly from its measured selection
 receipt. The vLLM configurations come from matching immutable cache entries and
 historical worker plans, not a fresh actor dump from the HTTP benchmark.
 
-| Component | Sparkgap | Pinned vLLM path |
+| Component | Flare | Pinned vLLM path |
 |---|---|---|
 | MoE decode B1/B2 | Micro; deterministic output; fast math disabled | Dynamic M16; direct/internal routing; nondeterministic output; fast math enabled |
 | MoE decode B4 | Micro; same numerical policy | Dynamic M16; grouped/Triton routing; 128 active clusters |
@@ -202,7 +202,7 @@ historical worker plans, not a fresh actor dump from the HTTP benchmark.
 | Hyperconnection | FP32 checkpoint gain; separate 320+4 projections; combine then norm | BF16 zero-centered norm weight; merged 336 projection; delayed combine/norm |
 | PLE norm | FP32 checkpoint norm weights | BF16 norm weights |
 
-For each decode capacity 1/2/4, Sparkgap measures all 17 legal MoE candidates and
+For each decode capacity 1/2/4, Flare measures all 17 legal MoE candidates and
 selects micro without an override. Determinism excludes direct and
 Triton-planned routes while retaining 16 grouped/internal dynamic candidates.
 All 48 layers agree within each capacity. The smaller search is a semantic
@@ -277,7 +277,7 @@ tests pass. Formatting and Clippy checks pass.
 
 Native extension SHA-256
 `586907fc1cb14cd5bcffa4af2f5865fb97012fa7dcd74d81266e638800fe7cdc`
-serves the full unchanged corpus through `python -m sparkgap` on loopback port 8000,
+serves the full unchanged corpus through `python -m flare` on loopback port 8000,
 PID 3455550. All 64 requests/41 groups pass with zero errors. An independent CPU
 comparison revalidates request bytes, raw SSE, prompt IDs, complete generated
 IDs, usage, finish reasons, reused prefixes and all 16,711 selected
@@ -393,7 +393,7 @@ separate processes and independently selected prefill plans.
 
 The 512-token catalog reserves more available memory for KV pages, so its final
 allocated device memory is not an operator-scratch comparison. Its 163 recorded
-Sparkgap source files, 8,159 FlashInfer files and installed extension all match
+Flare source files, 8,159 FlashInfer files and installed extension all match
 the post-run source scan. Full plan differences and both HTTP file indexes are
 referenced from the compact receipt.
 
@@ -590,14 +590,14 @@ compilations. Compiled-cache and filesystem cold-start cost are not measured.
 The HTTP baselines, replay floors and Nsight captures load the native extension
 with SHA-256
 `7a1d846930ca76f2c86ffe6ea8ce49c4a5d10ecf6893206519248d4b2fe23cc4`.
-Both working trees were dirty: Sparkgap HEAD was
+Both working trees were dirty: Flare HEAD was
 `9d70e7f25310df4957a953f6000b089c7a4c60c2` and FlashInfer HEAD was
 `98fb87a461183f98d6a7049ca947fb136cc6fb59`. The launch receipt records every
 source file's hash, so the HEADs alone do not identify the executed source.
 
 An independent post-run scan verifies all 31 recorded Python package files,
 42 native source/build files, 8,159 FlashInfer files and the installed native
-extension unchanged. Of all 160 Sparkgap files in the launch manifest, 158 are
+extension unchanged. Of all 160 Flare files in the launch manifest, 158 are
 unchanged. Only `qualify/performance_server.py` and `qualify/replay_floor.py`
 differ; their before/after hashes are retained. The measured HTTP process had
 already loaded its preparation wrapper and had `replay_corpus=null`.

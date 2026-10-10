@@ -2,7 +2,7 @@
 
 The version-1 artifact contains prompt_tokens, teacher_tokens, logits, model_id,
 and revision. teacher_tokens are the consumed continuation inputs, so S logit
-steps require exactly S-1 teacher tokens. Historical canonical and Sparkgap
+steps require exactly S-1 teacher tokens. Historical canonical and Flare
 decoder artifacts are accepted without changing their stored inputs.
 """
 
@@ -107,13 +107,13 @@ def trace_from_artifact(
         prompt = prompt[0]
         artifact_format = "canonical_decoder"
     else:
-        artifact_format = "sparkgap_decoder"
+        artifact_format = "flare_decoder"
     if prompt_key == "prompt":
         if "teacher_tokens" in artifact:
-            raise ValueError("legacy Sparkgap artifact must not mix generated and teacher tokens")
+            raise ValueError("legacy Flare artifact must not mix generated and teacher tokens")
         generated = _token_ids(artifact.get("tokens"), "tokens", vocab_size)
         if len(generated) != len(rows):
-            raise ValueError("legacy Sparkgap tokens count must equal logit steps")
+            raise ValueError("legacy Flare tokens count must equal logit steps")
         teachers = generated[:-1]
     else:
         teachers = _token_ids(artifact.get("teacher_tokens"), "teacher_tokens", vocab_size)
@@ -167,9 +167,9 @@ def _metrics(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any]:
     return result
 
 
-def compare_traces(*, sparkgap: LogitTrace, vllm: LogitTrace, canonical: LogitTrace) -> dict[str, Any]:
+def compare_traces(*, flare: LogitTrace, vllm: LogitTrace, canonical: LogitTrace) -> dict[str, Any]:
     """Return measurements for matching contexts; no numerical gate is applied."""
-    traces = {"sparkgap": sparkgap, "vllm": vllm, "canonical": canonical}
+    traces = {"flare": flare, "vllm": vllm, "canonical": canonical}
     for name, trace in traces.items():
         _validate(trace)
         if trace.vocab_size != canonical.vocab_size:
@@ -185,7 +185,7 @@ def compare_traces(*, sparkgap: LogitTrace, vllm: LogitTrace, canonical: LogitTr
         if len(identities) > 1:
             raise ValueError(f"recorded {field} differs across artifacts")
     pairs = {}
-    for actual, reference in (("sparkgap", "vllm"), ("sparkgap", "canonical"), ("vllm", "canonical")):
+    for actual, reference in (("flare", "vllm"), ("flare", "canonical"), ("vllm", "canonical")):
         pairs[f"{actual}_vs_{reference}"] = {
             "actual": actual, "reference": reference,
             "steps": [{"step": step, **_metrics(a, r)} for step, (a, r) in enumerate(
@@ -213,14 +213,14 @@ def compare_traces(*, sparkgap: LogitTrace, vllm: LogitTrace, canonical: LogitTr
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("sparkgap", "vllm", "canonical"):
+    for name in ("flare", "vllm", "canonical"):
         parser.add_argument(f"--{name}", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output already exists")
     result = compare_traces(**{name: load_trace(getattr(args, name))
-                               for name in ("sparkgap", "vllm", "canonical")})
+                               for name in ("flare", "vllm", "canonical")})
     with args.output.open("x") as handle:
         json.dump(result, handle, indent=2, allow_nan=False)
         handle.write("\n")

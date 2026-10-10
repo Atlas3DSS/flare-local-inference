@@ -136,14 +136,14 @@ impl Metrics {
 
     pub fn render(&self) -> String {
         let mut text = String::with_capacity(4096);
-        text.push_str("# HELP sparkgap_sampling_graph_launches_total Successful native submissions by captured sampler mode; includes consumption-only prefill.\n# TYPE sparkgap_sampling_graph_launches_total counter\n");
+        text.push_str("# HELP flare_sampling_graph_launches_total Successful native submissions by captured sampler mode; includes consumption-only prefill.\n# TYPE flare_sampling_graph_launches_total counter\n");
         for (kind, count) in ["prefill", "decode", "resume", "speculative"]
             .into_iter()
             .zip(&self.sampling_launches)
         {
             let _ = writeln!(
                 text,
-                "sparkgap_sampling_graph_launches_total{{kind=\"{kind}\",mode=\"general\"}} {}",
+                "flare_sampling_graph_launches_total{{kind=\"{kind}\",mode=\"general\"}} {}",
                 count.load(Ordering::Relaxed)
             );
         }
@@ -171,7 +171,7 @@ impl Metrics {
         ] {
             let _ = writeln!(
                 text,
-                "# HELP sparkgap_speculative_{metric} {help}\n# TYPE sparkgap_speculative_{metric} counter"
+                "# HELP flare_speculative_{metric} {help}\n# TYPE flare_speculative_{metric} counter"
             );
             for (batch, widths) in [1, 2, 4].into_iter().zip(&self.speculative) {
                 for (width, counts) in (1..=8).zip(widths) {
@@ -188,12 +188,12 @@ impl Metrics {
                     .load(Ordering::Relaxed);
                     let _ = writeln!(
                         text,
-                        "sparkgap_speculative_{metric}{{batch=\"{batch}\",width=\"{width}\"}} {value}"
+                        "flare_speculative_{metric}{{batch=\"{batch}\",width=\"{width}\"}} {value}"
                     );
                 }
             }
         }
-        text.push_str("# HELP sparkgap_speculative_drafts_total Draft outcomes by one-based depth and actual proposal source; accepted counts are clipped at EOS/output budget.\n# TYPE sparkgap_speculative_drafts_total counter\n");
+        text.push_str("# HELP flare_speculative_drafts_total Draft outcomes by one-based depth and actual proposal source; accepted counts are clipped at EOS/output budget.\n# TYPE flare_speculative_drafts_total counter\n");
         for (index, sources) in self.draft_sources.iter().enumerate() {
             let depth = index + 1;
             for (source, outcomes) in ["mtp", "copy"].into_iter().zip(sources) {
@@ -201,7 +201,7 @@ impl Metrics {
                     let value = count.load(Ordering::Relaxed);
                     let _ = writeln!(
                         text,
-                        "sparkgap_speculative_drafts_total{{depth=\"{depth}\",source=\"{source}\",outcome=\"{outcome}\"}} {value}"
+                        "flare_speculative_drafts_total{{depth=\"{depth}\",source=\"{source}\",outcome=\"{outcome}\"}} {value}"
                     );
                 }
             }
@@ -283,7 +283,7 @@ impl Metrics {
             "Prefix lookups without a GPU-ready checkpoint.",
             self.cache_misses.load(Ordering::Relaxed),
         );
-        text.push_str("# HELP sparkgap_graph_launches_total Successful native CUDA graph submissions.\n# TYPE sparkgap_graph_launches_total counter\n");
+        text.push_str("# HELP flare_graph_launches_total Successful native CUDA graph submissions.\n# TYPE flare_graph_launches_total counter\n");
         for (kind, count) in [
             "init",
             "restore",
@@ -299,7 +299,7 @@ impl Metrics {
         {
             let _ = writeln!(
                 text,
-                "sparkgap_graph_launches_total{{kind=\"{kind}\"}} {}",
+                "flare_graph_launches_total{{kind=\"{kind}\"}} {}",
                 count.load(Ordering::Relaxed)
             );
         }
@@ -365,7 +365,7 @@ impl Metrics {
 pub(super) fn metric(text: &mut String, name: &str, kind: &str, help: &str, value: u64) {
     let _ = writeln!(
         text,
-        "# HELP sparkgap_{name} {help}\n# TYPE sparkgap_{name} {kind}\nsparkgap_{name} {value}"
+        "# HELP flare_{name} {help}\n# TYPE flare_{name} {kind}\nflare_{name} {value}"
     );
 }
 
@@ -392,14 +392,14 @@ mod tests {
         metrics.speculative_completed(1, 8, 1000, &records);
         let text = metrics.render();
         for line in [
-            "sparkgap_speculative_rounds_total{batch=\"1\",width=\"8\"} 1",
-            "sparkgap_speculative_gpu_nanoseconds_total{batch=\"1\",width=\"8\"} 1000",
-            "sparkgap_speculative_emitted_tokens_total{batch=\"1\",width=\"8\"} 2",
-            "sparkgap_speculative_offered_drafts_total{batch=\"1\",width=\"8\"} 7",
-            "sparkgap_speculative_drafts_total{depth=\"1\",source=\"copy\",outcome=\"accepted\"} 1",
-            "sparkgap_speculative_drafts_total{depth=\"2\",source=\"mtp\",outcome=\"accepted\"} 1",
-            "sparkgap_speculative_drafts_total{depth=\"3\",source=\"copy\",outcome=\"offered\"} 1",
-            "sparkgap_speculative_drafts_total{depth=\"3\",source=\"copy\",outcome=\"accepted\"} 0",
+            "flare_speculative_rounds_total{batch=\"1\",width=\"8\"} 1",
+            "flare_speculative_gpu_nanoseconds_total{batch=\"1\",width=\"8\"} 1000",
+            "flare_speculative_emitted_tokens_total{batch=\"1\",width=\"8\"} 2",
+            "flare_speculative_offered_drafts_total{batch=\"1\",width=\"8\"} 7",
+            "flare_speculative_drafts_total{depth=\"1\",source=\"copy\",outcome=\"accepted\"} 1",
+            "flare_speculative_drafts_total{depth=\"2\",source=\"mtp\",outcome=\"accepted\"} 1",
+            "flare_speculative_drafts_total{depth=\"3\",source=\"copy\",outcome=\"offered\"} 1",
+            "flare_speculative_drafts_total{depth=\"3\",source=\"copy\",outcome=\"accepted\"} 0",
         ] {
             assert!(text.lines().any(|value| value == line), "{line}");
         }
@@ -419,16 +419,18 @@ mod tests {
         metrics.launched(GraphKind::Decode);
         metrics.launched(GraphKind::Decode);
         let text = metrics.render();
-        assert!(text.contains("sparkgap_cache_misses_total 3\n"));
-        assert!(text.contains("sparkgap_cache_reused_tokens_total 192\n"));
-        assert!(text.contains("sparkgap_graph_launches_total{kind=\"restore\"} 1\n"));
+        assert!(text.contains("flare_cache_misses_total 3\n"));
+        assert!(text.contains("flare_cache_reused_tokens_total 192\n"));
+        assert!(text.contains("flare_graph_launches_total{kind=\"restore\"} 1\n"));
         assert!(!text.contains("mode=\"greedy\""));
-        assert!(text.contains(
-            "sparkgap_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"} 2\n"
-        ));
+        assert!(
+            text.contains(
+                "flare_sampling_graph_launches_total{kind=\"decode\",mode=\"general\"} 2\n"
+            )
+        );
         assert_eq!(
             text.lines()
-                .filter(|line| line.starts_with("sparkgap_graph_launches_total{"))
+                .filter(|line| line.starts_with("flare_graph_launches_total{"))
                 .count(),
             8
         );

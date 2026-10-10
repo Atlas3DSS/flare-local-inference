@@ -86,7 +86,7 @@ def observations(*, groups=((10,), (11,), (12,), (13,)), core=True, cached=0):
 
 def test_metadata_only_token_events_and_parser_deltas_are_not_double_counted():
     case, events = observations()
-    result = p.analyze_events(events, case, backend="sparkgap")
+    result = p.analyze_events(events, case, backend="flare")
     assert result["passed"]
     assert result["generated_token_ids"] == [10, 11, 12, 13]
     assert result["delivery_ttft_ns"] == 110
@@ -108,7 +108,7 @@ def test_coalesced_chunks_never_create_per_token_arrival_times():
 
 def test_coalesced_delivery_can_still_have_exact_native_core_intervals():
     case, events = observations(groups=((10, 11), (12, 13)))
-    result = p.analyze_events(events, case, backend="sparkgap")
+    result = p.analyze_events(events, case, backend="flare")
     assert result["passed"]
     assert result["delivery_itl_ns"] == []
     assert result["core_itl_ns"] == [7, 7, 7]
@@ -138,7 +138,7 @@ def test_failed_conditions_are_retained(mutation, check):
         events.insert(-1, {"elapsed_ns": 175, "data": {"error": {"message": "failure"}}})
     elif mutation == "no_done":
         events.pop()
-    result = p.analyze_events(events, case, backend="sparkgap")
+    result = p.analyze_events(events, case, backend="flare")
     assert not result["passed"]
     assert not result["checks"][check]
     assert result["generated_token_ids"]
@@ -165,7 +165,7 @@ def test_nearest_rank_p99_and_empty_distributions():
 
 def test_concurrent_throughput_excludes_first_generated_token_per_request():
     case, events = observations()
-    a = p.analyze_events(events, case, backend="sparkgap")
+    a = p.analyze_events(events, case, backend="flare")
     b = deepcopy(a)
     group = {"id": "group", "kind": "decode-b2", "batch": 2, "measured": True}
     summary = p.group_summary(group, [
@@ -180,7 +180,7 @@ def test_concurrent_throughput_excludes_first_generated_token_per_request():
 @pytest.mark.parametrize("summaries,expected", [([], False), ([False], False), ([True], True)])
 def test_measurement_acceptance_includes_group_cache_checks_and_coverage(summaries, expected):
     case, events = observations()
-    analysis = p.analyze_events(events, case, backend="sparkgap")
+    analysis = p.analyze_events(events, case, backend="flare")
     assert analysis["passed"]
     corpus = {"groups": [{"id": "group", "kind": "decode-b1", "measured": True}],
               "cases": [{"id": "case", "group": "group"}]}
@@ -217,9 +217,9 @@ class Connection:
         self.closed = True
 
 
-@pytest.mark.parametrize("backend", ["sparkgap", "vllm"])
+@pytest.mark.parametrize("backend", ["flare", "vllm"])
 def test_client_preserves_raw_stream_and_sends_only_supported_observation_fields(tmp_path, monkeypatch, backend):
-    case, events = observations(core=backend == "sparkgap")
+    case, events = observations(core=backend == "flare")
     case.update(id="request", request={"model": p.MODEL_ID, "max_tokens": 4})
     raw = b": keepalive\n\n" + b"".join(b"data: " + (e["data"].encode() if isinstance(e["data"], str)
                 else json.dumps(e["data"]).encode()) + b"\n\n" for e in events)
@@ -232,7 +232,7 @@ def test_client_preserves_raw_stream_and_sends_only_supported_observation_fields
     body = json.loads(conn.calls[0][1]["body"])
     assert body["return_token_ids"] is True
     assert body["stream_options"] == {"include_usage": True}
-    assert body.get("return_token_timestamps", False) == (backend == "sparkgap")
+    assert body.get("return_token_timestamps", False) == (backend == "flare")
     assert conn.closed
 
 
@@ -242,7 +242,7 @@ def test_truncated_sse_is_saved_with_failure(tmp_path, monkeypatch):
     raw = b'data: {"choices":[]}'
     conn = Connection(Response(raw))
     monkeypatch.setattr(p, "connection", lambda *_: (conn, ""))
-    result = p.stream_request("http://unused", case, tmp_path / "request", backend="sparkgap",
+    result = p.stream_request("http://unused", case, tmp_path / "request", backend="flare",
                               model=None, timeout=1, barrier=threading.Barrier(1))
     assert not result["analysis"]["passed"]
     assert "truncated" in result["client_error"]

@@ -23,7 +23,7 @@ def git(checkout, *args):
 
 @pytest.fixture
 def source(tmp_path, monkeypatch):
-    project, checkout = tmp_path / "sparkgap", tmp_path / "flashinfer"
+    project, checkout = tmp_path / "flare", tmp_path / "flashinfer"
     project.mkdir()
     checkout.mkdir()
     git(checkout, "init", "--quiet")
@@ -33,7 +33,7 @@ def source(tmp_path, monkeypatch):
     revision = git(checkout, "rev-parse", "HEAD")
     (project / "pyproject.toml").write_text(
         '[tool.uv.sources]\nflashinfer-python = { path = "../flashinfer", editable = true }\n'
-        f'[tool.sparkgap.source-revisions]\nflashinfer = "{revision}"\n')
+        f'[tool.flare.source-revisions]\nflashinfer = "{revision}"\n')
     monkeypatch.setattr(setup, "ROOT", project)
     return project, checkout, revision
 
@@ -116,7 +116,7 @@ def test_project_and_lock_use_only_main_editable_flashinfer():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
     assert project["tool"]["uv"]["sources"]["flashinfer-python"] == {"path": "../flashinfer", "editable": True}
-    assert set(project["tool"]["sparkgap"]["source-revisions"]) == {"flashinfer"}
+    assert set(project["tool"]["flare"]["source-revisions"]) == {"flashinfer"}
     dependency = next(package for package in lock["package"] if package["name"] == "flashinfer-python")
     assert dependency["source"] == {"editable": "../flashinfer"}
-    assert project["tool"]["setuptools"]["packages"]["find"]["include"] == ["sparkgap*"]
+    assert project["tool"]["setuptools"]["packages"]["find"]["include"] == ["flare*"]

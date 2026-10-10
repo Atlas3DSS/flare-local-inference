@@ -4,7 +4,7 @@ import weakref
 
 import pytest
 
-from sparkgap.recipes.qwen38.bootstrap import _allocate_page_pools
+from flare.recipes.qwen38.bootstrap import _allocate_page_pools
 
 
 class Pool:

@@ -1,7 +1,6 @@
 #![cfg(feature = "server")]
 
-use serde_json::{Map, Value, json};
-use sparkgap_native::{
+use flare_native::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -11,6 +10,7 @@ use sparkgap_native::{
     scheduler::SchedulerLimits,
     server::{PreparedRequest, prepare_request},
 };
+use serde_json::{Map, Value, json};
 use std::{fs, path::PathBuf};
 
 struct Fixture {
@@ -23,7 +23,7 @@ struct Fixture {
 impl Fixture {
     fn load(defaults: Map<String, Value>) -> Self {
         let snapshot = PathBuf::from(
-            std::env::var_os("SPARKGAP_TEST_SNAPSHOT").expect("SPARKGAP_TEST_SNAPSHOT is required"),
+            std::env::var_os("FLARE_TEST_SNAPSHOT").expect("FLARE_TEST_SNAPSHOT is required"),
         );
         let fixture: Value = serde_json::from_slice(
             &fs::read(
@@ -116,7 +116,7 @@ fn tool(name: &str) -> Value {
 }
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn exact_short_instruction_boundary_survives_changed_user_content() {
     let fixture = Fixture::load(Map::new());
     let options = json!({"enable_thinking":false,"add_generation_prompt":true});
@@ -146,7 +146,7 @@ fn exact_short_instruction_boundary_survives_changed_user_content() {
 }
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn tool_instructions_are_rendered_without_explicit_system_and_disable_with_none() {
     let fixture = Fixture::load(Map::new());
     let messages = json!([{"role":"user","content":"Weather in Oslo?"}]);
@@ -181,7 +181,7 @@ fn tool_instructions_are_rendered_without_explicit_system_and_disable_with_none(
 }
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn reasoning_defaults_and_explicit_overrides_follow_actual_system_rendering() {
     let messages = json!([{"role":"user","content":"Compute two plus two."}]);
     let default = Fixture::load(Map::new());
@@ -225,7 +225,7 @@ fn reasoning_defaults_and_explicit_overrides_follow_actual_system_rendering() {
 }
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn user_header_and_empty_system_do_not_create_checkpoints() {
     let fixture = Fixture::load(Map::new());
     for messages in [
@@ -243,7 +243,7 @@ fn user_header_and_empty_system_do_not_create_checkpoints() {
 }
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn token_prefix_mismatch_or_complete_prompt_match_suppresses_boundary() {
     let fixture = Fixture::load(Map::new());
     let messages = json!([{"role":"system","content":"Be concise."},{"role":"user","content":"Explain the sky."}]);
@@ -277,7 +277,7 @@ fn token_prefix_mismatch_or_complete_prompt_match_suppresses_boundary() {
 }
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn tool_and_system_prefix_survives_assistant_continuation() {
     let fixture = Fixture::load(Map::new());
     let a = fixture.prepare(

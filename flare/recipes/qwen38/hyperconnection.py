@@ -9,8 +9,8 @@ import torch
 from b12x.norm import hyperconnection as hc
 from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
-from sparkgap.preparation.tuning import register_finalizer
-from sparkgap.preparation.fixtures import hyperconnection as hc_fixtures
+from flare.preparation.tuning import register_finalizer
+from flare.preparation.fixtures import hyperconnection as hc_fixtures
 
 from .linear import BF16Projection
 

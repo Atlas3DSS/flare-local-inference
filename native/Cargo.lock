@@ -476,6 +476,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "flare-native"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "axum",
+ "base64 0.22.1",
+ "blake2",
+ "libloading",
+ "llguidance",
+ "minijinja",
+ "minijinja-contrib",
+ "png",
+ "pyo3",
+ "ryu",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokenizers",
+ "tokio",
+ "turbojpeg",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1558,30 +1582,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys",
-]
-
-[[package]]
-name = "sparkgap-native"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "axum",
- "base64 0.22.1",
- "blake2",
- "libloading",
- "llguidance",
- "minijinja",
- "minijinja-contrib",
- "png",
- "pyo3",
- "ryu",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
- "tokenizers",
- "tokio",
- "turbojpeg",
 ]
 
 [[package]]

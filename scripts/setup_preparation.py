@@ -19,7 +19,7 @@ def git(path: Path, *args: str) -> str:
 
 def verify_flashinfer() -> dict:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    revisions = project["tool"]["sparkgap"]["source-revisions"]
+    revisions = project["tool"]["flare"]["source-revisions"]
     revision = revisions["flashinfer"]
     source = project["tool"]["uv"]["sources"]["flashinfer-python"]
     if source.get("editable") is not True or not isinstance(source.get("path"), str):
@@ -46,7 +46,7 @@ def main() -> int:
         environment = dict(os.environ, BUILD_NVEP="0", FLASHINFER_BUILD_NO_PIP="1")
         subprocess.run(
             ["uv", "sync", "--locked", "--extra", "prepare", "--extra", "test",
-             "--reinstall-package", "flashinfer-python", "--reinstall-package", "sparkgap-native"],
+             "--reinstall-package", "flashinfer-python", "--reinstall-package", "flare-native"],
             cwd=ROOT, env=environment, check=True,
         )
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:

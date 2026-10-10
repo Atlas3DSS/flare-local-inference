@@ -8,8 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.recipes.qwen38.sampling import (
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.recipes.qwen38.sampling import (
     DeviceRequestState, RequestAdmission, PreparedSampling, PreparedTokenState,
     AdmissionBuffers, PreparedAdmission,
     philox4x32_reference, FINISHED, ERROR, INVALID_DISTRIBUTION, UNCONSUMED_PENDING,
@@ -159,8 +159,8 @@ def _flashinfer_uniform(seed, counter):
 
 
 
-CUDA = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires SPARKGAP_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES")
+CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires FLARE_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES")
 
 
 def _metadata(rows=4, fields=8):

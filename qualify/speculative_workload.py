@@ -17,7 +17,7 @@ import struct
 import subprocess
 
 from qualify.provenance import digest, file_record, write_json
-from sparkgap.preparation.qwen38 import (
+from flare.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, INDEX_SHA256,
     MODEL_ID, REVISION, TRANSFORMERS_REVISION,
 )
@@ -399,7 +399,7 @@ def generate(snapshot, output, native_frontend, baseline_fixture):
     workload = build_workload(AutoTokenizer.from_pretrained(snapshot, local_files_only=True))
     root = Path(__file__).resolve().parents[1]
     paths = [Path(__file__), root / "tests/reference/test_speculative_workload.py",
-             root / "qualify/provenance.py", root / "sparkgap/preparation/qwen38.py",
+             root / "qualify/provenance.py", root / "flare/preparation/qwen38.py",
              root / "native/examples/qualify_frontend.rs", root / "native/src/frontend/mod.rs",
              root / "native/src/frontend/json.rs", root / "native/src/server/request.rs",
              root / "native/Cargo.toml", root / "native/Cargo.lock", baseline_fixture, native_frontend]

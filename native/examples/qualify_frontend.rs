@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use flare_native::frontend::{Asset, Frontend, FrontendAssets};
 use serde_json::{Map, Value};
-use sparkgap_native::frontend::{Asset, Frontend, FrontendAssets};
 
 fn main() -> Result<(), String> {
     run().map_err(|error| error.to_string())

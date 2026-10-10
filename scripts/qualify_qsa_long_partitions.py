@@ -101,14 +101,14 @@ def execute(args, records, capture_receipt, receipt):
         raise RuntimeError(f'assigned GPU occupied before preparation: {processes}')
     import b12x.attention.paged._selected_forward as kernels
     import b12x.attention.qsa.reference as reference_module
-    import sparkgap_native
-    from sparkgap.preparation.graphs import PreparedGraphBundle
+    import flare_native
+    from flare.preparation.graphs import PreparedGraphBundle
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.set_float32_matmul_precision('highest')
-    native = next(Path(sparkgap_native.__file__).parent.glob('*.so'))
+    native = next(Path(flare_native.__file__).parent.glob('*.so'))
     root = Path(kernels.__file__).resolve().parents[2]
     receipt['installed_native'] = {'path': str(native), 'sha256': sha(native)}
     receipt['versions'] = {'torch': torch.__version__, 'cuda': torch.version.cuda,
@@ -120,7 +120,7 @@ def execute(args, records, capture_receipt, receipt):
         'callable': 'sparse_paged_gqa_reference', 'device': 'cpu', 'rtol': 0, 'atol': .02,
         'arithmetic': 'FP32 QK, FP32 softmax, FP32 PV, BF16 output; exact installed callable.'}
     receipt['sampling_sources'] = {str(path): sha(path) for path in (
-        ROOT / 'sparkgap/recipes/qwen38/sampling.py',
+        ROOT / 'flare/recipes/qwen38/sampling.py',
         Path(importlib.util.find_spec('flashinfer.sampling').origin),
     )}
     if receipt['b12x_sources'] != capture_receipt['b12x_sources']:
@@ -255,7 +255,7 @@ def main():
     shutil.copyfile(__file__, args.artifacts / Path(__file__).name)
     base = Path(__file__).with_name('qualify_qsa_fixed_partitions.py')
     shutil.copyfile(base, args.artifacts / base.name)
-    receipt = {'schema': 'sparkgap.qsa-long-partitions.v1', 'passed': False,
+    receipt = {'schema': 'flare.qsa-long-partitions.v1', 'passed': False,
         'script': {'path': str(Path(__file__).resolve()), 'sha256': sha(__file__)},
         'shared_capture_helper': {'path': str(base), 'sha256': sha(base)}, 'command': sys.argv,
         'input_artifact': {'path': str(args.artifact), 'sha256': ARTIFACT_SHA},

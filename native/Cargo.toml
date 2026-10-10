@@ -1,12 +1,12 @@
 [package]
-name = "sparkgap-native"
+name = "flare-native"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
 publish = false
 
 [lib]
-name = "sparkgap_native"
+name = "flare_native"
 crate-type = ["cdylib", "rlib"]
 
 [features]

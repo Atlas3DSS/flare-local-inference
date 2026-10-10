@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from sparkgap.recipes.qwen38 import moe
-from sparkgap.recipes.qwen38.moe import PreparedRouter, PreparedQwenMoe, QwenMoeWeights, RouterScratch, QwenMoeScratch
+from flare.recipes.qwen38 import moe
+from flare.recipes.qwen38.moe import PreparedRouter, PreparedQwenMoe, QwenMoeWeights, RouterScratch, QwenMoeScratch
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 17, 4096])
@@ -62,7 +62,7 @@ def test_router_rejects_changed_precision():
         router(torch.zeros(1, 512, dtype=torch.float32))
 
 
-@pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                    reason="requires an explicitly assigned CUDA device")
 @pytest.mark.parametrize("tokens,experts", [(1, 512), (8, 512), (17, 384)])
 def test_native_router_ties_fp32_weights_and_changed_input_graph(tokens, experts):

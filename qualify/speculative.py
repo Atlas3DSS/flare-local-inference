@@ -37,9 +37,9 @@ def idle(base):
     deadline = time.monotonic() + 30
     while True:
         raw, values = metrics(base)
-        if (values.get("sparkgap_active_requests", -1) == 0
-                and values.get("sparkgap_pending_requests", -1) == 0
-                and values.get("sparkgap_free_request_slots", -1) == 4):
+        if (values.get("flare_active_requests", -1) == 0
+                and values.get("flare_pending_requests", -1) == 0
+                and values.get("flare_free_request_slots", -1) == 4):
             return raw, values
         if time.monotonic() >= deadline:
             raise TimeoutError("native server did not reclaim all requests within 30 seconds")
@@ -109,7 +109,7 @@ def run(args, model, server):
                                     if "_total" in key}
         if args.source == "copy" and not args.no_copy and args.fixed_width != 1:
             accepted_copy = sum(value for key, value in receipt["metrics_delta"].items()
-                                if key.startswith("sparkgap_speculative_drafts_total{")
+                                if key.startswith("flare_speculative_drafts_total{")
                                 and 'source="copy"' in key and 'outcome="accepted"' in key)
             check("grammar-accepted-copy", accepted_copy > 0, accepted_drafts=accepted_copy)
         receipt["passed"] = all(check["passed"] for check in receipt["checks"])
@@ -125,8 +125,8 @@ def run(args, model, server):
 
 def main():
     import flashinfer
-    import sparkgap_native
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    import flare_native
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -142,9 +142,9 @@ def main():
         raise FileExistsError(args.output / "service.json")
     root = Path(__file__).resolve().parents[1]
     source_paths = [Path(__file__)]
-    source_paths += sorted((root / "sparkgap").rglob("*.py"))
+    source_paths += sorted((root / "flare").rglob("*.py"))
     source_paths += sorted((root / "native" / "src").rglob("*.rs"))
-    source_paths += sorted(Path(sparkgap_native.__file__).parent.glob("*.so"))
+    source_paths += sorted(Path(flare_native.__file__).parent.glob("*.so"))
     source_paths += sorted((Path(flashinfer.__file__).parent / "experimental" / "b12x").rglob("*.py"))
     source_paths += [Path(flashinfer.__file__).parent / "sampling.py",
                      Path(flashinfer.__file__).parent.parent / "include/flashinfer/sampling.cuh"]

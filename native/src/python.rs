@@ -13,7 +13,7 @@ use crate::lifetime::OwnerLease;
 use crate::{BufferSpan, GraphBundle, ReplayWorker};
 
 #[cfg(feature = "qualification")]
-#[pyclass(module = "sparkgap_native")]
+#[pyclass(module = "flare_native")]
 struct ReplayCompletion {
     #[pyo3(get)]
     ticket: u64,
@@ -31,7 +31,7 @@ struct ReplayCompletion {
 /// Graph handles must not be reinstantiated and tensor storage must not be resized
 /// or mutated concurrently. Captured PyTorch generator-backed RNG is unsupported.
 #[cfg(feature = "qualification")]
-#[pyclass(module = "sparkgap_native")]
+#[pyclass(module = "flare_native")]
 struct GraphReplayWorker {
     worker: ReplayWorker,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
@@ -199,7 +199,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
     })
 }
 
-#[pyclass(module = "sparkgap_native")]
+#[pyclass(module = "flare_native")]
 struct ExecutionCompletion {
     #[pyo3(get)]
     fence: u64,
@@ -211,7 +211,7 @@ struct ExecutionCompletion {
     elapsed_ns: Option<u64>,
 }
 
-#[pyclass(name = "GraphExecutor", module = "sparkgap_native")]
+#[pyclass(name = "GraphExecutor", module = "flare_native")]
 struct PreparedGraphExecutor {
     worker: ExecutionWorker,
     owner: Mutex<OwnerLease<Py<PyAny>>>,
@@ -331,7 +331,7 @@ impl Drop for PreparedGraphExecutor {
 }
 
 #[pymodule]
-fn sparkgap_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn flare_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "qualification")]
     {
         module.add_class::<GraphReplayWorker>()?;
@@ -353,8 +353,8 @@ mod binding_tests {
     fn raw_replay_exports_require_qualification_feature() {
         Python::initialize();
         Python::attach(|py| {
-            let module = PyModule::new(py, "sparkgap_native").unwrap();
-            sparkgap_native(&module).unwrap();
+            let module = PyModule::new(py, "flare_native").unwrap();
+            flare_native(&module).unwrap();
             for name in ["GraphReplayWorker", "ReplayCompletion"] {
                 assert_eq!(
                     module.hasattr(name).unwrap(),
@@ -369,7 +369,7 @@ mod binding_tests {
 }
 
 #[cfg(feature = "server")]
-#[pyclass(name = "Server", module = "sparkgap_native")]
+#[pyclass(name = "Server", module = "flare_native")]
 struct NativeServer {
     server: crate::server::Server<crate::model::qwen4exp::Qwen4Exp>,
     owner: Mutex<OwnerLease<Py<PyAny>>>,

@@ -7,8 +7,8 @@ import importlib.metadata
 import json
 from typing import TYPE_CHECKING
 
-from sparkgap.preparation.checkpoint import CheckpointError, CheckpointManifest
-from sparkgap.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
+from flare.preparation.checkpoint import CheckpointError, CheckpointManifest
+from flare.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
 
 if TYPE_CHECKING:
     from transformers import Qwen4ExpForConditionalGeneration

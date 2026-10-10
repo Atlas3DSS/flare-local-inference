@@ -56,7 +56,7 @@ fn hash_matches_independent_blake2b128_vectors() {
     let mut history = PrefixHistory::new([7; 32]);
     assert_eq!(
         hexadecimal(history.key_at(0).unwrap().digest),
-        "40339416bf7d7cc72d27a2bdfdac8381"
+        "6f0178338c96c0355272862173689b48"
     );
     history
         .append(
@@ -75,11 +75,11 @@ fn hash_matches_independent_blake2b128_vectors() {
         .unwrap();
     assert_eq!(
         hexadecimal(history.key_at(64).unwrap().digest),
-        "4a4c0d9b81f4796d5873559aa3935816"
+        "2b20a8f1daa365699d9a90bb10600d30"
     );
     assert_eq!(
         hexadecimal(history.key_at(128).unwrap().digest),
-        "2e38c76b2d0b54afbacca4f9f039f08e"
+        "df75df435a8efc99d5e398479fdf2519"
     );
 }
 

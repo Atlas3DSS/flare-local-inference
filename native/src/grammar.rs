@@ -770,14 +770,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires SPARKGAP_CHECKPOINT pointing to the exact Qwen3.8 checkpoint"]
+    #[ignore = "requires FLARE_CHECKPOINT pointing to the exact Qwen3.8 checkpoint"]
     fn checkpoint_mask_trace() {
         let snapshot = std::path::PathBuf::from(
-            std::env::var_os("SPARKGAP_CHECKPOINT").expect("SPARKGAP_CHECKPOINT is required"),
+            std::env::var_os("FLARE_CHECKPOINT").expect("FLARE_CHECKPOINT is required"),
         );
         let reference = check_checkpoint_masks(&snapshot, None);
         let trace_path = std::env::temp_dir().join(format!(
-            "sparkgap-grammar-{}-{}.json",
+            "flare-grammar-{}-{}.json",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

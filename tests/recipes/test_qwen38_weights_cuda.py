@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
-from sparkgap.reference.qwen38_quant import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
+from flare.reference.qwen38_quant import (
     CheckpointTensors,
     decode_csf_scales,
     mxfp8_linear_reference,
@@ -21,8 +21,8 @@ from sparkgap.reference.qwen38_quant import (
 )
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires SPARKGAP_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires FLARE_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
 )
 
 
@@ -32,7 +32,7 @@ def manifest():
         pytest.fail("assign a CUDA device explicitly")
     assert torch.cuda.get_device_capability(0) in ((12, 0), (12, 1))
     default = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
-    return inspect_qwen38_checkpoint(Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", default)))
+    return inspect_qwen38_checkpoint(Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default)))
 
 
 def _assert_numerical(actual, expected):

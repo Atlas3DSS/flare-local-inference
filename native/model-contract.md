@@ -18,7 +18,7 @@ drain of the model and completion-copy streams.
 Build with `server,extension-module` and construct:
 
 ```python
-server = sparkgap_native.Server(owner, manifest, config_json)
+server = flare_native.Server(owner, manifest, config_json)
 print(server.address)
 # The interpreter may wait for process signals. Requests execute entirely in Rust.
 server.close()
@@ -216,9 +216,9 @@ determine the status code.
 `/metrics` exposes native Prometheus counters and gauges for request lifecycle,
 graph launches, prefix reuse, snapshot publication and eviction, and resource
 capacity. Metric labels contain no request identifiers, prompt contents, or token IDs.
-`sparkgap_mixed_grammar_decode_steps_total` counts successful decode submissions
+`flare_mixed_grammar_decode_steps_total` counts successful decode submissions
 whose actual request lanes include both constrained and unconstrained requests.
-`sparkgap_constrained_max_inflight` records the maximum outstanding executor
+`flare_constrained_max_inflight` records the maximum outstanding executor
 frames immediately after a successful constrained submission. It is zero before
 any constrained submission and must remain one afterward. Both measurements
 cover the lifetime of the native model worker.
@@ -257,7 +257,7 @@ contains 25. When `speculative_widths` is nonempty, ABI3 and the configured
 speculative variants replace ordinary decode. All eight widths give 39 graphs
 at chunk size 4096, or 36 at chunk size 512: widths 1–8 at batch one, 1–4 at
 batch two, and 1–2 at batch four. Graph names use the kind and capacity.
-The fixed metric `sparkgap_sampling_graph_launches_total` exposes successful
+The fixed metric `flare_sampling_graph_launches_total` exposes successful
 sampling graph submissions with the `general` mode label, including
 consumption-only prefill.
 
@@ -326,9 +326,9 @@ the largest prepared width no greater than that width, remaining context, and
 eight divided by the batch capacity. Adaptive selection uses the same bounds.
 No expert-reuse or confidence predictor is implied by these measurements.
 
-Metrics `sparkgap_speculative_{rounds,gpu_nanoseconds,emitted_tokens,offered_drafts,
+Metrics `flare_speculative_{rounds,gpu_nanoseconds,emitted_tokens,offered_drafts,
 accepted_drafts}_total` use fixed batch and width labels. Graph time excludes
-uploads and D2H completion transfer. `sparkgap_speculative_drafts_total` records
+uploads and D2H completion transfer. `flare_speculative_drafts_total` records
 offered and accepted counts by one-based depth and actual `mtp`/`copy` source;
 accepted counts are clipped at EOS and output budget. Completed records can
 include a lane cancelled after its graph submission.

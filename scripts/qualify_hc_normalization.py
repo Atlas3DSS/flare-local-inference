@@ -79,9 +79,9 @@ def load_inputs(args):
     from safetensors import safe_open
     from b12x.norm import hyperconnection as hc
 
-    sg = torch.load(args.sparkgap_trace, map_location="cpu", weights_only=True)
+    sg = torch.load(args.flare_trace, map_location="cpu", weights_only=True)
     vllm = torch.load(args.vllm_trace, map_location="cpu", weights_only=True)
-    receipt = json.loads(args.sparkgap_receipt.read_text())
+    receipt = json.loads(args.flare_receipt.read_text())
     worker = json.loads(args.vllm_worker.read_text())
     if len(worker) != 1:
         raise ValueError("normalization probe requires a TP1 worker record")
@@ -95,7 +95,7 @@ def load_inputs(args):
     if any(query.get(key) != value for key, value in expected_query.items()):
         raise ValueError("recorded vLLM normalization query does not match the trace contract")
     if receipt["prefill_capacity"] != 512 or not vllm["passed"]:
-        raise ValueError("expected a 512-row Sparkgap trace and complete vLLM stage coverage")
+        raise ValueError("expected a 512-row Flare trace and complete vLLM stage coverage")
     if (receipt["prompt_tokens"] != vllm["prompt_tokens"]
             or receipt["generated_tokens"][:3] != vllm["teacher_tokens"]):
         raise ValueError("trace prompt or teacher-forced continuation differs")
@@ -146,12 +146,12 @@ def load_inputs(args):
         if not pair["identical"]:
             raise ValueError(f"installed and pinned HC sources differ: {path.name}")
         source_pairs.append(pair)
-    tracked_paths = [Path(__file__), ROOT / "qualify/provenance.py", args.sparkgap_trace,
-                     args.sparkgap_receipt, args.vllm_trace, args.vllm_worker,
+    tracked_paths = [Path(__file__), ROOT / "qualify/provenance.py", args.flare_trace,
+                     args.flare_receipt, args.vllm_trace, args.vllm_worker,
                      index_path, config_path, shard]
     tracked = [file_record(path) for path in tracked_paths]
     if tracked[2]["sha256"] != receipt["tensor_sha256"]:
-        raise ValueError("Sparkgap tensor artifact differs from its recorded digest")
+        raise ValueError("Flare tensor artifact differs from its recorded digest")
     tracked += [pair[side] for pair in source_pairs for side in ("installed", "pinned")]
     stage_report = args.vllm_trace.parent / "layer-trace.json"
     trace_validation = json.loads(stage_report.read_text()) if stage_report.is_file() else None
@@ -163,7 +163,7 @@ def load_inputs(args):
         "inputs_and_sources": tracked, "hc_sources": source_pairs,
         "pinned_flashinfer_revision": PINNED_REVISION,
         "checkpoint_weight_key": WEIGHT_KEY, "checkpoint_weight": tensor_record(weight),
-        "recorded_sparkgap_selections": selections, "recorded_vllm_plan": vplan,
+        "recorded_flare_selections": selections, "recorded_vllm_plan": vplan,
         "vllm_trace_qualification": trace_validation,
         "prompt_tokens": receipt["prompt_tokens"], "teacher_tokens": vllm["teacher_tokens"],
         "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
@@ -201,7 +201,7 @@ def qualify(inputs, args, report, raw):
 
     with torch.inference_mode(), PreparationSession(device=device, autotune=False, compile_workers=0) as session:
         def prepare_case(name, step, geometry, arm, source_cpu, expected=None):
-            rows = (512 if geometry == "sparkgap" else 8) if step == 0 else 1
+            rows = (512 if geometry == "flare" else 8) if step == 0 else 1
             mode = "prefill" if step == 0 else "decode"
             zero_centered = arm == "bf16_zero_centered"
             max_tokens = 512 if zero_centered or geometry == "vllm" else rows
@@ -234,14 +234,14 @@ def qualify(inputs, args, report, raw):
                 "query": query_record(plan.query), "config": config})
 
         for step in range(4):
-            for geometry, trace, arm in (("sparkgap", inputs.sg, "original_fp32_gain"),
+            for geometry, trace, arm in (("flare", inputs.sg, "original_fp32_gain"),
                                         ("vllm", inputs.vllm, "bf16_zero_centered")):
                 stages = trace["stage_outputs"][step]
                 prepare_case(f"own.{geometry}.{step}", step, geometry, arm,
                              stages["residual_in"].bfloat16(), stages["attn_normalized"].bfloat16())
         for step in range(4):
             common = inputs.sg["stage_outputs"][step]["residual_in"].bfloat16()
-            for geometry in ("sparkgap", "vllm"):
+            for geometry in ("flare", "vllm"):
                 for arm in weights:
                     prepare_case(f"common.{geometry}.{step}.{arm}", step, geometry, arm, common)
 
@@ -288,7 +288,7 @@ def qualify(inputs, args, report, raw):
     report["own_input_reproduction_passed"] = len(own_gates) == 8 and all(own_gates)
     report["same_input_comparisons"] = []
     for step in range(4):
-        for geometry in ("sparkgap", "vllm"):
+        for geometry in ("flare", "vllm"):
             get = lambda arm: raw["cases"][f"common.{geometry}.{step}.{arm}"]["output"]
             report["same_input_comparisons"].append({"step": step, "geometry": geometry,
                 "attribution_ready": report["own_input_reproduction_passed"],
@@ -299,8 +299,8 @@ def qualify(inputs, args, report, raw):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sparkgap-trace", type=Path, default=TRACE_ROOT / "sparkgap-b12x-combine/decoder.pt")
-    parser.add_argument("--sparkgap-receipt", type=Path, default=TRACE_ROOT / "sparkgap-b12x-combine/decoder.json")
+    parser.add_argument("--flare-trace", type=Path, default=TRACE_ROOT / "flare-b12x-combine/decoder.pt")
+    parser.add_argument("--flare-receipt", type=Path, default=TRACE_ROOT / "flare-b12x-combine/decoder.json")
     parser.add_argument("--vllm-trace", type=Path, default=TRACE_ROOT / "vllm-quantized-mxfp8-int32/vllm-layer-tensors.pt")
     parser.add_argument("--vllm-worker", type=Path, default=TRACE_ROOT / "vllm-quantized-mxfp8-int32/worker-before.json")
     parser.add_argument("--snapshot", type=Path, default=Path("/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD"))

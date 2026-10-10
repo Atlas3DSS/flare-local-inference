@@ -27,7 +27,7 @@ from qualify.speculative_workload import (
 
 VOCABULARY = 248320
 EOS = {248046, 248044}
-_ROUND = re.compile(r'^sparkgap_speculative_(rounds|gpu_nanoseconds|emitted_tokens|offered_drafts|accepted_drafts)_total\{batch="([124])",width="([1-8])"\}$')
+_ROUND = re.compile(r'^flare_speculative_(rounds|gpu_nanoseconds|emitted_tokens|offered_drafts|accepted_drafts)_total\{batch="([124])",width="([1-8])"\}$')
 
 
 def read_sse(response, raw, *, elapsed_ns, limit=32 << 20):
@@ -352,8 +352,8 @@ def read_metrics(base_url, path, timeout):
 
 def is_idle(values):
     return all(values.get(key) == expected for key, expected in {
-        "sparkgap_active_requests": 0, "sparkgap_pending_requests": 0,
-        "sparkgap_retiring_request_slots": 0, "sparkgap_free_request_slots": 4}.items())
+        "flare_active_requests": 0, "flare_pending_requests": 0,
+        "flare_retiring_request_slots": 0, "flare_free_request_slots": 4}.items())
 
 
 def idle_metrics(base_url, folder, label, timeout):
@@ -403,8 +403,8 @@ def round_metrics(delta):
             row = shapes.setdefault((int(batch), int(width)), {"batch": int(batch), "width": int(width)})
             row[metric] = value
     return {"shapes": [row for _, row in sorted(shapes.items()) if any(value for key, value in row.items() if key not in ("batch", "width"))],
-            "source_depth_outcomes": {key: value for key, value in delta.items() if key.startswith("sparkgap_speculative_drafts_total{")},
-            "graph_launches": {key: value for key, value in delta.items() if key.startswith("sparkgap_graph_launches_total{")},
+            "source_depth_outcomes": {key: value for key, value in delta.items() if key.startswith("flare_speculative_drafts_total{")},
+            "graph_launches": {key: value for key, value in delta.items() if key.startswith("flare_graph_launches_total{")},
             "scope": "Completed graph capacity B/W, not live-lane count. Duration covers the full speculative graph and excludes transfers; separate draft/verify/commit durations are unavailable."}
 
 
@@ -413,16 +413,16 @@ def summarize_group(group, observations, before, after, memory):
     count = len(observations)
     checks = {"requests_observed": count == len(group["case_ids"]),
               "http_integrity": all(o["analysis"]["passed"] for o in observations),
-              "admitted_count": delta.get("sparkgap_requests_admitted_total") == count,
-              "completed_count": delta.get("sparkgap_requests_completed_total") == count,
-              "no_runtime_failure": delta.get("sparkgap_requests_failed_total") == 0,
-              "no_cancellation": delta.get("sparkgap_requests_cancelled_total") == 0,
+              "admitted_count": delta.get("flare_requests_admitted_total") == count,
+              "completed_count": delta.get("flare_requests_completed_total") == count,
+              "no_runtime_failure": delta.get("flare_requests_failed_total") == 0,
+              "no_cancellation": delta.get("flare_requests_cancelled_total") == 0,
               "idle_after": is_idle(after),
-              "pages_conserved": after.get("sparkgap_free_kv_pages", -1) + after.get("sparkgap_cached_kv_pages", -1) == memory["pages"],
-              "snapshots_conserved": after.get("sparkgap_free_snapshots", -1) + after.get("sparkgap_cached_checkpoints", -1) == memory["snapshot_capacity"]}
+              "pages_conserved": after.get("flare_free_kv_pages", -1) + after.get("flare_cached_kv_pages", -1) == memory["pages"],
+              "snapshots_conserved": after.get("flare_free_snapshots", -1) + after.get("flare_cached_checkpoints", -1) == memory["snapshot_capacity"]}
     analyses = [o["analysis"] for o in observations]
     reuse = [a["reused_prompt_tokens"] for a in analyses]
-    checks["reuse_counter_matches_requests"] = all(type(v) is int for v in reuse) and delta.get("sparkgap_cache_reused_tokens_total") == sum(reuse)
+    checks["reuse_counter_matches_requests"] = all(type(v) is int for v in reuse) and delta.get("flare_cache_reused_tokens_total") == sum(reuse)
     spans = [(o.get("request_start_perf_counter_ns"), o.get("elapsed_ns")) for o in observations]
     span = max(s + e for s, e in spans) - min(s for s, _ in spans) if all(s is not None and e is not None for s, e in spans) else None
     emitted = sum(len(a["generated_token_ids"]) for a in analyses)
@@ -430,7 +430,7 @@ def summarize_group(group, observations, before, after, memory):
     if memory.get("speculative_widths"):
         shapes = speculative["shapes"]
         checks["speculative_shape_band"] = all(row["batch"] * row["width"] <= 8 for row in shapes)
-        checks["completed_rounds_match_launches"] = sum(row.get("rounds", 0) for row in shapes) == delta.get('sparkgap_graph_launches_total{kind="speculative"}')
+        checks["completed_rounds_match_launches"] = sum(row.get("rounds", 0) for row in shapes) == delta.get('flare_graph_launches_total{kind="speculative"}')
         checks["speculative_emissions_match_raw_ids"] = sum(row.get("emitted_tokens", 0) for row in shapes) + count == emitted
     semantics_pass = all(a["output_semantics"]["automatic_passed"] for a in analyses)
     return {**group, "passed": all(checks.values()) and semantics_pass,
@@ -501,7 +501,7 @@ def run(args):
     for index, path in enumerate(inputs):
         (args.output / f"input-{index:02}-{path.name}").write_bytes(path.read_bytes())
     sources = [Path(__file__), Path(__file__).with_name("speculative_workload.py"), Path(__file__).with_name("performance.py"), Path(__file__).with_name("provenance.py")]
-    receipt = {"schema": "sparkgap-speculative-http-v1", "started_at": utc(), "arm": arm,
+    receipt = {"schema": "flare-speculative-http-v1", "started_at": utc(), "arm": arm,
         "concurrency_ceiling": args.concurrency, "repetition": args.repetition,
         "provenance": {"inputs": [file_record(p) for p in inputs], "sources": [file_record(p) for p in sources],
                        "base_url": args.base_url, "server_pid": args.server_pid, "argv": sys.argv},
@@ -520,8 +520,8 @@ def run(args):
         receipt["process_before"] = before_process
         initial = idle_metrics(args.base_url, args.output, "initial", args.timeout)
         receipt["initial_metrics"] = initial
-        if (initial.get("sparkgap_cached_checkpoints") != 0 or initial.get("sparkgap_cached_kv_pages") != 0
-                or initial.get("sparkgap_requests_admitted_total") != 0):
+        if (initial.get("flare_cached_checkpoints") != 0 or initial.get("flare_cached_kv_pages") != 0
+                or initial.get("flare_requests_admitted_total") != 0):
             raise ValueError("paired workload requires a fresh unused server/cache for this arm/concurrency trial")
         for index, group in enumerate(groups):
             folder = args.output / f"group-{index:03}-{group['stage']}"

@@ -51,9 +51,9 @@ def main():
                'replay_corpus': file_record(args.replay_corpus) if args.replay_corpus else None}
     write_json(args.output / 'launch.json', receipt)
     import flashinfer
-    import sparkgap_native
+    import flare_native
     import torch
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
     def progress(message):
         record = {'elapsed_ns': time.perf_counter_ns() - started, 'message': message}
@@ -62,10 +62,10 @@ def main():
         write_json(args.output / 'launch.json', receipt)
 
     receipt.update(
-        sources={'sparkgap': source_record(ROOT),
+        sources={'flare': source_record(ROOT),
                  'flashinfer': source_record(Path(flashinfer.__file__).resolve().parents[1])},
-        native_extension=file_record(Path(sparkgap_native.__file__).parent /
-                                     'sparkgap_native.cpython-312-x86_64-linux-gnu.so'),
+        native_extension=file_record(Path(flare_native.__file__).parent /
+                                     'flare_native.cpython-312-x86_64-linux-gnu.so'),
         versions={name: importlib.metadata.version(name) for name in
                   ('torch', 'transformers', 'flashinfer-python', 'nvidia-cutlass-dsl', 'triton')})
     receipt['source_recording_finished_ns'] = time.perf_counter_ns() - started

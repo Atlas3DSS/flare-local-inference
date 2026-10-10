@@ -69,22 +69,22 @@ def terminal_branch(tokenizer, seed_request, seed_prompt, generated_ids, message
 
 def counter_checks(delta, *, prompt, reused, chunk_size, snapshots, publications, prompts):
     return {
-        "one_completed_request": delta["sparkgap_requests_admitted_total"] == 1
-            and delta["sparkgap_requests_completed_total"] == 1
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
-        "exact_admission": delta["sparkgap_cache_hits_total"] == int(reused > 0)
-            and delta["sparkgap_cache_misses_total"] == int(reused == 0)
-            and delta["sparkgap_cache_reused_tokens_total"] == reused
-            and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(reused > 0)
-            and delta['sparkgap_graph_launches_total{kind="init"}'] == int(reused == 0),
-        "exact_prompt_execution": delta['sparkgap_graph_launches_total{kind="prefill"}']
+        "one_completed_request": delta["flare_requests_admitted_total"] == 1
+            and delta["flare_requests_completed_total"] == 1
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0,
+        "exact_admission": delta["flare_cache_hits_total"] == int(reused > 0)
+            and delta["flare_cache_misses_total"] == int(reused == 0)
+            and delta["flare_cache_reused_tokens_total"] == reused
+            and delta['flare_graph_launches_total{kind="restore"}'] == int(reused > 0)
+            and delta['flare_graph_launches_total{kind="init"}'] == int(reused == 0),
+        "exact_prompt_execution": delta['flare_graph_launches_total{kind="prefill"}']
             == prefill_launches(prompt, reused, chunk_size)
-            and delta['sparkgap_graph_launches_total{kind="resume"}'] == int(reused == prompt),
-        "exact_publication": delta['sparkgap_graph_launches_total{kind="snapshot"}'] == snapshots
-            and delta["sparkgap_snapshot_publications_total"] == publications
-            and delta["sparkgap_prompt_checkpoints_total"] == prompts
-            and delta["sparkgap_system_checkpoints_total"] == 0,
-        "no_eviction": delta["sparkgap_snapshot_evictions_total"] == 0,
+            and delta['flare_graph_launches_total{kind="resume"}'] == int(reused == prompt),
+        "exact_publication": delta['flare_graph_launches_total{kind="snapshot"}'] == snapshots
+            and delta["flare_snapshot_publications_total"] == publications
+            and delta["flare_prompt_checkpoints_total"] == prompts
+            and delta["flare_system_checkpoints_total"] == 0,
+        "no_eviction": delta["flare_snapshot_evictions_total"] == 0,
     }
 
 
@@ -112,8 +112,8 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
                 publications=publications, prompts=prompts).items():
             run.check(name + "." + check, passed, delta=delta)
         run.check(name + ".retained_checkpoint_count",
-                  after["sparkgap_cached_checkpoints"] - before["sparkgap_cached_checkpoints"] == publications,
-                  before=before["sparkgap_cached_checkpoints"], after=after["sparkgap_cached_checkpoints"])
+                  after["flare_cached_checkpoints"] - before["flare_cached_checkpoints"] == publications,
+                  before=before["flare_cached_checkpoints"], after=after["flare_cached_checkpoints"])
         run.reclaimed(name, before, after)
         run.receipt.setdefault("model_metric_deltas", []).append({"case": name, "delta": delta})
         run.save()
@@ -121,7 +121,7 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
 
     def require_capacity(name, snapshots):
         before = run.metrics(name + "-capacity")
-        if before["sparkgap_free_snapshots"] < snapshots:
+        if before["flare_free_snapshots"] < snapshots:
             raise ValueError(f"{name} requires {snapshots} free snapshots to exclude eviction")
 
     def residues():

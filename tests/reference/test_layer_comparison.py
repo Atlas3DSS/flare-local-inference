@@ -48,7 +48,7 @@ def trace(value):
 
 
 def compare(actual, reference):
-    return compare_layers(sparkgap=trace(actual), vllm=trace(reference))
+    return compare_layers(flare=trace(actual), vllm=trace(reference))
 
 
 def test_lossless_bank_conversion_is_equal_and_preserves_recorded_dtype_metadata():
@@ -70,7 +70,7 @@ def test_lossless_bank_conversion_is_equal_and_preserves_recorded_dtype_metadata
             assert layer["relative_l2"] == 0
             assert layer["fp32_value_bits_equal"]
             assert layer["storage_bitwise_equal"] is None
-            assert layer["sparkgap_storage_dtype"] == "torch.bfloat16"
+            assert layer["flare_storage_dtype"] == "torch.bfloat16"
             assert layer["vllm_storage_dtype"] == "torch.float32"
     assert "passed" not in report
     assert report["numerical_acceptance"] == "not evaluated; no thresholds supplied"
@@ -142,7 +142,7 @@ def test_missing_stage_keys_are_explicit_and_not_renamed_or_silently_matched():
     step = compare(actual, reference)["steps"][0]
     assert step["stage_coverage"] == {
         "compared": ["embedding"],
-        "missing_in_sparkgap": ["gdn_projected_qkvz"],
+        "missing_in_flare": ["gdn_projected_qkvz"],
         "missing_in_vllm": ["gdn_projected_qkv", "moe_ids"],
         "identical_key_sets": False, "has_comparable_stages": True,
     }
@@ -151,7 +151,7 @@ def test_missing_stage_keys_are_explicit_and_not_renamed_or_silently_matched():
 
 
 def report_dtype(actual, reference):
-    return compare(actual, reference)["sources"]["sparkgap"]["stage_bank_dtypes"][0]["moe_ids"]
+    return compare(actual, reference)["sources"]["flare"]["stage_bank_dtypes"][0]["moe_ids"]
 
 
 def test_empty_stage_coverage_is_not_a_success_predicate():
@@ -242,7 +242,7 @@ def test_file_loading_keeps_digests_and_legacy_teacher_context(tmp_path):
     torch.save(artifact(steps=4, legacy=True), path)
     loaded = load_layer_trace(path, vocab_size=VOCAB)
     assert loaded.logits.teacher_tokens == (4, 5, 6)
-    assert loaded.logits.source["artifact_format"] == "sparkgap_decoder"
+    assert loaded.logits.source["artifact_format"] == "flare_decoder"
     assert loaded.logits.source["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert all(value.device.type == "cpu" for value in loaded.layers)
 
@@ -255,12 +255,12 @@ def test_cli_preserves_all_layers_and_refuses_existing_output(tmp_path, monkeypa
     a, r, output = (tmp_path / name for name in ("actual.pt", "reference.pt", "comparison.json"))
     torch.save(actual, a)
     torch.save(reference, r)
-    monkeypatch.setattr("sys.argv", ["layer_comparison", "--sparkgap", str(a), "--vllm", str(r),
+    monkeypatch.setattr("sys.argv", ["layer_comparison", "--flare", str(a), "--vllm", str(r),
                                     "--output", str(output)])
     main()
     data = json.loads(output.read_text())
     assert len(data["steps"][0]["layers"]) == 48
-    assert data["sources"]["sparkgap"]["path"] == str(a)
+    assert data["sources"]["flare"]["path"] == str(a)
     original = output.read_bytes()
     with pytest.raises(SystemExit, match="2"):
         main()

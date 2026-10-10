@@ -16,9 +16,9 @@ from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.utils._python_dispatch import TorchDispatchMode, _disable_current_modes
 from torch.utils._pytree import tree_leaves, tree_map
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
-from sparkgap.recipes.qwen38 import bootstrap
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, REVISION
+from flare.recipes.qwen38 import bootstrap
 
 
 class MetadataValues(TorchDispatchMode):
@@ -218,7 +218,7 @@ def checkpoint():
     if not snapshot.exists():
         pytest.skip("exact Qwen checkpoint metadata is not available")
     manifest = inspect_qwen38_checkpoint(snapshot)
-    from sparkgap.recipes.qwen38.ple import table_layout
+    from flare.recipes.qwen38.ple import table_layout
 
     config, layout = table_layout(manifest, "cuda:0")
     return manifest, config, layout
@@ -233,8 +233,8 @@ def _install_boundaries(monkeypatch, checkpoint):
     from flashinfer import sampling
     from triton.runtime.jit import JITFunction
 
-    from sparkgap.preparation import tuning
-    from sparkgap.recipes.qwen38 import (
+    from flare.preparation import tuning
+    from flare.recipes.qwen38 import (
         attention,
         gdn,
         hyperconnection,
@@ -598,7 +598,7 @@ def _install_boundaries(monkeypatch, checkpoint):
         "vision_state",
     )
     for name in modules:
-        module = importlib.import_module("sparkgap.recipes.qwen38." + name)
+        module = importlib.import_module("flare.recipes.qwen38." + name)
         for cls in vars(module).values():
             if not inspect.isclass(cls) or cls.__module__ != module.__name__:
                 continue
@@ -752,7 +752,7 @@ def test_recording_metadata_preserves_values_and_rejects_unknown_scalars():
 def test_real_moe_constructor_rejects_incompatible_loaded_geometry(
     monkeypatch, checkpoint
 ):
-    from sparkgap.recipes.qwen38.weights import QwenWeightLoader
+    from flare.recipes.qwen38.weights import QwenWeightLoader
 
     session, _signatures, constructors = _install_boundaries(monkeypatch, checkpoint)
     load = QwenWeightLoader.load_tensor

@@ -256,17 +256,17 @@ def parent(args):
 
     plan = json.loads(args.plan.read_text())
     receipt = json.loads((ROOT / 'docs/validation/decoder-autotuned.json').read_text())
-    expected = {'sparkgap': receipt['artifacts']['tensors/native-sequential-k1.pt']['sha256'],
+    expected = {'flare': receipt['artifacts']['tensors/native-sequential-k1.pt']['sha256'],
                 'canonical': receipt['artifacts']['tensors/canonical-reference.pt']['sha256']}
-    paths = {'sparkgap': args.sparkgap_trace, 'canonical': args.canonical_trace}
+    paths = {'flare': args.flare_trace, 'canonical': args.canonical_trace}
     for name, path in paths.items():
         if digest(path) != expected[name]:
             raise ValueError(f'{name} trace differs from the recorded comparison input')
-    native, canonical = (load_trace(paths[name]) for name in ('sparkgap', 'canonical'))
+    native, canonical = (load_trace(paths[name]) for name in ('flare', 'canonical'))
     if (native.prompt_tokens, native.teacher_tokens, len(native.logits)) != (
             canonical.prompt_tokens, canonical.teacher_tokens, len(canonical.logits)):
-        raise ValueError('recorded Sparkgap and canonical contexts differ')
-    trace = torch.load(args.sparkgap_trace, weights_only=True, map_location='cpu')['tokens']
+        raise ValueError('recorded Flare and canonical contexts differ')
+    trace = torch.load(args.flare_trace, weights_only=True, map_location='cpu')['tokens']
     if list(trace[:-1]) != list(native.teacher_tokens) or len(trace) != len(native.logits):
         raise ValueError('recorded continuation does not match its logit contexts')
     if plan['gpu_uuid'] != GPU or plan['declared_revision'] != REVISION:
@@ -311,7 +311,7 @@ def parent(args):
     # Worker provenance uses a trusted callable over the offline engine's local RPC.
     env['VLLM_ALLOW_INSECURE_SERIALIZATION'] = '1'
     if args.layer_trace:
-        env['SPARKGAP_VLLM_LAYER_TRACE_INPUTS'] = str(args.output / 'inputs.json')
+        env['FLARE_VLLM_LAYER_TRACE_INPUTS'] = str(args.output / 'inputs.json')
     if args.check:
         env['CUDA_VISIBLE_DEVICES'] = ''
     command = [plan['python'], '-u', '-m', 'qualify.vllm_text', '--worker', '--plan', str(args.plan), '--output', str(args.output)]
@@ -337,7 +337,7 @@ def parent(args):
                 'started_utc': started, 'cwd': plan['cwd'], 'source_sha256': frozen,
                 'environment': {key: env[key] for key in (*plan['environment'],
                     'VLLM_B12X_DUMP_QUERIES', 'VLLM_ALLOW_INSECURE_SERIALIZATION',
-                    *(('SPARKGAP_VLLM_LAYER_TRACE_INPUTS',) if args.layer_trace else ()))}})
+                    *(('FLARE_VLLM_LAYER_TRACE_INPUTS',) if args.layer_trace else ()))}})
             print(json.dumps({'pid': process.pid, 'log': str(args.output / 'worker.log')}), flush=True)
             process.wait()
     except BaseException as error:
@@ -372,7 +372,7 @@ def parent(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', type=Path, default=Path('/tmp/sparkgap-vllm-tp1-reference-64fc1eec/plan.json'))
-    parser.add_argument('--sparkgap-trace', type=Path, default=Path('/tmp/sparkgap-decoder-sequential-k1.pt'))
+    parser.add_argument('--flare-trace', type=Path, default=Path('/tmp/sparkgap-decoder-sequential-k1.pt'))
     parser.add_argument('--canonical-trace', type=Path, default=Path('/tmp/sparkgap-canonical-text-short.pt'))
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--check', action='store_true')

@@ -88,7 +88,7 @@ class Commands:
 
     def __init__(self, model, fixture, artifacts):
         import torch
-        from sparkgap.recipes.qwen38.sampling import AdmissionBuffers
+        from flare.recipes.qwen38.sampling import AdmissionBuffers
 
         self.model, self.fixture, self.artifacts = model, fixture, artifacts
         self.host = {name: tensor.detach().cpu().clone() for name, tensor in model.buffers.items()}
@@ -127,7 +127,7 @@ class Commands:
             _mask(h["sampling_grammar_mask"][slot], [self.token])
 
     def prepare(self, operation):
-        from sparkgap.recipes.qwen38.sampling import RequestAdmission
+        from flare.recipes.qwen38.sampling import RequestAdmission
 
         h, kind, slots = self.host, operation["kind"], operation["slots"]
         active = [slot for slot in slots if slot >= 0]
@@ -291,10 +291,10 @@ class MutableState:
 
     def __init__(self, model, owner):
         import torch
-        from sparkgap.preparation.scratch import ScratchArena
-        from sparkgap.recipes.qwen38.decoder import DecoderScratch, ModelWeights
-        from sparkgap.recipes.qwen38.vision import VisionScratch
-        from sparkgap.recipes.qwen38.vision_state import VisionFeatureState
+        from flare.preparation.scratch import ScratchArena
+        from flare.recipes.qwen38.decoder import DecoderScratch, ModelWeights
+        from flare.recipes.qwen38.vision import VisionScratch
+        from flare.recipes.qwen38.vision_state import VisionFeatureState
 
         self.model, self.owner, self.storage = model, owner, {}
         self.features = next(x for x in model._resources if isinstance(x, VisionFeatureState))
@@ -403,7 +403,7 @@ def _allocated(device):
 
 def observe(evidence, side, stage, model, owner, pages, operation=None):
     """Copy persistent state after a completion fence, without GPU gather kernels."""
-    from sparkgap.recipes.qwen38.vision_state import VisionFeatureState
+    from flare.recipes.qwen38.vision_state import VisionFeatureState
 
     pool = owner.pool
     for row in range(pool.backing.shape[0]):
@@ -634,7 +634,7 @@ def main(argv=None):
         parser.error("fresh output and artifact paths are required")
     import torch
     from transformers import AutoTokenizer
-    from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
+    from flare.preparation.qwen38 import MODEL_ID, REVISION
 
     snapshot = args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
@@ -656,13 +656,13 @@ def main(argv=None):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
     import flashinfer
     import b12x
-    import sparkgap_native
+    import flare_native
     from qualify.graph_execution import Evidence
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-    from sparkgap.recipes.qwen38.speculative_model import SpeculativePreparation
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from flare.recipes.qwen38.speculative_model import SpeculativePreparation
 
     source_paths = {Path(__file__), ROOT / "qualify/graph_execution.py", ROOT / "qualify/provenance.py"}
-    for directory, suffix in ((ROOT / "sparkgap", "*.py"), (ROOT / "native/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):
+    for directory, suffix in ((ROOT / "flare", "*.py"), (ROOT / "native/src", "*.rs"), (Path(b12x.__file__).resolve().parent, "*.py")):
         source_paths.update(directory.rglob(suffix))
     fi = Path(flashinfer.__file__).resolve().parent
     source_paths.update(fi / path for path in ("sampling.py", "utils.py", "jit/sampling.py",
@@ -670,7 +670,7 @@ def main(argv=None):
         "data/csrc/sampling_utils.h", "data/include/flashinfer/sampling.cuh",
         "data/include/flashinfer/topk.cuh", "data/include/flashinfer/topk_common.cuh",
         "data/include/flashinfer/air_top_p.cuh"))
-    extension, = Path(sparkgap_native.__file__).parent.glob("*.so")
+    extension, = Path(flare_native.__file__).parent.glob("*.so")
     provenance = {"checkpoint": {"repository": MODEL_ID, "revision": REVISION, "snapshot": str(snapshot),
         "assets": [file_record(snapshot / name) for name in ("config.json", "tokenizer.json", "model.safetensors.index.json")]},
         "gpu_uuid": os.environ["CUDA_VISIBLE_DEVICES"], "cuda_home": os.environ.get("CUDA_HOME"),
@@ -678,7 +678,7 @@ def main(argv=None):
         "versions": {name: importlib.metadata.version(name) for name in ("torch", "flashinfer-python", "transformers")},
         "scope": "Actual checkpoint copy-only target graphs; identical graph handles and uploads through Python and Rust; singleton grammar controls acceptance through FlashInfer; no target-logit substitution."}
     evidence = Evidence(args.output, args.artifacts, provenance)
-    evidence.value["schema"] = "sparkgap-speculative-state-parity-v1"
+    evidence.value["schema"] = "flare-speculative-state-parity-v1"
     evidence.value["fixture"] = fixture
     source_dir = args.artifacts / "sources"
     source_dir.mkdir()

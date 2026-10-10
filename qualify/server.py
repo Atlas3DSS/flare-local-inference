@@ -110,9 +110,9 @@ def metric_delta(before: dict, after: dict) -> dict:
 
 
 def resource_totals(metrics: dict) -> dict:
-    return {"pages": metrics["sparkgap_free_kv_pages"] + metrics["sparkgap_cached_kv_pages"],
-        "snapshots": metrics["sparkgap_free_snapshots"] + metrics["sparkgap_cached_checkpoints"],
-        "slots": metrics["sparkgap_free_request_slots"]}
+    return {"pages": metrics["flare_free_kv_pages"] + metrics["flare_cached_kv_pages"],
+        "snapshots": metrics["flare_free_snapshots"] + metrics["flare_cached_checkpoints"],
+        "slots": metrics["flare_free_request_slots"]}
 
 
 def kv_pressure_geometry(memory: dict, metrics: dict, context: int) -> dict:
@@ -210,7 +210,7 @@ class Run:
             raise ValueError("base URL must be an HTTP(S) server URL without credentials, query or fragment")
         self.lock = threading.RLock()
         self.counter = 0
-        self.receipt = {"schema": "sparkgap-http-qualification-v1", "started_at": datetime.now(timezone.utc).isoformat(),
+        self.receipt = {"schema": "flare-http-qualification-v1", "started_at": datetime.now(timezone.utc).isoformat(),
             "base_url": args.base_url, "provenance": provenance, "requests": [], "checks": [], "case_errors": [],
             "limitations": ["The HTTP API does not expose cache-hit or graph-submission counters. Prefix geometry and output consistency are checked; actual cache hits are not directly observable.",
                 "Timings are diagnostic request observations, not serving-throughput acceptance measurements.",
@@ -355,7 +355,7 @@ class Run:
                 if line and not line.startswith("#"):
                     key, value = line.rsplit(" ", 1)
                     metrics[key] = int(value)
-            required = ["sparkgap_active_requests", "sparkgap_retiring_request_slots", "sparkgap_pending_requests", "sparkgap_http_inflight_requests"]
+            required = ["flare_active_requests", "flare_retiring_request_slots", "flare_pending_requests", "flare_http_inflight_requests"]
             if not wait_idle or all(metrics[key] == 0 for key in required):
                 return metrics
             if time.monotonic() >= deadline:
@@ -366,7 +366,7 @@ class Run:
     def reclaimed(self, name, before, after):
         if before is not None:
             self.check(name + ".resource_accounting", resource_totals(before) == resource_totals(after)
-                and after["sparkgap_active_requests"] == after["sparkgap_retiring_request_slots"] == 0,
+                and after["flare_active_requests"] == after["flare_retiring_request_slots"] == 0,
                 before=resource_totals(before), after=resource_totals(after))
 
     def concurrent(self, name, requests):
@@ -383,14 +383,14 @@ class Run:
         after = self.metrics(name + "-after")
         if before is not None:
             delta = metric_delta(before, after)
-            peak = max((sample["sparkgap_active_requests"] for sample in samples), default=0)
+            peak = max((sample["flare_active_requests"] for sample in samples), default=0)
             self.check(name + ".all_model_slots_observed", peak == len(requests), peak_active_requests=peak)
-            self.check(name + ".admitted_and_completed", delta["sparkgap_requests_admitted_total"] == len(requests)
-                and delta["sparkgap_requests_completed_total"] == len(requests)
-                and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
-            self.check(name + ".capacity_bounds", all(sample["sparkgap_active_requests"] <= before["sparkgap_free_request_slots"]
-                and sample["sparkgap_frontend_active_workers"] <= sample["sparkgap_frontend_worker_capacity"]
-                and sample["sparkgap_http_inflight_requests"] <= sample["sparkgap_http_request_capacity"] for sample in samples))
+            self.check(name + ".admitted_and_completed", delta["flare_requests_admitted_total"] == len(requests)
+                and delta["flare_requests_completed_total"] == len(requests)
+                and delta["flare_requests_cancelled_total"] == delta["flare_requests_failed_total"] == 0, delta=delta)
+            self.check(name + ".capacity_bounds", all(sample["flare_active_requests"] <= before["flare_free_request_slots"]
+                and sample["flare_frontend_active_workers"] <= sample["flare_frontend_worker_capacity"]
+                and sample["flare_http_inflight_requests"] <= sample["flare_http_request_capacity"] for sample in samples))
             self.reclaimed(name, before, after)
         return results
 
@@ -491,13 +491,13 @@ def main() -> int:
         raise ValueError("snapshot frontend assets differ from pinned canonical fixtures")
     import transformers
     import tokenizers
-    import sparkgap_native
+    import flare_native
 
     origin = json.loads(importlib.metadata.distribution("transformers").read_text("direct_url.json"))
     if origin.get("vcs_info", {}).get("commit_id") != text_fixture["transformers_commit"] or tokenizers.__version__ != text_fixture["tokenizers_version"]:
         raise ValueError("qualification requires the pinned Transformers/tokenizers preparation environment")
     tokenizer = transformers.AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
-    package = Path(sparkgap_native.__file__).resolve()
+    package = Path(flare_native.__file__).resolve()
     extensions = [path for path in package.parent.iterdir() if any(path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)]
     if len(extensions) != 1:
         raise ValueError("cannot identify exactly one installed native extension")
@@ -529,14 +529,14 @@ def main() -> int:
             return
         system = len(system_prefix_ids(tokenizer, request, ids))
         launches = prefill_launches(len(ids), reused, chunk_size, system)
-        run.check(name + ".exact_cache_admission", delta["sparkgap_cache_hits_total"] == int(reused > 0)
-            and delta["sparkgap_cache_misses_total"] == int(reused == 0)
-            and delta["sparkgap_cache_reused_tokens_total"] == reused
-            and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(reused > 0)
-            and delta['sparkgap_graph_launches_total{kind="init"}'] == int(reused == 0),
+        run.check(name + ".exact_cache_admission", delta["flare_cache_hits_total"] == int(reused > 0)
+            and delta["flare_cache_misses_total"] == int(reused == 0)
+            and delta["flare_cache_reused_tokens_total"] == reused
+            and delta['flare_graph_launches_total{kind="restore"}'] == int(reused > 0)
+            and delta['flare_graph_launches_total{kind="init"}'] == int(reused == 0),
             reused_tokens=reused, system_tokens=system, prompt_tokens=len(ids), delta=delta)
-        run.check(name + ".exact_suffix_graph", delta['sparkgap_graph_launches_total{kind="prefill"}'] == launches
-            and delta['sparkgap_graph_launches_total{kind="resume"}'] == int(reused == len(ids)),
+        run.check(name + ".exact_suffix_graph", delta['flare_graph_launches_total{kind="prefill"}'] == launches
+            and delta['flare_graph_launches_total{kind="resume"}'] == int(reused == len(ids)),
             expected_prefill_launches=launches, delta=delta)
 
     def health(name):
@@ -630,13 +630,13 @@ def main() -> int:
         replay, delta = measured("prefix-full-reuse", full, full_ids)
         check_cache("prefix-full-reuse", delta, full, full_ids, len(full_ids))
         run.check("full_prompt_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=128,
-            checkpoint_tokens=128, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
+            checkpoint_tokens=128, cache_hit_observed=delta is not None and delta["flare_cache_hits_total"] == 1)
         partial, partial_ids = aligned_request("branch", 160)
         seed, _ = measured("prefix-aligned-seed", partial, partial_ids)
         replay, delta = measured("prefix-aligned-reuse", partial, partial_ids)
         check_cache("prefix-aligned-reuse", delta, partial, partial_ids, len(partial_ids))
         run.check("exact_partial_page_prompt_reuse_equivalence", comparable_message(seed["message"]) == comparable_message(replay["message"]), prompt_tokens=160,
-            checkpoint_tokens=160, tail_tokens=0, cache_hit_observed=delta is not None and delta["sparkgap_cache_hits_total"] == 1)
+            checkpoint_tokens=160, tail_tokens=0, cache_hit_observed=delta is not None and delta["flare_cache_hits_total"] == 1)
         for name in ("A", "B"):
             branch = copy.deepcopy(partial)
             branch["messages"][0]["content"] += f"\nBranch {name}: return {name}."
@@ -674,9 +674,9 @@ def main() -> int:
             check_cache("system-" + name, delta, request, ids, reusable)
             generated = response["body"]["usage"]["completion_tokens"]
             run.check("system-" + name + ".retained_endpoints",
-                delta["sparkgap_system_checkpoints_total"] == int(not expected_reuse)
-                and delta["sparkgap_prompt_checkpoints_total"] == 1
-                and delta["sparkgap_snapshot_publications_total"] == int(not expected_reuse) + 1 + int(generated > 1),
+                delta["flare_system_checkpoints_total"] == int(not expected_reuse)
+                and delta["flare_prompt_checkpoints_total"] == 1
+                and delta["flare_snapshot_publications_total"] == int(not expected_reuse) + 1 + int(generated > 1),
                 system_token_ids=prefix, prompt_tokens=len(ids), generated_tokens=generated, delta=delta)
             run.reclaimed("system-" + name, before, after)
             seen.append(prefix)
@@ -759,9 +759,9 @@ def main() -> int:
         run.pair("full-vision", request, tokens)
         after = run.metrics("full-vision-after")
         delta = metric_delta(before, after)
-        run.check("full_vision.completes_both_encodes", delta['sparkgap_graph_launches_total{kind="vision"}'] == 2
-            and delta["sparkgap_requests_admitted_total"] == delta["sparkgap_requests_completed_total"] == 2
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+        run.check("full_vision.completes_both_encodes", delta['flare_graph_launches_total{kind="vision"}'] == 2
+            and delta["flare_requests_admitted_total"] == delta["flare_requests_completed_total"] == 2
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0,
             delta=delta, patches_per_image=16384, features_per_image=4096)
         run.reclaimed("full-vision", before, after)
     if args.full_vision_png:
@@ -808,13 +808,13 @@ def main() -> int:
                 choice = run.complete(response, tokens)
                 after = run.metrics(name + "-after")
                 delta = metric_delta(last, after)
-                run.check(name + ".conditioned_prefix", delta["sparkgap_cache_hits_total"] == int(repeated)
-                    and delta["sparkgap_cache_misses_total"] == int(not repeated)
-                    and delta["sparkgap_cache_reused_tokens_total"] == (tokens if repeated else 0)
-                    and delta['sparkgap_graph_launches_total{kind="restore"}'] == int(repeated)
-                    and delta['sparkgap_graph_launches_total{kind="vision"}'] == 1
-                    and delta["sparkgap_prompt_checkpoints_total"] == int(not repeated)
-                    and delta["sparkgap_snapshot_publications_total"] == (0 if repeated else 1 + int(response["body"]["usage"]["completion_tokens"] > 1)),
+                run.check(name + ".conditioned_prefix", delta["flare_cache_hits_total"] == int(repeated)
+                    and delta["flare_cache_misses_total"] == int(not repeated)
+                    and delta["flare_cache_reused_tokens_total"] == (tokens if repeated else 0)
+                    and delta['flare_graph_launches_total{kind="restore"}'] == int(repeated)
+                    and delta['flare_graph_launches_total{kind="vision"}'] == 1
+                    and delta["flare_prompt_checkpoints_total"] == int(not repeated)
+                    and delta["flare_snapshot_publications_total"] == (0 if repeated else 1 + int(response["body"]["usage"]["completion_tokens"] > 1)),
                     delta=delta, checkpoint_tokens=tokens)
                 if repeated:
                     run.check(name + ".greedy_cache_equivalence",
@@ -825,9 +825,9 @@ def main() -> int:
                 run.reclaimed(name, before, after)
                 last = after
         delta = metric_delta(before, last)
-        run.check("image_identity.all_requests_complete", delta["sparkgap_requests_admitted_total"] == 4
-            and delta["sparkgap_requests_completed_total"] == 4
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+        run.check("image_identity.all_requests_complete", delta["flare_requests_admitted_total"] == 4
+            and delta["flare_requests_completed_total"] == 4
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0,
             delta=delta)
     if args.image_cache_identity:
         run.case("image_cache_identity", image_cache_identity)
@@ -865,13 +865,13 @@ def main() -> int:
         run.check("mixed_grammar.unconstrained_answer", "paris" in plain["message"].get("content", "").casefold(), choice=plain)
         after = run.metrics("mixed-grammar-after")
         delta = metric_delta(before, after)
-        run.check("mixed_grammar.shared_decode_observed", delta["sparkgap_mixed_grammar_decode_steps_total"] > 0,
+        run.check("mixed_grammar.shared_decode_observed", delta["flare_mixed_grammar_decode_steps_total"] > 0,
             delta=delta)
-        run.check("mixed_grammar.one_submission_inflight", after["sparkgap_constrained_max_inflight"] == 1,
-            observed_maximum=after["sparkgap_constrained_max_inflight"])
-        run.check("mixed_grammar.both_requests_complete", delta["sparkgap_requests_admitted_total"] == 2
-            and delta["sparkgap_requests_completed_total"] == 2
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0,
+        run.check("mixed_grammar.one_submission_inflight", after["flare_constrained_max_inflight"] == 1,
+            observed_maximum=after["flare_constrained_max_inflight"])
+        run.check("mixed_grammar.both_requests_complete", delta["flare_requests_admitted_total"] == 2
+            and delta["flare_requests_completed_total"] == 2
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0,
             delta=delta)
         run.reclaimed("mixed-grammar", before, after)
     if args.mixed_grammar:
@@ -886,8 +886,8 @@ def main() -> int:
         after = run.metrics("cancel-after")
         if before is not None:
             delta = metric_delta(before, after)
-            run.check("disconnect_cancels_active_generation", delta["sparkgap_requests_admitted_total"] == 1
-                and delta["sparkgap_requests_cancelled_total"] == 1 and delta["sparkgap_requests_completed_total"] == 0,
+            run.check("disconnect_cancels_active_generation", delta["flare_requests_admitted_total"] == 1
+                and delta["flare_requests_cancelled_total"] == 1 and delta["flare_requests_completed_total"] == 0,
                 delta=delta)
             run.reclaimed("cancel", before, after)
         health("health-after-cancel")
@@ -896,9 +896,9 @@ def main() -> int:
         reused = run.metrics("slot-reuse-after")
         if after is not None:
             delta = metric_delta(after, reused)
-            run.check("reclaimed_slots_accept_four_generations", delta["sparkgap_requests_admitted_total"] == 4
-                and delta["sparkgap_requests_completed_total"] == 4
-                and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
+            run.check("reclaimed_slots_accept_four_generations", delta["flare_requests_admitted_total"] == 4
+                and delta["flare_requests_completed_total"] == 4
+                and delta["flare_requests_cancelled_total"] == delta["flare_requests_failed_total"] == 0, delta=delta)
             run.reclaimed("slot-reuse", before, reused)
     run.case("cancellation_and_slot_reuse", cancellation)
 
@@ -922,30 +922,30 @@ def main() -> int:
             first = result if first is None else first
             after = run.metrics(f"pressure-fill-{index}-after")
             delta = metric_delta(last, after)
-            run.check(f"pressure-fill-{index}.unique_publication", delta["sparkgap_cache_misses_total"] == 1
-                and delta["sparkgap_cache_hits_total"] == 0 and delta["sparkgap_snapshot_publications_total"] == 1
-                and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 1, delta=delta)
+            run.check(f"pressure-fill-{index}.unique_publication", delta["flare_cache_misses_total"] == 1
+                and delta["flare_cache_hits_total"] == 0 and delta["flare_snapshot_publications_total"] == 1
+                and delta['flare_graph_launches_total{kind="snapshot"}'] == 1, delta=delta)
             last = after
         delta = metric_delta(before, last)
-        run.check("snapshot_capacity_is_exercised", last["sparkgap_cached_checkpoints"] == capacity
-            and last["sparkgap_free_snapshots"] == 0 and delta["sparkgap_snapshot_evictions_total"] > 0
-            and delta["sparkgap_snapshot_publications_total"] == capacity + 1,
+        run.check("snapshot_capacity_is_exercised", last["flare_cached_checkpoints"] == capacity
+            and last["flare_free_snapshots"] == 0 and delta["flare_snapshot_evictions_total"] > 0
+            and delta["flare_snapshot_publications_total"] == capacity + 1,
             capacity=capacity, published_prefixes=len(inputs), delta=delta)
         run.reclaimed("pressure-fill", before, last)
         request, ids = inputs[0]
         repeated = run.complete(run.request("pressure-evicted-prefix", request), len(ids))
         after = run.metrics("pressure-evicted-prefix-after")
         delta = metric_delta(last, after)
-        run.check("oldest_prefix_was_evicted", delta["sparkgap_cache_misses_total"] == 1
-            and delta["sparkgap_cache_hits_total"] == 0 and delta['sparkgap_graph_launches_total{kind="init"}'] == 1
-            and delta['sparkgap_graph_launches_total{kind="restore"}'] == 0
-            and delta["sparkgap_snapshot_evictions_total"] == delta["sparkgap_snapshot_publications_total"] == 1, delta=delta)
+        run.check("oldest_prefix_was_evicted", delta["flare_cache_misses_total"] == 1
+            and delta["flare_cache_hits_total"] == 0 and delta['flare_graph_launches_total{kind="init"}'] == 1
+            and delta['flare_graph_launches_total{kind="restore"}'] == 0
+            and delta["flare_snapshot_evictions_total"] == delta["flare_snapshot_publications_total"] == 1, delta=delta)
         run.check("evicted_prefix_cold_replay_equivalence", comparable_message(first["message"]) == comparable_message(repeated["message"])
             and first["finish_reason"] == repeated["finish_reason"], expected=first, observed=repeated)
         delta = metric_delta(before, after)
-        run.check("pressure_requests_complete_without_failure", delta["sparkgap_requests_admitted_total"] == capacity + 2
-            and delta["sparkgap_requests_completed_total"] == capacity + 2
-            and delta["sparkgap_requests_cancelled_total"] == delta["sparkgap_requests_failed_total"] == 0, delta=delta)
+        run.check("pressure_requests_complete_without_failure", delta["flare_requests_admitted_total"] == capacity + 2
+            and delta["flare_requests_completed_total"] == capacity + 2
+            and delta["flare_requests_cancelled_total"] == delta["flare_requests_failed_total"] == 0, delta=delta)
         run.reclaimed("pressure-evicted-prefix", before, after)
     if args.cache_pressure:
         run.case("cache_pressure", cache_pressure)
@@ -985,9 +985,9 @@ def main() -> int:
             delta = metric_delta(last, after)
             check_cache(f"conversation-turn-{turn}", delta, request, ids, 0)
             run.check(f"conversation-turn-{turn}.exact_prompt_publication",
-                delta["sparkgap_snapshot_publications_total"] == 1
-                and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 1
-                and delta["sparkgap_system_checkpoints_total"] == delta["sparkgap_prompt_checkpoints_total"] == 0,
+                delta["flare_snapshot_publications_total"] == 1
+                and delta['flare_graph_launches_total{kind="snapshot"}'] == 1
+                and delta["flare_system_checkpoints_total"] == delta["flare_prompt_checkpoints_total"] == 0,
                 prompt_tokens=len(ids), terminal_checkpoint_tokens=len(ids), delta=delta)
             run.reclaimed(f"conversation-turn-{turn}", before, after)
             retained_lengths.append(len(ids))
@@ -995,20 +995,20 @@ def main() -> int:
         delta = metric_delta(before, last)
         retained_pages = sum(length // 64 for length in retained_lengths[-capacity:])
         run.check("conversation_exceeds_snapshot_capacity",
-            delta["sparkgap_requests_admitted_total"] == turns
-            and delta["sparkgap_requests_completed_total"] == turns
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0
-            and delta["sparkgap_snapshot_evictions_total"] >= turns - capacity
-            and last["sparkgap_cached_checkpoints"] == capacity
-            and last["sparkgap_cached_kv_pages"] == retained_pages,
+            delta["flare_requests_admitted_total"] == turns
+            and delta["flare_requests_completed_total"] == turns
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0
+            and delta["flare_snapshot_evictions_total"] >= turns - capacity
+            and last["flare_cached_checkpoints"] == capacity
+            and last["flare_cached_kv_pages"] == retained_pages,
             turns=turns, snapshot_capacity=capacity, independent_checkpoint_pages=retained_pages, delta=delta)
         run.complete(run.request("conversation-repeat", request), len(ids))
         after = run.metrics("conversation-repeat-after")
         delta = metric_delta(last, after)
         check_cache("conversation-repeat", delta, request, ids, len(ids))
         run.check("conversation_repeat_restores_newest_checkpoint",
-            delta["sparkgap_snapshot_publications_total"] == 0
-            and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 0,
+            delta["flare_snapshot_publications_total"] == 0
+            and delta['flare_graph_launches_total{kind="snapshot"}'] == 0,
             restored_tokens=len(ids), delta=delta)
         run.reclaimed("conversation-repeat", before, after)
     if args.conversation_pressure:
@@ -1069,10 +1069,10 @@ def main() -> int:
                     futures.append(future)
                     if not progress[index].wait_after(0, min(args.timeout, 30)):
                         raise ValueError(f"KV holder {index} did not produce visible output")
-                held = observed("kv-held", lambda metrics: metrics["sparkgap_active_requests"] == count
+                held = observed("kv-held", lambda metrics: metrics["flare_active_requests"] == count
                     and resource_totals(metrics)["pages"] == geometry["unreserved_pages"]
-                    and metrics["sparkgap_prompt_checkpoints_total"] == before["sparkgap_prompt_checkpoints_total"] + count)
-                run.check("kv.context_reservations_observed", held["sparkgap_free_request_slots"] == 4 - count
+                    and metrics["flare_prompt_checkpoints_total"] == before["flare_prompt_checkpoints_total"] + count)
+                run.check("kv.context_reservations_observed", held["flare_free_request_slots"] == 4 - count
                     and resource_totals(held)["snapshots"] == resource_totals(before)["snapshots"] - count,
                     geometry=geometry, held=held)
                 rejected = run.request("kv-rejected-json", reserved_request("rejected-json", "x"))
@@ -1085,20 +1085,20 @@ def main() -> int:
                     and rejected_stream.get("done_count") == 0 and not rejected_stream.get("client_error")
                     and not rejected_stream.get("sse", {}).get("message", {}).get("content"), response=rejected_stream)
                 rejected_state = observed("kv-rejected", lambda metrics:
-                    metrics["sparkgap_requests_failed_total"] >= before["sparkgap_requests_failed_total"] + 2)
+                    metrics["flare_requests_failed_total"] >= before["flare_requests_failed_total"] + 2)
                 delta = metric_delta(before, rejected_state)
-                run.check("kv.rejection_preserves_existing_reservations", rejected_state["sparkgap_active_requests"] == count
-                    and rejected_state["sparkgap_free_request_slots"] == 4 - count
-                    and rejected_state["sparkgap_retiring_request_slots"] == rejected_state["sparkgap_pending_requests"] == 0
-                    and rejected_state["sparkgap_free_kv_pages"] == geometry["unreserved_pages"]
-                    and rejected_state["sparkgap_cached_kv_pages"] == 0
-                    and rejected_state["sparkgap_cached_checkpoints"] == count
-                    and rejected_state["sparkgap_free_snapshots"] == resource_totals(before)["snapshots"] - 2 * count
-                    and delta["sparkgap_prompt_checkpoints_total"] == count
-                    and delta["sparkgap_system_checkpoints_total"] == 0
-                    and delta["sparkgap_requests_admitted_total"] == count and delta["sparkgap_requests_failed_total"] == 2
-                    and delta["sparkgap_requests_completed_total"] == delta["sparkgap_requests_cancelled_total"] == 0
-                    and delta["sparkgap_cache_hits_total"] == delta["sparkgap_cache_reused_tokens_total"] == 0,
+                run.check("kv.rejection_preserves_existing_reservations", rejected_state["flare_active_requests"] == count
+                    and rejected_state["flare_free_request_slots"] == 4 - count
+                    and rejected_state["flare_retiring_request_slots"] == rejected_state["flare_pending_requests"] == 0
+                    and rejected_state["flare_free_kv_pages"] == geometry["unreserved_pages"]
+                    and rejected_state["flare_cached_kv_pages"] == 0
+                    and rejected_state["flare_cached_checkpoints"] == count
+                    and rejected_state["flare_free_snapshots"] == resource_totals(before)["snapshots"] - 2 * count
+                    and delta["flare_prompt_checkpoints_total"] == count
+                    and delta["flare_system_checkpoints_total"] == 0
+                    and delta["flare_requests_admitted_total"] == count and delta["flare_requests_failed_total"] == 2
+                    and delta["flare_requests_completed_total"] == delta["flare_requests_cancelled_total"] == 0
+                    and delta["flare_cache_hits_total"] == delta["flare_cache_reused_tokens_total"] == 0,
                     delta=delta, metrics=rejected_state)
                 checkpoints = [observer.count() for observer in progress]
                 for index, observer in enumerate(progress):
@@ -1118,17 +1118,17 @@ def main() -> int:
                 and not result.get("sse", {}).get("finish_reasons"), response=result,
                 received_visible_events=progress[index].count())
         delta = metric_delta(before, after)
-        run.check("kv.all_holders_retired_after_cancellation", delta["sparkgap_requests_admitted_total"] == count
-            and delta["sparkgap_requests_cancelled_total"] == count and delta["sparkgap_requests_failed_total"] == 2
-            and delta["sparkgap_requests_completed_total"] == 0
-            and delta["sparkgap_snapshot_publications_total"] == delta["sparkgap_prompt_checkpoints_total"] == count
-            and delta["sparkgap_system_checkpoints_total"] == 0, delta=delta)
+        run.check("kv.all_holders_retired_after_cancellation", delta["flare_requests_admitted_total"] == count
+            and delta["flare_requests_cancelled_total"] == count and delta["flare_requests_failed_total"] == 2
+            and delta["flare_requests_completed_total"] == 0
+            and delta["flare_snapshot_publications_total"] == delta["flare_prompt_checkpoints_total"] == count
+            and delta["flare_system_checkpoints_total"] == 0, delta=delta)
         answer = run.complete(run.request("kv-followup", capital), len(prompt_ids(capital)))
         run.check("kv.healthy_followup_answer", "paris" in answer["message"].get("content", "").casefold(), choice=answer)
         final = run.metrics("kv-followup-after")
         delta = metric_delta(after, final)
-        run.check("kv.reclaimed_resources_serve_followup", delta["sparkgap_requests_admitted_total"] == delta["sparkgap_requests_completed_total"] == 1
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0, delta=delta)
+        run.check("kv.reclaimed_resources_serve_followup", delta["flare_requests_admitted_total"] == delta["flare_requests_completed_total"] == 1
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0, delta=delta)
         run.reclaimed("kv-followup", before, final)
         health("health-after-kv-pressure")
     if args.kv_pressure:
@@ -1167,15 +1167,15 @@ def main() -> int:
         after = run.metrics("slow-reader-after")
         delta = metric_delta(before, after)
         held_delta = metric_delta(before, preclose)
-        run.check("stalled_reader_observed_during_other_progress", held["sparkgap_http_inflight_requests"] >= 1
+        run.check("stalled_reader_observed_during_other_progress", held["flare_http_inflight_requests"] >= 1
             and cancelled.get("paused_read_seconds", 0) >= args.slow_consumer_seconds
             and cancelled.get("cancelled") is True and cancelled.get("done_count") == 0, stream=cancelled)
-        run.check("stalled_reader_cancelled_and_other_request_completed", delta["sparkgap_requests_admitted_total"] == 2
-            and delta["sparkgap_requests_cancelled_total"] == 1 and delta["sparkgap_requests_completed_total"] == 1,
+        run.check("stalled_reader_cancelled_and_other_request_completed", delta["flare_requests_admitted_total"] == 2
+            and delta["flare_requests_cancelled_total"] == 1 and delta["flare_requests_completed_total"] == 1,
             delta=delta, preclose_delta=held_delta)
         run.receipt["slow_consumer_observation"] = {
-            "native_output_backpressure_observed": held_delta["sparkgap_requests_failed_total"] > 0
-                and held_delta["sparkgap_requests_cancelled_total"] > 0,
+            "native_output_backpressure_observed": held_delta["flare_requests_failed_total"] > 0
+                and held_delta["flare_requests_cancelled_total"] > 0,
             "preclose_delta": held_delta, "final_delta": delta,
             "paused_read_seconds": cancelled.get("paused_read_seconds"),
             "socket_receive_buffer_bytes": cancelled.get("socket_receive_buffer_bytes")}

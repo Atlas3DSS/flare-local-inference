@@ -101,17 +101,17 @@ def load_layer_trace(path: str | Path, *, vocab_size: int = QWEN_VOCAB_SIZE) -> 
 
 def _matching_contexts(actual: LogitTrace, reference: LogitTrace) -> None:
     if actual.vocab_size != reference.vocab_size:
-        raise ValueError("vocabulary size differs between Sparkgap and vLLM")
+        raise ValueError("vocabulary size differs between Flare and vLLM")
     if len(actual.logits) != len(reference.logits):
-        raise ValueError("logit step count differs between Sparkgap and vLLM")
+        raise ValueError("logit step count differs between Flare and vLLM")
     if actual.prompt_tokens != reference.prompt_tokens:
-        raise ValueError("prompt token IDs differ between Sparkgap and vLLM")
+        raise ValueError("prompt token IDs differ between Flare and vLLM")
     if actual.teacher_tokens != reference.teacher_tokens:
-        raise ValueError("consumed teacher token IDs differ between Sparkgap and vLLM")
+        raise ValueError("consumed teacher token IDs differ between Flare and vLLM")
     for name in ("model_id", "revision"):
         identities = {getattr(trace, name) for trace in (actual, reference)} - {None}
         if len(identities) > 1:
-            raise ValueError(f"recorded {name} differs between Sparkgap and vLLM")
+            raise ValueError(f"recorded {name} differs between Flare and vLLM")
 
 
 def _measurement(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any]:
@@ -145,7 +145,7 @@ def _measurement(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any
             for row in range(actual.shape[0])]
     result = {
         "shape": list(actual.shape),
-        "sparkgap_storage_dtype": str(actual.dtype), "vllm_storage_dtype": str(reference.dtype),
+        "flare_storage_dtype": str(actual.dtype), "vllm_storage_dtype": str(reference.dtype),
         **metrics(torch.linalg.vector_norm(r), torch.linalg.vector_norm(difference),
                   row_maximum.max(), value_equal.all(),
                   None if storage_equal is None else storage_equal.all()),
@@ -158,12 +158,12 @@ def _measurement(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any
     return result
 
 
-def compare_layers(*, sparkgap: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
+def compare_layers(*, flare: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
     """Measure every layer and shared stage; report one-sided stages explicitly."""
-    _matching_contexts(sparkgap.logits, vllm.logits)
+    _matching_contexts(flare.logits, vllm.logits)
     steps = []
     for step, (actual, reference, actual_stages, reference_stages) in enumerate(zip(
-        sparkgap.layers, vllm.layers, sparkgap.stages, vllm.stages, strict=True
+        flare.layers, vllm.layers, flare.stages, vllm.stages, strict=True
     )):
         layers = [{"layer": index, **_measurement(actual[index], reference[index])}
                   for index in range(LAYERS)]
@@ -174,7 +174,7 @@ def compare_layers(*, sparkgap: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
                 stages[name] = _measurement(actual_stages[name], reference_stages[name])
             except ValueError as error:
                 raise ValueError(f"step {step}, stage {name}: {error}") from error
-        missing_in_sparkgap = sorted(reference_stages.keys() - actual_stages.keys())
+        missing_in_flare = sorted(reference_stages.keys() - actual_stages.keys())
         missing_in_vllm = sorted(actual_stages.keys() - reference_stages.keys())
         steps.append({
             "step": step, "context_length": len(vllm.logits.prompt_tokens) + step,
@@ -186,15 +186,15 @@ def compare_layers(*, sparkgap: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
                 (item["layer"] for item in layers if not item["last_row"]["fp32_value_bits_equal"]), None),
             "layers": layers,
             "stage_coverage": {
-                "compared": common, "missing_in_sparkgap": missing_in_sparkgap,
+                "compared": common, "missing_in_flare": missing_in_flare,
                 "missing_in_vllm": missing_in_vllm,
-                "identical_key_sets": not missing_in_sparkgap and not missing_in_vllm,
+                "identical_key_sets": not missing_in_flare and not missing_in_vllm,
                 "has_comparable_stages": bool(common),
             },
             "stages": stages,
         })
     return {
-        "schema_version": 1, "actual": "sparkgap", "reference": "vllm",
+        "schema_version": 1, "actual": "flare", "reference": "vllm",
         "prompt_tokens": list(vllm.logits.prompt_tokens),
         "teacher_tokens": list(vllm.logits.teacher_tokens),
         "vocab_size": vllm.logits.vocab_size, "layer_count": LAYERS,
@@ -204,10 +204,10 @@ def compare_layers(*, sparkgap: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
                     "layer_bank_dtypes": [str(value.dtype) for value in trace.layers],
                     "stage_bank_dtypes": [{key: str(value.dtype) for key, value in stage.items()}
                                           for stage in trace.stages]}
-                    for name, trace in (("sparkgap", sparkgap), ("vllm", vllm))},
+                    for name, trace in (("flare", flare), ("vllm", vllm))},
         "metrics": {
             "arithmetic": "All measurements use CPU FP32 tensors.",
-            "relative_l2": "norm(sparkgap-vllm) / norm(vllm); null when vLLM norm is zero",
+            "relative_l2": "norm(flare-vllm) / norm(vllm); null when vLLM norm is zero",
             "fp32_value_bits_equal": "Bitwise equality after FP32 conversion, including signed zero; independent of storage dtype.",
             "storage_bitwise_equal": "Original tensor bytes equal; null when storage dtypes differ.",
             "rows": "Every recorded row; last_row repeats the final prompt row or the single continuation row.",
@@ -219,13 +219,13 @@ def compare_layers(*, sparkgap: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sparkgap", required=True, type=Path)
+    parser.add_argument("--flare", required=True, type=Path)
     parser.add_argument("--vllm", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output already exists")
-    result = compare_layers(sparkgap=load_layer_trace(args.sparkgap),
+    result = compare_layers(flare=load_layer_trace(args.flare),
                             vllm=load_layer_trace(args.vllm))
     with args.output.open("x") as handle:
         json.dump(result, handle, indent=2, allow_nan=False)

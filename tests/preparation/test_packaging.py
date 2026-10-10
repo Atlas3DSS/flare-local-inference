@@ -15,16 +15,16 @@ def test_pyproject_declares_preparation_entrypoint_and_packages():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     includes = set(pyproject["tool"]["setuptools"]["packages"]["find"]["include"])
 
-    assert "sparkgap*" in includes
+    assert "flare*" in includes
     assert not any(name.startswith("serve") for name in includes)
     assert pyproject["project"]["dependencies"] == []
-    assert pyproject["project"]["scripts"]["sparkgap"] == "sparkgap.__main__:main"
-    assert pyproject["project"]["scripts"]["sparkgap-inspect"] == "sparkgap.preparation.__main__:main"
+    assert pyproject["project"]["scripts"]["flare"] == "flare.__main__:main"
+    assert pyproject["project"]["scripts"]["flare-inspect"] == "flare.preparation.__main__:main"
 
 
 def test_cli_help_smoke():
     result = subprocess.run(
-        [sys.executable, "-m", "sparkgap.preparation", "--help"],
+        [sys.executable, "-m", "flare.preparation", "--help"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -37,10 +37,10 @@ def test_cli_help_smoke():
 
 def test_package_import_has_no_runtime_or_cuda_side_effects():
     result = subprocess.run(
-        [sys.executable, "-c", "import sys, sparkgap; "
-         "assert sparkgap.__all__ == ['__version__']; "
+        [sys.executable, "-c", "import sys, flare; "
+         "assert flare.__all__ == ['__version__']; "
          "assert 'torch' not in sys.modules; "
-         "assert 'sparkgap_native' not in sys.modules; "
+         "assert 'flare_native' not in sys.modules; "
          "assert not any(n == 'serve' or n.startswith('serve.') for n in sys.modules)"],
         cwd=ROOT, check=False, capture_output=True, text=True,
     )
@@ -50,7 +50,7 @@ def test_package_import_has_no_runtime_or_cuda_side_effects():
 
 def test_server_cli_help_does_not_prepare_model():
     result = subprocess.run(
-        [sys.executable, "-m", "sparkgap", "--help"],
+        [sys.executable, "-m", "flare", "--help"],
         cwd=ROOT, check=False, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr

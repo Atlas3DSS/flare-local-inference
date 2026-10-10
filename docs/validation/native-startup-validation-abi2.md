@@ -2,7 +2,7 @@
 
 All 21 constructor-rejection cases pass against native library SHA256
 `6048fb01a15dc0059debfd8ec50876891c8d6948ed62083a45a4402d6b364c9f`.
-Each isolated process calls the installed `sparkgap_native.Server` with invalid
+Each isolated process calls the installed `flare_native.Server` with invalid
 manifest or configuration metadata. Every call rejects with the expected error
 and releases its borrowed owner. Syscall traces record zero CUDA-library or
 NVIDIA-device opens, zero socket/bind/listen/connect attempts, and zero thread

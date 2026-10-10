@@ -1,9 +1,7 @@
 //! Verify frozen generation-corpus prompts through native HTTP request preparation.
-use sparkgap_native::model::qwen4exp::Qwen4Exp;
+use flare_native::model::qwen4exp::Qwen4Exp;
 
-use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
-use sparkgap_native::{
+use flare_native::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -13,6 +11,8 @@ use sparkgap_native::{
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf};
 
 fn main() -> Result<(), String> {

@@ -12,12 +12,12 @@ from time import monotonic
 
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.execution import GraphSignature, PreparedExecution
-from sparkgap.preparation.fixtures.gdn import register_benchmark_state
-from sparkgap.preparation.tuning import RecordedPreparationSession
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.preparation.qwen38 import CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, HEADERS_SHA256, MODEL_ID, REVISION
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.execution import GraphSignature, PreparedExecution
+from flare.preparation.fixtures.gdn import register_benchmark_state
+from flare.preparation.tuning import RecordedPreparationSession
+from flare.preparation.scratch import ScratchArena
+from flare.preparation.qwen38 import CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, HEADERS_SHA256, MODEL_ID, REVISION
 
 from .attention import QSAState, RotaryTables
 from .decoder import ModelWeights, DecoderScratch, PreparedDecoder
@@ -122,7 +122,7 @@ class PreparedModel(PreparedExecution):
         self._preparation_thread = get_ident()
 
     def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None):
-        import sparkgap_native
+        import flare_native
 
         with self._handoff_lock:
             if self._consumed or self.closed:
@@ -132,7 +132,7 @@ class PreparedModel(PreparedExecution):
             manifest = self.manifest()
             torch.cuda.synchronize(self.device)
             try:
-                server = sparkgap_native.Server(self, manifest, json.dumps(config))
+                server = flare_native.Server(self, manifest, json.dumps(config))
             except BaseException as error:
                 if getattr(error, "resources_retained", False):
                     self._startup_undrained = True

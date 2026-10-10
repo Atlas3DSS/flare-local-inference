@@ -40,7 +40,7 @@ def captured_node(node, by_id, parents):
 
 
 def analyze(database, mapping):
-    if mapping['schema'] != 'sparkgap-capture-node-map-v1' or mapping['unassigned_node_ids']:
+    if mapping['schema'] != 'flare-capture-node-map-v1' or mapping['unassigned_node_ids']:
         raise ValueError('require complete captured node attribution')
     if len({node['node_id'] for node in mapping['nodes']}) != len(mapping['nodes']):
         raise ValueError('duplicate mapped node IDs')
@@ -143,7 +143,7 @@ def analyze(database, mapping):
     if 'expected_replays' in mapping:
         checks.append({'name': 'replay_count', 'passed': len(executions) == mapping['expected_replays'],
                        'expected': mapping['expected_replays'], 'observed': len(executions)})
-    return {'schema': 'sparkgap-nsys-node-timeline-v1', 'checks': checks,
+    return {'schema': 'flare-nsys-node-timeline-v1', 'checks': checks,
             'passed': all(check['passed'] for check in checks), 'executions': executions,
             'summaries': {key: distribution(item[key] for item in executions) for key in
                           ('node_span_ns', 'kernel_sum_ns', 'kernel_union_ns', 'span_without_observed_nodes_ns')},

@@ -6,15 +6,15 @@ import os
 import pytest
 import torch
 
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, FINISHED
-from sparkgap.recipes.qwen38.speculation import (
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, FINISHED
+from flare.recipes.qwen38.speculation import (
     PreparedCopyProposals, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
     PreparedStochasticVerification, SpeculativeRngState, TARGET_RNG_DOMAIN,
 )
 
-pytestmark = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires explicitly assigned CUDA device and SPARKGAP_RUN_CUDA_TESTS=1")
+pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires explicitly assigned CUDA device and FLARE_RUN_CUDA_TESTS=1")
 VOCAB = 248320
 
 

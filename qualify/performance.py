@@ -28,12 +28,12 @@ from urllib.parse import urlsplit
 import uuid
 
 from .provenance import digest, file_record, utc, write_json
-from sparkgap.preparation.qwen38 import (
+from flare.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "sparkgap-http-performance-v1"
+SCHEMA = "flare-http-performance-v1"
 VOCABULARY = 248320
 SAMPLING = {"temperature": 0, "top_p": 1, "top_k": 0, "min_p": 0,
             "repetition_penalty": 1, "presence_penalty": 0, "frequency_penalty": 0,
@@ -225,7 +225,7 @@ def prepare(args):
     corpus = build_corpus(tokenizer, repetitions=args.repetitions, nonce=args.nonce)
     corpus["provenance"] = {"snapshot": str(args.snapshot.resolve()), "assets_sha256": assets,
                             "transformers_origin": origin, "tokenizers_version": tokenizers.__version__,
-                            "sources": [file_record(Path(__file__)), file_record(ROOT / "sparkgap/preparation/qwen38.py")]}
+                            "sources": [file_record(Path(__file__)), file_record(ROOT / "flare/preparation/qwen38.py")]}
     args.output.mkdir(parents=True)
     for case in corpus["cases"]:
         folder = args.output / case["id"]
@@ -307,7 +307,7 @@ def analyze_events(events, case, *, backend):
     delivery_itl = [b["timestamp_ns"] - a["timestamp_ns"] for a, b in zip(groups, groups[1:])] if singleton else []
     core_complete = bool(core) and len(core) == len(ids) and all(a <= b for a, b in zip(core, core[1:]))
     checks["valid_core_timestamps"] = not core or core_complete
-    if backend == "sparkgap":
+    if backend == "flare":
         checks["native_core_timestamps"] = core_complete
     metadata = performance[-1] if performance else {}
     usage = usages[-1] if usages else {}
@@ -316,7 +316,7 @@ def analyze_events(events, case, *, backend):
     checks["cache_count_reported"] = type(cached) is int and 0 <= cached <= len(case["prompt_tokens"])
     if case["expected_cache"] == "cold":
         checks["cold_cache"] = cached == 0
-    elif backend == "sparkgap":
+    elif backend == "flare":
         checks["prefix_4096_reused"] = cached == 4096
     else:
         checks["prefix_reused"] = type(cached) is int and 0 < cached <= 4096
@@ -327,7 +327,7 @@ def analyze_events(events, case, *, backend):
         checks["native_ingress_order"] = 0 <= ingress <= enqueue <= core[0]
         if checks["native_ingress_order"]:
             native_ttft = core[0] - ingress
-    if backend == "sparkgap":
+    if backend == "flare":
         checks["native_timing_metadata_complete"] = native_ttft is not None
     return {"passed": all(checks.values()), "checks": checks, "errors": errors,
             "generated_token_ids": ids, "token_groups": groups, "core_token_timestamps_ns": core,
@@ -352,7 +352,7 @@ def stream_request(base_url, case, folder, *, backend, model, timeout, barrier):
     folder.mkdir()
     request = deepcopy(case["request"])
     request.update(stream=True, return_token_ids=True, stream_options={"include_usage": True})
-    if backend == "sparkgap":
+    if backend == "flare":
         request["return_token_timestamps"] = True
     if model:
         request["model"] = model
@@ -461,10 +461,10 @@ def idle_metrics(args, folder, name):
     while True:
         path = folder / f"metrics-{name}-{attempt:03}.txt"
         values = metrics(args.base_url, path, args.timeout)
-        if args.backend != "sparkgap" or (values.get("sparkgap_active_requests") == 0
-                and values.get("sparkgap_free_request_slots") == 4
-                and values.get("sparkgap_retiring_request_slots") == 0
-                and values.get("sparkgap_pending_requests") == 0):
+        if args.backend != "flare" or (values.get("flare_active_requests") == 0
+                and values.get("flare_free_request_slots") == 4
+                and values.get("flare_retiring_request_slots") == 0
+                and values.get("flare_pending_requests") == 0):
             return values
         if time.monotonic() >= deadline:
             raise ValueError("native scheduler did not become idle within 30 seconds")
@@ -508,9 +508,9 @@ def run(args):
                 or (folder / "prompt.u32le").read_bytes() != token_bytes(case["prompt_tokens"])
                 or (folder / "rendered.txt").read_text() != case["rendered_prompt"]):
             raise ValueError(f"corpus sidecar mismatch: {case['id']}")
-    if args.backend == "sparkgap":
+    if args.backend == "flare":
         if args.memory_report is None:
-            raise ValueError("Sparkgap measurement requires its actual preparation memory report")
+            raise ValueError("Flare measurement requires its actual preparation memory report")
         memory = json.loads(args.memory_report.read_text())
         if memory.get("prefill_chunk_size") != args.prefill_chunk_size:
             raise ValueError("actual prepared prefill capacity differs from the measurement label")
@@ -556,15 +556,15 @@ def run(args):
             summary["metric_deltas"] = {key: after[key] - before[key] for key in before.keys() & after.keys()
                                         if after[key] is not None and before[key] is not None
                                         and ("_total" in key or key.startswith("vllm:"))}
-            if args.backend == "sparkgap":
+            if args.backend == "flare":
                 expected = 4096 if group["kind"] == "prefix-hit" else 0
-                summary["native_cache_metric_exact"] = summary["metric_deltas"].get("sparkgap_cache_reused_tokens_total") == expected
-                summary["native_requests_completed"] = summary["metric_deltas"].get("sparkgap_requests_completed_total") == group["batch"]
+                summary["native_cache_metric_exact"] = summary["metric_deltas"].get("flare_cache_reused_tokens_total") == expected
+                summary["native_requests_completed"] = summary["metric_deltas"].get("flare_requests_completed_total") == group["batch"]
                 summary["native_no_failures"] = all(summary["metric_deltas"].get(name) == 0 for name in (
-                    "sparkgap_requests_failed_total", "sparkgap_requests_cancelled_total"))
+                    "flare_requests_failed_total", "flare_requests_cancelled_total"))
                 summary["native_resources_conserved"] = all(
-                    before[f"sparkgap_free_{resource}"] + before[f"sparkgap_cached_{cached}"]
-                    == after[f"sparkgap_free_{resource}"] + after[f"sparkgap_cached_{cached}"]
+                    before[f"flare_free_{resource}"] + before[f"flare_cached_{cached}"]
+                    == after[f"flare_free_{resource}"] + after[f"flare_cached_{cached}"]
                     for resource, cached in (("kv_pages", "kv_pages"), ("snapshots", "checkpoints")))
                 summary["passed"] &= all(summary[key] for key in ("native_cache_metric_exact", "native_requests_completed",
                                          "native_no_failures", "native_resources_conserved"))
@@ -608,7 +608,7 @@ def main():
     measure = commands.add_parser("run")
     measure.add_argument("--corpus", type=Path, required=True)
     measure.add_argument("--output", type=Path, required=True)
-    measure.add_argument("--backend", choices=("sparkgap", "vllm"), required=True)
+    measure.add_argument("--backend", choices=("flare", "vllm"), required=True)
     measure.add_argument("--base-url", required=True)
     measure.add_argument("--server-pid", type=int, required=True)
     measure.add_argument("--prefill-chunk-size", type=int, choices=(512, 4096), required=True)

@@ -193,15 +193,15 @@ def test_actual_prepared_arm_must_match_source_fixed_width_copy_and_catalog():
 
 
 def metrics(admitted=0):
-    return {"sparkgap_active_requests": 0, "sparkgap_pending_requests": 0,
-            "sparkgap_free_request_slots": 4, "sparkgap_retiring_request_slots": 0,
-            "sparkgap_free_kv_pages": 90, "sparkgap_cached_kv_pages": 10,
-            "sparkgap_free_snapshots": 9, "sparkgap_cached_checkpoints": 1,
-            "sparkgap_requests_admitted_total": admitted, "sparkgap_requests_completed_total": admitted,
-            "sparkgap_requests_failed_total": 0, "sparkgap_requests_cancelled_total": 0,
-            "sparkgap_cache_reused_tokens_total": 0,
-            'sparkgap_speculative_rounds_total{batch="4",width="2"}': admitted * 3,
-            'sparkgap_speculative_gpu_nanoseconds_total{batch="4",width="2"}': admitted * 1000}
+    return {"flare_active_requests": 0, "flare_pending_requests": 0,
+            "flare_free_request_slots": 4, "flare_retiring_request_slots": 0,
+            "flare_free_kv_pages": 90, "flare_cached_kv_pages": 10,
+            "flare_free_snapshots": 9, "flare_cached_checkpoints": 1,
+            "flare_requests_admitted_total": admitted, "flare_requests_completed_total": admitted,
+            "flare_requests_failed_total": 0, "flare_requests_cancelled_total": 0,
+            "flare_cache_reused_tokens_total": 0,
+            'flare_speculative_rounds_total{batch="4",width="2"}': admitted * 3,
+            'flare_speculative_gpu_nanoseconds_total{batch="4",width="2"}': admitted * 1000}
 
 
 def test_actual_round_shape_counters_are_not_inferred_from_client_concurrency():
@@ -223,13 +223,13 @@ def test_vector_emission_and_completed_round_counts_are_cross_checked():
     observation = {"case": "chat-capacity", "analysis": analysis, "request_start_perf_counter_ns": 1, "elapsed_ns": 100}
     group = {"stage": "chat", "case_ids": ["chat-capacity"], "concurrency": 1}
     before, after = metrics(), metrics(1)
-    before['sparkgap_graph_launches_total{kind="speculative"}'] = 0
-    after['sparkgap_graph_launches_total{kind="speculative"}'] = 3
-    before['sparkgap_speculative_emitted_tokens_total{batch="4",width="2"}'] = 0
-    after['sparkgap_speculative_emitted_tokens_total{batch="4",width="2"}'] = 1
+    before['flare_graph_launches_total{kind="speculative"}'] = 0
+    after['flare_graph_launches_total{kind="speculative"}'] = 3
+    before['flare_speculative_emitted_tokens_total{batch="4",width="2"}'] = 0
+    after['flare_speculative_emitted_tokens_total{batch="4",width="2"}'] = 1
     result = sb.summarize_group(group, [observation], before, after, memory(sw.arms()[-1]))
     assert result["passed"]
-    after['sparkgap_speculative_emitted_tokens_total{batch="4",width="2"}'] = 2
+    after['flare_speculative_emitted_tokens_total{batch="4",width="2"}'] = 2
     result = sb.summarize_group(group, [observation], before, after, memory(sw.arms()[-1]))
     assert not result["passed"]
     assert not result["checks"]["speculative_emissions_match_raw_ids"]

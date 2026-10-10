@@ -160,7 +160,7 @@ impl<M: ModelContract> Server<M> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let runtime_model = model.clone();
         let thread = match thread::Builder::new()
-            .name("sparkgap-http".into())
+            .name("flare-http".into())
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)

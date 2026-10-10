@@ -3,15 +3,15 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sparkgap"
+name = "flare"
 version = "0.1.0"
 description = "Python model preparation for a native CUDA graph serving core"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
 [project.scripts]
-sparkgap = "sparkgap.__main__:main"
-sparkgap-inspect = "sparkgap.preparation.__main__:main"
+flare = "flare.__main__:main"
+flare-inspect = "flare.preparation.__main__:main"
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
@@ -26,7 +26,7 @@ prepare = [
     "huggingface-hub==1.33.0",
     "accelerate==1.14.0",
     "Pillow==12.3.0",
-    "sparkgap-native",
+    "flare-native",
 ]
 
 [[tool.uv.index]]
@@ -38,13 +38,13 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 flashinfer-python = { path = "../flashinfer", editable = true }
-sparkgap-native = { path = "native" }
+flare-native = { path = "native" }
 
-[tool.sparkgap.source-revisions]
+[tool.flare.source-revisions]
 flashinfer = "c691c681ebcbda066faf5bd80fef0d257b256fbc"
 
 [tool.setuptools.packages.find]
-include = ["sparkgap*"]
+include = ["flare*"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

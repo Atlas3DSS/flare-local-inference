@@ -8,10 +8,10 @@ import pytest
 import torch
 
 from qualify.speculative_state_parity import Commands, LEGAL_SHAPES, _mask, command_plan
-from sparkgap.preparation.execution import GraphSignature
-from sparkgap.recipes.qwen38.decoder_state import DecoderInputs
-from sparkgap.recipes.qwen38.sampling import AdmissionBuffers
-from sparkgap.recipes.qwen38.state import StateTransferMetadata
+from flare.preparation.execution import GraphSignature
+from flare.recipes.qwen38.decoder_state import DecoderInputs
+from flare.recipes.qwen38.sampling import AdmissionBuffers
+from flare.recipes.qwen38.state import StateTransferMetadata
 
 
 def fixture():

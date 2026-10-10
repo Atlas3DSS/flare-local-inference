@@ -7,9 +7,9 @@ from typing import Callable
 
 import torch
 
-from sparkgap.preparation.checkpoint import CheckpointManifest
-from sparkgap.preparation.qwen38 import TEXT_PREFIX
-from sparkgap.preparation.scratch import ScratchArena
+from flare.preparation.checkpoint import CheckpointManifest
+from flare.preparation.qwen38 import TEXT_PREFIX
+from flare.preparation.scratch import ScratchArena
 
 from .model import create_model_tree
 from .moe import QwenMoeWeights

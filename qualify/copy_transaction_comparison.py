@@ -448,7 +448,7 @@ def main(argv=None):
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.artifacts.mkdir(parents=True)
     write_json(args.artifacts / "fixture.json", {**fixture, "cases": plans})
-    receipt = {"schema": "sparkgap-copy-transaction-comparison-v1", "gpu_execution": False,
+    receipt = {"schema": "flare-copy-transaction-comparison-v1", "gpu_execution": False,
                "fixture": file_record(args.artifacts / "fixture.json"), "shapes": shapes,
                "full_shape_coverage": set(shapes) == set(LEGAL_SHAPES), "cases": {},
                "coverage": {"executor": "Python replay of production captured graphs",
@@ -470,11 +470,11 @@ def main(argv=None):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
     import b12x
     import flashinfer
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-    from sparkgap.recipes.qwen38.speculative_model import SpeculativePreparation
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from flare.recipes.qwen38.speculative_model import SpeculativePreparation
 
     paths = {Path(__file__), ROOT / "qualify/speculative_state_parity.py", ROOT / "qualify/provenance.py", ROOT / "qualify/graph_execution.py", ROOT / "qualify/checkpoint_state.py"}
-    for directory, pattern in ((ROOT / "sparkgap", "*.py"), (Path(b12x.__file__).resolve().parent, "*.py")):
+    for directory, pattern in ((ROOT / "flare", "*.py"), (Path(b12x.__file__).resolve().parent, "*.py")):
         paths.update(directory.rglob(pattern))
     fi = Path(flashinfer.__file__).resolve().parent
     paths.update(fi / name for name in ("sampling.py", "jit/sampling.py", "data/include/flashinfer/sampling.cuh"))

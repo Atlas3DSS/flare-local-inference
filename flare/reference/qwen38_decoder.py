@@ -17,9 +17,9 @@ from types import FunctionType, MethodType
 import torch
 import torch.nn.functional as F
 
-from sparkgap.preparation.checkpoint import CheckpointManifest
-from sparkgap.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
-from sparkgap.recipes.qwen38.model import create_model_tree
+from flare.preparation.checkpoint import CheckpointManifest
+from flare.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
+from flare.recipes.qwen38.model import create_model_tree
 
 from .qwen38_quant import (
     CheckpointTensors,

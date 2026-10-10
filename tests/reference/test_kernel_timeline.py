@@ -94,7 +94,7 @@ def fixture(path):
                        (165+offset,170+offset,77<<24,0,1,7,index+12,900))
         db.execute('INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES(?,?,?,?,?,?,?,?,?,?)',
                    (100,900,88<<24,0,1,7,12,101,24,2))
-    mapping = {'schema':'sparkgap-capture-node-map-v1','pid':77,'graph_id':24,
+    mapping = {'schema':'flare-capture-node-map-v1','pid':77,'graph_id':24,
                'graph_exec_id':97,'unassigned_node_ids':[],'expected_replays':2,
                'nodes':[{'node_id':n,'node_type':t,'layer':3,'operator':op,'call_index':i}
                         for i,(n,t,op) in enumerate([(101,0,'qsa.qkv'),(401,0,'qsa.attend'),(900,2,'metadata')])]}

@@ -72,7 +72,7 @@ def test_fixture_identity_and_normalization_weights_are_checked(tmp_path):
     saved, case = sample()
     fixture = tmp_path / 'fixture.pt'
     torch.save({'cases': [case]}, fixture)
-    for name in ('sparkgap', 'vllm'):
+    for name in ('flare', 'vllm'):
         torch.save([saved], tmp_path / f'{name}.pt')
     values, _ = load_inputs(tmp_path, fixture)
     assert len(values) == 2
@@ -98,14 +98,14 @@ def test_padding_rejects_truncation_and_retains_signed_zero():
 def paired_probe(tmp_path):
     saved, case = sample()
     torch.save({'cases': [case]}, tmp_path / 'fixture.pt')
-    for name in ('sparkgap', 'vllm'):
+    for name in ('flare', 'vllm'):
         torch.save([saved], tmp_path / f'{name}.pt')
-    records = [file_record(tmp_path / name) for name in ('fixture.pt', 'sparkgap.pt', 'vllm.pt')]
+    records = [file_record(tmp_path / name) for name in ('fixture.pt', 'flare.pt', 'vllm.pt')]
     payloads = {}
-    for backend in ('sparkgap', 'vllm'):
+    for backend in ('flare', 'vllm'):
         cases = []
-        for operand_source in ('sparkgap', 'vllm'):
-            for capacity in ((8,) if backend == 'sparkgap' else (5, 8)):
+        for operand_source in ('flare', 'vllm'):
+            for capacity in ((8,) if backend == 'flare' else (5, 8)):
                 cases.append({'step': 0, 'operand_source': operand_source, 'capacity': capacity,
                     'live_rows': 5, 'inputs': _input_records(saved, case, eps=1e-6),
                     'outputs': {name: saved['stages'][stage].clone() for name, stage in REPRODUCTION.items()}})
@@ -122,7 +122,7 @@ def save_probe(tmp_path, payloads):
 
 def test_comparison_retains_both_row_geometries_and_own_reproduction(tmp_path):
     payloads = paired_probe(tmp_path)
-    payloads['sparkgap']['cases'][0]['outputs']['hc_down'][2, 13] += 1
+    payloads['flare']['cases'][0]['outputs']['hc_down'][2, 13] += 1
     save_probe(tmp_path, payloads)
     result = compare(tmp_path, tmp_path)
     assert len(result['identical_live_inputs']) == 4

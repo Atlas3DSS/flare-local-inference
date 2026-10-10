@@ -78,7 +78,7 @@ class StageTrace:
         for owner, name, original in reversed(self.originals):
             setattr(owner, name, original)
 
-    def install_sparkgap(self, op):
+    def install_flare(self, op):
         self.wrap(op, 'feedback',
             before=lambda args, kwargs: self.record('embedding', op.scratch.embedding),
             after=lambda args, kwargs, result: self.record('feedback', op.scratch.residual))
@@ -262,22 +262,22 @@ def inputs(args):
 
 
 def source_records():
-    paths = sorted((ROOT / 'sparkgap/preparation').rglob('*.py'))
-    paths += sorted((ROOT / 'sparkgap/recipes/qwen38').glob('*.py'))
+    paths = sorted((ROOT / 'flare/preparation').rglob('*.py'))
+    paths += sorted((ROOT / 'flare/recipes/qwen38').glob('*.py'))
     return [file_record(path) for path in [Path(__file__), Path(__file__).with_name('mtp_operators.py'), *paths]]
 
 
 @torch.no_grad()
-def sparkgap(args):
+def flare(args):
     import b12x
     from b12x.preparation import PreparationSession
-    from sparkgap.preparation import inspect_qwen38_checkpoint
-    from sparkgap.preparation.qwen38 import TEXT_PREFIX
-    from sparkgap.preparation.scratch import ScratchArena
-    from sparkgap.recipes.qwen38.attention import QSAMetadata, QSAState, RotaryTables
-    from sparkgap.recipes.qwen38.mtp import MTPScratch, PreparedMTP
-    from sparkgap.recipes.qwen38.mtp_weights import MTPWeights
-    from sparkgap.recipes.qwen38.weights import QwenWeightLoader
+    from flare.preparation import inspect_qwen38_checkpoint
+    from flare.preparation.qwen38 import TEXT_PREFIX
+    from flare.preparation.scratch import ScratchArena
+    from flare.recipes.qwen38.attention import QSAMetadata, QSAState, RotaryTables
+    from flare.recipes.qwen38.mtp import MTPScratch, PreparedMTP
+    from flare.recipes.qwen38.mtp_weights import MTPWeights
+    from flare.recipes.qwen38.weights import QwenWeightLoader
 
     dev = device()
     manifest = inspect_qwen38_checkpoint(args.snapshot)
@@ -302,7 +302,7 @@ def sparkgap(args):
                     output_indices=selected, session=session, name=f'mtp.{capacity}', max_cache_pages=2)
                 trace = StageTrace() if args.trace_stages else None
                 if trace is not None:
-                    trace.install_sparkgap(op)
+                    trace.install_flare(op)
                 owners.append((op, tokens, hidden, selected, metadata, trace))
             arena.finalize(); arena.freeze()
             stream = torch.cuda.Stream(); stream.wait_stream(torch.cuda.current_stream())
@@ -350,18 +350,18 @@ def sparkgap(args):
                         'k_norm': weights.module.layers[0].self_attn.k_norm.weight.cpu().clone(),
                         'rope_cos': rotary.cos[:8].cpu().clone(), 'rope_sin': rotary.sin[:8].cpu().clone()}})
             if any(not check['equal'] for check in allocation_checks):
-                raise RuntimeError('Sparkgap MTP graph replay allocated')
-            torch.save(outputs, args.output / 'sparkgap.pt')
+                raise RuntimeError('Flare MTP graph replay allocated')
+            torch.save(outputs, args.output / 'flare.pt')
             operator_probe = None
             if args.operator_inputs is not None:
-                from qualify.mtp_operators import run_sparkgap
-                operator_probe = run_sparkgap(args, owners, cases)
+                from qualify.mtp_operators import run_flare
+                operator_probe = run_flare(args, owners, cases)
             return {'sources': sources, 'sources_unchanged': sources == source_records(),
                 'operator_probe': operator_probe,
                 'b12x_origin': b12x.__file__, 'stored_mtp_bytes': weights.stored_bytes,
                 'shared_embedding_head': True, 'arena_bytes': arena.nbytes,
                 'capacities': [8, 1], 'kv_dtype': 'bfloat16', 'cache_page_size': 64,
-                'allocation_checks': allocation_checks, 'result': file_record(args.output / 'sparkgap.pt'),
+                'allocation_checks': allocation_checks, 'result': file_record(args.output / 'flare.pt'),
                 'preparation': 'public default plans; BF16Projection explicit recipe override retained'}
         finally:
             torch.cuda.synchronize()
@@ -404,7 +404,7 @@ def vllm(args):
         enforce_eager=True, load_format='instanttensor',
         speculative_config={'method': 'mtp', 'num_speculative_tokens': 7}).create_engine_config()
     outputs, preparation, executed_linear_calls = [], [], []
-    with set_current_vllm_config(config), tempfile.TemporaryDirectory(prefix='sparkgap-mtp-dist-') as temporary, ExitStack() as cleanup:
+    with set_current_vllm_config(config), tempfile.TemporaryDirectory(prefix='flare-mtp-dist-') as temporary, ExitStack() as cleanup:
         init_distributed_environment(world_size=1, rank=0, local_rank=0,
             distributed_init_method=f'file://{temporary}/rendezvous', backend='nccl')
         cleanup.callback(cleanup_dist_env_and_memory)
@@ -521,7 +521,7 @@ def compare_output(actual, reference):
         result[name] = _measurement(value, reference[name])
     result['vocabulary'] = _metrics(actual['logits'][0].float(), reference['logits'][0].float())
     a_stages, r_stages = actual.get('stages', {}), reference.get('stages', {})
-    result['stage_coverage'] = {'missing_in_sparkgap': sorted(r_stages.keys() - a_stages.keys()),
+    result['stage_coverage'] = {'missing_in_flare': sorted(r_stages.keys() - a_stages.keys()),
                                 'missing_in_vllm': sorted(a_stages.keys() - r_stages.keys())}
     stages = {}
     for name in sorted(a_stages.keys() & r_stages.keys()):
@@ -540,7 +540,7 @@ def compare_output(actual, reference):
 
 def compare(args):
     from qualify.layer_comparison import _measurement
-    a = torch.load(args.output / 'sparkgap.pt', map_location='cpu', weights_only=True)
+    a = torch.load(args.output / 'flare.pt', map_location='cpu', weights_only=True)
     b = torch.load(args.output / 'vllm.pt', map_location='cpu', weights_only=True)
     if len(a) != len(b):
         raise ValueError('MTP step count differs')
@@ -552,12 +552,12 @@ def compare(args):
             **compare_output(actual, reference)})
     return {'reference': 'pinned vLLM Qwen4ExpMTP; identical target-derived feedback',
         'acceptance_threshold': None, 'cases': records,
-        'artifacts': [file_record(args.output / name) for name in ('fixture.pt', 'sparkgap.pt', 'vllm.pt')]}
+        'artifacts': [file_record(args.output / name) for name in ('fixture.pt', 'flare.pt', 'vllm.pt')]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('backend', choices=('fixture', 'sparkgap', 'vllm', 'compare'))
+    parser.add_argument('backend', choices=('fixture', 'flare', 'vllm', 'compare'))
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--snapshot', type=Path, default=SNAPSHOT)
     parser.add_argument('--trace', type=Path, default=TRACE)
@@ -565,11 +565,11 @@ def main():
     parser.add_argument('--operator-inputs', type=Path,
                         help='immutable recorded MTP fixture and stage tensors for independent identical-input probes')
     args = parser.parse_args()
-    if args.operator_inputs is not None and args.backend not in ('sparkgap', 'vllm'):
+    if args.operator_inputs is not None and args.backend not in ('flare', 'vllm'):
         parser.error('--operator-inputs requires a model backend')
     args.output.mkdir(parents=True, exist_ok=True)
     destination = args.output / f'{args.backend}.json'
-    if destination.exists() or (args.backend in ('sparkgap', 'vllm') and (args.output / f'{args.backend}.pt').exists()):
+    if destination.exists() or (args.backend in ('flare', 'vllm') and (args.output / f'{args.backend}.pt').exists()):
         raise FileExistsError(f'qualification output already exists: {destination}')
     report = {'started_at': utc(), 'command': sys.argv, 'script': file_record(__file__), 'backend': args.backend,
         'environment': {key: os.environ.get(key) for key in ('CUDA_VISIBLE_DEVICES', 'CUDA_HOME', 'PYTHONPATH',

@@ -11,20 +11,20 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import (
     MODEL_ID,
     REVISION,
     TEXT_PREFIX,
     TRANSFORMERS_REVISION,
 )
-from sparkgap.reference.qwen38_decoder import (
+from flare.reference.qwen38_decoder import (
     CanonicalTextReference,
     _SelectedEmbedding,
     _SelectedExperts,
     _StreamLinear,
 )
-from sparkgap.reference.qwen38_quant import (
+from flare.reference.qwen38_quant import (
     CheckpointTensors,
     mxfp8_linear_reference,
     nvfp4_expert_reference,
@@ -41,7 +41,7 @@ def manifest():
         / "snapshots"
         / REVISION
     )
-    snapshot = Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", default))
+    snapshot = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default))
     if not snapshot.is_dir():
         pytest.skip("exact Qwen checkpoint is unavailable")
     return inspect_qwen38_checkpoint(snapshot)
@@ -171,7 +171,7 @@ def test_reference_rejects_invalid_inputs_before_checkpoint_reads(cpu_reference,
 
 
 @pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires explicitly assigned GPU",
 )
 @pytest.mark.parametrize("case", ["short", "64_tokens"])

@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from sparkgap.preparation import CheckpointManifest
-from sparkgap.preparation.qwen38 import PLE_PREFIX
+from flare.preparation import CheckpointManifest
+from flare.preparation.qwen38 import PLE_PREFIX
 
 
 class CheckpointTensors:

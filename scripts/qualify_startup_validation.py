@@ -25,7 +25,7 @@ import weakref
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from sparkgap.preparation.qwen38 import (
+from flare.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, MODEL_ID, REVISION,
 )
 
@@ -189,7 +189,7 @@ def cases(snapshot):
 
 
 def child(path):
-    import sparkgap_native
+    import flare_native
 
     case = json.loads(path.read_text())
 
@@ -200,7 +200,7 @@ def child(path):
     retained = weakref.ref(owner)
     result = {"name": case["name"]}
     try:
-        server = sparkgap_native.Server(owner, case["manifest"], json.dumps(case["config"]))
+        server = flare_native.Server(owner, case["manifest"], json.dumps(case["config"]))
     except Exception as error:
         result.update(error_type=type(error).__name__, error=str(error),
             resources_retained=getattr(error, "resources_retained", False),
@@ -219,15 +219,15 @@ def child(path):
 
 
 def run(args):
-    import sparkgap_native
+    import flare_native
 
     if not shutil.which("strace"):
         raise RuntimeError("strace is required for startup syscall evidence")
     args.artifacts.mkdir(parents=True, exist_ok=False)
-    extension = next(Path(sparkgap_native.__file__).parent.glob("*.so"))
-    sources = [Path(__file__).resolve(), ROOT / "sparkgap/preparation/qwen38.py",
+    extension = next(Path(flare_native.__file__).parent.glob("*.so"))
+    sources = [Path(__file__).resolve(), ROOT / "flare/preparation/qwen38.py",
         *sorted((ROOT / "native/src").rglob("*.rs")), ROOT / "native/Cargo.toml", ROOT / "native/Cargo.lock"]
-    receipt = {"schema": "sparkgap-native-startup-validation-v1", "scope":
+    receipt = {"schema": "flare-native-startup-validation-v1", "scope":
         "Installed constructor rejects invalid synthetic manifest/config metadata before CUDA or networking; no prepared model or GPU graph is created.",
         "extension": {"path": str(extension), "sha256": digest(extension)},
         "abi_version": ABI_VERSION,

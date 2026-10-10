@@ -12,7 +12,7 @@ from b12x.preparation import FrozenMapping, MemoryRequirements, PersistentMemory
 from b12x.preparation import device
 from b12x.preparation.types import DeviceIdentity, _CompositePlan
 
-from sparkgap.preparation.execution import GraphSignature
+from flare.preparation.execution import GraphSignature
 from tests.preparation.test_bootstrap_construction import construction_contract
 from tests.preparation.test_tuning import backend, declaration
 
@@ -110,8 +110,8 @@ def test_extracted_attention_fixture_lives_through_trials_and_releases_before_ca
     backend, monkeypatch, fail_finalizer
 ):
     from b12x.preparation import PreparationSession
-    from sparkgap.preparation.fixtures.varlen_attention import benchmark_call
-    from sparkgap.preparation.tuning import RecordedPreparationSession
+    from flare.preparation.fixtures.varlen_attention import benchmark_call
+    from flare.preparation.tuning import RecordedPreparationSession
 
     session = RecordedPreparationSession(device=0, checkpoint="fixture-lifetime")
     arguments = {name: torch.zeros(4, 2, 8) for name in ("q", "k", "v")}

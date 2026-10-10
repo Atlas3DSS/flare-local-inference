@@ -2,7 +2,7 @@
 
 All 14 invalid manifest/configuration cases pass against installed native library
 SHA256 `735bf767999b26affeacc5ae574b6e52c6a5e1dc18f42cc208ee8b9f0b2a18ab`.
-Each case calls `sparkgap_native.Server` in a separate CPU process. Every call
+Each case calls `flare_native.Server` in a separate CPU process. Every call
 rejects with its expected error and releases the borrowed Python owner. The
 recorded syscalls contain zero socket, bind, listen or connect attempts, zero
 CUDA-library or NVIDIA-device opens, and zero thread-creation attempts.

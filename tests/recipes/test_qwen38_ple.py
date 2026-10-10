@@ -11,10 +11,10 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.checkpoint import TensorMetadata
-from sparkgap.preparation.qwen38 import MODEL_ID, PLE_PREFIX, REVISION
-from sparkgap.recipes.qwen38.ple import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.checkpoint import TensorMetadata
+from flare.preparation.qwen38 import MODEL_ID, PLE_PREFIX, REVISION
+from flare.recipes.qwen38.ple import (
     PLE_LAYER_PREFIX,
     TABLE_BYTES,
     MappedPLETable,
@@ -26,15 +26,15 @@ from sparkgap.recipes.qwen38.ple import (
     allocate_convolution_state,
     table_layout,
 )
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader
-from sparkgap.reference.qwen38_quant import (
+from flare.recipes.qwen38.weights import QwenWeightLoader
+from flare.reference.qwen38_quant import (
     CheckpointTensors,
     read_ple_rows,
 )
 
 CUDA = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires explicit CUDA_VISIBLE_DEVICES and SPARKGAP_RUN_CUDA_TESTS=1",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires explicit CUDA_VISIBLE_DEVICES and FLARE_RUN_CUDA_TESTS=1",
 )
 
 
@@ -47,7 +47,7 @@ def manifest():
         / "snapshots"
         / REVISION
     )
-    path = Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", default))
+    path = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default))
     if not path.exists():
         pytest.skip("exact Qwen checkpoint snapshot is unavailable")
     return inspect_qwen38_checkpoint(path)
@@ -135,7 +135,7 @@ def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
 def test_ple_mapping_checks_available_host_memory_before_allocation(
     manifest, monkeypatch
 ):
-    monkeypatch.setattr("sparkgap.recipes.qwen38.ple._available_host_bytes", lambda: 0)
+    monkeypatch.setattr("flare.recipes.qwen38.ple._available_host_bytes", lambda: 0)
     with pytest.raises(MemoryError, match="PLE mapping requires"):
         MappedPLETable.load(manifest, "cuda:0")
 
@@ -148,17 +148,17 @@ def test_ple_mapping_releases_storage_after_checkpoint_read_failure(
         weight_load_view=torch.empty(1), close=lambda: closed.append(True)
     )
     monkeypatch.setattr(
-        "sparkgap.recipes.qwen38.ple._available_host_bytes", lambda: 2 * TABLE_BYTES
+        "flare.recipes.qwen38.ple._available_host_bytes", lambda: 2 * TABLE_BYTES
     )
     monkeypatch.setattr(
-        "sparkgap.recipes.qwen38.ple.ple_embedding.allocate_storage",
+        "flare.recipes.qwen38.ple.ple_embedding.allocate_storage",
         lambda layout: storage,
     )
 
     def fail_read(*args):
         raise OSError("injected checkpoint read failure")
 
-    monkeypatch.setattr("sparkgap.recipes.qwen38.ple._copy_plane", fail_read)
+    monkeypatch.setattr("flare.recipes.qwen38.ple._copy_plane", fail_read)
     with pytest.raises(OSError, match="checkpoint read failure"):
         MappedPLETable.load(manifest, "cuda:0")
     assert closed == [True]
@@ -284,7 +284,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
 ):
     from b12x.preparation import PreparationSession
 
-    from sparkgap.preparation.graphs import PreparedGraphBundle
+    from flare.preparation.graphs import PreparedGraphBundle
 
     module, projections, table = cuda_components
     device = torch.device("cuda", 0)

@@ -183,7 +183,7 @@ def main():
     args = parser.parse_args()
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         raise RuntimeError("assign CUDA_VISIBLE_DEVICES explicitly")
-    spec = importlib.util.spec_from_file_location("sparkgap_native", args.extension.resolve(strict=True))
+    spec = importlib.util.spec_from_file_location("flare_native", args.extension.resolve(strict=True))
     native = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(native)
     torch.cuda.set_device(0)

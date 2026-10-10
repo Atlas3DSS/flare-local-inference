@@ -1,7 +1,6 @@
 #![cfg(feature = "server")]
 use base64::Engine;
-use serde_json::{Map, Value, json};
-use sparkgap_native::{
+use flare_native::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -10,13 +9,14 @@ use sparkgap_native::{
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
+use serde_json::{Map, Value, json};
 use std::{fs, path::PathBuf};
 
 #[test]
-#[ignore = "requires SPARKGAP_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     let snapshot = PathBuf::from(
-        std::env::var_os("SPARKGAP_TEST_SNAPSHOT").expect("SPARKGAP_TEST_SNAPSHOT is required"),
+        std::env::var_os("FLARE_TEST_SNAPSHOT").expect("FLARE_TEST_SNAPSHOT is required"),
     );
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/frontend");
     let fixture: Value =
@@ -59,7 +59,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         speculative_copy: false,
         speculative_proposal_source: Default::default(),
     };
-    let compiler = sparkgap_native::grammar::GrammarCompiler::new(
+    let compiler = flare_native::grammar::GrammarCompiler::new(
         frontend.tokenizer(),
         248320,
         &config.eos_token_ids,
@@ -124,7 +124,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             prepare_request::<Qwen4Exp>(&frontend, &limited, &compiler, &config, request)
                 .err()
                 .unwrap(),
-            sparkgap_native::Error::Admission(sparkgap_native::AdmissionError::Image(_))
+            flare_native::Error::Admission(flare_native::AdmissionError::Image(_))
         ));
         counts += 1;
     }

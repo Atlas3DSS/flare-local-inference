@@ -2,7 +2,7 @@
 
 import pytest
 
-from sparkgap.recipes.qwen38.bootstrap import PreparationConfig
+from flare.recipes.qwen38.bootstrap import PreparationConfig
 
 
 @pytest.mark.parametrize("size, expected", [
@@ -39,7 +39,7 @@ def test_prefill_chunk_must_fit_explicit_context():
 
 @pytest.mark.parametrize("arguments, expected", [([], 4096), (["--prefill-chunk-size", "3072"], 3072)])
 def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expected):
-    from sparkgap.__main__ import main
+    from flare.__main__ import main
 
     configurations = []
 
@@ -59,7 +59,7 @@ def test_cli_passes_prefill_chunk_to_preparation(monkeypatch, arguments, expecte
         configurations.append(config)
         return Model()
 
-    monkeypatch.setattr("sparkgap.recipes.qwen38.bootstrap.prepare_model", prepare)
+    monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare)
     assert main(["--prepare-only", *arguments]) == 0
     assert len(configurations) == 1
     assert configurations[0].prefill_chunk_size == expected
@@ -88,7 +88,7 @@ def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
 
 
 def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch):
-    from sparkgap.__main__ import main
+    from flare.__main__ import main
 
     captured = []
 
@@ -108,7 +108,7 @@ def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch):
         captured.append(config)
         return Model()
 
-    monkeypatch.setattr("sparkgap.recipes.qwen38.bootstrap.prepare_model", prepare)
+    monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare)
     assert main(["--prepare-only", "--mtp", "--mtp-proposal-source", "copy", "--mtp-widths", "1", "2", "4",
                  "--mtp-fixed-width", "4", "--no-mtp-copy"]) == 0
     assert captured[0].mtp

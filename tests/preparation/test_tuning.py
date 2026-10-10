@@ -10,9 +10,9 @@ import torch
 from b12x.preparation import FrozenMapping, PreparationSession, MemoryRequirements, PreparedCall
 from b12x._lib.scratch import ScratchBufferSpec
 
-from sparkgap.preparation.scratch import ScratchArena, scratch_storage
+from flare.preparation.scratch import ScratchArena, scratch_storage
 
-from sparkgap.preparation.tuning import (
+from flare.preparation.tuning import (
     RecordedPreparationSession,
     benchmark_resource,
     register_finalizer,
@@ -354,7 +354,7 @@ def test_borrowed_registration_is_unique_collecting_only_and_restores_on_close(b
 
 
 def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(backend):
-    from sparkgap.preparation.fixtures.gdn import register_benchmark_state
+    from flare.preparation.fixtures.gdn import register_benchmark_state
 
     session = RecordedPreparationSession(device=0, checkpoint="revision")
     storage = torch.full((2, 32), 7, dtype=torch.uint8)
@@ -728,7 +728,7 @@ def test_undeclared_candidate_growth_fails_before_freeze_finalization_or_capture
 @pytest.mark.parametrize("retain_arena_owner", [False, True])
 def test_published_priming_owners_can_release_candidate_storage_only_when_arena_is_retained(
         backend, monkeypatch, retain_arena_owner):
-    from sparkgap.preparation.scratch import prime_owners
+    from flare.preparation.scratch import prime_owners
 
     session = RecordedPreparationSession(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
@@ -778,10 +778,10 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
 
 @pytest.mark.parametrize("operator", ["gdn", "fused_moe", "hyperconnection", "varlen_attention", "blockscaled_gemm", "mtp_feedback"])
 def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
-    from sparkgap.preparation.fixtures import (
+    from flare.preparation.fixtures import (
         blockscaled_gemm, fused_moe, gdn, hyperconnection, varlen_attention, mtp_feedback,
     )
-    from sparkgap.recipes.qwen38.moe import RouterScratch
+    from flare.recipes.qwen38.moe import RouterScratch
 
     events, controls = backend
     controls.retain_trials = True

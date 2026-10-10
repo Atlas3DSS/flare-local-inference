@@ -1,8 +1,6 @@
 use base64::Engine;
-use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
-use sparkgap_native::model::qwen4exp::Qwen4Exp;
-use sparkgap_native::{
+use flare_native::model::qwen4exp::Qwen4Exp;
+use flare_native::{
     frontend::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
@@ -11,6 +9,8 @@ use sparkgap_native::{
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf};
 
 fn main() -> Result<(), String> {
@@ -72,7 +72,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut text_count = 0;
     let mut tool_string_count = 0;
-    let compiler = sparkgap_native::grammar::GrammarCompiler::new(
+    let compiler = flare_native::grammar::GrammarCompiler::new(
         frontend.tokenizer(),
         248320,
         &config.eos_token_ids,
@@ -90,7 +90,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| expected["message"].as_str().unwrap());
             match result {
                 Err(error)
-                    if matches!(&error, sparkgap_native::Error::Admission(_))
+                    if matches!(&error, flare_native::Error::Admission(_))
                         && error.to_string() == expected => {}
                 Err(error) => {
                     return Err((format!(

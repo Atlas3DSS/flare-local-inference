@@ -6,9 +6,9 @@ from dataclasses import fields, is_dataclass, replace
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.decoder import DecoderScratch
-from sparkgap.preparation.scratch import ScratchArena
-from sparkgap.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
+from flare.recipes.qwen38.decoder import DecoderScratch
+from flare.preparation.scratch import ScratchArena
+from flare.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
 
 
 @pytest.mark.parametrize("tokens", [3072, 4096, 8192])

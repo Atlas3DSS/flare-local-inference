@@ -1,18 +1,18 @@
 # Text decoder layer comparison
 
-Sparkgap and the pinned vLLM serving path first differ at layer 0's
+Flare and the pinned vLLM serving path first differ at layer 0's
 hyperconnection normalization. Their input residuals are identical; normalized
 outputs differ by 0.0223–0.0645% relative L2 across four token contexts. The two
 implementations use different precision for the normalization weights:
-Sparkgap retains the checkpoint's FP32 values; vLLM loads BF16 values.
+Flare retains the checkpoint's FP32 values; vLLM loads BF16 values.
 
 The vLLM reference also varies between requests. Two identical cold requests in
 one engine first differ at layer 0's MoE output, despite identical recorded
 attention results, hyperconnection projections and MoE inputs. The resulting
 0.29–0.39% difference in layer-0 residuals grows to 18.95–23.96% in full-vocabulary
-logits. The same reference request differs from Sparkgap by 19.35–20.26% in logits.
+logits. The same reference request differs from Flare by 19.35–20.26% in logits.
 A final-logit difference of that magnitude does not isolate an implementation
-defect in Sparkgap.
+defect in Flare.
 
 ## Inputs and observation boundaries
 
@@ -31,7 +31,7 @@ outputs from layer 0. vLLM's deferred residual additions are observed when they
 materialize, before PLE or the following attention block. These are copies of
 model-produced tensors, without recomputing residual arithmetic.
 
-Sparkgap executes capacity-512 prefill and single-row decode graphs. vLLM
+Flare executes capacity-512 prefill and single-row decode graphs. vLLM
 executes eight padded rows for the five-token prefill and one row for each
 decode step. Only the five active prefill rows and the single decode row are
 compared. The second vLLM request follows successful prefix-cache invalidation
@@ -56,7 +56,7 @@ suddenly appears.
 
 Stage errors include every active row: five for prefill and one for decode.
 
-| Boundary | Sparkgap / vLLM relative L2, range across four contexts | vLLM repeat / vLLM |
+| Boundary | Flare / vLLM relative L2, range across four contexts | vLLM repeat / vLLM |
 |---|---:|---:|
 | Embedding and input residual | 0 | 0 |
 | Attention HC normalization | 0.0223–0.0645% | 0 |
@@ -84,7 +84,7 @@ changes the grouping and rounding of those contributions.
 operations using the recorded plans, exact checkpoint weight and saved residual
 inputs. All eight original-output reproductions are byte-exact: four contexts
 for each implementation. The probe preserves execution capacities of 512/1
-rows for Sparkgap and 8/1 for vLLM. Unobserved padding rows are zero-filled;
+rows for Flare and 8/1 for vLLM. Unobserved padding rows are zero-filled;
 normalization has no cross-row reduction.
 
 Three weight configurations are evaluated on each geometry: original FP32
@@ -124,8 +124,8 @@ coverage and fail original-baseline logit equality. Complete tensors are under
 `vllm-moe-inprocess-repeat/`; `moe-layer-analysis/` contains the measured
 substage errors, route counts, source identities and all 48 layer comparisons.
 
-Sparkgap and vLLM choose the same expert sets on all eight recorded rows.
-Their ordering differs on two rows. Sparkgap rounds route weights through BF16;
+Flare and vLLM choose the same expert sets on all eight recorded rows.
+Their ordering differs on two rows. Flare rounds route weights through BF16;
 vLLM retains FP32 values, and all 80 recorded weights contain precision lost
 by BF16 conversion. This is an additional arithmetic difference. The
 cross-implementation expert inputs already differ, so those expert outputs
@@ -141,10 +141,10 @@ logits. The repeated instrumented requests use identical loaded weights,
 selected plans, module bindings and configuration. GPU memory returns to 2 MiB
 on shutdown; source and checkpoint identities remain unchanged.
 
-The Sparkgap trace completes with zero CUDA allocations during native replay.
+The Flare trace completes with zero CUDA allocations during native replay.
 Its HC residual combination uses public `b12x.norm.hyperconnection.run_combine`.
 The corresponding trace, selected plans and source snapshots are retained under
-`sparkgap-b12x-combine/` in the artifact root.
+`flare-b12x-combine/` in the artifact root.
 
 The [compact receipt](text-layer-comparison.json) identifies the tensors,
 comparison reports and complete layer tables. Full artifacts are under
@@ -160,7 +160,7 @@ size and SHA-256.
 ## All 48 layers
 
 Each value is a percentage of the reference residual L2 norm at the final
-active row. `SG N` compares Sparkgap with vLLM at context step N; `V repeat N`
+active row. `SG N` compares Flare with vLLM at context step N; `V repeat N`
 compares the second vLLM request with the first at that same step. Layer indices
 are zero-based.
 

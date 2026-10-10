@@ -1,14 +1,14 @@
 # Teacher-forced text logits against the vLLM serving path
 
-Sparkgap's recorded text decoder differs from the pinned vLLM serving path by
+Flare's recorded text decoder differs from the pinned vLLM serving path by
 **17.72–22.41% relative L2** over four identical token contexts. All four argmax
-IDs agree. Two of four steps exceed the required bound of Sparkgap–vLLM error
+IDs agree. Two of four steps exceed the required bound of Flare–vLLM error
 being no larger than vLLM–canonical error. **The reference varies between
 requests:** two identical cold requests in one vLLM engine differ by
 18.95–23.96% logit relative L2, with one of four argmax IDs changing. Their first
 different recorded tensor is the layer-0 MoE output; every preceding recorded
 layer-0 tensor, including the MoE input, is identical. The cross-implementation
-discrepancy cannot be attributed to Sparkgap from final logits alone. Numerical
+discrepancy cannot be attributed to Flare from final logits alone. Numerical
 acceptance requires component comparisons on identical operands and a measured
 reference variance floor.
 
@@ -30,7 +30,7 @@ GPU, UUID `GPU-afd4b1ad-8a64-7057-4bde-241822724c7f`.
   clean `98fb87a461183f98d6a7049ca947fb136cc6fb59`.
 - TP1, BF16 model/KV/convolution state, FP32 GDN recurrent state, mapped-host PLE,
   no speculative decoding, 512-token prefill limit and context limit 262,144.
-- Sparkgap tensors: the [recorded decoder execution](decoder-autotuned.md),
+- Flare tensors: the [recorded decoder execution](decoder-autotuned.md),
   with capacity-512 prefill, single-row decode, quantized MXFP8, sequential GDN
   with one key split and 16 QSA attention partitions.
 - Canonical tensors: the stored Transformers diagnostic with MXFP8 and NVFP4
@@ -52,17 +52,17 @@ finiteness and the duplicated sampled-token score.
 
 Relative L2 is `norm(actual - reference) / norm(reference)`, using FP32 logits.
 The named right-hand implementation supplies the denominator. KL is
-`KL(vLLM || Sparkgap)` using FP32 log-softmax over the complete vocabulary.
+`KL(vLLM || Flare)` using FP32 log-softmax over the complete vocabulary.
 Top-10 overlap counts shared token IDs.
 
-| Step | Argmax, all paths | Sparkgap / vLLM L2 | vLLM / canonical L2 | Sparkgap / canonical L2 | Sparkgap / vLLM top-10 | KL | Relative bound |
+| Step | Argmax, all paths | Flare / vLLM L2 | vLLM / canonical L2 | Flare / canonical L2 | Flare / vLLM top-10 | KL | Relative bound |
 |---|---:|---:|---:|---:|---:|---:|---|
 | 0 | 11751 | 0.1923783 | 0.1796956 | 0.1588928 | 9 | 0.0648012 | Fails |
 | 1 | 13 | 0.2033026 | 0.1627352 | 0.1820679 | 10 | 0.0190213 | Fails |
 | 2 | 561 | 0.1772253 | 0.2014077 | 0.1998211 | 9 | 0.1466506 | Passes |
 | 3 | 6511 | 0.2240819 | 0.2311742 | 0.2439030 | 6 | 0.0069344 | Passes |
 
-This measurement covers one short prompt and the stored Sparkgap implementation.
+This measurement covers one short prompt and the stored Flare implementation.
 Generation agreement over a diverse corpus and the default 4,096-token graph
 catalog require separate execution. Logit extraction and provenance collection
 make these runs numerical measurements rather than inference benchmarks.
@@ -122,7 +122,7 @@ sets of tensors are retained under
 `/data/sparkgap-artifacts/text-layer-trace/vllm-inprocess-repeat/`.
 
 The selected vLLM MoE plans permit BF16 atomic output accumulation. The selected
-Sparkgap paths use deterministic reductions with different rounding boundaries.
+Flare paths use deterministic reductions with different rounding boundaries.
 For the vLLM dynamic kernel, ten routed experts and five intermediate slices
 produce approximately 50 arrival-ordered BF16 additions per output element.
 Separate routed/shared observations confirm identical router logits, all 80
@@ -149,7 +149,7 @@ Recompute the comparison from the retained tensors:
 
 ```sh
 .venv/bin/python -m qualify.text_oracle \
-  --sparkgap /data/sparkgap-artifacts/text-serving-oracle/tp1-quantized-mxfp8-rpc/sparkgap.pt \
+  --flare /data/sparkgap-artifacts/text-serving-oracle/tp1-quantized-mxfp8-rpc/sparkgap.pt \
   --vllm /data/sparkgap-artifacts/text-serving-oracle/tp1-quantized-mxfp8-rpc/vllm.pt \
   --canonical /data/sparkgap-artifacts/text-serving-oracle/tp1-quantized-mxfp8-rpc/canonical.pt \
   --output /data/sparkgap-artifacts/text-serving-oracle/comparison-reproduction.json

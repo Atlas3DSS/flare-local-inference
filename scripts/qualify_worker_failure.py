@@ -48,7 +48,7 @@ def plan():
 
 def catalog(snapshot):
     import torch
-    from sparkgap.preparation.execution import GraphSignature, PreparedExecution
+    from flare.preparation.execution import GraphSignature, PreparedExecution
 
     metadata, config = fixture(snapshot)
     buffers = {item["name"]: torch.zeros(item["shape"], dtype=getattr(torch, item["dtype"]), device="cuda")
@@ -107,13 +107,13 @@ class Evidence:
 
 
 def qualify_case(evidence, snapshot, stream):
-    import sparkgap_native
+    import flare_native
 
     case = "waiting-sse" if stream else "waiting-json"
     owner, config = catalog(snapshot)
     manifest = owner.manifest()
     retained = weakref.ref(owner)
-    server = sparkgap_native.Server(owner, manifest, json.dumps(config))
+    server = flare_native.Server(owner, manifest, json.dumps(config))
     del owner
     gc.collect()
     save(evidence.artifacts / f"{case}.manifest.json", manifest)
@@ -148,12 +148,12 @@ def qualify_case(evidence, snapshot, stream):
         metrics = evidence.http(server.address, case + "-metrics", "/metrics")
         counters = {line.split()[0]: int(line.split()[1]) for line in metrics["body"].splitlines()
             if line and not line.startswith("#")}
-        evidence.check(case, "one-fatal-initialization", counters.get('sparkgap_graph_launches_total{kind="init"}') == 1
-            and counters.get("sparkgap_requests_admitted_total") == 1
-            and counters.get("sparkgap_requests_failed_total") == 1, counters=counters)
-        evidence.check(case, "resources-returned-after-drain", counters.get("sparkgap_free_kv_pages") == config["pages"]
-            and counters.get("sparkgap_free_snapshots") == config["snapshots"]
-            and counters.get("sparkgap_free_request_slots") == 4)
+        evidence.check(case, "one-fatal-initialization", counters.get('flare_graph_launches_total{kind="init"}') == 1
+            and counters.get("flare_requests_admitted_total") == 1
+            and counters.get("flare_requests_failed_total") == 1, counters=counters)
+        evidence.check(case, "resources-returned-after-drain", counters.get("flare_free_kv_pages") == config["pages"]
+            and counters.get("flare_free_snapshots") == config["snapshots"]
+            and counters.get("flare_free_request_slots") == 4)
         evidence.check(case, "owner-held-before-close", retained() is not None)
     finally:
         try:
@@ -179,17 +179,17 @@ def main():
     if args.artifacts is None or not args.device_uuid or os.environ.get("CUDA_VISIBLE_DEVICES") != args.device_uuid:
         parser.error("--run requires --artifacts and --device-uuid matching CUDA_VISIBLE_DEVICES")
     import torch
-    import sparkgap_native
+    import flare_native
 
     torch.cuda.set_device(0)
     actual_uuid = str(torch.cuda.get_device_properties(0).uuid)
     if actual_uuid.removeprefix("GPU-") != args.device_uuid.removeprefix("GPU-"):
         raise RuntimeError(f"CUDA UUID {actual_uuid} does not match assigned {args.device_uuid}")
     args.artifacts.mkdir(parents=True, exist_ok=False)
-    extension = next(Path(sparkgap_native.__file__).parent.glob("*.so"))
+    extension = next(Path(flare_native.__file__).parent.glob("*.so"))
     sources = [Path(__file__).resolve(), Path(__file__).with_name("qualify_startup_validation.py"),
         *sorted((ROOT / "native/src").rglob("*.rs")), ROOT / "native/Cargo.toml", ROOT / "native/Cargo.lock"]
-    value = {"schema": "sparkgap-native-worker-failure-v1", "plan": plan(), "checks": [],
+    value = {"schema": "flare-native-worker-failure-v1", "plan": plan(), "checks": [],
         "extension": {"path": str(extension), "sha256": digest(extension)}, "device_uuid": actual_uuid,
         "assigned_device_uuid": args.device_uuid,
         "torch": torch.__version__, "cuda": torch.version.cuda,

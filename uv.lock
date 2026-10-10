@@ -1048,7 +1048,7 @@ wheels = [
 ]
 
 [[package]]
-name = "sparkgap"
+name = "flare"
 version = "0.1.0"
 source = { editable = "." }
 
@@ -1060,7 +1060,7 @@ prepare = [
     { name = "huggingface-hub" },
     { name = "pillow" },
     { name = "safetensors" },
-    { name = "sparkgap-native" },
+    { name = "flare-native" },
     { name = "tokenizers" },
     { name = "torch" },
     { name = "torchvision" },
@@ -1079,7 +1079,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'prepare'", specifier = "==12.3.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9,<10" },
     { name = "safetensors", marker = "extra == 'prepare'", specifier = "==0.8.0" },
-    { name = "sparkgap-native", marker = "extra == 'prepare'", directory = "native" },
+    { name = "flare-native", marker = "extra == 'prepare'", directory = "native" },
     { name = "tokenizers", marker = "extra == 'prepare'", specifier = "==0.23.2" },
     { name = "torch", marker = "extra == 'prepare'", specifier = "==2.13.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "extra == 'prepare'", specifier = "==0.28.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
@@ -1088,7 +1088,7 @@ requires-dist = [
 provides-extras = ["test", "prepare"]
 
 [[package]]
-name = "sparkgap-native"
+name = "flare-native"
 version = "0.1.0"
 source = { directory = "native" }
 

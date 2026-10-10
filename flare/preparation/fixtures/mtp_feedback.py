@@ -3,8 +3,8 @@
 import torch
 from b12x.preparation import PreparedCall
 
-from sparkgap.preparation.scratch import planned_scratch
-from sparkgap.preparation.tuning import benchmark_resource
+from flare.preparation.scratch import planned_scratch
+from flare.preparation.tuning import benchmark_resource
 
 
 class FeedbackInputs:

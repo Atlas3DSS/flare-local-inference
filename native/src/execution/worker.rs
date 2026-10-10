@@ -41,7 +41,7 @@ impl ExecutionWorker {
         let (sender, receiver) = mpsc::sync_channel(1);
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
-            .name("sparkgap-execution".into())
+            .name("flare-execution".into())
             .spawn(move || {
                 // SAFETY: The caller retains the manifest's graphs and allocations
                 // until this worker reports drain. The executor binds its streams

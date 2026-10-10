@@ -21,7 +21,7 @@ impl Fixture {
     fn new() -> Self {
         static SERIAL: AtomicUsize = AtomicUsize::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "sparkgap-worker-phase-{}-{}",
+            "flare-worker-phase-{}-{}",
             std::process::id(),
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));

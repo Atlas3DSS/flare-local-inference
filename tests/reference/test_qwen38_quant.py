@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, PLE_PREFIX, REVISION
-from sparkgap.reference.qwen38_quant import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, PLE_PREFIX, REVISION
+from flare.reference.qwen38_quant import (
     CheckpointTensors,
     Nvfp4Projection,
     decode_csf_scales,
@@ -87,7 +87,7 @@ def test_nvfp4_activation_zero_underflow_and_finite_saturation():
 
 
 def test_nvfp4_midpoint_uses_rounded_reciprocal_metadata():
-    from sparkgap.reference.qwen38_quant import _nvfp4_activation_unscaled
+    from flare.reference.qwen38_quant import _nvfp4_activation_unscaled
 
     values = torch.zeros((1, 16), dtype=torch.bfloat16)
     values[0, 0] = -.02685546875
@@ -131,11 +131,11 @@ def test_w4a4_projection_is_not_bf16_dequantized_linear():
 @pytest.fixture(scope="module")
 def manifest():
     default = Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
-    configured = os.environ.get("SPARKGAP_QWEN38_SNAPSHOT")
+    configured = os.environ.get("FLARE_QWEN38_SNAPSHOT")
     snapshot = Path(configured) if configured else default
     if not snapshot.is_dir():
         if configured:
-            pytest.fail(f"SPARKGAP_QWEN38_SNAPSHOT does not exist: {snapshot}")
+            pytest.fail(f"FLARE_QWEN38_SNAPSHOT does not exist: {snapshot}")
         pytest.skip("exact Qwen3.8 checkpoint is not cached")
     return inspect_qwen38_checkpoint(snapshot)
 

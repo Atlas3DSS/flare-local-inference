@@ -7,7 +7,7 @@ import os
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.state import (
+from flare.recipes.qwen38.state import (
     COPY,
     EOS_TOKEN_ID,
     GDN_LAYERS,
@@ -19,7 +19,7 @@ from sparkgap.recipes.qwen38.state import (
 )
 
 CUDA = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires explicitly assigned CUDA_VISIBLE_DEVICES",
 )
 
@@ -152,8 +152,8 @@ def _replay(worker, index):
 @CUDA
 @torch.no_grad()
 def test_native_full_state_copy_reset_restore_and_metadata_replay():
-    from sparkgap.preparation.graphs import PreparedGraphBundle
-    from sparkgap.recipes.qwen38.attention import QSAState
+    from flare.preparation.graphs import PreparedGraphBundle
+    from flare.recipes.qwen38.attention import QSAState
 
     device = _device()
     pool = HybridStatePool.allocate(6, device)
@@ -268,10 +268,10 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
     from b12x.preparation import PreparationSession
     from b12x.sequence import short_conv
 
-    from sparkgap.preparation.graphs import PreparedGraphBundle
-    from sparkgap.recipes.qwen38.gdn import GDNMetadata, GDNScratch, PreparedGDN
-    from sparkgap.recipes.qwen38.ple import PLE_LAYER_PREFIX
-    from sparkgap.recipes.qwen38.weights import QwenWeightLoader
+    from flare.preparation.graphs import PreparedGraphBundle
+    from flare.recipes.qwen38.gdn import GDNMetadata, GDNScratch, PreparedGDN
+    from flare.recipes.qwen38.ple import PLE_LAYER_PREFIX
+    from flare.recipes.qwen38.weights import QwenWeightLoader
     from tests.recipes import test_qwen38_gdn as canonical
 
     device = _device()

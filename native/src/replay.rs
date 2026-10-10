@@ -164,7 +164,7 @@ impl ReplayWorker {
         let (completion_sender, completions) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
-            .name("sparkgap-cuda".into())
+            .name("flare-cuda".into())
             .spawn(move || run(receiver, completion_sender, ready_sender))
             .map_err(|e| {
                 ExecutionError::Worker(Failure::caused_by(

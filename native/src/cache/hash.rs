@@ -35,7 +35,7 @@ pub struct PrefixHistory {
 impl PrefixHistory {
     pub fn new(identity: [u8; 32]) -> Self {
         let mut hash = Blake2b::<U16>::new();
-        hash.update(b"sparkgap-prefix-root-v1\0");
+        hash.update(b"flare-prefix-root-v1\0");
         hash.update(identity);
         Self {
             identity,
@@ -70,7 +70,7 @@ impl PrefixHistory {
         }
         let start = index * PAGE_SIZE;
         let mut hash = Blake2b::<U16>::new();
-        hash.update(b"sparkgap-prefix-tail-v1\0");
+        hash.update(b"flare-prefix-tail-v1\0");
         hash.update(self.identity);
         hash.update(parent.digest);
         hash.update(consumed_tokens.to_le_bytes());
@@ -124,7 +124,7 @@ impl PrefixHistory {
                 let parent = *self.boundaries.last().unwrap();
                 let consumed_tokens = parent.consumed_tokens + PAGE_SIZE as u64;
                 let mut hash = Blake2b::<U16>::new();
-                hash.update(b"sparkgap-prefix-block-v1\0");
+                hash.update(b"flare-prefix-block-v1\0");
                 hash.update(self.identity);
                 hash.update(parent.digest);
                 hash.update(consumed_tokens.to_le_bytes());

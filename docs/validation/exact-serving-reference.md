@@ -1,7 +1,7 @@
 # Exact-checkpoint vLLM serving reference
 
 The saved vLLM run `candidate-qwen-64fc1eec59-verified` served the same local
-checkpoint payload used by Sparkgap. Its execution arithmetic differs from the
+checkpoint payload used by Flare. Its execution arithmetic differs from the
 pinned Transformers eager component adapter. A [paired vision comparison](vision-serving-reference.md)
 uses this implementation with the same checkpoint and records encoder differences;
 no complete-model numerical bound is established. The canonical component
@@ -86,6 +86,6 @@ the recipe resolves available devices and is not itself a fixed-device command.
 `tool-eval/results.json` records 15 completed scenarios and score 100, with
 temperature 0, seed 42, and concurrency 1. Source receipts bracket that run,
 and `raw-output-audit.json` retains its saved-output review.
-[Sparkgap tool qualification](tool-eval-native.json) repeats the same 15-scenario
+[Flare tool qualification](tool-eval-native.json) repeats the same 15-scenario
 configuration and scores 30/30, matching the recorded vLLM result. Neither run
 establishes multimodal quality or canonical numerical parity.

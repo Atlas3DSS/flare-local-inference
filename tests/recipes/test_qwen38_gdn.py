@@ -9,25 +9,25 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
-from sparkgap.recipes.qwen38.gdn import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.recipes.qwen38.gdn import (
     GDNMetadata,
     GDNScratch,
     GDNState,
     PreparedGDN,
     _validate_geometry,
 )
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader
-from sparkgap.reference.qwen38_quant import (
+from flare.recipes.qwen38.weights import QwenWeightLoader
+from flare.reference.qwen38_quant import (
     CheckpointTensors,
     decode_mxfp8,
     quantize_mxfp8_activation,
 )
 
 CUDA = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-    reason="requires explicit CUDA_VISIBLE_DEVICES and SPARKGAP_RUN_CUDA_TESTS=1",
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+    reason="requires explicit CUDA_VISIBLE_DEVICES and FLARE_RUN_CUDA_TESTS=1",
 )
 PREFIX = f"{TEXT_PREFIX}.layers.0.linear_attn"
 PROJECTIONS = ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj")
@@ -71,7 +71,7 @@ def manifest():
         / "snapshots"
         / REVISION
     )
-    path = Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", path))
+    path = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", path))
     if not path.exists():
         pytest.skip("exact Qwen checkpoint snapshot is unavailable")
     return inspect_qwen38_checkpoint(path)

@@ -2,14 +2,14 @@
 
 The isolated vision module from the established vLLM serving source completed
 both image fixtures using the exact Qwen3.8 Flash Next NVFP4/MXFP8/CSF checkpoint.
-Sparkgap flash and vLLM both exceed the canonical encoder's unchanged 3% relative
+Flare flash and vLLM both exceed the canonical encoder's unchanged 3% relative
 L2 limit. No serving-reference numerical acceptance bound is defined.
 
 | Encoder comparison | Image 0 relative L2 | Image 1 relative L2 |
 | --- | ---: | ---: |
-| Sparkgap flash against vLLM | 13.258807% | 7.061926% |
+| Flare flash against vLLM | 13.258807% | 7.061926% |
 | vLLM against canonical eager adapter | 12.224209% | 6.419347% |
-| Sparkgap flash against canonical eager adapter | 7.800213% | 6.946120% |
+| Flare flash against canonical eager adapter | 7.800213% | 6.946120% |
 
 All six output tensors are finite BF16 with shape [64, 2560]. The two images are
 the 256×256 RGB fixtures defined by
@@ -58,7 +58,7 @@ with tile M/N/K = 64/128/64 and split K = 1.
 
 The unmodified vLLM weights-preparation coordinator derives 65,536 encoder rows
 and 16,384 merger rows from its multimodal budget. The same policy ran with
-autotuning enabled. Sparkgap uses its 256-patch prepared flash path.
+autotuning enabled. Flare uses its 256-patch prepared flash path.
 The different preparation capacities and selected GEMM configurations remain
 part of the comparison.
 
@@ -72,12 +72,12 @@ not retained in the serving log. Exact executed winners are retained here.
 
 The harness is
 [compare_vision_serving_reference.py](../../scripts/compare_vision_serving_reference.py).
-It has four sequential modes: fixtures, vllm, sparkgap, compare. The vllm mode
+It has four sequential modes: fixtures, vllm, flare, compare. The vllm mode
 requires the exact clean source revisions above and rejects imports outside
 those trees. Both GPU modes require the assigned GPU UUID. They must run only
 after acquiring the device.
 
-From the Sparkgap repository, export fixtures with its isolated environment:
+From the Flare repository, export fixtures with its isolated environment:
 
     PYTHONPATH=. CUDA_VISIBLE_DEVICES= .venv/bin/python scripts/compare_vision_serving_reference.py \
       fixtures /home/luke/.cache/huggingface/hub/models--local-inference-lab--Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD/snapshots/dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2 \
@@ -88,7 +88,7 @@ directory, and selected environment. Replay it in a fresh subprocess with
 that environment merged into the calling environment. It starts only the
 standalone vision harness, not vLLM serve.
 
-Run sparkgap mode using the same snapshot/output arguments, Sparkgap's
+Run flare mode using the same snapshot/output arguments, Flare's
 interpreter, PYTHONPATH=., CUDA_HOME=/opt/cuda and the assigned CUDA_VISIBLE_DEVICES
 UUID. Run compare mode on CPU to reproduce all three paired metrics.
 

@@ -29,7 +29,7 @@ Reproduce the CPU suite:
 
 ```bash
 cd /home/luke/projects/sparkgap
-env -u SPARKGAP_RUN_CUDA_TESTS CUDA_VISIBLE_DEVICES='' \
+env -u FLARE_RUN_CUDA_TESTS CUDA_VISIBLE_DEVICES='' \
   .venv/bin/python -m pytest -q tests/preparation tests/recipes
 ```
 

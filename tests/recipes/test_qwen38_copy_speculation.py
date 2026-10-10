@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, ERROR
-from sparkgap.recipes.qwen38.speculation import (
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission, RUNNING, ERROR
+from flare.recipes.qwen38.speculation import (
     INVALID_SPECULATION, PreparedCopyProposals, PreparedSpeculativeDistributions,
 )
 
@@ -116,7 +116,7 @@ def test_per_prefix_masks_use_physical_slot_and_include_bonus():
 
 
 def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(monkeypatch):
-    from sparkgap.recipes.qwen38 import speculative_model as module
+    from flare.recipes.qwen38 import speculative_model as module
 
     cuda_initialized = torch.cuda.is_initialized()
     batch, width, vocab = 2, 3, 64

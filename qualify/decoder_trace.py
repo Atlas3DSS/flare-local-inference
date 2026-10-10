@@ -46,18 +46,18 @@ def checkpoint_identity():
 def source_paths():
     paths = {Path(__file__), ROOT / 'qualify/provenance.py',
              ROOT / 'qualify/vllm_observation.py', ROOT / 'scripts/qualify_decoder.py'}
-    for directory in ('sparkgap/preparation', 'sparkgap/recipes', 'native/src'):
+    for directory in ('flare/preparation', 'flare/recipes', 'native/src'):
         paths.update(path for path in (ROOT / directory).rglob('*')
                      if path.suffix in ('.py', '.rs'))
     paths.update(ROOT / name for name in ('pyproject.toml', 'uv.lock',
         'native/Cargo.toml', 'native/Cargo.lock'))
-    for name in ('b12x', 'flashinfer', 'sparkgap_native'):
+    for name in ('b12x', 'flashinfer', 'flare_native'):
         spec = importlib.util.find_spec(name)
         if spec is None or spec.origin is None:
             raise RuntimeError(f'required preparation package is absent: {name}')
         package = Path(spec.origin).parent
         paths.update(package.rglob('*.py'))
-        if name == 'sparkgap_native':
+        if name == 'flare_native':
             paths.update(package.glob('*.so'))
     spec = importlib.util.find_spec('transformers')
     paths.update((Path(spec.origin).parent / 'models/qwen4_exp').glob('*.py'))

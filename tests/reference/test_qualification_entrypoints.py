@@ -63,7 +63,7 @@ before = list(sys.path)
 import qualify.server
 import qualify.graph_execution
 assert sys.path == before
-assert not any(name in sys.modules for name in ('torch', 'flashinfer', 'b12x', 'sparkgap_native'))
+assert not any(name in sys.modules for name in ('torch', 'flashinfer', 'b12x', 'flare_native'))
 assert qualify.server.Run.__module__ == 'qualify.server'
 assert qualify.graph_execution.Evidence.__module__ == 'qualify.graph_execution'
 """,
@@ -241,5 +241,5 @@ def test_http_request_bytes_and_receipt_preserve_utf8_and_sse(
         assert all(check["passed"] for check in run.receipt["checks"])
     saved = json.loads(args.output.read_text())
     assert saved == run.receipt
-    assert saved["schema"] == "sparkgap-http-qualification-v1"
+    assert saved["schema"] == "flare-http-qualification-v1"
     assert saved["requests"] == [record]

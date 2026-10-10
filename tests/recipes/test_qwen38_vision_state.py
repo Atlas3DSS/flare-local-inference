@@ -7,8 +7,8 @@ import os
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from sparkgap.recipes.qwen38.vision_state import (
+from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from flare.recipes.qwen38.vision_state import (
     PreparedEmbeddingInjection,
     PreparedVisionHandoff,
     VisionFeatureState,
@@ -16,7 +16,7 @@ from sparkgap.recipes.qwen38.vision_state import (
 )
 
 CUDA = pytest.mark.skipif(
-    os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1", reason="requires assigned GPU"
+    os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires assigned GPU"
 )
 
 
@@ -55,7 +55,7 @@ def _replay(worker, graph=0):
 @CUDA
 @torch.no_grad()
 def test_native_vision_handoff_append_epoch_validation_and_completion():
-    from sparkgap.preparation.graphs import PreparedGraphBundle
+    from flare.preparation.graphs import PreparedGraphBundle
 
     device = _device()
     features, inputs = (
@@ -164,8 +164,8 @@ def test_native_vision_handoff_append_epoch_validation_and_completion():
 @pytest.mark.parametrize("capacity", [512, 3072, 4096, 8192])
 @torch.no_grad()
 def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity):
-    from sparkgap.preparation.graphs import PreparedGraphBundle
-    from sparkgap.recipes.qwen38.sampling import PreparedTokenState
+    from flare.preparation.graphs import PreparedGraphBundle
+    from flare.recipes.qwen38.sampling import PreparedTokenState
 
     device = _device()
     features = VisionFeatureState.allocate(device)

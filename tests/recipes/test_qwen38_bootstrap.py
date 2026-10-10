@@ -10,8 +10,8 @@ import weakref
 
 import pytest
 
-from sparkgap.preparation.execution import GraphSignature
-from sparkgap.recipes.qwen38.bootstrap import PreparedModel
+from flare.preparation.execution import GraphSignature
+from flare.recipes.qwen38.bootstrap import PreparedModel
 
 
 class Resource:
@@ -42,7 +42,7 @@ def model_fixture(monkeypatch, *, synchronize=None, server=None):
     )
     monkeypatch.setattr(model, "manifest", lambda: {"test_manifest": True})
     monkeypatch.setattr("torch.cuda.synchronize", synchronize or (lambda device: events.append("synchronize")))
-    monkeypatch.setitem(sys.modules, "sparkgap_native", SimpleNamespace(Server=server))
+    monkeypatch.setitem(sys.modules, "flare_native", SimpleNamespace(Server=server))
     return model, events, weights_ref
 
 
@@ -272,8 +272,8 @@ def test_drained_owner_can_retry_incomplete_resource_cleanup(monkeypatch):
 
 @pytest.mark.parametrize("proposal", ["mtp", "copy"])
 def test_snapshot_budget_covers_the_selected_speculative_layout(proposal):
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig
-    from sparkgap.recipes.qwen38.state import HybridStateLayout
+    from flare.recipes.qwen38.bootstrap import PreparationConfig
+    from flare.recipes.qwen38.state import HybridStateLayout
 
     ordinary = HybridStateLayout.build().row_bytes
     speculative = HybridStateLayout.build(speculative_tokens=7).row_bytes

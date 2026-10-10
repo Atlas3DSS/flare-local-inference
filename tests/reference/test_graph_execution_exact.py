@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from qualify.graph_execution import Scenario
-from sparkgap.preparation.execution import GraphSignature
-from sparkgap.recipes.qwen38.decoder_state import DecoderInputs
-from sparkgap.recipes.qwen38.sampling import AdmissionBuffers
+from flare.preparation.execution import GraphSignature
+from flare.recipes.qwen38.decoder_state import DecoderInputs
+from flare.recipes.qwen38.sampling import AdmissionBuffers
 
 
 def make_scenario(tmp_path, cap=512):

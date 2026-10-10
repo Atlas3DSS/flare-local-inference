@@ -5,8 +5,8 @@ import pytest
 
 import torch
 
-from sparkgap.recipes.qwen38 import linear
-from sparkgap.preparation.scratch import ScratchArena
+from flare.recipes.qwen38 import linear
+from flare.preparation.scratch import ScratchArena
 
 
 @dataclass

@@ -143,7 +143,7 @@ def prepare(args):
     invalid = {**body, "max_tokens": OUTPUT_TOKENS + 1}
     write_json(args.artifacts / "invalid-request.json", invalid)
     names = ("prompt-token-ids.u32le", "prompt-token-ids.json", "rendered-prompt.txt", "valid-request.json", "invalid-request.json")
-    plan = {"schema": "sparkgap-context-limit-fixture-v1", "model": MODEL, "revision": REVISION,
+    plan = {"schema": "flare-context-limit-fixture-v1", "model": MODEL, "revision": REVISION,
         "context_tokens": CONTEXT, "prompt_tokens": len(ids), "max_new_tokens": OUTPUT_TOKENS,
         "invalid_prompt_plus_output": len(ids) + invalid["max_tokens"], "nonce": nonce,
         "expected_consumed_tokens": PROMPT_TOKENS + OUTPUT_TOKENS - 1,
@@ -234,8 +234,8 @@ def idle(run, label, timeout=60):
     index = 0
     while True:
         metrics = run.metrics(f"{label}-{index}", wait_idle=False)
-        if all(metrics[key] == 0 for key in ("sparkgap_active_requests", "sparkgap_retiring_request_slots",
-                "sparkgap_pending_requests", "sparkgap_http_inflight_requests")):
+        if all(metrics[key] == 0 for key in ("flare_active_requests", "flare_retiring_request_slots",
+                "flare_pending_requests", "flare_http_inflight_requests")):
             return metrics
         if time.monotonic() >= deadline:
             raise TimeoutError(f"{label}: model did not reach idle within {timeout}s")
@@ -248,18 +248,18 @@ def execute(args, tokenizer, plan, body):
         raise ValueError("output receipt already exists")
     if args.memory_report is None or args.server_pid is None:
         raise ValueError("execution requires the active memory report and server PID")
-    extensions = list((ROOT / ".venv").glob("lib/python*/site-packages/sparkgap_native/*.so"))
+    extensions = list((ROOT / ".venv").glob("lib/python*/site-packages/flare_native/*.so"))
     if len(extensions) != 1 or digest(extensions[0]) != args.expected_native_sha256:
         raise ValueError("installed native extension differs from the declared qualification build")
     extension = extensions[0]
     mappings = [line for line in Path(f"/proc/{args.server_pid}/maps").read_text().splitlines()
-        if "sparkgap_native" in line and ".so" in line]
+        if "flare_native" in line and ".so" in line]
     if not mappings or any(int(line.split()[4]) != extension.stat().st_ino for line in mappings):
         raise ValueError("running server native mapping differs from the installed extension")
     memory = json.loads(args.memory_report.read_text())
     if memory["cached_token_capacity"] != memory["pages"] * PAGE_TOKENS or memory["pages"] < plan["reserved_pages"]:
         raise ValueError("memory report cannot represent the full requested context")
-    sources = {str(path.relative_to(ROOT)): digest(path) for root in (ROOT / "native/src", ROOT / "sparkgap")
+    sources = {str(path.relative_to(ROOT)): digest(path) for root in (ROOT / "native/src", ROOT / "flare")
         for path in sorted(root.rglob("*")) if path.suffix in (".rs", ".py")}
     sources["scripts/qualify_context_limit.py"] = digest(Path(__file__))
     sources["qualify/server.py"] = digest(ROOT / "qualify/server.py")
@@ -272,7 +272,7 @@ def execute(args, tokenizer, plan, body):
         "fixture": plan, "fixture_path": str(args.artifacts / "case-plan.json"),
         "request_deadline_seconds": args.deadline_seconds, "metric_poll_seconds": args.poll_seconds}
     run = Run(args, provenance)
-    run.receipt["schema"] = "sparkgap-context-limit-qualification-v1"
+    run.receipt["schema"] = "flare-context-limit-qualification-v1"
     run.receipt["limitations"] = ["Memory, indexing and captured-graph execution at the declared context limit; no long-context quality or performance acceptance.",
         "Consumed length262143 derives from exact HTTP usage and the seven validated decode completions; no direct GPU state readback occurs.",
         "Prefill progress samples count submitted native graphs. A sampled submission may still be in flight.",
@@ -297,8 +297,8 @@ def execute(args, tokenizer, plan, body):
             response=invalid)
         rejected = idle(run, "after-rejection")
         reject_delta = metric_delta(before, rejected)
-        run.check("rejection_no_model_admission", reject_delta["sparkgap_requests_admitted_total"] == 0
-            and all(reject_delta[f'sparkgap_graph_launches_total{{kind="{kind}"}}'] == 0
+        run.check("rejection_no_model_admission", reject_delta["flare_requests_admitted_total"] == 0
+            and all(reject_delta[f'flare_graph_launches_total{{kind="{kind}"}}'] == 0
                 for kind in ("init", "restore", "resume", "prefill", "decode", "vision", "snapshot")), delta=reject_delta)
         if not all(check["passed"] for check in run.receipt["checks"]):
             raise ValueError("context prerequisites failed; exact input remains preserved")
@@ -317,7 +317,7 @@ def execute(args, tokenizer, plan, body):
                 break
             metrics = run.metrics(f"context-progress-{len(run.receipt['progress']):04d}", wait_idle=False)
             delta = metric_delta(before, metrics)
-            submitted = delta['sparkgap_graph_launches_total{kind="prefill"}']
+            submitted = delta['flare_graph_launches_total{kind="prefill"}']
             sample = {"elapsed_seconds": time.monotonic() - started, "metrics": metrics,
                 "prefill_graphs_submitted": submitted,
                 "completed_prefill_token_lower_bound": max(0, submitted - 1) * PREFILL_CAPACITY}
@@ -326,7 +326,7 @@ def execute(args, tokenizer, plan, body):
                 run.save()
             print(json.dumps({"event": "context_progress", "elapsed_seconds": round(sample["elapsed_seconds"], 2),
                 "prefill_graphs": submitted, "expected_prefill_graphs": plan["expected_prefill_launches"],
-                "active_requests": metrics["sparkgap_active_requests"]}), flush=True)
+                "active_requests": metrics["flare_active_requests"]}), flush=True)
             active.done.wait(min(args.poll_seconds, max(0, deadline - time.monotonic())))
         thread.join(timeout=1)
         result = active.record
@@ -344,21 +344,21 @@ def execute(args, tokenizer, plan, body):
         run.check("context_finishes_at_length", len(choices) == 1 and choices[0].get("finish_reason") == "length"
             and bool(content) and LITERAL.startswith(content) and content != LITERAL,
             content=content, choices=choices, grammar_minimum_tokens=plan["grammar"]["minimum_tokens"])
-        run.check("context_executes_all_prefill_and_decode", delta['sparkgap_graph_launches_total{kind="prefill"}'] == 512
-            and delta['sparkgap_graph_launches_total{kind="decode"}'] == 7
-            and delta['sparkgap_graph_launches_total{kind="init"}'] == 1
-            and delta['sparkgap_graph_launches_total{kind="snapshot"}'] == 1
-            and all(delta[f'sparkgap_graph_launches_total{{kind="{kind}"}}'] == 0 for kind in ("restore", "resume", "vision"))
-            and delta["sparkgap_cache_hits_total"] == delta["sparkgap_cache_reused_tokens_total"] == 0,
+        run.check("context_executes_all_prefill_and_decode", delta['flare_graph_launches_total{kind="prefill"}'] == 512
+            and delta['flare_graph_launches_total{kind="decode"}'] == 7
+            and delta['flare_graph_launches_total{kind="init"}'] == 1
+            and delta['flare_graph_launches_total{kind="snapshot"}'] == 1
+            and all(delta[f'flare_graph_launches_total{{kind="{kind}"}}'] == 0 for kind in ("restore", "resume", "vision"))
+            and delta["flare_cache_hits_total"] == delta["flare_cache_reused_tokens_total"] == 0,
             delta=delta, derived_consumed_tokens=262143, last_consumed_zero_based_position=262142,
             final_sample_pending=True, pending_sample_zero_based_position=262143)
-        run.check("context_no_request_errors", delta["sparkgap_requests_admitted_total"] == 1
-            and delta["sparkgap_requests_completed_total"] == 1
-            and delta["sparkgap_requests_failed_total"] == delta["sparkgap_requests_cancelled_total"] == 0, delta=delta)
+        run.check("context_no_request_errors", delta["flare_requests_admitted_total"] == 1
+            and delta["flare_requests_completed_total"] == 1
+            and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0, delta=delta)
         samples = run.receipt["progress"]
-        run.check("context_page_reservation_observed", any(sample["metrics"]["sparkgap_active_requests"] == 1
+        run.check("context_page_reservation_observed", any(sample["metrics"]["flare_active_requests"] == 1
             and resource_totals(sample["metrics"])["pages"] == totals["pages"] - plan["reserved_pages"]
-            and sample["metrics"]["sparkgap_free_request_slots"] == 3 for sample in samples),
+            and sample["metrics"]["flare_free_request_slots"] == 3 for sample in samples),
             pages_per_request=plan["reserved_pages"], samples=len(samples))
         run.check("context_prefill_progress_observed", len({sample["prefill_graphs_submitted"] for sample in samples}) > 1,
             observed_prefill_counts=[sample["prefill_graphs_submitted"] for sample in samples])

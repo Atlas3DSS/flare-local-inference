@@ -9,18 +9,18 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.graphs import PreparedGraphBundle
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
-from sparkgap.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader
-from sparkgap.reference.qwen38_quant import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.graphs import PreparedGraphBundle
+from flare.preparation.qwen38 import MODEL_ID, REVISION
+from flare.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
+from flare.recipes.qwen38.weights import QwenWeightLoader
+from flare.reference.qwen38_quant import (
     CheckpointTensors, decode_mxfp8, decode_nvfp4, quantize_mxfp8_activation,
     read_nvfp4_projection,
 )
 
-CUDA = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
-                         reason="requires explicit GPU assignment and SPARKGAP_RUN_CUDA_TESTS=1")
+CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                         reason="requires explicit GPU assignment and FLARE_RUN_CUDA_TESTS=1")
 
 
 def test_vision_buffer_geometry():
@@ -39,7 +39,7 @@ def test_vision_buffer_geometry():
 @pytest.fixture(scope="module")
 def manifest():
     path = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
-    path = Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", path))
+    path = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", path))
     if not path.exists():
         pytest.skip("exact checkpoint is unavailable")
     return inspect_qwen38_checkpoint(path)

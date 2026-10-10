@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from sparkgap.preparation import CheckpointError, inspect_qwen38_checkpoint
-from sparkgap.preparation import qwen38
-from sparkgap.preparation.__main__ import main
-from sparkgap.preparation.checkpoint import (
+from flare.preparation import CheckpointError, inspect_qwen38_checkpoint
+from flare.preparation import qwen38
+from flare.preparation.__main__ import main
+from flare.preparation.checkpoint import (
     _inspect_frontend_assets, _parse_json, _read_header, _validate_config, _validate_tensors,
 )
 
@@ -102,12 +102,12 @@ def test_duplicate_json_keys_rejected():
 @pytest.fixture(scope="module")
 def snapshot():
     default = Path.home() / ".cache/huggingface/hub" / ("models--" + qwen38.MODEL_ID.replace("/", "--")) / "snapshots" / qwen38.REVISION
-    configured = os.environ.get("SPARKGAP_QWEN38_SNAPSHOT")
+    configured = os.environ.get("FLARE_QWEN38_SNAPSHOT")
     path = Path(configured) if configured else default
     if not path.is_dir():
         if configured:
-            pytest.fail(f"SPARKGAP_QWEN38_SNAPSHOT does not exist: {path}")
-        pytest.skip("exact Qwen3.8 checkpoint is not cached; set SPARKGAP_QWEN38_SNAPSHOT")
+            pytest.fail(f"FLARE_QWEN38_SNAPSHOT does not exist: {path}")
+        pytest.skip("exact Qwen3.8 checkpoint is not cached; set FLARE_QWEN38_SNAPSHOT")
     return path
 
 

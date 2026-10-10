@@ -1,6 +1,6 @@
 """Compare exact-checkpoint vision modules across isolated Python environments.
 
-Run fixtures and sparkgap with Sparkgap's preparation environment. Run vllm
+Run fixtures and flare with Flare's preparation environment. Run vllm
 with the source-isolated serving environment recorded in
 docs/validation/exact-serving-reference.json. Only the vision tower is loaded;
 the vLLM encoder retains its own weight hooks, preparation policy and forward.
@@ -66,7 +66,7 @@ def tensor_hash(tensor):
 
 
 def fixtures(args):
-    from sparkgap.preparation import inspect_qwen38_checkpoint
+    from flare.preparation import inspect_qwen38_checkpoint
     from PIL import Image
 
     manifest = inspect_qwen38_checkpoint(args.snapshot)
@@ -129,11 +129,11 @@ def metrics(actual, expected):
 
 
 @torch.no_grad()
-def sparkgap(args):
+def flare(args):
     from b12x.preparation import PreparationSession
-    from sparkgap.preparation import inspect_qwen38_checkpoint
-    from sparkgap.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
-    from sparkgap.recipes.qwen38.weights import QwenWeightLoader
+    from flare.preparation import inspect_qwen38_checkpoint
+    from flare.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
+    from flare.recipes.qwen38.weights import QwenWeightLoader
     from transformers.vision_utils import get_vision_interpolation_indices_and_weights, get_vision_position_ids
 
     device = assigned_device()
@@ -164,15 +164,15 @@ def sparkgap(args):
             expected = canonical(pixels, grid.to(device)).pooler_output
             prepared(pixels)
             torch.testing.assert_close(actual, scratch.output, rtol=0, atol=0)
-            outputs.append({"variant": case["variant"], "sparkgap_flash": actual.cpu(), "canonical": expected.cpu()})
+            outputs.append({"variant": case["variant"], "flare_flash": actual.cpu(), "canonical": expected.cpu()})
             error = metrics(actual, expected)
             cases.append({"variant": case["variant"], "canonical_comparison": error,
                           "canonical_relative_l2_limit": .03,
                           "canonical_relative_l2_passed": error["relative_l2"] < .03})
         torch.cuda.synchronize()
-    torch.save(outputs, args.output / "sparkgap.pt")
-    save_json(args.output / "sparkgap.json", provenance(args, "Sparkgap PreparedVision flash; canonical eager adapter") |
-              {"cases": cases, "output_sha256": sha256(args.output / "sparkgap.pt")})
+    torch.save(outputs, args.output / "flare.pt")
+    save_json(args.output / "flare.json", provenance(args, "Flare PreparedVision flash; canonical eager adapter") |
+              {"cases": cases, "output_sha256": sha256(args.output / "flare.pt")})
 
 
 def source_identity(path, expected):
@@ -218,7 +218,7 @@ def vllm(args):
         gpu_memory_utilization=.94, load_format="instanttensor").create_engine_config()
     fixture_cases = torch.load(args.output / "fixtures.pt", weights_only=True)
     trace, outputs, input_comparisons = [], [], []
-    with set_current_vllm_config(config), tempfile.TemporaryDirectory(prefix="sparkgap-vision-dist-") as temporary, ExitStack() as cleanup:
+    with set_current_vllm_config(config), tempfile.TemporaryDirectory(prefix="flare-vision-dist-") as temporary, ExitStack() as cleanup:
         init_distributed_environment(world_size=1, rank=0, local_rank=0,
             distributed_init_method=f"file://{temporary}/rendezvous", backend="nccl")
         cleanup.callback(cleanup_dist_env_and_memory)
@@ -321,24 +321,24 @@ def vllm(args):
 
 
 def compare(args):
-    native = torch.load(args.output / "sparkgap.pt", weights_only=True)
+    native = torch.load(args.output / "flare.pt", weights_only=True)
     serving = torch.load(args.output / "vllm.pt", weights_only=True)
     cases = []
     for a, b in zip(native, serving, strict=True):
         assert a["variant"] == b["variant"]
-        cases.append({"variant": a["variant"], "sparkgap_flash_vs_vllm": metrics(a["sparkgap_flash"], b["vllm"]),
+        cases.append({"variant": a["variant"], "flare_flash_vs_vllm": metrics(a["flare_flash"], b["vllm"]),
                       "vllm_vs_canonical": metrics(b["vllm"], a["canonical"]),
-                      "sparkgap_flash_vs_canonical": metrics(a["sparkgap_flash"], a["canonical"])})
+                      "flare_flash_vs_canonical": metrics(a["flare_flash"], a["canonical"])})
     report = {"cases": cases, "canonical_relative_l2_limit": .03, "serving_reference_bound": None,
               "artifacts": {name: sha256(args.output / name) for name in
-                            ("fixtures.pt", "fixtures.json", "vllm.pt", "vllm.json", "sparkgap.pt", "sparkgap.json")}}
+                            ("fixtures.pt", "fixtures.json", "vllm.pt", "vllm.json", "flare.pt", "flare.json")}}
     save_json(args.output / "comparison.json", report)
     print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("fixtures", "vllm", "sparkgap", "compare"))
+    parser.add_argument("mode", choices=("fixtures", "vllm", "flare", "compare"))
     parser.add_argument("snapshot", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

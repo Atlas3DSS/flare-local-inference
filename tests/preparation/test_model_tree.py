@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
-from sparkgap.recipes.qwen38 import create_model_tree
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, REVISION
+from flare.recipes.qwen38 import create_model_tree
 
 
 def test_exact_checkpoint_constructs_canonical_meta_tree_without_cuda():

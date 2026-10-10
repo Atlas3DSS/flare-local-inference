@@ -1,6 +1,6 @@
 # Validation index
 
-Sparkgap targets `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`,
+Flare targets `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`,
 revision `dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2`. Hardware results in this
 index use NVIDIA SM120; they do not establish SM121 behavior.
 
@@ -14,7 +14,7 @@ source, workload, and measurement conditions.
 | Contract | Result and limitation | Reports |
 |---|---|---|
 | Text serving reference | All 48 layers are traced. Cross-stack normalization differences precede amplified logit differences; repeated vLLM runs also diverge because their MoE reductions are nondeterministic. | [Serving oracle](text-serving-oracle.md), [layer comparison](text-layer-comparison.md) |
-| Generation agreement | The fixed 82-prompt, 64-token corpus exists. Sparkgap and repeated-reference captures are pending. | [Corpus](greedy-agreement-corpus.json), [comparison tool](../../qualify/generation_agreement.py) |
+| Generation agreement | The fixed 82-prompt, 64-token corpus exists. Flare and repeated-reference captures are pending. | [Corpus](greedy-agreement-corpus.json), [comparison tool](../../qualify/generation_agreement.py) |
 | MTP operators | Common-input checks isolate projection arithmetic and normalization behavior; complete learned-MTP serving remains unqualified. | [Operator comparison](mtp-operators.md), [module comparison](mtp-module.md) |
 | Vision | Serving-path encoder differences remain open; image admission and preprocessing checks are separate. | [Serving comparison](vision-serving-reference.md), [encoder diagnostics](vision-eager-bf16.json) |
 | Prefix arithmetic | Exact transfer and restored/direct-split continuation pass. Splitting inside a 16-token BF16 GDN chunk changes arithmetic relative to uninterrupted prefill; partition-sensitive acceptance remains open. | [4,096-token catalog](prefix-replay-prefill4096.md), [GDN policy](gdn-recurrence-policy.md), [unconstrained failures](prefix-replay-autotuned.md) |

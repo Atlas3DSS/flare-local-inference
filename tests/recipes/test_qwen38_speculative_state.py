@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.recipes.qwen38.draft_state import DraftMetadata
-from sparkgap.recipes.qwen38.state import HybridStatePool
+from flare.recipes.qwen38.draft_state import DraftMetadata
+from flare.recipes.qwen38.state import HybridStatePool
 
 
 def test_draft_rows_pack_unequal_lengths_and_inactive_lanes():
@@ -43,16 +43,16 @@ def test_empty_draft_absorption_preserves_inactive_metadata():
     assert metadata.qsa.slot_mapping.tolist() == [-1]
 
 
-CUDA = pytest.mark.skipif(os.environ.get("SPARKGAP_RUN_CUDA_TESTS") != "1",
+CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                          reason="requires an explicitly assigned CUDA device")
 
 
 @CUDA
 @torch.no_grad()
 def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
-    from sparkgap.recipes.qwen38.decoder_state import DecoderInputs
-    from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from sparkgap.recipes.qwen38.speculative_state import PreparedVerificationState
+    from flare.recipes.qwen38.decoder_state import DecoderInputs
+    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from flare.recipes.qwen38.speculative_state import PreparedVerificationState
 
     device = torch.device("cuda", 0)
     pool = HybridStatePool.allocate(34, device, speculative_tokens=7)
@@ -112,8 +112,8 @@ def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
 @pytest.mark.parametrize("temperature", [0., 1.])
 @pytest.mark.parametrize("copy_epoch", [12, 13])
 def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature, copy_epoch):
-    from sparkgap.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from sparkgap.recipes.qwen38.speculative_model import PreparedSpeculativeRound
+    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from flare.recipes.qwen38.speculative_model import PreparedSpeculativeRound
 
     batch, width = 2, 4
     requests = DeviceRequestState.allocate("cpu", vocab_size=128)

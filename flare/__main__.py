@@ -10,7 +10,7 @@ import sys
 
 
 def main(argv=None):
-    from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
+    from flare.preparation.qwen38 import MODEL_ID, REVISION
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, default=Path.home() / ".cache/huggingface/hub" /
@@ -41,7 +41,7 @@ def main(argv=None):
         defaults = json.loads(args.template_defaults.read_text())
         if not isinstance(defaults, dict):
             parser.error("template defaults must be a JSON object")
-    from sparkgap.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
 
     config = PreparationConfig(device=args.device, context=args.context, pages=args.pages,
         prefill_chunk_size=args.prefill_chunk_size,

@@ -94,7 +94,7 @@ def test_stage_comparison_only_selects_declared_request_tail_and_records_missing
     assert measured['stages']['feedback']['selected_actual_rows'] is None
     assert measured['stages']['mlp_mix']['selected_actual_rows'] == [1]
     assert measured['stages']['mlp_mix']['fp32_value_bits_equal']
-    assert measured['stage_coverage'] == {'missing_in_sparkgap': ['only_reference'], 'missing_in_vllm': ['only_actual']}
+    assert measured['stage_coverage'] == {'missing_in_flare': ['only_reference'], 'missing_in_vllm': ['only_actual']}
 
 
 def test_functional_linear_observer_preserves_values_and_restores_function():

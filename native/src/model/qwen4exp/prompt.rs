@@ -52,7 +52,7 @@ pub(super) fn prepare_input(
             if *kind == 1 && (position == 0 || expanded.mm_token_type_ids[position - 1] != 1) {
                 let source = &images[image];
                 let mut hash = Sha256::new();
-                hash.update(b"sparkgap-rgb-image-v1\0");
+                hash.update(b"flare-rgb-image-v1\0");
                 hash.update((source.width() as u64).to_le_bytes());
                 hash.update((source.height() as u64).to_le_bytes());
                 hash.update(source.pixels());

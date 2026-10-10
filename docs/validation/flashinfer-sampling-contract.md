@@ -193,7 +193,7 @@ sampler variants with RNG tensors, changes seed and offset, and compares replay
 with scalar calls. `tests/utils/test_sampling.py:950`, `:983`, and `:1144`
 exercise deterministic renormalization and mixed enabled/disabled top-k.
 
-Sparkgap's
+Flare's
 [focused native replay tests](../../tests/recipes/test_qwen38_sampling_flashinfer.py)
 cover full-vocabulary threshold ties, device parameter changes, capacity and
 slot invariance, invalid/grammar-masked distributions, duplicate and stale

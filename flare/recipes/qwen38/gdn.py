@@ -10,9 +10,9 @@ from b12x.gemm.blockscaled import Weight
 from b12x.preparation import PreparationSession, PreparedCall
 from b12x.sequence import gdn_decode, gdn_prefill, short_conv
 
-from sparkgap.preparation.fixtures import gdn as gdn_fixtures
-from sparkgap.preparation.scratch import planned_scratch, prime_owners
-from sparkgap.preparation.tuning import register_finalizer
+from flare.preparation.fixtures import gdn as gdn_fixtures
+from flare.preparation.scratch import planned_scratch, prime_owners
+from flare.preparation.tuning import register_finalizer
 
 from .linear import QuantizedProjection
 

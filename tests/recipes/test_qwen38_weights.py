@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
-from sparkgap.recipes.qwen38.weights import (
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.recipes.qwen38.weights import (
     QwenWeightLoader,
     _expert_ids,
     _expert_scale_vectors,
@@ -16,13 +16,13 @@ from sparkgap.recipes.qwen38.weights import (
     allocate_expert_scale_scratch,
     expert_memory_plan,
 )
-from sparkgap.reference.qwen38_quant import CheckpointTensors, decode_csf_scales
+from flare.reference.qwen38_quant import CheckpointTensors, decode_csf_scales
 
 
 @pytest.fixture(scope="module")
 def manifest():
     default = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
-    snapshot = Path(os.environ.get("SPARKGAP_QWEN38_SNAPSHOT", default))
+    snapshot = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default))
     if not snapshot.exists():
         pytest.skip("exact Qwen checkpoint snapshot is unavailable")
     return inspect_qwen38_checkpoint(snapshot)

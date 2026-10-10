@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparkgap.preparation.fixtures import varlen_attention as attention_fixtures
-from sparkgap.recipes.qwen38 import attention, ple, vision
-from sparkgap.preparation.scratch import ScratchArena
+from flare.preparation.fixtures import varlen_attention as attention_fixtures
+from flare.recipes.qwen38 import attention, ple, vision
+from flare.preparation.scratch import ScratchArena
 
 
 class Plan:
@@ -327,8 +327,8 @@ def test_ple_singleton_binding_refreshes_without_reinvoking_prepare_factory(
 def test_plain_preparation_session_keeps_workspace_without_finalizer_protocol():
     from b12x.preparation import PreparationSession
 
-    from sparkgap.preparation.tuning import register_finalizer
-    from sparkgap.preparation.scratch import scratch_storage
+    from flare.preparation.tuning import register_finalizer
+    from flare.preparation.scratch import scratch_storage
 
     ordinary = object.__new__(PreparationSession)
     workspace = torch.empty(8, dtype=torch.uint8)

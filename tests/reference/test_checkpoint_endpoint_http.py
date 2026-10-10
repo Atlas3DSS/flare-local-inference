@@ -86,27 +86,27 @@ def test_observations_require_native_full_ids_and_exact_usage(field):
 
 
 def duplicate_counters():
-    return {"sparkgap_requests_admitted_total": 1, "sparkgap_requests_completed_total": 1,
-        "sparkgap_requests_failed_total": 0, "sparkgap_requests_cancelled_total": 0,
-        "sparkgap_cache_hits_total": 1, "sparkgap_cache_misses_total": 0,
-        "sparkgap_cache_reused_tokens_total": 194,
-        'sparkgap_graph_launches_total{kind="restore"}': 1,
-        'sparkgap_graph_launches_total{kind="init"}': 0,
-        'sparkgap_graph_launches_total{kind="prefill"}': 0,
-        'sparkgap_graph_launches_total{kind="resume"}': 1,
-        'sparkgap_graph_launches_total{kind="snapshot"}': 1,
-        "sparkgap_snapshot_publications_total": 0, "sparkgap_prompt_checkpoints_total": 0,
-        "sparkgap_system_checkpoints_total": 0, "sparkgap_snapshot_evictions_total": 0}
+    return {"flare_requests_admitted_total": 1, "flare_requests_completed_total": 1,
+        "flare_requests_failed_total": 0, "flare_requests_cancelled_total": 0,
+        "flare_cache_hits_total": 1, "flare_cache_misses_total": 0,
+        "flare_cache_reused_tokens_total": 194,
+        'flare_graph_launches_total{kind="restore"}': 1,
+        'flare_graph_launches_total{kind="init"}': 0,
+        'flare_graph_launches_total{kind="prefill"}': 0,
+        'flare_graph_launches_total{kind="resume"}': 1,
+        'flare_graph_launches_total{kind="snapshot"}': 1,
+        "flare_snapshot_publications_total": 0, "flare_prompt_checkpoints_total": 0,
+        "flare_system_checkpoints_total": 0, "flare_snapshot_evictions_total": 0}
 
 
 @pytest.mark.parametrize("key,value,failed", [
-    ('sparkgap_graph_launches_total{kind="snapshot"}', 0, "exact_publication"),
-    ("sparkgap_snapshot_publications_total", 1, "exact_publication"),
-    ("sparkgap_cache_reused_tokens_total", 192, "exact_admission"),
-    ('sparkgap_graph_launches_total{kind="prefill"}', 1, "exact_prompt_execution"),
-    ("sparkgap_requests_admitted_total", 2, "one_completed_request"),
-    ("sparkgap_requests_cancelled_total", 1, "one_completed_request"),
-    ("sparkgap_snapshot_evictions_total", 1, "no_eviction"),
+    ('flare_graph_launches_total{kind="snapshot"}', 0, "exact_publication"),
+    ("flare_snapshot_publications_total", 1, "exact_publication"),
+    ("flare_cache_reused_tokens_total", 192, "exact_admission"),
+    ('flare_graph_launches_total{kind="prefill"}', 1, "exact_prompt_execution"),
+    ("flare_requests_admitted_total", 2, "one_completed_request"),
+    ("flare_requests_cancelled_total", 1, "one_completed_request"),
+    ("flare_snapshot_evictions_total", 1, "no_eviction"),
 ])
 def test_duplicate_proof_requires_executed_snapshot_without_publication_or_pressure(key, value, failed):
     delta = duplicate_counters()

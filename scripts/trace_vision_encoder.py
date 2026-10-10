@@ -26,11 +26,11 @@ from transformers.vision_utils import (
     get_vision_interpolation_indices_and_weights, get_vision_position_ids,
 )
 
-from sparkgap.preparation import inspect_qwen38_checkpoint
-from sparkgap.preparation.qwen38 import MODEL_ID, REVISION
-from sparkgap.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
-from sparkgap.recipes.qwen38.weights import QwenWeightLoader
-from sparkgap.reference.qwen38_quant import quantize_mxfp8_activation
+from flare.preparation import inspect_qwen38_checkpoint
+from flare.preparation.qwen38 import MODEL_ID, REVISION
+from flare.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
+from flare.recipes.qwen38.weights import QwenWeightLoader
+from flare.reference.qwen38_quant import quantize_mxfp8_activation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,8 +66,8 @@ def provenance(manifest):
     source_root = Path(b12x.__file__).parent
     files = [ROOT / name for name in (
         "scripts/trace_vision_encoder.py", "tests/recipes/test_qwen38_vision.py",
-        "sparkgap/recipes/qwen38/vision.py", "sparkgap/recipes/qwen38/linear.py",
-        "sparkgap/recipes/qwen38/weights.py", "sparkgap/reference/qwen38_quant.py",
+        "flare/recipes/qwen38/vision.py", "flare/recipes/qwen38/linear.py",
+        "flare/recipes/qwen38/weights.py", "flare/reference/qwen38_quant.py",
     )]
     files += list(source_root.rglob("*.py")) + [Path(canonical.__file__)]
     return {

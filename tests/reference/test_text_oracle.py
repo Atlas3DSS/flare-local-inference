@@ -28,7 +28,7 @@ def trace(value=None):
 
 
 def compare(actual, reference):
-    return compare_traces(sparkgap=actual, vllm=reference, canonical=reference)
+    return compare_traces(flare=actual, vllm=reference, canonical=reference)
 
 
 @pytest.fixture(autouse=True)
@@ -43,12 +43,12 @@ def test_all_three_pairs_use_named_reference_norm_and_preserve_storage():
     actual = trace(artifact(logits=[row * 2 for row in reference.logits]))
     serving = trace(artifact(logits=[row * 3 for row in reference.logits]))
     originals = [row.clone() for row in actual.logits]
-    report = compare_traces(sparkgap=actual, vllm=serving, canonical=reference)
+    report = compare_traces(flare=actual, vllm=serving, canonical=reference)
     assert set(report["pairs"]) == {
-        "sparkgap_vs_vllm", "sparkgap_vs_canonical", "vllm_vs_canonical",
+        "flare_vs_vllm", "flare_vs_canonical", "vllm_vs_canonical",
     }
-    for pair, expected in (("sparkgap_vs_vllm", 1 / 3),
-                           ("sparkgap_vs_canonical", 1), ("vllm_vs_canonical", 2)):
+    for pair, expected in (("flare_vs_vllm", 1 / 3),
+                           ("flare_vs_canonical", 1), ("vllm_vs_canonical", 2)):
         for row in report["pairs"][pair]["steps"]:
             assert row["relative_l2"] == pytest.approx(expected)
             assert row["top10_overlap_count"] == 10
@@ -65,7 +65,7 @@ def test_kl_direction_matches_independent_probability_formula():
     actual = [0.4 * i for i in range(VOCAB)]
     reference = [0.2 * (i % 5) for i in range(VOCAB)]
     a, r = (trace(artifact(logits=[torch.tensor(x)], teachers=[])) for x in (actual, reference))
-    row = compare(a, r)["pairs"]["sparkgap_vs_canonical"]["steps"][0]
+    row = compare(a, r)["pairs"]["flare_vs_canonical"]["steps"][0]
     def probabilities(values):
         exp = [math.exp(v) for v in values]
         return [v / sum(exp) for v in exp]
@@ -82,7 +82,7 @@ def test_extreme_logits_use_stable_log_softmax_and_keep_large_kl():
     actual = reference.clone()
     reference[0], actual[1] = 1000.0, 1000.0
     row = compare(trace(artifact(logits=[actual], teachers=[])),
-                  trace(artifact(logits=[reference], teachers=[])))["pairs"]["sparkgap_vs_canonical"]["steps"][0]
+                  trace(artifact(logits=[reference], teachers=[])))["pairs"]["flare_vs_canonical"]["steps"][0]
     assert row["kl_reference_to_actual"] == 2000
     assert row["reference"]["argmax"] == 0
     assert row["actual"]["argmax"] == 1
@@ -92,7 +92,7 @@ def test_extreme_logits_use_stable_log_softmax_and_keep_large_kl():
 def test_same_argmax_does_not_hide_logit_change_or_additive_offset():
     reference = trace()
     actual = trace(artifact(logits=[row + 20 for row in reference.logits]))
-    rows = compare(actual, reference)["pairs"]["sparkgap_vs_canonical"]["steps"]
+    rows = compare(actual, reference)["pairs"]["flare_vs_canonical"]["steps"]
     for row in rows:
         assert row["argmax_equal"]
         assert row["relative_l2"] > 1
@@ -102,7 +102,7 @@ def test_same_argmax_does_not_hide_logit_change_or_additive_offset():
 def test_top10_overlap_count_and_fraction():
     reference = trace(artifact(logits=[torch.arange(VOCAB).float()], teachers=[]))
     actual = trace(artifact(logits=[torch.arange(VOCAB).flip(0).float()], teachers=[]))
-    row = compare(actual, reference)["pairs"]["sparkgap_vs_canonical"]["steps"][0]
+    row = compare(actual, reference)["pairs"]["flare_vs_canonical"]["steps"][0]
     assert row["top10_overlap_count"] == 4
     assert row["top10_overlap_fraction"] == 0.4
 
@@ -110,7 +110,7 @@ def test_top10_overlap_count_and_fraction():
 def test_legal_zero_logits_report_undefined_relative_l2_without_infinity():
     zero = trace(artifact(logits=[torch.zeros(VOCAB)], teachers=[]))
     actual = trace(artifact(logits=[torch.ones(VOCAB)], teachers=[]))
-    row = compare(actual, zero)["pairs"]["sparkgap_vs_canonical"]["steps"][0]
+    row = compare(actual, zero)["pairs"]["flare_vs_canonical"]["steps"][0]
     assert row["relative_l2"] is None
     assert row["reference_l2_norm"] == 0
     assert row["kl_reference_to_actual"] == 0
@@ -122,10 +122,10 @@ def test_storage_dtypes_may_differ_and_are_recorded():
     canonical = trace()
     native = trace(artifact(logits=[x.bfloat16() for x in canonical.logits]))
     vllm = trace(artifact(logits=torch.stack(canonical.logits)))
-    report = compare_traces(sparkgap=native, vllm=vllm, canonical=canonical)
-    assert report["sources"]["sparkgap"]["logit_dtypes"] == ["torch.bfloat16"] * 2
+    report = compare_traces(flare=native, vllm=vllm, canonical=canonical)
+    assert report["sources"]["flare"]["logit_dtypes"] == ["torch.bfloat16"] * 2
     assert report["sources"]["vllm"]["logit_dtypes"] == ["torch.float32"] * 2
-    assert report["pairs"]["sparkgap_vs_vllm"]["steps"][0]["relative_l2"] == 0
+    assert report["pairs"]["flare_vs_vllm"]["steps"][0]["relative_l2"] == 0
 
 
 def test_historical_formats_load_consumed_contexts_and_hashes(tmp_path):
@@ -145,7 +145,7 @@ def test_historical_formats_load_consumed_contexts_and_hashes(tmp_path):
         assert all(row.device.type == "cpu" for row in loaded.logits)
         traces.append(loaded)
     result = compare(traces[1], traces[0])
-    assert result["sources"]["sparkgap"]["model_id"] is None
+    assert result["sources"]["flare"]["model_id"] is None
     assert result["sources"]["canonical"]["model_id"] == "checkpoint"
 
 
