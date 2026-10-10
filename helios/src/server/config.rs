@@ -168,14 +168,16 @@ impl Bootstrap {
                 })
                 .transpose()?
                 .unwrap_or_default(),
-            max_new_tokens: u32::try_from(integer("max_new_tokens", Some(256))?).map_err(
-                |error| {
-                    crate::ExecutionError::Manifest(crate::Failure::caused_by(
-                        "default output limit overflow",
-                        error,
-                    ))
-                },
-            )?,
+            max_new_tokens: u32::try_from(integer(
+                "max_new_tokens",
+                Some(integer("max_sequence_tokens", None)?),
+            )?)
+            .map_err(|error| {
+                crate::ExecutionError::Manifest(crate::Failure::caused_by(
+                    "default output limit overflow",
+                    error,
+                ))
+            })?,
         };
         crate::model::catalog::validate::<M>(&model, manifest)?;
         let assets = object

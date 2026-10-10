@@ -260,30 +260,12 @@ fn prepare_inner<M: ModelContract>(
     {
         return Err("structured output cannot continue an existing assistant message".into());
     }
-    let max_new_tokens = u32::try_from(if object.contains_key("max_completion_tokens") {
-        integer(
-            object,
-            "max_completion_tokens",
-            config.max_new_tokens as u64,
-        )?
-    } else {
-        integer(object, "max_tokens", config.max_new_tokens as u64)?
-    })
-    .map_err(|error| {
-        Error::Admission(AdmissionError::Invalid(Failure::caused_by(
-            "output limit exceeds uint32",
-            error,
-        )))
-    })?;
-    if max_new_tokens == 0
-        || max_new_tokens > i32::MAX as u32
-        || tokens
-            .len()
-            .checked_add(max_new_tokens as usize)
-            .is_none_or(|count| count > config.limits.max_sequence_tokens)
-    {
-        return Err("prompt plus output limit exceeds prepared context capacity".into());
-    }
+    let max_new_tokens = output_limit(
+        object,
+        config.max_new_tokens,
+        tokens.len(),
+        config.limits.max_sequence_tokens,
+    )?;
     Ok(PreparedRequest {
         prompt: Prompt {
             tokens,
@@ -302,6 +284,40 @@ fn prepare_inner<M: ModelContract>(
         rendered_prompt: rendered.text,
         observation,
     })
+}
+
+fn output_limit(
+    object: &Map<String, Value>,
+    configured: u32,
+    prompt: usize,
+    context: usize,
+) -> Result<u32> {
+    let remaining = context.saturating_sub(prompt);
+    let requested = object
+        .get("max_completion_tokens")
+        .filter(|v| !v.is_null())
+        .or_else(|| object.get("max_tokens").filter(|v| !v.is_null()));
+    let limit = match requested {
+        Some(value) => value
+            .as_u64()
+            .ok_or("output limit must be a nonnegative integer")?,
+        None => (configured as usize).min(remaining) as u64,
+    };
+    let max_new_tokens = u32::try_from(limit).map_err(|error| {
+        Error::Admission(AdmissionError::Invalid(Failure::caused_by(
+            "output limit exceeds uint32",
+            error,
+        )))
+    })?;
+    if max_new_tokens == 0
+        || max_new_tokens > i32::MAX as u32
+        || prompt
+            .checked_add(max_new_tokens as usize)
+            .is_none_or(|count| count > context)
+    {
+        return Err("prompt plus output limit exceeds prepared context capacity".into());
+    }
+    Ok(max_new_tokens)
 }
 
 fn string_stops(value: Option<&Value>) -> Result<Vec<String>> {
@@ -467,6 +483,51 @@ fn number(object: &Map<String, Value>, name: &str, default: f32) -> Result<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn omitted_output_limit_uses_remaining_context_and_explicit_limits_win() {
+        let limit = |value: Value, configured, prompt| {
+            output_limit(value.as_object().unwrap(), configured, prompt, 262144)
+        };
+        assert_eq!(limit(serde_json::json!({}), 262144, 144).unwrap(), 262000);
+        assert_eq!(
+            limit(serde_json::json!({"max_tokens":null}), 262144, 144).unwrap(),
+            262000
+        );
+        assert_eq!(limit(serde_json::json!({}), 1024, 144).unwrap(), 1024);
+        assert_eq!(limit(serde_json::json!({}), 1024, 262140).unwrap(), 4);
+        assert_eq!(
+            limit(serde_json::json!({"max_tokens":4096}), 1024, 144).unwrap(),
+            4096
+        );
+        assert_eq!(
+            limit(
+                serde_json::json!({"max_tokens":32,"max_completion_tokens":64}),
+                262144,
+                144
+            )
+            .unwrap(),
+            64
+        );
+        assert_eq!(
+            limit(
+                serde_json::json!({"max_tokens":32,"max_completion_tokens":null}),
+                262144,
+                144
+            )
+            .unwrap(),
+            32
+        );
+        for body in [
+            serde_json::json!({"max_tokens":0}),
+            serde_json::json!({"max_tokens":-1}),
+            serde_json::json!({"max_tokens":262144}),
+            serde_json::json!({"max_tokens":"32"}),
+        ] {
+            assert!(limit(body, 262144, 144).is_err());
+        }
+        assert!(limit(serde_json::json!({}), 262144, 262144).is_err());
+        assert!(limit(serde_json::json!({}), 262144, 262145).is_err());
+    }
     #[test]
     fn standard_string_stop_values_are_validated_without_coercion() {
         assert!(string_stops(None).unwrap().is_empty());

@@ -118,6 +118,20 @@ fn tool(name: &str) -> Value {
 
 #[test]
 #[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+fn omitted_output_limit_fills_context_after_chat_tokenization() {
+    let mut fixture = Fixture::load(Map::new());
+    fixture.config.max_new_tokens = fixture.config.limits.max_sequence_tokens as u32;
+    let prepared = fixture.prepare(
+        json!([{"role":"user","content":"Write a long explanation."}]),
+        json!({"enable_thinking":false,"add_generation_prompt":true}),
+    );
+    assert_eq!(prepared.prompt.tokens.len() + prepared.prompt.max_new_tokens as usize,
+        fixture.config.limits.max_sequence_tokens);
+    assert!(prepared.prompt.max_new_tokens > 256);
+}
+
+#[test]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn exact_short_instruction_boundary_survives_changed_user_content() {
     let fixture = Fixture::load(Map::new());
     let options = json!({"enable_thinking":false,"add_generation_prompt":true});
