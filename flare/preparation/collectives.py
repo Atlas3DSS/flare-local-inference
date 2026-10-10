@@ -5,6 +5,23 @@ from datetime import timedelta
 import torch.distributed as dist
 
 
+def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size):
+    """Allocate one b12x IPC channel for the largest BF16 hidden activation.
+
+    Every rank supplies identical capacities before preparing graph variants.
+    The bootstrap retains the runtime until every native rank worker drains.
+    """
+    from b12x.comm.pcie import AllReduce
+
+    if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size)):
+        raise ValueError("all-reduce capacities must be positive integers")
+    nbytes = max_tokens * hidden_size * 2
+    if nbytes % 16:
+        raise ValueError("BF16 all-reduce capacity must occupy complete 16-byte packs")
+    return AllReduce.from_exchange_group(exchange_group=group, device=device, single_channel=True,
+                                         max_size=nbytes, eager_buffer_bytes=nbytes)
+
+
 class CollectivePreparation:
     """Authorize matching collective declarations and synchronize kernel entry.
 

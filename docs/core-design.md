@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `e844e35841562a13781fa182dc46ffa5d4e9bd9c`, including the CuTe DSL operators
+  `497bd28df3abef79c4d1ab77afacfe1db5dcaf72`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -226,11 +226,22 @@ b12x convolution and recurrence, and head-sharded FP32 recurrent state. Shared
 device metadata, checkpoint export, and prepared bindings for Qwen GDN and GLM
 KDA. Compiled KDA prefill graphs support chunks through 4096 tokens. KDA decode,
 prefill, and MLP graphs include b12x output reductions and support native replay
-on TP2 and TP4. Sparse MLA, mHC integration, complete decoder-layer replacement,
-and GLM serving are not implemented.
+on TP2 and TP4. The shared [prepared mHC component](../flare/components/mhc.py)
+uses FP32 mixing coefficients, BF16 residual streams, fused weighted RMSNorm,
+and caller-owned scratch. The [dense GLM layer](../flare/recipes/glm53/decoder.py)
+composes mHC, head-sharded KDA, an attention all-reduce, fused post/pre mixing,
+the sharded dense MLP, a second all-reduce, and residual expansion in one
+compiled graph. Dense-layer graph variants support decode and prefill through
+4096 tokens. Each rank hands its graph to its native replay worker.
+Sparse MLA, routed-MoE layer composition, the complete decoder stack, and GLM
+serving are not implemented.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
+A bootstrap-owned IPC runtime reserves the largest configured BF16 hidden
+activation: `max_tokens × hidden_size × 2` bytes. A 4096-token GLM prefill needs
+32 MiB per collective input. The runtime and its IPC buffers persist across
+serialized graph variants.
 A [Gloo bootstrap coordinator](../flare/preparation/collectives.py) matches
 collective declarations and barriers before kernel preparation. Completed ranks
 continue exchanging readiness until all peers finish local preparation. Kernel
