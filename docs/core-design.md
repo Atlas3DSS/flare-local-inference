@@ -448,7 +448,10 @@ Completed cache entries can avoid a search; incompatible identities cannot reuse
 the same entry. Compiled kernel objects persist across restarts independently.
 
 The search preserves activation precision and arithmetic constraints. BF16
-projections pin their SIMT or MMA backend and `rows_per_tile=8`. Quantized MXFP8
+projections search every eligible b12x backend and `rows_per_tile` configuration
+using private activation and output buffers with the serving tensor strides.
+Hyperconnection down and residual-injection weights share one packed projection;
+the canonical Transformers parameters remain views of that storage. Quantized MXFP8
 wrappers retain default inner dense-GEMM lowerings; their existing benchmark
 callbacks do not expose an inner search. Vision NVFP4 projections remain A16;
 routed MoE remains activation-quantized. QSA fixes `attention_splits=16`, and GDN

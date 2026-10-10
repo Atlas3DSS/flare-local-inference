@@ -32,12 +32,14 @@ def qualify(snapshot: Path) -> list[dict]:
             child.weight = torch.nn.Parameter(loader.load_tensor(f"{prefix}.{name}.weight"), requires_grad=False)
     generator = torch.Generator().manual_seed(1607)
     reports = []
-    with torch.inference_mode(), PreparationSession(device=device, autotune=False, compile_workers=0) as session:
-        for tokens in (1, 4, 16, 64):
+    with torch.inference_mode(), PreparationSession(device=device, autotune=True, compile_workers=0) as session:
+        for tokens in (1, 4, 8, 16, 64, 4096):
             scratch = HyperconnectionScratch.allocate(tokens, device)
             source = torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
             prepared = PreparedHyperconnection(module, scratch, priming_state=source,
                 session=session, name=f"hyperconnection_{tokens}")
+            for projection in (prepared.down, prepared.up):
+                assert projection.plan.selection.source in ("tuned", "cached")
             block = torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device)
             mixed = torch.empty_like(block)
             combined = torch.empty_like(source)
@@ -74,6 +76,8 @@ def qualify(snapshot: Path) -> list[dict]:
                         torch.testing.assert_close(actual, expected, rtol=.02, atol=.02)
                         difference = (actual.float() - expected.float())
                         reports.append({"tokens": tokens, "iteration": iteration, "operation": name,
+                            "down_backend": prepared.down.plan.selection.config.backend,
+                            "up_backend": prepared.up.plan.selection.config.backend,
                             "max_absolute_error": difference.abs().max().item(),
                             "relative_l2_error": (difference.norm() / expected.float().norm().clamp_min(1e-12)).item()})
             finally:

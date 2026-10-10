@@ -13,6 +13,7 @@ from flare.preparation.checkpoint import CheckpointError, CheckpointManifest
 from flare.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
 
 from .moe import QwenMoeWeights, SharedExpertWeights
+from .hyperconnection import packed_down_projection
 from .weights import QwenWeightLoader, _expert_ids
 
 
@@ -158,6 +159,8 @@ class MTPWeights:
                 value = loader.load_tensor(f"mtp.{name}")
                 parent, _, attribute = name.rpartition(".")
                 setattr(module.get_submodule(parent), attribute, torch.nn.Parameter(value, requires_grad=False))
+            for mixer in (module.layers[0].attn_hyper_connection, module.layers[0].mlp_hyper_connection):
+                packed_down_projection(mixer)
             shared = loader.load_shared()
             moe = QwenMoeWeights(loader.load_tensor("mtp.layers.0.mlp.gate.weight"),
                                 loader.load_experts(), shared)

@@ -12,6 +12,7 @@ from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
 
 from .model import create_model_tree
+from .hyperconnection import packed_down_projection
 from .moe import QwenMoeWeights
 from .vision import VisionWeights
 from .weights import QwenWeightLoader, allocate_expert_scale_scratch
@@ -71,6 +72,7 @@ class ModelWeights:
                     names += ("block_inject_weight",)
                 for name in names:
                     parameter(f"{prefix}.{name}.weight")
+                packed_down_projection(tree.get_submodule(prefix))
 
             parameter(f"{TEXT_PREFIX}.embed_tokens.weight")
             parameter("lm_head.weight")

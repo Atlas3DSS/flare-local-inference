@@ -15,6 +15,24 @@ from flare.preparation.fixtures import hyperconnection as hc_fixtures
 from .linear import BF16Projection
 
 
+def packed_down_projection(module: torch.nn.Module) -> torch.Tensor:
+    if module.block_inject_weight is None:
+        return module.input_mix_weight_down.weight
+    packed = getattr(module, "packed_down_injection", None)
+    if packed is None:
+        down = module.input_mix_weight_down.weight
+        injection = module.block_inject_weight.weight
+        rows = down.shape[0] + injection.shape[0]
+        packed = down.new_zeros(((rows + 15) // 16 * 16, down.shape[1]))
+        with torch.no_grad():
+            packed[:down.shape[0]].copy_(down)
+            packed[down.shape[0]:rows].copy_(injection)
+        module.input_mix_weight_down.weight = torch.nn.Parameter(packed[:down.shape[0]], requires_grad=False)
+        module.block_inject_weight.weight = torch.nn.Parameter(packed[down.shape[0]:rows], requires_grad=False)
+        module.register_buffer("packed_down_injection", packed, persistent=False)
+    return packed
+
+
 @dataclass(frozen=True)
 class HyperconnectionScratch:
     normalized: torch.Tensor
@@ -23,13 +41,17 @@ class HyperconnectionScratch:
     gate_logits: torch.Tensor
     injection_logits: torch.Tensor
     block_input: torch.Tensor
+    down_and_injection: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens: int, device: torch.device) -> HyperconnectionScratch:
         if tokens <= 0:
             raise ValueError("hyperconnection token capacity must be positive")
-        return cls(*(torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
-                     for width in (10240, 320, 320, 10240, 4, 2560)))
+        normalized, projected, bottleneck, gate_logits, block_input = (
+            torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
+            for width in (10240, 336, 320, 10240, 2560))
+        return cls(normalized, projected[:, :320], bottleneck, gate_logits,
+                   projected[:, 320:324], block_input, projected)
 
     def rows(self, tokens: int) -> HyperconnectionScratch:
         if not 0 < tokens <= self.normalized.shape[0]:
@@ -114,23 +136,20 @@ class PreparedHyperconnection:
             finalize()
             register_finalizer(session, finalize)
 
-        self.down = BF16Projection(scratch.normalized, module.input_mix_weight_down.weight,
-            scratch.projected_down, session=session, name=f"{name}.down")
+        self.injection = None if module.block_inject_weight is None else scratch.injection_logits
+        down_output = scratch.projected_down if self.injection is None else scratch.down_and_injection
+        self.down = BF16Projection(scratch.normalized, packed_down_projection(module),
+            down_output, session=session, name=f"{name}.down")
         self.up = BF16Projection(scratch.bottleneck, module.input_mix_weight_up.weight,
             scratch.gate_logits, session=session, name=f"{name}.up")
-        self.injection = None if module.block_inject_weight is None else BF16Projection(
-            scratch.normalized, module.block_inject_weight.weight, scratch.injection_logits,
-            session=session, name=f"{name}.injection")
 
     def mix(self, residual: torch.Tensor) -> torch.Tensor:
         normalized = hc.run_grouped_rmsnorm(residual, self.norm_gain, eps=self.eps,
             zero_centered=False, binding=self.bindings["grouped_rmsnorm"])
-        projected = self.down(normalized)
-        bottleneck = hc.run_scaled_silu(projected, binding=self.bindings["scaled_silu"])
+        self.down(normalized)
+        bottleneck = hc.run_scaled_silu(self.scratch.projected_down, binding=self.bindings["scaled_silu"])
         gate_logits = self.up(bottleneck)
         result = hc.run_gate_mean(normalized, gate_logits, binding=self.bindings["gate_mean"])
-        if self.injection is not None:
-            self.injection(normalized)
         return result
 
     def combine(self, residual: torch.Tensor, block_output: torch.Tensor) -> torch.Tensor:

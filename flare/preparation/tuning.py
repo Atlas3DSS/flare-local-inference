@@ -183,7 +183,7 @@ class RecordedPreparationSession(PreparationSession):
                 "allocated_shared_benchmark_bytes": sum(int(getattr(value, "allocated_nbytes",
                     getattr(value, "nbytes", 0))) for value in self._benchmark_resources.values()),
                 "search_limits": {
-                    "bf16_projection": "explicit backend and rows_per_tile override",
+                    "bf16_projection": "all eligible b12x backends and rows_per_tile configurations",
                     "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
                     "qsa": "fixed attention_splits=16 and singleton kernel configuration",
                     "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",

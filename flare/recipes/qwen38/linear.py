@@ -13,6 +13,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 from flare.preparation.scratch import ScratchArena, scratch_storage, prime_owners
 from flare.preparation.tuning import register_finalizer
 from flare.preparation.fixtures import blockscaled_gemm as gemm_fixtures
+from flare.preparation.fixtures import bf16_gemv as bf16_fixtures
 
 
 class BF16Projection:
@@ -31,14 +32,15 @@ class BF16Projection:
         if output.dtype != torch.bfloat16:
             raise TypeError("Qwen BF16 projections require BF16 output")
         query = bf16_gemv.query_from_call(source, weight, out=output, bias=bias)
-        backend = "mma" if query.max_rows > 8 and query.out_features >= 256 else "simt"
-        self.plan = bf16_gemv.plan(query, override=bf16_gemv.GemvConfig(backend=backend))
+        self.plan = bf16_gemv.plan(query)
         self.weight = weight
         self.bias = bias
         self.output = output
         session.prepare((self.plan.request(
             name=name,
             prepare_call=lambda state: PreparedCall(run=lambda: state.run(source, weight, out=output, bias=bias)),
+            benchmark_call=partial(bf16_fixtures.benchmark_call, source=source,
+                                   weight=weight, output=output, bias=bias),
         ),))
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:

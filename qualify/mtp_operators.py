@@ -149,8 +149,8 @@ def _run(operations, rows, *, capture):
 def _operands(saved, case, capacity, device, *, vllm, eps):
     stages = saved['stages']
     result = {name: padded(value, capacity, device) for name, value in stages.items() if name in STAGES}
+    result['attn_projected_down'] = padded(stages['attn_projected_down'], capacity, device, stride=(336, 1))
     if vllm:
-        result['attn_projected_down'] = padded(stages['attn_projected_down'], capacity, device, stride=(336, 1))
         qkv = torch.zeros((capacity, 13312), dtype=torch.bfloat16, device=device)
         for target, name in zip(qkv.split((12288, 512, 512), dim=-1),
                                 ('q_projected', 'k_projected', 'v_projected'), strict=True):

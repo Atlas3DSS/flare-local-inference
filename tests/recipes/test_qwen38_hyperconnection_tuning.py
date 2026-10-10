@@ -12,6 +12,29 @@ from flare.recipes.qwen38.hyperconnection import HyperconnectionScratch
 from flare.preparation.fixtures.hyperconnection import HyperconnectionBenchmarkInputs, benchmark_call
 
 
+def test_packed_projection_preserves_canonical_weights_without_duplicate_storage():
+    module = torch.nn.Module()
+    module.input_mix_weight_down = torch.nn.Linear(10240, 320, bias=False, dtype=torch.bfloat16)
+    module.block_inject_weight = torch.nn.Linear(10240, 4, bias=False, dtype=torch.bfloat16)
+    down, injection = module.input_mix_weight_down.weight.detach().clone(), module.block_inject_weight.weight.detach().clone()
+    original = weakref.ref(module.input_mix_weight_down.weight)
+    packed = hyperconnection.packed_down_projection(module)
+    assert original() is None
+    assert hyperconnection.packed_down_projection(module) is packed
+    assert packed.shape == (336, 10240) and not packed[324:].count_nonzero()
+    for actual, expected in ((module.input_mix_weight_down.weight, down),
+                             (module.block_inject_weight.weight, injection)):
+        assert torch.equal(actual, expected)
+        assert actual.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr()
+    scratch = HyperconnectionScratch.allocate(64, torch.device("cpu"))
+    for tokens in (1, 4, 16, 64):
+        rows = scratch.rows(tokens)
+        assert rows.projected_down.stride() == rows.injection_logits.stride() == (336, 1)
+        rows.down_and_injection[:, :320].fill_(2)
+        rows.down_and_injection[:, 320:324].fill_(3)
+        assert torch.all(rows.projected_down == 2) and torch.all(rows.injection_logits == 3)
+
+
 def test_benchmark_call_retains_private_operands_gain_and_launch_options():
     source = torch.zeros((3, 16), dtype=torch.bfloat16)[:, ::2]
     gain = torch.linspace(.5, 1.5, 8)

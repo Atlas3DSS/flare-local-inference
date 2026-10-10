@@ -776,10 +776,10 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
     assert all(owner.binding.scratch is arena.tensor for owner in owners)
 
 
-@pytest.mark.parametrize("operator", ["gdn", "fused_moe", "hyperconnection", "varlen_attention", "blockscaled_gemm", "mtp_feedback"])
+@pytest.mark.parametrize("operator", ["gdn", "fused_moe", "hyperconnection", "varlen_attention", "blockscaled_gemm", "bf16_gemv", "mtp_feedback"])
 def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
     from flare.preparation.fixtures import (
-        blockscaled_gemm, fused_moe, gdn, hyperconnection, varlen_attention, mtp_feedback,
+        blockscaled_gemm, bf16_gemv, fused_moe, gdn, hyperconnection, varlen_attention, mtp_feedback,
     )
     from flare.recipes.qwen38.moe import RouterScratch
 
@@ -825,6 +825,9 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
             call = mtp_feedback.benchmark_call(state,
                 arguments=dict(token_embedding=source, multi_state=source, output=output),
                 session=session, name="op", workspace=None, eps=1e-6)
+        elif operator == "bf16_gemv":
+            call = bf16_gemv.benchmark_call(state, source=source, output=output,
+                weight=torch.ones(32, 32, dtype=torch.bfloat16), bias=None)
         else:
             call = blockscaled_gemm.benchmark_call(state, source=source, output=output,
                 values=torch.ones(32, 32), scales=None, gain=None, bias=None,

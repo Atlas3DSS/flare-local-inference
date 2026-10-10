@@ -33,7 +33,7 @@ def test_actual_projection_strides_and_padding_preserve_every_live_value():
         assert torch.count_nonzero(x[name][5:]) == 0
     sg = _operands(saved, case, 8, 'cpu', vllm=False, eps=1e-6)
     assert sg['query_raw'].stride() == (12288, 512, 1)
-    assert sg['attn_projected_down'].stride() == (320, 1)
+    assert sg['attn_projected_down'].stride() == (336, 1)
     assert torch.equal(sg['q_rope_input'], x['q_rope_input'])
     assert torch.equal(sg['k_rope_input'], x['k_rope_input'])
     assert not torch.cuda.is_initialized()
