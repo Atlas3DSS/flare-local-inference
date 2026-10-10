@@ -136,8 +136,7 @@ def compile_forward(fn):
     dtypes, storage_references = {}, {}
     for node, key in keys.items():
         dtypes.setdefault(key, set()).add(node.meta['val'].dtype)
-        if node.op == 'get_attr':
-            storage_references.setdefault(key, set()).add(node)
+        storage_references.setdefault(key, set()).add(node)
 
     for node in originals:
         if node.op != 'get_attr' or not isinstance(node.meta.get('val'), torch.Tensor):

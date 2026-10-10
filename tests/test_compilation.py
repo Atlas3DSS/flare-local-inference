@@ -148,3 +148,26 @@ def test_compiled_head_norm_preserves_fp32_reduction_order(rows):
         graph.replay()
         torch.testing.assert_close(variance, expected_variance, rtol=0, atol=0)
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_snapshots_of_reused_copy_destinations():
+    source = torch.zeros(1, 6144, device="cuda", dtype=torch.bfloat16)
+    staged = torch.empty_like(source)
+    snapshots = [torch.empty_like(source), torch.empty_like(source)]
+
+    def forward():
+        for value, snapshot in enumerate(snapshots, 1):
+            _fill_output(source, float(value))
+            staged.copy_(source)
+            snapshot.copy_(staged)
+
+    compiled = compile_forward(forward)
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    graph.replay()
+    for value, snapshot in enumerate(snapshots, 1):
+        torch.testing.assert_close(snapshot, torch.full_like(snapshot, value), rtol=0, atol=0)
