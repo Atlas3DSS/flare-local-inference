@@ -8,10 +8,10 @@ import torch
 import triton
 import triton.language as tl
 
+from flare.components.recurrent import DeltaMetadata
 from flare.preparation.triton import prepare_triton
 
 from .attention import QSAMetadata
-from .gdn import GDNMetadata
 from .ple import PLEMetadata
 from .sampling import DeviceRequestState, PreparedTokenState
 from .state import HybridStatePool
@@ -217,7 +217,7 @@ class PreparedDecoderState:
         self.inputs, self.requests, self.pool = inputs, requests, pool
         self.tokens, self.rows, self.mode = tokens, rows, mode
         device = inputs.token_ids.device
-        self.gdn = GDNMetadata.allocate(rows, device)
+        self.gdn = DeltaMetadata.allocate(rows, device)
         self.qsa = QSAMetadata.allocate(tokens=tokens, batch=rows,
             context=inputs.page_tables.shape[1] * 64, device=device)
         self.qsa = QSAMetadata(self.qsa.main_block_table, self.qsa.main_block_table,

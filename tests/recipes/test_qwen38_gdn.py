@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 import torch
 
+from flare.components.recurrent import DeltaMetadata
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
 from flare.recipes.qwen38.gdn import (
-    GDNMetadata,
     GDNScratch,
     GDNState,
     PreparedGDN,
@@ -35,7 +35,7 @@ PROJECTIONS = ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj")
 
 def test_gdn_cpu_buffer_contracts():
     state = GDNState.allocate(3, torch.device("cpu"), speculative_tokens=2)
-    metadata = GDNMetadata.allocate(2, torch.device("cpu"), verification_columns=3)
+    metadata = DeltaMetadata.allocate(2, torch.device("cpu"), verification_columns=3)
     scratch = GDNScratch.allocate(6, torch.device("cpu"))
     assert state.convolution.shape == (3, 10240, 5)
     assert state.recurrent.shape == (3, 48, 128, 128)
@@ -52,8 +52,8 @@ def test_gdn_cpu_buffer_contracts():
     [
         (GDNState.allocate, (1, "cpu"), {}),
         (GDNState.allocate, (3, "cpu"), {"speculative_tokens": 8}),
-        (GDNMetadata.allocate, (0, "cpu"), {}),
-        (GDNMetadata.allocate, (2, "cpu"), {"verification_columns": 0}),
+        (DeltaMetadata.allocate, (0, "cpu"), {}),
+        (DeltaMetadata.allocate, (2, "cpu"), {"verification_columns": 0}),
         (GDNScratch.allocate, (0, "cpu"), {}),
     ],
 )
@@ -220,8 +220,8 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
     device = torch.device("cuda", 0)
     state = GDNState.allocate(4, device)
     prefill_metadata, decode_metadata = (
-        GDNMetadata.allocate(3, device),
-        GDNMetadata.allocate(3, device),
+        DeltaMetadata.allocate(3, device),
+        DeltaMetadata.allocate(3, device),
     )
     prefill_scratch, decode_scratch = (
         GDNScratch.allocate(max(initial_tokens + 1, 32), device),
@@ -365,7 +365,7 @@ def test_actual_checkpoint_decode_accepts_selected_speculative_state(
     module, projections = _load_cuda(manifest)
     device = torch.device("cuda", 0)
     state = GDNState.allocate(5, device, speculative_tokens=2)
-    metadata = GDNMetadata.allocate(1, device, verification_columns=3)
+    metadata = DeltaMetadata.allocate(1, device, verification_columns=3)
     scratch = GDNScratch.allocate(3, device)
     inputs = torch.zeros((3, 2560), dtype=torch.bfloat16, device=device)
     source = (

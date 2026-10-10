@@ -383,7 +383,7 @@ def test_borrowed_registration_is_unique_collecting_only_and_restores_on_close(b
 
 
 def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(backend):
-    from flare.preparation.fixtures.gdn import register_benchmark_state
+    from flare.preparation.fixtures.recurrent import register_benchmark_state
 
     session = make_session(device=0, checkpoint="revision")
     storage = torch.full((2, 32), 7, dtype=torch.uint8)
@@ -395,7 +395,7 @@ def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(
         storage.zero_()
 
     register_benchmark_state(session, template, storage=storage, restore=restore)
-    key = ("qwen_gdn_state", "cpu", 2, 32)
+    key = ("delta_state", "cpu", 2, 32)
     references.append(weakref.ref(session._benchmark_resources[key]))
 
     def trial(state):
@@ -834,7 +834,7 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
 @pytest.mark.parametrize("operator", ["gdn", "fused_moe", "hyperconnection", "varlen_attention", "blockscaled_gemm", "bf16_gemv", "mtp_feedback"])
 def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
     from flare.preparation.fixtures import (
-        blockscaled_gemm, bf16_gemv, fused_moe, gdn, hyperconnection, varlen_attention, mtp_feedback,
+        blockscaled_gemm, bf16_gemv, fused_moe, recurrent, hyperconnection, varlen_attention, mtp_feedback,
     )
     from flare.recipes.qwen38.moe import RouterScratch
 
@@ -862,7 +862,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
                 state_is_fresh=torch.zeros(1, dtype=torch.bool),
                 num_accepted_tokens=torch.ones(1, dtype=torch.int32),
                 num_seqs=torch.zeros(1, dtype=torch.int32), num_tokens=torch.zeros(1, dtype=torch.int32))
-            call = gdn.benchmark_call(state, arguments=arguments, session=session, name="op",
+            call = recurrent.benchmark_call(state, arguments=arguments, session=session, name="op",
                 mode="prefill", scratch_specs=lambda _: specs(), workspace=None,
                 run_options={}, binding_plan=object())
         elif operator == "fused_moe":

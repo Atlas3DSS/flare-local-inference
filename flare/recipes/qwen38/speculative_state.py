@@ -6,9 +6,10 @@ import torch
 import triton
 import triton.language as tl
 
+from flare.components.recurrent import DeltaMetadata
+
 from .attention import QSAMetadata
 from .decoder_state import compile_kernel
-from .gdn import GDNMetadata
 from .ple import PLEMetadata
 from .sampling import PreparedTokenState
 
@@ -120,7 +121,7 @@ class PreparedVerificationState:
         self.previous_accepted = previous_accepted
         device = inputs.token_ids.device
         self.token_ids = torch.full((self.tokens,), 248044, dtype=torch.int64, device=device)
-        self.gdn = GDNMetadata.allocate(rows, device, verification_columns=8)
+        self.gdn = DeltaMetadata.allocate(rows, device, verification_columns=8)
         self.qsa = QSAMetadata.allocate(tokens=self.tokens, batch=rows,
             context=inputs.page_tables.shape[1] * 64, device=device)
         self.qsa = QSAMetadata(self.qsa.main_block_table, self.qsa.main_block_table,

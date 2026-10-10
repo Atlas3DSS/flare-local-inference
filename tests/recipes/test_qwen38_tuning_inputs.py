@@ -1,13 +1,17 @@
 """Active tuning workloads preserve serving inputs and recurrent layouts."""
 from __future__ import annotations
 
-import pytest
-import torch
 from types import SimpleNamespace
 
-from flare.preparation.fixtures import gdn as gdn_fixtures
-from flare.preparation.fixtures.gdn import BenchmarkStateArena, GDNBenchmarkInputs
+import pytest
+import torch
+
+from flare.preparation.fixtures import recurrent as gdn_fixtures
 from flare.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
+from flare.preparation.fixtures.recurrent import (
+    BenchmarkStateArena,
+    RecurrentBenchmarkInputs,
+)
 from flare.recipes.qwen38.moe import RouterScratch
 
 
@@ -40,7 +44,7 @@ def _recurrent_args(mode, tokens, sequences):
 def test_prefill_benchmark_has_live_fresh_and_continued_checkpoint_cases(tokens, boundary):
     original = _recurrent_args('prefill', tokens, 1)
     arena = BenchmarkStateArena(original['recurrent_state'])
-    fixture = GDNBenchmarkInputs(original, mode='prefill', arena=arena)
+    fixture = RecurrentBenchmarkInputs(original, mode='prefill', arena=arena)
     fixture.reset()
     fixture.producers[0]()
     assert fixture.args['num_tokens'].item() == tokens
@@ -81,7 +85,7 @@ def test_prefill_benchmark_has_live_fresh_and_continued_checkpoint_cases(tokens,
 
 def test_decode_benchmark_distinct_live_slots_and_repeatable_state():
     original = _recurrent_args('decode', 4, 4)
-    fixture = GDNBenchmarkInputs(original, mode='decode', arena=BenchmarkStateArena(original['recurrent_state']))
+    fixture = RecurrentBenchmarkInputs(original, mode='decode', arena=BenchmarkStateArena(original['recurrent_state']))
     fixture.reset()
     fixture.producers[0]()
     assert fixture.args['query_start_loc'].tolist() == [0, 1, 2, 3, 4]
@@ -106,7 +110,7 @@ def test_convolution_and_recurrence_share_benchmark_arena_with_exact_byte_stride
         query_start_loc=torch.zeros(2, dtype=torch.int32), state_slot_ids=torch.full((1,), -1, dtype=torch.int64),
         state_is_fresh=torch.zeros(1, dtype=torch.bool), num_accepted_tokens=torch.ones(1, dtype=torch.int32),
         num_seqs=torch.zeros(1, dtype=torch.int32), num_tokens=torch.zeros(1, dtype=torch.int32))
-    fixture = GDNBenchmarkInputs(args, mode='prefill', arena=arena)
+    fixture = RecurrentBenchmarkInputs(args, mode='prefill', arena=arena)
     assert fixture.state.data_ptr() == arena.view(recurrent).data_ptr()
     assert fixture.state.stride() == template.stride()
     assert arena.nbytes == 6 * slot_bytes
@@ -118,7 +122,7 @@ def test_convolution_and_recurrence_share_benchmark_arena_with_exact_byte_stride
     assert fixture.args['state_is_fresh'].tolist() == [True]
     assert torch.all(template == 9)
     storage = torch.empty(arena.nbytes, dtype=torch.uint8)
-    borrowed = GDNBenchmarkInputs(args, mode='prefill',
+    borrowed = RecurrentBenchmarkInputs(args, mode='prefill',
         arena=BenchmarkStateArena(template, storage=storage))
     for left_producer, right_producer in zip(fixture.producers, borrowed.producers, strict=True):
         fixture.reset()
@@ -143,8 +147,8 @@ def test_borrowed_arena_preserves_exact_benchmark_operands_and_reset(mode, token
     assert borrowed.allocated_nbytes == 0 and borrowed.borrowed_nbytes == private.nbytes
     assert private.allocated_nbytes == private.nbytes and private.borrowed_nbytes == 0
     assert borrowed.view(template).data_ptr() == storage.data_ptr()
-    left = GDNBenchmarkInputs(original, mode=mode, arena=private)
-    right = GDNBenchmarkInputs(original, mode=mode, arena=borrowed)
+    left = RecurrentBenchmarkInputs(original, mode=mode, arena=private)
+    right = RecurrentBenchmarkInputs(original, mode=mode, arena=borrowed)
     assert torch.equal(left.initial_state, right.initial_state)
     for left_producer, right_producer in zip(left.producers, right.producers, strict=True):
         left.reset()
@@ -174,14 +178,14 @@ def test_borrowed_arena_rejects_storage_contract_mismatch(kind):
 
 
 def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial_reset(monkeypatch):
-    from flare.recipes.qwen38 import gdn
+    from flare.components import recurrent
 
     args = _recurrent_args('prefill', 65, 1)
     resource_cache = {}
     callbacks = []
     workspace = torch.empty(256, dtype=torch.uint8)
     session = SimpleNamespace(prepare=lambda requests: callbacks.extend(requests))
-    monkeypatch.setattr(gdn, 'register_finalizer', lambda *args, **kwargs: None)
+    monkeypatch.setattr(recurrent, 'register_finalizer', lambda *args, **kwargs: None)
 
     def resource(session, key, factory):
         if key not in resource_cache:
@@ -193,7 +197,7 @@ def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial
                                           device=torch.device('cpu')),)
     plan = SimpleNamespace(scratch_specs=lambda: specs(16))
     plan.request = lambda **kwargs: SimpleNamespace(**kwargs)
-    gdn.PreparedGDN._prepare_binding(plan, args, session=session, name='prefill65.layer0',
+    recurrent.prepare_sequence_binding(plan, args, session=session, name='prefill65.layer0',
         public_bind=lambda plan, **kwargs: SimpleNamespace(**kwargs), mode='prefill',
         set_binding=lambda value: None, workspace=workspace)
     runs = []
@@ -211,7 +215,7 @@ def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial
              for index, size in enumerate((32, 128, 256))]
     operands = calls[0].owners[0]
     assert len(resource_cache) == 2
-    assert resource_cache[('qwen_gdn_inputs', 'prefill65.layer0')] is operands
+    assert resource_cache[('delta_inputs', 'prefill65.layer0')] is operands
     assert all(call.owners[0] is operands and call.owners[1] is workspace for call in calls)
     assert all(call.output is operands.args['output'] for call in calls)
     assert all(call.owners[2].q is operands.args['q'] for call in calls)

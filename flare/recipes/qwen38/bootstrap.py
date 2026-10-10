@@ -14,7 +14,7 @@ import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.execution import GraphSignature, PreparedExecution
-from flare.preparation.fixtures.gdn import register_benchmark_state
+from flare.preparation.fixtures.recurrent import register_benchmark_state
 from flare.preparation.qwen38 import (
     CONFIG_SHA256,
     FRONTEND_SHA256,

@@ -7,17 +7,20 @@ from dataclasses import dataclass, fields
 
 import torch
 from b12x.gemm.blockscaled import Weight
-from b12x.preparation import PreparationSession, PreparedCall
+from b12x.preparation import PreparationSession
 from b12x.sequence import gdn_decode, gdn_prefill, short_conv
 
 from flare.components.linear import QuantizedProjection
-from flare.preparation.fixtures import gdn as gdn_fixtures
-from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from flare.preparation.tuning import register_finalizer
+from flare.components.recurrent import (
+    DeltaMetadata,
+    DeltaState,
+    prepare_sequence_binding,
+)
+from flare.preparation.scratch import ScratchArena
 
 
 @dataclass(frozen=True)
-class GDNState:
+class GDNState(DeltaState):
     """Persistent chronological convolution history and transposed FP32 recurrence.
 
     Recurrence slots have physical shape ``[slot, 48, value_dim=128, key_dim=128]``.
@@ -27,77 +30,12 @@ class GDNState:
     state through metadata. Convolution fresh flags discard prior history.
     """
 
-    convolution: torch.Tensor
-    recurrent: torch.Tensor
-
     @classmethod
     def allocate(
         cls, slots: int, device: torch.device, *, speculative_tokens: int = 0
     ) -> GDNState:
-        if type(slots) is not int or slots < 2:
-            raise ValueError(
-                "GDN requires a null slot and at least one live state slot"
-            )
-        if type(speculative_tokens) is not int or not 0 <= speculative_tokens <= 7:
-            raise ValueError("GDN supports zero through seven speculative tokens")
-        return cls(
-            torch.zeros(
-                (slots, 10240, 3 + speculative_tokens),
-                device=device,
-                dtype=torch.bfloat16,
-            ),
-            torch.zeros((slots, 48, 128, 128), device=device, dtype=torch.float32),
-        )
-
-
-@dataclass(frozen=True)
-class GDNMetadata:
-    """Fixed-address device metadata updated by the native scheduler.
-
-    Decode consumes ``state_indices[:, accepted_tokens - 1]`` and writes each
-    query token's checkpoint to its corresponding column. Prefill uses explicit
-    initial/final indices and can export a checkpoint at a multiple of 16 tokens.
-    Live nonnegative slots must be unique and in range. Counts and packed query
-    boundaries must fit their buffer capacities. These are scheduler invariants.
-    """
-
-    query_start_loc: torch.Tensor
-    convolution_slots: torch.Tensor
-    fresh: torch.Tensor
-    accepted_tokens: torch.Tensor
-    state_indices: torch.Tensor
-    initial_state_indices: torch.Tensor
-    final_state_indices: torch.Tensor
-    checkpoint_state_indices: torch.Tensor
-    checkpoint_offsets: torch.Tensor
-    num_seqs: torch.Tensor
-    num_tokens: torch.Tensor
-
-    @classmethod
-    def allocate(
-        cls, sequences: int, device: torch.device, *, verification_columns: int = 1
-    ) -> GDNMetadata:
-        if type(sequences) is not int or sequences <= 0:
-            raise ValueError("GDN sequence capacity must be positive")
-        if type(verification_columns) is not int or not 1 <= verification_columns <= 8:
-            raise ValueError("GDN verification columns must be in [1, 8]")
-
-        def zeros(shape, dtype=torch.int32):
-            return torch.zeros(shape, dtype=dtype, device=device)
-
-        return cls(
-            zeros((sequences + 1,)),
-            torch.full((sequences,), -1, dtype=torch.int64, device=device),
-            zeros((sequences,), torch.bool),
-            torch.ones(sequences, dtype=torch.int32, device=device),
-            zeros((sequences, verification_columns), torch.int64),
-            zeros((sequences,), torch.int64),
-            zeros((sequences,), torch.int64),
-            zeros((sequences,), torch.int64),
-            zeros((sequences,)),
-            zeros((1,)),
-            zeros((1,)),
-        )
+        return super().allocate(slots, device, heads=48, channels=10240,
+                                speculative_tokens=speculative_tokens)
 
 
 @dataclass(frozen=True)
@@ -181,7 +119,7 @@ class PreparedGDN:
         source: torch.Tensor,
         scratch: GDNScratch,
         state: GDNState,
-        metadata: GDNMetadata,
+        metadata: DeltaMetadata,
         *,
         mode: str,
         session: PreparationSession,
@@ -325,7 +263,7 @@ class PreparedGDN:
             conv_caps,
             invocation=short_conv.invocation_from_tensors(**conv_args),
         )
-        self.conv_binding = self._prepare_binding(
+        self.conv_binding = prepare_sequence_binding(
             self.conv_plan,
             conv_args,
             session=session,
@@ -406,7 +344,7 @@ class PreparedGDN:
             self.recurrent_binding = binding
             self.workspace = binding.scratch
 
-        self.recurrent_binding = self._prepare_binding(
+        self.recurrent_binding = prepare_sequence_binding(
             self.recurrent_plan,
             args,
             session=session,
@@ -424,45 +362,6 @@ class PreparedGDN:
         self.inactive_rows = torch.empty(
             (self.tokens, 1), dtype=torch.bool, device=self.device
         )
-
-    @staticmethod
-    def _prepare_binding(
-        plan, args, *, session, name, public_bind, mode, set_binding,
-        bind_plan=False, workspace=None, run_options=None,
-    ):
-        run_options = {} if run_options is None else dict(run_options)
-
-        def selected_scratch(specs):
-            return planned_scratch(specs, workspace)
-
-        def candidate_specs(prepared):
-            return plan.scratch_specs() if bind_plan else prepared.layout.scratch_specs()
-
-        def prepare_call(prepared):
-            scratch = selected_scratch(candidate_specs(prepared))
-            binding = prepared.bind(scratch=scratch, **args, **({"plan": plan} if bind_plan else {}))
-            return PreparedCall(run=lambda: prepared.run(binding, **run_options), owners=prime_owners(workspace, scratch, binding))
-
-        def benchmark_call(prepared):
-            return gdn_fixtures.benchmark_call(
-                prepared, arguments=args, session=session, name=name, mode=mode,
-                scratch_specs=candidate_specs, workspace=workspace,
-                run_options=run_options, binding_plan=plan if bind_plan else None,
-            )
-
-        session.prepare((plan.request(name=name, prepare_call=prepare_call,
-            benchmark_call=benchmark_call),))
-        selected = None
-
-        def finalize():
-            nonlocal selected
-            scratch = selected_scratch(plan.scratch_specs())
-            selected = public_bind(plan, scratch=scratch, **args)
-            set_binding(selected)
-
-        finalize()
-        register_finalizer(session, finalize, workspace=workspace)
-        return selected
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         scratch = self.scratch
@@ -489,4 +388,4 @@ class PreparedGDN:
         return self.projections["out_proj"](scratch.gated)
 
 
-__all__ = ["GDNMetadata", "GDNScratch", "GDNState", "PreparedGDN"]
+__all__ = [ "GDNScratch", "GDNState", "PreparedGDN"]

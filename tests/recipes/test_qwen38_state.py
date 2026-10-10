@@ -268,8 +268,9 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
     from b12x.preparation import PreparationSession
     from b12x.sequence import short_conv
 
+    from flare.components.recurrent import DeltaMetadata
     from flare.preparation.graphs import PreparedGraphBundle
-    from flare.recipes.qwen38.gdn import GDNMetadata, GDNScratch, PreparedGDN
+    from flare.recipes.qwen38.gdn import GDNScratch, PreparedGDN
     from flare.recipes.qwen38.ple import PLE_LAYER_PREFIX
     from flare.recipes.qwen38.weights import QwenWeightLoader
     from tests.recipes import test_qwen38_gdn as canonical
@@ -301,7 +302,7 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
         mode: GDNScratch.allocate(value.shape[0], device)
         for mode, value in inputs.items()
     }
-    metadata = {mode: GDNMetadata.allocate(1, device) for mode in inputs}
+    metadata = {mode: DeltaMetadata.allocate(1, device) for mode in inputs}
     workspace = torch.empty(80 << 20, dtype=torch.uint8, device=device)
     projection_workspace = torch.empty(64 << 20, dtype=torch.uint8, device=device)
     with PreparationSession(

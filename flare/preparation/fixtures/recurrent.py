@@ -1,4 +1,4 @@
-"""Finite GDN benchmark operands with serving layouts and serialized state reuse."""
+"""Finite recurrent benchmark operands with serving layouts and serialized state reuse."""
 
 from functools import partial
 
@@ -21,7 +21,7 @@ class BenchmarkStateArena:
         elif (not isinstance(storage, torch.Tensor) or storage.dtype != torch.uint8
                 or not storage.is_contiguous() or storage.nbytes != self.nbytes
                 or storage.device != template.device):
-            raise ValueError("borrowed GDN arena requires contiguous uint8 storage with the exact extent and device")
+            raise ValueError("borrowed recurrent arena requires contiguous uint8 storage with the exact extent and device")
         self.storage = storage.view(-1)
 
     def view(self, template):
@@ -35,7 +35,7 @@ class BenchmarkStateArena:
 
 
 def _benchmark_state_key(template):
-    return ("qwen_gdn_state", str(template.device), template.shape[0],
+    return ("delta_state", str(template.device), template.shape[0],
             template.stride(0) * template.element_size())
 
 
@@ -44,7 +44,7 @@ def register_benchmark_state(session, template, *, storage, restore):
     from flare.preparation.tuning import RecordedPreparationSession
 
     if not isinstance(session, RecordedPreparationSession):
-        raise TypeError("borrowing GDN state requires RecordedPreparationSession")
+        raise TypeError("borrowing recurrent state requires RecordedPreparationSession")
     arena = BenchmarkStateArena(template, storage=storage)
     session.register_benchmark_resource(_benchmark_state_key(template), arena,
                                         restore=restore)
@@ -57,7 +57,7 @@ def _strided_empty(template):
 def _packed_qkv(original):
     tensors = tuple(original[name] for name in ("q", "k", "v"))
     if len({tensor.untyped_storage().data_ptr() for tensor in tensors}) != 1:
-        raise ValueError("GDN prefill benchmark requires packed QKV storage")
+        raise ValueError("recurrent prefill benchmark requires packed QKV storage")
     first = min(tensor.storage_offset() for tensor in tensors)
     end = max(tensor.storage_offset() + 1 + sum(
         (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())
@@ -70,7 +70,7 @@ def _packed_qkv(original):
     return storage, views
 
 
-class GDNBenchmarkInputs:
+class RecurrentBenchmarkInputs:
     """Active recurrence/convolution operands with exact serving tensor layouts."""
 
     def __init__(self, original, *, mode, arena):
@@ -178,14 +178,14 @@ class GDNBenchmarkInputs:
 
 
 def benchmark_call(prepared, *, arguments, session, name, mode, scratch_specs,
-                   workspace, run_options, binding_plan=None):
+                   workspace, run_options, binding_plan=None, bind_method="bind"):
     template = arguments["conv_state"] if binding_plan is not None else arguments["recurrent_state"]
     key = _benchmark_state_key(template)
     arena = benchmark_resource(session, key, lambda: BenchmarkStateArena(template))
-    operands = benchmark_resource(session, ("qwen_gdn_inputs", name),
-        lambda: GDNBenchmarkInputs(arguments, mode=mode, arena=arena))
+    operands = benchmark_resource(session, ("delta_inputs", name),
+        lambda: RecurrentBenchmarkInputs(arguments, mode=mode, arena=arena))
     scratch = planned_scratch(scratch_specs(prepared), workspace)
-    binding = prepared.bind(scratch=scratch, **operands.args,
+    binding = getattr(prepared, bind_method)(scratch=scratch, **operands.args,
                             **({"plan": binding_plan} if binding_plan is not None else {}))
     return PreparedCall(run=lambda: prepared.run(binding, **run_options),
         output=operands.args[operands.output_name], produce=operands.producers[0],
