@@ -137,7 +137,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False):
             if generate:
                 tokens = tokenizer.apply_chat_template([{"role": "user", "content":
                     "In one short sentence, what does tensor parallelism do?"}],
-                    tokenize=True, add_generation_prompt=True, reasoning_effort="low")
+                    tokenize=True, return_dict=False, add_generation_prompt=True, reasoning_effort="low")
                 assert 0 < len(tokens) <= capacity
                 eos = json.loads((Path(snapshot) / "generation_config.json").read_text())["eos_token_id"]
                 requests.admit(0, RequestAdmission(1, 13, max_new_tokens=32, eos_token_ids=tuple(eos)), tokens)
