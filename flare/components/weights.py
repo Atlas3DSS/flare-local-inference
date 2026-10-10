@@ -315,7 +315,9 @@ class DirectWeightLoader:
         ))
 
     def _cpu_csf(self, name):
-        from safetensors import safe_open
+        import math
+        import mmap
+        import torch
 
         self._require_open()
 
@@ -323,10 +325,14 @@ class DirectWeightLoader:
         if "nvfp4_csf_" not in name:
             raise ValueError("CPU payload reads are restricted to compressed scale planes")
         if metadata.shard not in self._csf_files:
-            self._csf_files[metadata.shard] = self._stack.enter_context(safe_open(
-                str(self.manifest.snapshot / metadata.shard), framework="pt", device="cpu",
-            ))
-        return self._csf_files[metadata.shard].get_tensor(name).clone()
+            with (self.manifest.snapshot / metadata.shard).open("rb") as source:
+                self._csf_files[metadata.shard] = self._stack.enter_context(
+                    mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_COPY))
+        dtype = {"U8": torch.uint8, "U32": torch.uint32}[metadata.dtype]
+        if not metadata.nbytes:
+            return torch.empty(metadata.shape, dtype=dtype)
+        return torch.frombuffer(self._csf_files[metadata.shard], dtype=dtype,
+            count=math.prod(metadata.shape), offset=metadata.offset).reshape(metadata.shape).clone()
 
 
 def _aligned_range(selected, extent, alignment):

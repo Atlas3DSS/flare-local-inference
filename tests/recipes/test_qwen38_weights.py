@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -133,3 +134,17 @@ def test_actual_layer_scales_and_csf_order(manifest):
         fixed, exceptions = join_nvfp4_csf(*planes[0], *planes[1], rows=640, columns=160)
         expected = torch.cat([decode_csf_scales(*plane, rows=640, columns=160) for plane in planes])
         assert torch.equal(decode_csf_scales(fixed, exceptions, rows=1280, columns=160), expected)
+
+
+def test_mapped_scale_planes_match_checkpoint_and_own_storage(manifest):
+    loader = QwenWeightLoader(manifest, "cpu")
+    loader._session = object()
+    prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts.511.up_proj.weight_scale.nvfp4_csf_"
+    with ExitStack() as stack:
+        loader._stack = stack
+        tensors = {suffix: loader._cpu_csf(prefix + suffix) for suffix in ("fixed", "exceptions")}
+    with CheckpointTensors(manifest, byte_budget=2 << 20) as reader:
+        for suffix, tensor in tensors.items():
+            assert torch.equal(tensor, reader.read(prefix + suffix))
+            tensor.zero_()
+            assert torch.count_nonzero(reader.read(prefix + suffix).view(torch.uint8)) > 0
