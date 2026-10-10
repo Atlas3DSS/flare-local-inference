@@ -11,7 +11,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 from b12x.sequence import gdn_decode, gdn_prefill, short_conv
 
 from flare.preparation.fixtures import gdn as gdn_fixtures
-from flare.preparation.scratch import planned_scratch, prime_owners
+from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
 
 from .linear import QuantizedProjection
@@ -292,6 +292,13 @@ class PreparedGDN:
             name=f"{name}.out_proj",
             workspace=projection_workspace,
         )
+        self.parallel_projections = None
+        if mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena):
+            from .linear import ParallelProjections
+
+            self.parallel_projections = ParallelProjections(
+                self.projections["in_proj_qkvz"], self.projections["in_proj_ba"],
+                session=session, workspace=projection_workspace)
         self.conv_weight = module.conv1d.weight.squeeze(1)
         conv_args = {
             "x": scratch.projected_qkv,
@@ -460,8 +467,11 @@ class PreparedGDN:
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         scratch = self.scratch
-        self.projections["in_proj_qkvz"](source)
-        self.projections["in_proj_ba"](source)
+        if self.parallel_projections is None:
+            self.projections["in_proj_qkvz"](source)
+            self.projections["in_proj_ba"](source)
+        else:
+            self.parallel_projections(source)
         short_conv.run(self.conv_binding)
         if self.mode == "decode":
             gdn_decode.run(

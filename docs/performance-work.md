@@ -42,7 +42,12 @@ caller-owned scratch, and allocation-stable replay are required.
    and atomic reductions. Measure kernel selection and complete graph latency
    against vLLM's b12x integration.
 5. Overlap independent graph branches where separate scratch and explicit
-   stream dependencies permit concurrent execution. Evaluate QSA indexing
+   stream dependencies permit concurrent execution. Decode GDN input projections
+   use separate views of the operator arena and one preparation-owned auxiliary
+   stream at capacities up to 16 rows. An opaque projection-pair operation retains
+   the fork and join through forward compilation. Scratch planning reserves the
+   maximum concurrent candidate requirement, then trims to the selected peak;
+   serial layers and graph variants reuse the same storage. Evaluate QSA indexing
    alongside QKV projection and shared experts alongside routed experts, with
    joins captured before dependent operators consume their outputs. Fork and
    rejoin auxiliary streams within Python's capture of a single CUDA graph;

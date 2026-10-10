@@ -100,3 +100,65 @@ class QuantizedProjection:
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         return blockscaled.mm(source, self.weight, out=self.output, plan=self.plan, bias=self.bias,
                               workspace=self.workspace)
+
+
+@torch.library.custom_op("flare::parallel_mxfp8_projections", mutates_args=("outputs", "workspaces"))
+def _parallel_mxfp8_projections(
+    source: torch.Tensor, values: list[torch.Tensor], scales: list[torch.Tensor],
+    outputs: list[torch.Tensor], workspaces: list[torch.Tensor],
+    plans: list[int], auxiliary_stream: int,
+) -> None:
+    from b12x.gemm.blockscaled._ops import _out_workspace
+
+    main = torch.cuda.current_stream(source.device)
+    auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
+    auxiliary.wait_stream(main)
+
+    def project(index):
+        _out_workspace(
+            source, values[index], scales[index], None, None, outputs[index],
+            workspaces[index], "none", None, plans[index], "any")
+
+    with torch.cuda.stream(auxiliary):
+        project(1)
+    project(0)
+    main.wait_stream(auxiliary)
+
+
+@_parallel_mxfp8_projections.register_fake
+def _fake_parallel_mxfp8_projections(source, values, scales, outputs, workspaces, plans, auxiliary_stream):
+    pass
+
+
+class ParallelProjections:
+    """Two prepared MXFP8 projections with explicit storage and a captured join."""
+
+    def __init__(self, main: QuantizedProjection, auxiliary: QuantizedProjection, *, session,
+                 workspace: ScratchArena):
+        from b12x.gemm.blockscaled._a16 import _weight_parts
+
+        self.projections = (main, auxiliary)
+        self.arena = workspace
+        self.values, self.scales, self.outputs, self.plans = [], [], [], []
+        for projection in self.projections:
+            values, scales, gain, fp4 = _weight_parts(projection.weight)
+            if (values.dtype != torch.float8_e4m3fn or gain is not None or fp4
+                    or projection.activation_mode != "quantized" or projection.bias is not None):
+                raise ValueError("parallel projections require unbiased quantized MXFP8 weights")
+            self.values.append(values)
+            self.scales.append(scales.view(torch.uint8))
+            self.outputs.append(projection.output)
+            self.plans.append(projection.plan.handle)
+        workspace.register_parallel(*(projection.plan for projection in self.projections))
+        self.stream = workspace.auxiliary_stream
+        self.refresh()
+        register_finalizer(session, self.refresh, workspace=workspace)
+
+    def refresh(self):
+        self.workspaces = list(self.arena.views(*(
+            ((projection.plan.memory_requirements().scratch_nbytes,), torch.uint8)
+            for projection in self.projections)))
+
+    def __call__(self, source):
+        _parallel_mxfp8_projections(source, self.values, self.scales, self.outputs,
+                                   self.workspaces, self.plans, self.stream.cuda_stream)
