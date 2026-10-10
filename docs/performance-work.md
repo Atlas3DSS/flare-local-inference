@@ -43,6 +43,10 @@ caller-owned scratch, and allocation-stable replay are required.
 4. Tune MoE with b12x's default numerical policy, including dynamic direct routing
    and atomic reductions. Measure kernel selection and complete graph latency
    against vLLM's b12x integration.
+   TODO: Use one layer-wide input activation amax to derive a shared activation
+   scale for the expert gate (w1) and up (w3) projections. Ensure every layer
+   has this scale; retain per-expert activation scales for the down (w2)
+   projection.
 5. Overlap independent graph branches where separate scratch and explicit
    stream dependencies permit concurrent execution. Decode GDN input projections
    use separate views of the operator arena and one preparation-owned auxiliary
