@@ -147,10 +147,13 @@ class DirectWeightLoader:
         self._session.flush()
         return target
 
-    def load_tensors(self, names: Sequence[str]) -> tuple[torch.Tensor, ...]:
+    def load_tensors(self, names: Sequence[str], *, extents=None) -> tuple[torch.Tensor, ...]:
         """Transfer independent weights together, returning ready GPU tensors."""
         self._require_open()
-        targets = tuple(self._queue_tensor(name) for name in names)
+        if extents is None:
+            extents = (None,) * len(names)
+        targets = tuple(self._queue_tensor(name, extent=extent)
+                        for name, extent in zip(names, extents, strict=True))
         self._session.flush()
         return targets
 
@@ -224,10 +227,11 @@ class DirectWeightLoader:
         prefixes = tuple(prefixes)
         if not prefixes or hidden_size <= 0 or hidden_size % 128:
             raise ValueError("NVFP4 experts require nonempty prefixes and 128-aligned hidden width")
-        first, last = _aligned_range(intermediate_range, intermediate_size, 128)
+        first, last = _aligned_range(intermediate_range, intermediate_size, 16)
         local = last - first
         count = len(prefixes)
-        shapes = ((count, 2 * local, hidden_size // 16), (count, hidden_size, local // 16))
+        shapes = ((count, (2 * local + 127) // 128 * 128, hidden_size // 16),
+                  (count, hidden_size, (local // 16 + 3) // 4 * 4))
         if scale_scratch is None:
             scale_scratch = tuple(torch.empty(shape, dtype=torch.float8_e4m3fn, device=self.device)
                                   for shape in shapes)
