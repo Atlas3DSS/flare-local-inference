@@ -6,9 +6,9 @@ import pytest
 import torch
 from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
 
-from flare.recipes.qwen38 import moe
-from flare.preparation.scratch import ScratchArena
+from flare.components import moe
 from flare.preparation.fixtures import fused_moe as moe_fixtures
+from flare.preparation.scratch import ScratchArena
 
 
 @pytest.mark.parametrize("tokens", [4, 17])
@@ -36,7 +36,7 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
     monkeypatch.setattr(moe.fused_moe, "plan_execution", lambda **kwargs: plan)
     monkeypatch.setattr(moe.fused_moe, "bind", lambda plan, **kwargs: SimpleNamespace(**kwargs))
     monkeypatch.setattr(moe, "register_finalizer", lambda *args, **kwargs: None)
-    router_plan = object()
+    router_plan = SimpleNamespace(query=SimpleNamespace(logits_dtype="bfloat16", routed_scaling_factor=1.0))
 
     def route(selected_plan, logits, selected, routed_ids, routed_weights):
         assert selected_plan is router_plan
@@ -74,7 +74,7 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
 
     calls = [requests[0].benchmark_call(candidate(index, size))
              for index, size in enumerate((32, 128, 256))]
-    fixture = resources[("qwen_moe_inputs", "prefill.layer0.experts")]
+    fixture = resources[("moe_inputs", "prefill.layer0.experts")]
     reference = moe_fixtures.ExpertBenchmarkInputs(source, experts=512, top_k=10,
         allocate_router=moe.RouterScratch.allocate,
         router_weight=router_weight, router_plan=router_plan)

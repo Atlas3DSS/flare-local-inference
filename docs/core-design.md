@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `497bd28df3abef79c4d1ab77afacfe1db5dcaf72`, including the CuTe DSL operators
+  `baf286f76219d2722bc47e5cceab3958bfec5a50`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -202,10 +202,14 @@ host.
 The [Qwen3.8 recipe](../flare/recipes/qwen38/model.py) keeps the Transformers
 module tree and replaces its forwards with prepared operations.
 
-[Prepared projection components](../flare/components/linear.py) provide BF16
-and block-scaled b12x execution, tuning declarations, caller-owned outputs,
+[Prepared projection components](../flare/components/linear.py) provide BF16,
+FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,
 shared scratch, and captured projection overlap. Recipes supply weights and
 geometry; the components have no Qwen-specific dimensions or state layout.
+Shared [routing and expert components](../flare/components/moe.py) retain FP32
+route weights, configurable scoring and correction bias, fixed output buffers,
+and b12x's default expert execution policy. Autotuning uses private activation
+and routing fixtures with the recipe's router precision and scaling.
 
 The shared [canonical constructor](../flare/components/model.py) creates meta
 module trees without initializing CUDA. The [GLM 5.3 Flash recipe](../flare/recipes/glm53/model.py)

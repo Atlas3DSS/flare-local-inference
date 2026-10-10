@@ -9,7 +9,7 @@ import torch
 from b12x.norm import hyperconnection as hc
 from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
-from flare.components.linear import BF16Projection
+from flare.components.linear import UnquantizedProjection
 from flare.preparation.fixtures import hyperconnection as hc_fixtures
 from flare.preparation.tuning import register_finalizer
 
@@ -137,9 +137,9 @@ class PreparedHyperconnection:
 
         self.injection = None if module.block_inject_weight is None else scratch.injection_logits
         down_output = scratch.projected_down if self.injection is None else scratch.down_and_injection
-        self.down = BF16Projection(scratch.normalized, packed_down_projection(module),
+        self.down = UnquantizedProjection(scratch.normalized, packed_down_projection(module),
             down_output, session=session, name=f"{name}.down")
-        self.up = BF16Projection(scratch.bottleneck, module.input_mix_weight_up.weight,
+        self.up = UnquantizedProjection(scratch.bottleneck, module.input_mix_weight_up.weight,
             scratch.gate_logits, session=session, name=f"{name}.up")
 
     def prepare_combine_norm(self, following: PreparedHyperconnection, *,

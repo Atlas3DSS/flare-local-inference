@@ -617,7 +617,7 @@ def _install_boundaries(monkeypatch, checkpoint):
             if not (
                 cls.__name__.startswith("Prepared")
                 or cls.__name__
-                in ("SpeculativePreparation", "BF16Projection", "QuantizedProjection")
+                in ("SpeculativePreparation", "UnquantizedProjection", "QuantizedProjection")
             ):
                 continue
             original_init = cls.__init__

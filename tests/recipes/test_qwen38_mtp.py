@@ -150,7 +150,7 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
             return self.output.copy_(source[:, :1])
 
     for name, value in (("PreparedMTPFeedback", Feedback), ("PreparedHyperconnection", HC),
-                        ("PreparedAttention", Attention), ("PreparedQwenMoe", Moe), ("BF16Projection", Head)):
+                        ("PreparedAttention", Attention), ("PreparedQwenMoe", Moe), ("UnquantizedProjection", Head)):
         monkeypatch.setattr(mtp, name, value)
     layer = SimpleNamespace(attn_hyper_connection=object(), mlp_hyper_connection=object(), self_attn=object())
     weights = SimpleNamespace(module=SimpleNamespace(layers=[layer], hyper_connection_mixer=object()),
@@ -182,7 +182,7 @@ def test_shared_bf16_expert_uses_bf16_projections_without_activation_quantizatio
         torch.empty((2560, 640), dtype=torch.bfloat16, device="meta"),
         torch.empty((1, 2560), dtype=torch.bfloat16, device="meta"))
     calls = []
-    monkeypatch.setattr(moe, "BF16Projection", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(moe, "UnquantizedProjection", lambda *args, **kwargs: calls.append((args, kwargs)))
     monkeypatch.setattr(moe, "QuantizedProjection", lambda *a, **kw: pytest.fail("BF16 MTP must not use quantized projections"))
     plan = SimpleNamespace(request=lambda **kwargs: kwargs)
     monkeypatch.setattr(moe.hyperconnection, "Caps", lambda **kwargs: kwargs)

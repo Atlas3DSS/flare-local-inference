@@ -836,7 +836,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
     from flare.preparation.fixtures import (
         blockscaled_gemm, bf16_gemv, fused_moe, recurrent, hyperconnection, varlen_attention, mtp_feedback,
     )
-    from flare.recipes.qwen38.moe import RouterScratch
+    from flare.components.moe import RouterScratch
 
     events, controls = backend
     controls.retain_trials = True

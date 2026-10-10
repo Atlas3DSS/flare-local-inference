@@ -282,7 +282,7 @@ class PreparedResume:
 
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
                  completion_records, frame_index, submission_sequence, *, session, name):
-        from flare.components.linear import BF16Projection
+        from flare.components.linear import UnquantizedProjection
 
         from .sampling import PreparedSampling
 
@@ -295,7 +295,7 @@ class PreparedResume:
              requests.pending_token, pool.last_hidden.stride(0), requests.consumed_tokens.stride(0), 4096),
             (rows, 1, 1))
         self.sample_hidden = sample_hidden
-        self.projection = BF16Projection(sample_hidden, lm_head_weight, logits, session=session, name=name)
+        self.projection = UnquantizedProjection(sample_hidden, lm_head_weight, logits, session=session, name=name)
         self.sampler = PreparedSampling(logits, requests, inputs.row_slot_ids[:rows],
             inputs.row_generations[:rows], inputs.live_rows, completion_records, frame_index, submission_sequence,
             sample_enabled=inputs.sample_enabled[:rows])

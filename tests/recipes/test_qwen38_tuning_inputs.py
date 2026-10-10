@@ -12,7 +12,7 @@ from flare.preparation.fixtures.recurrent import (
     BenchmarkStateArena,
     RecurrentBenchmarkInputs,
 )
-from flare.recipes.qwen38.moe import RouterScratch
+from flare.components.moe import RouterScratch
 
 
 def _recurrent_args(mode, tokens, sequences):
@@ -266,7 +266,7 @@ def test_prefill_benchmark_reuses_prepared_router_without_nested_preparation(mon
 
     source = torch.zeros(16, 32, dtype=torch.bfloat16)
     weight = torch.randn(512, 32, generator=torch.Generator().manual_seed(17)).bfloat16()
-    plan, calls = object(), []
+    plan, calls = SimpleNamespace(query=SimpleNamespace(logits_dtype="bfloat16", routed_scaling_factor=1.0)), []
 
     def route(selected_plan, logits, selected, ids, weights):
         assert selected_plan is plan

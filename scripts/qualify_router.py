@@ -120,7 +120,7 @@ def load_traces(args):
 def run_gpu(args, traces, report, raw):
     import torch
     from b12x.preparation import PreparationSession
-    from flare.recipes.qwen38.moe import PreparedRouter, RouterScratch
+    from flare.components.moe import PreparedRouter, RouterScratch
 
     if not os.environ.get("CUDA_VISIBLE_DEVICES") or torch.cuda.device_count() != 1:
         raise ValueError("assign exactly one CUDA device")
@@ -137,7 +137,7 @@ def run_gpu(args, traces, report, raw):
         try:
             for capacity in capacities:
                 logits = torch.zeros((capacity, 512), device=device, dtype=torch.bfloat16)
-                scratch = RouterScratch.allocate(capacity, device)
+                scratch = RouterScratch.allocate(capacity, device, experts=512, top_k=10)
                 operator = PreparedRouter(logits, scratch, session=session, name=f"router.{capacity}")
                 operators[capacity] = (logits, scratch, operator)
             stream.wait_stream(torch.cuda.current_stream(device))

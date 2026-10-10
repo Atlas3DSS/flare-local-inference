@@ -12,18 +12,17 @@ import torch
 import torch.nn.functional as F
 from b12x.preparation import PreparationSession
 
-from flare.components.linear import BF16Projection
+from flare.components.linear import UnquantizedProjection
+from flare.components.moe import PreparedRoutedExperts, RouterScratch
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
 from flare.recipes.qwen38.moe import (
     PreparedQwenMoe,
-    PreparedRoutedExperts,
     PreparedSharedExpert,
     QwenMoeScratch,
     QwenMoeWeights,
-    RouterScratch,
     SharedExpertWeights,
 )
 from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
@@ -82,10 +81,10 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens):
         reference_gate = reader.read(f"{prefix}.shared_expert_gate.weight")
     source = torch.zeros((tokens, 2560), dtype=torch.bfloat16, device="cuda")
     logits = torch.zeros((tokens, 512), dtype=torch.bfloat16, device="cuda")
-    route = RouterScratch.allocate(tokens, source.device)
+    route = RouterScratch.allocate(tokens, source.device, experts=512, top_k=10)
     with torch.inference_mode(), PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
         shared = PreparedSharedExpert(source, weights, session=session, name=f"shared:{tokens}")
-        router = BF16Projection(source, router_weight, logits, session=session, name=f"router:{tokens}")
+        router = UnquantizedProjection(source, router_weight, logits, session=session, name=f"router:{tokens}")
         session.freeze()
 
         def run():

@@ -181,7 +181,7 @@ class PreparedDecoder:
         from b12x.preparation import PreparedCall
         from b12x.sequence import embedding
 
-        from flare.components.linear import BF16Projection
+        from flare.components.linear import UnquantizedProjection
 
         from .attention import PreparedAttention
         from .gdn import PreparedGDN
@@ -253,7 +253,7 @@ class PreparedDecoder:
                     session=session, name=f"{name}.layer{index}.mlp_combine_norm")
         state.prepare_hidden(scratch.hidden, scratch.sample_hidden)
         state.prepare_residual(scratch.residual)
-        self.lm_head = BF16Projection(scratch.sample_hidden, weights.tree.lm_head.weight,
+        self.lm_head = UnquantizedProjection(scratch.sample_hidden, weights.tree.lm_head.weight,
             scratch.logits, session=session, name=f"{name}.lm_head")
         self.sampler = None
         if not verification:

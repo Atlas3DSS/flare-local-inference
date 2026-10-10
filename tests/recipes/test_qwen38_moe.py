@@ -5,14 +5,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from flare.recipes.qwen38 import moe
-from flare.recipes.qwen38.moe import PreparedRouter, PreparedQwenMoe, QwenMoeWeights, RouterScratch, QwenMoeScratch
+
+from flare.components import moe
+from flare.components.moe import PreparedRouter, RouterScratch
+from flare.recipes.qwen38.moe import PreparedQwenMoe, QwenMoeScratch, QwenMoeWeights
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 17, 4096])
 def test_router_declares_exact_fixed_library_abi(tokens):
     logits = torch.zeros((tokens, 512), dtype=torch.bfloat16)
-    scratch = RouterScratch.allocate(tokens, "cpu")
+    scratch = RouterScratch.allocate(tokens, "cpu", experts=512, top_k=10)
     requests = []
     session = SimpleNamespace(prepare=lambda batch: requests.extend(batch))
     router = PreparedRouter(logits, scratch, session=session, name="router")
@@ -34,7 +36,7 @@ def test_router_declares_exact_fixed_library_abi(tokens):
 
 
 def test_router_reuses_preallocated_buffers_through_public_entrypoint(monkeypatch):
-    scratch = RouterScratch.allocate(2, "cpu")
+    scratch = RouterScratch.allocate(2, "cpu", experts=512, top_k=10)
     pointers = tuple(getattr(scratch, name).data_ptr() for name in scratch.__dataclass_fields__)
     logits = torch.zeros(2, 512, dtype=torch.bfloat16)
     router = PreparedRouter(logits, scratch, session=SimpleNamespace(prepare=lambda _: None), name="router")
@@ -55,10 +57,10 @@ def test_router_rejects_invalid_geometry(experts, top_k):
 
 
 def test_router_rejects_changed_precision():
-    scratch = RouterScratch.allocate(1, "cpu")
+    scratch = RouterScratch.allocate(1, "cpu", experts=512, top_k=10)
     router = PreparedRouter(torch.zeros(1, 512, dtype=torch.bfloat16), scratch,
         session=SimpleNamespace(prepare=lambda _: None), name="router")
-    with pytest.raises(ValueError, match="BF16"):
+    with pytest.raises(ValueError, match="prepared dtype"):
         router(torch.zeros(1, 512, dtype=torch.float32))
 
 
@@ -71,7 +73,7 @@ def test_native_router_ties_fp32_weights_and_changed_input_graph(tokens, experts
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
     device = torch.device("cuda", 0)
     logits = torch.zeros((tokens, experts), dtype=torch.bfloat16, device=device)
-    scratch = RouterScratch.allocate(tokens, device, experts=experts)
+    scratch = RouterScratch.allocate(tokens, device, experts=experts, top_k=10)
     stream = torch.cuda.Stream(device=device)
     graph = torch.cuda.CUDAGraph()
     with PreparationSession(device=device, autotune=False, compile_workers=0) as session:

@@ -15,7 +15,7 @@ from flare.preparation.scratch import ScratchArena, prime_owners, scratch_storag
 from flare.preparation.tuning import register_finalizer
 
 
-class BF16Projection:
+class UnquantizedProjection:
     def __init__(
         self,
         source: torch.Tensor,
@@ -26,10 +26,8 @@ class BF16Projection:
         name: str,
         bias: torch.Tensor | None = None,
     ) -> None:
-        if source.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
-            raise TypeError("BF16 projections require BF16 source and weight")
-        if output.dtype != torch.bfloat16:
-            raise TypeError("BF16 projections require BF16 output")
+        if any(t.dtype not in (torch.bfloat16, torch.float32) for t in (source, weight, output)):
+            raise TypeError("unquantized projections require BF16 or FP32 operands")
         query = bf16_gemv.query_from_call(source, weight, out=output, bias=bias)
         self.plan = bf16_gemv.plan(query)
         self.weight = weight

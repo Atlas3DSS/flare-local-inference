@@ -1,11 +1,27 @@
 """Prepared SwiGLU MLPs using b12x projections and caller-owned buffers."""
 
+from dataclasses import dataclass
+
 import torch
 from b12x.norm import hyperconnection
 from b12x.preparation import PreparedCall
 
-from flare.components.linear import BF16Projection, QuantizedProjection
+from flare.components.linear import QuantizedProjection, UnquantizedProjection
 from flare.components.weights import MLPWeights
+
+
+@dataclass(frozen=True)
+class MLPScratch:
+    gate_up: torch.Tensor
+    intermediate: torch.Tensor
+    output: torch.Tensor
+
+    @classmethod
+    def allocate(cls, tokens, hidden, intermediate, device):
+        if any(type(value) is not int or value <= 0 for value in (tokens, hidden, intermediate)):
+            raise ValueError("MLP scratch dimensions must be positive integers")
+        return cls(*(torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+                     for width in (2 * intermediate, intermediate, hidden)))
 
 
 class PreparedMLP:
@@ -32,7 +48,7 @@ class PreparedMLP:
 
         def projection(input, weight, out, suffix):
             if isinstance(weight, torch.Tensor):
-                return BF16Projection(input, weight, out, session=session, name=f"{name}.{suffix}")
+                return UnquantizedProjection(input, weight, out, session=session, name=f"{name}.{suffix}")
             return QuantizedProjection(input, weight, out, session=session,
                                        name=f"{name}.{suffix}", workspace=workspace)
 

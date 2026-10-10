@@ -8,7 +8,7 @@ import torch
 from b12x.preparation import PreparedCall
 from b12x.sequence import embedding, mtp_feedback
 
-from flare.components.linear import BF16Projection
+from flare.components.linear import UnquantizedProjection
 from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
@@ -162,7 +162,7 @@ class PreparedMTP:
             priming_state=scratch.residual, session=session, name=f"{name}.final_mixer")
         self.attn_hc.prepare_combine_norm(self.mlp_hc, priming_state=scratch.residual,
             session=session, name=f"{name}.attn_combine_norm")
-        self.lm_head = BF16Projection(scratch.selected_hidden, weights.lm_head, scratch.logits,
+        self.lm_head = UnquantizedProjection(scratch.selected_hidden, weights.lm_head, scratch.logits,
                                      session=session, name=f"{name}.lm_head")
 
     def rebind_pages_for_preparation(self, state):

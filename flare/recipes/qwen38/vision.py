@@ -12,7 +12,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     apply_rotary_pos_emb_vision,
 )
 
-from flare.components.linear import BF16Projection, QuantizedProjection
+from flare.components.linear import QuantizedProjection, UnquantizedProjection
 from flare.preparation.fixtures import varlen_attention as attention_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import register_finalizer
@@ -190,7 +190,7 @@ class PreparedVision:
             parent, _, attribute = path.rpartition(".")
             setattr(module.get_submodule(parent), attribute, torch.nn.Parameter(tensor, requires_grad=False))
         # Conv3d rounds the projection before adding the BF16 bias.
-        self.patch_embed = _Linear(BF16Projection(scratch.patches,
+        self.patch_embed = _Linear(UnquantizedProjection(scratch.patches,
             module.patch_embed.proj.weight.flatten(1), scratch.hidden,
             session=session, name=f"{name}.patch_embed"), module.patch_embed.proj.bias)
         module.rotary_pos_emb = Qwen4ExpVisionRotaryEmbedding(config).to(device)

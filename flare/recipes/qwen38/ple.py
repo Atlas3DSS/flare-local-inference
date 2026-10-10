@@ -12,7 +12,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 from b12x.sequence import ple_embedding, short_conv
 from safetensors import safe_open
 
-from flare.components.linear import BF16Projection
+from flare.components.linear import UnquantizedProjection
 from flare.preparation.checkpoint import CheckpointManifest
 from flare.preparation.qwen38 import PLE_PREFIX, TEXT_PREFIX
 from flare.preparation.scratch import planned_scratch, prime_owners
@@ -376,14 +376,14 @@ class PreparedPLE:
             self.embedding_plan, args, session, f"{name}.embedding", ple_embedding.bind,
             attribute="embedding_binding", workspace=workspace,
         )
-        self.key_projection = BF16Projection(
+        self.key_projection = UnquantizedProjection(
             scratch.embedding,
             projections["key_proj"],
             scratch.key,
             session=session,
             name=f"{name}.key",
         )
-        self.value_projection = BF16Projection(
+        self.value_projection = UnquantizedProjection(
             scratch.embedding,
             projections["value_proj"],
             scratch.value,
