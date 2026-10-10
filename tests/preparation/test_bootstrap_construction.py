@@ -577,7 +577,7 @@ def _install_boundaries(monkeypatch, checkpoint):
     monkeypatch.setattr(ple.MappedPLETable, "load", classmethod(load_table))
     session = RecordingSession()
     monkeypatch.setattr(
-        bootstrap, "RecordedPreparationSession", lambda **kwargs: session
+        bootstrap, "preparation_session", lambda **kwargs: session
     )
     monkeypatch.setattr(tuning, "RecordedPreparationSession", RecordingSession)
     monkeypatch.setattr(bootstrap, "inspect_qwen38_checkpoint", lambda path: manifest)

@@ -24,7 +24,6 @@ from flare.preparation.qwen38 import (
     REVISION,
 )
 from flare.preparation.scratch import ScratchArena
-from flare.preparation.tuning import RecordedPreparationSession
 
 from .attention import QSAState, RotaryTables
 from .decoder import DecoderScratch, ModelWeights, PreparedDecoder
@@ -38,6 +37,7 @@ from .state import (
     HybridStatePool,
     StateTransferMetadata,
 )
+from .tuning import preparation_session
 from .vision import PreparedVision, VisionScratch
 
 _KV_ALLOCATION_MARGIN = 64 << 20
@@ -246,7 +246,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig = PreparationConfig(
             lm_head_weight=weights.tree.lm_head.weight)
         report(f"loaded MTP weights: {mtp_weights.allocated_bytes} device bytes")
     table = MappedPLETable.load(manifest, device)
-    session = RecordedPreparationSession(device=device, checkpoint=REVISION,
+    session = preparation_session(device=device, checkpoint=REVISION,
         namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
     session.__enter__()
     graphs = {}

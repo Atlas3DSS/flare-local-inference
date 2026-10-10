@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `c691c681ebcbda066faf5bd80fef0d257b256fbc`, including the CuTe DSL operators
+  `07323a5b0c168e4e85ee29fab168790a77679d87`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -206,6 +206,27 @@ module tree and replaces its forwards with prepared operations.
 and block-scaled b12x execution, tuning declarations, caller-owned outputs,
 shared scratch, and captured projection overlap. Recipes supply weights and
 geometry; the components have no Qwen-specific dimensions or state layout.
+
+The shared [canonical constructor](../flare/components/model.py) creates meta
+module trees without initializing CUDA. The [GLM 5.3 Flash recipe](../flare/recipes/glm53/model.py)
+uses it for `Glm5NextForConditionalGeneration`; GLM weight loading, prepared
+layer replacement, and serving are not implemented.
+
+[Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
+single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
+A [Gloo bootstrap coordinator](../flare/preparation/collectives.py) matches
+collective declarations and barriers before kernel preparation. Per-rank native
+workers can replay the captured reductions without Python between iterations.
+Production multi-rank scheduling and failure coordination are not implemented.
+The bootstrap must retain each PCIe runtime until every rank has drained replay.
+
+The shared [tuning session](../flare/preparation/tuning.py) owns declaration
+collection, candidate scratch reservation, autotuning, and binding finalization.
+Recipes supply the workload schema, numerical policy, and search-limit metadata;
+the [Qwen policy](../flare/recipes/qwen38/tuning.py) defines those values for its
+operator catalog. Collective preparation uses b12x sessions directly; integrating
+collective coordination into the batched tuning lifecycle remains required for
+multi-rank model preparation.
 
 | Model region | Prepared execution |
 |---|---|

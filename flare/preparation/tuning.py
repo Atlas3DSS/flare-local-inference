@@ -14,9 +14,6 @@ from b12x.preparation import MemoryRequirements, PreparationSession
 from .scratch import ScratchArena
 
 
-WORKLOAD_SCHEMA = "qwen38-active-operators-v1"
-
-
 class RecordedPreparationSession(PreparationSession):
     """Retain declarations, tune them together, and refresh selected bindings.
 
@@ -25,15 +22,18 @@ class RecordedPreparationSession(PreparationSession):
     even when b12x shares a selected payload without invoking a priming callback.
     """
 
-    def __init__(self, *, device, checkpoint: str, namespace=None, race_budget=None):
+    def __init__(self, *, device, checkpoint: str, workload_schema: str,
+                 numerical_policy: str, search_limits=None, namespace=None, race_budget=None):
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
+        if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
+            raise ValueError("tuning requires a workload schema and numerical policy")
         identity = dict(namespace or {})
         reserved = {"checkpoint", "workload_schema", "numerical_policy"}
         if reserved.intersection(identity):
             raise ValueError("tuning namespace cannot override its workload identity")
-        identity.update(checkpoint=checkpoint, workload_schema=WORKLOAD_SCHEMA,
-                        numerical_policy="qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-route-fp32")
+        identity.update(checkpoint=checkpoint, workload_schema=workload_schema,
+                        numerical_policy=numerical_policy)
         super().__init__(device=device, autotune=False, compile_workers=0,
                          namespace=identity, race_budget=race_budget)
         self._recorded_requests = {}
@@ -43,6 +43,8 @@ class RecordedPreparationSession(PreparationSession):
         self._benchmark_restorers = {}
         self._preparation_thread = get_ident()
         self._tune_status = "collecting"
+        self._workload_schema = workload_schema
+        self._search_limits = dict(search_limits or {})
         self.tuning_report = None
 
     def _require_collecting(self):
@@ -177,7 +179,7 @@ class RecordedPreparationSession(PreparationSession):
                 callback()
             self._synchronize()
             self.tuning_report = {
-                "workload_schema": WORKLOAD_SCHEMA, "namespace": self.namespace.to_dict(),
+                "workload_schema": self._workload_schema, "namespace": self.namespace.to_dict(),
                 "requests": len(requests), "compile_workers": self.compile_workers,
                 "cache_hits": result.cache_hits, "benchmarked_candidates": result.benchmarked_candidates,
                 "elapsed_seconds": result.elapsed_seconds,
@@ -191,13 +193,7 @@ class RecordedPreparationSession(PreparationSession):
                                                 for value in self._benchmark_resources.values()),
                 "allocated_shared_benchmark_bytes": sum(int(getattr(value, "allocated_nbytes",
                     getattr(value, "nbytes", 0))) for value in self._benchmark_resources.values()),
-                "search_limits": {
-                    "bf16_projection": "all eligible b12x backends and rows_per_tile configurations",
-                    "mxfp8_projection": "fixed quantized wrapper with default inner dense lowering",
-                    "qsa": "fixed attention_splits=16 and singleton kernel configuration",
-                    "gdn_prefill": "sequential k_split=1; v_split, stages, and window_tiles remain tunable",
-                    "operator_scratch": "one arena sized to the complete candidate envelope",
-                },
+                "search_limits": dict(self._search_limits),
                 "allocated_before_tuning": allocated_before,
                 "allocated_before_trial_release": self._allocated(),
             }

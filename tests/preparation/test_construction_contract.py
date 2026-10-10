@@ -113,7 +113,8 @@ def test_extracted_attention_fixture_lives_through_trials_and_releases_before_ca
     from flare.preparation.fixtures.varlen_attention import benchmark_call
     from flare.preparation.tuning import RecordedPreparationSession
 
-    session = RecordedPreparationSession(device=0, checkpoint="fixture-lifetime")
+    session = RecordedPreparationSession(device=0, checkpoint="fixture-lifetime",
+        workload_schema="attention-fixture-v1", numerical_policy="default")
     arguments = {name: torch.zeros(4, 2, 8) for name in ("q", "k", "v")}
     arguments["cu_seqlens_q"] = torch.zeros(3, dtype=torch.int32)
     calls, references, events = [], [], []

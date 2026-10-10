@@ -19,6 +19,11 @@ from flare.preparation.tuning import (
 )
 
 
+def make_session(**kwargs):
+    return RecordedPreparationSession(workload_schema="test-operators-v1",
+        numerical_policy="default", **kwargs)
+
+
 @pytest.fixture
 def backend(monkeypatch):
     events = []
@@ -114,7 +119,7 @@ def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_si
 
 
 def test_benchmark_resource_shared_across_requests_and_released_before_capture(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     observed = []
     references = []
 
@@ -146,7 +151,7 @@ def test_benchmark_resource_shared_across_requests_and_released_before_capture(b
 
 @pytest.mark.parametrize("source", ["fixed", "override", "cached", "tuned"])
 def test_completed_selection_sources_are_accepted_and_reported(backend, source):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     session.prepare((declaration("op", source=source),))
     assert session.tune()["selection_counts"] == {source: 1}
 
@@ -154,7 +159,7 @@ def test_completed_selection_sources_are_accepted_and_reported(backend, source):
 @pytest.mark.parametrize("failure", ["default", "cancel", "finalizer", "result_close"])
 def test_incomplete_tuning_never_allows_capture_or_freeze(backend, failure):
     events, controls = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     session.prepare((declaration("op", source="default" if failure == "default" else "tuned"),))
     controls.cancel = failure == "cancel"
     controls.close_error = failure == "result_close"
@@ -175,7 +180,7 @@ def test_incomplete_tuning_never_allows_capture_or_freeze(backend, failure):
 
 def test_disabled_tuning_does_not_silently_keep_defaults(backend):
     events, _ = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     session.prepare((declaration("op"),))
     session._stop.set()
     with pytest.raises(RuntimeError, match="enabled, uncancelled"):
@@ -184,7 +189,7 @@ def test_disabled_tuning_does_not_silently_keep_defaults(backend):
 
 
 def test_names_registration_and_one_shot_lifecycle_are_strict(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     item = declaration("op")
     with pytest.raises(ValueError, match="unique"):
         session.prepare((item, item))
@@ -203,12 +208,36 @@ def test_names_registration_and_one_shot_lifecycle_are_strict(backend):
 
 
 def test_namespace_is_exact_and_reserved_policy_cannot_be_overridden(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision", namespace={"headers": "digest"})
+    session = make_session(device=0, checkpoint="revision", namespace={"headers": "digest"})
     assert session.namespace["checkpoint"] == "revision"
     assert session.namespace["headers"] == "digest"
     for key in ("checkpoint", "workload_schema", "numerical_policy"):
         with pytest.raises(ValueError, match="cannot override"):
-            RecordedPreparationSession(device=0, checkpoint="revision", namespace={key: "different"})
+            make_session(device=0, checkpoint="revision", namespace={key: "different"})
+
+
+def test_recipe_policy_owns_cache_identity_and_report_limits(backend):
+    limits = {"projection": "all eligible backends"}
+    session = RecordedPreparationSession(device=0, checkpoint="revision",
+        workload_schema="glm53-test-operators-v1", numerical_policy="default-tp2",
+        search_limits=limits)
+    limits["projection"] = "changed after construction"
+    session.prepare((declaration("op"),))
+    report = session.tune()
+    assert report["workload_schema"] == "glm53-test-operators-v1"
+    assert report["namespace"]["numerical_policy"] == "default-tp2"
+    assert report["search_limits"] == {"projection": "all eligible backends"}
+
+
+def test_qwen_recipe_preserves_preparation_cache_identity(backend):
+    from flare.recipes.qwen38.tuning import preparation_session
+
+    session = preparation_session(device=0, checkpoint="revision", namespace={"headers": "digest"})
+    assert session.namespace.to_dict() == {
+        "checkpoint": "revision", "headers": "digest",
+        "workload_schema": "qwen38-active-operators-v1",
+        "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-route-fp32",
+    }
 
 
 
@@ -223,7 +252,7 @@ def test_helpers_preserve_ordinary_session_behavior():
 @pytest.mark.parametrize("source", ["cached", "tuned"])
 def test_borrowed_state_restores_after_result_close_and_owner_release(backend, monkeypatch, source):
     events, _ = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     storage = torch.zeros(32, dtype=torch.uint8)
     resource = SimpleNamespace(nbytes=32, allocated_nbytes=0, borrowed_nbytes=32)
     calls = []
@@ -273,7 +302,7 @@ def test_borrowed_state_restores_after_result_close_and_owner_release(backend, m
 @pytest.mark.parametrize("failure", ["prepare", "finalizer", "result_close"])
 def test_borrowed_state_restores_on_tuning_failures(backend, monkeypatch, failure):
     _, controls = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     storage = torch.full((8,), 7, dtype=torch.uint8)
     session.register_benchmark_resource("state", SimpleNamespace(nbytes=8), restore=storage.zero_)
     session.prepare((declaration("op"),))
@@ -298,7 +327,7 @@ def test_borrowed_state_restores_on_tuning_failures(backend, monkeypatch, failur
 
 @pytest.mark.parametrize("failure", ["reset", "pre_sync", "post_sync"])
 def test_failed_restore_retains_owner_and_close_retries_before_freeze(backend, monkeypatch, failure):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     attempts = []
 
     class Owner:
@@ -339,7 +368,7 @@ def test_failed_restore_retains_owner_and_close_retries_before_freeze(backend, m
 
 
 def test_borrowed_registration_is_unique_collecting_only_and_restores_on_close(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     resource = SimpleNamespace(nbytes=4)
     restored = []
     with pytest.raises(TypeError, match="restore callback"):
@@ -356,7 +385,7 @@ def test_borrowed_registration_is_unique_collecting_only_and_restores_on_close(b
 def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(backend):
     from flare.preparation.fixtures.gdn import register_benchmark_state
 
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     storage = torch.full((2, 32), 7, dtype=torch.uint8)
     template = torch.empty_strided((2, 4), (8, 1))
     references = []
@@ -383,7 +412,7 @@ def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(
 
 
 def test_close_retries_restoration_after_base_session_has_closed(backend, monkeypatch):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     session.state = "OPEN"
     attempts = []
 
@@ -420,7 +449,7 @@ def test_close_retries_restoration_after_base_session_has_closed(backend, monkey
 
 def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_aliases(backend):
     events, controls = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     arena.reserve(4)
     session.register_scratch(arena)
@@ -463,7 +492,7 @@ def test_all_component_envelope_reserves_one_arena_before_tuning_and_refreshes_a
 
 
 def test_parallel_workspace_peak_is_reserved_then_trimmed_without_summing_serial_groups(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     requests = [declaration("main", size=700, selected_size=300),
@@ -487,7 +516,7 @@ def test_parallel_workspace_peak_is_reserved_then_trimmed_without_summing_serial
 
 
 def test_default_storage_released_after_alias_rebind_and_trial_cleanup_before_report(backend, monkeypatch):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     original = arena.reserve(4)
     reference = weakref.ref(original)
@@ -514,7 +543,7 @@ def test_default_storage_released_after_alias_rebind_and_trial_cleanup_before_re
 @pytest.mark.parametrize("borrowed_state", [False, True])
 def test_selected_arena_retained_after_trials_restoration_and_capture(backend, monkeypatch, source, borrowed_state):
     events, _ = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     references, restored = {}, []
@@ -576,7 +605,7 @@ def test_selected_arena_retained_after_trials_restoration_and_capture(backend, m
 
 
 def test_arena_registration_is_unique_collecting_only_and_optional(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     with pytest.raises(TypeError):
         session.register_scratch(torch.empty(4, dtype=torch.uint8))
     arena = ScratchArena("cpu")
@@ -587,13 +616,13 @@ def test_arena_registration_is_unique_collecting_only_and_optional(backend):
     session.tune()
     with pytest.raises(RuntimeError, match="closed after tuning"):
         session.register_scratch(ScratchArena("cpu"))
-    ordinary = RecordedPreparationSession(device=0, checkpoint="revision")
+    ordinary = make_session(device=0, checkpoint="revision")
     ordinary.prepare((declaration("op"),))
     assert ordinary.tune()["scratch_arena"] == {}
 
 
 def test_failed_close_retains_arena_owner_until_successful_drain(backend, monkeypatch):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     arena.reserve(17)
     reference = weakref.ref(arena)
@@ -625,7 +654,7 @@ def test_failed_close_retains_arena_owner_until_successful_drain(backend, monkey
 
 def test_arena_binding_finalizers_precede_other_finalizers_and_close_trial(backend):
     events, controls = backend
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     arena.reserve(1)
     session.register_scratch(arena)
@@ -651,7 +680,7 @@ def test_arena_binding_finalizers_precede_other_finalizers_and_close_trial(backe
 
 
 def test_arena_binding_failure_keeps_callback_owner_until_session_cleanup(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     session.prepare((declaration("op"),))
@@ -675,7 +704,7 @@ def test_arena_binding_failure_keeps_callback_owner_until_session_cleanup(backen
 
 
 def test_candidate_storage_survives_trial_close_then_dies_before_selected_memory_report(backend, monkeypatch):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     references, order = {}, []
@@ -731,7 +760,7 @@ def test_candidate_storage_survives_trial_close_then_dies_before_selected_memory
 
 
 def test_undeclared_candidate_growth_fails_before_freeze_finalization_or_capture(backend):
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     finalized = []
@@ -756,7 +785,7 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
         backend, monkeypatch, retain_arena_owner):
     from flare.preparation.scratch import prime_owners
 
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     arena.reserve(16)
     session.register_scratch(arena)
@@ -811,7 +840,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
 
     events, controls = backend
     controls.retain_trials = True
-    session = RecordedPreparationSession(device=0, checkpoint="revision")
+    session = make_session(device=0, checkpoint="revision")
     source = torch.zeros(4, 32, dtype=torch.bfloat16)
     output = torch.zeros_like(source)
     references = []

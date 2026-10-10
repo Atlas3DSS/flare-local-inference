@@ -137,8 +137,8 @@ def main():
                "completion_records": completion}
     if args.tune:
         from flare.preparation.qwen38 import CONFIG_SHA256, HEADERS_SHA256
-        from flare.preparation.tuning import RecordedPreparationSession
-        preparation = RecordedPreparationSession(device=device, checkpoint=REVISION,
+        from flare.recipes.qwen38.tuning import preparation_session
+        preparation = preparation_session(device=device, checkpoint=REVISION,
             namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
     else:
         preparation = PreparationSession(device=device, autotune=False, compile_workers=0)
