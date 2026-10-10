@@ -455,11 +455,13 @@ struct NativeServer {
 #[pymethods]
 impl NativeServer {
     #[new]
+    #[pyo3(signature = (owner, manifest, config_json, *, peer_fds=None))]
     fn new(
         py: Python<'_>,
         owner: Py<PyAny>,
         manifest: &Bound<'_, PyAny>,
         config_json: &str,
+        peer_fds: Option<Vec<i32>>,
     ) -> PyResult<Self> {
         if owner.bind(py).is_none() {
             return Err(PyValueError::new_err(
@@ -467,6 +469,13 @@ impl NativeServer {
             ));
         }
         let manifest = execution_manifest(manifest)?;
+        let peers = peer_fds
+            .map(|fds| {
+                fds.into_iter()
+                    .map(rank_socket)
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
         let bootstrap = py
             .detach(|| {
                 crate::server::Bootstrap::load::<crate::model::qwen4exp::Qwen4Exp>(
@@ -487,6 +496,7 @@ impl NativeServer {
                     bootstrap.frontend,
                     bootstrap.images,
                     bootstrap.server,
+                    peers,
                 )
             }
         }) {

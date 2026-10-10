@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    os::unix::net::UnixStream,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -13,7 +14,7 @@ use tokio::sync::mpsc as async_mpsc;
 use crate::{
     AdmissionError, Error, ExecutionError, Failure, Result, Shutdown,
     cache::ConditioningEvent,
-    execution::{ExecutionManifest, GraphExecutor, GraphKind, SamplingMode},
+    execution::{ExecutionManifest, GraphKind, RankExecutor, SamplingMode},
     model::{ModelConfig, ModelContract, SamplingParameters},
     scheduler::{RequestHandle, RequestPhase, RequestScheduler, RequestSpec, ScheduledStep},
 };
@@ -184,6 +185,7 @@ impl<M: ModelContract> ModelRuntime<M> {
         queue_capacity: usize,
         event_capacity: usize,
         frontend: Arc<crate::frontend::Frontend>,
+        peers: Option<Vec<UnixStream>>,
     ) -> Result<Self> {
         M::validate(&config, &manifest)?;
         super::observation::initialize_clock();
@@ -208,7 +210,7 @@ impl<M: ModelContract> ModelRuntime<M> {
                 // SAFETY: start's caller retains all prepared resources through
                 // confirmed drain. This thread exclusively owns the executor;
                 // construction binds both streams to the manifest's context.
-                let mut executor = match unsafe { GraphExecutor::new(manifest) } {
+                let mut executor = match unsafe { RankExecutor::new(manifest, peers) } {
                     Ok(executor) => executor,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error.clone()));
@@ -495,7 +497,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         }
     }
 
-    fn run(&mut self, executor: &mut GraphExecutor) -> Result<()> {
+    fn run(&mut self, executor: &mut RankExecutor) -> Result<()> {
         // Input construction stays inside the worker's unwind and drain boundary.
         self.inputs = Some(M::Inputs::default());
         while !self.stop.load(Ordering::Acquire) {
@@ -922,7 +924,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         Ok(())
     }
 
-    fn submit(&mut self, executor: &mut GraphExecutor, step: &ScheduledStep) -> Result<bool> {
+    fn submit(&mut self, executor: &mut RankExecutor, step: &ScheduledStep) -> Result<bool> {
         if !executor.can_submit(step.grammar_constrained) {
             return Ok(false);
         }

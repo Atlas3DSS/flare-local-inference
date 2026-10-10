@@ -2,50 +2,13 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
-use super::{ExecutionManifest, FrameCompletion, GraphExecutor, TensorParallelExecutor, Upload};
+use super::{ExecutionManifest, FrameCompletion, RankExecutor, Upload};
 use crate::{Error, ExecutionError, Failure, Result, Shutdown, cache::Fence};
 
 pub struct OwnedUpload {
     pub buffer: String,
     pub offset: usize,
     pub bytes: Vec<u8>,
-}
-
-enum Executor {
-    Local(Box<GraphExecutor>),
-    Parallel(Box<TensorParallelExecutor>),
-}
-
-impl Executor {
-    fn submit(
-        &mut self,
-        graph: usize,
-        uploads: &[Upload<'_>],
-        grammar: bool,
-    ) -> Result<Option<Fence>> {
-        match self {
-            Self::Local(executor) => executor.submit(graph, uploads, grammar),
-            Self::Parallel(executor) => executor.submit(graph, uploads, grammar),
-        }
-    }
-    fn poll(&mut self) -> Result<Option<FrameCompletion>> {
-        match self {
-            Self::Local(executor) => executor.poll(),
-            Self::Parallel(executor) => executor.poll(),
-        }
-    }
-    fn outstanding(&self) -> usize {
-        match self {
-            Self::Local(executor) => executor.outstanding(),
-            Self::Parallel(executor) => executor.outstanding(),
-        }
-    }
-    fn close(&mut self) -> Shutdown {
-        match self {
-            Self::Local(executor) => executor.close(),
-            Self::Parallel(executor) => executor.close(),
-        }
-    }
 }
 
 enum Command {
@@ -66,7 +29,7 @@ struct Control {
 }
 
 /// Synchronous control surface for bootstrap/qualification callers on other threads.
-/// A native scheduler can own GraphExecutor directly without this channel boundary.
+/// The native scheduler owns its rank executor directly without this channel boundary.
 pub struct ExecutionWorker {
     control: Mutex<Control>,
 }
@@ -97,12 +60,7 @@ impl ExecutionWorker {
                 // SAFETY: The caller retains the manifest's graphs and allocations
                 // until this worker reports drain. The executor binds its streams
                 // to the declared context on this thread and has exclusive access.
-                let opened = match peers {
-                    Some(peers) => unsafe { TensorParallelExecutor::new(manifest, peers) }
-                        .map(|executor| Executor::Parallel(Box::new(executor))),
-                    None => unsafe { GraphExecutor::new(manifest) }
-                        .map(|executor| Executor::Local(Box::new(executor))),
-                };
+                let opened = unsafe { RankExecutor::new(manifest, peers) };
                 let mut executor = match opened {
                     Ok(executor) => executor,
                     Err(error) => {

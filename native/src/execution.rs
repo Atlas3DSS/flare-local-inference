@@ -2,9 +2,11 @@
 
 mod manifest;
 mod parallel;
+mod ranks;
 mod transport;
 mod worker;
 pub use parallel::{TensorParallelExecutor, serve_rank};
+pub(crate) use ranks::RankExecutor;
 pub use transport::{CompletionRecord, FrameCompletion, GraphExecutor, TokenVector, Upload};
 pub use worker::{ExecutionWorker, OwnedUpload};
 

@@ -73,6 +73,27 @@ impl TensorParallelExecutor {
         usize::from(self.pending.is_some())
     }
 
+    pub fn manifest(&self) -> &ExecutionManifest {
+        self.local.manifest()
+    }
+
+    pub fn can_submit(&self, grammar: bool) -> bool {
+        self.poison.is_none()
+            && self.shutdown.is_none()
+            && self.pending.is_none()
+            && self.local.can_submit(grammar)
+    }
+
+    pub fn next_fence(&self) -> Result<Fence> {
+        if let Some(error) = &self.poison {
+            return Err(error.clone());
+        }
+        if self.shutdown.is_some() {
+            return Err(invalid("tensor-parallel executor is closed"));
+        }
+        self.local.next_fence()
+    }
+
     pub fn submit(
         &mut self,
         graph: usize,

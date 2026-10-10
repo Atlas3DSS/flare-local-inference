@@ -113,6 +113,7 @@ impl<M: ModelContract> Server<M> {
         frontend: Frontend,
         images: ImageProcessor,
         config: ServerConfig,
+        peers: Option<Vec<std::os::unix::net::UnixStream>>,
     ) -> std::result::Result<Self, StartFailure> {
         if config.qualification_token_trace && !config.bind.ip().is_loopback() {
             return Err("token qualification requires a loopback listener".into());
@@ -143,6 +144,7 @@ impl<M: ModelContract> Server<M> {
                 config.queue_capacity,
                 config.event_capacity,
                 frontend.clone(),
+                peers,
             )?
         });
         let state = Arc::new(HttpState {

@@ -445,8 +445,11 @@ Shutdown drains every rank before releasing graph owners and IPC mappings.
 Disconnected ranks or graph-completion timeouts retain resources without
 synchronizing a potentially stranded collective. Process supervision must
 terminate the whole failed rank group before reclaiming those resources.
-Production multi-rank scheduling, process supervision, and HTTP integration
-remain unimplemented.
+The native model scheduler owns either the local executor or this coordinator
+through [RankExecutor](../native/src/execution/ranks.rs), with no intervening
+execution-worker queue. Native server startup accepts prepared peer sockets.
+The Python server binding still selects the Qwen contract; GLM contract dispatch,
+rank-process supervision, and GLM HTTP integration remain unimplemented.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
 
 The shared [tuning session](../flare/preparation/tuning.py) owns declaration
