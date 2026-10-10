@@ -75,7 +75,7 @@ class PreparationConfig:
     pages: int | None = None
     mtp: bool = False
     speculative_proposal_source: str = "mtp"
-    speculative_widths: tuple[int, ...] = tuple(range(1, 9))
+    speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
     speculative_fixed_width: int | None = None
     history_drafts: bool = False
 

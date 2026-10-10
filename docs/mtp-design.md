@@ -180,9 +180,20 @@ rerunning the model.
 ## Graph catalog, control and scheduling
 
 The chain catalog has request capacities `B ∈ {1,2,4}` and integer verification
-widths `1 <= W <= 8/B`, where `K=W-1`. Batch one captures every width from one
-through eight, batch two captures one through four, and batch four captures one
-and two. All default shapes stay within the eight-row MoE direct-micro band.
+widths `1 <= W <= min(K_max + 1, 8/B)`, where `K=W-1`.
+`--mtp-max-draft-tokens` sets `K_max` and defaults to three for Qwen. Batch one
+and batch two therefore capture widths one through four; batch four captures
+one and two. A limit of five permits batch-one widths through six. Only the
+selected widths are prepared and handed to the native adaptive controller,
+which may choose fewer drafts but cannot exceed the limit.
+`--mtp-draft-tokens` selects an explicit increasing set of draft counts, including
+zero, instead of a draft-token limit; the options are mutually exclusive.
+`--mtp-fixed-draft-tokens 3` selects three drafts rather than adapting the count.
+An explicit fixed count expands the default limit when necessary, but must fit
+an explicit maximum or count catalog. Batch capacity, context limits and host
+constraints can reduce the selected count. Verification widths include the
+pending input and remain an internal graph-layout detail. All shapes stay within
+the eight-row MoE direct-micro band.
 Grouped-path shapes require measured round costs before entering the catalog. Width one consumes the
 pending input and emits one target token, with no draft proposals; MTP history
 still absorbs the committed feedback pair. All shapes are prepared, tuned,

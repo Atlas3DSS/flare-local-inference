@@ -30,10 +30,13 @@ def main(argv=None):
     parser.add_argument("--mtp", action="store_true", help="prepare native multi-token prediction graphs")
     parser.add_argument("--mtp-proposal-source", choices=("mtp", "copy"), default="mtp",
         help="proposal source for speculative graphs; copy loads no MTP weights")
-    parser.add_argument("--mtp-widths", type=int, nargs="+", default=list(range(1, 9)),
-        help="verification widths including the pending input; batch times width is at most eight (default: 1 through 8)")
-    parser.add_argument("--mtp-fixed-width", type=int, choices=range(1, 9),
-        help="select a fixed prepared width instead of adaptive verification")
+    catalog = parser.add_mutually_exclusive_group()
+    catalog.add_argument("--mtp-max-draft-tokens", type=int, choices=range(1, 8),
+        help="maximum draft tokens per request; adaptive speculation may use fewer (Qwen default: 3)")
+    catalog.add_argument("--mtp-draft-tokens", type=int, nargs="+", choices=range(8),
+        help="explicit increasing draft-token counts including zero; overrides the default draft limit")
+    parser.add_argument("--mtp-fixed-draft-tokens", type=int, choices=range(8),
+        help="fixed draft-token count instead of adaptive selection; expands the default limit if necessary")
     parser.add_argument("--history-drafts", action="store_true",
         help="enable draft continuations from request history during speculation (default: disabled)")
     parser.add_argument("--snapshot-budget-gib", type=float, default=4)
@@ -46,6 +49,17 @@ def main(argv=None):
     parser.add_argument("--memory-report", type=Path)
     parser.add_argument("--prepare-only", action="store_true", help="validate the graph catalog and release it without binding HTTP")
     args = parser.parse_args(argv)
+    if args.mtp_draft_tokens is None:
+        maximum = args.mtp_max_draft_tokens
+        if maximum is None:
+            maximum = max(3, args.mtp_fixed_draft_tokens or 0)
+        args.mtp_draft_tokens = list(range(maximum + 1))
+    if args.mtp_draft_tokens[0] != 0 or sorted(set(args.mtp_draft_tokens)) != args.mtp_draft_tokens:
+        parser.error("--mtp-draft-tokens must be increasing unique counts including zero")
+    if args.mtp_fixed_draft_tokens is not None and args.mtp_fixed_draft_tokens not in args.mtp_draft_tokens:
+        parser.error("--mtp-fixed-draft-tokens must fit the explicit maximum or belong to --mtp-draft-tokens")
+    args.mtp_widths = [count + 1 for count in args.mtp_draft_tokens]
+    args.mtp_fixed_width = None if args.mtp_fixed_draft_tokens is None else args.mtp_fixed_draft_tokens + 1
     import flare_helios
 
     with flare_helios.CliSignals():

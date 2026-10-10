@@ -74,10 +74,12 @@ def test_speculative_policy_requires_a_prepared_width_catalog(widths, fixed):
         PreparationConfig(mtp=True, speculative_widths=widths, speculative_fixed_width=fixed)
 
 
-def test_speculative_catalog_covers_each_width_inside_micro_band():
-    shapes = PreparationConfig(mtp=True).speculative_shapes
-    assert len(shapes) == 14
-    assert {width for batch, width in shapes if batch == 1} == set(range(1, 9))
+@pytest.mark.parametrize("widths, count", [(None, 10), (tuple(range(1, 7)), 12), (tuple(range(1, 9)), 14)])
+def test_speculative_catalog_covers_selected_widths_inside_micro_band(widths, count):
+    config = PreparationConfig(mtp=True, **({} if widths is None else {"speculative_widths": widths}))
+    shapes = config.speculative_shapes
+    assert len(shapes) == count
+    assert {width for batch, width in shapes if batch == 1} == set(widths or (1, 2, 3, 4))
     assert {width for batch, width in shapes if batch == 2} == set(range(1, 5))
     assert {width for batch, width in shapes if batch == 4} == {1, 2}
 
@@ -91,7 +93,15 @@ def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
 
 @pytest.mark.parametrize("source", ["mtp", "copy"])
 @pytest.mark.parametrize("history_drafts", [False, True])
-def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch, source, history_drafts):
+@pytest.mark.parametrize("catalog, widths, fixed", [
+    ([], (1, 2, 3, 4), None),
+    ([], (1, 2, 3, 4), 3),
+    ([], (1, 2, 3, 4, 5, 6), 5),
+    (["--mtp-max-draft-tokens", "5"], (1, 2, 3, 4, 5, 6), None),
+    (["--mtp-max-draft-tokens", "5"], (1, 2, 3, 4, 5, 6), 5),
+    (["--mtp-draft-tokens", "0", "1", "3", "7"], (1, 2, 4, 8), 7),
+])
+def test_cli_preserves_mtp_draft_limits_and_proposal_policy(monkeypatch, source, history_drafts, catalog, widths, fixed):
     from flare.__main__ import main
 
     captured = []
@@ -114,13 +124,32 @@ def test_cli_preserves_explicit_mtp_measurement_policy(monkeypatch, source, hist
         return Model()
 
     monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare)
-    arguments = ["--prepare-only", "--mtp", "--mtp-proposal-source", source, "--mtp-widths", "1", "2", "4",
-                 "--mtp-fixed-width", "4"]
+    arguments = ["--prepare-only", "--mtp", "--mtp-proposal-source", source, *catalog]
+    if fixed is not None:
+        arguments.extend(["--mtp-fixed-draft-tokens", str(fixed)])
     if history_drafts:
         arguments.append("--history-drafts")
     assert main(arguments) == 0
     assert captured[0].mtp
     assert captured[0].speculative_proposal_source == source
-    assert captured[0].speculative_widths == (1, 2, 4)
-    assert captured[0].speculative_fixed_width == 4
+    assert captured[0].speculative_widths == widths
+    assert captured[0].speculative_fixed_width == (None if fixed is None else fixed + 1)
     assert captured[0].history_drafts is history_drafts
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--mtp-max-draft-tokens", "0"],
+    ["--mtp-max-draft-tokens", "8"],
+    ["--mtp-max-draft-tokens", "3", "--mtp-draft-tokens", "0", "3"],
+    ["--mtp-max-draft-tokens", "3", "--mtp-fixed-draft-tokens", "5"],
+    ["--mtp-draft-tokens", "1", "3"],
+    ["--mtp-draft-tokens", "0", "3", "1"],
+    ["--mtp-draft-tokens", "0", "1", "1"],
+    ["--mtp-draft-tokens", "0", "3", "--mtp-fixed-draft-tokens", "2"],
+])
+def test_cli_rejects_invalid_draft_limits_before_loading(arguments):
+    from flare.__main__ import main
+
+    with pytest.raises(SystemExit) as error:
+        main(["--mtp", *arguments])
+    assert error.value.code == 2

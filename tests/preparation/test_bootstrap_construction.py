@@ -660,7 +660,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         "restore": 3,
         "snapshot": 3,
     }
-    expected.update({"decode": 3} if proposal == "ordinary" else {"speculative": 14})
+    expected.update({"decode": 3} if proposal == "ordinary" else {"speculative": 10})
     assert Counter(signature.kind for signature in signatures) == expected
     assert {
         signature.token_capacity
@@ -684,7 +684,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         if signature.kind in ("prefill", "resume", "speculative")
     )
     decoders = constructors["PreparedDecoder"]
-    assert len(decoders) == (9 if proposal == "ordinary" else 20)
+    assert len(decoders) == (9 if proposal == "ordinary" else 16)
     assert len(constructors["PreparedVision"]) == 4
     assert len(constructors["PreparedMaintenance"]) == 9
     assert len(constructors["PreparedResume"]) == 3
@@ -715,17 +715,17 @@ def test_prepare_model_constructs_real_catalog_on_meta(
             assert type(layer[1]).__name__ == (
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
-    assert len(constructors["PreparedMTP"]) == (31 if proposal == "mtp" else 0)
+    assert len(constructors["PreparedMTP"]) == (23 if proposal == "mtp" else 0)
     assert len(constructors["PreparedCheckpointCaches"]) == 9
     for owner, _ in constructors["PreparedMaintenance"]:
         assert owner.transfers.exact.pool is owner.pool
         assert owner.transfers.exact.tables is owner.forward_inputs.page_tables
         assert (owner.transfers.exact.draft is not None) == (proposal == "mtp")
     assert len(constructors["PreparedStochasticVerification"]) == (
-        0 if proposal == "ordinary" else 14
+        0 if proposal == "ordinary" else 10
     )
     assert len(constructors["PreparedCopyProposals"]) == (
-        14 if proposal == "copy" else 0
+        10 if proposal == "copy" else 0
     )
     for _, args in constructors["PreparedMTP"]:
         assert args["workspace"] is session.arena

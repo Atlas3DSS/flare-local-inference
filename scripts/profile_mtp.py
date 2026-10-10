@@ -120,7 +120,8 @@ def main():
         raise ValueError('profiling requires a 512-token prompt')
     started = monotonic()
     progress = lambda message: print(f'{monotonic() - started:.1f}s {message}', flush=True)
-    with prepare_model(args.snapshot, PreparationConfig(mtp=True), progress=progress) as model:
+    with prepare_model(args.snapshot, PreparationConfig(mtp=True, speculative_widths=tuple(range(1, 9))),
+                       progress=progress) as model:
         replay = Replay(model, tokens)
         selected = False
         for trial in range(args.trials):

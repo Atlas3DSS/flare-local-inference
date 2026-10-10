@@ -168,8 +168,9 @@ insufficient memory fails startup without reducing the chunk size or omitting a
 graph variant.
 
 At the default prefill limit, ordinary execution declares 25 graphs. Speculative
-execution replaces the three ordinary decode graphs with 14 verification shapes,
-producing 36 graphs. Every variant uses the common FlashInfer sampler. The
+execution defaults to at most three draft tokens per request and replaces the
+three ordinary decode graphs with 10 verification shapes, producing 32 graphs.
+Every variant uses the common FlashInfer sampler. The
 catalog includes vision, prefill, resume, initialization, snapshot, and restore;
 startup rejects incomplete declarations.
 
@@ -1127,8 +1128,9 @@ Execution ABIs 2 and 3 retain `sampling_mode="general"` as their sole supported
 manifest value. With batch capacities 1, 2 and 4, the ordinary serving catalog
 contains `19 + len(prefill_capacities)` graphs: 25 with the 4,096-token default,
 or 22 with a 512-token limit. The speculative catalog replaces three ordinary
-decode graphs with 14 verification shapes, for 36 graphs at the default prefill
-capacity. Bounded top-k optimization is deferred. Historical component
+decode graphs with 10 verification shapes under the default three-draft limit,
+for 32 graphs at the default prefill capacity. Bounded top-k optimization is
+deferred. Historical component
 measurements of the general path were 120–170 microseconds per step; each
 prepared implementation requires its own measurement. Threshold ties must never
 be truncated to a fixed number of candidates.
