@@ -62,7 +62,8 @@ class ModelWeights:
         tree = create_model_tree(manifest.snapshot)
         before = torch.cuda.memory_allocated(device)
         layers = []
-        with GlmWeightLoader(manifest, device, shard=shard) as loader:
+        with GlmWeightLoader(manifest, device, shard=shard,
+                             show_progress=progress is not None and shard.rank == 0) as loader:
             names = [f"{TEXT_PREFIX}.embed_tokens.weight", f"{TEXT_PREFIX}.norm.weight"]
             for name in names:
                 path, attribute = name.rsplit(".", 1)
@@ -75,8 +76,6 @@ class ModelWeights:
             for index in range(len(tree.model.language_model.layers)):
                 layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),
                                            loader.load_residual(index)))
-                if progress is not None:
-                    progress(f"loaded text layer {index + 1}/{len(tree.model.language_model.layers)}")
         torch.cuda.synchronize(device)
         return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before)
 
@@ -91,8 +90,9 @@ class GlmWeightLoader(DirectWeightLoader):
     """
 
     def __init__(self, manifest: IndexedCheckpoint, device, *, shard: TensorParallelShard,
-                 prefixes=None, csf_byte_budget=128 << 20):
-        super().__init__(manifest, device, prefixes=prefixes, csf_byte_budget=csf_byte_budget)
+                 prefixes=None, csf_byte_budget=128 << 20, show_progress=False):
+        super().__init__(manifest, device, prefixes=prefixes, csf_byte_budget=csf_byte_budget,
+                         show_progress=show_progress)
         self.shard = shard
         config = json.loads((manifest.snapshot / "config.json").read_text())
         if (config.get("model_type") != "glm5_next"

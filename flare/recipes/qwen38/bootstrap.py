@@ -6,7 +6,6 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
 
 import torch
 
@@ -152,7 +151,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     device = torch.device("cuda", config.device)
     torch.cuda.set_device(device)
     manifest = inspect_qwen38_checkpoint(snapshot)
-    weights = ModelWeights.load(manifest, device, progress=report)
+    weights = ModelWeights.load(manifest, device, progress=progress)
     mtp_weights = None
     has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
     if has_mtp:
@@ -160,8 +159,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
 
         mtp_weights = MTPWeights.load(manifest, device,
             embedding_weight=weights.tree.model.language_model.embed_tokens.weight,
-            lm_head_weight=weights.tree.lm_head.weight)
-        report(f"loaded MTP weights: {mtp_weights.allocated_bytes} device bytes")
+            lm_head_weight=weights.tree.lm_head.weight, progress=progress)
     table = MappedPLETable.load(manifest, device)
     session = preparation_session(device=device, checkpoint=REVISION,
         namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
@@ -242,6 +240,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
         if not config.mtp:
             modes += (("decode", (4, 2, 1)),)
+        report("declaring graph shapes before kernel autotuning")
         for mode, capacities in modes:
             for capacity in capacities:
                 rows = 1 if mode == "prefill" else capacity
@@ -260,7 +259,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 add(f"{mode}{capacity}", forward, mode, rows,
                     capacity if mode == "prefill" else 1, forward_fields)
                 decoders.append(decoder)
-                report(f"prepared {mode} capacity {capacity}")
+                report(f"declared {mode} capacity {capacity}")
 
         if speculation is not None:
             fields = (*forward_fields, *(name for name in speculation.buffers() if name != "draft_page_tables"))
@@ -269,7 +268,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 operation = speculation.round(batch, width, name)
                 operation.prepare()
                 add(name, operation, "speculative", batch, width, fields)
-                report(f"prepared speculative batch={batch}, verification_width={width}")
+                report(f"declared speculative batch={batch}, verification_width={width}")
             decoders.extend(speculation.decoders)
             owners.append(speculation)
 
@@ -295,18 +294,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 owners.append(maintenance)
         session.register_scratch(workspaces)
         report("tuning prepared kernel candidates")
-        last_tuning_report = 0.0
-        def tuning_progress(status):
-            nonlocal last_tuning_report
-            now = monotonic()
-            if status.done or now - last_tuning_report >= 10:
-                report(f"kernel preparation: {status.phase}; {status.component_id}:{status.request_name}; "
-                       f"{status.completed_requests}/{status.total_requests} coalesced requests, "
-                       f"{status.candidates_prepared}/{status.candidate_count} current candidates prepared, "
-                       f"{status.measured_candidates} candidates measured, {status.cache_hits} cache hits, "
-                       f"{status.active_compilations} compile jobs active")
-                last_tuning_report = now
-        tuning = session.tune(progress=tuning_progress)
+        tuning = session.tune(show_progress=progress is not None)
         report(f"selected prepared kernels: {tuning['selection_counts']}")
         report(f"preparation allocated bytes: before tuning={tuning['allocated_before_tuning']}, "
                f"after trial release={tuning['allocated_after_trial_release']}")

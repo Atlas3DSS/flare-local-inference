@@ -142,7 +142,7 @@ class MTPWeights:
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest: CheckpointManifest, device, *, embedding_weight, lm_head_weight):
+    def load(cls, manifest: CheckpointManifest, device, *, embedding_weight, lm_head_weight, progress=None):
         device = torch.device(device)
         if device.type != "cuda":
             raise ValueError("MTP weights require a CUDA device")
@@ -154,7 +154,7 @@ class MTPWeights:
         stored = sum(t.nbytes for t in manifest.tensors.values() if t.component == "mtp")
         module = create_mtp_modules(manifest)
         before = torch.cuda.memory_allocated(device)
-        with MTPWeightLoader(manifest, device) as loader:
+        with MTPWeightLoader(manifest, device, show_progress=progress is not None) as loader:
             for name, _ in tuple(module.named_parameters()):
                 value = loader.load_tensor(f"mtp.{name}")
                 parent, _, attribute = name.rpartition(".")

@@ -97,7 +97,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     device = torch.device("cuda", config.devices[rank])
     torch.cuda.set_device(device)
     manifest = inspect_indexed_checkpoint(snapshot)
-    weights = ModelWeights.load(manifest, device, shard=shard, progress=report)
+    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress)
     layer_types = weights.tree.config.text_config.layer_types
     layout = continuation_layout(layer_types, shard.world_size)
     snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
@@ -168,7 +168,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
             add(name, operation, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()))
     report("autotuning complete GLM graph catalog")
-    tuning = session.tune()
+    tuning = session.tune(show_progress=progress is not None and rank == 0)
     report(f"selected kernels: {tuning['selection_counts']}")
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle()

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+import sys
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from flare.preparation.checkpoint import IndexedCheckpoint
@@ -51,6 +53,7 @@ class DirectWeightLoader:
     def __init__(
         self, manifest: IndexedCheckpoint, device: torch.device | str,
         *, prefixes: Sequence[str] | None = None, csf_byte_budget: int = 128 << 20,
+        show_progress: bool = False,
     ):
         if csf_byte_budget <= 0:
             raise ValueError("csf_byte_budget must be positive")
@@ -60,6 +63,9 @@ class DirectWeightLoader:
         if self.prefixes is not None and not self.prefixes:
             raise ValueError("prefixes must be nonempty when supplied")
         self.csf_byte_budget = csf_byte_budget
+        self.show_progress = show_progress
+        self._display = None
+        self._load_stats = None
         self._session = None
         self._sources = {}
         self._stack = None
@@ -69,6 +75,19 @@ class DirectWeightLoader:
         return {name for name in self.manifest.tensors
                 if "nvfp4_csf_" not in name
                 and (self.prefixes is None or name.startswith(self.prefixes))}
+
+    @contextmanager
+    def _loading_display(self):
+        from b12x.loader import CheckpointDisplay
+
+        with CheckpointDisplay() as display:
+            self._display = display
+            started = monotonic()
+            stats = {}
+            yield stats
+            display.complete(dict(ranks=1, payload_bytes=stats["payload_bytes"],
+                                  physical_bytes=stats["physical_bytes"],
+                                  load_seconds=monotonic() - started))
 
     def __enter__(self):
         import torch
@@ -82,36 +101,59 @@ class DirectWeightLoader:
         self.device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         stack = ExitStack()
         try:
+            if self.show_progress:
+                self._load_stats = stack.enter_context(self._loading_display())
             # Small CPU scale planes do not amortize intra-op thread dispatch.
             stack.callback(torch.set_num_threads, torch.get_num_threads())
             torch.set_num_threads(1)
             self._session = stack.enter_context(DirectWeightSession(device=self.device.index))
             selected = self._selected_names()
             shards = {self.manifest.tensors[name].shard for name in selected}
+            if self._display is not None:
+                self._display.source(len(shards))
+
+            def paths():
+                for shard in sorted(shards):
+                    if self._display is not None:
+                        self._display.file(shard)
+                    yield self.manifest.snapshot / shard
+                    if self._display is not None:
+                        self._display.advance(self._session.payload_bytes)
+
             # b12x validates source view mutations through tensor version counters.
             with torch.inference_mode(False):
                 self._sources = dict(self._session.weights(
-                    tuple(self.manifest.snapshot / shard for shard in sorted(shards)),
+                    paths(),
                     index_path=self.manifest.index_path,
                     skip=lambda name: name not in selected,
                     needs_values=lambda entry: entry.name.endswith((".weight_scale_2", ".input_scale")),
                 ))
             if self._sources.keys() != selected:
                 raise ValueError("direct loader tensor coverage differs from the inspected checkpoint")
+            if self._display is not None:
+                self._display.phase("execute")
             self._stack = stack
             return self
         except BaseException:
-            stack.close()
+            stack.__exit__(*sys.exc_info())
             self._session = None
+            self._display = self._load_stats = None
             self._sources.clear()
             raise
 
     def __exit__(self, *exc):
         try:
+            if exc[0] is None and self._display is not None:
+                try:
+                    self._load_stats.update(self._session.stats())
+                except BaseException:
+                    self._stack.__exit__(*sys.exc_info())
+                    raise
             return self._stack.__exit__(*exc)
         finally:
             self._stack = None
             self._session = None
+            self._display = self._load_stats = None
             self._sources.clear()
             self._csf_files.clear()
 
@@ -122,6 +164,8 @@ class DirectWeightLoader:
     def _copy(self, destination, source):
         if not self._session(destination, source):
             raise RuntimeError("b12x rejected the direct weight transfer")
+        if self._display is not None:
+            self._display.update(self._session.payload_bytes)
 
     def load_tensor(self, name: str, *, dtype: torch.dtype | None = None, extent=None) -> torch.Tensor:
         """Transfer a selected resident weight or declared scalar to the GPU."""

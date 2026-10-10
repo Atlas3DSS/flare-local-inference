@@ -60,7 +60,7 @@ class ModelWeights:
         before = torch.cuda.memory_allocated(device)
         scale_scratch = allocate_expert_scale_scratch(device)
         layers = []
-        with QwenWeightLoader(manifest, device) as loader:
+        with QwenWeightLoader(manifest, device, show_progress=progress is not None) as loader:
             def parameter(path: str):
                 value = loader.load_tensor(path)
                 parent, _, attribute = path.rpartition(".")
@@ -98,8 +98,6 @@ class ModelWeights:
                 module.gate.weight = torch.nn.Parameter(moe.router, requires_grad=False)
                 module.shared_expert_gate.weight = torch.nn.Parameter(moe.shared.gate, requires_grad=False)
                 layers.append(DecoderLayerWeights(attention, moe))
-                if progress is not None:
-                    progress(f"loaded decoder layer {layer + 1}/48")
 
             prefix = f"{TEXT_PREFIX}.layers.1.ple"
             for name in ("key_proj.weight", "value_proj.weight", "conv1d.weight", "norm_key.weight",

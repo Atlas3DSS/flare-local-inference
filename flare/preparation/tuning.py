@@ -5,11 +5,11 @@ from __future__ import annotations
 import gc
 from collections import Counter
 from collections.abc import Hashable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from threading import get_ident
 
 import torch
-from b12x.preparation import MemoryRequirements, PreparationSession
+from b12x.preparation import MemoryRequirements, PreparationDisplay, PreparationSession
 
 from .scratch import ScratchArena
 
@@ -145,7 +145,7 @@ class RecordedPreparationSession(PreparationSession):
                 "candidate_reserved_bytes": arena.nbytes,
                 "pending_persistent_bytes": envelope.pending_persistent_nbytes}
 
-    def tune(self, *, progress=None):
+    def tune(self, *, progress=None, show_progress=False):
         self._require_collecting()
         if not self._recorded_requests:
             raise RuntimeError("tuning requires recorded preparation requests")
@@ -158,7 +158,17 @@ class RecordedPreparationSession(PreparationSession):
             requests = tuple(self._recorded_requests.values())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
-            result = self._prepare_job(requests, progress=progress, autotune=True)
+            with ExitStack() as display_stack:
+                update = progress
+                if show_progress:
+                    display = display_stack.enter_context(PreparationDisplay(global_rank=0))
+
+                    def update(status):
+                        display.update(status)
+                        if progress is not None:
+                            progress(status)
+
+                result = self._prepare_job(requests, progress=update, autotune=True)
             if self._stop.is_set():
                 raise RuntimeError("b12x tuning was cancelled before serving preparation completed")
             selections = []
