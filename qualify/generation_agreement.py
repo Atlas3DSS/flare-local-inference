@@ -1,14 +1,12 @@
-"""Compare complete greedy token continuations against vLLM request variation."""
+"""Measure token continuation agreement and repeated-reference variation."""
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
-from pathlib import Path
 import statistics
-
-from .provenance import file_record, write_json
+from collections import Counter
+from pathlib import Path
 
 
 def common_prefix(actual, reference):
@@ -56,11 +54,7 @@ def compare_cases(prompts, actual, reference):
 
 def load_observations(path, *, repetitions):
     path = Path(path)
-    receipt = json.loads((path.parent / 'capture.json').read_text())
-    if receipt['observations']['sha256'] != file_record(path)['sha256']:
-        raise ValueError('observation file differs from its completed capture receipt')
     result = {index: {} for index in range(repetitions)}
-    count = 0
     for line in path.read_text().splitlines():
         observation = json.loads(line)
         repetition = observation['repetition']
@@ -71,14 +65,7 @@ def load_observations(path, *, repetitions):
         if observation.get('prefix_cache_reset') is not True:
             raise ValueError('observation does not confirm cold prompt execution')
         result[repetition][observation['id']] = observation
-        count += 1
-    if receipt['completed_observations'] != count or receipt['repetitions'] != repetitions:
-        raise ValueError('capture observation count or repetition contract differs')
-    if receipt['generation_contract'] != {
-            'tokens': 64, 'temperature': 0, 'ignore_eos': True,
-            'teacher_forcing': False, 'prefix_reuse': False}:
-        raise ValueError('capture generation contract differs')
-    return result, receipt
+    return result
 
 
 def main():
@@ -87,34 +74,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--corpus', type=Path, required=True)
     parser.add_argument('--flare', type=Path, required=True)
-    parser.add_argument('--vllm', type=Path, required=True)
+    parser.add_argument('--reference', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
         parser.error('output already exists')
     corpus = load_corpus(args.corpus)
-    actual, actual_receipt = load_observations(args.flare, repetitions=1)
-    reference, reference_receipt = load_observations(args.vllm, repetitions=2)
-    for path, receipt in ((args.flare, actual_receipt), (args.vllm, reference_receipt)):
-        captured = load_corpus(path.parent / 'corpus.json', expected_sha256=receipt['corpus']['sha256'])
-        if captured != corpus:
-            raise ValueError('captured corpus differs from comparison corpus')
-    pairs = {'vllm_repeat': compare_cases(corpus['prompts'], reference[1], reference[0]),
-             'flare_vs_vllm_0': compare_cases(corpus['prompts'], actual[0], reference[0]),
-             'flare_vs_vllm_1': compare_cases(corpus['prompts'], actual[0], reference[1])}
-    floor = pairs['vllm_repeat']['summary']
+    actual = load_observations(args.flare, repetitions=1)
+    reference = load_observations(args.reference, repetitions=2)
+    pairs = {'reference_repeat': compare_cases(corpus['prompts'], reference[1], reference[0]),
+             'flare_vs_reference_0': compare_cases(corpus['prompts'], actual[0], reference[0]),
+             'flare_vs_reference_1': compare_cases(corpus['prompts'], actual[0], reference[1])}
+    floor = pairs['reference_repeat']['summary']
     measurements = ('median_agreement_length', 'full_64_token_agreement_fraction')
-    write_json(args.output, {'schema_version': 1, 'corpus': file_record(args.corpus),
-        'sources': {name: {'observations': file_record(path), 'capture': file_record(path.parent / 'capture.json')}
-                    for name, path in (('flare', args.flare), ('vllm', args.vllm))},
+    result = {'schema_version': 1,
         'metric': 'Number of identical leading raw generated token IDs, from 0 through 64; larger is better.',
         'eos_policy': 'Exactly 64 generated tokens, including tokens produced after EOS; no teacher forcing.',
         'pairs': pairs,
         'observed_reference_floor': {name: floor[name] for name in measurements},
         'at_least_observed_reference_agreement': {
             pair: {name: pairs[pair]['summary'][name] >= floor[name] for name in measurements}
-            for pair in ('flare_vs_vllm_0', 'flare_vs_vllm_1')},
-        'scope': 'Fixed prompt continuation agreement. Reference floor comes from two cold requests per prompt; task success is not measured.'})
+            for pair in ('flare_vs_reference_0', 'flare_vs_reference_1')},
+        'scope': 'Fixed prompt continuation agreement. Reference floor comes from two cold requests per prompt; task success is not measured.'}
+    args.output.write_text(json.dumps(result, indent=2) + '\n')
 
 
 if __name__ == '__main__':

@@ -440,13 +440,12 @@ and 4096-row prefill graphs run through the Rust replay worker without allocator
 activity. Selected IDs and scores match uncompiled execution, allowing either
 candidate at an exactly equal-score cutoff tie.
 
-b12x also provides prepared GLM C4 pooling and FP8 query rotation using the
-vLLM pooling kernels. Caller-owned BF16 key/gate tails carry incomplete pools
-between chunks. Nine consecutive 65-token chunks crossing physical pages produce
+b12x also provides prepared GLM C4 pooling and FP8 query rotation. Caller-owned
+BF16 key/gate tails carry incomplete pools between chunks. Nine consecutive
+65-token chunks crossing physical pages produce
 the same cache and tail as ordered decode over the combined input. The strict
 4096-token PyTorch pooling comparison remains failing at two FP8 bytes, each
-one representable step apart; prepared execution matches the original vLLM
-kernel exactly on those inputs. The [GLM indexer recipe](../flare/recipes/glm53/indexer.py)
+one representable step apart. The [GLM indexer recipe](../flare/recipes/glm53/indexer.py)
 composes checkpoint MXFP8 query/key/head-weight projections, BF16 pooling gates,
 canonical LayerNorm, rotated FP8 queries, C4 pool updates, selection, and physical
 slot expansion. A model page holds 256 raw tokens and one 64-record index page;
@@ -978,33 +977,20 @@ to 503, and execution failure to 500. After SSE headers are sent, failure termin
 stream with an error event. Workers retain the first failure, and a failed CUDA
 drain retains the graph and buffer owners.
 
-### Frontend implementation references
+### Native frontend dependencies
 
-The vLLM Rust frontend at revision
-`cb4f016c5d02c9d483e6e3f1702d51da239b1a9b` implements native HTTP, chat rendering,
-tokenization, and output processing, then sends token requests to a Python
-engine through ZMQ. Flare connects these responsibilities directly to the
-native graph worker. The vLLM engine transport and distributed routing are not
-part of this core.
-[vLLM Rust architecture](https://github.com/vllm-project/vllm/blob/cb4f016c5d02c9d483e6e3f1702d51da239b1a9b/rust/README.md)
+Helios uses Axum/Tokio for HTTP, Hugging Face `tokenizers` for tokenization,
+and MiniJinja with Python-method compatibility for chat templates. Dependency
+versions and features are specified in [Cargo.toml](../helios/Cargo.toml).
+The [template renderer](../helios/src/frontend/mod.rs) supplies Python-compatible
+JSON formatting, whitespace handling, and template exceptions. Rendering must
+match the checkpoint template's bytes and token IDs, including tool schemas and
+image content.
 
-Relevant dependency choices in that revision are Axum/Tokio, Hugging Face
-`tokenizers` 0.22, and MiniJinja 2.24 with Python-method compatibility. Its HF
-template renderer also supplies Python-compatible `tojson`, whitespace
-handling, and template exceptions. Native rendering must match the exact
-checkpoint template's bytes and token IDs, including tool schemas and image
-content.
-[vLLM dependencies](https://github.com/vllm-project/vllm/blob/cb4f016c5d02c9d483e6e3f1702d51da239b1a9b/rust/Cargo.toml)
-[HF template support](https://github.com/vllm-project/vllm/blob/cb4f016c5d02c9d483e6e3f1702d51da239b1a9b/rust/src/chat/src/renderer/hf/template.rs)
-
-vLLM uses `llm-multimodal` at
-`f0985ef65967615db2c79279aa07818499301bfd`, which recognizes `qwen4_exp` and
-selects Qwen3-VL preprocessing. Its HF/Pillow golden checks provide a useful
-reference, but qualification must compare pixels, patch order, image grids,
-placeholder expansion, and positions against this checkpoint's locked
-Transformers processor. Native support must pass that comparison before image
-requests are admitted.
-[Qwen processor selection](https://github.com/vllm-project/llm-multimodal/blob/f0985ef65967615db2c79279aa07818499301bfd/src/registry/qwen3_vl.rs)
+The [native image processor](../helios/src/frontend/images/mod.rs) is checked
+against the checkpoint's Transformers processor. Compare resized and normalized
+pixels, patch order, image grids, placeholder expansion, and positions before
+admitting image requests.
 
 ### Prepared graph bundle
 
@@ -1404,7 +1390,7 @@ to recover either resource.
    The b12x GDN decode operator already reads the state column selected by the
    accepted-token count and writes per-token checkpoint columns. Transformers
    drops the MTP tensors on load and has no MTP module. The
-   [MTP design](mtp-design.md) pins an executable vLLM reference and specifies
+   [MTP design](mtp-design.md) specifies the feedback arithmetic,
    adaptive proposal budgets, draft-history caching, verification, and commit.
 
 The model-independent bundle contract is exercised by small captured graphs
@@ -1454,14 +1440,12 @@ replay comparisons account for the selected kernels' reduction-order variation;
 cross-capacity cold-versus-restored comparisons also account for changes in
 reduction association.
 
-Qualify each component on identical operands against the exact-checkpoint
-serving reference, with tolerances derived from measured FP32-versus-BF16
-arithmetic differences. Record repeated vLLM execution to establish reference
-variance. Run the frozen 82-prompt, 64-token generation corpus against both
-engines; compare token agreement with the vLLM-versus-vLLM floor. Its
-temperature-zero requests use the common probability sampler. Complete-model
-logit and encoder relative L2 remain diagnostics rather than acceptance gates.
-Canonical eager execution remains a separate diagnostic reference.
+Test each component on identical operands against its Transformers or b12x
+operator reference, with tolerances derived from the required precision and
+reduction arithmetic. Measure repeated execution when a kernel's reduction
+order can vary. Generation tests cover chat, tool use, and long contexts with
+explicit sampling settings and output budgets. Complete-model logit and encoder
+relative L2 remain diagnostics; they do not isolate individual operator errors.
 
 ### Graph and lifetime acceptance
 
@@ -1486,7 +1470,7 @@ unchanged warmup input is insufficient.
 
 ### Performance acceptance
 
-Matching vLLM serving performance is the minimum acceptance bar. Compare the
+Established serving baselines set the minimum performance bar. Compare the
 same checkpoint, GPU, precision, prompt corpus, sampling settings, output
 budgets, cache conditions, and concurrency. Flare must match or improve
 end-to-end TTFT, inter-token latency, and completed-work throughput across the
@@ -1499,7 +1483,7 @@ separate. Correctness and request-completion gates apply to both engines.
 Measure three paths with matching model, inputs, precision, and generation
 behavior:
 
-1. Existing vLLM serving.
+1. A serving baseline with the same workload and checkpoint.
 2. The prepared Flare graphs under a minimal replay harness.
 3. The complete Rust serving runtime.
 
@@ -1526,7 +1510,7 @@ The replay harness establishes the achievable floor for the captured computation
 The native core must sustain decode within 5% of that floor for the same graph
 sequence, with frontend delivery measured separately. This host-overhead limit
 is an additional requirement; efficient replay of slow graphs does not satisfy
-the vLLM serving-performance floor.
+the serving-performance floor.
 
 The weight-traffic bandwidth bound excludes kernel latency and other execution
 costs. At decode batch 1 this model reads about
@@ -1543,8 +1527,8 @@ costs. At decode batch 1 this model reads about
 | Routers, BF16 | 0.13 |
 
 At the target GPU's 1.79 TB/s this gives a bandwidth bound near 3.9 ms per token.
-Serving performance must meet the vLLM floor, and native replay must meet the
-measured graph-overhead limit.
+Serving performance must meet the measured baseline, and native replay must meet
+the measured graph-overhead limit.
 
-Keep raw traces, configurations, checkpoint revisions, and source fingerprints.
+Keep raw measurements and the configurations needed to interpret them.
 Correctness failures block performance qualification.

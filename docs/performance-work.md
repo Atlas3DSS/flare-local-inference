@@ -41,8 +41,8 @@ caller-owned scratch, and allocation-stable replay are required.
    bytewise diagnostic requires deterministic kernels; ordinary performance runs
    use b12x's default numerical policy without this check.
 4. Tune MoE with b12x's default numerical policy, including dynamic direct routing
-   and atomic reductions. Measure kernel selection and complete graph latency
-   against vLLM's b12x integration.
+   and atomic reductions. Measure selected kernel plans and complete graph
+   latency for the serving workload.
    TODO: Use one layer-wide input activation amax to derive a shared activation
    scale for the expert gate (w1) and up (w3) projections. Ensure every layer
    has this scale; retain per-expert activation scales for the down (w2)

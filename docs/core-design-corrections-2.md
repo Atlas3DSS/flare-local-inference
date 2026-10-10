@@ -163,73 +163,41 @@ later state-representation extension.
 
 ### 2.1 Replace logit relative L2 as an acceptance metric
 
-**Current state.** The serving-path oracle measured Flare against vLLM at
-17.7 to 22.4 percent logit relative L2 with all argmaxes agreeing. Two identical
-requests to one vLLM engine differ from each other by 19 to 24 percent, with one
-argmax flipping on a tie. The first divergence between the two vLLM runs is the
-layer-0 MoE output, where vLLM's selected MoE plan accumulates in BF16 with
-atomic, arrival-ordered additions; a 0.3 percent layer-0 residual difference
-grows to 20 percent at the logits through 48 layers and four residual streams.
-Flare versus vLLM first differs at the layer-0 hyperconnection norm at 0.02 to
-0.06 percent, because Flare keeps the checkpoint's FP32 norm weights and vLLM
-loads them as BF16. Flare's selected paths use deterministic reductions.
-The 0.015 GDN limit remains in `tests/recipes/test_qwen38_gdn.py`.
+BF16 reduction order and normalization precision can introduce small component
+perturbations that grow across 48 layers and four residual streams. Whole-model
+logit relative L2 does not isolate a recipe defect.
 
-**Conclusion.** The reference's own variance floor exceeds the Flare-to-vLLM
-gap, so there is no evidence of a Flare defect. Logit relative L2 is not a
-usable acceptance metric for this model because it amplifies sub-percent
-perturbations chaotically; the relative bound in the first corrections
-document is unsatisfiable by construction.
+Acceptance requires component comparisons on identical operands, with tolerances
+derived from FP32-versus-BF16 arithmetic and the selected kernel's repeatability.
+Generation tests cover chat, tool calls, and long contexts with fixed sampling
+settings. Teacher-forced logits remain useful for locating the first differing
+layer; investigate its operators before changing model arithmetic.
 
-**Required change.** Acceptance consists of:
-
-- Greedy agreement over the 82-prompt corpus against vLLM, with vLLM-versus-vLLM
-  agreement on the same corpus as the floor. The corpus manifest and tooling
-  exist (`qualify/generation_corpus.py`, `qualify/generation_agreement.py`,
-  the `test_generation_corpus` test driver); the run has not happened.
-- Per-component equality on identical operands, which already passes at 0.02
-  to 0.5 percent in the layer-0 stage trace, extended to every operator.
-- A recorded reference variance floor from repeated vLLM runs.
-
-The eager comparison remains a diagnostic. Remove the 0.015 and 0.03 limits
-as gates; replace them with per-component tolerances taken from the measured
-FP32-versus-BF16 gap. The compensated-BF16 and normalization-reorder kernel
-work stays stopped.
-
-**Acceptance.** The greedy-agreement receipt exists with the vLLM floor, and
-no test asserts a logit or encoder relative-L2 limit as a gate.
+The eager comparison remains diagnostic. Replace arbitrary whole-model logit
+and encoder relative-L2 gates with component-specific bounds. Comparison
+utilities accept explicit saved reference tensors or token sequences.
 
 ### 2.2 State determinism as a design property
 
-**Required change.** Add to the core design's runtime contract that every
-captured operator uses deterministic reductions, so identical inputs produce
-identical logits across runs. Record in the validation index that the pinned
-vLLM path does not have this property on this model.
+**Required change.** State the reduction semantics in the runtime contract.
+Plans with deterministic reductions must produce identical logits for identical
+inputs. Plans using atomic reductions require measured numerical tolerances on
+identical inputs; state copies and metadata retain exact equality requirements.
 
 ## 3. Performance, amended
 
-### 3.1 Measured position
+### 3.1 Measurement conditions
 
-**Current state.** At the 4,096-token prefill limit, greedy, no speculation:
+Measure complete GPU steps, native scheduling, and HTTP delivery separately.
+Use the same checkpoint, GPU assignment, activation precision, graph capacity,
+prompt lengths, sampling settings, generated-token counts, and cache conditions
+for comparisons. Include vocabulary projection, collectives, and sampling in
+GPU step timing.
 
-| Measurement | Flare | vLLM |
-|---|---:|---:|
-| Decode tok/s at concurrency 1 / 2 / 4 | 78 / 128 / 201 | 111 / 197 / 353 |
-| Core inter-token latency median at 1 / 2 / 4, ms | 12.8 / 15.2 / 18.5 | 9.0 / 10.1 / 11.4 |
-| TTFT, 512-token cold prompt, ms | 106 | 147 |
-| TTFT, 4,096-token cold prompt, ms | 512 | 281 |
-| TTFT, 65,536-token cold prompt, s | 8.6 | 5.0 |
-| TTFT, 4,096 cached tokens plus 11-token tail, ms | 45 | 177 |
-| Native core above the autoregressive replay floor | 0.1 percent | |
-
-The runtime meets the design's 5 percent target by a factor of fifty, so the
-remaining gap is inside the captured graphs. The receipt's operator-policy
-table lists the differences from the pinned vLLM path: sequential single-split
-GDN against a two-way key split, fixed 16-way QSA against adaptive 64/32/16
-partitions, deterministic MoE decode with fast math disabled against a
-nondeterministic fast-math kernel, and separate FP32 hyperconnection
-projections with combine-then-norm against a merged BF16 projection with
-delayed combine. No causal attribution has been measured.
+Measure GDN recurrence splits, QSA partitions, MoE reduction policy, and
+hyperconnection projection fusion independently. A small native replay overhead
+does not establish that the captured model is efficient; attribute remaining
+GPU time to operators and dependencies with a kernel timeline.
 
 ### 3.2 Produce a per-kernel decode timeline
 

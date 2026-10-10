@@ -1,6 +1,5 @@
 """CPU layer measurements preserve paired contexts and expose every mismatch."""
 
-import hashlib
 import json
 import math
 
@@ -8,9 +7,10 @@ import pytest
 import torch
 
 from qualify.layer_comparison import (
-    compare_layers, layer_trace_from_artifact, load_layer_trace,
+    compare_layers,
+    layer_trace_from_artifact,
+    load_layer_trace,
 )
-
 
 VOCAB = 16
 
@@ -48,7 +48,7 @@ def trace(value):
 
 
 def compare(actual, reference):
-    return compare_layers(flare=trace(actual), vllm=trace(reference))
+    return compare_layers(flare=trace(actual), reference=trace(reference))
 
 
 def test_lossless_bank_conversion_is_equal_and_preserves_recorded_dtype_metadata():
@@ -58,7 +58,7 @@ def test_lossless_bank_conversion_is_equal_and_preserves_recorded_dtype_metadata
     report = compare(actual, reference)
     assert [step["context_length"] for step in report["steps"]] == [2, 3, 4, 5]
     assert [step["input_token_ids"] for step in report["steps"]] == [[2, 3], [4], [5], [6]]
-    assert report["sources"]["vllm"]["recorded_dtype_metadata"] == {
+    assert report["sources"]["reference"]["recorded_dtype_metadata"] == {
         "stage_storage_dtype": "float32",
         "stage_source_dtypes": "BF16/FP16/FP32 copied exactly into FP32",
     }
@@ -71,7 +71,7 @@ def test_lossless_bank_conversion_is_equal_and_preserves_recorded_dtype_metadata
             assert layer["fp32_value_bits_equal"]
             assert layer["storage_bitwise_equal"] is None
             assert layer["flare_storage_dtype"] == "torch.bfloat16"
-            assert layer["vllm_storage_dtype"] == "torch.float32"
+            assert layer["reference_storage_dtype"] == "torch.float32"
     assert "passed" not in report
     assert report["numerical_acceptance"] == "not evaluated; no thresholds supplied"
     json.dumps(report, allow_nan=False)
@@ -97,7 +97,7 @@ def test_first_layer_and_last_row_mismatches_report_independently_without_stoppi
     assert torch.equal(actual["layer_outputs"][0], saved)
 
 
-def test_reference_denominator_is_vllm_for_layers_and_stages():
+def test_reference_denominator_is_reference_for_layers_and_stages():
     actual, reference = artifact(), artifact()
     actual["layer_outputs"][0].mul_(6)
     reference["layer_outputs"][0].mul_(2)
@@ -143,7 +143,7 @@ def test_missing_stage_keys_are_explicit_and_not_renamed_or_silently_matched():
     assert step["stage_coverage"] == {
         "compared": ["embedding"],
         "missing_in_flare": ["gdn_projected_qkvz"],
-        "missing_in_vllm": ["gdn_projected_qkv", "moe_ids"],
+        "missing_in_reference": ["gdn_projected_qkv", "moe_ids"],
         "identical_key_sets": False, "has_comparable_stages": True,
     }
     assert set(step["stages"]) == {"embedding"}
@@ -237,13 +237,13 @@ def test_fp32_metric_overflow_fails_instead_of_emitting_invalid_json():
         compare(actual, reference)
 
 
-def test_file_loading_keeps_digests_and_legacy_teacher_context(tmp_path):
+def test_file_loading_preserves_teacher_context(tmp_path):
     path = tmp_path / "decoder.pt"
     torch.save(artifact(steps=4, legacy=True), path)
     loaded = load_layer_trace(path, vocab_size=VOCAB)
     assert loaded.logits.teacher_tokens == (4, 5, 6)
     assert loaded.logits.source["artifact_format"] == "flare_decoder"
-    assert loaded.logits.source["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert loaded.logits.source["path"] == str(path)
     assert all(value.device.type == "cpu" for value in loaded.layers)
 
 
@@ -255,7 +255,7 @@ def test_cli_preserves_all_layers_and_refuses_existing_output(tmp_path, monkeypa
     a, r, output = (tmp_path / name for name in ("actual.pt", "reference.pt", "comparison.json"))
     torch.save(actual, a)
     torch.save(reference, r)
-    monkeypatch.setattr("sys.argv", ["layer_comparison", "--flare", str(a), "--vllm", str(r),
+    monkeypatch.setattr("sys.argv", ["layer_comparison", "--flare", str(a), "--reference", str(r),
                                     "--output", str(output)])
     main()
     data = json.loads(output.read_text())

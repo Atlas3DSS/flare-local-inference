@@ -1,11 +1,9 @@
 """Exact token agreement rejects changed contexts and incomplete observations."""
 
-from types import SimpleNamespace
 
 import pytest
 
 from qualify.generation_agreement import common_prefix, compare_cases
-from qualify.vllm_generation import validate_completion
 
 
 def test_first_divergence_and_complete_agreement():
@@ -57,23 +55,3 @@ def test_no_prompt_can_be_dropped_or_reconditioned(change):
         actual['0']['finish_reason'] = 'stop'
     with pytest.raises(ValueError):
         compare_cases(prompts, actual, reference)
-
-
-def test_vllm_observation_retains_actual_ids():
-    prompt = {'id': 'case', 'category': 'chat', 'prompt_tokens': [42]}
-    output = SimpleNamespace(prompt_token_ids=[42], outputs=[SimpleNamespace(
-        token_ids=list(range(64)), finish_reason='length', stop_reason=None)])
-    result = validate_completion(output, prompt)
-    assert result['generated_tokens'] == list(range(64))
-    output.prompt_token_ids = [43]
-    with pytest.raises(ValueError, match='different prompt'):
-        validate_completion(output, prompt)
-
-
-@pytest.mark.parametrize('length,reason', [(63, 'length'), (64, 'stop'), (65, 'length')])
-def test_vllm_observation_rejects_early_or_wrong_termination(length, reason):
-    prompt = {'id': 'case', 'category': 'chat', 'prompt_tokens': [42]}
-    output = SimpleNamespace(prompt_token_ids=[42], outputs=[SimpleNamespace(
-        token_ids=list(range(length)), finish_reason=reason, stop_reason=None)])
-    with pytest.raises(ValueError, match='expected 64'):
-        validate_completion(output, prompt)

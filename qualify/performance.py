@@ -9,27 +9,32 @@ when present, form a separate clock domain from client delivery timestamps.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 import hashlib
 import http.client
 import importlib.metadata
 import json
 import math
-from pathlib import Path
 import re
 import statistics
 import struct
 import threading
 import time
 import traceback
-from urllib.parse import urlsplit
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from flare.preparation.qwen38 import (
+    CONFIG_SHA256,
+    FRONTEND_SHA256,
+    MODEL_ID,
+    REVISION,
+    TRANSFORMERS_REVISION,
+)
 
 from .provenance import digest, write_json
-from flare.preparation.qwen38 import (
-    CONFIG_SHA256, FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION,
-)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "flare-http-performance-v1"
@@ -210,8 +215,8 @@ def validate_corpus(corpus):
 def prepare(args):
     if args.output.exists():
         raise ValueError("corpus destination already exists")
-    from transformers import AutoTokenizer
     import tokenizers
+    from transformers import AutoTokenizer
 
     origin = json.loads(importlib.metadata.distribution("transformers").read_text("direct_url.json") or "{}")
     if origin.get("vcs_info", {}).get("commit_id") != TRANSFORMERS_REVISION or tokenizers.__version__ != "0.23.2":
@@ -541,7 +546,7 @@ def run(args):
             summary = group_summary(group, observations)
             summary["metric_deltas"] = {key: after[key] - before[key] for key in before.keys() & after.keys()
                                         if after[key] is not None and before[key] is not None
-                                        and ("_total" in key or key.startswith("vllm:"))}
+                                        and "_total" in key}
             if args.backend == "flare":
                 expected = 4096 if group["kind"] == "prefix-hit" else 0
                 summary["native_cache_metric_exact"] = summary["metric_deltas"].get("flare_cache_reused_tokens_total") == expected
@@ -587,7 +592,7 @@ def main():
     measure = commands.add_parser("run")
     measure.add_argument("--corpus", type=Path, required=True)
     measure.add_argument("--output", type=Path, required=True)
-    measure.add_argument("--backend", choices=("flare", "vllm"), required=True)
+    measure.add_argument("--backend", choices=("flare", "http"), required=True)
     measure.add_argument("--base-url", required=True)
     measure.add_argument("--prefill-chunk-size", type=int, choices=(512, 4096), required=True)
     measure.add_argument("--model")

@@ -287,9 +287,7 @@ with every Transformers template extension. JSON inputs use UTF-8 strings,
 
 The Jinja environment and continuation semantics follow Transformers
 `utils/chat_template_utils.py` at revision
-`4cc2aa84301c9aa210b5513dab9fefae03981f6e` (Apache-2.0). vLLM's Rust renderer at
-`cb4f016c5d02c9d483e6e3f1702d51da239b1a9b` was consulted as a compatibility
-reference; this crate does not copy its implementation or depend on vLLM.
+`4cc2aa84301c9aa210b5513dab9fefae03981f6e` (Apache-2.0).
 
 ## Prefix checkpoint policy
 

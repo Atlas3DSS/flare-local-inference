@@ -17,7 +17,7 @@ from flare.recipes.qwen38.weights import QwenWeightLoader
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an assigned CUDA_VISIBLE_DEVICES and FLARE_RUN_CUDA_TESTS=1")
 
-TRACE = Path("/data/sparkgap-artifacts/text-layer-trace/vllm-moe-inprocess-repeat/vllm-layers.pt")
+FEEDBACK = Path(__file__).resolve().parents[1] / "fixtures/qwen38_mtp_feedback.pt"
 
 
 @pytest.fixture(scope="module")
@@ -36,10 +36,8 @@ def weights():
 
 
 def inputs():
-    trace = torch.load(TRACE, map_location="cpu", weights_only=True)
-    hidden = trace["layer_outputs"][0][-1].bfloat16()
-    assert torch.equal(hidden.float(), trace["layer_outputs"][0][-1])
-    tokens = torch.tensor(trace["prompt_tokens"][1:] + trace["teacher_tokens"][:1], dtype=torch.int64)
+    values = torch.load(FEEDBACK, map_location="cpu", weights_only=True)
+    hidden, tokens = values["hidden"], values["tokens"]
     assert hidden.shape == (len(tokens), 10240)
     return hidden, tokens
 

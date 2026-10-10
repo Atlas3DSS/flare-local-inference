@@ -12,85 +12,35 @@ the item is closed. Items are ordered by priority within each section.
 
 ## 1. Numerical acceptance oracle
 
-### 1.1 Replace the eager-reference gate with a serving-path oracle
+### 1.1 Compare serving operators on identical inputs
 
-**Current state.** Text acceptance compares Flare logits against the pinned
-Transformers eager model running unquantized activations over dequantized
-weights (`serve/reference/qwen38_decoder.py`, `serve/reference/qwen38_quant.py`).
-The recorded result is logit relative L2 of 0.159 to 0.244 over four steps
-(decoder-autotuned.md). The layer-0 stage
-trace (decoder-stage-comparison.json)
-shows every operator agreeing with the reference when fed identical inputs:
-MXFP8 projection 0.0002, routed MoE 0.004 to 0.005, GDN gated output 0.004.
-The vision comparison (vision-serving-reference.md)
-shows vLLM's b12x path missing the same 3 percent eager limit by more than
-Flare does:
+Serving arithmetic dynamically quantizes activations and may retain BF16
+recurrence intermediates. A Transformers eager model using dequantized weights
+and FP32 intermediates computes different arithmetic. Whole-model logit error
+alone cannot distinguish expected precision differences from recipe defects.
 
-| Vision encoder comparison | Image 0 | Image 1 |
-|---|---:|---:|
-| Flare vs eager | 0.078 | 0.069 |
-| vLLM vs eager | 0.122 | 0.064 |
-| Flare vs vLLM | 0.133 | 0.071 |
+Test each prepared operator against its Transformers or b12x reference on
+identical operands. Include the checkpoint's normalization weights, activation
+policy, cache dtype, and recurrence precision in the comparison. Retain
+teacher-forced full-vocabulary logits to locate divergence, then isolate the
+first differing component. Relative L2 uses the reference norm as denominator;
+logit diagnostics also include top-10 overlap and FP32 softmax KL divergence.
 
-**Defect.** The serving arithmetic quantizes activations dynamically and keeps
-BF16 recurrence intermediates. The eager reference does neither. The comparison
-therefore cannot distinguish "serving arithmetic differs from eager" from
-"Flare has a bug", and the 3 percent and 1.5 percent limits are not met by
-the same kernels under vLLM.
+### 1.2 Exercise generation behavior
 
-**Required change.** Add a logit-level oracle built from the vLLM serving path
-that already runs this checkpoint on this machine: vLLM
-`64fc1eec593397cbd765cc082e9ec90fbeb5ea66` at
-`/home/luke/projects/vllm-lunar-leviathan` with FlashInfer pinned at
-`98fb87a461183f98d6a7049ca947fb136cc6fb59`. Follow the structure of
-`scripts/compare_vision_serving_reference.py`: load the vLLM Qwen4Exp model on
-one GPU through vLLM's loader, run the teacher-forced forward on the recorded
-prompt and continuation, retain full-vocabulary logits per step, and compare
-against Flare's recorded tensors. Record both implementations' MXFP8
-activation-mode selections, because vLLM selects A16 for calls of at most
-eight rows and quantized activations otherwise. Run with BF16 KV cache and
-speculative decoding disabled so the target-model arithmetic matches
-Flare's configuration.
+Use at least 50 prompts spanning chat, tool calls, and long contexts, with fixed
+sampling settings and a 64-token output budget. Check request completion and
+task behavior. Token agreement is meaningful only with matched sampling and
+contexts; interpret differences against measured repeatability on identical
+inputs. Store reusable test inputs and expected outputs as ordinary fixtures.
 
-**Acceptance.** Per step: relative L2, top-10 overlap, and KL divergence of the
-FP32 softmax. Flare-versus-vLLM relative L2 must not exceed
-vLLM-versus-eager relative L2 on the same prompt. A result in the range of a
-few percent closes this item; a result comparable to the eager gap indicates a
-defect and reopens component qualification against vLLM's per-operator
-outputs rather than against eager.
+### 1.3 Keep eager comparisons diagnostic
 
-### 1.2 Add a task-level gate
-
-**Current state.** The 15-scenario tool workload matches the recorded vLLM
-score. The 69-scenario workload scores 120/136 with API exclusions. No
-generation-level agreement measurement exists.
-
-**Required change.** Add a greedy-agreement gate against vLLM over a fixed
-prompt set: at least 50 prompts across chat, tool-call, and long-context
-cases, 64 greedy tokens each, recording the first divergence position per
-prompt. Store the vLLM outputs as a fixture with the launch provenance.
-
-**Acceptance.** Median agreement length and the fraction of prompts with full
-64-token agreement are reported in the validation index. Thresholds are set
-from the first measurement with the vLLM-versus-vLLM run-to-run variance as
-the floor.
-
-### 1.3 Demote the eager comparison to a diagnostic
-
-**Required change.** Keep the canonical comparison scripts and receipts. Remove
-the 3 percent vision and 1.5 percent GDN limits as acceptance criteria.
-Replace them with per-component tolerances derived from the measured
-precision gap: the GDN FP32-intermediate variant reaches 0.0015 where the
-BF16-intermediate serving kernel reaches 0.0143 (gdn-fp32.json,
-gdn-normalization-factors.md), so the
-BF16 kernel's tolerance is set at its measured value with margin, not at an
-arbitrary limit it cannot meet.
-
-**Required change.** Stop the compensated-BF16 and normalization-reorder
-kernel work (gdn-compensated-bf16.md)
-until item 1.1 has a result. Those diagnostics improve the precision of a
-kernel that vLLM ships unchanged; they are only worth pursuing if 1.1 shows
-Flare further from vLLM than vLLM is from eager.
+Derive component tolerances from their precision and reduction arithmetic.
+For GDN, compare FP32 and BF16 intermediates separately instead of imposing a
+whole-model threshold that conflates the two. Preserve the operator's intended
+arithmetic; require a localized defect before changing recurrence rounding or
+normalization order to improve aggregate logit agreement.
 
 ## 2. Determinism constraints
 
@@ -156,12 +106,11 @@ seconds.
 | Host submission gap per decode step | From the native executor's event timeline |
 
 Report each against the 3.9 ms per-token floor from the design's weight-traffic
-table and against the recorded vLLM configuration on the same GPU. Store raw
-traces and configuration with the receipt.
+table and against the serving baseline on the same GPU with matched settings.
+Keep raw measurements and the configuration needed to interpret them.
 
-**Acceptance.** The receipt exists in the validation index with provenance,
-and the design's 5 percent sustained-decode target is either met or the gap
-is attributed to a named component.
+**Acceptance.** The design's 5 percent sustained-decode overhead target is met,
+or profiling attributes the gap to a named component.
 
 ## 4. Repository hygiene
 
@@ -438,7 +387,7 @@ than as a disclaimer on each sentence.
 
 | Section | Edit |
 |---|---|
-| 5, Correctness acceptance | Replace "Qualify the model recipe separately against canonical component references and the exact-checkpoint serving reference" with the oracle hierarchy from items 1.1 to 1.3: vLLM serving path as the acceptance oracle, task-level agreement gate, eager reference as a diagnostic with derived tolerances. |
+| 5, Correctness acceptance | Use identical-input component tests with measured precision tolerances, generation tests, and eager whole-model diagnostics as specified in items 1.1 to 1.3. |
 | 5, Correctness acceptance | Add the tolerance-based cross-capacity predicate and the bitwise same-capacity predicate from item 2.1. |
 | 2, Sparse attention arithmetic; 2, GDN prefill arithmetic | Rewrite per item 2.1. |
 | 5, Performance acceptance | Add the measurement table from item 3.1 as the required minimum set. |

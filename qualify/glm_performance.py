@@ -2,20 +2,20 @@
 
 Create one corpus and reuse it for both engines. The ``flare`` command prepares
 the production rank group and runs the client against Helios. The ``http``
-command targets a running vLLM server with its CUDA profiler enabled. Each runs
+command targets an HTTP server exposing CUDA profiler controls. Each runs
 one warmup, three unprofiled requests, and three requests inside the profiler
 capture range. Nsight Systems should use graph tracing and cudaProfilerApi.
 """
 
 import argparse
-from contextlib import closing
 import ctypes
 import http.client
 import json
 import os
-from pathlib import Path
 import statistics
 import time
+from contextlib import closing
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -151,6 +151,7 @@ def measure(args, start, stop, *, native):
 
 def flare(args):
     import torch
+
     from flare.preparation.rank_group import prepare_group
     from flare.recipes.glm53.bootstrap import PreparationConfig, prepare_rank
     from qualify.performance_trace import loaded_cupti_path

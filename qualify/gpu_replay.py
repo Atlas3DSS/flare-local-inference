@@ -1,14 +1,13 @@
 """Capture whole-graph GPU decode time with identical prompt token workloads.
 
-Generate a corpus with ``prepare`` and reuse it for both engine commands.
-The vLLM plan supplies its existing launch surface as a ``serve_args`` list.
-Run each engine under Nsight with ``--trace=cuda-sw,nvtx``,
-``--cuda-graph-trace=graph``, ``--capture-range=cudaProfilerApi``,
-``--capture-range-end=stop`` and ``--export=sqlite``. Name the reports
-``flare-trace`` and ``vllm-trace`` beside their respective output directories,
-then run ``python -m qualify.gpu_replay_analysis DIRECTORY``.
+Generate a corpus with ``prepare`` and replay it with ``flare``.
+Run under Nsight with ``--trace=cuda-sw,nvtx``,
+``--cuda-graph-trace=graph:host-only``, ``--capture-range=cudaProfilerApi``,
+``--capture-range-end=stop`` and ``--export=sqlite``. Place ``flare-trace.sqlite``
+beside the ``flare`` output directory, then run
+``python -m qualify.gpu_replay_analysis DIRECTORY``.
 
-For kernel timings, pass ``--ncu`` to either engine and collect with Nsight
+For kernel timings, pass ``--ncu`` and collect with Nsight
 Compute's ``--nvtx --nvtx-include kernel.b1/ --graph-profiling node
 --metrics gpu__time_duration.sum --cache-control none --clock-control none``.
 The range selects one warmed decode at position 575, including sampling.
@@ -17,9 +16,8 @@ Nsight Compute serializes the individual kernel measurements.
 """
 
 import argparse
-from contextlib import nullcontext
 import json
-import os
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -29,6 +27,7 @@ def save(path, value):
 
 def prepare(args):
     from transformers import AutoTokenizer
+
     from qualify.performance import make_prompt
 
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot, local_files_only=True)
@@ -47,6 +46,7 @@ def prepare(args):
 
 def flare(args, corpus):
     import torch
+
     from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
     from qualify.performance_trace import prepared_graph_map
     from qualify.replay_floor import ReplayCase
@@ -105,64 +105,12 @@ def flare(args, corpus):
             save(args.output / 'results.json', result)
 
 
-def vllm(args, corpus):
-    from vllm import LLM, SamplingParams
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.config import ProfilerConfig
-
-    plan = json.loads(args.plan.read_text())
-    parsed = make_arg_parser(FlexibleArgumentParser()).parse_args(plan['serve_args'])
-    parsed.model = parsed.model_tag
-    engine = EngineArgs.from_cli_args(parsed)
-    if Path(engine.model).resolve() != args.snapshot.resolve():
-        raise ValueError('vLLM launch plan must use the requested checkpoint')
-    engine.worker_cls = 'qualify.vllm_graph_worker.GraphTimingWorker'
-    engine.profiler_config = ProfilerConfig(profiler='cuda')
-    if engine.speculative_config is not None or engine.enforce_eager:
-        raise ValueError('require ordinary graph-enabled vLLM')
-    os.environ['FLARE_GPU_REPLAY_OUTPUT'] = str(args.output.resolve())
-    if args.ncu:
-        os.environ['FLARE_GPU_REPLAY_NCU'] = '1'
-    llm = LLM.from_engine_args(engine)
-    profiling = False
-    result = {'engine': 'vllm', 'groups': []}
-    try:
-        for group in corpus['groups']:
-            if group['measured'] and not profiling:
-                llm.start_profile()
-                profiling = True
-            cases = group['cases']
-            params = [SamplingParams(temperature=case['request']['temperature'],
-                      top_k=case['request']['top_k'], top_p=case['request']['top_p'],
-                      seed=case['request']['seed'], max_tokens=256) for case in cases]
-            outputs = llm.generate([{'prompt_token_ids': case['prompt_tokens']} for case in cases],
-                                   params, use_tqdm=False)
-            rows = []
-            for case, output in zip(cases, outputs, strict=True):
-                completion, = output.outputs
-                if (list(output.prompt_token_ids) != case['prompt_tokens']
-                        or len(completion.token_ids) != 256 or completion.finish_reason != 'length'):
-                    raise RuntimeError('vLLM did not complete the identical 256-token workload')
-                rows.append({'tokens': list(completion.token_ids), 'finish_reason': completion.finish_reason})
-            result['groups'].append({'batch': group['batch'], 'repeat': group['repeat'],
-                                    'measured': group['measured'], 'outputs': rows})
-            save(args.output / 'results.json', result)
-            print(f"vllm batch={group['batch']} repeat={group['repeat']} completed 256 tokens per request", flush=True)
-    finally:
-        if profiling:
-            llm.stop_profile()
-        llm.llm_engine.engine_core.shutdown()
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('engine', choices=('prepare', 'flare', 'vllm'))
+    parser.add_argument('engine', choices=('prepare', 'flare'))
     parser.add_argument('--snapshot', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--corpus', type=Path)
-    parser.add_argument('--plan', type=Path)
     parser.add_argument('--batches', type=int, nargs='+', choices=(1, 2, 4), default=(1, 2, 4))
     parser.add_argument('--ncu', action='store_true',
         help='annotate one warmed decode at context position 575 per batch for Nsight Compute')
@@ -182,15 +130,15 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.engine == 'prepare':
         return prepare(args)
-    if not args.corpus or (args.engine == 'vllm' and not args.plan):
-        parser.error('require --corpus and vLLM --plan')
+    if not args.corpus:
+        parser.error('require --corpus')
     args.output.mkdir()
     corpus = json.loads(args.corpus.read_text())
     corpus['groups'] = [group for group in corpus['groups'] if group['batch'] in args.batches]
     expected = {(batch, repeat) for batch in args.batches for repeat in range(4)}
     if {(group['batch'], group['repeat']) for group in corpus['groups']} != expected or len(corpus['groups']) != len(expected):
         parser.error('corpus must contain one warmup and three measured groups per selected batch')
-    (flare if args.engine == 'flare' else vllm)(args, corpus)
+    flare(args, corpus)
 
 
 if __name__ == '__main__':

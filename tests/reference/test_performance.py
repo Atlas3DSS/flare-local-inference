@@ -1,10 +1,10 @@
 """CPU tests for exact workload geometry and token-aware performance accounting."""
 
-from copy import deepcopy
 import io
 import json
 import threading
 import zlib
+from copy import deepcopy
 
 import pytest
 
@@ -97,7 +97,7 @@ def test_metadata_only_token_events_and_parser_deltas_are_not_double_counted():
 
 def test_coalesced_chunks_never_create_per_token_arrival_times():
     case, events = observations(groups=((10, 11), (12, 13)), core=False)
-    result = p.analyze_events(events, case, backend="vllm")
+    result = p.analyze_events(events, case, backend="http")
     assert result["passed"]
     assert result["delivery_itl_exact"] is False
     assert result["delivery_itl_ns"] == []
@@ -144,13 +144,13 @@ def test_failed_conditions_are_retained(mutation, check):
     assert result["generated_token_ids"]
 
 
-def test_vllm_prefix_reports_real_hybrid_cache_granularity():
+def test_http_prefix_reports_real_hybrid_cache_granularity():
     case, events = observations(cached=3040, core=False)
     case["expected_cache"] = "prefix-4096"
     case["prompt_tokens"] = [1] * 4107
     events[0]["data"]["prompt_token_ids"] = case["prompt_tokens"]
     events[-2]["data"]["usage"].update(prompt_tokens=4107, total_tokens=4111)
-    result = p.analyze_events(events, case, backend="vllm")
+    result = p.analyze_events(events, case, backend="http")
     assert result["passed"]
     assert result["reused_prompt_tokens"] == 3040
     assert result["checks"]["prefix_reused"]
@@ -217,7 +217,7 @@ class Connection:
         self.closed = True
 
 
-@pytest.mark.parametrize("backend", ["flare", "vllm"])
+@pytest.mark.parametrize("backend", ["flare", "http"])
 def test_client_preserves_raw_stream_and_sends_only_supported_observation_fields(tmp_path, monkeypatch, backend):
     case, events = observations(core=backend == "flare")
     case.update(id="request", request={"model": p.MODEL_ID, "max_tokens": 4})

@@ -68,8 +68,9 @@ def test_reference_tail_rejects_nonfinite_outputs():
 
 
 def test_stage_copies_preserve_return_identity_and_do_not_retain_mutable_view():
-    from qualify.mtp import StageTrace
     from types import SimpleNamespace
+
+    from qualify.mtp import StageTrace
     tensor = torch.tensor([[1., 2.], [3., 4.]])
     owner = SimpleNamespace(operation=lambda value: value)
     original = owner.operation
@@ -94,12 +95,13 @@ def test_stage_comparison_only_selects_declared_request_tail_and_records_missing
     assert measured['stages']['feedback']['selected_actual_rows'] is None
     assert measured['stages']['mlp_mix']['selected_actual_rows'] == [1]
     assert measured['stages']['mlp_mix']['fp32_value_bits_equal']
-    assert measured['stage_coverage'] == {'missing_in_flare': ['only_reference'], 'missing_in_vllm': ['only_actual']}
+    assert measured['stage_coverage'] == {'missing_in_flare': ['only_reference'], 'missing_in_reference': ['only_actual']}
 
 
 def test_functional_linear_observer_preserves_values_and_restores_function():
-    from qualify.mtp import observe_functional_linear
     import torch.nn.functional as functional
+
+    from qualify.mtp import observe_functional_linear
     module = torch.nn.Linear(3, 2, bias=False)
     value = torch.tensor([[1., 2., 3.]])
     original, expected = functional.linear, module(value)

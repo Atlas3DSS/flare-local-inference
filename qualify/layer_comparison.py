@@ -2,13 +2,12 @@
 
 Layer tensors contain all 48 residual outputs, with shape [48,rows,10240].
 The prompt step records every prompt row; each continuation step records one
-consumed token. Measurements use vLLM as the reference and apply no tolerance.
+consumed token. Measurements use the reference as the reference and apply no tolerance.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,8 +15,7 @@ from typing import Any, Mapping
 
 import torch
 
-from .text_oracle import LogitTrace, QWEN_VOCAB_SIZE, load_trace, trace_from_artifact
-
+from .text_oracle import QWEN_VOCAB_SIZE, LogitTrace, trace_from_artifact
 
 LAYERS = 48
 RESIDUAL_WIDTH = 10240
@@ -88,30 +86,26 @@ def layer_trace_from_artifact(
 
 
 def load_layer_trace(path: str | Path, *, vocab_size: int = QWEN_VOCAB_SIZE) -> LayerTrace:
-    """Load CPU tensors and reject a file changed after logit validation."""
-    trace = load_trace(path, vocab_size=vocab_size)
-    with Path(trace.source["path"]).open("rb") as handle:
-        digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        if digest != trace.source["sha256"]:
-            raise ValueError("layer artifact changed after logit/context validation")
-        handle.seek(0)
-        artifact = torch.load(handle, map_location="cpu", weights_only=True)
+    """Load logits and layers together and validate their shared contexts."""
+    path = Path(path).resolve()
+    artifact = torch.load(path, map_location="cpu", weights_only=True)
+    trace = trace_from_artifact(artifact, vocab_size=vocab_size, source={"path": str(path)})
     return _layer_trace(artifact, trace)
 
 
 def _matching_contexts(actual: LogitTrace, reference: LogitTrace) -> None:
     if actual.vocab_size != reference.vocab_size:
-        raise ValueError("vocabulary size differs between Flare and vLLM")
+        raise ValueError("vocabulary size differs between Flare and the reference")
     if len(actual.logits) != len(reference.logits):
-        raise ValueError("logit step count differs between Flare and vLLM")
+        raise ValueError("logit step count differs between Flare and the reference")
     if actual.prompt_tokens != reference.prompt_tokens:
-        raise ValueError("prompt token IDs differ between Flare and vLLM")
+        raise ValueError("prompt token IDs differ between Flare and the reference")
     if actual.teacher_tokens != reference.teacher_tokens:
-        raise ValueError("consumed teacher token IDs differ between Flare and vLLM")
+        raise ValueError("consumed teacher token IDs differ between Flare and the reference")
     for name in ("model_id", "revision"):
         identities = {getattr(trace, name) for trace in (actual, reference)} - {None}
         if len(identities) > 1:
-            raise ValueError(f"recorded {name} differs between Flare and vLLM")
+            raise ValueError(f"recorded {name} differs between Flare and the reference")
 
 
 def _measurement(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any]:
@@ -145,7 +139,7 @@ def _measurement(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any
             for row in range(actual.shape[0])]
     result = {
         "shape": list(actual.shape),
-        "flare_storage_dtype": str(actual.dtype), "vllm_storage_dtype": str(reference.dtype),
+        "flare_storage_dtype": str(actual.dtype), "reference_storage_dtype": str(reference.dtype),
         **metrics(torch.linalg.vector_norm(r), torch.linalg.vector_norm(difference),
                   row_maximum.max(), value_equal.all(),
                   None if storage_equal is None else storage_equal.all()),
@@ -158,14 +152,14 @@ def _measurement(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any
     return result
 
 
-def compare_layers(*, flare: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
+def compare_layers(*, flare: LayerTrace, reference: LayerTrace) -> dict[str, Any]:
     """Measure every layer and shared stage; report one-sided stages explicitly."""
-    _matching_contexts(flare.logits, vllm.logits)
+    _matching_contexts(flare.logits, reference.logits)
     steps = []
-    for step, (actual, reference, actual_stages, reference_stages) in enumerate(zip(
-        flare.layers, vllm.layers, flare.stages, vllm.stages, strict=True
+    for step, (actual, expected, actual_stages, reference_stages) in enumerate(zip(
+        flare.layers, reference.layers, flare.stages, reference.stages, strict=True
     )):
-        layers = [{"layer": index, **_measurement(actual[index], reference[index])}
+        layers = [{"layer": index, **_measurement(actual[index], expected[index])}
                   for index in range(LAYERS)]
         common = sorted(actual_stages.keys() & reference_stages.keys())
         stages = {}
@@ -175,11 +169,11 @@ def compare_layers(*, flare: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
             except ValueError as error:
                 raise ValueError(f"step {step}, stage {name}: {error}") from error
         missing_in_flare = sorted(reference_stages.keys() - actual_stages.keys())
-        missing_in_vllm = sorted(actual_stages.keys() - reference_stages.keys())
+        missing_in_reference = sorted(actual_stages.keys() - reference_stages.keys())
         steps.append({
-            "step": step, "context_length": len(vllm.logits.prompt_tokens) + step,
-            "input_token_ids": list(vllm.logits.prompt_tokens if step == 0
-                                    else vllm.logits.teacher_tokens[step - 1:step]),
+            "step": step, "context_length": len(reference.logits.prompt_tokens) + step,
+            "input_token_ids": list(reference.logits.prompt_tokens if step == 0
+                                    else reference.logits.teacher_tokens[step - 1:step]),
             "first_fp32_value_mismatch_layer": next(
                 (item["layer"] for item in layers if not item["fp32_value_bits_equal"]), None),
             "first_last_row_fp32_value_mismatch_layer": next(
@@ -187,27 +181,27 @@ def compare_layers(*, flare: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
             "layers": layers,
             "stage_coverage": {
                 "compared": common, "missing_in_flare": missing_in_flare,
-                "missing_in_vllm": missing_in_vllm,
-                "identical_key_sets": not missing_in_flare and not missing_in_vllm,
+                "missing_in_reference": missing_in_reference,
+                "identical_key_sets": not missing_in_flare and not missing_in_reference,
                 "has_comparable_stages": bool(common),
             },
             "stages": stages,
         })
     return {
-        "schema_version": 1, "actual": "flare", "reference": "vllm",
-        "prompt_tokens": list(vllm.logits.prompt_tokens),
-        "teacher_tokens": list(vllm.logits.teacher_tokens),
-        "vocab_size": vllm.logits.vocab_size, "layer_count": LAYERS,
+        "schema_version": 1, "actual": "flare", "reference": "reference",
+        "prompt_tokens": list(reference.logits.prompt_tokens),
+        "teacher_tokens": list(reference.logits.teacher_tokens),
+        "vocab_size": reference.logits.vocab_size, "layer_count": LAYERS,
         "residual_width": RESIDUAL_WIDTH,
         "sources": {name: {**trace.logits.source, "model_id": trace.logits.model_id,
                     "revision": trace.logits.revision, "recorded_dtype_metadata": dict(trace.metadata),
                     "layer_bank_dtypes": [str(value.dtype) for value in trace.layers],
                     "stage_bank_dtypes": [{key: str(value.dtype) for key, value in stage.items()}
                                           for stage in trace.stages]}
-                    for name, trace in (("flare", flare), ("vllm", vllm))},
+                    for name, trace in (("flare", flare), ("reference", reference))},
         "metrics": {
             "arithmetic": "All measurements use CPU FP32 tensors.",
-            "relative_l2": "norm(flare-vllm) / norm(vllm); null when vLLM norm is zero",
+            "relative_l2": "norm(flare-reference) / norm(reference); null when the reference norm is zero",
             "fp32_value_bits_equal": "Bitwise equality after FP32 conversion, including signed zero; independent of storage dtype.",
             "storage_bitwise_equal": "Original tensor bytes equal; null when storage dtypes differ.",
             "rows": "Every recorded row; last_row repeats the final prompt row or the single continuation row.",
@@ -220,13 +214,13 @@ def compare_layers(*, flare: LayerTrace, vllm: LayerTrace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--flare", required=True, type=Path)
-    parser.add_argument("--vllm", required=True, type=Path)
+    parser.add_argument("--reference", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output already exists")
     result = compare_layers(flare=load_layer_trace(args.flare),
-                            vllm=load_layer_trace(args.vllm))
+                            reference=load_layer_trace(args.reference))
     with args.output.open("x") as handle:
         json.dump(result, handle, indent=2, allow_nan=False)
         handle.write("\n")

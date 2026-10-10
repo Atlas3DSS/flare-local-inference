@@ -76,9 +76,8 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 ## Optimize the serving path
 
 - Apply the recipe requirements below during implementation. Inspect the
-  corresponding model's active SM120 implementation in vLLM as a performance
-  reference for fusion boundaries, precision, sharding, overlap, and kernel
-  plans. Reuse FlashInfer/b12x mechanisms directly; vLLM is not a runtime dependency.
+  model's fusion boundaries, precision, sharding, overlap, and selected kernel
+  plans. Reuse FlashInfer/b12x mechanisms directly.
 - Measure GPU graph replay separately from native scheduling and end-to-end
   request latency. Compare equivalent shapes and execution configurations when
   using another server as a performance reference.

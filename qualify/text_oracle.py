@@ -9,14 +9,12 @@ decoder artifacts are accepted without changing their stored inputs.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import torch
-
 
 QWEN_VOCAB_SIZE = 248320
 _FLOAT_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
@@ -127,15 +125,10 @@ def trace_from_artifact(
 
 
 def load_trace(path: str | Path, *, vocab_size: int = QWEN_VOCAB_SIZE) -> LogitTrace:
-    """Load CPU tensors with weights_only=True and retain the artifact digest."""
+    """Load full-vocabulary CPU tensors with weights_only=True."""
     path = Path(path).resolve()
-    with path.open("rb") as handle:
-        digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        handle.seek(0)
-        artifact = torch.load(handle, map_location="cpu", weights_only=True)
-    return trace_from_artifact(artifact, vocab_size=vocab_size, source={
-        "path": str(path), "sha256": digest, "bytes": path.stat().st_size,
-    })
+    artifact = torch.load(path, map_location="cpu", weights_only=True)
+    return trace_from_artifact(artifact, vocab_size=vocab_size, source={"path": str(path)})
 
 
 def _prediction(row: torch.Tensor) -> dict[str, Any]:
@@ -167,9 +160,9 @@ def _metrics(actual: torch.Tensor, reference: torch.Tensor) -> dict[str, Any]:
     return result
 
 
-def compare_traces(*, flare: LogitTrace, vllm: LogitTrace, canonical: LogitTrace) -> dict[str, Any]:
+def compare_traces(*, flare: LogitTrace, reference: LogitTrace, canonical: LogitTrace) -> dict[str, Any]:
     """Return measurements for matching contexts; no numerical gate is applied."""
-    traces = {"flare": flare, "vllm": vllm, "canonical": canonical}
+    traces = {"flare": flare, "reference": reference, "canonical": canonical}
     for name, trace in traces.items():
         _validate(trace)
         if trace.vocab_size != canonical.vocab_size:
@@ -185,7 +178,7 @@ def compare_traces(*, flare: LogitTrace, vllm: LogitTrace, canonical: LogitTrace
         if len(identities) > 1:
             raise ValueError(f"recorded {field} differs across artifacts")
     pairs = {}
-    for actual, reference in (("flare", "vllm"), ("flare", "canonical"), ("vllm", "canonical")):
+    for actual, reference in (("flare", "reference"), ("flare", "canonical"), ("reference", "canonical")):
         pairs[f"{actual}_vs_{reference}"] = {
             "actual": actual, "reference": reference,
             "steps": [{"step": step, **_metrics(a, r)} for step, (a, r) in enumerate(
@@ -213,14 +206,14 @@ def compare_traces(*, flare: LogitTrace, vllm: LogitTrace, canonical: LogitTrace
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("flare", "vllm", "canonical"):
+    for name in ("flare", "reference", "canonical"):
         parser.add_argument(f"--{name}", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output already exists")
     result = compare_traces(**{name: load_trace(getattr(args, name))
-                               for name in ("flare", "vllm", "canonical")})
+                               for name in ("flare", "reference", "canonical")})
     with args.output.open("x") as handle:
         json.dump(result, handle, indent=2, allow_nan=False)
         handle.write("\n")

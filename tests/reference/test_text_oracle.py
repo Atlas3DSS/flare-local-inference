@@ -1,6 +1,5 @@
 """CPU measurements reject unpaired contexts before comparing serving logits."""
 
-import hashlib
 import json
 import math
 from dataclasses import replace
@@ -9,7 +8,6 @@ import pytest
 import torch
 
 from qualify.text_oracle import compare_traces, load_trace, trace_from_artifact
-
 
 VOCAB = 16
 
@@ -28,7 +26,7 @@ def trace(value=None):
 
 
 def compare(actual, reference):
-    return compare_traces(flare=actual, vllm=reference, canonical=reference)
+    return compare_traces(flare=actual, reference=reference, canonical=reference)
 
 
 @pytest.fixture(autouse=True)
@@ -43,12 +41,12 @@ def test_all_three_pairs_use_named_reference_norm_and_preserve_storage():
     actual = trace(artifact(logits=[row * 2 for row in reference.logits]))
     serving = trace(artifact(logits=[row * 3 for row in reference.logits]))
     originals = [row.clone() for row in actual.logits]
-    report = compare_traces(flare=actual, vllm=serving, canonical=reference)
+    report = compare_traces(flare=actual, reference=serving, canonical=reference)
     assert set(report["pairs"]) == {
-        "flare_vs_vllm", "flare_vs_canonical", "vllm_vs_canonical",
+        "flare_vs_reference", "flare_vs_canonical", "reference_vs_canonical",
     }
-    for pair, expected in (("flare_vs_vllm", 1 / 3),
-                           ("flare_vs_canonical", 1), ("vllm_vs_canonical", 2)):
+    for pair, expected in (("flare_vs_reference", 1 / 3),
+                           ("flare_vs_canonical", 1), ("reference_vs_canonical", 2)):
         for row in report["pairs"][pair]["steps"]:
             assert row["relative_l2"] == pytest.approx(expected)
             assert row["top10_overlap_count"] == 10
@@ -121,14 +119,14 @@ def test_legal_zero_logits_report_undefined_relative_l2_without_infinity():
 def test_storage_dtypes_may_differ_and_are_recorded():
     canonical = trace()
     native = trace(artifact(logits=[x.bfloat16() for x in canonical.logits]))
-    vllm = trace(artifact(logits=torch.stack(canonical.logits)))
-    report = compare_traces(flare=native, vllm=vllm, canonical=canonical)
+    reference = trace(artifact(logits=torch.stack(canonical.logits)))
+    report = compare_traces(flare=native, reference=reference, canonical=canonical)
     assert report["sources"]["flare"]["logit_dtypes"] == ["torch.bfloat16"] * 2
-    assert report["sources"]["vllm"]["logit_dtypes"] == ["torch.float32"] * 2
-    assert report["pairs"]["flare_vs_vllm"]["steps"][0]["relative_l2"] == 0
+    assert report["sources"]["reference"]["logit_dtypes"] == ["torch.float32"] * 2
+    assert report["pairs"]["flare_vs_reference"]["steps"][0]["relative_l2"] == 0
 
 
-def test_historical_formats_load_consumed_contexts_and_hashes(tmp_path):
+def test_decoder_formats_load_consumed_contexts(tmp_path):
     value = artifact()
     canonical = {"input_ids": torch.tensor([[2, 3]], dtype=torch.int64),
                  "teacher_tokens": [4], "model_id": "checkpoint", "revision": "revision",
@@ -140,7 +138,7 @@ def test_historical_formats_load_consumed_contexts_and_hashes(tmp_path):
         path = tmp_path / f"{index}.pt"
         torch.save(data, path)
         loaded = load_trace(path, vocab_size=VOCAB)
-        assert loaded.source["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert loaded.source["path"] == str(path)
         assert loaded.teacher_tokens == (4,)
         assert all(row.device.type == "cpu" for row in loaded.logits)
         traces.append(loaded)

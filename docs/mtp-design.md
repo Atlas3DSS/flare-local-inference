@@ -38,12 +38,11 @@ The [checkpoint manifest](../flare/preparation/qwen38.py) validates MTP
 headers; the [weight loader](../flare/recipes/qwen38/weights.py) excludes them.
 Header validation does not verify tensor payload hashes or model execution.
 
-Pinned Transformers `4cc2aa84301c9aa210b5513dab9fefae03981f6e` ignores `mtp.*`
-and has no MTP module. The executable model reference is vLLM
-`64fc1eec593397cbd765cc082e9ec90fbeb5ea66` at
-`/home/luke/projects/vllm-lunar-leviathan`, principally
-`vllm/models/qwen4_exp/nvidia/mtp.py` and
-`vllm/v1/spec_decode/utils.py`.
+Transformers `4cc2aa84301c9aa210b5513dab9fefae03981f6e` ignores `mtp.*`
+and has no MTP module. The [MTP recipe](../flare/recipes/qwen38/mtp.py) composes
+b12x operators for feedback, attention, expert execution, and output mixing.
+Feedback arithmetic is checked against `b12x.sequence.mtp_feedback.reference`;
+state alignment and graph replay are exercised by the recipe tests.
 
 For a consumed target token `x[i]`, let `h[i]` be the target's 10,240-wide
 residual **before its final mixer**. One teacher-forced MTP row receives
@@ -335,8 +334,8 @@ this checkpoint.
    distribution at each copied token.
 3. **MTP weights and arithmetic.** Load the exact W4A16 experts and BF16 tensors;
    qualify feedback, target-hidden alignment, draft attention, routed/shared
-   experts and logits against pinned vLLM. Match activation policy, KV dtype and
-   draft-head policy explicitly. Add target-derived MTP absorption to prefill,
+   experts and logits against component operator references. Match activation
+   policy, KV dtype and draft-head policy explicitly. Add target-derived MTP absorption to prefill,
    accepted rounds and prefix checkpoints. Keep canonical eager comparisons
    diagnostic.
 4. **Adaptive budget.** Measure fixed depths including zero first, with the
@@ -362,14 +361,13 @@ and rejected proposals never enter committed state or public output.
 Compare Python and Rust replay of the same graphs bitwise, including same-shape
 restore and every persistent state region. Cross-capacity and ordinary-versus-
 verification arithmetic use tolerances established from measured same-input
-variation. Teacher-forced diagnostics retain full-vocabulary vLLM logits,
+variation. Teacher-forced diagnostics retain full-vocabulary logits,
 relative L2 with the reference norm as denominator, top-10 overlap and FP32
 `KL(reference || actual)`. Numerical acceptance requires component comparisons
 on identical operands, tolerances derived from measured arithmetic differences,
-and a repeated-reference variance floor. The frozen 82-prompt generation corpus
-retains its temperature-zero, 64-token contract and compares token agreement
-against vLLM's own repeatability. It exercises the common probability sampler.
-Whole-model logit relative L2 is diagnostic, not an acceptance threshold. A higher
+and measured repeatability for kernels whose reduction order can vary.
+Generation tests exercise the common probability sampler with explicit settings
+and fixed output budgets. Whole-model logit relative L2 is diagnostic. A higher
 speculative acceptance rate cannot close an unexplained component discrepancy.
 
 Every admitted graph must replay without allocation, compilation, recapture or
@@ -412,9 +410,9 @@ EOS, repeated-text artifact or truncated response cannot be counted as equivalen
 completed work. Synthetic serving throughput does not predict the result of
 these workload measurements.
 
-Performance compares vLLM, minimal replay of the same prepared speculative graph
-sequence, and the complete native service with matched settings. The native
-overhead target remains within 5% of that **measured replay floor**, separately
+Performance compares ordinary decoding, minimal replay of the prepared
+speculative graph sequence, and the complete native service with matched settings.
+The native overhead target remains within 5% of that **measured replay floor**, separately
 from frontend delivery. The approximate 3.9 ms single-token weight-traffic bound
 is a non-speculative batch-one reference: amortized verification can reduce bytes
 per emitted token, while extra expert routes and MTP work can increase round
