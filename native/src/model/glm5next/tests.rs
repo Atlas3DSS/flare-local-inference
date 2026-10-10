@@ -6,7 +6,7 @@ use crate::{
     cache::Fence,
     execution::{ABI_VERSION, BufferDescriptor, Dtype, GraphDescriptor, InputBinding},
     model::SamplingParameters,
-    scheduler::{RequestSpec, SchedulerLimits, prefill_capacities},
+    scheduler::{RequestHandle, RequestSpec, SchedulerLimits, prefill_capacities},
 };
 
 pub(super) fn config() -> ModelConfig {
@@ -242,6 +242,7 @@ fn add(
         })
         .unwrap();
     admissions[handle.slot as usize] = Some(Admission {
+        data: (),
         handle,
         sampling: SamplingParameters {
             seed: u64::MAX - 5,

@@ -1,16 +1,18 @@
 //! Statically dispatched prepared-model semantics; CUDA transport remains model-independent.
 
+pub mod admission;
 pub mod catalog;
 pub mod glm5next;
 pub(crate) mod inputs;
 pub mod qwen4exp;
+#[cfg(feature = "images")]
+use crate::scheduler::RequestHandle;
 use crate::{
     Result,
     execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
-    scheduler::{
-        RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities, SchedulerLimits,
-    },
+    scheduler::{RequestScheduler, ScheduledStep, SchedulerCapabilities, SchedulerLimits},
 };
+pub use admission::Admission;
 
 #[cfg_attr(feature = "server", derive(serde::Deserialize))]
 #[cfg_attr(feature = "server", serde(deny_unknown_fields))]
@@ -147,7 +149,7 @@ impl ModelConfig {
 }
 
 pub trait ModelContract: Send + Sync + Sized + 'static {
-    type Admission;
+    type PromptData: Clone + Send;
     type Inputs: Default;
     fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()>;
     fn required_buffers(config: &ModelConfig) -> Vec<catalog::BufferSpec>;
@@ -159,11 +161,9 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         config: &ModelConfig,
         scheduler: &RequestScheduler,
         step: &ScheduledStep,
-        admissions: &[Option<Self::Admission>; REQUEST_LANES],
+        admissions: &[Option<Admission<Self>>; REQUEST_LANES],
     ) -> Result<()>;
     fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>>;
-    fn admission_handle(admission: &Self::Admission) -> RequestHandle;
-    fn grammar_updated(admission: &mut Self::Admission, mask: &[i32]);
     fn validate_completion(
         config: &ModelConfig,
         kind: GraphKind,
@@ -177,8 +177,6 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         images: &crate::frontend::images::ProcessedImages,
         image: usize,
     ) -> Result<()>;
-    #[cfg(feature = "server")]
-    type PromptData: Send;
     #[cfg(feature = "server")]
     type OutputConfig: Send;
     #[cfg(feature = "server")]
@@ -205,17 +203,13 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         options: &serde_json::Map<String, serde_json::Value>,
         structured: bool,
     ) -> Result<Self::OutputConfig>;
-    #[cfg(feature = "server")]
-    fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()>;
+    fn validate_prompt_data(
+        config: &ModelConfig,
+        tokens: &[u32],
+        data: &Self::PromptData,
+    ) -> Result<()>;
     #[cfg(feature = "server")]
     fn text_only(data: &Self::PromptData) -> bool;
-    #[cfg(feature = "server")]
-    fn admission(
-        config: &ModelConfig,
-        handle: RequestHandle,
-        prompt: &crate::server::Prompt<Self>,
-        ignore_eos: bool,
-    ) -> Result<Self::Admission>;
 }
 
 #[cfg(feature = "server")]

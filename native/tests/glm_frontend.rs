@@ -65,7 +65,8 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         let prepared =
             prepare_request::<Glm5Next>(&frontend, None, &compiler, &config, case["body"].clone())
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
-        Glm5Next::validate_prompt(&config, &prepared.prompt).unwrap();
+        flare_native::model::admission::validate_prompt::<Glm5Next>(&config, &prepared.prompt)
+            .unwrap();
         assert_eq!(
             prepared.rendered_prompt,
             case["rendered"].as_str().unwrap(),

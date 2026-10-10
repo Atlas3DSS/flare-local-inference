@@ -9,18 +9,20 @@ mod prompt;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "images")]
+use crate::scheduler::RequestHandle;
 use crate::{
     Result,
     execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
     model::{ContractMetadata, ModelConfig, ModelContract, VisionCapabilities},
-    scheduler::{RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities},
+    scheduler::{RequestScheduler, ScheduledStep, SchedulerCapabilities},
 };
 
 pub struct Qwen4Exp;
 pub const INPUT_SCHEMA: &str = "qwen4exp.graph-inputs.v2";
 pub const VOCABULARY: usize = 248320;
 
-#[cfg(feature = "server")]
+#[derive(Clone)]
 pub struct PromptData {
     pub positions: Vec<[i64; 3]>,
     pub vision_token_indices: Vec<i32>,
@@ -51,7 +53,6 @@ impl Qwen4Exp {
 }
 
 impl ModelContract for Qwen4Exp {
-    type Admission = inputs::Admission;
     type Inputs = inputs::Inputs;
     fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
         config::validate_config(config, manifest)
@@ -79,22 +80,12 @@ impl ModelContract for Qwen4Exp {
         config: &ModelConfig,
         scheduler: &RequestScheduler,
         step: &ScheduledStep,
-        admissions: &[Option<Self::Admission>; REQUEST_LANES],
+        admissions: &[Option<crate::model::Admission<Self>>; REQUEST_LANES],
     ) -> Result<()> {
         inputs.pack(config, scheduler, step, admissions)
     }
     fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>> {
         inputs.uploads()
-    }
-    fn admission_handle(admission: &Self::Admission) -> RequestHandle {
-        admission.handle
-    }
-    fn grammar_updated(admission: &mut Self::Admission, mask: &[i32]) {
-        admission
-            .grammar_mask
-            .as_mut()
-            .expect("grammar admission has a mask")
-            .copy_from_slice(mask);
     }
     fn validate_completion(
         config: &ModelConfig,
@@ -155,7 +146,6 @@ impl ModelContract for Qwen4Exp {
     ) -> Result<()> {
         inputs.pack_vision(config, handle, images, image)
     }
-    #[cfg(feature = "server")]
     type PromptData = PromptData;
     #[cfg(feature = "server")]
     type OutputConfig = output::OutputConfig;
@@ -191,60 +181,28 @@ impl ModelContract for Qwen4Exp {
             frontend, rendered, messages, options, structured,
         ))
     }
-    #[cfg(feature = "server")]
-    fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()> {
-        prompt.sampling.validate()?;
-        if prompt.tokens.is_empty()
-            || prompt
-                .system_boundary
-                .is_some_and(|boundary| boundary == 0 || boundary >= prompt.tokens.len())
-            || prompt.tokens.len() != prompt.data.positions.len()
-            || prompt.tokens.len() != prompt.data.vision_token_indices.len()
-            || prompt
-                .data
-                .vision_token_indices
+    fn validate_prompt_data(
+        config: &ModelConfig,
+        tokens: &[u32],
+        data: &Self::PromptData,
+    ) -> Result<()> {
+        if tokens.len() != data.positions.len()
+            || tokens.len() != data.vision_token_indices.len()
+            || data.vision_token_indices.iter().any(|index| {
+                *index < -1 || *index >= config.contract.vision.features_per_request as i32
+            })
+            || data
+                .positions
                 .iter()
-                .any(|i| *i < -1 || *i >= config.contract.vision.features_per_request as i32)
-            || prompt
-                .tokens
-                .iter()
-                .any(|t| *t as usize >= config.contract.vocabulary)
-            || prompt.data.positions.iter().flatten().any(|p| *p < 0)
-            || prompt.sampling.top_k > config.contract.vocabulary as i32
-            || prompt.max_new_tokens == 0
-            || prompt.max_new_tokens > i32::MAX as u32
-            || prompt
-                .tokens
-                .len()
-                .checked_add(prompt.max_new_tokens as usize)
-                .is_none_or(|n| n > config.limits.max_sequence_tokens)
+                .flatten()
+                .any(|position| *position < 0)
         {
-            return Err("prompt and output limit exceed the prepared model contract".into());
+            return Err("invalid prompt position or vision feature metadata".into());
         }
         Ok(())
     }
     #[cfg(feature = "server")]
     fn text_only(data: &Self::PromptData) -> bool {
         data.vision_token_indices.iter().all(|i| *i == -1)
-    }
-    #[cfg(feature = "server")]
-    fn admission(
-        config: &ModelConfig,
-        handle: RequestHandle,
-        prompt: &crate::server::Prompt<Self>,
-        ignore_eos: bool,
-    ) -> Result<Self::Admission> {
-        let admission = inputs::Admission {
-            handle,
-            sampling: prompt.sampling.clone(),
-            max_new_tokens: prompt.max_new_tokens,
-            prompt: prompt.tokens.clone(),
-            positions: prompt.data.positions.clone(),
-            vision_token_indices: prompt.data.vision_token_indices.clone(),
-            grammar_mask: prompt.grammar.as_ref().map(|g| g.mask().to_vec()),
-            ignore_eos,
-        };
-        admission.validate(config)?;
-        Ok(admission)
     }
 }

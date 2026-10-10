@@ -217,6 +217,11 @@ The shared [graph catalog](../native/src/model/catalog.rs) validates model limit
 buffer layouts, declared capacities, required operations, and every supplied
 graph's input bindings. Native startup and graph selection use this common
 implementation; adapters supply declarations and model-specific constraints.
+Shared [request admission](../native/src/model/admission.rs) owns request epochs,
+sampling parameters, prompt tokens, output budgets, and grammar masks. The core
+validates prompt limits and constructs admissions for every model. Model adapters
+supply additional prompt metadata and validate its layout; Qwen includes rotary
+positions and vision-feature indices, while GLM text requires no extra metadata.
 
 [Prepared projection components](../flare/components/linear.py) provide BF16,
 FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,

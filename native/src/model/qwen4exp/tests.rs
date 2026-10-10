@@ -190,6 +190,37 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
 }
 
 #[test]
+fn shared_admission_enforces_slot_capacity_and_model_metadata() {
+    let mut config = config();
+    config.limits.max_active = 1;
+    let mut admission = Admission {
+        handle: crate::scheduler::RequestHandle {
+            slot: 1,
+            generation: 1,
+        },
+        sampling: SamplingParameters::default(),
+        max_new_tokens: 16,
+        prompt: vec![7],
+        data: PromptData {
+            positions: vec![[0; 3]],
+            vision_token_indices: vec![-1],
+        },
+        grammar_mask: None,
+        ignore_eos: false,
+    };
+    assert!(admission.validate(&config).is_err());
+    admission.handle.slot = 0;
+    admission.validate(&config).unwrap();
+    admission.data.positions.clear();
+    assert!(admission.validate(&config).is_err());
+    admission.data.positions.push([0; 3]);
+    admission.grammar_mask = Some(vec![-1]);
+    assert!(admission.validate(&config).is_err());
+    admission.grammar_mask = Some(vec![-1; VOCABULARY.div_ceil(32)]);
+    admission.validate(&config).unwrap();
+}
+
+#[test]
 fn optional_decode_graphs_in_speculative_catalogs_obey_the_shared_contract() {
     let mut config = config();
     config.speculative_widths = (1..=8).collect();
@@ -386,8 +417,10 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
         },
         max_new_tokens: 16,
         prompt,
-        positions: (0..65).map(|p| [p; 3]).collect(),
-        vision_token_indices: vec![-1; 65],
+        data: PromptData {
+            positions: (0..65).map(|p| [p; 3]).collect(),
+            vision_token_indices: vec![-1; 65],
+        },
         grammar_mask: None,
         ignore_eos: false,
     });
@@ -671,8 +704,10 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         },
         max_new_tokens: 4,
         prompt: vec![7; 65],
-        positions: (0..65).map(|p| [p; 3]).collect(),
-        vision_token_indices: vec![-1; 65],
+        data: PromptData {
+            positions: (0..65).map(|p| [p; 3]).collect(),
+            vision_token_indices: vec![-1; 65],
+        },
         grammar_mask: None,
         ignore_eos: false,
     });
@@ -806,11 +841,13 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         handle,
         sampling: SamplingParameters::default(),
         max_new_tokens: 4,
-        positions: prompt.iter().map(|&token| [token as i64; 3]).collect(),
-        vision_token_indices: prompt
-            .iter()
-            .map(|&token| if token % 2 == 0 { token as i32 } else { -1 })
-            .collect(),
+        data: PromptData {
+            positions: prompt.iter().map(|&token| [token as i64; 3]).collect(),
+            vision_token_indices: prompt
+                .iter()
+                .map(|&token| if token % 2 == 0 { token as i32 } else { -1 })
+                .collect(),
+        },
         prompt,
         grammar_mask: None,
         ignore_eos: false,
@@ -1008,8 +1045,10 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         sampling: SamplingParameters::default(),
         max_new_tokens: 16,
         prompt: vec![7; 65],
-        positions: (0..65).map(|p| [p; 3]).collect(),
-        vision_token_indices: vec![-1; 65],
+        data: PromptData {
+            positions: (0..65).map(|p| [p; 3]).collect(),
+            vision_token_indices: vec![-1; 65],
+        },
         grammar_mask: Some(vec![1; words]),
         ignore_eos: false,
     });
@@ -1298,8 +1337,10 @@ fn state_transfer_and_resume_upload_fixture() {
             sampling: SamplingParameters::default(),
             max_new_tokens: 2,
             prompt,
-            positions: (0..64).map(|i| [i, i + 1, i + 2]).collect(),
-            vision_token_indices: vec![-1; 64],
+            data: PromptData {
+                positions: (0..64).map(|i| [i, i + 1, i + 2]).collect(),
+                vision_token_indices: vec![-1; 64],
+            },
             grammar_mask: None,
             ignore_eos: false,
         });
@@ -1568,8 +1609,10 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
                 sampling: SamplingParameters::default(),
                 max_new_tokens: 1,
                 prompt: vec![7; end],
-                positions: (0..end).map(|i| [i as i64; 3]).collect(),
-                vision_token_indices: vec![-1; end],
+                data: PromptData {
+                    positions: (0..end).map(|i| [i as i64; 3]).collect(),
+                    vision_token_indices: vec![-1; end],
+                },
                 grammar_mask: None,
                 ignore_eos: false,
             });

@@ -383,7 +383,7 @@ impl<M: ModelContract> ModelRuntime<M> {
             !prompt.stop_sequences.is_empty(),
             prompt.grammar.is_some(),
         )?;
-        M::validate_prompt(&self.config, &prompt)
+        crate::model::admission::validate_prompt::<M>(&self.config, &prompt)
             .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
         let (events, receiver) = async_mpsc::channel(self.event_capacity);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -467,7 +467,7 @@ struct Worker<'a, M: ModelContract> {
     scheduler: RequestScheduler,
     pending: VecDeque<Incoming<M>>,
     active: [Option<Active<'a, M>>; 4],
-    admissions: [Option<M::Admission>; 4],
+    admissions: [Option<crate::model::Admission<M>>; 4],
     inputs: Option<M::Inputs>,
     queue_capacity: usize,
 }
@@ -618,7 +618,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     continue;
                 }
             }
-            self.admissions[slot] = Some(M::admission(
+            self.admissions[slot] = Some(crate::model::Admission::<M>::from_prompt(
                 self.config,
                 handle,
                 &incoming.prompt,
@@ -698,12 +698,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                         stopped.push(token.request);
                         continue;
                     }
-                    M::grammar_updated(
-                        self.admissions[token.request.slot as usize]
-                            .as_mut()
-                            .unwrap(),
-                        grammar.mask(),
-                    );
+                    self.admissions[token.request.slot as usize]
+                        .as_mut()
+                        .unwrap()
+                        .grammar_updated(grammar.mask());
                 }
                 let stop = match request.emit_output(token.token, &self.config.eos_token_ids) {
                     Ok(matched) => matched,
@@ -972,7 +970,7 @@ fn cancel_stopped<M: ModelContract>(
     stopped: &[RequestHandle],
     scheduler: &mut RequestScheduler,
     active: &mut [Option<Active<'_, M>>; 4],
-    admissions: &mut [Option<M::Admission>; 4],
+    admissions: &mut [Option<crate::model::Admission<M>>; 4],
 ) -> Result<()> {
     for (index, &handle) in stopped.iter().enumerate() {
         // Several tokens from one completion can encounter the same poisoned grammar.
@@ -1019,7 +1017,7 @@ fn prepare_copy_proposal(
 
 fn validate_sampling_admissions<M: ModelContract>(
     step: &ScheduledStep,
-    admissions: &[Option<M::Admission>; 4],
+    admissions: &[Option<crate::model::Admission<M>>; 4],
 ) -> Result<()> {
     if !step.kind.samples() {
         return Ok(());
@@ -1031,7 +1029,7 @@ fn validate_sampling_admissions<M: ModelContract>(
         admissions
             .get(lane.request.slot as usize)
             .and_then(Option::as_ref)
-            .filter(|admission| M::admission_handle(admission) == lane.request)
+            .filter(|admission| admission.handle == lane.request)
             .ok_or("sampling submission lacks its matching admission")?;
     }
     Ok(())
@@ -1084,8 +1082,10 @@ mod tests {
                 },
                 max_new_tokens: 16,
                 prompt: vec![7],
-                positions: vec![[0; 3]],
-                vision_token_indices: vec![-1],
+                data: PromptData {
+                    positions: vec![[0; 3]],
+                    vision_token_indices: vec![-1],
+                },
                 grammar_mask: None,
                 ignore_eos: false,
             })
@@ -1497,8 +1497,10 @@ mod tests {
                 sampling: SamplingParameters::default(),
                 max_new_tokens: 10,
                 prompt: vec![0],
-                positions: vec![[0; 3]],
-                vision_token_indices: vec![-1],
+                data: PromptData {
+                    positions: vec![[0; 3]],
+                    vision_token_indices: vec![-1],
+                },
                 grammar_mask: None,
                 ignore_eos: false,
             });

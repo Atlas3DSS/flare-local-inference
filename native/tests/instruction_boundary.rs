@@ -97,7 +97,8 @@ impl Fixture {
         .unwrap();
         assert_eq!(prepared.rendered_prompt, expected.text);
         assert_eq!(prepared.prompt.tokens, expected.token_ids);
-        Qwen4Exp::validate_prompt(&self.config, &prepared.prompt).unwrap();
+        flare_native::model::admission::validate_prompt::<Qwen4Exp>(&self.config, &prepared.prompt)
+            .unwrap();
         prepared
     }
 
@@ -140,7 +141,13 @@ fn exact_short_instruction_boundary_survives_changed_user_content() {
     let mut malformed = a;
     for boundary in [0, malformed.prompt.tokens.len(), usize::MAX] {
         malformed.prompt.system_boundary = Some(boundary);
-        assert!(Qwen4Exp::validate_prompt(&fixture.config, &malformed.prompt).is_err());
+        assert!(
+            flare_native::model::admission::validate_prompt::<Qwen4Exp>(
+                &fixture.config,
+                &malformed.prompt
+            )
+            .is_err()
+        );
     }
     println!("exact short boundary: {} tokens", prefix.len());
 }

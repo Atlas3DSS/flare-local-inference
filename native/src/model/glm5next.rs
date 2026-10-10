@@ -9,11 +9,13 @@ mod prompt;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "images")]
+use crate::scheduler::RequestHandle;
 use crate::{
     Result,
     execution::{CompletionRecord, ExecutionManifest, GraphKind, REQUEST_LANES, Upload},
     model::{ContractMetadata, ModelConfig, ModelContract, VisionCapabilities},
-    scheduler::{RequestHandle, RequestScheduler, ScheduledStep, SchedulerCapabilities},
+    scheduler::{RequestScheduler, ScheduledStep, SchedulerCapabilities},
 };
 
 pub struct Glm5Next;
@@ -32,7 +34,6 @@ impl Glm5Next {
 }
 
 impl ModelContract for Glm5Next {
-    type Admission = inputs::Admission;
     type Inputs = inputs::Inputs;
 
     fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
@@ -59,7 +60,7 @@ impl ModelContract for Glm5Next {
         config: &ModelConfig,
         scheduler: &RequestScheduler,
         step: &ScheduledStep,
-        admissions: &[Option<Self::Admission>; REQUEST_LANES],
+        admissions: &[Option<crate::model::Admission<Self>>; REQUEST_LANES],
     ) -> Result<()> {
         inputs.pack(config, scheduler, step, admissions)
     }
@@ -67,17 +68,6 @@ impl ModelContract for Glm5Next {
     fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>> {
         inputs.uploads()
     }
-    fn admission_handle(admission: &Self::Admission) -> RequestHandle {
-        admission.handle
-    }
-    fn grammar_updated(admission: &mut Self::Admission, mask: &[i32]) {
-        admission
-            .grammar_mask
-            .as_mut()
-            .expect("grammar admission has a mask")
-            .copy_from_slice(mask);
-    }
-
     fn validate_completion(
         config: &ModelConfig,
         _: GraphKind,
@@ -106,7 +96,6 @@ impl ModelContract for Glm5Next {
         Err("prepared GLM catalog has no vision graphs".into())
     }
 
-    #[cfg(feature = "server")]
     type PromptData = ();
     #[cfg(feature = "server")]
     type OutputConfig = output::OutputConfig;
@@ -151,54 +140,11 @@ impl ModelContract for Glm5Next {
         Ok(output)
     }
 
-    #[cfg(feature = "server")]
-    fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt<Self>) -> Result<()> {
-        prompt.sampling.validate()?;
-        if prompt.tokens.is_empty()
-            || prompt
-                .system_boundary
-                .is_some_and(|n| n == 0 || n >= prompt.tokens.len())
-            || prompt
-                .tokens
-                .iter()
-                .any(|t| *t as usize >= config.contract.vocabulary)
-            || prompt.sampling.top_k > config.contract.vocabulary as i32
-            || prompt.max_new_tokens == 0
-            || prompt.max_new_tokens > i32::MAX as u32
-            || prompt
-                .tokens
-                .len()
-                .checked_add(prompt.max_new_tokens as usize)
-                .is_none_or(|n| n > config.limits.max_sequence_tokens)
-            || prompt.images.is_some()
-            || !prompt.conditioning.is_empty()
-        {
-            return Err("prompt and output limit exceed the prepared GLM text contract".into());
-        }
+    fn validate_prompt_data(_: &ModelConfig, _: &[u32], _: &()) -> Result<()> {
         Ok(())
     }
-
     #[cfg(feature = "server")]
     fn text_only(_: &()) -> bool {
         true
-    }
-
-    #[cfg(feature = "server")]
-    fn admission(
-        config: &ModelConfig,
-        handle: RequestHandle,
-        prompt: &crate::server::Prompt<Self>,
-        ignore_eos: bool,
-    ) -> Result<Self::Admission> {
-        let admission = inputs::Admission {
-            handle,
-            sampling: prompt.sampling.clone(),
-            max_new_tokens: prompt.max_new_tokens,
-            prompt: prompt.tokens.clone(),
-            grammar_mask: prompt.grammar.as_ref().map(|g| g.mask().to_vec()),
-            ignore_eos,
-        };
-        admission.validate(config)?;
-        Ok(admission)
     }
 }

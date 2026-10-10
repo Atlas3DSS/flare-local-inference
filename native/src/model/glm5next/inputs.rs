@@ -2,46 +2,11 @@ use super::PAGE_TOKENS;
 use crate::{
     Result,
     execution::{GraphKind, Upload},
-    model::{
-        ModelConfig, SamplingParameters,
-        inputs::{SamplingAdmission, UploadBatch},
-    },
-    scheduler::{RequestHandle, RequestScheduler, ScheduledStep},
+    model::{ModelConfig, inputs::UploadBatch},
+    scheduler::{RequestScheduler, ScheduledStep},
 };
 
-pub struct Admission {
-    pub handle: RequestHandle,
-    pub sampling: SamplingParameters,
-    pub max_new_tokens: u32,
-    pub prompt: Vec<u32>,
-    pub grammar_mask: Option<Vec<i32>>,
-    pub ignore_eos: bool,
-}
-
-impl Admission {
-    pub fn validate(&self, config: &ModelConfig) -> Result<()> {
-        self.sampling.validate()?;
-        if self.handle.slot >= 4
-            || self.handle.generation == 0
-            || self.handle.generation > i64::MAX as u64
-            || self.sampling.top_k > config.contract.vocabulary as i32
-            || self.max_new_tokens == 0
-            || self.max_new_tokens > i32::MAX as u32
-            || self.prompt.is_empty()
-            || self
-                .prompt
-                .iter()
-                .any(|t| *t as usize >= config.contract.vocabulary)
-            || self
-                .grammar_mask
-                .as_ref()
-                .is_some_and(|mask| mask.len() != config.contract.vocabulary.div_ceil(32))
-        {
-            return Err("invalid GLM request admission".into());
-        }
-        Ok(())
-    }
-}
+pub type Admission = crate::model::Admission<super::Glm5Next>;
 
 #[derive(Default)]
 pub struct Inputs {
@@ -225,17 +190,7 @@ impl Inputs {
             self.staging.i64("admission_generations", 0, epochs);
             for (row, lane) in step.lanes.iter().enumerate() {
                 let admission = admissions[lane.request.slot as usize].as_ref().unwrap();
-                self.staging.admission(
-                    config,
-                    row,
-                    SamplingAdmission {
-                        sampling: &admission.sampling,
-                        max_new_tokens: admission.max_new_tokens,
-                        prompt: &admission.prompt,
-                        grammar_mask: admission.grammar_mask.as_deref(),
-                        ignore_eos: admission.ignore_eos,
-                    },
-                )?;
+                self.staging.admission(config, row, admission.sampling())?;
             }
         }
         Ok(())

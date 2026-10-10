@@ -1,61 +1,13 @@
+#[cfg(feature = "images")]
+use crate::scheduler::RequestHandle;
 use crate::{
     Result,
     execution::{GraphKind, Upload},
-    model::{
-        ModelConfig, SamplingParameters,
-        inputs::{SamplingAdmission, UploadBatch},
-    },
-    scheduler::{RequestHandle, RequestScheduler, ScheduledStep},
+    model::{ModelConfig, inputs::UploadBatch},
+    scheduler::{RequestScheduler, ScheduledStep},
 };
 
-pub struct Admission {
-    pub handle: RequestHandle,
-    pub sampling: SamplingParameters,
-    pub max_new_tokens: u32,
-    pub prompt: Vec<u32>,
-    /// Interleaved temporal, height and width positions for every prompt token.
-    pub positions: Vec<[i64; 3]>,
-    pub vision_token_indices: Vec<i32>,
-    pub grammar_mask: Option<Vec<i32>>,
-    pub ignore_eos: bool,
-}
-
-impl Admission {
-    pub fn validate(&self, config: &ModelConfig) -> Result<()> {
-        self.sampling.validate()?;
-        if self.sampling.top_k > config.contract.vocabulary as i32
-            || self.handle.slot >= 4
-            || self.handle.generation == 0
-            || self.handle.generation > i64::MAX as u64
-            || self.max_new_tokens == 0
-            || self.max_new_tokens > i32::MAX as u32
-            || self.prompt.is_empty()
-            || self.prompt.len() != self.positions.len()
-            || self.prompt.len() != self.vision_token_indices.len()
-            || self.vision_token_indices.iter().any(|index| {
-                *index < -1 || *index >= config.contract.vision.features_per_request as i32
-            })
-            || self
-                .grammar_mask
-                .as_ref()
-                .is_some_and(|mask| mask.len() != config.contract.vocabulary.div_ceil(32))
-            || self
-                .prompt
-                .iter()
-                .any(|id| *id as usize >= config.contract.vocabulary)
-            || self
-                .positions
-                .iter()
-                .flatten()
-                .any(|position| *position < 0)
-        {
-            return Err(
-                "invalid prompt/admission extent, token, position or request generation".into(),
-            );
-        }
-        Ok(())
-    }
-}
+pub type Admission = crate::model::Admission<super::Qwen4Exp>;
 
 /// Reusable host upload storage; GraphExecutor copies these bytes before submit returns.
 pub struct Inputs {
@@ -268,6 +220,7 @@ impl Inputs {
                 .get(range.clone())
                 .ok_or("prefill exceeds prompt")?;
             let positions = admission
+                .data
                 .positions
                 .get(range)
                 .ok_or("prefill exceeds positions")?;
@@ -279,7 +232,7 @@ impl Inputs {
             self.staging.i32(
                 "vision_token_indices",
                 0,
-                admission.vision_token_indices
+                admission.data.vision_token_indices
                     [lane.start_position as usize..lane.start_position as usize + lane.tokens]
                     .iter()
                     .copied(),
@@ -334,17 +287,7 @@ impl Inputs {
             self.staging.i64("admission_generations", 0, generations);
             for (row, lane) in step.lanes.iter().enumerate() {
                 let admission = admissions[lane.request.slot as usize].as_ref().unwrap();
-                self.staging.admission(
-                    config,
-                    row,
-                    SamplingAdmission {
-                        sampling: &admission.sampling,
-                        max_new_tokens: admission.max_new_tokens,
-                        prompt: &admission.prompt,
-                        grammar_mask: admission.grammar_mask.as_deref(),
-                        ignore_eos: admission.ignore_eos,
-                    },
-                )?;
+                self.staging.admission(config, row, admission.sampling())?;
             }
         }
         Ok(())
