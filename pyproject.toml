@@ -41,7 +41,7 @@ flashinfer-python = { path = "../flashinfer", editable = true }
 flare-native = { path = "native" }
 
 [tool.flare.source-revisions]
-flashinfer = "baf286f76219d2722bc47e5cceab3958bfec5a50"
+flashinfer = "41527912aa0e8def6ded8ee675417d733837fd01"
 
 [tool.setuptools.packages.find]
 include = ["flare*"]

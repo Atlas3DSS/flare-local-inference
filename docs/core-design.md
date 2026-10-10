@@ -103,7 +103,7 @@ and image requests against:
   qualification described in section 5; golden outputs are stored with their
   inputs and loader provenance.
 - Kernel library: FlashInfer
-  `baf286f76219d2722bc47e5cceab3958bfec5a50`, including the CuTe DSL operators
+  `41527912aa0e8def6ded8ee675417d733837fd01`, including the CuTe DSL operators
   under `flashinfer/experimental/b12x` and FlashInfer sampling. Every operator launches from
   Python; captured CUDA graphs are the only native execution path.
 
@@ -251,6 +251,17 @@ and replicated rank outputs exactly, but differs from the eager residual in
 0.1% of elements under that pointwise check (maximum absolute error 0.0048828125).
 Sparse MLA composition, the complete decoder stack, and GLM serving are not
 implemented.
+
+Shared [sparse MLA components](../flare/components/sparse_mla.py) prepare b12x
+latent-cache writes and attention over caller-selected physical records. Recipes
+supply geometry and device metadata; results copy into caller-owned output
+storage before another operator reuses the arena. Arena finalization refreshes
+bindings after tuning. Fixed-shape compiled graphs with 32-head decode and
+16-head 4096-token prefill run through the native replay worker with exact cache
+and output agreement against uncompiled execution and no allocator changes.
+b12x owns the sparse kernels, latent-record encoding, and pooled-selection
+expansion. GLM index projections, C4 pool production, and absorbed query/value
+projections still need composition into the recipe.
 
 [Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
