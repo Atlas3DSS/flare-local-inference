@@ -6,6 +6,7 @@ import inspect
 import operator
 import os
 import pickle
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,37 @@ def _guard_serialization():
             yield
         finally:
             guards.GuardsStatePickler = original
+
+
+@contextmanager
+def _guard_code_cache(root):
+    from torch._dynamo import guards
+
+    with _GUARD_LOCK:
+        original = guards.build_guard_function
+
+        def build(code_parts, closure_args):
+            key = hashlib.sha256(pickle.dumps((tuple(code_parts), closure_args))).hexdigest()
+            path = root / (key + '.bin')
+            if path.is_file():
+                return pickle.loads(path.read_bytes())
+            result = original(code_parts, closure_args)
+            root.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=root, suffix='.tmp', delete=False) as file:
+                temporary = Path(file.name)
+                try:
+                    pickle.dump(result, file)
+                    file.close()
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            return result
+
+        guards.build_guard_function = build
+        try:
+            yield
+        finally:
+            guards.build_guard_function = original
 
 
 def _signature(inputs):
@@ -255,6 +287,10 @@ class ForwardCache:
 
     def prepare(self, forward, *, name, signature):
         """Bind and warm one callable on the caller's preparation stream."""
+        with _guard_code_cache(self.root / 'guards'):
+            return self._prepare(forward, name=name, signature=signature)
+
+    def _prepare(self, forward, *, name, signature):
         identity = (type(forward).__module__, type(forward).__qualname__, name, signature)
         path = self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
         if path.is_file():

@@ -112,6 +112,7 @@ def test_restored_forward_rejects_changed_storage_aliases(tmp_path, rebind):
 def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_path, monkeypatch):
     import flare.preparation.aot as aot
     from flare.preparation.execution import GraphSignature
+    from torch._dynamo.guards import PyExprCSEPass
 
     monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
     cache = ForwardCache(namespace={'model': 'buffer'}, device='cuda:0')
@@ -126,6 +127,7 @@ def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_
     with monkeypatch.context() as patch:
         patch.setattr(aot, 'aot_forward', forbid_trace)
         patch.setattr(aot, 'make_fx', forbid_trace)
+        patch.setattr(PyExprCSEPass, 'count', forbid_trace)
         restored = cache.prepare(fresh, name='decode', signature=signature)
         assert restored.cache_hit
         torch.testing.assert_close(fresh.output, fresh.source + 73.25)
