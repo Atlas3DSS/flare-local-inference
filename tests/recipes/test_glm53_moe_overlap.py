@@ -36,8 +36,9 @@ def expert_partition(request):
 
 @pytest.mark.parametrize("rows", [1, 8])
 @pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("defer_launch", [False, True])
 @torch.no_grad()
-def test_autotuned_shared_routed_graph(expert_partition, rows, compiled):
+def test_autotuned_shared_routed_graph(expert_partition, rows, compiled, defer_launch):
     module, weights, _scale_owners, world_size = expert_partition
     arena = ScratchArena("cuda:0")
     source = torch.randn(rows, 4096, dtype=torch.bfloat16, device="cuda") * .1
@@ -52,6 +53,7 @@ def test_autotuned_shared_routed_graph(expert_partition, rows, compiled):
         session.freeze()
         overlap = moe.concurrent_shared
         assert overlap is not None
+        overlap.defer_launch = defer_launch
         routed_bytes = moe.experts.plan.memory_requirements().scratch_nbytes
         assert moe.experts.scratch.data_ptr() + routed_bytes <= overlap.workspace.data_ptr()
 

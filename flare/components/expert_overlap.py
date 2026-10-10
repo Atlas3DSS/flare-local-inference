@@ -7,18 +7,9 @@ from flare.preparation.scratch import ScratchArena
 from flare.preparation.tuning import register_finalizer
 
 
-@torch.library.custom_op("flare::start_shared_expert", mutates_args=("outputs", "workspace"))
-def _start_shared_expert(
-    source: torch.Tensor, weights: list[torch.Tensor],
-    scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
-    scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
-    plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
-) -> None:
+def _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
+                       workspace, plans, limit, round_silu, auxiliary):
     from b12x.gemm.blockscaled._ops import _out_workspace
-
-    main = torch.cuda.current_stream(source.device)
-    auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
-    auxiliary.wait_stream(main)
 
     def project(value, index, output):
         if scales[index] is None:
@@ -37,21 +28,47 @@ def _start_shared_expert(
             project(source, 2, outputs[3])
 
 
+@torch.library.custom_op("flare::start_shared_expert", mutates_args=("outputs", "workspace"))
+def _start_shared_expert(
+    source: torch.Tensor, weights: list[torch.Tensor],
+    scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
+    scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
+    plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
+    defer_launch: bool,
+) -> None:
+    main = torch.cuda.current_stream(source.device)
+    auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
+    auxiliary.wait_stream(main)
+    if not defer_launch:
+        _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
+                           workspace, plans, limit, round_silu, auxiliary)
+
+
 @_start_shared_expert.register_fake
 def _fake_start_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
-                             workspace, plans, limit, round_silu, auxiliary_stream):
+                             workspace, plans, limit, round_silu, auxiliary_stream, defer_launch):
     pass
 
 
 @torch.library.custom_op("flare::join_shared_expert", mutates_args=("outputs", "workspace"))
-def _join_shared_expert(source: torch.Tensor, routed: torch.Tensor, outputs: list[torch.Tensor],
-                        workspace: torch.Tensor, auxiliary_stream: int) -> None:
-    torch.cuda.current_stream(source.device).wait_stream(
-        torch.cuda.ExternalStream(auxiliary_stream, device=source.device))
+def _join_shared_expert(
+    source: torch.Tensor, routed: torch.Tensor, weights: list[torch.Tensor],
+    scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
+    scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
+    plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
+    defer_launch: bool,
+) -> None:
+    main = torch.cuda.current_stream(source.device)
+    auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
+    if defer_launch:
+        _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
+                           workspace, plans, limit, round_silu, auxiliary)
+    main.wait_stream(auxiliary)
 
 
 @_join_shared_expert.register_fake
-def _fake_join_shared_expert(source, routed, outputs, workspace, auxiliary_stream):
+def _fake_join_shared_expert(source, routed, weights, scales, gains, scale_kinds, outputs,
+                            workspace, plans, limit, round_silu, auxiliary_stream, defer_launch):
     pass
 
 
@@ -64,15 +81,19 @@ class ConcurrentSharedExpert:
     fork, join, and storage lifetimes ordered through forward compilation.
     An optional source projection computes a shared-expert gate on the same fork;
     the recipe applies its activation and combines outputs after ``finish``.
+    With ``defer_launch``, ``start`` records the fork and ``finish`` enqueues the
+    MLP before joining. The GPU branches still overlap, while main-stream kernels
+    precede shared-expert kernels in graph construction order.
     """
 
     def __init__(self, mlp, *, parallel_plans, session, workspace: ScratchArena,
-                 gate_projection=None):
+                 gate_projection=None, defer_launch=False):
         from b12x.gemm.blockscaled._a16 import _weight_parts
 
         if not isinstance(workspace, ScratchArena) or not parallel_plans:
             raise ValueError("shared-expert overlap requires an arena and concurrent main-stream plans")
         self.mlp, self.parallel_plans, self.arena = mlp, tuple(parallel_plans), workspace
+        self.defer_launch = bool(defer_launch)
         self.projections = (mlp.up_projection, mlp.down_projection)
         self.outputs = [mlp.up_projection.output, mlp.intermediate, mlp.down_projection.output]
         if gate_projection is not None:
@@ -108,8 +129,10 @@ class ConcurrentSharedExpert:
     def start(self, source):
         _start_shared_expert(source, self.weights, self.scales, self.gains, self.scale_kinds,
                             self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                            self.mlp.round_silu, self.stream.cuda_stream)
+                            self.mlp.round_silu, self.stream.cuda_stream, self.defer_launch)
 
     def finish(self, source, routed):
-        _join_shared_expert(source, routed, self.outputs, self.workspace, self.stream.cuda_stream)
+        _join_shared_expert(source, routed, self.weights, self.scales, self.gains, self.scale_kinds,
+                           self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
+                           self.mlp.round_silu, self.stream.cuda_stream, self.defer_launch)
         return self.mlp.down_projection.output

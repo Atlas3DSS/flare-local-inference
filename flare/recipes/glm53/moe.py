@@ -66,7 +66,7 @@ class PreparedGlmMoe:
         if source.shape[0] <= 256:
             self.concurrent_shared = ConcurrentSharedExpert(self.shared,
                 parallel_plans=(self.routing.plan, self.experts.plan),
-                session=session, workspace=workspace)
+                session=session, workspace=workspace, defer_launch=source.shape[0] == 1)
 
     def __call__(self, source):
         if source is not self.source and (source.data_ptr() != self.source.data_ptr() or source.shape != self.source.shape):

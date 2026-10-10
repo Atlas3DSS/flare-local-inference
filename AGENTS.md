@@ -106,7 +106,10 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   [ConcurrentSharedExpert](flare/components/expert_overlap.py) and
   [ConcurrentProjectionChain](flare/components/projection_overlap.py) where their
   contracts fit. Measure the relevant row capacities: branches competing for
-  bandwidth or SM capacity can make overlap slower.
+  bandwidth or SM capacity can make overlap slower. Graph node construction
+  order also affects scheduling. `ConcurrentSharedExpert(..., defer_launch=True)`
+  records routed kernels before shared kernels while preserving the fork and
+  join dependencies; measure this ordering in the complete model graph.
 - **Make overlap safe through compilation.** Declare every concurrently live
   plan with [ScratchArena.register_parallel](flare/preparation/scratch.py).
   Sequential work reuses storage; concurrent work gets disjoint storage sized
