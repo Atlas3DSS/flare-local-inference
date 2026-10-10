@@ -212,8 +212,9 @@ def test_native_flashinfer_stale_duplicate_and_disabled_rows_do_not_sample(vocab
             assert torch.equal(expected, after[name]), name
 
 
-def test_native_flashinfer_mixed_temperatures_eos_and_budget_stop_are_terminal(vocab_size):
-    with captured(4, vocab_size=vocab_size) as owner:
+@pytest.mark.parametrize("compile_forward", [False, True])
+def test_native_flashinfer_mixed_temperatures_eos_and_budget_stop_are_terminal(vocab_size, compile_forward):
+    with captured(4, vocab_size=vocab_size, compile_forward=compile_forward) as owner:
         owner.admit(0, temperature=0., top_k=1, max_new_tokens=1)
         owner.admit(1, eos_token_ids=(7,))
         owner.admit(2, max_new_tokens=1)

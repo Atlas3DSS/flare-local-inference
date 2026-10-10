@@ -290,13 +290,19 @@ def _mask_min_p(Input, Output, Maximum, MinP, V: tl.constexpr, BLOCK: tl.constex
 
 
 @triton.jit
-def _normalize_probs(Probability, Mass, V: tl.constexpr, BLOCK: tl.constexpr):
+def _normalize_probs(Probability, Mass, Slots, Params, PointMassIds,
+                     V: tl.constexpr, BLOCK: tl.constexpr):
     row, block = tl.program_id(0), tl.program_id(1)
     token = block * BLOCK + tl.arange(0, BLOCK)
     mass = tl.load(Mass + row)
     valid = (mass > 0.) & (mass != float("inf"))
     value = tl.load(Probability + row * V + token, token < V, other=0.)
-    tl.store(Probability + row * V + token, tl.where(valid, value / mass, (token == 0).to(tl.float32)), token < V)
+    value = tl.where(valid, value / mass, (token == 0).to(tl.float32))
+    slot = tl.minimum(tl.maximum(tl.load(Slots + row), 0), 3)
+    point_mass = tl.load(Params + slot * 6) == 0.
+    point_mass_id = tl.load(PointMassIds + row)
+    value = tl.where(point_mass, (token == point_mass_id).to(tl.float32), value)
+    tl.store(Probability + row * V + token, value, token < V)
 
 
 @triton.jit
@@ -436,7 +442,7 @@ class PreparedSampling:
     of packed row or physical slot. One word is drawn per generated token;
     the logical counter advances once, including temperature-zero tokens. FlashInfer's
     temporary outputs remain inside the captured graph. ``scratch_tensors``
-    enumerates persistent mutable scratch for ownership and reset auditing.
+    enumerates mutable storage retained through graph replay.
     """
 
     def __init__(self, logits, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
@@ -453,7 +459,6 @@ class PreparedSampling:
                 (frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
             _check_tensor(tensor, shape, dtype, device, name)
         self.state, self.logits, self.slots = state, logits, row_slot_ids
-        self.vocab_ids = torch.arange(vocab, device=device)
         self.sample_enabled = torch.ones(rows, dtype=torch.int32, device=device) if sample_enabled is None else sample_enabled
         _check_tensor(self.sample_enabled, (rows,), torch.int32, device, "sample_enabled")
         self.scratch_tensors = {}
@@ -483,7 +488,8 @@ class PreparedSampling:
             state.parameters, state.top_k, state.seed, state.rng_counter, self.packed_top_k,
             self.packed_top_p, self.packed_min_p, self.packed_seed, self.packed_offset, vocab)
         self._sanitize_args = (self.scores, self.maximum, vocab, 1024)
-        self._normalize_args = (self.probabilities, self.probability_mass, vocab, 1024)
+        self._normalize_args = (self.probabilities, self.probability_mass, self.slots,
+            state.parameters, self.point_mass_ids, vocab, 1024)
         # The top-p output address is graph-private and supplied during capture.
         self._min_p_kernel = None
         sampled, valid, mass = self.sampled_tokens, self.sample_valid, self.probability_mass
@@ -533,10 +539,6 @@ class PreparedSampling:
             num_warps=4, enable_fp_fusion=False)
         torch.sum(self.probabilities, dim=-1, keepdim=True, out=self.probability_mass)
         self._normalize()
-        temperature = self.state.parameters[self.slots.long().clamp(0, 3), 0]
-        point_mass = (self.vocab_ids == self.point_mass_ids[:, None]).float()
-        self.probabilities.copy_(torch.where(temperature[:, None] == 0, point_mass, self.probabilities))
-        torch.sum(self.probabilities, dim=-1, keepdim=True, out=self.probability_mass)
         for row in range(self._rows):
             sampled, valid = self._flashinfer.sampling_from_probs(self.probabilities[row:row + 1],
                 seed=self.packed_seed[row:row + 1], offset=self.packed_offset[row:row + 1],

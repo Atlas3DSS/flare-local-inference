@@ -86,53 +86,6 @@ def test_native_admission_staging_is_contiguous_and_preserves_seed_bits():
     assert all(getattr(buffers, field).is_contiguous() for field in buffers.__dataclass_fields__)
 
 
-def test_temperature_zero_constructs_point_mass_and_calls_flashinfer_for_every_row():
-    from types import SimpleNamespace
-
-    owner = PreparedSampling.__new__(PreparedSampling)
-    owner.state = DeviceRequestState.allocate("cpu", vocab_size=8)
-    owner.state.parameters[3, 0] = 0.
-    owner.state.parameters[1, 0] = 1.
-    owner.slots = torch.tensor([3, 1], dtype=torch.int32)
-    owner.vocab_ids = torch.arange(8)
-    owner.scores = torch.tensor([[0., 1., 3., 3., 0., 0., 0., 0.], [0., 1., 2., 3., 0., 0., 0., 0.]])
-    owner.maximum = torch.empty(2)
-    owner.point_mass_ids = torch.empty(2, dtype=torch.int64)
-    owner.probabilities = torch.empty(2, 8)
-    owner.probability_maximum = torch.empty(2)
-    owner.probability_mass = torch.empty(2, 1)
-    owner.packed_top_k = torch.zeros(2, dtype=torch.int32)
-    owner.packed_top_p = torch.ones(2)
-    owner.packed_min_p = torch.zeros(2)
-    owner.packed_seed = torch.tensor([19, 23], dtype=torch.uint64)
-    owner.packed_offset = torch.tensor([4, 8], dtype=torch.uint64)
-    owner.sampled_tokens = torch.empty(2, dtype=torch.int32)
-    owner.sample_valid = torch.empty(2, dtype=torch.bool)
-    owner._rows, owner._grid = 2, (2, 1, 1)
-    owner._metadata = owner._sanitize = lambda: None
-    owner._normalize = lambda: owner.probabilities.div_(owner.probability_mass)
-
-    class MinP:
-        def __getitem__(self, grid):
-            return lambda probabilities, out, *args: out.copy_(probabilities)
-
-    draws = []
-    def sample(probabilities, *, seed, offset, **kwargs):
-        draws.append((probabilities.clone(), seed.clone(), offset.clone()))
-        return probabilities.argmax(-1).to(torch.int32), torch.ones(1, dtype=torch.bool)
-
-    owner._min_p_kernel = MinP()
-    owner._flashinfer = SimpleNamespace(top_k_mask_logits=lambda scores, k: scores,
-        softmax=lambda scores: scores.softmax(-1), top_p_renorm_probs=lambda p, top_p, **kw: p,
-        sampling_from_probs=sample)
-    owner._filter_scores()
-    assert len(draws) == 2
-    assert draws[0][0].tolist() == [[0., 0., 1., 0., 0., 0., 0., 0.]]
-    torch.testing.assert_close(draws[1][0], owner.scores[1:].softmax(-1))
-    assert [(seed.item(), offset.item()) for _, seed, offset in draws] == [(19, 4), (23, 8)]
-    assert owner.sampled_tokens.tolist() == [2, 3] and owner.sample_valid.all()
-
-
 def _reference(logits, counts, params, seed, counter, grammar=None):
     scores = logits.float().clone()
     seen = counts > 0
