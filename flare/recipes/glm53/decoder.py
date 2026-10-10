@@ -59,14 +59,15 @@ class PreparedGlmLayer:
 
     def __init__(self, module, attention_weights, mlp_weights, residual_weights,
                  source, output, scratch: LayerScratch, state, metadata, *,
-                 mode, runtime, coordinator, session, name, workspace):
+                 mode, runtime, coordinator, session, name, workspace, carry=None, defer_post=False):
         if module.block_type not in ("linear_attention", "indexed_attention"):
             raise ValueError("prepared GLM layer requires canonical KDA or sparse MLA attention")
-        if (source.shape != (scratch.attention.output.shape[0], 4, 4096)
-                or output.shape != source.shape or source.dtype != torch.bfloat16
+        rows = scratch.attention.output.shape[0]
+        if (source.shape != ((rows, 4, 4096) if carry is None else (rows, 4096))
+                or output.shape != (rows, 4, 4096) or source.dtype != torch.bfloat16
                 or output.dtype != source.dtype or output.device != source.device):
             raise ValueError("GLM layer residuals require BF16 [tokens, 4, 4096] on one device")
-        self.module, self.scratch, self.output = module, scratch, output
+        self.module, self.scratch, self.output, self.carry = module, scratch, output, carry
         attention_mhc = _install_mhc(module.attn_hc, module.input_layernorm, residual_weights,
                                     "hc_attn", "input_layernorm")
         mlp_mhc = _install_mhc(module.ffn_hc, module.post_attention_layernorm, residual_weights,
@@ -74,7 +75,8 @@ class PreparedGlmLayer:
         options = {"rms_eps": module.attn_hc.input_norm.eps,
                    "hc_eps": module.attn_hc.hc_eps, "sinkhorn_iters": module.attn_hc.hc_sinkhorn_iters,
                    "norm_eps": module.input_layernorm.variance_epsilon}
-        self.attention_hc = PreparedMHC((source,), attention_mhc, scratch.attention_hc,
+        inputs = (source,) if carry is None else (source, carry.residual, carry.post, carry.comb)
+        self.attention_hc = PreparedMHC(inputs, attention_mhc, scratch.attention_hc,
             session=session, name=f"{name}.attn_hc", workspace=workspace, **options)
         attention_args = (module.self_attn, attention_weights, scratch.attention_hc.normalized,
                           scratch.attention, state, metadata)
@@ -98,12 +100,16 @@ class PreparedGlmLayer:
                 swiglu_limit=module.mlp.swiglu_limit)
         self.mlp_reduce = PreparedAllReduce(scratch.mlp.output, scratch.mlp_output, runtime=runtime,
             session=session, coordinator=coordinator, name=f"{name}.mlp_reduce")
-        self.post = PreparedMHCPost(scratch.mlp_output, scratch.mlp_hc.residual, scratch.mlp_hc.post,
-                                    scratch.mlp_hc.comb, output, session=session, name=f"{name}.post")
+        self.post = None if defer_post else PreparedMHCPost(scratch.mlp_output, scratch.mlp_hc.residual,
+            scratch.mlp_hc.post, scratch.mlp_hc.comb, output, session=session, name=f"{name}.post")
 
     def __call__(self, source):
         s = self.scratch
-        self.attention_reduce(self.attention(self.attention_hc(source)))
+        inputs = (source,) if self.carry is None else (
+            source, self.carry.residual, self.carry.post, self.carry.comb)
+        self.attention_reduce(self.attention(self.attention_hc(*inputs)))
         self.mlp_hc(s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb)
         self.mlp_reduce(self.mlp(s.mlp_hc.normalized))
+        if self.post is None:
+            return s.mlp_output
         return self.post(s.mlp_output, s.mlp_hc.residual, s.mlp_hc.post, s.mlp_hc.comb)

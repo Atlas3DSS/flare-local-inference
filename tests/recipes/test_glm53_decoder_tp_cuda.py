@@ -1,6 +1,7 @@
 """GLM KDA/MLA and dense/MoE layers in compiled TP graphs with native rank replay."""
 
 import os
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,7 +14,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
     reason="requires four explicitly assigned CUDA devices and FLARE_RUN_TP_CUDA_TESTS=1")
 
 
-def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
+def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index, following_dense=False):
     from flare.components.parallel import TensorParallelShard
     from flare.components.recurrent import DeltaMetadata, DeltaState
     from flare.preparation.checkpoint import inspect_indexed_checkpoint
@@ -22,7 +23,7 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
         create_all_reduce_runtime,
     )
     from flare.preparation.compilation import compile_forward
-    from flare.preparation.graphs import PreparedGraphBundle
+    from flare.preparation.execution import GraphSignature, PreparedExecution
     from flare.preparation.scratch import ScratchArena
     from flare.preparation.tuning import RecordedPreparationSession
     from flare.recipes.glm53.decoder import LayerScratch, PreparedGlmLayer
@@ -35,10 +36,16 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
     device = torch.device("cuda", rank)
     model = create_model_tree(Path(snapshot))
     manifest = inspect_indexed_checkpoint(snapshot)
+    selected = (layer_index, layer_index + 1) if following_dense else (layer_index,)
     with GlmWeightLoader(manifest, device, shard=TensorParallelShard(rank, world),
-                         prefixes=(f"{TEXT_PREFIX}.layers.{layer_index}.",)) as loader:
+                         prefixes=tuple(f"{TEXT_PREFIX}.layers.{index}." for index in selected)) as loader:
         attention, mlp, residual = loader.load_attention(layer_index), loader.load_mlp(layer_index), loader.load_residual(layer_index)
+        if following_dense:
+            following_weights = (loader.load_attention(layer_index + 1), loader.load_mlp(layer_index + 1),
+                                 loader.load_residual(layer_index + 1))
         assert loader._session.torch_copy_bytes == 0
+    count = capacity if mode == "prefill" else 1
+    capacity = 1 << (capacity - 1).bit_length()
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=world,
                             timeout=timedelta(minutes=5))
     group = dist.group.WORLD
@@ -47,7 +54,6 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
     worker = None
     graph = torch.cuda.CUDAGraph()
     try:
-        count = capacity if mode == "prefill" else 1
         heads = 64 // world
         module = model.model.language_model.layers[layer_index]
         is_mla = module.block_type == "indexed_attention"
@@ -59,6 +65,9 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
             state = DeltaState.allocate(6, device, heads=heads, channels=3 * heads * 128)
             metadata = DeltaMetadata.allocate(2, device)
             persistent = {"state": state.recurrent, "history": state.convolution}
+        if following_dense:
+            following_state = DeltaState.allocate(6, device, heads=heads, channels=3 * heads * 128)
+            persistent.update(following_state=following_state.recurrent, following_history=following_state.convolution)
         scratch = LayerScratch.allocate(capacity, world, device, sparse=layer_index >= 3,
             block_type=module.block_type, mode=mode, blocks=64)
         source = torch.zeros((capacity, 4, 4096), dtype=torch.bfloat16, device=device)
@@ -70,11 +79,19 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
             session.register_scratch(arena)
             layer = PreparedGlmLayer(module, attention, mlp, residual,
                 source, output, scratch, state, metadata, mode=mode, runtime=runtime, coordinator=coordinator,
-                session=session, name=f"layer{layer_index}", workspace=arena)
+                session=session, name=f"layer{layer_index}", workspace=arena, defer_post=following_dense)
+            following = None
+            if following_dense:
+                following = PreparedGlmLayer(model.model.language_model.layers[layer_index + 1], *following_weights,
+                    scratch.mlp_output, output, scratch, following_state, metadata, mode=mode, runtime=runtime,
+                    coordinator=coordinator, session=session, name=f"layer{layer_index + 1}", workspace=arena,
+                    carry=scratch.mlp_hc)
             session.tune()
 
             def forward():
-                layer(source)
+                value = layer(source)
+                if following is not None:
+                    following(value)
                 arena.tensor.fill_(255)
 
             compiled = compile_forward(forward)
@@ -86,10 +103,15 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
                 compiled()
             torch.cuda.synchronize(device)
             session.freeze()
-            bundle = PreparedGraphBundle(device=rank, graphs={mode: graph},
-                buffers={"source": source, "output": output, **persistent},
-                resources=(compiled, layer, runtime, session, arena, stream, metadata))
-            worker = bundle.start_worker()
+            control = {"frame_index": torch.zeros(1, dtype=torch.int32, device=device),
+                       "submission_sequence": torch.zeros(1, dtype=torch.int64, device=device),
+                       "completion_records": torch.zeros((2, 4, 8), dtype=torch.int64, device=device)}
+            bundle = PreparedExecution(device=rank, graphs={mode: graph}, buffers=control,
+                signatures={mode: GraphSignature(mode, capacity if mode == "decode" else 1,
+                                                capacity if mode == "prefill" else 1)},
+                resources=(compiled, layer, following, runtime, session, arena, stream, metadata,
+                           source, output, persistent, scratch))
+            worker = bundle.start_executor()
             generator = torch.Generator().manual_seed(530)
             source[:count].copy_((torch.randn((count, 4, 4096), generator=generator) * .1).to(torch.bfloat16))
             if is_mla:
@@ -129,9 +151,15 @@ def _rank(rank, world, rendezvous, snapshot, mode, capacity, layer_index):
                 torch.cuda.synchronize(device)
                 before = torch.cuda.memory_stats(device)
                 dist.barrier(group=group)
-                ticket = worker.submit(0, repetitions=repetitions)
-                completion = worker.poll(timeout_ms=120000)
-                assert completion is not None and completion.ticket == ticket and completion.error is None
+                for _ in range(repetitions):
+                    ticket = worker.submit(0, [])
+                    assert ticket is not None
+                    deadline = time.monotonic() + 120
+                    completion = worker.poll()
+                    while completion is None and time.monotonic() < deadline:
+                        time.sleep(.001)
+                        completion = worker.poll()
+                    assert completion is not None and completion.fence == ticket
                 after = torch.cuda.memory_stats(device)
                 for key in ("allocation.all.allocated", "allocation.all.freed", "segment.all.allocated", "segment.all.freed"):
                     assert before[key] == after[key]
@@ -178,3 +206,15 @@ def test_actual_layer_native_tp_graph(world, mode, capacity, layer_index, tmp_pa
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), mode, capacity, layer_index),
              nprocs=world, join=True)
+
+
+@pytest.mark.parametrize("mode,capacity", [("decode", 2), ("prefill", 65), ("prefill", 4096)])
+def test_adjacent_dense_layers_fuse_mhc_native_tp_graph(mode, capacity, tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    assert torch.cuda.device_count() >= 2
+    snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
+        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+    if not snapshot.is_dir():
+        pytest.skip("GLM 5.3 Flash checkpoint is not available")
+    mp.spawn(_rank, args=(2, (tmp_path / "rendezvous").as_uri(), str(snapshot), mode, capacity, 0, True),
+             nprocs=2, join=True)

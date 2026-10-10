@@ -73,8 +73,9 @@ class DecoderScratch:
 class PreparedDecoder:
     """Prepare all 45 layers into a serial forward owned by one TP rank.
 
-    Layers reuse residual, mHC, attention and MLP intermediates. Each layer's
-    cache and recurrent state have separate owners. Canonical final stream
+    Layers carry MLP output and mixing coefficients into the following fused
+    mHC post/pre operation. They reuse residual, attention and MLP intermediates.
+    Each layer's cache and recurrent state have separate owners. Canonical final stream
     averaging and RMSNorm operate only on selected output rows. Vocabulary
     projection shards run on every rank before gathering logits for sampling.
     This object executes in Python only during preparation and CUDA graph capture.
@@ -98,10 +99,11 @@ class PreparedDecoder:
                 language.layers, weights.layers, state.layers, strict=True)):
             indexed = module.block_type == "indexed_attention"
             layer = PreparedGlmLayer(module, layer_weights.attention, layer_weights.mlp, layer_weights.residual,
-                scratch.residual, scratch.residual,
+                scratch.residual if index == 0 else scratch.mlp_output, scratch.residual,
                 scratch.layer(module.block_type, sparse=isinstance(layer_weights.mlp, MoEWeights)), layer_state,
                 metadata.indexed if indexed else metadata.recurrent, mode=mode, runtime=runtime,
-                coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace)
+                coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
+                carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1)
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")
@@ -112,8 +114,9 @@ class PreparedDecoder:
     def __call__(self):
         s, language = self.scratch, self.weights.tree.model.language_model
         s.residual.copy_(self.embedding()[:, None, :])
+        value = s.residual
         for layer in self.layers:
-            layer(s.residual)
+            value = layer(value)
         torch.index_select(s.residual, 0, self.metadata.sample_indices, out=s.selected_residual)
         collapsed = language.hc_head(s.selected_residual[:, None]).squeeze(1)
         s.hidden.copy_(language.norm(collapsed))

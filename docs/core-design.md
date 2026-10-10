@@ -270,6 +270,9 @@ PyTorch CPU thread for small compressed-scale planes and restore the caller's
 thread count on exit. The shared
 [prepared MLP](../flare/components/mlp.py) executes BF16 dense and MXFP8 shared
 experts with the checkpoint's SwiGLU clamp and caller-owned intermediates.
+The [MLA branch](../flare/recipes/glm53/mla.py) combines the replicated query and
+KV low-rank inputs into one MXFP8 projection. Separate canonical RMSNorms read
+views of the fused output and write contiguous query and latent buffers.
 The [KDA branch](../flare/recipes/glm53/kda.py) packs Q/K/V, beta, and the
 forget-gate input into one MXFP8 projection. A shared
 [projection-chain component](../flare/components/projection_overlap.py) runs
@@ -287,8 +290,10 @@ on TP2 and TP4. The shared [prepared mHC component](../flare/components/mhc.py)
 uses FP32 mixing coefficients, BF16 residual streams, fused weighted RMSNorm,
 and caller-owned scratch. The [GLM decoder layer](../flare/recipes/glm53/decoder.py)
 composes mHC, head-sharded KDA or sparse MLA, an attention all-reduce, fused post/pre mixing,
-the sharded dense MLP or MoE, a second all-reduce, and residual expansion in one
-compiled graph. Graph variants support decode and prefill through 4096 tokens.
+the sharded dense MLP or MoE, and a second all-reduce. MLP output and mixing
+coefficients feed the following layer's fused post/pre operation; the final
+layer materializes the residual streams for contraction. Graph variants support
+decode and prefill through 4096 tokens.
 Each rank hands its graph to its native replay worker. The
 [GLM MoE composition](../flare/recipes/glm53/moe.py) keeps replicated router weights
 in their stored BF16 format and produces FP32 logits. Routing uses sigmoid scores,
