@@ -273,24 +273,23 @@ of mHC, KDA, MLA, dense-MLP, and MoE intermediates reused across serialized laye
 Every layer owns separate recurrent or cache state; graph variants share that
 persistent state and the tuned operator arena. Embeddings and final normalization
 are replicated, while only rank zero loads the vocabulary projection.
-The [full-checkpoint TP test](../tests/recipes/test_glm53_stack_tp_cuda.py) covers
-65- and 4096-token prefill capacities on TP2 and TP4, followed by teacher-forced
-decode through native workers. TP4 qualification passed for a 65-token prefill
-and three decode steps: replicated hidden outputs matched exactly across ranks,
-outputs and recurrent state remained finite, and CUDA allocation and segment
-counters did not change during replay. Rank-zero weight allocations occupied
-46,148,968,960 bytes; the selected operator arena occupied 11,896,064 bytes.
-TP2 qualification passed for a 4096-token prefill and three decode steps with
-the same rank-agreement and allocation checks. Rank-zero weight allocations
-occupied 89,184,592,384 bytes; the operator arena occupied 161,084,160 bytes.
-Sampled TP2 generation through native uploads also passed: a 24-token chat
-prompt produced 30 tokens and stopped at a checkpoint EOS token. Sampling used
-the complete checkpoint, all 45 layers, and FlashInfer. This generation test
-uses a Python control group to distribute rank-zero token IDs between steps;
-it does not qualify native rank coordination or HTTP serving. Complete-model
-4096-token TP4 replay and TP4 sampled generation remain pending.
-Production GLM serving is not implemented. Full-checkpoint generation through
-coordinated native rank execution remains unqualified.
+The [full-checkpoint TP test](../tests/recipes/test_glm53_stack_tp_cuda.py) passed
+4096-token prefill and three teacher-forced decode steps on TP2 and TP4.
+Replicated hidden outputs matched exactly across ranks, outputs and recurrent
+state remained finite, and CUDA allocation and segment counters stayed stable.
+Rank-zero weight allocations occupied 89,184,592,384 bytes on TP2 and
+46,148,968,960 bytes on TP4. The selected operator arenas occupied 161,084,160
+and 161,031,936 bytes, respectively.
+Sampled generation through the Rust rank coordinator also passed on TP2 and TP4.
+A 24-token chat prompt used a 128-token prefill graph, all 45 decoder layers,
+and FlashInfer sampling. TP2 reached the requested 32-token budget; TP4 produced
+29 tokens and stopped at a checkpoint EOS token. Peers stayed inside Rust from
+handoff through coordinated drain, with stable allocator counters. The test's
+rank-zero Python harness submitted native uploads and inspected completion
+records; rank communication and replay were native. Replicated final hidden
+outputs and consumed-token counts agreed after drain.
+Production GLM serving, hybrid-state checkpoint maintenance, and HTTP integration
+are not implemented.
 
 [GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
