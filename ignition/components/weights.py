@@ -26,6 +26,31 @@ class MLPWeights:
     down: Weight | torch.Tensor
 
 
+def _release_unused_contexts(device):
+    """Destroy primary contexts that checkpoint reads opened on other visible GPUs.
+
+    GPUDirect Storage reads retain a CUDA context, about 0.5 GiB, on every visible
+    device. A rank process allocates only on its own device, so those contexts only
+    take memory from its peers' KV pages.
+    """
+    import ctypes
+
+    import torch
+
+    try:
+        driver = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return
+    for ordinal in range(torch.cuda.device_count()):
+        if ordinal == device or torch.cuda.memory_reserved(ordinal):
+            continue
+        handle, flags, active = ctypes.c_int(), ctypes.c_uint(), ctypes.c_int()
+        if (driver.cuDeviceGet(ctypes.byref(handle), ordinal) == 0
+                and driver.cuDevicePrimaryCtxGetState(handle, ctypes.byref(flags), ctypes.byref(active)) == 0
+                and active.value):
+            driver.cuDevicePrimaryCtxReset_v2(handle)
+
+
 class DirectWeightLoader:
     """Own b12x tensor views until direct transfers finish.
 
@@ -191,6 +216,7 @@ class DirectWeightLoader:
             self._session = None
             self._display = self._load_stats = None
             self._sources.clear()
+            _release_unused_contexts(self.device.index)
 
     def _require_open(self):
         if self._session is None:
