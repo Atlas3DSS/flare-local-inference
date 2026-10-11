@@ -141,9 +141,9 @@ impl Drop for Screen {
 struct Rates {
     prefill: f64,
     generated: f64,
-    draft: f64,
     verify: f64,
     acceptance: Option<f64>,
+    depth: Option<f64>,
 }
 
 struct History {
@@ -179,11 +179,17 @@ impl History {
             }
         };
         let rounds = snapshot.draft_rounds.saturating_sub(before.draft_rounds);
+        let verifications = snapshot.verify_steps.saturating_sub(before.verify_steps);
         self.rates = Rates {
             prefill: per_second(snapshot.prefill_tokens, before.prefill_tokens),
             generated: per_second(snapshot.generated_tokens, before.generated_tokens),
-            draft: per_second(snapshot.draft_steps, before.draft_steps),
             verify: per_second(snapshot.verify_steps, before.verify_steps),
+            depth: (verifications > 0).then(|| {
+                snapshot
+                    .verification_drafts
+                    .saturating_sub(before.verification_drafts) as f64
+                    / verifications as f64
+            }),
             acceptance: (rounds > 0).then(|| {
                 snapshot
                     .accepted_drafts
@@ -224,6 +230,7 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
     let acceptance = r
         .acceptance
         .map_or_else(|| "—".into(), |v| format!("{v:.2}"));
+    let depth = r.depth.map_or_else(|| "—".into(), |v| format!("{v:.2}"));
     if area.width < 64 || area.height < 22 {
         frame.render_widget(
             Paragraph::new(vec![
@@ -232,9 +239,9 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
                 Line::from(format!(" {title}")),
                 Line::from(format!(" Prefill      {} tok/s", rate(r.prefill))),
                 Line::from(format!(" Generation   {} tok/s", rate(r.generated))),
-                Line::from(format!(" Drafter      {} steps/s", rate(r.draft))),
                 Line::from(format!(" Verify       {} steps/s", rate(r.verify))),
                 Line::from(format!(" Acceptance   {acceptance} drafts/round")),
+                Line::from(format!(" Verify depth {depth} drafts/step")),
                 Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
                 Line::from(" Enlarge terminal for history plots.")
                     .style(Style::default().fg(MUTED)),
@@ -302,23 +309,19 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
     plot(
         frame,
         bottom[0],
-        &format!(
-            " DRAFT {} / VERIFY {} steps/s ",
-            rate(r.draft),
-            rate(r.verify)
-        ),
+        &format!(" VERIFY  {} steps/s ", rate(r.verify)),
         history,
-        &[
-            ("draft", PURPLE, |r| r.draft),
-            ("verify", GOLD, |r| r.verify),
-        ],
+        &[("", PURPLE, |r| r.verify)],
     );
     plot(
         frame,
         bottom[1],
-        &format!(" ACCEPTANCE  {acceptance} drafts/round "),
+        &format!(" ACCEPTANCE {acceptance} / DEPTH {depth} "),
         history,
-        &[("", GOLD, |r| r.acceptance.unwrap_or(0.0))],
+        &[
+            ("accepted", GOLD, |r| r.acceptance.unwrap_or(0.0)),
+            ("depth", CYAN, |r| r.depth.unwrap_or(0.0)),
+        ],
     );
     frame.render_widget(
         Paragraph::new(vec![
@@ -336,7 +339,7 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
     );
     frame.render_widget(
         Paragraph::new(
-            " 2s rates · 120s history · acceptance excludes bonus token · Ctrl-C stops server",
+            " 2s averages · 120s history · acceptance/depth in draft tokens · Ctrl-C stops server",
         )
         .style(Style::default().fg(MUTED)),
         rows[4],
@@ -419,6 +422,7 @@ mod tests {
             generated_tokens: 8,
             draft_steps: 7,
             verify_steps: 1,
+            verification_drafts: 5,
             accepted_drafts: 6,
             draft_rounds: 2,
             ..Default::default()
@@ -429,6 +433,7 @@ mod tests {
             generated_tokens: 10,
             draft_steps: 8,
             verify_steps: 2,
+            verification_drafts: 8,
             accepted_drafts: 7,
             draft_rounds: 3,
             ..Default::default()
@@ -436,7 +441,7 @@ mod tests {
         history.sample(start + Duration::from_secs(2), last);
         assert_eq!(history.rates.prefill, 150.0);
         assert_eq!(history.rates.generated, 5.0);
-        assert_eq!(history.rates.draft, 4.0);
+        assert_eq!(history.rates.depth, Some(4.0));
         assert_eq!(history.rates.verify, 1.0);
         assert_eq!(history.rates.acceptance, Some(7.0 / 3.0));
         for tick in 3..=130 {
@@ -444,8 +449,17 @@ mod tests {
         }
         assert_eq!(history.rates.generated, 0.0);
         assert_eq!(history.rates.acceptance, None);
+        assert_eq!(history.rates.depth, None);
         assert!(history.points.len() <= 121);
         assert!(history.previous.len() <= 3);
+        history.sample(
+            start + Duration::from_secs(131),
+            Snapshot {
+                verify_steps: last.verify_steps + 1,
+                ..last
+            },
+        );
+        assert_eq!(history.rates.depth, Some(0.0));
     }
 
     #[test]
@@ -461,6 +475,7 @@ mod tests {
                     prefill_tokens: tick * 100,
                     draft_steps: tick * 12,
                     verify_steps: tick * 3,
+                    verification_drafts: tick * 12,
                     accepted_drafts: tick * 7,
                     draft_rounds: tick * 3,
                     ..Default::default()

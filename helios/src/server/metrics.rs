@@ -23,6 +23,7 @@ pub(super) struct Snapshot {
     pub generated_tokens: u64,
     pub draft_steps: u64,
     pub verify_steps: u64,
+    pub verification_drafts: u64,
     pub accepted_drafts: u64,
     pub draft_rounds: u64,
     pub active: u64,
@@ -101,6 +102,7 @@ impl Metrics {
             for (drafts, counts) in widths.iter().enumerate() {
                 let rounds = counts.rounds.load(Ordering::Relaxed);
                 snapshot.verify_steps += rounds;
+                snapshot.verification_drafts += rounds * drafts as u64;
                 if learned_drafter {
                     snapshot.draft_steps += rounds * drafts as u64;
                 }
@@ -471,6 +473,11 @@ mod tests {
             ..Default::default()
         };
         metrics.speculative_completed(1, 8, 1000, &records);
+        for learned in [false, true] {
+            let snapshot = metrics.snapshot(learned);
+            assert_eq!(snapshot.verify_steps, 1);
+            assert_eq!(snapshot.verification_drafts, 7);
+        }
         let text = metrics.render();
         for line in [
             "flare_speculative_rounds_total{batch=\"1\",width=\"8\"} 1",
