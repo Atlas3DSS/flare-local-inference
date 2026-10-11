@@ -53,8 +53,12 @@ class MLAScratch:
         from .dcp import SLICE_ROWS
 
         rows = min(tokens, SLICE_ROWS) if context_ranks > 1 else 0
+        # Context-parallel attention absorbs, attends and expands one slice of rows at a time.
+        sliced = tokens if context_ranks == 1 else rows
+        def rows_of(count, *shape):
+            return torch.zeros((count, *shape), dtype=torch.bfloat16, device=device)
         return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:], buffer(512),
-            buffer(heads, 256), buffer(heads, 512), buffer(heads, 512), buffer(heads, 256),
+            buffer(heads, 256), rows_of(sliced, heads, 512), rows_of(sliced, heads, 512), buffer(heads, 256),
             buffer(4096), torch.zeros(tokens, dtype=torch.int32, device=device), index,
             torch.zeros((rows, heads * context_ranks, 512), dtype=torch.bfloat16, device=device),
             torch.zeros((rows, heads * context_ranks, 512), dtype=torch.bfloat16, device=device),
@@ -107,12 +111,14 @@ class PreparedGlmMLA:
                 session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
         packed = weights["kv_b_proj"].weight
         values, scales = packed.values.view(heads, 512, 512), packed.scale_rows.view(heads, 512, 16)
-        self.query_absorption = BatchedQuantizedProjection(scratch.query.transpose(0, 1),
-            (values[:, :256], scales[:, :256]), scratch.absorbed_query.transpose(0, 1), major="n",
-            session=session, name=f"{name}.absorb_query")
-        self.value_expansion = BatchedQuantizedProjection(scratch.attended.transpose(0, 1),
-            (values[:, 256:], scales[:, 256:]), scratch.expanded.transpose(0, 1), major="k",
-            session=session, name=f"{name}.expand_value")
+        self.absorb_weights, self.expand_weights = (values[:, :256], scales[:, :256]), (values[:, 256:], scales[:, 256:])
+        if context is None:
+            self.query_absorption = BatchedQuantizedProjection(scratch.query.transpose(0, 1),
+                self.absorb_weights, scratch.absorbed_query.transpose(0, 1), major="n",
+                session=session, name=f"{name}.absorb_query")
+            self.value_expansion = BatchedQuantizedProjection(scratch.attended.transpose(0, 1),
+                self.expand_weights, scratch.expanded.transpose(0, 1), major="k",
+                session=session, name=f"{name}.expand_value")
         self.indexer = PreparedGlmIndexer(module.indexer, weights, source, scratch.query_residual,
             scratch.index, state.index, metadata, mode=mode, session=session, name=f"{name}.indexer",
             workspace=workspace, max_cache_pages=max_cache_pages, context=context)
@@ -140,21 +146,27 @@ class PreparedGlmMLA:
         for start, end in slices:
             count = end - start
             gathered, partial, lse = scratch.gathered[:count], scratch.partial[:count], scratch.lse[:count]
-            gather = PreparedAllGather(scratch.absorbed_query[start:end].view(count, -1), gathered.view(count, -1),
+            absorbed, attended = scratch.absorbed_query[:count], scratch.attended[:count]
+            absorb = BatchedQuantizedProjection(scratch.query[start:end].transpose(0, 1), self.absorb_weights,
+                absorbed.transpose(0, 1), major="n", session=session, name=f"{name}.absorb_query{start}")
+            expand = BatchedQuantizedProjection(attended.transpose(0, 1), self.expand_weights,
+                scratch.expanded[start:end].transpose(0, 1), major="k", session=session,
+                name=f"{name}.expand_value{start}")
+            gather = PreparedAllGather(absorbed.view(count, -1), gathered.view(count, -1),
                 runtime=context.heads, session=session, coordinator=context.coordinator,
                 name=f"{name}.gather_heads{start}")
             attention = PreparedSparseMLA(gathered, state.cache, scratch.index.physical[start:end],
                 scratch.visible[start:end], scratch.index.selected_lengths[start:end], partial, caps=caps,
                 session=session, name=f"{name}.attention{start}", workspace=workspace, lse=lse)
-            combine = PreparedLseReduceScatter(partial, lse, scratch.attended[start:end], runtime=context.heads,
+            combine = PreparedLseReduceScatter(partial, lse, attended, runtime=context.heads,
                 session=session, coordinator=context.coordinator, name=f"{name}.combine{start}")
-            self.slices.append((start, end, gather, attention, combine))
+            self.slices.append((start, end, absorb, gather, attention, combine, expand))
 
     def rebind_pages(self):
         """Write and attend through the state's current page pools after they were replaced."""
         self.writer.cache = self.state.cache
         self.indexer.rebind_pages()
-        for attention in ([self.attention] if self.context is None else [a for _, _, _, a, _ in self.slices]):
+        for attention in ([self.attention] if self.context is None else [slice[4] for slice in self.slices]):
             attention.rebind_cache(self.state.cache)
 
     def __call__(self, source):
@@ -163,7 +175,8 @@ class PreparedGlmMLA:
         rms_norm(s.query_input, self.module.q_a_layernorm.weight, s.query_residual,
             self.module.q_a_layernorm.variance_epsilon, round_before_weight=True)
         p["q_b_proj"](s.query_residual)
-        self.query_absorption(s.query.transpose(0, 1))
+        if self.context is None:
+            self.query_absorption(s.query.transpose(0, 1))
         rms_norm(s.latent_input, self.module.kv_a_layernorm.weight, s.latent,
             self.module.kv_a_layernorm.variance_epsilon, round_before_weight=True)
         self.writer()
@@ -171,11 +184,13 @@ class PreparedGlmMLA:
         if self.context is None:
             s.visible.copy_(self.metadata.positions + 1)
             self.attention()
+            self.value_expansion(s.attended.transpose(0, 1))
         else:
             s.visible.copy_(self.context.shards.local_tokens(self.metadata.positions + 1))
-            for start, end, gather, attention, combine in self.slices:
-                gather(s.absorbed_query[start:end].view(end - start, -1))
+            for start, end, absorb, gather, attention, combine, expand in self.slices:
+                count = end - start
+                absorb(s.query[start:end].transpose(0, 1))
+                gather(s.absorbed_query[:count].view(count, -1))
                 attention()
-                combine(attention.output, attention.lse)
-        self.value_expansion(s.attended.transpose(0, 1))
+                expand(combine(attention.output, attention.lse).transpose(0, 1))
         return p["o_proj"](s.expanded.view(s.output.shape[0], -1))
