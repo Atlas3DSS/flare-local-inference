@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from b12x.preparation import PreparationSession
 
 from flare.components.linear import UnquantizedProjection
-from flare.components.moe import PreparedRoutedExperts, RouterScratch
+from flare.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.preparation.qwen38 import TEXT_PREFIX
@@ -67,7 +67,7 @@ def _assert_values(actual, expected):
 @pytest.mark.parametrize("tokens", [1, 4, 16])
 def test_actual_router_and_shared_expert_graph(manifest, tokens):
     prefix = f"{TEXT_PREFIX}.layers.0.mlp"
-    with torch.inference_mode(), QwenWeightLoader(manifest, "cuda:0", prefixes=(
+    with torch.no_grad(), QwenWeightLoader(manifest, "cuda:0", prefixes=(
         f"{prefix}.gate.", f"{prefix}.shared_expert.", f"{prefix}.shared_expert_gate.",
     )) as loader:
         weights = SharedExpertWeights.load(loader, 0)
@@ -82,15 +82,16 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens):
     source = torch.zeros((tokens, 2560), dtype=torch.bfloat16, device="cuda")
     logits = torch.zeros((tokens, 512), dtype=torch.bfloat16, device="cuda")
     route = RouterScratch.allocate(tokens, source.device, experts=512, top_k=10)
-    with torch.inference_mode(), PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+    with torch.no_grad(), PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
         shared = PreparedSharedExpert(source, weights, session=session, name=f"shared:{tokens}")
         router = UnquantizedProjection(source, router_weight, logits, session=session, name=f"router:{tokens}")
+        routing = PreparedRouter(logits, route, session=session, name=f"route:{tokens}")
         session.freeze()
 
         def run():
             shared(source)
             router(source)
-            route.route(logits)
+            routing(logits)
 
         run()
         graph = torch.cuda.CUDAGraph()
@@ -112,11 +113,11 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens):
             shared_gate = torch.sigmoid(F.linear(cpu_source, reference_gate))
             expected = projected * shared_gate
             metrics = _assert_values(shared.output, expected)
-            expected_probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
-            expected_weights, expected_ids = torch.topk(expected_probabilities, 10, dim=-1)
-            expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
+            expected_ids = logits.shape[-1] - 1 - torch.argsort(
+                logits.flip(-1), dim=-1, descending=True, stable=True)[:, :10]
+            expected_weights = torch.softmax(logits.float().gather(1, expected_ids), dim=-1)
             assert torch.equal(route.ids, expected_ids)
-            assert torch.equal(route.weights, expected_weights.to(torch.bfloat16).float())
+            torch.testing.assert_close(route.weights, expected_weights, rtol=2e-6, atol=1e-7)
             canonical_logits = F.linear(source, router_weight)
             torch.testing.assert_close(logits, canonical_logits, rtol=.01, atol=.001)
             print(json.dumps({"component": "actual_shared_expert", "tokens": tokens,
