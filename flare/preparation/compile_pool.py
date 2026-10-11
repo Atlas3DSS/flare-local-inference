@@ -54,7 +54,7 @@ class CompilePool:
     def __init__(self, device):
         self.device = torch.device(device)
         budget = max(1, _OPTIONS["compile_threads"])
-        self.workers = min(4, budget)
+        self.workers = min(8, budget)
         self.options = dict(_OPTIONS, compile_threads=max(1, budget // self.workers))
         self.pool = None
 

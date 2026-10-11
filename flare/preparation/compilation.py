@@ -19,7 +19,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 _INVOCATIONS = ContextVar('flare_storage_invocations')
 _OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
             'triton.cudagraphs': False, 'triton.autotune_at_compile_time': False,
-            'compile_threads': int(os.environ.get('TORCHINDUCTOR_COMPILE_THREADS', '4'))}
+            'compile_threads': int(os.environ.get('TORCHINDUCTOR_COMPILE_THREADS', '16'))}
 
 
 @contextmanager

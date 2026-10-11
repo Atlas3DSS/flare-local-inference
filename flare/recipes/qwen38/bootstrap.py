@@ -16,6 +16,7 @@ from flare.components.sampling import AdmissionBuffers
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.capture import capture_forwards
 from flare.preparation.execution import GraphSignature
+from flare.preparation.deferred import deferred_mode
 from flare.preparation.fixtures.recurrent import register_benchmark_state
 from flare.preparation.model import PreparedModel
 from flare.preparation.qwen38 import (
@@ -364,37 +365,54 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         stream = torch.cuda.Stream(device=device)
         graph_pool = torch.cuda.graph_pool_handle()
         compiled_functions = {}
-        def capture_catalog(*, compile_decoder, label="Prepare serving graphs"):
+        def capture_catalog(*, compile_decoder, materialize=None, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
-                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress, label=label,
+                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, materialize=materialize,
+                progress=progress, label=label,
                 collective=collective, coordinator=coordinator)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
 
         capture_catalog(compile_decoder=False, label="Measure graph memory")
-        with phase(progress, "Allocate KV cache"):
-            free, total = torch.cuda.mem_get_info(device)
-            available = _minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
-            page_capacity = available // page_bytes if config.pages is None else config.pages
-            if page_capacity <= 0 or page_capacity * page_bytes > available:
-                raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
-            report(f"{page_capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {page_capacity * 64:,} tokens")
-            final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
-                device=device, headroom_bytes=config.headroom_bytes, automatic=config.pages is None, report=report, group=group)
+        free, total = torch.cuda.mem_get_info(device)
+        available = _minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
+        page_capacity = available // page_bytes if config.pages is None else config.pages
+        if page_capacity <= 0 or page_capacity * page_bytes > available:
+            raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
+
+        def rebind_cache(pages):
             for decoder in decoders:
                 for index in range(3, 48, 4):
-                    decoder.layers[index][1].rebind_pages_for_preparation(final_cache[index])
-                decoder.qsa_states = final_cache
+                    decoder.layers[index][1].rebind_pages_for_preparation(pages[index])
+                decoder.qsa_states = pages
             if speculation is not None:
-                speculation.rebind_pages_for_preparation(final_cache)
-            for owner in owners:
-                if isinstance(owner, PreparedMaintenance):
-                    owner.rebind_pages_for_preparation(final_cache)
-            for graph in graphs.values():
-                graph.reset()
-            graphs.clear()
-        capture_catalog(compile_decoder=compile_decoder)
+                speculation.rebind_pages_for_preparation(pages)
+
+        if compile_decoder:
+            from b12x._lib.compile_plan import compile_only_launches
+
+            mode = deferred_mode()
+            with compile_only_launches():
+                rebind_cache({index: value.resize_pages_for_preparation(page_capacity, metadata_mode=mode)
+                              for index, value in cache.items()})
+
+        final_cache = None
+        def materialize_cache():
+            nonlocal final_cache, page_capacity
+            with phase(progress, "Allocate KV cache"):
+                final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
+                    device=device, headroom_bytes=config.headroom_bytes,
+                    automatic=config.pages is None and not compile_decoder, report=report, group=group)
+                rebind_cache(final_cache)
+                for owner in owners:
+                    if isinstance(owner, PreparedMaintenance):
+                        owner.rebind_pages_for_preparation(final_cache)
+                for graph in graphs.values():
+                    graph.reset()
+                graphs.clear()
+
+        capture_catalog(compile_decoder=compile_decoder, materialize=materialize_cache)
         session.freeze()
         free, total = torch.cuda.mem_get_info(device)
         memory = {"weights_bytes": weights.allocated_bytes, "mapped_ple_bytes": table.storage.mapped_host_nbytes,

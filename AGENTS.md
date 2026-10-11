@@ -157,6 +157,11 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   bind process-local kernel handles and caller-owned tensors at startup. Complete
   b12x preparation, tuning, binding refresh, and compiled warmup before capturing
   each serving graph. Retain compiled kernel owners until native replay has drained.
+- **Allocate large KV pools after forward compilation.** Describe their final
+  shapes with CUDA tensor metadata while compiling. Pass a `materialize` callback
+  to `capture_forwards` to allocate and bind real storage after compiler workers
+  exit and before warmup and capture. Validate compiled guards against those real
+  tensors. Temporary compiler contexts must not reduce the serving KV budget.
 - **Compile tensor-parallel forwards on rank zero.** Pass the preparation
   coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
   tensors and native handles, and participate in ordered warmup and local capture.

@@ -27,6 +27,7 @@ from .device_binding import bind_device, relocate_inductor, restore_device, rest
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
 _COMPILE_POOL = ContextVar("flare_compile_pool", default=None)
+_DEFERRED_BINDINGS = ContextVar("flare_deferred_bindings", default=False)
 
 
 class BindingMismatch(ValueError):
@@ -41,7 +42,9 @@ class _GuardPickler(GuardsStatePickler):
     """Exclude unguarded kernel resources from prepared Python objects."""
 
     @classmethod
-    def _unpickle_tensor(cls, meta_tensor, device, pytype, dispatch_keys_raw, grad):
+    def _unpickle_tensor(cls, meta_tensor, device, pytype, dispatch_keys_raw, grad, deferred=False):
+        if deferred and _DEFERRED_BINDINGS.get():
+            pytype = torch._subclasses.FakeTensor
         mode = _GUARD_TENSOR_MODE.get()
         if mode is None:
             return super()._unpickle_tensor(meta_tensor, device, pytype, dispatch_keys_raw, grad)
@@ -57,6 +60,12 @@ class _GuardPickler(GuardsStatePickler):
 
         if isinstance(obj, torch.device):
             return restore_device, (obj.type, obj.index)
+        if isinstance(obj, torch._subclasses.FakeTensor):
+            with torch._C._DisableTorchDispatch():
+                meta = torch.empty_strided(obj.shape, obj.stride(), dtype=obj.dtype,
+                                          device="meta", requires_grad=obj.requires_grad)
+            return type(self)._unpickle_tensor, (meta, obj.device, torch.Tensor,
+                torch._C._dispatch_keys(obj).raw_repr(), obj.grad, True)
         if isinstance(obj, JITFunction):
             return _deserialize_triton_kernel, (_serialize_triton_kernel(obj),)
         if (hasattr(obj, '__dict__')
@@ -347,35 +356,50 @@ class ForwardCache:
             bound, path = self._prepare(forward, name=name, signature=signature, progress=progress)
             return self._warm(bound, path, name=name, progress=progress)
 
-    def prepare_many(self, functions, signatures, *, progress=None, coordinator=None):
+    def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
         """Pipeline tracing and compilation, then warm each shape on the owning rank."""
         from flare.progress import phase
         from .compile_pool import CompilePool
 
         if coordinator is not None:
-            return self._prepare_ranks(functions, signatures, coordinator, progress=progress)
-        compiled, pending = {}, deque()
+            return self._prepare_ranks(functions, signatures, coordinator, progress=progress, materialize=materialize)
+        compiled, paths, pending = {}, {}, deque()
         with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device) as compiler:
             def finish():
                 name, bound, path = pending.popleft()
                 try:
                     with _guard_code_cache(self.root / 'guards'):
-                        compiled[name] = self._warm(bound, path, name=name, compiler=compiler)
+                        if materialize is None:
+                            compiled[name] = self._warm(bound, path, name=name, compiler=compiler)
+                        else:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            if not bound.cache_hit:
+                                bound.artifact.save_compiled_function(str(path))
+                            paths[name] = path
                 except Exception as error:
                     raise RuntimeError(f"failed to prepare compiled forward {name}") from error
                 stage.update(advance=1)
 
             for name, forward in functions.items():
                 with _guard_code_cache(self.root / 'guards'):
-                    bound, path = self._prepare(forward, name=name, signature=signatures[name], compiler=compiler)
+                    bound, path = self._prepare(forward, name=name, signature=signatures[name], compiler=compiler,
+                                                deferred=materialize is not None)
                 pending.append((name, bound, path))
                 if len(pending) >= compiler.workers:
                     finish()
             while pending:
                 finish()
+        if materialize is not None:
+            materialize()
+            with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
+                for name, forward in functions.items():
+                    with _guard_code_cache(self.root / 'guards'):
+                        compiled[name] = self._load(forward, paths[name], required=True)
+                    compiled[name]()
+                    stage.update(advance=1)
         return compiled
 
-    def _prepare_ranks(self, functions, signatures, coordinator, *, progress):
+    def _prepare_ranks(self, functions, signatures, coordinator, *, progress, materialize):
         import torch.distributed as dist
         from flare.progress import phase
         from .compile_pool import CompilePool
@@ -403,7 +427,7 @@ class ForwardCache:
                         for variant, forward in choices.items():
                             with _guard_code_cache(self.root / 'guards'):
                                 bound, path = self._prepare(forward, name=f"{name}.{variant}",
-                                    signature=signatures[name], compiler=compiler)
+                                    signature=signatures[name], compiler=compiler, deferred=materialize is not None)
                             pending.append((name, variant, bound, path))
                             if len(pending) >= compiler.workers:
                                 finish()
@@ -418,7 +442,9 @@ class ForwardCache:
             raise RuntimeError(f"rank-zero forward compilation failed: {failure}")
         error = None
         try:
-            if not primary:
+            if materialize is not None:
+                materialize()
+            if not primary or materialize is not None:
                 with phase(progress, "Load compiled forwards", total=len(functions)) as stage:
                     for name, forward in functions.items():
                         path = paths[name, getattr(forward, "compilation_variant", "shared")]
@@ -447,7 +473,7 @@ class ForwardCache:
             raise BindingMismatch(f"rank-local forward does not match compiled guards: {reason}")
         return None
 
-    def _prepare(self, forward, *, name, signature, compiler=None, progress=None):
+    def _prepare(self, forward, *, name, signature, compiler=None, progress=None, deferred=False):
         def report(operation):
             if progress is not None:
                 progress.update(f"{name} · {operation}")
@@ -455,7 +481,11 @@ class ForwardCache:
         path = self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
         if path.is_file():
             report("restoring compiled forward")
-            bound = self._load(forward, path)
+            token = _DEFERRED_BINDINGS.set(deferred)
+            try:
+                bound = self._load(forward, path)
+            finally:
+                _DEFERRED_BINDINGS.reset(token)
             report("checking compiled bindings")
             if bound is not None:
                 return bound, path

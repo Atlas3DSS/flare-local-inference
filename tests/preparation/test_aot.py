@@ -65,6 +65,47 @@ class BufferForward:
 
 
 @torch.no_grad()
+def test_compile_before_materializing_storage(tmp_path, monkeypatch):
+    import flare.preparation.aot as aot
+    from flare.preparation.compile_pool import CompilePool
+    from flare.preparation.deferred import deferred_mode, deferred_tensor
+    from flare.preparation.execution import GraphSignature
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    cache = ForwardCache(namespace={"model": "deferred-buffer"}, device="cuda:0")
+    pools = []
+    shutdown = CompilePool.__exit__
+
+    def close(pool, *args):
+        shutdown(pool, *args)
+        pools.append(pool)
+
+    monkeypatch.setattr(CompilePool, "__exit__", close)
+    for warm in (False, True):
+        forward = BufferForward(73)
+        forward.output = deferred_tensor((32,), dtype=torch.float32, device="cuda:0", mode=deferred_mode())
+        def materialize():
+            assert len(pools) == 1 + int(warm)
+            forward.output = torch.empty(32, device="cuda")
+        if warm:
+            def unexpected(*args, **kwargs):
+                raise AssertionError("cached deferred compilation must not trace or start workers")
+            monkeypatch.setattr(aot, "aot_forward", unexpected)
+            monkeypatch.setattr(CompilePool, "submit", unexpected)
+        compiled = cache.prepare_many({"decode": forward}, {"decode": GraphSignature("decode", 1, 1)},
+                                      materialize=materialize)
+        torch.testing.assert_close(forward.output, forward.source + 73.25)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
+            compiled["decode"]()
+        forward.source.fill_(2)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(forward.output, torch.full_like(forward.output, 75.25))
+        graph.reset()
+
+
+@torch.no_grad()
 def test_compiled_forward_rebinds_cuda_device_without_tracing(tmp_path, monkeypatch):
     from flare.preparation.device_binding import bind_device
 

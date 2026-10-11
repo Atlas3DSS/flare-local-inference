@@ -179,18 +179,28 @@ loading for development startup. b12x preparation and autotuning still run,
 and every serving path is captured as a CUDA graph. The option applies to Qwen
 and every GLM tensor-parallel rank; compiled forwards remain the default.
 
-Rank zero traces and lowers each static forward variant; up to four worker
+Rank zero traces and lowers each static forward variant; up to eight worker
 processes compile FX graphs containing tensor metadata. Other ranks load the
 compiled forwards without running Dynamo or Inductor. Recipes with different
 rank behavior supply compilation variants on rank zero and select a variant on
 each rank. GLM supplies sampling and consumption variants; Qwen shares one variant.
 Weights, mutable state, and native kernel bindings remain rank-local. Loading
 rebinds CUDA ordinals in guards and generated wrappers while retaining shape,
-layout, and alias checks. `TORCHINDUCTOR_COMPILE_THREADS` is divided across the
-compiler workers. Rank zero publishes compiled forwards before any collective
+layout, and alias checks. `TORCHINDUCTOR_COMPILE_THREADS` defaults to 16 and is
+divided across the compiler workers: eight workers with two Inductor threads
+each. Rank zero publishes compiled forwards before any collective
 warmup. Every rank then warms the same shape sequence and captures its own CUDA
 graphs against its shared scratch and state. Warm forward-cache hits do not start
 compiler workers. Terminal presentation sources do not invalidate compiled forwards.
+
+Qwen measures graph memory with a one-page cache, determines the final page
+capacity, and compiles with CUDA tensor metadata describing that capacity.
+The compiler pool exits before allocating the final KV storage. Each rank then
+loads the compiled forwards against real buffers, validates their guards, warms
+them, and captures its CUDA graphs. Cache-maintenance pointer tables are bound
+only to real storage. Tensor-parallel scratch finalization agrees on byte-buffer
+sizes and offsets across ranks before compilation, including independent scratch
+regions for overlapping operators.
 
 A context limit is distinct from aggregate cache capacity. Admission must reserve
 enough resources for each request's prompt and permitted output. Aggregate page
