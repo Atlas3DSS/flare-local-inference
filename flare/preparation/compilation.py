@@ -19,6 +19,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 _INVOCATIONS = ContextVar('flare_storage_invocations')
 _OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
             'triton.cudagraphs': False, 'triton.autotune_at_compile_time': False,
+            'triton.cooperative_reductions': True,
             'compile_threads': min(16, os.cpu_count() or 1)}
 # Compiled forwards and their guards persist beside b12x kernels and tuning selections.
 DEFAULT_CACHE_ROOT = Path.home() / '.cache' / 'flare' / 'kernels'

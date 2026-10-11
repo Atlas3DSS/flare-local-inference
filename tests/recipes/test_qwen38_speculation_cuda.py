@@ -253,6 +253,40 @@ def test_native_flashinfer_one_hot_all_prefix_lengths_and_clipping(width):
         assert torch.equal(state.histogram.cpu(), before)
 
 
+@pytest.mark.parametrize("batch,width", [(1, 1), (1, 4), (2, 4)])
+@torch.no_grad()
+def test_compiled_distributions_match_eager_with_changed_parameters(batch, width):
+    from flare.preparation.compilation import compile_forward
+
+    args = tensors(batch, width)
+    state, slots, epochs, live, inputs, *_ = args
+    generator = torch.Generator(device="cuda").manual_seed(1803)
+    logits = torch.randn((batch, width, VOCAB), generator=generator, device="cuda") * 3
+    op = PreparedSpeculativeDistributions(logits, state, slots, epochs, live,
+        inputs[:, 1:].contiguous())
+    op.prepare()
+    run = compile_forward(op)
+    with captured(run, (*args, op, run), {"probabilities": op.probabilities}) as replay:
+        for top_k, top_p, min_p in ((0, 1., 0.), (20, .95, .1), (1, 1., .5)):
+            state.top_k.fill_(top_k)
+            state.parameters[:, 1] = top_p
+            state.parameters[:, 2] = min_p
+            state.parameters[:, 3] = 1.2
+            state.parameters[:, 4] = .15
+            expected = op().clone()
+            expected_valid = op.valid.clone()
+            op.probabilities.fill_(float("nan"))
+            replay()
+            torch.testing.assert_close(op.probabilities, expected, rtol=2e-5, atol=1e-7)
+            assert torch.equal(op.valid, expected_valid)
+        state.grammar_enabled.fill_(1)
+        state.grammar_mask.zero_()
+        replay()
+        assert not op.valid.any()
+        assert op.probabilities[:, :, 0].eq(1).all()
+        assert op.probabilities[:, :, 1:].count_nonzero() == 0
+
+
 def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
     args = tensors(4, 8)
     state, slots, epochs, live, inputs, records, frame, sequence = args
