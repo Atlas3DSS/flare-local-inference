@@ -1,6 +1,7 @@
 """Spawn preparation ranks and transfer their lifetime supervision to Rust."""
 
 import os
+import signal
 import socket
 import traceback
 from datetime import timedelta
@@ -17,6 +18,8 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
     import flare_helios
 
     flare_helios.bind_parent_lifetime(parent)
+    # Rank zero coordinates shutdown; a terminal interrupt must not end a peer mid-drain.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=len(config.devices),
                                 timeout=timedelta(minutes=15))
@@ -46,7 +49,7 @@ class PreparedRankGroup:
         self.memory_report = {"world_size": len(processes) + 1, "ranks": [model.memory_report, *reports]}
         self._started = self._closed = False
 
-    def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None):
+    def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         try:
@@ -54,7 +57,8 @@ class PreparedRankGroup:
                 control.send("serve")
                 control.close()
             self._started = True
-            server = self.model.start_server(bind=bind, template_defaults=template_defaults, peers=self.connections)
+            server = self.model.start_server(bind=bind, template_defaults=template_defaults, peers=self.connections,
+                                             options=options)
             for connection in self.connections:
                 connection.close()
             return server

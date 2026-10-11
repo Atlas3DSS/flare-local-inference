@@ -19,7 +19,9 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 _INVOCATIONS = ContextVar('flare_storage_invocations')
 _OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
             'triton.cudagraphs': False, 'triton.autotune_at_compile_time': False,
-            'compile_threads': int(os.environ.get('TORCHINDUCTOR_COMPILE_THREADS', '16'))}
+            'compile_threads': min(16, os.cpu_count() or 1)}
+# Compiled forwards and their guards persist beside b12x kernels and tuning selections.
+DEFAULT_CACHE_ROOT = Path.home() / '.cache' / 'flare' / 'kernels'
 
 
 @contextmanager
@@ -183,8 +185,7 @@ def _compile_module(module, calls, owner, output_tree):
                          tensor.requires_grad, alias))
     key = hashlib.sha256(pickle.dumps((module.code, metadata, _OPTIONS, torch_key(),
         torch.cuda.get_device_capability(), torch.cuda.get_device_name()))).hexdigest()
-    root = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
-    path = root / 'flare' / 'compiled' / (key + '.bin')
+    path = DEFAULT_CACHE_ROOT / 'compiled' / (key + '.bin')
     cache_hit = path.is_file()
     if cache_hit:
         with _artifact_kernel_table():

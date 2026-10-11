@@ -87,6 +87,9 @@ class PreparationConfig:
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     pages: int | None = None
+    # With a minimum, pages fill measured free memory, at most `pages` when it is set.
+    minimum_pages: int | None = None
+    kernel_cache: Path | None = None
     mtp: bool = False
     speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
@@ -110,6 +113,9 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
+        if self.minimum_pages is not None and (type(self.minimum_pages) is not int or self.minimum_pages <= 0
+                                               or self.pages is not None and self.minimum_pages > self.pages):
+            raise ValueError("minimum page capacity must be positive and no larger than the page limit")
         if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
             raise TypeError("MTP and history draft switches must be booleans")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
@@ -360,7 +366,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         def capture_catalog(*, compile_decoder, materialize=None, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
                 stream=stream, pool=graph_pool, compile_decoder=compile_decoder, materialize=materialize,
-                progress=progress, label=label,
+                progress=progress, label=label, cache_root=config.kernel_cache,
                 collective=collective, coordinator=coordinator)
             graphs.update(captured)
             compiled_functions.clear()
@@ -370,7 +376,9 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         free, total = torch.cuda.mem_get_info(device)
         available = _minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
         page_capacity = available // page_bytes if config.pages is None else config.pages
-        if page_capacity <= 0 or page_capacity * page_bytes > available:
+        if config.minimum_pages is not None:
+            page_capacity = min(page_capacity, available // page_bytes)
+        if page_capacity < (config.minimum_pages or 1) or page_capacity * page_bytes > available:
             raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
 
         def rebind_cache(pages):

@@ -24,13 +24,14 @@ class PreparedModel(PreparedExecution):
         self._startup_undrained = False
         self._preparation_thread = get_ident()
 
-    def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None, peers=None):
+    def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None, peers=None, options=None):
+        """Hand the prepared graphs to the native server; `options` adds server configuration keys."""
         import flare_helios
 
         with self._handoff_lock:
             if self._consumed or self.closed:
                 raise RuntimeError("prepared model has already been consumed or closed")
-            config = {**self.server_config, "bind": bind,
+            config = {**self.server_config, **(options or {}), "bind": bind,
                       "template_defaults": {} if template_defaults is None else template_defaults}
             manifest = self.manifest()
             torch.cuda.synchronize(self.device)

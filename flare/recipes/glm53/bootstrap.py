@@ -45,6 +45,7 @@ class PreparationConfig:
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
+    kernel_cache: Path | None = None
     mtp: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
@@ -236,7 +237,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     graph_pool = torch.cuda.graph_pool_handle()
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
-        compile_decoder=config.compile_decoder, progress=progress)
+        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache)
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)

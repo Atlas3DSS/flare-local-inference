@@ -21,7 +21,8 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
 from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, treespec_loads
 
-from .compilation import _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table, _byte_storage, _lower_storage
+from .compilation import (DEFAULT_CACHE_ROOT, _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table,
+                          _byte_storage, _lower_storage)
 from .device_binding import bind_device, relocate_inductor, restore_device, restore_prepared_device
 
 _GUARD_LOCK = RLock()
@@ -320,10 +321,14 @@ def _completed(pending):
         wait([item[-2].pending for item in pending], return_when=FIRST_COMPLETED)
 
 
+# Command-line, planning, and display sources do not change compiled forwards.
+_COMMAND_SOURCES = ('cli', 'errors.py', 'planning.py', 'progress.py')
+
+
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
-    def __init__(self, *, namespace, device):
+    def __init__(self, *, namespace, device, root=None):
         import flashinfer
         from torch._inductor.codecache import torch_key
 
@@ -332,14 +337,15 @@ class ForwardCache:
         options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
         key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
             properties.name, properties.major, properties.minor, properties.multi_processor_count)))
-        for root in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
-            for path in sorted(root.rglob('*.py')):
-                if root.name == 'flare' and (path.name == '__main__.py' or path == root / 'progress.py'):
+        for source in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
+            for path in sorted(source.rglob('*.py')):
+                if source.name == 'flare' and (path.name == '__main__.py'
+                                               or path.relative_to(source).parts[0] in _COMMAND_SOURCES):
                     continue
-                key.update(str(path.relative_to(root)).encode())
+                key.update(str(path.relative_to(source)).encode())
                 key.update(path.read_bytes())
-        root = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
-        self.root = root / 'flare' / 'forwards' / key.hexdigest()
+        root = DEFAULT_CACHE_ROOT if root is None else Path(root)
+        self.root = root / 'forwards' / key.hexdigest()
 
     def prepare(self, forward, *, name, signature, progress=None):
         """Bind and warm one callable on the caller's preparation stream."""
