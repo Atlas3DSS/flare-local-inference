@@ -1,4 +1,6 @@
-//! Terminal loading rows with measured progress and elapsed time.
+//! Animated startup banner and loading rows with measured progress and elapsed time.
+
+mod banner;
 
 use std::{
     io::{IsTerminal, Write},
@@ -11,20 +13,79 @@ use std::{
 pub struct StartupProgress {
     enabled: bool,
     terminal: bool,
+    output: Arc<Mutex<Output>>,
+    animation: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
 }
 
 impl StartupProgress {
     pub fn stderr() -> Self {
-        Self {
+        let mut progress = Self {
             enabled: true,
             terminal: std::io::stderr().is_terminal(),
-        }
+            output: Arc::new(Mutex::new(Output::default())),
+            animation: None,
+        };
+        progress.animate_banner();
+        progress
     }
 
     pub fn silent() -> Self {
         Self {
             enabled: false,
             terminal: false,
+            output: Arc::new(Mutex::new(Output::default())),
+            animation: None,
+        }
+    }
+
+    fn animate_banner(&mut self) {
+        if !self.terminal {
+            return;
+        }
+        let (width, height) = terminal_size();
+        if banner::frame(0.0, width).lines().count() + 2 >= height {
+            let mut out = std::io::stderr().lock();
+            let _ = out.write_all(banner::frame(1.0, width).as_bytes());
+            let _ = out.flush();
+            return;
+        }
+        let started = Instant::now();
+        let mut output = self.output.lock().unwrap();
+        output.started = Some(started);
+        output.redraw(0.0);
+        drop(output);
+        let output = self.output.clone();
+        let (stop, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            for tick in 1.. {
+                let stopped = !matches!(
+                    receiver.recv_timeout(
+                        (started + (Duration::from_micros(62_500) * tick).min(banner::DURATION))
+                            .saturating_duration_since(Instant::now()),
+                    ),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                );
+                let mut output = output.lock().unwrap();
+                let progress = output.progress();
+                if stopped || progress >= 1.0 {
+                    output.redraw(1.0);
+                    output.started = None;
+                    output.completed.clear();
+                    output.active = None;
+                    output.drawn_lines = 0;
+                    break;
+                }
+                output.redraw(progress);
+            }
+        });
+        self.animation = Some((stop, worker));
+    }
+
+    /// Settles the header before another terminal UI takes ownership of stderr.
+    pub fn finish_animation(&mut self) {
+        if let Some((stop, worker)) = self.animation.take() {
+            let _ = stop.send(());
+            let _ = worker.join();
         }
     }
 
@@ -33,6 +94,7 @@ impl StartupProgress {
             label: label.to_owned(),
             detail: String::new(),
             started: Instant::now(),
+            elapsed: None,
             completed: 0,
             total,
         }));
@@ -40,20 +102,29 @@ impl StartupProgress {
             state: state.clone(),
             enabled: self.enabled,
             terminal: self.terminal,
+            output: self.output.clone(),
             finished: false,
             animation: None,
         };
         if self.enabled {
-            state.lock().unwrap().render(self.terminal, Status::Running);
+            self.output.lock().unwrap().write(
+                &state.lock().unwrap(),
+                self.terminal,
+                Status::Running,
+            );
         }
         if self.terminal {
             let (stop, receiver) = mpsc::channel();
+            let output = self.output.clone();
             let worker = thread::spawn(move || {
                 while matches!(
                     receiver.recv_timeout(Duration::from_millis(125)),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    state.lock().unwrap().render(true, Status::Running);
+                    output
+                        .lock()
+                        .unwrap()
+                        .write(&state.lock().unwrap(), true, Status::Running);
                 }
             });
             phase.animation = Some((stop, worker));
@@ -62,11 +133,18 @@ impl StartupProgress {
     }
 }
 
+impl Drop for StartupProgress {
+    fn drop(&mut self) {
+        self.finish_animation();
+    }
+}
+
 /// A stage prints FAILED if dropped without an explicit successful finish.
 pub struct Phase {
     state: Arc<Mutex<State>>,
     enabled: bool,
     terminal: bool,
+    output: Arc<Mutex<Output>>,
     finished: bool,
     animation: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
 }
@@ -104,7 +182,8 @@ impl Drop for Phase {
             let _ = worker.join();
         }
         if self.enabled {
-            self.state.lock().unwrap().render(
+            self.output.lock().unwrap().write(
+                &self.state.lock().unwrap(),
                 self.terminal,
                 if self.finished {
                     Status::Ok
@@ -116,10 +195,12 @@ impl Drop for Phase {
     }
 }
 
+#[derive(Clone)]
 struct State {
     label: String,
     detail: String,
     started: Instant,
+    elapsed: Option<Duration>,
     completed: u64,
     total: Option<u64>,
 }
@@ -132,8 +213,12 @@ enum Status {
 }
 
 impl State {
-    fn render(&self, terminal: bool, status: Status) {
-        let elapsed = self.started.elapsed().as_secs_f64();
+    fn render(&self, terminal: bool, status: Status) -> String {
+        use std::fmt::Write;
+        let elapsed = self
+            .elapsed
+            .unwrap_or_else(|| self.started.elapsed())
+            .as_secs_f64();
         let status_text = match status {
             Status::Ok => "    OK    ".to_owned(),
             Status::Failed => "  FAILED  ".to_owned(),
@@ -174,7 +259,7 @@ impl State {
         } else {
             0
         };
-        let mut out = std::io::stderr().lock();
+        let mut out = String::new();
         if terminal {
             let color = match status {
                 Status::Running => "36",
@@ -189,10 +274,72 @@ impl State {
         } else {
             let _ = write!(out, "[{status_text}{label}{detail}{timing}");
         }
-        if !terminal || !matches!(status, Status::Running) {
-            let _ = writeln!(out);
+        out
+    }
+}
+
+#[derive(Default)]
+struct Output {
+    started: Option<Instant>,
+    completed: Vec<(State, Status)>,
+    active: Option<State>,
+    drawn_lines: usize,
+}
+
+impl Output {
+    fn progress(&self) -> f64 {
+        self.started.map_or(1.0, |started| {
+            (started.elapsed().as_secs_f64() / banner::DURATION.as_secs_f64()).min(1.0)
+        })
+    }
+
+    fn write(&mut self, state: &State, terminal: bool, status: Status) {
+        if self.started.is_some() {
+            if matches!(status, Status::Running) {
+                self.active = Some(state.clone());
+            } else {
+                let mut state = state.clone();
+                state.elapsed = Some(state.started.elapsed());
+                self.completed.push((state, status));
+                self.active = None;
+            }
+            self.redraw(self.progress());
+        } else {
+            let mut out = std::io::stderr().lock();
+            let _ = out.write_all(state.render(terminal, status).as_bytes());
+            if !terminal || !matches!(status, Status::Running) {
+                let _ = writeln!(out);
+            }
+            let _ = out.flush();
         }
+    }
+
+    fn redraw(&mut self, progress: f64) {
+        if self.started.is_none() {
+            return;
+        }
+        let (width, height) = terminal_size();
+        let mut content = banner::frame(progress, width);
+        for (state, status) in &self.completed {
+            content.push_str(&state.render(true, *status));
+            content.push('\n');
+        }
+        if let Some(state) = &self.active {
+            content.push_str(&state.render(true, Status::Running));
+        }
+        let lines: Vec<_> = content.split('\n').collect();
+        let visible = &lines[lines.len().saturating_sub(height.saturating_sub(1).max(1))..];
+        let mut out = std::io::stderr().lock();
+        if self.drawn_lines > 1 {
+            let _ = write!(
+                out,
+                "\x1b[{}A",
+                (self.drawn_lines - 1).min(height.saturating_sub(1))
+            );
+        }
+        let _ = write!(out, "\r\x1b[J{}", visible.join("\n"));
         let _ = out.flush();
+        self.drawn_lines = visible.len();
     }
 }
 
@@ -207,13 +354,23 @@ fn truncate(text: &str, width: usize) -> String {
 }
 
 fn terminal_width() -> usize {
+    terminal_size().0
+}
+
+fn terminal_size() -> (usize, usize) {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: ioctl writes the terminal dimensions into a valid winsize.
-    if unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) } == 0
-        && size.ws_col > 0
-    {
-        usize::from(size.ws_col)
-    } else {
-        80
-    }
+    unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
+    (
+        if size.ws_col > 0 {
+            usize::from(size.ws_col)
+        } else {
+            80
+        },
+        if size.ws_row > 0 {
+            usize::from(size.ws_row)
+        } else {
+            24
+        },
+    )
 }

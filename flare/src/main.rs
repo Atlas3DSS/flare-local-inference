@@ -1,7 +1,5 @@
 //! Serve a prepared model package without a Python interpreter.
 
-mod banner;
-
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -50,8 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(format!("unknown option {flag}").into()),
         }
     }
-    banner::print();
-    let progress = StartupProgress::stderr();
+    let mut progress = StartupProgress::stderr();
     // SAFETY: The trusted package owners remain live until every rank drains.
     let owner = unsafe { NativeModel::load(&root, &devices, &progress)? };
     let root = owner.frontend_root();
@@ -117,6 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
     }
+    progress.finish_animation();
     if let Err(error) = server.start_dashboard() {
         eprintln!("Could not start dashboard: {error}");
     }
