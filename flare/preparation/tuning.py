@@ -205,11 +205,13 @@ class RecordedPreparationSession(PreparationSession):
                     plan.memory_requirements().scratch_nbytes)
                 required = max(selected.scratch_nbytes, parallel)
                 self._scratch_arena.trim(required)
+                if self._coordinator is None:
+                    self._scratch_arena.freeze()
+                self._scratch_arena.finalize(group=None if self._coordinator is None else self._coordinator.group)
                 self._scratch_arena.freeze()
                 scratch_arena.update(selected_scratch_bytes=required,
                                      parallel_selected_scratch_bytes=parallel,
                                      reserved_bytes=self._scratch_arena.nbytes)
-                self._scratch_arena.finalize()
             for callback in self._finalizers:
                 callback()
             self._synchronize()

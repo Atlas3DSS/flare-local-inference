@@ -17,6 +17,26 @@ def spec(nbytes, *, dtype=torch.uint8, shape=None, device="cpu"):
                              dtype=dtype, device=torch.device(device))
 
 
+def test_rank_scratch_finalization_preserves_shared_offsets(monkeypatch):
+    import torch.distributed as dist
+
+    arena = ScratchArena("cpu")
+    arena.reserve(512)
+    owner = SimpleNamespace()
+    def bind():
+        owner.main, owner.side = arena.views(((64,), torch.uint8), ((128,), torch.uint8))
+    arena.register_finalizer(bind)
+    monkeypatch.setattr(dist, "get_world_size", lambda group: 2)
+    def gather(ranks, value, group):
+        ranks[:] = [value, (1024, [(((300,), torch.uint8), ((400,), torch.uint8))])]
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    arena.finalize(group=object())
+    assert owner.main.shape == (300,) and owner.side.shape == (400,)
+    assert owner.side.storage_offset() == 512
+    assert owner.main.untyped_storage()._cdata == owner.side.untyped_storage()._cdata == arena.tensor.untyped_storage()._cdata
+    assert arena.nbytes == 1024
+
+
 def test_arena_owns_one_aligned_highwater_storage_across_operator_specs():
     arena = ScratchArena("cpu")
     assert arena.nbytes == 0 and arena.device == torch.device("cpu")

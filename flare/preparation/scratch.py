@@ -16,6 +16,8 @@ class ScratchArena:
         self._finalizers = []
         self._parallel_plans = []
         self._auxiliary_stream = None
+        self._recorded_views = None
+        self._binding_views = None
 
     @property
     def device(self):
@@ -79,6 +81,10 @@ class ScratchArena:
         Calls reuse the same offsets. Preparation must refresh retained views
         after growth and freeze the arena before recording CUDA graph pointers.
         """
+        if self._recorded_views is not None:
+            self._recorded_views.append(shapes_and_dtypes)
+        if self._binding_views is not None:
+            shapes_and_dtypes = next(self._binding_views)
         sizes = []
         for shape, dtype in shapes_and_dtypes:
             if any(type(dim) is not int or dim < 0 for dim in shape):
@@ -100,10 +106,51 @@ class ScratchArena:
             raise TypeError("scratch binding finalizer must be callable")
         self._finalizers.append(callback)
 
-    def finalize(self):
-        for callback in self._finalizers:
-            callback()
+    def finalize(self, *, group=None):
+        if group is None:
+            for callback in self._finalizers:
+                callback()
+        else:
+            import torch.distributed as dist
+
+            self._recorded_views = []
+            try:
+                for callback in self._finalizers:
+                    callback()
+                layouts = self._recorded_views
+            finally:
+                self._recorded_views = None
+            ranks = [None] * dist.get_world_size(group)
+            dist.all_gather_object(ranks, (self.nbytes, layouts), group=group)
+            shared = _shared_views([views for _, views in ranks])
+            required = max((sum((prod(shape) * dtype.itemsize + 255) // 256 * 256
+                                for shape, dtype in views) for views in shared), default=0)
+            before = self.tensor
+            self.reserve(max(required, *(size for size, _ in ranks)))
+            if shared != layouts or self.tensor is not before:
+                self._binding_views = iter(shared)
+                try:
+                    for callback in self._finalizers:
+                        callback()
+                finally:
+                    self._binding_views = None
         self._finalizers.clear()
+
+
+def _shared_views(layouts):
+    """Give equivalent rank forwards identical scratch sizes and offsets."""
+    result = []
+    for calls in zip(*layouts, strict=True):
+        views = []
+        for specs in zip(*calls, strict=True):
+            shape, dtype = specs[0]
+            if any(spec != specs[0] for spec in specs[1:]):
+                if any(len(other) != 1 or kind != torch.uint8 for other, kind in specs):
+                    raise ValueError("tensor-parallel scratch layouts differ beyond byte-buffer capacity")
+                shape = (max(other[0] for other, _ in specs),)
+            views.append((shape, dtype))
+        result.append(tuple(views))
+    return result
 
 
 def scratch_storage(workspace, *, nbytes, device):
