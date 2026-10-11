@@ -51,7 +51,7 @@ class _Phase:
             position = min(position, 15 - position)
             for index in range(10):
                 row.append("-", style="bold cyan" if position <= index < position + 3 else "dim")
-        row.append(f"] {self.label}")
+        row.append(f"] {self.label}.")
         count = f"{self.completed}/{self.total}  " if self.total is not None else ""
         row.append(f"  {count}{now - self.started:.1f}s", style="dim")
         if not self.detail:
