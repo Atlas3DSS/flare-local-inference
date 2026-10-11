@@ -7,7 +7,7 @@ use std::{
 };
 
 use flare_helios::{
-    model::qwen4exp::Qwen4Exp,
+    model::{ModelContract, glm5next::Glm5Next, qwen4exp::Qwen4Exp},
     runtime_package::NativeModel,
     server::{Bootstrap, Server},
     startup::StartupProgress,
@@ -55,9 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let phase = progress.phase("Read model configuration", None);
     let mut config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("server.json"))?)?;
-    if config["model_contract"]["schema"] != flare_helios::model::qwen4exp::INPUT_SCHEMA {
-        return Err("native package serving supports the Qwen contract".into());
-    }
+    let schema = config["model_contract"]["schema"]
+        .as_str()
+        .ok_or("model_contract.schema is required")?
+        .to_owned();
     config["bind"] = bind.into();
     config["api_key"] = key.unwrap_or_default().into();
     for asset in config["assets"]
@@ -78,6 +79,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into();
     }
     phase.finish(config["model_id"].as_str().unwrap_or_default());
+    match schema.as_str() {
+        flare_helios::model::qwen4exp::INPUT_SCHEMA => {
+            serve::<Qwen4Exp>(owner, &config, &mut progress)
+        }
+        flare_helios::model::glm5next::INPUT_SCHEMA => {
+            serve::<Glm5Next>(owner, &config, &mut progress)
+        }
+        _ => Err(format!("unsupported model contract {schema:?}").into()),
+    }
+}
+
+/// Start the native server for one model contract and block until it stops and drains.
+fn serve<M: ModelContract>(
+    owner: NativeModel,
+    config: &serde_json::Value,
+    progress: &mut StartupProgress,
+) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
     let phase = progress.phase("Load tokenizer", None);
@@ -85,14 +103,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = manifests.remove(0);
     let peers =
         (!manifests.is_empty()).then_some(flare_helios::execution::RankPeers::Threads(manifests));
-    let bootstrap = Bootstrap::load::<Qwen4Exp>(&config.to_string(), &manifest)?;
+    let bootstrap = Bootstrap::load::<M>(&config.to_string(), &manifest)?;
     phase.finish(format!(
         "{} token vocabulary",
         bootstrap.model.contract.vocabulary
     ));
     let phase = progress.phase("Start server", None);
     let server = match unsafe {
-        Server::<Qwen4Exp>::start(
+        Server::<M>::start(
             manifest,
             bootstrap.model,
             bootstrap.frontend,
