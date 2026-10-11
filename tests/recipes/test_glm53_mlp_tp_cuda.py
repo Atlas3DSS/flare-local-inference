@@ -38,9 +38,9 @@ def _rank(rank, world_size, rendezvous, snapshot, rows):
         shared_prefix = prefixes[1].rstrip(".")
         extent = shard.partition(2048, alignment=128)
         shared_weights = MLPWeights(
-            loader.load_mxfp8_group(tuple(f"{shared_prefix}.{name}" for name in ("gate_proj", "up_proj")),
+            loader.load_linear_group(tuple(f"{shared_prefix}.{name}" for name in ("gate_proj", "up_proj")),
                                      row_ranges=(extent, extent)),
-            loader.load_mxfp8_group((shared_prefix + ".down_proj",), column_range=extent),
+            loader.load_linear_group((shared_prefix + ".down_proj",), column_range=extent),
         )
         assert loader._session.torch_copy_bytes == 0
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank,

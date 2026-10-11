@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from flare.components.weights import DirectWeightLoader
-from flare.preparation.quantization import linear_format, quantized_layers
+from flare.preparation.quantization import expert_format, linear_format, projection_group_format, quantized_layers
 from flare.recipes.qwen38.weights import QwenWeightLoader
 
 
@@ -16,19 +16,17 @@ def config(layers):
 
 
 @pytest.mark.parametrize("loader_type", [DirectWeightLoader, QwenWeightLoader])
-@pytest.mark.parametrize("algo,group,selected", [("MXFP8", 32, "mxfp8"), ("NVFP4", 16, "nvfp4"),
+@pytest.mark.parametrize("algo,group,selected", [("MXFP8", 32, "mxfp8"), ("MXFP4", 32, "mxfp4"), ("NVFP4", 16, "nvfp4"),
                                                 ("W4A16_NVFP4", 16, "nvfp4")])
 def test_checkpoint_selects_single_projection_format(tmp_path, monkeypatch, loader_type, algo, group, selected):
     prefix = "model.language_model.layers.0.linear_attn.out_proj"
     (tmp_path / "config.json").write_text(json.dumps(config({prefix: {"quant_algo": algo, "group_size": group}})))
     loader = loader_type(SimpleNamespace(snapshot=tmp_path), "cuda:0")
     loader._session = object()
-    monkeypatch.setattr(loader, "load_mxfp8_group", lambda *args, **kwargs: ("mxfp8", kwargs))
-    monkeypatch.setattr(loader, "_load_nvfp4_linear", lambda *args, **kwargs: ("nvfp4", kwargs))
+    monkeypatch.setattr(loader, "load_linear_group", lambda prefixes, **kwargs: (projection_group_format(loader.quantization, prefixes), kwargs))
     result, slices = loader.load_linear(prefix, rows=(0, 32), columns=(16, 144))
     assert result == selected
-    assert slices == ({"row_ranges": ((0, 32),), "column_range": (16, 144)} if selected == "mxfp8"
-                      else {"rows": (0, 32), "columns": (16, 144)})
+    assert slices == {"row_ranges": ((0, 32),), "column_range": (16, 144)}
 
 
 @pytest.mark.parametrize("formats", [("NVFP4", "NVFP4"), ("MXFP8", "NVFP4"),
@@ -40,7 +38,7 @@ def test_nvfp4_fusion_rejected_before_tensor_access(tmp_path, formats):
     loader = DirectWeightLoader(SimpleNamespace(snapshot=tmp_path), "cuda:0")
     loader._session = object()
     with pytest.raises(ValueError, match="cannot fuse NVFP4.*only MoE expert w1/w3"):
-        loader.load_mxfp8_group(("q", "k"))
+        loader.load_linear_group(("q", "k"))
 
 
 @pytest.mark.parametrize("entry", [None, {}, {"quant_algo": "AWQ", "group_size": 128},
@@ -55,3 +53,64 @@ def test_unsupported_projection_encodings_rejected(entry):
 def test_quantization_config_requires_supported_schema():
     with pytest.raises(ValueError, match="modelopt"):
         quantized_layers({"quantization_config": {"quant_method": "compressed-tensors"}})
+
+
+@pytest.mark.parametrize("algo,group,encoding,expected", [
+    ("NVFP4", 16, None, ("nvfp4", "a4")),
+    ("NVFP4", 16, "csf", ("nvfp4_csf", "a4")),
+    ("W4A16_NVFP4", 16, None, ("nvfp4", "a16")),
+    ("MXFP4", 32, None, ("mxfp4", "a8")),
+])
+def test_expert_storage_and_activation_contract(algo, group, encoding, expected):
+    entry = {"quant_algo": algo, "group_size": group}
+    if encoding is not None:
+        entry["weight_scale_encoding"] = encoding
+    assert expert_format({"experts": entry}, "experts") == expected
+
+
+def test_projection_fusion_requires_matching_formats():
+    with pytest.raises(ValueError, match="same quantization format"):
+        projection_group_format({"q": {"quant_algo": "MXFP4", "group_size": 32},
+                                 "k": {"quant_algo": "MXFP8", "group_size": 32}}, ("q", "k"))
+
+
+@pytest.mark.parametrize("algo,group,scale_dtype", [("NVFP4", 16, "F8_E4M3"),
+    ("W4A16_NVFP4", 16, "F8_E4M3"), ("MXFP4", 32, "U8")])
+def test_qwen_declares_ordinary_expert_storage(algo, group, scale_dtype):
+    from flare.preparation.qwen38 import _mlp
+
+    layers = {"layer.mlp.experts": {"quant_algo": algo, "group_size": group}}
+    tensors = {name: (dtype, shape) for name, dtype, shape in _mlp("layer.mlp", quantization=layers)}
+    prefix = "layer.mlp.experts.0.gate_proj"
+    assert tensors[prefix + ".weight"] == ("U8", (640, 1280))
+    assert tensors[prefix + ".weight_scale"] == (scale_dtype, (640, 2560 // group))
+    assert (prefix + ".input_scale" in tensors) == (algo == "NVFP4")
+    assert (prefix + ".weight_scale_2" in tensors) == (algo != "MXFP4")
+    assert not any("csf" in name for name in tensors)
+
+
+@pytest.mark.parametrize("algo,group,mode", [("NVFP4", 16, "a4"),
+    ("W4A16_NVFP4", 16, "a16"), ("MXFP4", 32, "a8")])
+def test_mtp_experts_use_declared_format_and_mtp_scales(tmp_path, monkeypatch, algo, group, mode):
+    import torch
+    from flare.components.parallel import TensorParallelShard
+    from flare.recipes.qwen38.mtp_weights import MTPWeightLoader
+
+    prefix = "mtp.layers.0.mlp.experts"
+    (tmp_path / "config.json").write_text(json.dumps(config({prefix: {"quant_algo": algo, "group_size": group}})))
+    loader = MTPWeightLoader(SimpleNamespace(snapshot=tmp_path), "cpu", shard=TensorParallelShard(1, 2))
+    loader._session = object()
+    loader._sources = {f"{prefix}.{expert}.{proj}.{suffix}": torch.tensor(value)
+        for expert, value in ((7, .5), (4, .25))
+        for proj in ("gate_proj", "up_proj", "down_proj")
+        for suffix in ("weight_scale_2", "input_scale")}
+    monkeypatch.setattr(loader, "load_fp4_experts", lambda prefixes, **kwargs: (prefixes, kwargs))
+    prefixes, options = loader.load_experts(expert_ids=(7, 4))
+    assert prefixes == (prefix + ".7", prefix + ".4")
+    assert options["format"] == ("mxfp4" if algo == "MXFP4" else "nvfp4")
+    assert options["activation_mode"] == mode
+    assert options["intermediate_range"] == (320, 640)
+    if mode == "a4":
+        assert [v.tolist() for v in options["scale_vectors"]] == [[.5, .25], [.5, .25], [2., 4.], [2., 4.]]
+    else:
+        assert options["scale_vectors"] is None

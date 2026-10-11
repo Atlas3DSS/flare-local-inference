@@ -141,10 +141,14 @@ class GlmWeightLoader(DirectWeightLoader):
             name: self._projection(f"{prefix}.{name}")
             for name in ("indexer.wq_b", "indexer.wk", "indexer.weights_proj")
         }
-        result["qkv_a_proj"] = self.load_mxfp8_group(
+        result["qkv_a_proj"] = self.load_linear_group(
             tuple(f"{prefix}.{name}" for name in ("q_a_proj", "kv_a_proj_with_mqa")))
         result["q_b_proj"] = self._projection(f"{prefix}.q_b_proj", rows=head_channels)
-        result["kv_b_proj"] = self.load_mxfp8_group(
+        from flare.preparation.quantization import linear_format
+
+        if linear_format(self.quantization, f"{prefix}.kv_b_proj") != "mxfp8":
+            raise ValueError(f"{prefix}.kv_b_proj: MLA absorption requires MXFP8 weights")
+        result["kv_b_proj"] = self.load_linear_group(
             (f"{prefix}.kv_b_proj",), row_ranges=(self.shard.partition(64 * 512, alignment=512),))
         result["o_proj"] = self._projection(f"{prefix}.o_proj", columns=head_channels)
         for name in ("q_a_layernorm.weight", "kv_a_layernorm.weight", "indexer.k_norm.weight",
@@ -159,7 +163,7 @@ class GlmWeightLoader(DirectWeightLoader):
         heads = self.shard.partition(64)
         result = {name: self._projection(f"{prefix}.{name}", rows=channels)
                   for name in ("f_b_proj", "g_b_proj")}
-        result["input_proj"] = self.load_mxfp8_group(
+        result["input_proj"] = self.load_linear_group(
             tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj")),
             row_ranges=(channels,) * 3 + (heads, None))
         result["g_a_proj"] = self._projection(f"{prefix}.g_a_proj")
@@ -188,7 +192,7 @@ class GlmWeightLoader(DirectWeightLoader):
         extent = self.shard.partition(2048, alignment=128)
         shared_prefix = prefix + ".shared_experts"
         shared = MLPWeights(
-            self.load_mxfp8_group(tuple(f"{shared_prefix}.{name}" for name in ("gate_proj", "up_proj")),
+            self.load_linear_group(tuple(f"{shared_prefix}.{name}" for name in ("gate_proj", "up_proj")),
                                  row_ranges=(extent, extent)),
             self._projection(f"{shared_prefix}.down_proj", columns=extent),
         )
@@ -207,13 +211,14 @@ class GlmWeightLoader(DirectWeightLoader):
                 or any(type(i) is not int or not 0 <= i < 288 for i in ids)):
             raise ValueError("GLM expert IDs must be distinct integers in [0, 288)")
         prefixes = tuple(f"{prefix}.{i}" for i in ids)
-        recipe = self.quantization.get(prefix, {})
-        if layer == 45 and recipe == {"quant_algo": "W4A16_NVFP4", "group_size": 16}:
-            return self.load_nvfp4_a16_experts(prefixes, hidden_size=4096, intermediate_size=2048,
-                intermediate_range=self.shard.partition(2048, alignment=128), swiglu_limit=10.0)
-        if (recipe.get("quant_algo") != "NVFP4" or recipe.get("group_size") != 16
-                or recipe.get("weight_scale_encoding") != "csf"):
-            raise ValueError(f"{prefix}: expected declared NVFP4 CSF quantization")
+        from flare.preparation.quantization import expert_format
+
+        fmt, mode = expert_format(self.quantization, prefix)
+        if fmt != "nvfp4_csf":
+            return self.load_fp4_experts(prefixes, hidden_size=4096, intermediate_size=2048,
+                format=fmt, activation_mode=mode,
+                intermediate_range=self.shard.partition(2048, alignment=128), swiglu_limit=10.0,
+                scale_vectors=_expert_scales(self._sources, prefixes) if mode == "a4" else None)
         return self.load_nvfp4_experts(
             prefixes, hidden_size=4096, intermediate_size=2048,
             intermediate_range=self.shard.partition(2048, alignment=128),

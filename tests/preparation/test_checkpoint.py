@@ -182,7 +182,7 @@ def test_missing_quantization_recipe_rejected(snapshot):
     config = json.loads((snapshot / "config.json").read_text())
     name = "model.language_model.layers.0.mlp.experts"
     del config["quantization_config"]["quantized_layers"][name]
-    with pytest.raises(CheckpointError, match="quantized_layers") as error:
+    with pytest.raises(CheckpointError, match="quantization") as error:
         _validate_config(config)
     assert name in str(error.value)
 
@@ -221,11 +221,10 @@ def test_dense_storage_follows_quantization_config(snapshot, manifest, algo):
     tensors[scales.name] = replace(scales, dtype="F8_E4M3", shape=(rows, columns // 16))
     name = prefix + ".weight_scale_2"
     tensors[name] = replace(weight, name=name, dtype="F32", shape=())
-    _validate_tensors(tensors, config["quantization_config"]["quantized_layers"])
     if algo == "NVFP4":
         name = prefix + ".input_scale"
         tensors[name] = replace(weight, name=name, dtype="F32", shape=())
-        _validate_tensors(tensors, config["quantization_config"]["quantized_layers"])
+    _validate_tensors(tensors, config["quantization_config"]["quantized_layers"])
     with pytest.raises(CheckpointError, match="expected U8"):
         _validate_tensors(manifest.tensors, config["quantization_config"]["quantized_layers"])
 

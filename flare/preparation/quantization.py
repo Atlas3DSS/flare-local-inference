@@ -20,20 +20,36 @@ def linear_format(layers, prefix):
     if not isinstance(entry, Mapping):
         raise ValueError(f"{prefix}: missing quantized_layers declaration")
     algo = entry.get("quant_algo")
-    group = {"MXFP8": 32, "NVFP4": 16, "W4A16_NVFP4": 16}.get(algo)
+    group = {"MXFP8": 32, "MXFP4": 32, "NVFP4": 16, "W4A16_NVFP4": 16}.get(algo)
     if group is None or entry.get("group_size") != group:
         raise ValueError(f"{prefix}: unsupported linear quantization {entry!r}")
     if entry.get("weight_scale_encoding") is not None:
         raise ValueError(f"{prefix}: dense projections require ordinary block scales")
-    return "mxfp8" if algo == "MXFP8" else "nvfp4"
+    return algo.lower() if algo in ("MXFP8", "MXFP4") else "nvfp4"
 
 
-def require_mxfp8_group(layers, prefixes):
+def projection_group_format(layers, prefixes):
     if not prefixes:
         raise ValueError("projection group must be nonempty")
     formats = [linear_format(layers, prefix) for prefix in prefixes]
-    if "nvfp4" in formats:
+    if "nvfp4" in formats and len(prefixes) > 1:
         names = ", ".join(prefixes)
-        if len(prefixes) > 1:
-            raise ValueError(f"cannot fuse NVFP4 projections ({names}); only MoE expert w1/w3 fusion is supported")
-        raise ValueError(f"{names}: this operation requires MXFP8 weights")
+        raise ValueError(f"cannot fuse NVFP4 projections ({names}); only MoE expert w1/w3 fusion is supported")
+    if len(set(formats)) != 1:
+        raise ValueError("fused projections must use the same quantization format")
+    return formats[0]
+
+
+def expert_format(layers, prefix):
+    entry = layers.get(prefix)
+    if not isinstance(entry, Mapping):
+        raise ValueError(f"{prefix}: missing expert quantization declaration")
+    if entry.get("weight_scale_encoding") == "csf":
+        if entry.get("quant_algo") == "NVFP4" and entry.get("group_size") == 16:
+            return "nvfp4_csf", "a4"
+        raise ValueError(f"{prefix}: unsupported compressed expert scales")
+    fmt = linear_format(layers, prefix)
+    if fmt not in ("nvfp4", "mxfp4"):
+        raise ValueError(f"{prefix}: expected NVFP4 or MXFP4 experts")
+    mode = "a16" if entry["quant_algo"] == "W4A16_NVFP4" else "a8" if fmt == "mxfp4" else "a4"
+    return fmt, mode

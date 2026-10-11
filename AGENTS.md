@@ -102,6 +102,9 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 - **Read quantization from checkpoint metadata.** Use `config.json` declarations
   to choose supported weight formats. Keep geometry and encoding validation
   explicit; do not hardcode a checkpoint's per-layer precision assignments.
+  Ordinary NVFP4, CSF NVFP4, and MXFP4 expert storage use the same b12x MoE
+  execution API. Dense weight formats likewise share `blockscaled.mm`; format
+  handling belongs in loading and preparation, not recipe inference branches.
   Reject fusion of NVFP4 projections except routed MoE w1/w3, whose dedicated
   loader validates the shared scales. Never silently rescale or requantize
   weights to make a fusion possible.

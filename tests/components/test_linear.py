@@ -29,7 +29,7 @@ def projection_fixture(monkeypatch):
                            memory_requirements=lambda: SimpleNamespace(scratch_nbytes=12))
     monkeypatch.setattr(linear.blockscaled, "plan", lambda query: plan)
 
-    def run(source, values, scales, gain, *, out, workspace):
+    def run(source, values, scales, gain, *, out, workspace, activation_scale=None):
         calls.append((source, out, workspace))
         out.copy_(source @ values.T)
         return out

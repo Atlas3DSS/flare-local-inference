@@ -57,10 +57,13 @@ class QuantizedProjection:
         bias: torch.Tensor | None = None,
         workspace: ScratchArena | torch.Tensor | None = None,
     ) -> None:
-        from b12x.gemm.blockscaled._a16 import _weight_parts
+        from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, _weight_parts
 
         self.weight = weight
         self.output = output
+        self.activation_scale = getattr(weight, "activation_global_scale", None)
+        if isinstance(weight, NVFP4LinearWeight) and self.activation_scale is None:
+            activation_mode = "a16"
         self.activation_mode = activation_mode
         self.bias = bias
         self.workspace = workspace
@@ -81,7 +84,7 @@ class QuantizedProjection:
         def prepare(state):
             storage = selected_workspace(state.required_workspace)
             return PreparedCall(run=lambda: state.run(source, values, scales, gain,
-                                                       out=output, workspace=storage),
+                                                       out=output, workspace=storage, activation_scale=self.activation_scale),
                                 owners=prime_owners(workspace, storage) if storage is not None else ())
 
         declare(session, (self.plan.request(
@@ -89,6 +92,7 @@ class QuantizedProjection:
             prepare_call=prepare,
             benchmark_call=partial(gemm_fixtures.benchmark_call, source=source, output=output,
                 values=values, scales=scales, gain=gain, bias=bias, weight=weight,
+                activation_scale=self.activation_scale,
                 selected_workspace=selected_workspace),
         ),))
         register_finalizer(session, lambda: setattr(self, "workspace", selected_workspace()), workspace=workspace)
@@ -126,8 +130,8 @@ class BatchedQuantizedProjection:
             c_dtype="bfloat16", sf_vec_size=32, b_major=self.major, sf_axis=self.major)
 
 
-@torch.library.custom_op("flare::parallel_mxfp8_projections", mutates_args=("outputs", "workspaces"))
-def _parallel_mxfp8_projections(
+@torch.library.custom_op("flare::parallel_mx_projections", mutates_args=("outputs", "workspaces"))
+def _parallel_mx_projections(
     source: torch.Tensor, values: list[torch.Tensor], scales: list[torch.Tensor],
     outputs: list[torch.Tensor], workspaces: list[torch.Tensor],
     plans: list[int], auxiliary_stream: int, join: bool = True,
@@ -150,13 +154,13 @@ def _parallel_mxfp8_projections(
         main.wait_stream(auxiliary)
 
 
-@_parallel_mxfp8_projections.register_fake
-def _fake_parallel_mxfp8_projections(source, values, scales, outputs, workspaces, plans, auxiliary_stream, join=True):
+@_parallel_mx_projections.register_fake
+def _fake_parallel_mx_projections(source, values, scales, outputs, workspaces, plans, auxiliary_stream, join=True):
     pass
 
 
 class ParallelProjections:
-    """Two prepared MXFP8 projections with explicit storage and a captured join."""
+    """Two prepared MX projections with explicit storage and a captured join."""
 
     def __init__(self, main: QuantizedProjection, auxiliary: QuantizedProjection, *, session,
                  workspace: ScratchArena):
@@ -167,9 +171,9 @@ class ParallelProjections:
         self.values, self.scales, self.outputs, self.plans = [], [], [], []
         for projection in self.projections:
             values, scales, gain, fp4 = _weight_parts(projection.weight)
-            if (values.dtype != torch.float8_e4m3fn or gain is not None or fp4
+            if (values.dtype not in (torch.float8_e4m3fn, torch.uint8) or gain is not None or fp4
                     or projection.activation_mode != "quantized" or projection.bias is not None):
-                raise ValueError("parallel projections require unbiased quantized MXFP8 weights")
+                raise ValueError("parallel projections require unbiased quantized MXFP8 or MXFP4 weights")
             self.values.append(values)
             self.scales.append(scales.view(torch.uint8))
             self.outputs.append(projection.output)
@@ -185,5 +189,5 @@ class ParallelProjections:
             for projection in self.projections)))
 
     def __call__(self, source):
-        _parallel_mxfp8_projections(source, self.values, self.scales, self.outputs,
+        _parallel_mx_projections(source, self.values, self.scales, self.outputs,
                                    self.workspaces, self.plans, self.stream_handle)

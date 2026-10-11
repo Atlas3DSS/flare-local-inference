@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from . import qwen38
-from .quantization import linear_format, quantized_layers
+from .quantization import expert_format, linear_format, quantized_layers
 
 
 class CheckpointError(ValueError):
@@ -253,7 +253,11 @@ def _validate_config(config: dict) -> None:
         actual = quantized_layers(config)
         expected = qwen38.expected_quantization()
         for name, recipe in expected.items():
-            if name.endswith(".experts") or name == f"{qwen38.PLE_PREFIX}.ngram_embedding":
+            if name.endswith(".experts"):
+                fmt, mode = expert_format(actual, name)
+                if name.startswith("mtp.") and fmt == "nvfp4_csf":
+                    raise CheckpointError("Qwen MTP experts require ordinary NVFP4 or MXFP4 storage")
+            elif name == f"{qwen38.PLE_PREFIX}.ngram_embedding":
                 if actual.get(name) != recipe:
                     raise CheckpointError(
                         f"quantized_layers.{name}: expected {recipe!r}, got {actual.get(name)!r}"

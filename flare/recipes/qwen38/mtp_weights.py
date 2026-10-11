@@ -15,7 +15,7 @@ from flare.preparation.qwen38 import TRANSFORMERS_REVISION
 
 from .moe import QwenMoeWeights, SharedExpertWeights
 from .hyperconnection import packed_down_projection
-from .weights import QwenWeightLoader, _expert_ids
+from .weights import QwenWeightLoader, _expert_ids, _expert_scale_vectors
 
 
 def _global_scales(sources, expert_ids):
@@ -47,50 +47,23 @@ class MTPWeightLoader(QwenWeightLoader):
                 and (self.prefixes is None or name.startswith(self.prefixes))}
 
     def load_experts(self, *, expert_ids=None):
-        """Prepare checkpoint E4M3 scales in native layout for A16 execution.
+        """Prepare ordinary FP4 experts using their checkpoint quantization.
 
         Explicit expert subsets are component-test inputs. The executable MTP
         layer requires all 512 experts in checkpoint order.
         """
-        from b12x.moe import fused_moe
-        from b12x._lib.intrinsics import swizzle_block_scale
+        from flare.preparation.quantization import expert_format
 
         self._require_open()
         ids = _expert_ids(0, expert_ids)
-        scales = _global_scales(self._sources, ids)
-        count = len(ids)
-        first, last = self.shard.partition(640, alignment=16)
-        local = last - first
-        w13 = torch.empty((count, 2 * local, 1280), dtype=torch.uint8, device=self.device)
-        w2 = torch.empty((count, 2560, local // 2), dtype=torch.uint8, device=self.device)
-        s13 = torch.empty((count, 2 * local, 160), dtype=torch.float8_e4m3fn, device=self.device)
-        s2 = torch.empty((count, 2560, local // 16), dtype=torch.float8_e4m3fn, device=self.device)
-        for index, expert in enumerate(ids):
-            prefix = f"mtp.layers.0.mlp.experts.{expert}"
-            for projection, values, blocks in (
-                ("up_proj", w13[index, :local], s13[index, :local]),
-                ("gate_proj", w13[index, local:], s13[index, local:]),
-                ("down_proj", w2[index], s2[index]),
-            ):
-                weight = self._sources[f"{prefix}.{projection}.weight"]
-                scale = self._sources[f"{prefix}.{projection}.weight_scale"]
-                self._copy(values, weight[:, first // 2:last // 2] if projection == "down_proj" else weight[first:last])
-                self._copy(blocks, scale[:, first // 16:last // 16] if projection == "down_proj" else scale[first:last])
-        device_scales = []
-        for value in scales:
-            destination = torch.empty_like(value, device=self.device)
-            self._copy(destination, value)
-            device_scales.append(destination)
-        self._session.flush()
-        plan = fused_moe.plan_weights(
-            source=fused_moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
-            activation=fused_moe.ActivationSpec(mode="a16", nonlinearity="silu", io_dtype=torch.bfloat16),
-            geometry=fused_moe.MoEGeometry(num_experts=count, hidden_size=2560, intermediate_size=local),
-        )
-        return fused_moe.prepare_weights(plan=plan, weights=fused_moe.PackedWeights(
-            w13=w13, w2=w2, w13_block_scales=swizzle_block_scale(s13), w2_block_scales=swizzle_block_scale(s2),
-            w13_global_scales=device_scales[0], w2_global_scales=device_scales[1],
-        ))
+        prefix = "mtp.layers.0.mlp.experts"
+        fmt, mode = expert_format(self.quantization, prefix)
+        if fmt == "nvfp4_csf":
+            raise ValueError("Qwen MTP experts require ordinary NVFP4 or MXFP4 storage")
+        return self.load_fp4_experts(tuple(f"{prefix}.{expert}" for expert in ids),
+            hidden_size=2560, intermediate_size=640, format=fmt, activation_mode=mode,
+            intermediate_range=self.shard.partition(640, alignment=32 if fmt == "mxfp4" else 16),
+            scale_vectors=_expert_scale_vectors(self._sources, 0, ids, prefix=prefix) if mode == "a4" else None)
 
     def load_shared(self):
         prefix = "mtp.layers.0.mlp"

@@ -5,7 +5,7 @@ from b12x.preparation import PreparedCall
 
 
 def benchmark_call(state, *, source, output, values, scales, gain, bias, weight,
-                   selected_workspace):
+                   selected_workspace, activation_scale=None):
     trial_source = torch.empty_strided(source.shape, source.stride(),
                                       dtype=source.dtype, device=source.device)
     trial_output = torch.empty_strided(output.shape, output.stride(),
@@ -16,7 +16,8 @@ def benchmark_call(state, *, source, output, values, scales, gain, bias, weight,
     storage = selected_workspace(state.required_workspace)
 
     def run():
-        state.run(trial_source, values, scales, gain, out=trial_output, workspace=storage)
+        state.run(trial_source, values, scales, gain, out=trial_output, workspace=storage,
+                  activation_scale=activation_scale)
         if bias is not None:
             trial_output.add_(bias)
         return trial_output

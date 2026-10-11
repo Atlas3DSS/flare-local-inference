@@ -33,7 +33,7 @@ class SharedExpertWeights:
         prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp"
         extent = loader.shard.partition(640, alignment=32)
         return cls(
-            loader.load_mxfp8_group(tuple(f"{prefix}.shared_expert.{name}" for name in ("gate_proj", "up_proj")),
+            loader.load_linear_group(tuple(f"{prefix}.shared_expert.{name}" for name in ("gate_proj", "up_proj")),
                                     row_ranges=(extent, extent)),
             loader.load_linear(f"{prefix}.shared_expert.down_proj", columns=extent),
             loader.load_tensor(f"{prefix}.shared_expert_gate.weight"),

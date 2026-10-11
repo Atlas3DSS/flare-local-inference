@@ -1,4 +1,4 @@
-"""Capture a chain of MXFP8 projections alongside independent main-stream work."""
+"""Capture a chain of MXFP8 or MXFP4 projections alongside independent main-stream work."""
 
 import torch
 
@@ -55,10 +55,10 @@ class ConcurrentProjectionChain:
         self.weights, self.scales, self.outputs, self.plans = [], [], [], []
         for projection in self.projections:
             if not isinstance(projection, QuantizedProjection) or projection.bias is not None:
-                raise ValueError("projection overlap requires unbiased MXFP8 projections")
+                raise ValueError("projection overlap requires unbiased MXFP8 or MXFP4 projections")
             values, scales, gain, fp4 = _weight_parts(projection.weight)
-            if values.dtype != torch.float8_e4m3fn or gain is not None or fp4:
-                raise ValueError("projection overlap requires MXFP8 weights")
+            if values.dtype not in (torch.float8_e4m3fn, torch.uint8) or gain is not None or fp4:
+                raise ValueError("projection overlap requires MXFP8 or MXFP4 weights")
             if self.outputs and self.outputs[-1].shape[1] != projection.weight.in_features:
                 raise ValueError("projection chain output width must match the following input width")
             self.weights.append(values)

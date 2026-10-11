@@ -98,11 +98,14 @@ def _linear(prefix, rows, columns, quant=None, *, quantization=None):
     if quantization is not None and prefix in quantization:
         from .quantization import linear_format
 
-        quant = "MXFP8" if linear_format(quantization, prefix) == "mxfp8" else "W4A16_NVFP4"
-    if quant == "MXFP8":
+        quant = {"mxfp8": "MXFP8", "mxfp4": "MXFP4", "nvfp4": quantization[prefix]["quant_algo"]}[linear_format(quantization, prefix)]
+    if quant == "MXFP4":
+        yield f"{prefix}.weight", "U8", (rows, columns // 2)
+        yield f"{prefix}.weight_scale", "U8", (rows, columns // 32)
+    elif quant == "MXFP8":
         yield f"{prefix}.weight", "F8_E4M3", (rows, columns)
         yield f"{prefix}.weight_scale", "U8", (rows, columns // 32)
-    elif quant in ("CSF", "W4A16_NVFP4"):
+    elif quant in ("CSF", "NVFP4", "W4A16_NVFP4"):
         yield f"{prefix}.weight", "U8", (rows, columns // 2)
         yield f"{prefix}.weight_scale_2", "F32", ()
         if quant == "CSF":
@@ -111,6 +114,8 @@ def _linear(prefix, rows, columns, quant=None, *, quantization=None):
             yield f"{prefix}.weight_scale.nvfp4_csf_exceptions", "U32", (None,)
         else:
             yield f"{prefix}.weight_scale", "F8_E4M3", (rows, columns // 16)
+            if quant == "NVFP4":
+                yield f"{prefix}.input_scale", "F32", ()
     else:
         yield f"{prefix}.weight", "BF16", (rows, columns)
 
@@ -139,11 +144,17 @@ def _sparse_attention(prefix, quant, *, quantization=None):
 def _mlp(prefix, *, mtp=False, quantization=None):
     yield from _linear(f"{prefix}.gate", 512, 2560)
     yield from _linear(f"{prefix}.shared_expert_gate", 1, 2560)
+    expert_quant = "W4A16_NVFP4" if mtp else "CSF"
+    if quantization is not None:
+        from .quantization import expert_format
+
+        fmt, mode = expert_format(quantization, f"{prefix}.experts")
+        expert_quant = "CSF" if fmt == "nvfp4_csf" else "MXFP4" if fmt == "mxfp4" else "W4A16_NVFP4" if mode == "a16" else "NVFP4"
     for proj, rows, columns in (("gate_proj", 640, 2560), ("up_proj", 640, 2560), ("down_proj", 2560, 640)):
         yield from _linear(f"{prefix}.shared_expert.{proj}", rows, columns, None if mtp else "MXFP8",
                            quantization=quantization)
         for expert in range(512):
-            yield from _linear(f"{prefix}.experts.{expert}.{proj}", rows, columns, "W4A16_NVFP4" if mtp else "CSF")
+            yield from _linear(f"{prefix}.experts.{expert}.{proj}", rows, columns, expert_quant)
 
 
 def expected_tensors(quantization=None):
@@ -214,4 +225,4 @@ def expected_tensors(quantization=None):
     for region in ("attn_hyper_connection", "mlp_hyper_connection"):
         yield from _hyperconnection(f"mtp.layers.0.{region}", norm_dtype="BF16")
     yield from _sparse_attention("mtp.layers.0.self_attn", None)
-    yield from _mlp("mtp.layers.0.mlp", mtp=True)
+    yield from _mlp("mtp.layers.0.mlp", mtp=True, quantization=quantization)

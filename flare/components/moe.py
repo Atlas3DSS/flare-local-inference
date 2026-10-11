@@ -1,4 +1,4 @@
-"""Prepared expert routing and NVFP4 execution with caller-owned storage."""
+"""Prepared expert routing and packed expert execution with caller-owned storage."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ class PreparedRouter:
 
 
 class PreparedRoutedExperts:
-    """Prepared native NVFP4 execution with fixed source and route storage.
+    """Prepared native expert execution with fixed source and route storage.
 
     Recipes supply expert geometry and enforce their complete model contract.
     Reduction order follows the execution plan selected by b12x.

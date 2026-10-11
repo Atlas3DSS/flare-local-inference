@@ -75,12 +75,13 @@ def allocate_expert_scale_scratch(
     )
 
 
-def _expert_scale_vectors(sources: Mapping[str, torch.Tensor], layer: int, ids: tuple[int, ...]):
+def _expert_scale_vectors(sources: Mapping[str, torch.Tensor], layer: int, ids: tuple[int, ...], *, prefix=None):
     import torch
 
     w13, w2, a1, a2 = [], [], [], []
+    root = prefix or f"{TEXT_PREFIX}.layers.{layer}.mlp.experts"
     for expert in ids:
-        prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}"
+        prefix = f"{root}.{expert}"
         values = {}
         for projection in ("gate_proj", "up_proj", "down_proj"):
             for suffix in ("weight_scale_2", "input_scale"):
@@ -134,10 +135,10 @@ class QwenWeightLoader(DirectWeightLoader):
         value = self.shard.partition(6144)
         heads = self.shard.partition(48)
         return {
-            "in_proj_qkvz": self.load_mxfp8_group(
+            "in_proj_qkvz": self.load_linear_group(
                 (f"{prefix}.in_proj_qkv",) * 3 + (f"{prefix}.in_proj_z",),
                 row_ranges=(*qkv, value)),
-            "in_proj_ba": self.load_mxfp8_group(
+            "in_proj_ba": self.load_linear_group(
                 (f"{prefix}.in_proj_b", f"{prefix}.in_proj_a"), row_ranges=(heads, heads)),
             "out_proj": self.load_linear(f"{prefix}.out_proj", columns=value),
         }
@@ -145,7 +146,7 @@ class QwenWeightLoader(DirectWeightLoader):
     def load_qsa_projections(self, prefix: str) -> dict[str, Weight]:
         kv = tuple(head * 256 for head in self.shard.replicated_partition(2))
         return {
-            "qkv_proj": self.load_mxfp8_group(
+            "qkv_proj": self.load_linear_group(
                 tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj")),
                 row_ranges=(self.shard.partition(12288), kv, kv)),
             "o_proj": self.load_linear(f"{prefix}.o_proj", columns=self.shard.partition(6144)),
@@ -162,8 +163,16 @@ class QwenWeightLoader(DirectWeightLoader):
         across layers requires serialized execution on one CUDA stream.
         """
         self._require_open()
-        memory = expert_memory_plan(self.manifest, layer, expert_ids)
-        ids = memory.expert_ids
+        from flare.preparation.quantization import expert_format
+
+        ids = _expert_ids(layer, expert_ids)
+        prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp.experts"
+        fmt, mode = expert_format(self.quantization, prefix)
+        if fmt != "nvfp4_csf":
+            return self.load_fp4_experts(
+                tuple(f"{prefix}.{expert}" for expert in ids), hidden_size=2560, intermediate_size=640,
+                format=fmt, activation_mode=mode, intermediate_range=self.shard.partition(640, alignment=32 if fmt == "mxfp4" else 16),
+                scale_vectors=_expert_scale_vectors(self._sources, layer, ids) if mode == "a4" else None)
         return self.load_nvfp4_experts(
             tuple(f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}" for expert in ids),
             hidden_size=2560, intermediate_size=640,

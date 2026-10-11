@@ -6,7 +6,7 @@ import weakref
 import torch
 from b12x.attention import qsa
 
-from flare.components.linear import _parallel_mxfp8_projections
+from flare.components.linear import _parallel_mx_projections
 from flare.preparation.tuning import register_finalizer
 
 _CONTEXTS = weakref.WeakValueDictionary()
@@ -48,9 +48,9 @@ class ConcurrentAttention:
         self.values, self.scales, self.outputs, self.plans = [], [], [], []
         for projection in self.projections:
             values, scales, gain, fp4 = _weight_parts(projection.weight)
-            if (values.dtype != torch.float8_e4m3fn or gain is not None or fp4
+            if (values.dtype not in (torch.float8_e4m3fn, torch.uint8) or gain is not None or fp4
                     or projection.activation_mode != "quantized" or projection.bias is not None):
-                raise ValueError("concurrent attention projections require unbiased quantized MXFP8 weights")
+                raise ValueError("concurrent attention projections require unbiased quantized MXFP8 or MXFP4 weights")
             self.values.append(values)
             self.scales.append(scales.view(torch.uint8))
             self.outputs.append(projection.output)
@@ -73,7 +73,7 @@ class ConcurrentAttention:
             for plan in (self.attention.plan, *(projection.plan for projection in self.projections))))
 
     def project(self, source):
-        _parallel_mxfp8_projections(source, self.values, self.scales, self.outputs,
+        _parallel_mx_projections(source, self.values, self.scales, self.outputs,
             self.projection_workspaces, self.plans, self.stream_handle, False)
 
     def attend(self, source):

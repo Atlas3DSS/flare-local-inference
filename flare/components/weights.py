@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from flare.preparation.checkpoint import IndexedCheckpoint
 from flare.progress import phase
-from flare.preparation.quantization import linear_format, quantized_layers, require_mxfp8_group
+from flare.preparation.quantization import projection_group_format, quantized_layers
 
 if TYPE_CHECKING:
     import torch
@@ -59,9 +59,7 @@ class DirectWeightLoader:
     def load_linear(self, prefix, *, rows=None, columns=None):
         """Load one projection using its checkpoint quantization declaration."""
         self._require_open()
-        if linear_format(self.quantization, prefix) == "mxfp8":
-            return self.load_mxfp8_group((prefix,), row_ranges=(rows,), column_range=columns)
-        return self._load_nvfp4_linear(prefix, rows=rows, columns=columns)
+        return self.load_linear_group((prefix,), row_ranges=(rows,), column_range=columns)
 
     def _load_nvfp4_linear(self, prefix, *, rows=None, columns=None):
         import torch
@@ -91,9 +89,21 @@ class DirectWeightLoader:
         self._copy(values[:, :logical_k // 2], source[r0:r1, c0 // 2:c1 // 2])
         self._copy(scales[:, :logical_k // 16], scale[r0:r1, c0 // 16:c1 // 16])
         self._copy(gain, scalar)
+        activation_scale = None
+        if self.quantization[prefix]["quant_algo"] == "NVFP4":
+            activation = self._sources[f"{prefix}.input_scale"]
+            if (activation.dtype != torch.float32 or activation.numel() != 1
+                    or not bool((torch.isfinite(activation) & (activation > 0)).all())):
+                raise ValueError(f"{prefix}.input_scale must be a positive finite FP32 scalar")
+            reciprocal = activation.reciprocal()
+            if not bool(torch.isfinite(reciprocal).all()):
+                raise ValueError(f"{prefix}.input_scale reciprocal must remain finite")
+            activation_scale = torch.empty_like(activation, device=self.device)
+            self._copy(activation_scale, reciprocal)
         self._session.flush()
         weight = pack_weight(values, swizzle_block_scale(scales), recipe="nvfp4",
-                             global_scale=gain, global_scale_kind="multiplier")
+                             global_scale=gain, global_scale_kind="multiplier",
+                             activation_global_scale=activation_scale)
         return replace(weight, in_features=logical_k)
 
     def _selected_names(self):
@@ -219,59 +229,76 @@ class DirectWeightLoader:
         self._copy(target, source)
         return target
 
-    def load_mxfp8_group(self, prefixes, *, row_ranges=None, column_range=None):
-        """Pack selected MXFP8 projection rows directly into one GPU matrix."""
+    def load_linear_group(self, prefixes, *, row_ranges=None, column_range=None):
+        """Pack compatible projection rows without changing their quantization."""
         self._require_open()
         prefixes = tuple(prefixes)
-        require_mxfp8_group(self.quantization, prefixes)
+        fmt = projection_group_format(self.quantization, prefixes)
         import torch
         from b12x.gemm.blockscaled import pack_weight
         if row_ranges is None:
             row_ranges = (None,) * len(prefixes)
+        if fmt == "nvfp4":
+            (rows,) = tuple(row_ranges)
+            return self._load_nvfp4_linear(prefixes[0], rows=rows, columns=column_range)
+        fp4 = fmt == "mxfp4"
+        pack = 2 if fp4 else 1
+        dtype = torch.uint8 if fp4 else torch.float8_e4m3fn
         weights, block_scales = [], []
         for prefix, row_range in zip(prefixes, row_ranges, strict=True):
             weight = self._sources[f"{prefix}.weight"]
             scale = self._sources[f"{prefix}.weight_scale"]
-            if weight.ndim != 2 or weight.dtype != torch.float8_e4m3fn:
-                raise ValueError(f"{prefix}: MXFP8 weight must be an FP8 matrix")
-            rows, columns = weight.shape
+            if weight.ndim != 2 or weight.dtype != dtype:
+                raise ValueError(f"{prefix}: {fmt.upper()} weight must be a {dtype} matrix")
+            rows, stored_columns = weight.shape
+            columns = stored_columns * pack
             r0, r1 = _aligned_range(row_range, rows, 1)
             c0, c1 = _aligned_range(column_range, columns, 32)
             if (scale.ndim != 2 or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu)
                     or scale.shape[0] < rows or scale.shape[1] < columns // 32):
-                raise ValueError(f"{prefix}: MXFP8 block scale geometry mismatch")
-            weights.append(weight[r0:r1, c0:c1])
+                raise ValueError(f"{prefix}: {fmt.upper()} block scale geometry mismatch")
+            weights.append(weight[r0:r1, c0 // pack:c1 // pack])
             block_scales.append(scale[r0:r1, c0 // 32:c1 // 32].view(torch.uint8))
-        columns = weights[0].shape[1]
-        if any(weight.shape[1] != columns for weight in weights):
-            raise ValueError("packed MXFP8 projections must share input width")
+        columns = weights[0].shape[1] * pack
+        if any(weight.shape[1] * pack != columns for weight in weights):
+            raise ValueError("packed projections must share input width")
         rows = sum(weight.shape[0] for weight in weights)
-        values = torch.empty((rows, columns), dtype=torch.float8_e4m3fn, device=self.device)
-        scales = torch.empty((rows, columns // 32), dtype=torch.uint8, device=self.device)
+        stored_columns = (columns + 255) // 256 * 256 if fp4 else columns
+        values = torch.zeros((rows, stored_columns // pack), dtype=dtype, device=self.device)
+        scales = torch.full((rows, stored_columns // 32), 127, dtype=torch.uint8, device=self.device)
         offset = 0
         for weight, scale in zip(weights, block_scales, strict=True):
             end = offset + weight.shape[0]
-            self._copy(values[offset:end], weight)
-            self._copy(scales[offset:end], scale)
+            self._copy(values[offset:end, :columns // pack], weight)
+            self._copy(scales[offset:end, :columns // 32], scale)
             offset = end
         self._session.flush()
+        if fp4:
+            from b12x._lib.intrinsics import swizzle_block_scale
+
+            return replace(pack_weight(values, swizzle_block_scale(scales), recipe="mxfp4"),
+                           in_features=columns)
         return pack_weight(values, scales, recipe="mxfp8")
 
-    def load_nvfp4_a16_experts(self, prefixes, *, hidden_size, intermediate_size,
-                               intermediate_range=None, swiglu_limit=None):
-        """Load packed NVFP4 weights with ordinary E4M3 scales for BF16 activations."""
+    def load_fp4_experts(self, prefixes, *, hidden_size, intermediate_size, format, activation_mode,
+                         intermediate_range=None, scale_vectors=None, swiglu_limit=None):
+        """Prepare ordinary NVFP4 or MXFP4 expert storage through b12x."""
         import torch
         from b12x.moe import fused_moe as moe
         from b12x._lib.intrinsics import swizzle_block_scale
 
         self._require_open()
         prefixes = tuple(prefixes)
-        first, last = _aligned_range(intermediate_range, intermediate_size, 16)
+        if format not in ("nvfp4", "mxfp4"):
+            raise ValueError("ordinary FP4 experts require NVFP4 or MXFP4")
+        group = 16 if format == "nvfp4" else 32
+        scale_dtype = torch.float8_e4m3fn if format == "nvfp4" else torch.uint8
+        first, last = _aligned_range(intermediate_range, intermediate_size, group)
         local, count = last - first, len(prefixes)
         w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
         w2 = torch.empty((count, hidden_size, local // 2), dtype=torch.uint8, device=self.device)
-        s13 = torch.empty((count, 2 * local, hidden_size // 16), dtype=torch.float8_e4m3fn, device=self.device)
-        s2 = torch.empty((count, hidden_size, local // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        s13 = torch.empty((count, 2 * local, hidden_size // group), dtype=scale_dtype, device=self.device)
+        s2 = torch.empty((count, hidden_size, local // group), dtype=scale_dtype, device=self.device)
         globals13, globals2 = [], []
         for index, prefix in enumerate(prefixes):
             scales = {}
@@ -282,30 +309,55 @@ class DirectWeightLoader:
             ):
                 source = self._sources[f"{prefix}.{projection}.weight"]
                 scale = self._sources[f"{prefix}.{projection}.weight_scale"]
+                rows, columns = ((hidden_size, intermediate_size) if projection == "down_proj"
+                                 else (intermediate_size, hidden_size))
+                if source.dtype != torch.uint8 or source.shape != (rows, columns // 2):
+                    raise ValueError(f"{prefix}.{projection}: packed FP4 weight geometry mismatch")
+                if scale.shape != (rows, columns // group) or scale.dtype != scale_dtype:
+                    raise ValueError(f"{prefix}.{projection}: {format.upper()} block scale geometry or dtype mismatch")
                 self._copy(values, source[:, first // 2:last // 2] if projection == "down_proj" else source[first:last])
-                self._copy(blocks, scale[:, first // 16:last // 16] if projection == "down_proj" else scale[first:last])
+                self._copy(blocks, scale[:, first // group:last // group] if projection == "down_proj" else scale[first:last])
+                if format == "mxfp4":
+                    continue
                 value = self._sources[f"{prefix}.{projection}.weight_scale_2"]
                 if value.dtype != torch.float32 or value.numel() != 1 or not bool(torch.isfinite(value) & (value > 0)):
                     raise ValueError(f"{prefix}.{projection}: expected a positive FP32 global weight scale")
                 scales[projection] = value.item()
+            if format == "mxfp4":
+                continue
             if scales["gate_proj"] != scales["up_proj"]:
                 raise ValueError(f"{prefix}: gate/up global scales differ")
             globals13.append(scales["up_proj"])
             globals2.append(scales["down_proj"])
+        if activation_mode == "a4":
+            if scale_vectors is None or len(scale_vectors) != 4:
+                raise ValueError("NVFP4 A4 experts require weight and activation scale vectors")
+            vectors = scale_vectors
+        elif format == "nvfp4":
+            vectors = (torch.tensor(globals13, dtype=torch.float32), torch.tensor(globals2, dtype=torch.float32))
+        else:
+            vectors = (torch.ones(count, dtype=torch.float32), torch.ones(count, dtype=torch.float32))
         device_scales = []
-        for values in (globals13, globals2):
+        for values in vectors:
+            if (values.shape != (count,) or values.dtype != torch.float32
+                    or not bool((torch.isfinite(values) & (values > 0)).all())):
+                raise ValueError("expert scales must be positive finite FP32 vectors")
             target = torch.empty(count, dtype=torch.float32, device=self.device)
-            self._copy(target, torch.tensor(values, dtype=torch.float32))
+            self._copy(target, values)
             device_scales.append(target)
         self._session.flush()
         plan = moe.plan_weights(
-            source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
-            activation=moe.ActivationSpec(mode="a16", nonlinearity="silu", io_dtype=torch.bfloat16,
+            source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32", w13_layout="w13"),
+            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
+        gains = {} if not device_scales else dict(w13_global_scales=device_scales[0], w2_global_scales=device_scales[1])
+        if activation_mode == "a4":
+            gains.update(input_scale=device_scales[2], intermediate_scale=device_scales[3], immutable_input_scales=True)
         return moe.prepare_weights(plan=plan, weights=moe.PackedWeights(
-            w13=w13, w2=w2, w13_block_scales=swizzle_block_scale(s13), w2_block_scales=swizzle_block_scale(s2),
-            w13_global_scales=device_scales[0], w2_global_scales=device_scales[1]))
+            w13=w13, w2=w2,
+            w13_block_scales=swizzle_block_scale(s13) if format == "nvfp4" else s13,
+            w2_block_scales=swizzle_block_scale(s2) if format == "nvfp4" else s2, **gains))
 
     def load_nvfp4_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_vectors,

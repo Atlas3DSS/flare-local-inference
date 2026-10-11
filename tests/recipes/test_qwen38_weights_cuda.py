@@ -203,7 +203,7 @@ def test_actual_csf_experts_prepared_graph_replay(manifest, rank, world):
 def test_packed_mxfp8_projections_preserve_serialized_rows(manifest, layer, region, names):
     prefixes = tuple(f"{TEXT_PREFIX}.layers.{layer}.{region}.{name}" for name in names)
     with QwenWeightLoader(manifest, "cuda:0", prefixes=prefixes) as loader:
-        packed = loader.load_mxfp8_group(prefixes)
+        packed = loader.load_linear_group(prefixes)
         assert loader._session.torch_copy_bytes == 0
     values = packed.weight.values.view(torch.uint8).cpu().reshape(packed.out_features, packed.padded_in_features)
     scales = packed.weight.scale_rows.view(torch.uint8).cpu().reshape(packed.out_features, -1)

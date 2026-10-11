@@ -29,7 +29,7 @@ def test_checkpoint_absorbed_projections_native_replay(world_size, rows):
     shard = TensorParallelShard(world_size - 1, world_size)
     prefix = f"{TEXT_PREFIX}.layers.3.self_attn.kv_b_proj"
     with GlmWeightLoader(manifest, device, shard=shard, prefixes=(prefix + ".",)) as loader:
-        packed = loader.load_mxfp8_group((prefix,), row_ranges=(shard.partition(64 * 512, alignment=512),))
+        packed = loader.load_linear_group((prefix,), row_ranges=(shard.partition(64 * 512, alignment=512),))
     heads = 64 // world_size
     values = packed.weight.values.view(heads, 512, 512)
     scales = packed.weight.scale_rows.view(heads, 512, 16)
