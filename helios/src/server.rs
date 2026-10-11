@@ -560,14 +560,13 @@ async fn chat<M: ModelContract>(
 ) -> Response {
     let ingress_ns = (body.get("return_token_timestamps") == Some(&Value::Bool(true)))
         .then(observation::monotonic_ns);
-    // Requests may use any served name; preparation sees the model's identifier.
-    if let Some(model) = body.get_mut("model") {
-        let served = model
-            .as_str()
-            .is_some_and(|name| state.served_names.iter().any(|served| served == name));
-        if served {
-            *model = Value::String(state.model.config().model_id.clone());
-        }
+    // One model is loaded: requests naming it, an alias, another model, an empty name or no
+    // model at all are served by it, so preparation always sees the model's identifier.
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "model".into(),
+            Value::String(state.model.config().model_id.clone()),
+        );
     }
     let permit = match state.frontend_slots.clone().acquire_owned().await {
         Ok(permit) => permit,
