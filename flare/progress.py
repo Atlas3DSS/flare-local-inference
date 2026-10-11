@@ -38,22 +38,27 @@ class _Phase:
 
     def __rich__(self):
         from rich.console import Group
+        from rich.progress_bar import ProgressBar
+        from rich.table import Table
         from rich.text import Text
 
         now = monotonic()
-        row = Text("[", overflow="ellipsis", no_wrap=True)
         if self.failed:
-            row.append("  FAILED  ", style="bold red")
+            status = Text("  FAILED  ", style="bold red")
         elif self.finished:
-            row.append("    OK    ", style="bold green")
+            status = Text("    OK    ", style="bold green")
         else:
-            position = int((now - self.started) * 8) % 16
-            position = min(position, 15 - position)
-            for index in range(10):
-                row.append("-", style="bold cyan" if position <= index < position + 3 else "dim")
-        row.append(f"] {self.label}.")
+            status = ProgressBar(total=self.total, completed=self.completed, width=10,
+                                 pulse=self.total is None, complete_style="cyan",
+                                 finished_style="green", pulse_style="cyan")
+        label = Text(f"] {self.label}.", overflow="ellipsis", no_wrap=True)
         count = f"{self.completed}/{self.total}  " if self.total is not None else ""
-        row.append(f"  {count}{now - self.started:.1f}s", style="dim")
+        label.append(f"  {count}{now - self.started:.1f}s", style="dim")
+        row = Table.grid(padding=0)
+        row.add_column(width=1, no_wrap=True)
+        row.add_column(width=10, no_wrap=True)
+        row.add_column(no_wrap=True)
+        row.add_row(Text("["), status, label)
         if not self.detail:
             return row
         detail = Text(f"             {self.detail}", style="dim", overflow="ellipsis", no_wrap=True)
