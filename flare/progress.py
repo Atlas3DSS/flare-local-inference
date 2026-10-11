@@ -109,7 +109,8 @@ class _Phase:
         row = Table.grid(padding=0)
         row.add_column(width=1, no_wrap=True)
         row.add_column(width=10, no_wrap=True)
-        row.add_column(no_wrap=True)
+        # Only the label gives way in a narrow console; its text ends in an ellipsis on one line.
+        row.add_column()
         row.add_column(width=len(timing.plain), no_wrap=True)
         row.add_row(Text("["), status, label, timing)
         return row
