@@ -268,15 +268,18 @@ closes the prepared model and exits without starting a listener.
 
 ### 5.3 `flare run`
 
-Display the Flare banner on a terminal, then load the model configuration,
-initialize the GPU, load weights and kernels, prepare execution, load the
-tokenizer and frontend assets, and start the HTTP server. Helios reports each
-stage with a ten-column bracketed progress bar, a result, and elapsed time.
-Memory loading advances by bytes; kernel loading and execution preparation
+Display the Flare banner on a terminal, then read the model configuration,
+prepare the model, initialize the GPU, allocate model memory, load weights,
+prepare kernels and execution, load the tokenizer and frontend assets, and
+start the HTTP server. Helios reports each stage with a ten-column bracketed
+progress bar, a result, and elapsed time.
+Memory loading advances by bytes; kernel and execution preparation
 advance by resource counts. Stages with no known total show a cycling bar.
 Completed stages show `[    OK    ]`; a failed stage shows `[  FAILED  ]`.
 A narrow terminal truncates the description while preserving status and timing.
 Redirected output contains plain start and completion lines without animation.
+After startup, a usable terminal switches to the live metrics dashboard.
+Shutdown restores the terminal after draining active execution.
 
 ## 6. Capacity errors
 

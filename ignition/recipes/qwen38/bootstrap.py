@@ -459,7 +459,12 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights, collective, vocabulary_collective, coordinator)
         report(f"prepared {len(graphs)} graphs and {page_capacity * 64} cached-token capacity")
+        from .export import disposable_ranges
+
+        export_zero_ranges = disposable_ranges(cache=final_cache, scratch=scratch, workspaces=workspaces,
+            vision_scratch=vision_scratch, decoders=decoders, owners=owners, speculation=speculation)
         return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
+            export_zero_ranges=export_zero_ranges,
             resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
     except BaseException:
         torch.cuda.synchronize(device)

@@ -1,6 +1,5 @@
 """Resource binding validation and cross-process native CUDA graph replay."""
 
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -8,7 +7,10 @@ import sys
 
 import pytest
 
-from ignition.preparation.runtime_package import Allocation, Argument, Kernel, Reference, Relocation, RuntimePackage, _external_allocations
+from ignition.preparation.runtime_package import (
+    Allocation, Argument, Kernel, Reference, Relocation, RuntimePackage,
+    _external_allocations, _merge_ranges, _without_zero_ranges, _write_allocation,
+)
 
 
 def package(*, allocations=None, arguments=None):
@@ -62,6 +64,51 @@ def test_external_allocations_share_pages_without_reading_unallocated_bytes():
     assert owner._reference(0x1F00, 512) == {"allocation": "external-0", "offset": 0xF00}
 
 
+def test_disposable_spans_preserve_neighbors_and_external_page_gaps():
+    zero = _merge_ranges(((0x1080, 32), (0x1090, 64), (0x1180, 128)))
+    allocation = _without_zero_ranges(Allocation("mixed", 0x1000, 512), zero)
+    assert allocation.snapshot_spans == ((0, 128), (208, 176))
+    external = Allocation("external", 0x1000, 512, snapshot_spans=((64, 128), (384, 64)))
+    assert _without_zero_ranges(external, zero).snapshot_spans == ((64, 64),)
+    assert _without_zero_ranges(external, ((0x1000, 512),)).initialize == "zero"
+
+
+@pytest.mark.parametrize("nonzero", [False, True])
+def test_packed_payload_elides_zero_blocks_without_changing_contents(tmp_path, nonzero):
+    block = 64 << 10
+    source = bytearray(4 * block + 17)
+    if nonzero:
+        source[block + 3] = 7
+        source[3 * block + 8] = 11
+        source[-1] = 19
+    class Cuda:
+        def download(self, address, nbytes):
+            return bytes(source[address - 0x1000:address - 0x1000 + nbytes])
+    file = tmp_path / "data.bin"
+    name, spans = _write_allocation(Cuda(), Allocation("data", 0x1000, len(source)), file)
+    if not nonzero:
+        assert name is None and spans == [] and not file.exists()
+        return
+    assert spans == [[block, block], [3 * block, block + 17]]
+    assert file.stat().st_size == 2 * block + 17
+    rebuilt = bytearray(len(source))
+    with file.open("rb") as payload:
+        for offset, size in spans:
+            rebuilt[offset:offset + size] = payload.read(size)
+    assert rebuilt == source
+
+
+def test_declared_zero_ranges_are_not_downloaded(tmp_path):
+    class Cuda:
+        def download(self, address, nbytes):
+            assert (address, nbytes) in ((0x1000, 64), (0x1100, 64))
+            return bytes([13]) * nbytes
+    allocation = _without_zero_ranges(Allocation("mixed", 0x1000, 320), ((0x1040, 192),))
+    file = tmp_path / "mixed.bin"
+    _, spans = _write_allocation(Cuda(), allocation, file)
+    assert spans == [[0, 64], [256, 64]] and file.read_bytes() == bytes([13]) * 128
+
+
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
 @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
     ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
@@ -81,12 +128,14 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         arguments.append(executable)
     result = subprocess.run(arguments, check=True, cwd=root, text=True, capture_output=True, timeout=180)
     package_path = tmp_path / "package"
-    document = json.loads((package_path / "package.json").read_text())
-    for module in document["modules"]:
-        assert b".py\0" not in (package_path / module["file"]).read_bytes()
-        for symbol in module["globals"]:
-            if symbol["symbol"].startswith("assertFile_"):
-                assert (package_path / symbol["file"]).read_bytes().rstrip(b"\0") == b"kernel"
+    from ignition.preparation.runtime_package_pb2 import Package
+
+    document = Package.FromString((package_path / "package.pb").read_bytes())
+    for module in document.modules:
+        assert b".py\0" not in (package_path / module.file).read_bytes()
+        for symbol in module.globals:
+            if symbol.symbol.startswith("assertFile_"):
+                assert (package_path / symbol.file).read_bytes().rstrip(b"\0") == b"kernel"
     if not exec_handover:
         result = subprocess.run([executable, str(tmp_path)],
                                 check=True, cwd=root, text=True, capture_output=True, timeout=60)

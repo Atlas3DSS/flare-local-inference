@@ -25,8 +25,9 @@ During export, Ctrl-C and SIGTERM terminate Ignition directly, bypassing
 Python finalizers and CUDA graph destruction. While serving, `flare run`
 stops admission, gives active responses five seconds to finish, drains native
 execution, and exits 0. Unexpected runtime failure exits 1. The library's
-optional terminal dashboard reads native metrics without contacting the GPU;
-the package command serves headlessly.
+terminal dashboard reads native metrics without contacting the GPU.
+`flare run` starts it after loading when stderr is a usable terminal; redirected
+output remains plain startup logs.
 
 Prefill throughput counts consumed prompt tokens, excluding padding and prefix
 reuse. Generation throughput counts committed output tokens, including EOS and

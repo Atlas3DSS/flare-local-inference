@@ -45,6 +45,9 @@ Heliopause depend on Helios; Helios has no Python or preparation-tool dependency
 
 ## Python prepares; Helios serves
 
+- When replacing internal formats or execution paths, remove superseded loaders,
+  fallback paths, and migration-only tests. Retain backward compatibility only
+  when it is an explicit requirement.
 - Python loads weights, resolves and autotunes kernels, plans storage, warms
   execution paths, and captures supported graph variants before serving starts.
   Ignition exports a runtime package and closes the prepared model. `ignition run`

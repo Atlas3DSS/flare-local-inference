@@ -2,12 +2,13 @@
 
 pub mod driver;
 mod format;
+mod payload;
+mod protobuf;
 mod serving;
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
@@ -39,7 +40,7 @@ pub struct NativeResources {
     executables: Vec<Handle>,
     names: Vec<String>,
     reservations: Vec<(u64, usize)>,
-    execution: Option<serde_json::Value>,
+    execution: Option<protobuf::wire::Execution>,
 }
 
 impl NativeResources {
@@ -63,12 +64,10 @@ impl NativeResources {
         ordinal: i32,
         progress: &StartupProgress,
     ) -> Result<Self> {
-        let phase = progress.phase("Read model", None);
+        let phase = progress.phase("Prepare model", None);
         let path = path.as_ref();
-        let package: Package = serde_json::from_reader(
-            File::open(path.join("package.json")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| invalid(format!("invalid runtime package: {e}")))?;
+        let bytes = fs::read(path.join("package.pb")).map_err(|e| e.to_string())?;
+        let package = protobuf::decode(&bytes)?;
         package.validate()?;
         phase.finish("validated");
         let phase = progress.phase("Initialize GPU", None);
@@ -156,12 +155,7 @@ impl NativeResources {
         let bytes = package.allocations.iter().fold(0u64, |total, allocation| {
             total.saturating_add(allocation.nbytes as u64)
         });
-        let phase = progress.phase("Load weights", Some(bytes));
-        let mut loaded = 0u64;
-        phase.detail(format!(
-            "0.0 / {:.1} GiB",
-            bytes as f64 / (1u64 << 30) as f64
-        ));
+        let phase = progress.phase("Allocate model memory", Some(bytes));
         // SAFETY: Package validation bounds all indexes and relocation fields.
         // Every CUDA resource is immediately retained by self for error cleanup.
         unsafe {
@@ -303,63 +297,36 @@ impl NativeResources {
                         }
                     }
                 }
-                if let Some(file) = &allocation.file {
-                    let mut file = File::open(root.join(file)).map_err(|e| e.to_string())?;
-                    if file.metadata().map_err(|e| e.to_string())?.len() != allocation.nbytes as u64
-                    {
-                        return Err(invalid(format!(
-                            "storage size mismatch for {}",
-                            allocation.name
-                        )));
-                    }
-                    let mut buffer = vec![0u8; allocation.nbytes.min(8 << 20)];
-                    let mut offset = 0;
-                    while offset < allocation.nbytes {
-                        let length = buffer.len().min(allocation.nbytes - offset);
-                        file.read_exact(&mut buffer[..length])
-                            .map_err(|e| e.to_string())?;
-                        match allocation.memory {
-                            Memory::Device => driver.check(
-                                "cuMemcpyHtoD_v2",
-                                (driver.upload)(
-                                    address + offset as u64,
-                                    buffer.as_ptr().cast(),
-                                    length,
-                                ),
-                            )?,
-                            Memory::MappedHost => std::ptr::copy_nonoverlapping(
-                                buffer.as_ptr(),
-                                (address as usize + offset) as *mut u8,
-                                length,
-                            ),
+                if allocation.stored_bytes() < allocation.nbytes {
+                    match allocation.memory {
+                        Memory::MappedHost => {
+                            std::ptr::write_bytes(address as *mut u8, 0, allocation.nbytes)
                         }
-                        offset += length;
-                        loaded += length as u64;
-                        phase.advance(length as u64);
-                        phase.detail(format!(
-                            "{:.1} / {:.1} GiB",
-                            loaded as f64 / (1u64 << 30) as f64,
-                            bytes as f64 / (1u64 << 30) as f64
-                        ));
+                        Memory::Device => driver.check(
+                            "cuMemsetD8_v2",
+                            (driver.zero)(address, 0, allocation.nbytes),
+                        )?,
                     }
-                } else if matches!(allocation.memory, Memory::MappedHost) {
-                    std::ptr::write_bytes(address as *mut u8, 0, allocation.nbytes);
-                } else {
-                    driver.check(
-                        "cuMemsetD8_v2",
-                        (driver.zero)(address, 0, allocation.nbytes),
-                    )?;
                 }
-                if allocation.file.is_none() {
-                    loaded += allocation.nbytes as u64;
-                    phase.advance(allocation.nbytes as u64);
-                    phase.detail(format!(
-                        "{:.1} / {:.1} GiB",
-                        loaded as f64 / (1u64 << 30) as f64,
-                        bytes as f64 / (1u64 << 30) as f64
-                    ));
-                }
+                phase.advance(allocation.nbytes as u64);
             }
+            driver.check("cuCtxSynchronize", (driver.context_sync)())?;
+            phase.finish(format!(
+                "{:.1} GiB GPU · {:.1} GiB host",
+                footprint as f64 / (1u64 << 30) as f64,
+                (bytes - footprint as u64) as f64 / (1u64 << 30) as f64
+            ));
+            let payload = package
+                .allocations
+                .iter()
+                .map(|allocation| allocation.stored_bytes() as u64)
+                .sum::<u64>();
+            let phase = progress.phase("Load weights", Some(payload));
+            phase.detail(format!(
+                "0.0 / {:.1} GiB",
+                payload as f64 / (1u64 << 30) as f64
+            ));
+            payload::load(self, root, package, &phase)?;
             for allocation in &package.allocations {
                 for relocation in &allocation.relocations {
                     let address =
@@ -376,13 +343,9 @@ impl NativeResources {
                     )?;
                 }
             }
-            phase.finish(format!(
-                "{:.1} GiB GPU · {:.1} GiB host",
-                footprint as f64 / (1u64 << 30) as f64,
-                (bytes - footprint as u64) as f64 / (1u64 << 30) as f64
-            ));
+            phase.finish(format!("{:.1} GiB", payload as f64 / (1u64 << 30) as f64));
             let phase = progress.phase(
-                "Load kernels",
+                "Prepare kernels",
                 Some((package.modules.len() + package.functions.len()) as u64),
             );
             let mut modules = HashMap::new();
@@ -624,8 +587,7 @@ impl NativeResources {
                 package
                     .execution
                     .as_ref()
-                    .and_then(|execution| execution.get("max_active"))
-                    .and_then(serde_json::Value::as_u64)
+                    .map(|execution| execution.max_active)
                     .map(|capacity| format!("concurrency {capacity}"))
                     .unwrap_or_default(),
             );

@@ -1,0 +1,90 @@
+syntax = "proto3";
+package flare.runtime;
+
+message Package {
+  uint32 version = 1;
+  repeated int32 architecture = 2;
+  repeated Allocation allocations = 3;
+  repeated Module modules = 4;
+  repeated Function functions = 5;
+  repeated Graph graphs = 6;
+  repeated Reservation reservations = 7;
+  Execution execution = 8;
+  Context context = 9;
+}
+message Context { uint32 flags = 1; int32 cache = 2; repeated Limit limits = 3; }
+message Limit { uint64 id = 1; uint64 value = 2; }
+message Reservation { uint64 address = 1; uint64 nbytes = 2; }
+message Span { uint64 offset = 1; uint64 nbytes = 2; }
+enum Memory { DEVICE = 0; MAPPED_HOST = 1; }
+message Allocation {
+  string name = 1;
+  uint64 nbytes = 2;
+  uint64 alignment = 3;
+  optional string file = 4;
+  repeated Span data_spans = 5;
+  repeated Relocation relocations = 6;
+  optional uint64 address = 7;
+  Memory memory = 8;
+}
+message Module { string name = 1; string file = 2; repeated Global globals = 3; }
+message Global { string symbol = 1; string file = 2; uint64 nbytes = 3; repeated Relocation relocations = 4; }
+message Function {
+  string module = 1;
+  string symbol = 2;
+  repeated uint64 parameter_sizes = 3;
+  repeated FunctionAttribute attributes = 4;
+}
+message FunctionAttribute { int32 id = 1; int32 value = 2; }
+message Reference { string allocation = 1; uint64 offset = 2; }
+enum RelocationKind { POINTER = 0; TENSOR_MAP = 1; }
+message Relocation { uint64 offset = 1; Reference target = 2; RelocationKind kind = 3; }
+message Blob { bytes data = 1; repeated Relocation relocations = 2; }
+message Attribute { int32 id = 1; Blob value = 2; }
+message Kernel {
+  uint64 function = 1;
+  repeated uint32 grid = 2;
+  repeated uint32 block = 3;
+  uint32 shared = 4;
+  repeated Blob arguments = 5;
+  repeated Attribute attributes = 6;
+}
+message Memset {
+  Reference destination = 1;
+  uint64 pitch = 2;
+  uint32 value = 3;
+  uint32 element_size = 4;
+  uint64 width = 5;
+  uint64 height = 6;
+}
+message Copy { Reference source = 1; Reference destination = 2; uint64 nbytes = 3; }
+message Empty {}
+message Node {
+  oneof operation { Kernel kernel = 1; Memset memset = 2; Copy copy = 3; Empty empty = 4; }
+}
+message Edge { uint64 source = 1; uint64 destination = 2; bytes data = 3; }
+message Graph { string name = 1; uint64 flags = 2; repeated Node nodes = 3; repeated Edge edges = 4; }
+message Execution {
+  uint32 abi_version = 1;
+  uint64 max_active = 2;
+  uint64 input_frame_bytes = 3;
+  repeated Buffer buffers = 4;
+  repeated ExecutionGraph graphs = 5;
+}
+message Buffer {
+  string name = 1;
+  uint64 nbytes = 2;
+  string dtype = 3;
+  repeated uint64 shape = 4;
+  repeated uint64 strides = 5;
+  Reference reference = 6;
+}
+message ExecutionGraph {
+  string name = 1;
+  string kind = 2;
+  string sampling_mode = 3;
+  uint64 batch_capacity = 4;
+  uint64 token_capacity = 5;
+  repeated InputBinding input_bindings = 6;
+}
+message InputBinding { string buffer_name = 1; uint64 host_offset = 2; uint64 nbytes = 3; }

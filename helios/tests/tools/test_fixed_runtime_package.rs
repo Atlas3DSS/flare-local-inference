@@ -12,6 +12,8 @@ struct Expected {
     reference: Reference,
     bytes: Vec<u8>,
     addresses: HashMap<String, usize>,
+    zero_reference: Reference,
+    zero_bytes: usize,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,6 +28,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(owner.allocation(&name)?.address, address);
     }
     owner.execution_manifest()?.validate()?;
+    let transient = owner.download(&expected.zero_reference.allocation)?;
+    assert!(
+        transient
+            [expected.zero_reference.offset..expected.zero_reference.offset + expected.zero_bytes]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     let worker = unsafe { ReplayWorker::new(owner.graph_bundle(), 1)? };
     let ticket = worker.submit(0, 7)?;
     let result = worker

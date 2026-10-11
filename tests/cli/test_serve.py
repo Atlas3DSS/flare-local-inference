@@ -110,7 +110,7 @@ def host(monkeypatch, tmp_path):
         calls["options"] = options
         calls["exports"] += 1
         path.mkdir()
-        (path / "package.json").write_text("{}")
+        (path / "package.pb").write_bytes(b"")
     monkeypatch.setattr(runtime_package, "export_model", export_model)
 
     def execute(path, arguments):

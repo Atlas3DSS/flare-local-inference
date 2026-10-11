@@ -106,6 +106,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
     }
+    if let Err(error) = server.start_dashboard() {
+        eprintln!("Could not start dashboard: {error}");
+    }
     while !STOP.load(Ordering::Relaxed) && server.wait(Duration::from_millis(250)) {}
     let shutdown = server.close();
     if !shutdown.drained {

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ctypes as C
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 import shutil
@@ -91,6 +91,74 @@ class _Cuda:
         data = (C.c_ubyte * nbytes)()
         self.call("cuMemcpyDtoH_v2", data, C.c_uint64(address), C.c_size_t(nbytes))
         return bytes(data)
+
+
+def _merge_ranges(ranges):
+    merged = []
+    for address, nbytes in sorted(ranges):
+        if address <= 0 or nbytes <= 0:
+            raise ValueError("storage ranges require a nonnull address and positive size")
+        end = address + nbytes
+        if merged and address <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((address, end))
+    return tuple((start, end - start) for start, end in merged)
+
+
+def _without_zero_ranges(allocation, zero_ranges):
+    """Exclude disposable bytes without losing neighboring data in a shared segment."""
+    if allocation.initialize == "zero":
+        return allocation
+    kept = []
+    for offset, size in (allocation.snapshot_spans if allocation.snapshot_spans is not None
+                         else ((0, allocation.nbytes),)):
+        cursor, end = allocation.address + offset, allocation.address + offset + size
+        for address, nbytes in zero_ranges:
+            if address >= end:
+                break
+            if address + nbytes <= cursor:
+                continue
+            if cursor < address:
+                kept.append((cursor - allocation.address, address - cursor))
+            cursor = max(cursor, min(end, address + nbytes))
+        if cursor < end:
+            kept.append((cursor - allocation.address, end - cursor))
+    return replace(allocation, initialize="snapshot" if kept else "zero",
+                   snapshot_spans=tuple(kept) if kept else None)
+
+
+def _write_allocation(cuda, allocation, path):
+    """Pack nonzero ranges into a file; the loader zeroes omitted bytes."""
+    import numpy as np
+
+    if allocation.initialize == "zero":
+        return None, []
+    stored = []
+    block = 64 << 10
+    with path.open("wb") as output:
+        for start, nbytes in (allocation.snapshot_spans if allocation.snapshot_spans is not None
+                              else ((0, allocation.nbytes),)):
+            for offset in range(start, start + nbytes, 8 << 20):
+                size = min(8 << 20, start + nbytes - offset)
+                data = (C.string_at(allocation.address + offset, size) if allocation.memory == "mapped_host"
+                        else cuda.download(allocation.address + offset, size))
+                full = size // block * block
+                occupied = np.frombuffer(data, dtype=np.uint8, count=full).reshape(-1, block).any(axis=1)
+                indices = np.flatnonzero(occupied).tolist()
+                if full < size and any(data[full:]):
+                    indices.append(full // block)
+                for index in indices:
+                    begin, length = offset + index * block, min(block, size - index * block)
+                    output.write(memoryview(data)[index * block:index * block + length])
+                    if stored and stored[-1][0] + stored[-1][1] == begin:
+                        stored[-1][1] += length
+                    else:
+                        stored.append([begin, length])
+    if not stored:
+        path.unlink()
+        return None, []
+    return path.name, stored
 
 
 class RuntimePackage:
@@ -245,20 +313,7 @@ class RuntimePackage:
                 if progress is not None and allocation.snapshot_spans is not None:
                     progress(f"Copy {allocation.name}: {allocation.address:#x}+{allocation.nbytes}; "
                              f"live spans {allocation.snapshot_spans}")
-                file = f"storage-{index}.bin" if allocation.initialize == "snapshot" else None
-                if file is not None:
-                    with (stage / file).open("wb") as output:
-                        spans = allocation.snapshot_spans
-                        if spans is None:
-                            spans = ((0, allocation.nbytes),)
-                        for start, nbytes in spans:
-                            output.seek(start)
-                            for offset in range(start, start + nbytes, 8 << 20):
-                                size = min(8 << 20, start + nbytes - offset)
-                                data = (C.string_at(allocation.address + offset, size) if allocation.memory == "mapped_host"
-                                        else cuda.download(allocation.address + offset, size))
-                                output.write(data)
-                        output.truncate(allocation.nbytes)
+                file, data_spans = _write_allocation(cuda, allocation, stage / f"storage-{index}.bin")
                 for relocation in allocation.relocations:
                     width = 8 if relocation.kind == "pointer" else 128
                     data = cuda.download(allocation.address + relocation.offset, width)
@@ -267,6 +322,7 @@ class RuntimePackage:
                     raise ValueError("tensor-map storage requires a snapshot initializer")
                 allocations.append({"name": allocation.name, "nbytes": allocation.nbytes,
                     "alignment": allocation.alignment, "file": file,
+                    "data_spans": data_spans,
                     "address": allocation.address if allocation.preserve_address else None,
                     "memory": allocation.memory,
                     "relocations": [asdict(r) for r in allocation.relocations]})
@@ -287,7 +343,7 @@ class RuntimePackage:
                     (stage / data_file).write_bytes(strip_global_source(symbol, cuda.download(address.value, size.value)))
                     globals.append({"symbol": symbol, "file": data_file, "nbytes": size.value, "relocations": []})
                 modules.append({"name": name, "file": file, "globals": globals})
-            document = {"version": 1, "architecture": architecture, "allocations": allocations,
+            document = {"version": 3, "architecture": architecture, "allocations": allocations,
                         "modules": modules, "functions": functions, "graphs": serialized_graphs,
                         "reservations": self.reservations, "execution": execution,
                         "context": {"flags": flags.value, "cache": cache.value, "limits": limits}}
@@ -299,7 +355,9 @@ class RuntimePackage:
                     shutil.copyfile(source, stage / destination)
                     asset["path"] = destination
                 (stage / "server.json").write_text(json.dumps(server) + "\n")
-            (stage / "package.json").write_text(json.dumps(document, separators=(",", ":")) + "\n")
+            from .package_proto import encode
+
+            (stage / "package.pb").write_bytes(encode(document))
             if path.exists():
                 raise FileExistsError(path)
             stage.rename(path)
@@ -424,6 +482,20 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
     cuda.call("cuCtxSynchronize")
     if storage.error is not None:
         raise RuntimeError("native package allocator failed") from storage.error
+    if prepared._consumed:
+        raise RuntimeError("runtime package export requires an unused prepared model")
+    zero_ranges = list(prepared.export_zero_ranges)
+    zero_ranges.extend((segment["address"], segment["total_size"])
+                       for segment in storage.graph_pool.snapshot(include_traces=False))
+    zero_ranges.extend((block["address"], block["size"])
+                       for segment in storage.pool.snapshot(include_traces=False)
+                       for block in segment["blocks"] if block["state"] == "inactive")
+    zero_ranges = _merge_ranges(zero_ranges)
+    for address, nbytes in zero_ranges:
+        cuda.call("cuMemsetD8_v2", C.c_uint64(address), C.c_ubyte(0), C.c_size_t(nbytes))
+    cuda.call("cuCtxSynchronize")
+    if progress is not None:
+        progress(f"Cleared {sum(size for _, size in zero_ranges) / (1 << 30):.2f} GiB of disposable storage")
     mappings = storage.mappings
     outside = [(address, size) for address, (size, kind) in images.allocations.items()
                if kind == "device" and address not in mappings]
@@ -446,6 +518,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
     allocations.extend(Allocation(f"host-{index}", region.address, region.extent, alignment=4096,
                                   preserve_address=True, memory="mapped_host")
                        for index, region in enumerate(storage.host_regions) if not region.closed)
+    allocations = [_without_zero_ranges(allocation, zero_ranges) for allocation in allocations]
     modules, module_names, kernels = {}, {}, {}
     for graph in prepared.graphs.values():
         count = C.c_size_t()

@@ -29,6 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let expected: Expected = serde_json::from_slice(&std::fs::read(root.join("expected.json"))?)?;
     let owner = unsafe { NativeResources::load(root.join("package"), 0)? };
+    let payload = owner.download("payload")?;
+    assert_eq!(payload.len(), (20 << 20) + 17);
+    assert!(
+        payload
+            .iter()
+            .enumerate()
+            .all(|(index, value)| *value == (index % 251) as u8)
+    );
     for (name, original) in &expected.addresses {
         assert_ne!(
             owner.allocation(name)?.address,

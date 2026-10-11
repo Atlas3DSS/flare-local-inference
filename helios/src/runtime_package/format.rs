@@ -1,16 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
-use serde::Deserialize;
-
 use crate::{Error, ExecutionError, Result};
 
 pub(super) fn invalid(message: impl Into<String>) -> Error {
     Error::execution(ExecutionError::Manifest, message)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Package {
     pub version: u32,
     pub architecture: [i32; 2],
@@ -18,62 +15,61 @@ pub(super) struct Package {
     pub modules: Vec<Module>,
     pub functions: Vec<Function>,
     pub graphs: Vec<Graph>,
-    #[serde(default)]
     pub reservations: Vec<Reservation>,
-    #[serde(default)]
-    pub execution: Option<serde_json::Value>,
-    #[serde(default)]
+    pub execution: Option<super::protobuf::wire::Execution>,
     pub context: Context,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default)]
 pub(super) struct Context {
     pub flags: u32,
     pub cache: i32,
     pub limits: Vec<[usize; 2]>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Reservation {
     pub address: u64,
     pub nbytes: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) enum Memory {
     #[default]
     Device,
     MappedHost,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Allocation {
     pub name: String,
     pub nbytes: usize,
     pub alignment: usize,
     pub file: Option<String>,
+    pub data_spans: Vec<[usize; 2]>,
     pub relocations: Vec<Relocation>,
-    #[serde(default)]
     pub address: Option<u64>,
-    #[serde(default)]
     pub memory: Memory,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl Allocation {
+    pub fn spans(&self) -> impl Iterator<Item = [usize; 2]> + '_ {
+        self.data_spans.iter().copied()
+    }
+
+    pub fn stored_bytes(&self) -> usize {
+        self.spans().map(|span| span[1]).sum()
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct Module {
     pub name: String,
     pub file: String,
-    #[serde(default)]
     pub globals: Vec<Global>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Global {
     pub symbol: String,
     pub file: String,
@@ -81,8 +77,7 @@ pub(super) struct Global {
     pub relocations: Vec<Relocation>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Function {
     pub module: String,
     pub symbol: String,
@@ -90,22 +85,19 @@ pub(super) struct Function {
     pub attributes: Vec<[i32; 2]>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Reference {
     pub allocation: String,
     pub offset: usize,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug)]
 pub(super) enum RelocationKind {
     Pointer,
     TensorMap,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Relocation {
     pub offset: usize,
     pub target: Reference,
@@ -121,22 +113,19 @@ impl Relocation {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Blob {
     pub data: Vec<u8>,
     pub relocations: Vec<Relocation>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Attribute {
     pub id: i32,
     pub value: Blob,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) enum Node {
     Kernel {
         function: usize,
@@ -162,19 +151,16 @@ pub(super) enum Node {
     Empty,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Edge {
     pub source: usize,
     pub destination: usize,
     pub data: [u8; 8],
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub(super) struct Graph {
     pub name: String,
-    #[serde(default)]
     pub flags: u64,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -192,17 +178,14 @@ fn filename(value: &str) -> Result<()> {
 
 impl Package {
     pub fn validate(&self) -> Result<()> {
-        if self.version != 1 || self.allocations.is_empty() || self.graphs.is_empty() {
+        if self.version != 3 || self.allocations.is_empty() || self.graphs.is_empty() {
             return Err(invalid("unsupported or empty runtime package"));
         }
-        if self.execution.as_ref().is_some_and(|execution| {
-            !matches!(
-                execution
-                    .get("abi_version")
-                    .and_then(|value| value.as_u64()),
-                Some(2 | 3)
-            )
-        }) {
+        if self
+            .execution
+            .as_ref()
+            .is_some_and(|execution| !matches!(execution.abi_version, 2 | 3))
+        {
             return Err(invalid("unsupported execution contract version"));
         }
         if self.context.limits.iter().any(|limit| limit[0] > 6)
@@ -224,6 +207,21 @@ impl Package {
             return Err(invalid("device address reservations overlap"));
         }
         for a in &self.allocations {
+            let mut end = 0;
+            for [offset, size] in a.spans() {
+                if size == 0
+                    || offset < end
+                    || offset.checked_add(size).is_none_or(|n| n > a.nbytes)
+                {
+                    return Err(invalid(
+                        "allocation data spans must be ordered, disjoint, and in bounds",
+                    ));
+                }
+                end = offset + size;
+            }
+            if a.file.is_some() != (a.stored_bytes() > 0) {
+                return Err(invalid("allocation payload file must match its data spans"));
+            }
             if matches!(a.memory, Memory::MappedHost)
                 && (a.nbytes % 4096 != 0 || a.address.is_none_or(|v| v % 4096 != 0))
             {
@@ -469,67 +467,122 @@ impl Package {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
 
-    fn document() -> Value {
-        json!({"version": 1, "architecture": [12, 0], "allocations": [
-            {"name": "state", "nbytes": 4096, "alignment": 256, "file": "state.bin", "relocations": []}
-        ], "modules": [], "functions": [], "graphs": [
-            {"name": "copy", "nodes": [{"kind": "empty"}, {"kind": "empty"}], "edges": []}
-        ]})
-    }
-
-    fn validate(value: Value) -> Result<()> {
-        serde_json::from_value::<Package>(value).unwrap().validate()
+    fn package() -> Package {
+        Package {
+            version: 3,
+            architecture: [12, 0],
+            allocations: vec![Allocation {
+                name: "state".into(),
+                nbytes: 4096,
+                alignment: 256,
+                file: Some("state.bin".into()),
+                data_spans: vec![[0, 4096]],
+                relocations: vec![],
+                address: None,
+                memory: Memory::Device,
+            }],
+            modules: vec![],
+            functions: vec![],
+            reservations: vec![],
+            execution: None,
+            context: Context::default(),
+            graphs: vec![Graph {
+                name: "copy".into(),
+                flags: 0,
+                nodes: vec![Node::Empty, Node::Empty],
+                edges: vec![],
+            }],
+        }
     }
 
     #[test]
     fn recorded_device_spans_require_a_containing_reservation() {
-        let mut value = document();
-        value["allocations"][0]["address"] = json!(0x200000000000_u64);
-        assert!(validate(value.clone()).is_err());
-        value["reservations"] = json!([{"address": 0x200000000000_u64, "nbytes": 8192}]);
-        assert!(validate(value.clone()).is_ok());
-        value["allocations"][0]["nbytes"] = json!(8193);
-        assert!(validate(value).is_err());
+        let mut value = package();
+        value.allocations[0].address = Some(0x200000000000);
+        assert!(value.validate().is_err());
+        value.reservations.push(Reservation {
+            address: 0x200000000000,
+            nbytes: 8192,
+        });
+        assert!(value.validate().is_ok());
+        value.allocations[0].nbytes = 8193;
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn packed_payload_spans_are_bounded_and_match_the_file() {
+        let mut value = package();
+        for spans in [
+            vec![[0, 0]],
+            vec![[4095, 2]],
+            vec![[16, 32], [32, 16]],
+            vec![],
+        ] {
+            value.allocations[0].data_spans = spans;
+            assert!(value.validate().is_err());
+        }
+        value.allocations[0].data_spans = vec![[16, 32], [128, 64]];
+        assert!(value.validate().is_ok());
+        assert_eq!(value.allocations[0].stored_bytes(), 96);
+        value.allocations[0].file = None;
+        assert!(value.validate().is_err());
+        value.allocations[0].data_spans.clear();
+        assert!(value.validate().is_ok());
     }
 
     #[test]
     fn pointer_fields_cannot_overlap_or_reference_an_allocation_end() {
-        let mut value = document();
-        let relocation = json!({"offset": 0, "kind": "pointer", "target": {"allocation": "state", "offset": 4095}});
-        value["allocations"][0]["relocations"] = json!([relocation]);
-        assert!(validate(value.clone()).is_ok());
-        value["allocations"][0]["relocations"][0]["target"]["offset"] = json!(4096);
-        assert!(validate(value.clone()).is_err());
-        value["allocations"][0]["relocations"] = json!([relocation.clone(), relocation]);
-        assert!(validate(value).is_err());
+        let mut value = package();
+        let relocation = || Relocation {
+            offset: 0,
+            kind: RelocationKind::Pointer,
+            target: Reference {
+                allocation: "state".into(),
+                offset: 4095,
+            },
+        };
+        value.allocations[0].relocations.push(relocation());
+        assert!(value.validate().is_ok());
+        value.allocations[0].relocations[0].target.offset = 4096;
+        assert!(value.validate().is_err());
+        value.allocations[0].relocations = vec![relocation(), relocation()];
+        assert!(value.validate().is_err());
     }
 
     #[test]
     fn graph_cycles_are_rejected() {
-        let mut value = document();
-        value["graphs"][0]["edges"] = json!([
-            {"source": 0, "destination": 1, "data": [0, 0, 0, 0, 0, 0, 0, 0]},
-            {"source": 1, "destination": 0, "data": [0, 0, 0, 0, 0, 0, 0, 0]}
-        ]);
-        assert!(validate(value).is_err());
+        let mut value = package();
+        value.graphs[0].edges = vec![
+            Edge {
+                source: 0,
+                destination: 1,
+                data: [0; 8],
+            },
+            Edge {
+                source: 1,
+                destination: 0,
+                data: [0; 8],
+            },
+        ];
+        assert!(value.validate().is_err());
     }
 
     #[test]
     fn data_paths_cannot_escape_the_package() {
-        let mut value = document();
-        value["allocations"][0]["file"] = json!("../weights.bin");
-        assert!(validate(value).is_err());
+        let mut value = package();
+        value.allocations[0].file = Some("../weights.bin".into());
+        assert!(value.validate().is_err());
     }
 
     #[test]
     fn mapped_host_extents_cover_complete_pages() {
-        let mut value = document();
-        value["allocations"][0]["memory"] = json!("mapped_host");
-        value["allocations"][0]["address"] = json!(0x100000000000_u64);
-        assert!(validate(value.clone()).is_ok());
-        value["allocations"][0]["nbytes"] = json!(4000);
-        assert!(validate(value).is_err());
+        let mut value = package();
+        value.allocations[0].memory = Memory::MappedHost;
+        value.allocations[0].address = Some(0x100000000000);
+        assert!(value.validate().is_ok());
+        value.allocations[0].nbytes = 4000;
+        value.allocations[0].data_spans = vec![[0, 4000]];
+        assert!(value.validate().is_err());
     }
 }

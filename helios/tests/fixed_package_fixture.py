@@ -14,6 +14,7 @@ from ignition.preparation.execution import GraphSignature, PreparedExecution
 from ignition.preparation.module_images import ModuleImages
 from ignition.preparation.package_storage import PackageStorage
 from ignition.preparation.runtime_package import export_model
+from ignition.preparation.runtime_package_pb2 import Package
 
 
 def global_kernel(root, storage, source):
@@ -54,6 +55,7 @@ def prepare(root):
                                           device=torch.device("cuda", 0), nbytes=65536)
             source.copy_(torch.arange(128, device="cuda", dtype=torch.float32))
             output = torch.zeros_like(source)
+            transient = torch.full((1 << 20,), 0xA5, dtype=torch.uint8, device="cuda")
             region = storage.host_allocate("table", (128,), torch.float32)
             region.host_view.fill_(3)
             module, function = global_kernel(root, storage, source)
@@ -80,14 +82,22 @@ def prepare(root):
             output.zero_()
             prepared = PreparedExecution(device=0, graphs={"decode": graph}, buffers=buffers,
                 signatures={"decode": GraphSignature("decode", 1, 1, ("source",))}, max_active=1,
-                resources=(storage, region))
+                resources=(storage, region, transient),
+                export_zero_ranges=((transient.data_ptr(), transient.nbytes),))
             prepared.server_config = {"assets": {}}
     package = export_model(prepared, images, storage, root / "package", options={})
     assert any(a.name.startswith("external-") and a.address <= external.value < a.address + a.nbytes
                for a in package.allocations)
+    zero_reference = package._reference(transient.data_ptr(), transient.nbytes)
+    document = Package.FromString((root / "package" / "package.pb").read_bytes())
+    allocation = next(a for a in document.allocations if a.name == zero_reference["allocation"])
+    start, end = zero_reference["offset"], zero_reference["offset"] + transient.nbytes
+    assert all(span.offset + span.nbytes <= start or span.offset >= end for span in allocation.data_spans)
     (root / "expected.json").write_text(json.dumps({
         "reference": package._reference(output.data_ptr(), output.nbytes), "bytes": list(expected),
         "addresses": {allocation.name: allocation.address for allocation in package.allocations},
+        "zero_reference": zero_reference,
+        "zero_bytes": transient.nbytes,
     }))
     print(f"exported fixed-address graph with {len(package.allocations)} allocations and {len(package.modules)} cubins", flush=True)
     storage.cuda.call("cuMemFree_v2", external)

@@ -115,6 +115,7 @@ def _prepare(root, images):
         "descriptor": (Relocation(0, reference("input"), "tensor_map"),),
         "pointers": tuple(Relocation(index * 8, target) for index, target in enumerate(table_targets)),
     }
+    tensors["payload"] = (torch.arange((20 << 20) + 17, device="cuda", dtype=torch.int32) % 251).to(torch.uint8)
     allocations = [Allocation(name, tensor.data_ptr(), tensor.numel() * tensor.element_size(),
                              initialize="zero" if name == "scratch" or name.startswith("rows_") else "snapshot",
                              relocations=storage_relocations.get(name, ()))

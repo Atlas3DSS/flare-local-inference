@@ -124,7 +124,17 @@ driver! {
     host_register: "cuMemHostRegister_v2"(Handle, usize, c_uint);
     host_unregister: "cuMemHostUnregister"(Handle);
     host_device: "cuMemHostGetDevicePointer_v2"(*mut u64, Handle, c_uint);
+    host_allocate: "cuMemHostAlloc"(*mut Handle, usize, c_uint);
+    host_free: "cuMemFreeHost"(Handle);
     upload: "cuMemcpyHtoD_v2"(u64, *const c_void, usize);
+    upload_async: "cuMemcpyHtoDAsync_v2"(u64, *const c_void, usize, Handle);
+    stream_create: "cuStreamCreate"(*mut Handle, c_uint);
+    stream_sync: "cuStreamSynchronize"(Handle);
+    stream_destroy: "cuStreamDestroy_v2"(Handle);
+    event_create: "cuEventCreate"(*mut Handle, c_uint);
+    event_record: "cuEventRecord"(Handle, Handle);
+    event_sync: "cuEventSynchronize"(Handle);
+    event_destroy: "cuEventDestroy_v2"(Handle);
     download: "cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
     zero: "cuMemsetD8_v2"(u64, u8, usize);
     module_load: "cuModuleLoadData"(*mut Handle, *const c_void);
