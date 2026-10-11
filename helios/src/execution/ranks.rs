@@ -5,7 +5,13 @@ use std::os::unix::net::UnixStream;
 use super::{ExecutionManifest, FrameCompletion, GraphExecutor, TensorParallelExecutor, Upload};
 use crate::{Result, Shutdown, cache::Fence};
 
+pub enum RankPeers {
+    Processes(Vec<UnixStream>),
+    Threads(Vec<ExecutionManifest>),
+}
+
 pub(crate) enum RankExecutor {
+    Threaded(Box<super::threaded::ThreadedExecutor>),
     Local(Box<GraphExecutor>),
     Parallel(Box<TensorParallelExecutor>),
 }
@@ -16,11 +22,17 @@ impl RankExecutor {
     /// retained until coordinated drain. Peer sockets identify ranks 1..world.
     pub(crate) unsafe fn new(
         manifest: ExecutionManifest,
-        peers: Option<Vec<UnixStream>>,
+        peers: Option<RankPeers>,
     ) -> Result<Self> {
         match peers {
-            Some(peers) => unsafe { TensorParallelExecutor::new(manifest, peers) }
-                .map(|executor| Self::Parallel(Box::new(executor))),
+            Some(RankPeers::Threads(ranks)) => {
+                unsafe { super::threaded::ThreadedExecutor::new(manifest, ranks) }
+                    .map(|executor| Self::Threaded(Box::new(executor)))
+            }
+            Some(RankPeers::Processes(peers)) => {
+                unsafe { TensorParallelExecutor::new(manifest, peers) }
+                    .map(|executor| Self::Parallel(Box::new(executor)))
+            }
             None => unsafe { GraphExecutor::new(manifest) }
                 .map(|executor| Self::Local(Box::new(executor))),
         }
@@ -35,6 +47,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.submit(graph, uploads, grammar),
             Self::Parallel(executor) => executor.submit(graph, uploads, grammar),
+            Self::Threaded(executor) => executor.submit(graph, uploads, grammar),
         }
     }
 
@@ -42,6 +55,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.poll(),
             Self::Parallel(executor) => executor.poll(),
+            Self::Threaded(executor) => executor.poll(),
         }
     }
 
@@ -49,6 +63,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.outstanding(),
             Self::Parallel(executor) => executor.outstanding(),
+            Self::Threaded(executor) => executor.outstanding(),
         }
     }
 
@@ -57,6 +72,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.manifest(),
             Self::Parallel(executor) => executor.manifest(),
+            Self::Threaded(executor) => executor.manifest(),
         }
     }
 
@@ -65,6 +81,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.can_submit(grammar),
             Self::Parallel(executor) => executor.can_submit(grammar),
+            Self::Threaded(executor) => executor.can_submit(grammar),
         }
     }
 
@@ -73,6 +90,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.next_fence(),
             Self::Parallel(executor) => executor.next_fence(),
+            Self::Threaded(executor) => executor.next_fence(),
         }
     }
 
@@ -80,6 +98,7 @@ impl RankExecutor {
         match self {
             Self::Local(executor) => executor.close(),
             Self::Parallel(executor) => executor.close(),
+            Self::Threaded(executor) => executor.close(),
         }
     }
 }

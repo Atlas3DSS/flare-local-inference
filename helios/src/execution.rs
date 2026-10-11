@@ -3,6 +3,8 @@
 mod manifest;
 mod parallel;
 mod ranks;
+mod threaded;
+pub use ranks::RankPeers;
 mod transport;
 mod worker;
 pub use parallel::{TensorParallelExecutor, serve_rank};

@@ -7,6 +7,98 @@ FlashInfer, including b12x. Its `flare_heliopause` extension is built by the
 in `helios/`, to serve requests through prepared CUDA graphs. Both Flare and
 Heliopause depend on Helios; Helios has no Python or preparation-tool dependency.
 
+## Build and run model checkpoints
+
+Run commands from the repository root. Ignition prepares a source checkpoint
+into a **runtime package**: a directory containing `model.pb` and one
+`rank-N/` resource bundle per TP rank. Each bundle contains `package.pb`,
+compiled CUDA modules, persistent tensor payloads, and frontend assets.
+Flare loads this directory without Python. Helios is a Rust library;
+`flare_heliopause` is a CPython extension imported by Ignition.
+
+Set up the preparation environment and build the native CLI:
+
+```sh
+uv sync --locked --extra prepare --extra test
+cargo build --release --manifest-path flare/Cargo.toml
+```
+
+The preparation environment uses the sibling `../flashinfer` checkout through
+`pyproject.toml`. Inspect that checkout and its local changes before updating
+dependencies. After changing Rust code in `heliopause/`, or Helios code used by
+the extension, rebuild the installed extension explicitly:
+
+```sh
+uv pip install --python .venv/bin/python --no-deps ./heliopause
+```
+
+Inspect GPU occupancy with `nvidia-smi` before preparation or loading. Select
+available GPUs explicitly on shared hosts. `--gpus 2` means one rank on GPU 2;
+`--gpus 0,1` means two ranks on GPUs 0 and 1. With `CUDA_VISIBLE_DEVICES` set,
+indices refer to the exposed device list. TP1, TP2, and TP4 require separately
+prepared packages; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 have
+been exercised end to end; TP4 still requires model validation.
+
+Export Qwen with up to five MTP draft tokens per round:
+
+```sh
+.venv/bin/ignition export qwen3.8-flash --gpus 2 \
+  --mtp-draft-tokens 5 --max-concurrency 4 \
+  --output /data/flare-runtime/qwen38-tp1-mtp5 --verbose
+
+.venv/bin/ignition export qwen3.8-flash --gpus 0,1 \
+  --mtp-draft-tokens 5 --max-concurrency 4 \
+  --output /data/flare-runtime/qwen38-tp2-mtp5 --verbose
+```
+
+Choose an unused output directory; export refuses to overwrite one. Do not
+delete an existing package merely to reuse its name. `MODEL` can also be a
+supported repository ID or a local source-checkpoint directory. Ignition
+downloads missing source weights, loads and tunes kernels, compiles forwards,
+warms and captures execution variants, writes the package, and exits.
+Compilation is enabled by default; `--no-compile` is for development.
+Qwen defaults to five MTP draft tokens, with explicit flags taking precedence.
+Changing this default does not change an already exported package.
+
+Both Ignition commands accept `--config PATH`; the default configuration is
+`~/.config/flare/config.toml`. Storage locations are configured with
+`[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`
+controls the GPU headroom left by preparation. Concurrency, prefill capacity,
+and MTP variants are prepared capacities, not Flare load-time flags.
+
+Load an exported package directly with the native CLI:
+
+```sh
+./flare/target/release/flare run /data/flare-runtime/qwen38-tp2-mtp5 \
+  --gpus 0,1 --bind 127.0.0.1:8001
+curl --fail http://127.0.0.1:8001/health
+```
+
+The selected GPU count must match the package, and each GPU must match its
+rank's architecture and memory requirements. Flare serves all ranks in one
+process with one execution thread per rank. Its dashboard runs on an
+interactive terminal. Use `--api-key-file PATH` to supply a serving API key;
+exported packages do not contain the key. Stop Flare with Ctrl-C or SIGTERM
+so native replay drains before CUDA resources are released.
+
+For preparation followed immediately by serving, use the cached workflow:
+
+```sh
+.venv/bin/ignition run qwen3.8-flash --gpus 0,1 --port 8001 --verbose
+```
+
+`ignition run` caches packages under `paths.package_cache` (default
+`~/.cache/flare/packages`) and replaces its process with Flare via `execv`.
+It finds `flare` on `PATH` first, then `flare/target/release/flare`; check for
+stale installed executables when testing a local build. Changes to preparation
+inputs select a different cache entry. To test a serving-only Rust change,
+rebuild Flare and load an existing compatible package directly. Re-export when
+changing prepared kernels, capacities, or the package format.
+
+Use `.venv/bin/ignition export --help` and `.venv/bin/ignition run --help` for
+preparation flags. See [the runtime package design](docs/runtime-package-design.md)
+for resource ownership and [the CLI design](docs/cli-design.md) for configuration.
+
 ## Preserve canonical model implementations where they fit
 
 - Treat Transformers as the canonical source for model structure and semantics.

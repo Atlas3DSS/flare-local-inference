@@ -14,7 +14,7 @@ import torch.multiprocessing as mp
 from ignition.progress import phase
 
 
-def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare):
+def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare, packaged):
     import flare_heliopause
 
     flare_heliopause.bind_parent_lifetime(parent)
@@ -23,10 +23,34 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
     try:
         dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=len(config.devices),
                                 timeout=timedelta(minutes=15))
-        model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD)
+        recorder = storage = None
+        if packaged:
+            from .module_images import ModuleImages
+            from .package_storage import PackageStorage
+            import torch
+
+            recorder = ModuleImages()
+            with recorder:
+                torch.cuda.set_device(config.devices[rank])
+                storage = PackageStorage(rank=rank, world=len(config.devices), device=config.devices[rank])
+                with storage:
+                    model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, package_storage=storage)
+        else:
+            model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD)
         model.manifest()
         control.send(model.memory_report)
         command = control.recv()
+        if isinstance(command, tuple) and command[0] == "export":
+            from .runtime_package import export_model
+
+            _, path, options = command
+            dist.barrier()
+            storage.peer_storage.reset()
+            torch.cuda.synchronize()
+            dist.barrier()
+            export_model(model, recorder, storage, path, options=options)
+            control.send({"peer_memory": list(storage.peer_storage.owned.items())})
+            command = control.recv()
         control.close()
         if command == "serve":
             model.serve_rank(connection, rank=rank, world=len(config.devices))
@@ -98,7 +122,7 @@ class PreparedRankGroup:
         self.close()
 
 
-def prepare_group(snapshot, config, prepare, *, progress=None):
+def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=None):
     """Prepare every rank before returning a root-owned native handoff.
 
     This function owns the process's Gloo group and must run in the main thread.
@@ -119,7 +143,7 @@ def prepare_group(snapshot, config, prepare, *, progress=None):
             control, child_control = context.Pipe()
             controls.append(control)
             process = context.Process(target=_peer, args=(os.getpid(), snapshot, config, rank,
-                address, peer, child_control, prepare), name=f"flare-rank-{rank}")
+                address, peer, child_control, prepare, package_storage is not None), name=f"flare-rank-{rank}")
             try:
                 process.start()
             finally:
@@ -139,7 +163,8 @@ def prepare_group(snapshot, config, prepare, *, progress=None):
         with phase(progress, "Connect tensor-parallel ranks"):
             dist.init_process_group("gloo", init_method=address, rank=0, world_size=len(config.devices),
                                     timeout=timedelta(minutes=15))
-        model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress)
+        model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress,
+                        **({} if package_storage is None else {"package_storage": package_storage}))
         model.manifest()
         with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
             reports = []

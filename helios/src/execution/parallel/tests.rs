@@ -139,3 +139,11 @@ fn completion_wire_preserves_the_execution_abi() {
         assert_eq!(expected.fields(), actual.fields());
     }
 }
+
+#[test]
+fn rank_completion_requires_every_record() {
+    let root = completed(1);
+    let mut peer = completed(1);
+    peer.records = [peer.records[0]; 3].into();
+    assert!(agree(&root, &peer).is_err());
+}

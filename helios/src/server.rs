@@ -173,7 +173,7 @@ impl<M: ModelContract> Server<M> {
         frontend: Frontend,
         images: Option<ImageProcessor>,
         config: ServerConfig,
-        peers: Option<Vec<std::os::unix::net::UnixStream>>,
+        peers: Option<crate::execution::RankPeers>,
     ) -> std::result::Result<Self, StartFailure> {
         if model.contract.vision.enabled() != images.is_some() {
             return Err("image processor must match prepared vision capabilities".into());

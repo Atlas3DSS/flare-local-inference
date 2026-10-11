@@ -18,6 +18,7 @@ const BASE: u64 = 0x200000000000;
 const EXTENT: usize = 1 << 40;
 struct Arena {
     driver: Driver,
+    device: i32,
     granularity: usize,
     free: Vec<(u64, usize)>,
     mappings: BTreeMap<u64, usize>,
@@ -25,11 +26,11 @@ struct Arena {
 static ARENA: Mutex<Option<Arena>> = Mutex::new(None);
 static ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
-fn properties() -> AllocationProperties {
+fn properties(device: i32) -> AllocationProperties {
     AllocationProperties {
         kind: 1,
-        handles: 0,
-        location: Location { kind: 1, device: 0 },
+        handles: 1,
+        location: Location { kind: 1, device },
         windows: null_mut(),
         flags: [0; 8],
     }
@@ -41,32 +42,44 @@ fn failure(error: impl ToString) {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn flare_package_initialize() -> i32 {
+extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i32 {
     let initialize = || -> Result<()> {
         let mut arena = ARENA.lock().unwrap_or_else(|e| e.into_inner());
         if arena.is_some() {
             return Err(invalid("native package allocator is already initialized"));
+        }
+        if ![1, 2, 4].contains(&world) || rank >= world || device < 0 {
+            return Err(invalid("invalid package rank or device"));
         }
         let driver = Driver::load()?;
         let (mut address, mut granularity) = (0, 0);
         unsafe {
             driver.check(
                 "cuMemGetAllocationGranularity",
-                (driver.granularity)(&mut granularity, &properties(), 0),
+                (driver.granularity)(&mut granularity, &properties(device), 0),
             )?;
-            driver.check(
-                "cuMemAddressReserve",
-                (driver.reserve)(&mut address, EXTENT, 0, BASE, 0),
-            )?;
-            if address != BASE {
-                (driver.release_address)(address, EXTENT);
-                return Err(invalid("native package device address range is occupied"));
+            let mut reserved = Vec::new();
+            for peer in 0..world {
+                let base = BASE + u64::from(peer) * EXTENT as u64;
+                let status = (driver.reserve)(&mut address, EXTENT, 0, base, 0);
+                if status != 0 || address != base {
+                    if status == 0 {
+                        (driver.release_address)(address, EXTENT);
+                    }
+                    for address in reserved {
+                        (driver.release_address)(address, EXTENT);
+                    }
+                    driver.check("cuMemAddressReserve", status)?;
+                    return Err(invalid("native package device address range is occupied"));
+                }
+                reserved.push(address);
             }
         }
         *arena = Some(Arena {
             driver,
+            device,
             granularity,
-            free: vec![(BASE, EXTENT)],
+            free: vec![(BASE + u64::from(rank) * EXTENT as u64, EXTENT)],
             mappings: BTreeMap::new(),
         });
         Ok(())
@@ -87,13 +100,13 @@ extern "C" fn flare_package_allocate(
     _stream: *mut c_void,
 ) -> *mut c_void {
     let allocate = || -> Result<u64> {
-        if device != 0 {
-            return Err(invalid("native package allocator requires TP1 device zero"));
-        }
         let mut guard = ARENA.lock().unwrap_or_else(|e| e.into_inner());
         let a = guard
             .as_mut()
             .ok_or_else(|| invalid("native package allocator is uninitialized"))?;
+        if device != a.device {
+            return Err(invalid("allocation device differs from package rank"));
+        }
         let size = size
             .checked_add(a.granularity - 1)
             .ok_or_else(|| invalid("allocation size overflow"))?
@@ -109,13 +122,13 @@ extern "C" fn flare_package_allocate(
         unsafe {
             a.driver.check(
                 "cuMemCreate",
-                (a.driver.physical_create)(&mut physical, size, &properties(), 0),
+                (a.driver.physical_create)(&mut physical, size, &properties(device), 0),
             )?;
             let mapped = (a.driver.map)(address, size, 0, physical, 0);
             (a.driver.physical_release)(physical);
             a.driver.check("cuMemMap", mapped)?;
             let access = Access {
-                location: Location { kind: 1, device: 0 },
+                location: Location { kind: 1, device },
                 flags: 3,
             };
             let status = (a.driver.access)(address, size, &access, 1);

@@ -76,8 +76,6 @@ def run(args) -> int:
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
                   speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size)
-    if plan.world_size != 1:
-        raise UsageError("native package serving requires TP1; select one GPU with --gpus")
     runtime = binary()
     bind = _address(configuration.get("server.host", args.host).value,
                     configuration.get("server.port", args.port).value)
@@ -87,7 +85,7 @@ def run(args) -> int:
         else:
             print(f"Load cached runtime package. {package}", flush=True)
     environment.apply(configuration, plan.gpus)
-    command = [str(runtime), "run", str(package), "--device", "0", "--bind", bind]
+    command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)), "--bind", bind]
     key = configuration.get("server.api_key").value
     if key:
         key_file = tempfile.TemporaryFile()
@@ -128,8 +126,6 @@ def _prepare(args, *, export_path) -> int:
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size)
-        if plan.world_size != 1:
-            raise UsageError("native package export requires TP1; select one GPU with --gpus")
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -161,7 +157,7 @@ def _prepare(args, *, export_path) -> int:
                 from ignition.preparation.package_storage import PackageStorage
 
                 torch.cuda.set_device(0)
-                storage = PackageStorage()
+                storage = PackageStorage(world=plan.world_size)
                 preparation_options["package_storage"] = storage
                 with storage:
                     prepared = model.recipe.prepare(
@@ -183,12 +179,12 @@ def _prepare(args, *, export_path) -> int:
             usage = model.recipe.usage(prepared)
             _keep_reserve(plan, usage)
             options = _server_options(configuration, model, plan, min(rank.pages for rank in usage))
-            from ignition.preparation.runtime_package import export_model
+            from ignition.preparation.model_package import export_package
 
             with phase(progress, "Export native package") as stage:
                 try:
                     options.pop("api_key")
-                    export_model(prepared, recorder, storage, export_path, options=options,
+                    export_package(prepared, recorder, storage, export_path, options=options,
                                  progress=progress if args.verbose else None)
                 except Exception as error:
                     if args.verbose:

@@ -77,6 +77,16 @@ impl Phase {
         state.completed = state.completed.saturating_add(count);
     }
 
+    pub fn advance_bytes(&self, count: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.completed = state.completed.saturating_add(count);
+        state.detail = format!(
+            "{:.1} / {:.1} GiB",
+            state.completed as f64 / (1u64 << 30) as f64,
+            state.total.unwrap_or(0) as f64 / (1u64 << 30) as f64,
+        );
+    }
+
     pub fn detail(&self, detail: impl Into<String>) {
         self.state.lock().unwrap().detail = detail.into();
     }

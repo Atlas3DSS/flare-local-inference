@@ -477,7 +477,7 @@ def _external_allocations(spans, granularity):
 
 
 def export_model(prepared, images, storage, path, *, options, progress=None):
-    """Export TP1 graphs and storage with their recorded virtual addresses."""
+    """Export one rank's graphs and storage with recorded virtual addresses."""
     cuda = _Cuda()
     cuda.call("cuCtxSynchronize")
     if storage.error is not None:
@@ -497,8 +497,12 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
     if progress is not None:
         progress(f"Cleared {sum(size for _, size in zero_ranges) / (1 << 30):.2f} GiB of disposable storage")
     mappings = storage.mappings
+    imports = {} if storage.peer_storage is None else storage.peer_storage.imported
+    for address, size in imports.items():
+        if images.allocations.get(address) != (size, "device"):
+            raise ValueError(f"peer mapping {address:#x}+{size} differs from the recorded allocation")
     outside = [(address, size) for address, (size, kind) in images.allocations.items()
-               if kind == "device" and address not in mappings]
+               if kind == "device" and address not in mappings and address not in imports]
     current = C.c_void_p()
     cuda.call("cuCtxGetCurrent", C.byref(current))
     for address, nbytes in outside:

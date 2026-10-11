@@ -93,7 +93,9 @@ pub(super) unsafe fn load(
     root: &Path,
     package: &Package,
     phase: &Phase,
+    ranks: usize,
 ) -> Result<()> {
+    let chunk_bytes = CHUNK / ranks;
     let mut files = Vec::new();
     let mut chunks = Vec::new();
     for allocation in &package.allocations {
@@ -111,8 +113,8 @@ pub(super) unsafe fn load(
         files.push(file);
         let mut file_offset = 0;
         for [offset, nbytes] in allocation.spans() {
-            for start in (0..nbytes).step_by(CHUNK) {
-                let nbytes = CHUNK.min(nbytes - start);
+            for start in (0..nbytes).step_by(chunk_bytes) {
+                let nbytes = chunk_bytes.min(nbytes - start);
                 chunks.push(Chunk {
                     file: index,
                     file_offset,
@@ -137,7 +139,6 @@ pub(super) unsafe fn load(
         .iter()
         .map(|buffer| *buffer as usize)
         .collect();
-    let payload: u64 = chunks.iter().map(|chunk| chunk.nbytes as u64).sum();
     thread::scope(|scope| -> Result<()> {
         let (work, available) = mpsc::sync_channel::<(usize, usize)>(count);
         let available = Arc::new(Mutex::new(available));
@@ -198,7 +199,6 @@ pub(super) unsafe fn load(
         }
         let mut inflight = VecDeque::new();
         let mut completed = 0;
-        let mut loaded = 0;
         while completed < chunks.len() {
             let read = match finished.try_recv() {
                 Ok(read) => Some(read),
@@ -245,13 +245,7 @@ pub(super) unsafe fn load(
                 (slot, index)
             };
             completed += 1;
-            loaded += chunks[index].nbytes as u64;
-            phase.advance(chunks[index].nbytes as u64);
-            phase.detail(format!(
-                "{:.1} / {:.1} GiB",
-                loaded as f64 / (1u64 << 30) as f64,
-                payload as f64 / (1u64 << 30) as f64
-            ));
+            phase.advance_bytes(chunks[index].nbytes as u64);
             if next < chunks.len() {
                 work.send((slot, next)).map_err(|e| e.to_string())?;
                 next += 1;

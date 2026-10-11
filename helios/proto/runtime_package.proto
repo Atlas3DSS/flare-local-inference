@@ -1,6 +1,18 @@
 syntax = "proto3";
 package flare.runtime;
 
+message ModelPackage {
+  uint32 version = 1;
+  repeated string ranks = 2;
+  repeated PeerMemory peer_memory = 3;
+}
+message PeerMemory {
+  uint32 owner = 1;
+  uint64 address = 2;
+  uint64 nbytes = 3;
+  repeated uint32 readers = 4;
+}
+
 message Package {
   uint32 version = 1;
   repeated int32 architecture = 2;

@@ -5,7 +5,7 @@ from datetime import timedelta
 import torch.distributed as dist
 
 
-def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size):
+def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
     """Allocate one b12x IPC channel for the largest BF16 hidden activation.
 
     Every rank supplies identical capacities before preparing graph variants.
@@ -19,10 +19,10 @@ def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size):
     if nbytes % 16:
         raise ValueError("BF16 all-reduce capacity must occupy complete 16-byte packs")
     return AllReduce.from_exchange_group(exchange_group=group, device=device, single_channel=True,
-                                         max_size=nbytes, eager_buffer_bytes=nbytes)
+                                         max_size=nbytes, eager_buffer_bytes=nbytes, ipc=ipc)
 
 
-def create_all_gather_runtime(group, device, *, max_rows, columns):
+def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
     """Allocate b12x staging for serial BF16 column gathers in prepared graphs."""
     from b12x.comm.pcie import DcpAllToAll
 
@@ -31,7 +31,7 @@ def create_all_gather_runtime(group, device, *, max_rows, columns):
             or type(columns) is not int or columns <= 0 or columns % (world_size * 64)):
         raise ValueError("column gathers require positive rows and 64-column-aligned TP2 or TP4 partitions")
     return DcpAllToAll.from_exchange_group(exchange_group=group, device=device,
-        max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False)
+        max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
 class CollectivePreparation:

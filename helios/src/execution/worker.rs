@@ -60,7 +60,8 @@ impl ExecutionWorker {
                 // SAFETY: The caller retains the manifest's graphs and allocations
                 // until this worker reports drain. The executor binds its streams
                 // to the declared context on this thread and has exclusive access.
-                let opened = unsafe { RankExecutor::new(manifest, peers) };
+                let opened =
+                    unsafe { RankExecutor::new(manifest, peers.map(super::RankPeers::Processes)) };
                 let mut executor = match opened {
                     Ok(executor) => executor,
                     Err(error) => {

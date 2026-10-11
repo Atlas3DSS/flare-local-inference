@@ -54,7 +54,7 @@ class Prepared:
 
 @pytest.fixture
 def host(monkeypatch, tmp_path):
-    from ignition.preparation import module_images, package_storage, runtime_package
+    from ignition.preparation import module_images, package_storage, model_package
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("COLUMNS", "200")
@@ -73,6 +73,8 @@ def host(monkeypatch, tmp_path):
             calls["signals"].exited += 1
 
     class Scope:
+        def __init__(self, **kwargs):
+            pass
         def __enter__(self):
             return self
         def __exit__(self, *exception):
@@ -111,7 +113,7 @@ def host(monkeypatch, tmp_path):
         calls["exports"] += 1
         path.mkdir()
         (path / "package.pb").write_bytes(b"")
-    monkeypatch.setattr(runtime_package, "export_model", export_model)
+    monkeypatch.setattr(model_package, "export_package", export_model)
 
     def execute(path, arguments):
         assert path == "/native/flare" and arguments[1] == "run"
@@ -141,7 +143,7 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert host["compile_forwards"] is False and host["exports"] == 1
     assert [gpu.index for gpu in host["gpus"]] == [0]
     assert host["plan"].speculation == host["plan"].recipe.speculation
-    assert host["exec"][3:5] == ["--device", "0"]
+    assert host["exec"][3:5] == ["--gpus", "0"]
     assert host["prepared"].closed and host["prepared"].started is None
     assert run("qwen3.8-flash", "--no-compile") == 0
     assert host["exports"] == 1
@@ -167,13 +169,6 @@ def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tm
     assert host["prepared"].closed
     assert main(["export", "qwen3.8-flash", "--output", str(output)]) == 2
     assert host["exports"] == 1
-
-
-def test_tensor_parallel_fails_before_preparation(host, tmp_path):
-    assert run("qwen3.8-flash", "--gpus", "0,1") == 2
-    assert "prepared" not in host
-    assert main(["export", "qwen3.8-flash", "--gpus", "0,1", "--output", str(tmp_path / "package")]) == 2
-    assert "prepared" not in host
 
 
 def test_listener_and_authentication_are_supplied_after_export(host, tmp_path):
@@ -248,3 +243,9 @@ def test_environment_selects_gpus_by_uuid_and_places_caches(monkeypatch, tmp_pat
     assert os.environ["HF_HUB_CACHE"] == f"{tmp_path}/.cache/huggingface/hub"
     assert os.environ["CUDA_HOME"] == f"{tmp_path}/cuda"
     assert environment.toolkit(None) is None or (environment.toolkit(None) / "bin/nvcc").is_file()
+
+
+def test_tensor_parallel_run_preserves_rank_selection_in_native_launch(host):
+    assert run("qwen3.8-flash", "--gpus", "0,1") == 0
+    assert host["plan"].world_size == 2
+    assert host["exec"][3:5] == ["--gpus", "0,1"]

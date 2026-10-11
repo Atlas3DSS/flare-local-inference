@@ -1,4 +1,4 @@
-//! Serve a prepared TP1 runtime package without a Python interpreter.
+//! Serve a prepared model package without a Python interpreter.
 
 mod banner;
 
@@ -10,7 +10,7 @@ use std::{
 
 use flare_helios::{
     model::qwen4exp::Qwen4Exp,
-    runtime_package::NativeResources,
+    runtime_package::NativeModel,
     server::{Bootstrap, Server},
     startup::StartupProgress,
 };
@@ -24,7 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
         return Err(
-            "usage: flare run PACKAGE [--bind IP:PORT] [--device N] [--api-key-file PATH]".into(),
+            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH]"
+                .into(),
         );
     };
     if command != "run" {
@@ -32,25 +33,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let root =
         PathBuf::from(arguments.next().ok_or("package directory is required")?).canonicalize()?;
-    let (mut bind, mut key, mut device) = ("127.0.0.1:8000".to_owned(), None, 0);
+    let (mut bind, mut key, mut devices) = ("127.0.0.1:8000".to_owned(), None, vec![0]);
     while let Some(flag) = arguments.next() {
         let value = arguments
             .next()
             .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
             "--bind" => bind = value,
-            "--device" => device = value.parse()?,
+            "--gpus" => {
+                devices = value
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<Vec<i32>, _>>()?
+            }
             "--api-key-file" => key = Some(std::fs::read_to_string(value)?.trim().to_owned()),
             _ => return Err(format!("unknown option {flag}").into()),
         }
     }
     banner::print();
     let progress = StartupProgress::stderr();
+    // SAFETY: The trusted package owners remain live until every rank drains.
+    let owner = unsafe { NativeModel::load(&root, &devices, &progress)? };
+    let root = owner.frontend_root();
     let phase = progress.phase("Read model configuration", None);
     let mut config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("server.json"))?)?;
     if config["model_contract"]["schema"] != flare_helios::model::qwen4exp::INPUT_SCHEMA {
-        return Err("native package serving supports the Qwen TP1 contract".into());
+        return Err("native package serving supports the Qwen contract".into());
     }
     config["bind"] = bind.into();
     config["api_key"] = key.unwrap_or_default().into();
@@ -74,9 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     phase.finish(config["model_id"].as_str().unwrap_or_default());
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
-    let owner = unsafe { NativeResources::load_with_progress(&root, device, &progress)? };
     let phase = progress.phase("Load tokenizer", None);
-    let manifest = owner.execution_manifest()?;
+    let mut manifests = owner.manifests()?;
+    let manifest = manifests.remove(0);
+    let peers =
+        (!manifests.is_empty()).then_some(flare_helios::execution::RankPeers::Threads(manifests));
     let bootstrap = Bootstrap::load::<Qwen4Exp>(&config.to_string(), &manifest)?;
     phase.finish(format!(
         "{} token vocabulary",
@@ -90,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bootstrap.frontend,
             bootstrap.images,
             bootstrap.server,
-            None,
+            peers,
         )
     } {
         Ok(server) => server,

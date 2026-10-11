@@ -47,7 +47,7 @@ then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
 
 ```
 ignition run     [MODEL] [flags]     cache a runtime package and launch Flare
-ignition export  [MODEL] --output DIR [flags]  prepare a native TP1 runtime package
+ignition export  [MODEL] --output DIR [flags]  prepare per-rank native resource bundles
 ```
 
 Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
@@ -73,7 +73,7 @@ Build the public serving executable, which links the Helios library:
 
 ```sh
 cargo build --release --manifest-path flare/Cargo.toml
-flare/target/release/flare run PACKAGE --device 0 --bind 127.0.0.1:8000
+flare/target/release/flare run PACKAGE --gpus 0 --bind 127.0.0.1:8000
 ```
 
 The native device ordinal follows CUDA's visible device enumeration. Optional
@@ -111,7 +111,7 @@ value; the flag overrides it.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round, 0 through 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | The recipe's count: 3 for Qwen, 5 for GLM |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round, 0 through 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 for Qwen and GLM |
 | `--no-mtp-adaptive-verification` | Verify exactly the draft-token count every round. Only that count's graphs are captured. | Adaptive |
 | `--mtp-graph-budget N` | Most speculative graphs captured across batch sizes, at least one per batch size and at most 56. Small batches and deep drafts are captured first. | 8 |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
@@ -237,12 +237,13 @@ a field in a lil manifest. None is a parameter in Flare.
 ### 5.1 `ignition run`
 
 1. Resolve `MODEL`, discover GPUs through NVML, and derive the memory plan.
-   Package serving requires TP1. Validate the requested listener address.
+   Validate the requested listener address. The selected GPU count determines
+   the number of rank bundles.
 2. Select a package cache entry from the checkpoint, preparation settings,
    dependencies, and preparation sources, holding a lock through publication.
 3. On a cache miss, import `flare_heliopause`, download missing weights, prepare
    the model, export all resources, and close the prepared model. These steps
-   run in Ignition's process. Preparation failures leave no published package.
+   run in one Python process per rank. Preparation failures leave no published package.
    A cache hit skips preparation entirely.
 4. Apply the selected GPU visibility and replace ignition with `flare run PACKAGE`.
    Pass the listener address and an anonymous file descriptor for the API key.
@@ -322,7 +323,7 @@ and each preparation phase with its counts and elapsed time. For example:
 
 ```
 [    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.3s
-[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · up to 3 draft tokens  0.2s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · up to 5 draft tokens  0.2s
 [    OK    ] Inspect checkpoint.  3.6s
 [    OK    ] Load weights.  15.8s
 [    OK    ] Load MTP weights.  1.8s

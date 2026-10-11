@@ -23,7 +23,7 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
     from ignition.recipes.qwen38.state import HybridStateLayout
 
     recipe = QWEN.recipe
-    assert recipe.speculation == Speculation(draft_tokens=3) and recipe.speculative_rows == 7
+    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.speculative_rows == 7
     assert recipe.speculation.adaptive and recipe.history_copy
 
     def layer(speculative_tokens):
@@ -126,7 +126,7 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     config = seen["config"]
     assert seen["compile_decoder"] is compile_forwards and config.compile_decoder is compile_forwards
     assert config.devices == (0,) and config.max_active == concurrency and config.mtp
-    assert (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4), None)
+    assert (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
     assert (config.speculative_graph_budget, config.speculative_proposal_source, config.history_drafts) == (
         8, "mtp", False)
     # Pages fill the free memory measured after capture, at least the plan's minimum.
@@ -170,7 +170,7 @@ def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
 def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
-                        lambda snapshot, config, prepare, *, progress: seen.append((config, prepare)) or "group")
+                        lambda snapshot, config, prepare, *, progress, package_storage=None: seen.append((config, prepare)) or "group")
     from ignition.recipes.glm53 import bootstrap as glm
     from ignition.recipes.qwen38 import bootstrap as qwen
 

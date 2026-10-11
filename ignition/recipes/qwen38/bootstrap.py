@@ -93,7 +93,7 @@ class PreparationConfig:
     kernel_cache: Path | None = None
     mtp: bool = False
     speculative_proposal_source: str = "mtp"
-    speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
+    speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
     speculative_graph_budget: int = 8
     history_drafts: bool = False
@@ -178,9 +178,9 @@ def _identity(manifest, world_size=1):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def prepare_rank(snapshot, config, *, rank, group, progress=None):
+def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storage=None):
     return prepare_model(snapshot, config, progress=progress, compile_decoder=config.compile_decoder,
-                         rank=rank, group=group)
+                         rank=rank, group=group, package_storage=package_storage)
 
 
 @torch.no_grad()
@@ -220,8 +220,9 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     table = MappedPLETable.load(manifest, device, progress=progress, shard=shard, **host_storage)
     sample_rows = max(batch * width for batch, width in config.speculative_shapes) if config.mtp else config.request_capacity
     coordinator = CollectivePreparation(group) if group is not None else None
-    collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560) if group is not None else None
-    vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320) if group is not None else None
+    ipc = None if package_storage is None else package_storage.peer_storage
+    collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560, ipc=ipc) if group is not None else None
+    vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc) if group is not None else None
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size})

@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    os::unix::net::UnixStream,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -185,7 +184,7 @@ impl<M: ModelContract> ModelRuntime<M> {
         queue_capacity: usize,
         event_capacity: usize,
         frontend: Arc<crate::frontend::Frontend>,
-        peers: Option<Vec<UnixStream>>,
+        peers: Option<crate::execution::RankPeers>,
     ) -> Result<Self> {
         crate::model::catalog::validate::<M>(&config, &manifest)?;
         super::observation::initialize_clock();

@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
         return subparser
 
     running = command("run", serve.run, "cache a runtime package and launch Flare")
-    exporting = command("export", serve.export, "prepare a native TP1 runtime package")
+    exporting = command("export", serve.export, "prepare per-rank native resource bundles")
     exporting.add_argument("--output", type=Path, required=True, metavar="DIR",
                            help="destination package directory; must not already exist")
     for preparing in (running, exporting):

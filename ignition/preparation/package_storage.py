@@ -27,9 +27,12 @@ class PackageStorage:
     HOST_BASE = 0x100000000000
     RESERVATION_BYTES = 1 << 40
 
-    def __init__(self):
+    def __init__(self, *, rank=0, world=1, device=0):
         import torch
 
+        self.rank, self.world, self.device = rank, world, device
+        self.DEVICE_BASE += rank * self.RESERVATION_BYTES
+        self.HOST_BASE += rank * self.RESERVATION_BYTES
         self.cuda = _Cuda()
         from flare_heliopause import flare_heliopause as native
 
@@ -38,14 +41,19 @@ class PackageStorage:
         self.library = C.CDLL(native.__file__)
         self.library.flare_package_error.restype = C.c_char_p
         self.library.flare_package_snapshot.restype = C.c_void_p
-        if self.library.flare_package_initialize():
+        if self.library.flare_package_initialize(rank, world, device):
             raise self.error or RuntimeError("cannot initialize native package allocator")
         self.granularity = self._snapshot()["granularity"]
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
         self.pool = torch.cuda.MemPool(allocator.allocator())
         self.graph_pool = torch.cuda.MemPool(allocator.allocator())
-        self._scope = torch.cuda.use_mem_pool(self.pool, device=0)
+        self._scope = torch.cuda.use_mem_pool(self.pool, device=device)
+        self.peer_storage = None
+        if world > 1:
+            from .peer_storage import PeerStorage
+
+            self.peer_storage = PeerStorage(self)
 
     def _snapshot(self):
         pointer = self.library.flare_package_snapshot()
@@ -71,7 +79,7 @@ class PackageStorage:
         extent = (size + 4095) // 4096 * 4096
         if self._host_cursor + extent > self.HOST_BASE + self.RESERVATION_BYTES:
             raise MemoryError("native package host-address range exhausted")
-        region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype)
+        region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype, self.device)
         self._host_cursor += extent
         self.host_regions.append(region)
         return region
@@ -86,7 +94,7 @@ class PackageStorage:
             raise RuntimeError("native package allocator failed") from self.error
 
 class HostRegion:
-    def __init__(self, cuda, address, extent, shape, dtype):
+    def __init__(self, cuda, address, extent, shape, dtype, device):
         import torch
         from b12x.sequence._shared.disk_table import _tensor_from_pointer
 
@@ -111,7 +119,7 @@ class HostRegion:
             if gpu.value != address:
                 raise RuntimeError("mapped host storage requires identical CPU and CUDA addresses")
             views = [_tensor_from_pointer(address, shape=shape, dtype=dtype, device=device, nbytes=self.nbytes)
-                     for device in (torch.device("cpu"), torch.device("cuda", 0))]
+                     for device in (torch.device("cpu"), torch.device("cuda", device))]
             self.host_view, self.device_view = views
         except BaseException:
             self.close()

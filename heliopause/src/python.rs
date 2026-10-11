@@ -637,7 +637,7 @@ impl NativeServer {
                             bootstrap.frontend,
                             bootstrap.images,
                             bootstrap.server,
-                            peers,
+                            peers.map(crate::execution::RankPeers::Processes),
                         )
                         .map(ModelServer::Qwen)
                     }
@@ -648,7 +648,7 @@ impl NativeServer {
                             bootstrap.frontend,
                             bootstrap.images,
                             bootstrap.server,
-                            peers,
+                            peers.map(crate::execution::RankPeers::Processes),
                         )
                         .map(ModelServer::Glm)
                     }

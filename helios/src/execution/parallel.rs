@@ -282,9 +282,12 @@ impl Drop for TensorParallelExecutor {
     }
 }
 
-fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()> {
+pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()> {
     if root.fence != peer.fence || root.graph_index != peer.graph_index {
         return Err(invalid("rank completion identity differs"));
+    }
+    if root.records.len() != peer.records.len() {
+        return Err(invalid("rank completion record counts differ"));
     }
     for (root, peer) in root.records.iter().zip(peer.records.iter()) {
         if root.generation != peer.generation

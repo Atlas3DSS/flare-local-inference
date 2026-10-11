@@ -2,9 +2,11 @@
 
 pub mod driver;
 mod format;
+mod model;
 mod payload;
 mod protobuf;
 mod serving;
+pub use model::NativeModel;
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -13,7 +15,10 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
-use crate::{BufferSpan, GraphBundle, Result, startup::StartupProgress};
+use crate::{
+    BufferSpan, GraphBundle, Result,
+    startup::{Phase, StartupProgress},
+};
 use driver::{
     Access, AllocationProperties, CopyEndpoint, CopyParams, Driver, Handle, KernelParams, Location,
     MemsetParams, TensorMap,
@@ -36,12 +41,17 @@ pub struct NativeResources {
     device: i32,
     allocations: HashMap<String, Storage>,
     modules: Vec<Handle>,
+    functions: Vec<Handle>,
     templates: Vec<Handle>,
     executables: Vec<Handle>,
     names: Vec<String>,
     reservations: Vec<(u64, usize)>,
     execution: Option<protobuf::wire::Execution>,
 }
+
+// SAFETY: CUDA contexts may move between threads. Resource operations bind the
+// owning context, and mutable ownership serializes loading and destruction.
+unsafe impl Send for NativeResources {}
 
 impl NativeResources {
     /// Load compiled code and persistent storage, then bind and instantiate graphs.
@@ -51,26 +61,24 @@ impl NativeResources {
     /// CUDA's memory and execution contracts, including any mapped host access.
     /// This method makes the owner's context current on the calling thread.
     pub unsafe fn load(path: impl AsRef<Path>, ordinal: i32) -> Result<Self> {
-        // SAFETY: The caller supplies the same trusted-package contract.
-        unsafe { Self::load_with_progress(path, ordinal, &StartupProgress::silent()) }
-    }
-
-    /// Load a model while reporting memory, kernel, and execution preparation.
-    ///
-    /// # Safety
-    /// The package must satisfy the trust and lifetime requirements of [`Self::load`].
-    pub unsafe fn load_with_progress(
-        path: impl AsRef<Path>,
-        ordinal: i32,
-        progress: &StartupProgress,
-    ) -> Result<Self> {
-        let phase = progress.phase("Prepare model", None);
         let path = path.as_ref();
         let bytes = fs::read(path.join("package.pb")).map_err(|e| e.to_string())?;
         let package = protobuf::decode(&bytes)?;
         package.validate()?;
-        phase.finish("validated");
-        let phase = progress.phase("Initialize GPU", None);
+        let phase = StartupProgress::silent().phase("Load model", None);
+        let mut owner = unsafe { Self::initialize(&package, ordinal)? };
+        unsafe {
+            owner.reserve(&package)?;
+            owner.allocate(&package, &phase)?;
+            owner.load_payload(path, &package, &phase, 1)?;
+            owner.prepare_kernels(path, &package, &phase)?;
+            owner.prepare_graphs(&package, &phase)?;
+        }
+        phase.finish("");
+        Ok(owner)
+    }
+
+    unsafe fn initialize(package: &Package, ordinal: i32) -> Result<Self> {
         let driver = Arc::new(Driver::load()?);
         // SAFETY: Driver signatures are checked against cuda.h; output storage is
         // valid, and CUDA initialization precedes all context/resource operations.
@@ -93,23 +101,19 @@ impl NativeResources {
                 "cuCtxCreate_v2",
                 (driver.context_create)(&mut context, package.context.flags, device),
             )?;
-            let mut owner = Self {
+            let owner = Self {
                 driver,
                 context,
                 device,
                 allocations: HashMap::new(),
                 modules: vec![],
+                functions: vec![],
                 templates: vec![],
                 executables: vec![],
                 names: vec![],
                 reservations: vec![],
                 execution: package.execution.clone(),
             };
-            phase.finish(format!(
-                "GPU {ordinal} · SM{}{}",
-                package.architecture[0], package.architecture[1]
-            ));
-            owner.populate(path, &package, progress)?;
             Ok(owner)
         }
     }
@@ -145,20 +149,34 @@ impl NativeResources {
         Ok(data)
     }
 
-    unsafe fn populate(
-        &mut self,
-        root: &Path,
-        package: &Package,
-        progress: &StartupProgress,
-    ) -> Result<()> {
+    unsafe fn reserve(&mut self, package: &Package) -> Result<()> {
+        let driver = &self.driver;
+        unsafe {
+            driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
+            for reservation in &package.reservations {
+                let mut address = 0;
+                driver.check(
+                    "cuMemAddressReserve",
+                    (driver.reserve)(&mut address, reservation.nbytes, 0, reservation.address, 0),
+                )?;
+                self.reservations.push((address, reservation.nbytes));
+                if address != reservation.address {
+                    return Err(invalid(format!(
+                        "CUDA address collision: requested {:#x}, reserved {address:#x}",
+                        reservation.address
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn allocate(&mut self, package: &Package, phase: &Phase) -> Result<()> {
         let driver = self.driver.clone();
-        let bytes = package.allocations.iter().fold(0u64, |total, allocation| {
-            total.saturating_add(allocation.nbytes as u64)
-        });
-        let phase = progress.phase("Allocate model memory", Some(bytes));
         // SAFETY: Package validation bounds all indexes and relocation fields.
         // Every CUDA resource is immediately retained by self for error cleanup.
         unsafe {
+            driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
             let footprint = package
                 .allocations
                 .iter()
@@ -187,20 +205,6 @@ impl NativeResources {
                 "cuCtxSetCacheConfig",
                 (driver.context_cache)(package.context.cache),
             )?;
-            for reservation in &package.reservations {
-                let mut address = 0;
-                driver.check(
-                    "cuMemAddressReserve",
-                    (driver.reserve)(&mut address, reservation.nbytes, 0, reservation.address, 0),
-                )?;
-                self.reservations.push((address, reservation.nbytes));
-                if address != reservation.address {
-                    return Err(invalid(format!(
-                        "CUDA address collision: requested {:#x}, reserved {address:#x}",
-                        reservation.address
-                    )));
-                }
-            }
             for allocation in &package.allocations {
                 let mut base = 0;
                 let size = allocation.nbytes + allocation.alignment - 1;
@@ -311,22 +315,21 @@ impl NativeResources {
                 phase.advance(allocation.nbytes as u64);
             }
             driver.check("cuCtxSynchronize", (driver.context_sync)())?;
-            phase.finish(format!(
-                "{:.1} GiB GPU · {:.1} GiB host",
-                footprint as f64 / (1u64 << 30) as f64,
-                (bytes - footprint as u64) as f64 / (1u64 << 30) as f64
-            ));
-            let payload = package
-                .allocations
-                .iter()
-                .map(|allocation| allocation.stored_bytes() as u64)
-                .sum::<u64>();
-            let phase = progress.phase("Load weights", Some(payload));
-            phase.detail(format!(
-                "0.0 / {:.1} GiB",
-                payload as f64 / (1u64 << 30) as f64
-            ));
-            payload::load(self, root, package, &phase)?;
+        }
+        Ok(())
+    }
+
+    unsafe fn load_payload(
+        &mut self,
+        root: &Path,
+        package: &Package,
+        phase: &Phase,
+        ranks: usize,
+    ) -> Result<()> {
+        let driver = self.driver.clone();
+        unsafe {
+            driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
+            payload::load(self, root, package, phase, ranks)?;
             for allocation in &package.allocations {
                 for relocation in &allocation.relocations {
                     let address =
@@ -343,11 +346,19 @@ impl NativeResources {
                     )?;
                 }
             }
-            phase.finish(format!("{:.1} GiB", payload as f64 / (1u64 << 30) as f64));
-            let phase = progress.phase(
-                "Prepare kernels",
-                Some((package.modules.len() + package.functions.len()) as u64),
-            );
+        }
+        Ok(())
+    }
+
+    unsafe fn prepare_kernels(
+        &mut self,
+        root: &Path,
+        package: &Package,
+        phase: &Phase,
+    ) -> Result<()> {
+        let driver = self.driver.clone();
+        unsafe {
+            driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
             let mut modules = HashMap::new();
             for module in &package.modules {
                 let image = fs::read(root.join(&module.file)).map_err(|e| e.to_string())?;
@@ -386,7 +397,6 @@ impl NativeResources {
                 }
                 phase.advance(1);
             }
-            let mut functions = Vec::new();
             for function in &package.functions {
                 let symbol = CString::new(function.symbol.as_str()).unwrap();
                 let mut handle = null_mut();
@@ -424,16 +434,17 @@ impl NativeResources {
                         (driver.function_attribute)(handle, *attribute, *value),
                     )?;
                 }
-                functions.push(handle);
+                self.functions.push(handle);
                 phase.advance(1);
             }
-            phase.finish(format!("{} kernels", functions.len()));
-            let nodes = package
-                .graphs
-                .iter()
-                .map(|graph| graph.nodes.len() as u64 + 1)
-                .sum();
-            let phase = progress.phase("Prepare execution", Some(nodes));
+        }
+        Ok(())
+    }
+
+    unsafe fn prepare_graphs(&mut self, package: &Package, phase: &Phase) -> Result<()> {
+        let driver = self.driver.clone();
+        unsafe {
+            driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
             for graph in &package.graphs {
                 let mut handle = null_mut();
                 driver.check("cuGraphCreate", (driver.graph_create)(&mut handle, 0))?;
@@ -457,7 +468,7 @@ impl NativeResources {
                             let mut pointers: Vec<_> =
                                 storage.iter_mut().map(|a| a.as_mut_ptr().cast()).collect();
                             let params = KernelParams {
-                                function: functions[*function],
+                                function: self.functions[*function],
                                 grid: *grid,
                                 block: *block,
                                 shared: *shared,
@@ -583,14 +594,6 @@ impl NativeResources {
                 phase.advance(1);
             }
             driver.check("cuCtxSynchronize", (driver.context_sync)())?;
-            phase.finish(
-                package
-                    .execution
-                    .as_ref()
-                    .map(|execution| execution.max_active)
-                    .map(|capacity| format!("concurrency {capacity}"))
-                    .unwrap_or_default(),
-            );
         }
         Ok(())
     }
