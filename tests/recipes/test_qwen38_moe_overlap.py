@@ -42,7 +42,7 @@ def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
     input_copy = torch.empty_like(source)
     output_copy = torch.empty_like(source)
     shared_copy = torch.empty_like(source)
-    with PreparationSession(device="cuda:0", autotune=False, compile_workers=0) as session:
+    with PreparationSession(device="cuda:0", autotune=True, compile_workers=0) as session:
         moe = PreparedQwenMoe(input_copy, weights, session=session, name="overlap",
                               workspace=arena, projection_workspace=arena)
         arena.freeze()

@@ -137,7 +137,7 @@ class PreparedSharedExpert(PreparedMLP):
         self.scratch = scratch
         super().__init__(source, MLPWeights(weights.gate_up, weights.down), self.gate_up,
             self.intermediate, self.projected, session=session, name=name,
-            workspace=projection_workspace, activation_mode="quantized")
+            workspace=projection_workspace, activation_mode="auto")
         self.output = scratch.output
         self.gate_projection = UnquantizedProjection(source, weights.gate, self.gate_logits,
             session=session, name=f"{name}.shared_gate")

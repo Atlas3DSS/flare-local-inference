@@ -11,9 +11,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 from b12x.preparation import PreparationSession
+from b12x.preparation.types import require_prepared
 
 from flare.components.linear import UnquantizedProjection
 from flare.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
+from flare.components.parallel import TensorParallelShard
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.preparation.qwen38 import TEXT_PREFIX
@@ -28,7 +30,9 @@ from flare.recipes.qwen38.moe import (
 from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
 from flare.reference.qwen38_quant import (
     CheckpointTensors,
+    decode_mxfp8,
     mxfp8_linear_reference,
+    quantize_mxfp8_activation,
     nvfp4_expert_reference,
     read_nvfp4_projection,
 )
@@ -65,11 +69,12 @@ def _assert_values(actual, expected):
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 16])
-def test_actual_router_and_shared_expert_graph(manifest, tokens):
+@pytest.mark.parametrize("world", [1, 2])
+def test_actual_router_and_shared_expert_graph(manifest, tokens, world):
     prefix = f"{TEXT_PREFIX}.layers.0.mlp"
     with torch.no_grad(), QwenWeightLoader(manifest, "cuda:0", prefixes=(
         f"{prefix}.gate.", f"{prefix}.shared_expert.", f"{prefix}.shared_expert_gate.",
-    )) as loader:
+    ), shard=TensorParallelShard(0, world)) as loader:
         weights = SharedExpertWeights.load(loader, 0)
         router_weight = loader.load_tensor(f"{prefix}.gate.weight")
     with CheckpointTensors(manifest, byte_budget=16 << 20) as reader:
@@ -82,11 +87,21 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens):
     source = torch.zeros((tokens, 2560), dtype=torch.bfloat16, device="cuda")
     logits = torch.zeros((tokens, 512), dtype=torch.bfloat16, device="cuda")
     route = RouterScratch.allocate(tokens, source.device, experts=512, top_k=10)
-    with torch.no_grad(), PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+    with torch.no_grad(), PreparationSession(device=source.device, autotune=True, compile_workers=0) as session:
         shared = PreparedSharedExpert(source, weights, session=session, name=f"shared:{tokens}")
         router = UnquantizedProjection(source, router_weight, logits, session=session, name=f"router:{tokens}")
         routing = PreparedRouter(logits, route, session=session, name=f"route:{tokens}")
         session.freeze()
+
+        def project(values, name, projection):
+            decoded = decode_mxfp8(*reference_weights[name])
+            if name == "down_proj":
+                decoded = decoded[:, :640 // world]
+            else:
+                decoded = decoded[:640 // world]
+            mode = require_prepared(projection.plan, projection.plan.contract.component_id).config.mode
+            inputs = quantize_mxfp8_activation(values) if mode == "quantized" else values.float()
+            return (inputs @ decoded.T).to(torch.bfloat16)
 
         def run():
             shared(source)
@@ -106,10 +121,10 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens):
             graph.replay()
             torch.cuda.synchronize()
             assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
-            gate, up = (mxfp8_linear_reference(cpu_source, *reference_weights[name]).to(torch.bfloat16)
+            gate, up = (project(cpu_source, name, shared.up_projection)
                         for name in ("gate_proj", "up_proj"))
             intermediate = F.silu(gate) * up
-            projected = mxfp8_linear_reference(intermediate, *reference_weights["down_proj"]).to(torch.bfloat16)
+            projected = project(intermediate, "down_proj", shared.down_projection)
             shared_gate = torch.sigmoid(F.linear(cpu_source, reference_gate))
             expected = projected * shared_gate
             metrics = _assert_values(shared.output, expected)
