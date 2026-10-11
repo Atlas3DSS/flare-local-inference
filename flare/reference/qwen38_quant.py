@@ -8,9 +8,9 @@ include activation quantization. They never expand a complete model or PLE table
 
 from __future__ import annotations
 
+import math
 from contextlib import ExitStack
 from dataclasses import dataclass
-import math
 
 import torch
 import torch.nn.functional as F
@@ -260,13 +260,21 @@ def quantize_nvfp4_activation(values: torch.Tensor, input_scale: torch.Tensor) -
     return _nvfp4_activation_unscaled(values, input_scale) * input_scale.reshape(())
 
 
-def _nvfp4_activation_unscaled(values, input_scale):
+def _nvfp4_activation_unscaled(values, input_scale, *, scale_math="micro"):
     if values.ndim == 0 or values.shape[-1] % 16:
         raise ValueError("NVFP4 activations require a last dimension divisible by 16")
     if values.device != input_scale.device:
         raise ValueError("activation and input_scale must be on the same device")
     global_scale = _positive_scalar(input_scale, "input_scale")
     _finite(values, "NVFP4 activations")
+    if scale_math != "micro":
+        from b12x.moe._shared.kernels.reference import _quantize_vec_to_fp4_dequant
+
+        return torch.stack([
+            _quantize_vec_to_fp4_dequant(row.float(), global_scale.reciprocal().item(),
+                block_size=16, fp8_e4m3_max=448, scale_math=scale_math)
+            for row in values.reshape(-1, values.shape[-1])
+        ]).reshape(values.shape)
     groups = values.float().reshape(*values.shape[:-1], -1, 16)
     inverse_global = global_scale.reciprocal()
     raw_scale = (
@@ -327,7 +335,9 @@ def read_nvfp4_projection(reader: CheckpointTensors, prefix: str) -> Nvfp4Projec
     return Nvfp4Projection(packed, scales, reader.read(f"{prefix}.weight_scale_2"), input_scale)
 
 
-def nvfp4_linear_reference(values: torch.Tensor, projection: Nvfp4Projection) -> torch.Tensor:
+def nvfp4_linear_reference(
+    values: torch.Tensor, projection: Nvfp4Projection, *, quant_scale_math="micro"
+) -> torch.Tensor:
     """FP32 projection with checkpoint-prescribed W4A4 or W4A16 arithmetic."""
     global_scale = _positive_scalar(projection.weight_scale_2, "weight_scale_2")
     weight = decode_nvfp4(projection.packed, projection.scales, torch.ones_like(global_scale))
@@ -338,7 +348,7 @@ def nvfp4_linear_reference(values: torch.Tensor, projection: Nvfp4Projection) ->
         weight = weight.to(torch.bfloat16).float()
         alpha = global_scale
     else:
-        inputs = _nvfp4_activation_unscaled(values, projection.input_scale)
+        inputs = _nvfp4_activation_unscaled(values, projection.input_scale, scale_math=quant_scale_math)
         alpha = global_scale / projection.input_scale.reshape(()).reciprocal()
     return (inputs @ weight.T) * alpha
 
@@ -362,16 +372,18 @@ class ExpertTrace:
 
 
 def nvfp4_expert_reference(
-    values: torch.Tensor, gate: Nvfp4Projection, up: Nvfp4Projection, down: Nvfp4Projection
+    values: torch.Tensor, gate: Nvfp4Projection, up: Nvfp4Projection, down: Nvfp4Projection,
+    *, quant_scale_math="micro",
 ) -> ExpertTrace:
     """Single-expert projections with BF16 SwiGLU, before router/reduction rounding."""
     if any(projection.input_scale is None for projection in (gate, up, down)):
         raise ValueError("NVFP4 expert reference requires all three activation scales")
-    gate_output = nvfp4_linear_reference(values, gate)
-    up_output = nvfp4_linear_reference(values, up)
+    gate_output = nvfp4_linear_reference(values, gate, quant_scale_math=quant_scale_math)
+    up_output = nvfp4_linear_reference(values, up, quant_scale_math=quant_scale_math)
     intermediate = (F.silu(gate_output) * up_output).to(torch.bfloat16)
     return ExpertTrace(
-        gate_output, up_output, intermediate, nvfp4_linear_reference(intermediate, down)
+        gate_output, up_output, intermediate,
+        nvfp4_linear_reference(intermediate, down, quant_scale_math=quant_scale_math)
     )
 
 

@@ -6,6 +6,7 @@ import json
 import os
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -31,9 +32,8 @@ from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale
 from flare.reference.qwen38_quant import (
     CheckpointTensors,
     decode_mxfp8,
-    mxfp8_linear_reference,
-    quantize_mxfp8_activation,
     nvfp4_expert_reference,
+    quantize_mxfp8_activation,
     read_nvfp4_projection,
 )
 
@@ -68,9 +68,37 @@ def _assert_values(actual, expected):
     return metrics
 
 
+def _quant_scale_math(experts):
+    binding = experts.binding
+    if binding.implementation == "micro":
+        return "micro"
+    assert binding.implementation == "dynamic"
+    return "dynamic_fast" if binding.fast_math else "dynamic_precise"
+
+
+@torch.no_grad()
+def test_compiled_shared_gate_preserves_bf16_rounding():
+    from flare.preparation.compilation import compile_forward
+
+    gates = torch.arange(65536, device="cuda", dtype=torch.int32).to(torch.int16).view(torch.bfloat16)
+    gates = gates[torch.isfinite(gates)].view(-1, 1)
+    projected = torch.randn(gates.shape[0], 16, device="cuda", dtype=torch.bfloat16,
+                            generator=torch.Generator(device="cuda").manual_seed(581))
+    output = torch.empty_like(projected)
+    shared = SimpleNamespace(gate_logits=gates, projected=projected, output=output)
+
+    def finish():
+        return PreparedSharedExpert.finish(shared)
+
+    expected = projected * torch.sigmoid(gates)
+    compile_forward(finish)()
+    torch.testing.assert_close(output.view(torch.int16), expected.view(torch.int16), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("tokens", [1, 4, 16])
 @pytest.mark.parametrize("world", [1, 2])
-def test_actual_router_and_shared_expert_graph(manifest, tokens, world):
+@pytest.mark.parametrize("compiled", [False, True])
+def test_actual_router_and_shared_expert_graph(manifest, tokens, world, compiled):
     prefix = f"{TEXT_PREFIX}.layers.0.mlp"
     with torch.no_grad(), QwenWeightLoader(manifest, "cuda:0", prefixes=(
         f"{prefix}.gate.", f"{prefix}.shared_expert.", f"{prefix}.shared_expert_gate.",
@@ -109,6 +137,12 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens, world):
             routing(logits)
 
         run()
+        if compiled:
+            from flare.preparation.compilation import compile_forward
+
+            run = compile_forward(run)
+            run()
+            torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             run()
@@ -154,12 +188,13 @@ def test_actual_two_expert_component_reduction_graph(manifest, tokens):
     route = RouterScratch.allocate(tokens, source.device, experts=2, top_k=2)
     output = torch.empty_like(source)
     with torch.inference_mode(), PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+        routing = PreparedRouter(logits, route, session=session, name=f"two_experts:{tokens}.route")
         prepared = PreparedRoutedExperts(source, experts, route.ids, route.weights, output,
                                         session=session, name=f"two_experts:{tokens}")
         session.freeze()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            route.route(logits)
+            routing(logits)
             prepared()
         generator = torch.Generator().manual_seed(63)
         for iteration in range(2):
@@ -177,7 +212,8 @@ def test_actual_two_expert_component_reduction_graph(manifest, tokens):
             native_sum = torch.zeros_like(cpu_source, dtype=torch.float32)
             canonical_sum = torch.zeros_like(cpu_source)
             for expert in range(2):
-                down = nvfp4_expert_reference(cpu_source, *projections[expert]).down
+                down = nvfp4_expert_reference(cpu_source, *projections[expert],
+                    quant_scale_math=_quant_scale_math(prepared)).down
                 route_index = (cpu_ids == expert).to(torch.int64).argmax(-1, keepdim=True)
                 probability = cpu_weights.gather(1, route_index)
                 native_sum += down * probability
@@ -194,7 +230,7 @@ def test_actual_two_expert_component_reduction_graph(manifest, tokens):
 def complete_layer(manifest):
     prefix = f"{TEXT_PREFIX}.layers.0.mlp"
     scratch = allocate_expert_scale_scratch("cuda:0")
-    with torch.inference_mode(), QwenWeightLoader(manifest, "cuda:0", prefixes=(prefix + ".",)) as loader:
+    with torch.no_grad(), QwenWeightLoader(manifest, "cuda:0", prefixes=(prefix + ".",)) as loader:
         weights = QwenMoeWeights.load(loader, 0, scale_scratch=scratch)
         assert loader._session.torch_copy_bytes == 0
     assert weights.experts.num_experts == 512
@@ -230,6 +266,7 @@ def test_actual_complete_layer_512_experts_graph(manifest, complete_layer, token
             for projection in (operator.shared.up_projection, operator.shared.down_projection):
                 assert projection.workspace.data_ptr() == workspace.tensor.data_ptr()
         first_output = torch.empty_like(source)
+        first_shared = torch.empty_like(source)
         session.freeze()
         prepared(source)
         graph = torch.cuda.CUDAGraph()
@@ -237,6 +274,7 @@ def test_actual_complete_layer_512_experts_graph(manifest, complete_layer, token
             workspace.tensor.fill_(0xA5)
             prepared(source)
             first_output.copy_(prepared.output)
+            first_shared.copy_(prepared.shared.output)
             workspace.tensor.fill_(0x5A)
             repeated(source)
         bundle = PreparedGraphBundle(device=0, graphs={"qwen_moe": graph},
@@ -257,13 +295,17 @@ def test_actual_complete_layer_512_experts_graph(manifest, complete_layer, token
             completion = worker.poll(timeout_ms=30000)
             assert completion is not None and completion.ticket == ticket and completion.error is None
             assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
-            assert torch.equal(first_output, repeated.output)
+            torch.testing.assert_close(first_shared, repeated.shared.output, rtol=0, atol=0)
             cpu_ids = prepared.router.ids.cpu()
             cpu_probabilities = prepared.router.weights.cpu()
             canonical_logits = F.linear(source, weights.router)
-            canonical_probabilities = torch.softmax(canonical_logits, dim=-1, dtype=torch.float32)
-            _, canonical_ids = torch.topk(canonical_probabilities, 10, dim=-1)
-            assert torch.equal(prepared.router.ids, canonical_ids), "prepared router changed canonical selected experts"
+            torch.testing.assert_close(prepared.router_logits, canonical_logits, rtol=.01, atol=.001)
+            canonical_ids = 511 - torch.argsort(
+                prepared.router_logits.flip(-1), dim=-1, descending=True, stable=True)[:, :10]
+            assert torch.equal(prepared.router.ids, canonical_ids)
+            canonical_probabilities = torch.softmax(
+                prepared.router_logits.float().gather(1, canonical_ids), dim=-1)
+            torch.testing.assert_close(prepared.router.weights, canonical_probabilities, rtol=2e-6, atol=1e-7)
             native_sum = torch.zeros_like(cpu_source, dtype=torch.float32)
             canonical_sum = torch.zeros_like(cpu_source)
             with CheckpointTensors(manifest, byte_budget=512 << 20) as reader:
@@ -271,19 +313,26 @@ def test_actual_complete_layer_512_experts_graph(manifest, complete_layer, token
                     rows, slots = (cpu_ids == expert).nonzero(as_tuple=True)
                     projections = tuple(read_nvfp4_projection(reader, f"{prefix}.{expert}.{name}")
                                         for name in ("gate_proj", "up_proj", "down_proj"))
-                    down = nvfp4_expert_reference(cpu_source[rows], *projections).down
+                    down = nvfp4_expert_reference(cpu_source[rows], *projections,
+                        quant_scale_math=_quant_scale_math(prepared.experts)).down
                     probability = cpu_probabilities[rows, slots, None]
                     native_sum[rows] += down * probability
                     canonical_sum[rows] += down.to(torch.bfloat16) * probability.to(torch.bfloat16)
                 read_bytes = reader.bytes_read
-            gate, up = (mxfp8_linear_reference(cpu_source, *shared_weights[name]).to(torch.bfloat16)
+            def project(values, name, projection):
+                mode = require_prepared(projection.plan, projection.plan.contract.component_id).config.mode
+                inputs = quantize_mxfp8_activation(values) if mode == "quantized" else values.float()
+                return (inputs @ decode_mxfp8(*shared_weights[name]).T).to(torch.bfloat16)
+
+            gate, up = (project(cpu_source, name, prepared.shared.up_projection)
                         for name in ("gate_proj", "up_proj"))
             intermediate = F.silu(gate) * up
-            shared = mxfp8_linear_reference(intermediate, *shared_weights["down_proj"]).to(torch.bfloat16)
+            shared = project(intermediate, "down_proj", prepared.shared.down_projection)
             shared *= torch.sigmoid(F.linear(cpu_source, shared_gate))
             expected_native = native_sum.to(torch.bfloat16) + shared
             expected_canonical = canonical_sum + shared
             metrics = _assert_values(prepared.output, expected_native)
+            _assert_values(first_output, expected_native)
             canonical_metrics = _metrics(prepared.output, expected_canonical)
             assert canonical_metrics["relative_l2_error"] < .015, canonical_metrics
             print(json.dumps({"component": "actual_layer0_512_experts_top10", "tokens": tokens,

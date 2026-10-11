@@ -34,7 +34,7 @@ def weights(request):
         return QwenMoeWeights.load(loader, 0, scale_scratch=scales), scales
 
 
-@pytest.mark.parametrize("rows", [1, 2, 8])
+@pytest.mark.parametrize("rows", [1, 2, 4, 8])
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
 def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):

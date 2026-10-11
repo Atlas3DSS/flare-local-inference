@@ -63,7 +63,6 @@ class SharedExpertScratch:
     intermediate: torch.Tensor
     projected: torch.Tensor
     gate_logits: torch.Tensor
-    gate_probability: torch.Tensor
     output: torch.Tensor
 
     @classmethod
@@ -71,7 +70,7 @@ class SharedExpertScratch:
         if tokens <= 0:
             raise ValueError("shared expert capacity must be positive")
         return cls(*(torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
-                     for width in (2 * intermediate, intermediate, 2560, 1, 1, 2560)))
+                     for width in (2 * intermediate, intermediate, 2560, 1, 2560)))
 
     def rows(self, tokens: int) -> SharedExpertScratch:
         if not 0 < tokens <= self.gate_up.shape[0]:
@@ -130,7 +129,7 @@ class PreparedSharedExpert(PreparedMLP):
             raise ValueError("shared expert gate must have geometry [1, 2560]")
         tokens, device = source.shape[0], source.device
         scratch = SharedExpertScratch.allocate(tokens, device, intermediate=intermediate) if scratch is None else scratch.rows(tokens)
-        for field, width in zip(scratch.__dataclass_fields__, (2 * intermediate, intermediate, 2560, 1, 1, 2560), strict=True):
+        for field, width in zip(scratch.__dataclass_fields__, (2 * intermediate, intermediate, 2560, 1, 2560), strict=True):
             tensor = getattr(scratch, field)
             if tensor.shape != (tokens, width) or tensor.dtype != torch.bfloat16 or tensor.device != device or not tensor.is_contiguous():
                 raise ValueError(f"shared expert {field} requires contiguous BF16 [{tokens}, {width}] on {device}")
@@ -149,8 +148,7 @@ class PreparedSharedExpert(PreparedMLP):
         return self.finish()
 
     def finish(self) -> torch.Tensor:
-        torch.sigmoid(self.gate_logits, out=self.gate_probability)
-        torch.mul(self.projected, self.gate_probability, out=self.output)
+        self.output.copy_(self.projected * torch.sigmoid(self.gate_logits))
         return self.output
 
 
