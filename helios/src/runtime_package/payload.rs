@@ -165,6 +165,7 @@ pub(super) unsafe fn load(
                             let address = match chunk.memory {
                                 Memory::Device => buffers[slot],
                                 Memory::MappedHost => chunk.destination as usize,
+                                Memory::Peer => unreachable!("peer allocations carry no payload"),
                             };
                             // SAFETY: A slot has one reader and is returned only after
                             // its upload event completes. Host chunks are disjoint

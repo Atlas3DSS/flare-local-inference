@@ -43,7 +43,10 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         (
             "page_tables",
             I32,
-            vec![slots, config.limits.max_sequence_tokens / Glm5Next::page_tokens(config)],
+            vec![
+                slots,
+                config.limits.max_sequence_tokens / Glm5Next::page_tokens(config),
+            ],
         ),
         ("sample_enabled", I32, vec![slots]),
         (
@@ -77,7 +80,10 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         buffers.push((
             "draft_page_tables",
             I32,
-            vec![slots, config.limits.max_sequence_tokens / Glm5Next::page_tokens(config)],
+            vec![
+                slots,
+                config.limits.max_sequence_tokens / Glm5Next::page_tokens(config),
+            ],
         ));
     }
     buffers

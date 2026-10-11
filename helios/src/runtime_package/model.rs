@@ -56,7 +56,12 @@ impl NativeModel {
         let mut allocations = Vec::new();
         let mut ranges = Vec::new();
         for package in &mut packages {
-            for allocation in &package.allocations {
+            // Peer allocations name storage another rank owns and are checked against model.pb below.
+            for allocation in package
+                .allocations
+                .iter()
+                .filter(|a| !matches!(a.memory, Memory::Peer))
+            {
                 let address = allocation
                     .address
                     .ok_or_else(|| invalid("model allocations require recorded addresses"))?;
@@ -114,6 +119,24 @@ impl NativeModel {
                 ));
             }
         }
+        for (rank, package) in packages.iter().enumerate() {
+            for allocation in package
+                .allocations
+                .iter()
+                .filter(|a| matches!(a.memory, Memory::Peer))
+            {
+                if !descriptor.peer_memory.iter().any(|peer| {
+                    peer.owner as usize != rank
+                        && Some(peer.address) == allocation.address
+                        && peer.nbytes == allocation.nbytes as u64
+                        && peer.readers.contains(&(rank as u32))
+                }) {
+                    return Err(invalid(
+                        "peer allocation must name another rank's shared memory this rank reads",
+                    ));
+                }
+            }
+        }
         phase.finish(format!(
             "{} rank{}",
             devices.len(),
@@ -155,6 +178,7 @@ impl NativeModel {
                 match allocation.memory {
                     Memory::Device => gpu_bytes += allocation.nbytes as u64,
                     Memory::MappedHost => host_bytes += allocation.nbytes as u64,
+                    Memory::Peer => {}
                 }
                 payload_bytes += allocation.stored_bytes() as u64;
             }

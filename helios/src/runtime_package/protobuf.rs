@@ -111,6 +111,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Package> {
                 memory: match wire::Memory::try_from(v.memory) {
                     Ok(wire::Memory::Device) => Memory::Device,
                     Ok(wire::Memory::MappedHost) => Memory::MappedHost,
+                    Ok(wire::Memory::Peer) => Memory::Peer,
                     Err(_) => return Err(invalid("unknown protobuf memory kind")),
                 },
             })

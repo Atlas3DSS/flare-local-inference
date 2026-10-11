@@ -194,8 +194,11 @@ class RuntimePackage:
                 raise ValueError("allocation alignment must be a satisfied power of two")
             if allocation.initialize not in ("snapshot", "zero"):
                 raise ValueError("allocation initializer must be snapshot or zero")
-            if allocation.memory not in ("device", "mapped_host"):
+            if allocation.memory not in ("device", "mapped_host", "peer"):
                 raise ValueError("unsupported allocation memory type")
+            if allocation.memory == "peer" and (not allocation.preserve_address or allocation.initialize != "zero"
+                                                or allocation.relocations):
+                raise ValueError("peer allocations name another rank's storage at its recorded address")
             if allocation.memory == "mapped_host" and not allocation.preserve_address:
                 raise ValueError("mapped host allocations require a recorded address")
             if allocation.snapshot_spans is not None:
@@ -387,9 +390,12 @@ class RuntimePackage:
                 params = _CopyParams()
                 cuda.call("cuGraphMemcpyNodeGetParams", C.c_void_p(handle), C.byref(params))
                 endpoints = (params.source, params.destination)
+                # Unified endpoints (cudaMemcpyDefault) carry their address in the device field.
                 if params.height != 1 or params.depth != 1 or any(
-                        p.memory_type != 2 or p.y or p.z or p.lod for p in endpoints):
-                    raise ValueError("only contiguous device-to-device graph copies are supported")
+                        p.memory_type not in (2, 4) or p.y or p.z or p.lod
+                        or p.memory_type == 4 and not self._is_device(cuda, p.device) for p in endpoints):
+                    raise ValueError("only contiguous device-to-device graph copies are supported; got memory types "
+                                     f"{[p.memory_type for p in endpoints]}")
                 node = {"kind": "copy", "nbytes": params.width,
                         "source": self._reference(params.source.device + params.source.x, params.width),
                         "destination": self._reference(params.destination.device + params.destination.x, params.width)}
@@ -415,6 +421,12 @@ class RuntimePackage:
         edges = [{"source": indices[a], "destination": indices[b], "data": list(d)}
                  for a, b, d in zip(sources, destinations, data, strict=True)]
         return {"name": name, "nodes": nodes, "edges": edges}
+
+    @staticmethod
+    def _is_device(cuda, address):
+        memory = C.c_int()
+        cuda.call("cuPointerGetAttribute", C.byref(memory), C.c_int(2), C.c_uint64(address))
+        return memory.value == 2
 
     def _kernel(self, cuda, handle):
         params = _KernelParams()
@@ -519,6 +531,10 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
                              alignment=storage.granularity, preserve_address=True)
                    for index, mapping in enumerate(sorted(mappings.values(), key=lambda m: m.address))]
     allocations.extend(_external_allocations(outside, storage.granularity))
+    # Graph copies may address peer mappings; their owners allocate them and model.pb grants access.
+    allocations.extend(Allocation(f"peer-{index}", address, size, alignment=storage.granularity,
+                                  initialize="zero", preserve_address=True, memory="peer")
+                       for index, (address, size) in enumerate(sorted(imports.items())))
     allocations.extend(Allocation(f"host-{index}", region.address, region.extent, alignment=4096,
                                   preserve_address=True, memory="mapped_host")
                        for index, region in enumerate(storage.host_regions) if not region.closed)

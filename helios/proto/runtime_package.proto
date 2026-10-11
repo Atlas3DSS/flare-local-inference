@@ -28,7 +28,9 @@ message Context { uint32 flags = 1; int32 cache = 2; repeated Limit limits = 3; 
 message Limit { uint64 id = 1; uint64 value = 2; }
 message Reservation { uint64 address = 1; uint64 nbytes = 2; }
 message Span { uint64 offset = 1; uint64 nbytes = 2; }
-enum Memory { DEVICE = 0; MAPPED_HOST = 1; }
+// PEER names another rank's device allocation that this rank reads or writes at its recorded
+// address; the owner allocates it and model.pb grants this rank access.
+enum Memory { DEVICE = 0; MAPPED_HOST = 1; PEER = 2; }
 message Allocation {
   string name = 1;
   uint64 nbytes = 2;
