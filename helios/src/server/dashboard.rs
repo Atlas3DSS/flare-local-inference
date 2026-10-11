@@ -41,7 +41,6 @@ const PURPLE: Color = Color::Rgb(191, 157, 245);
 const GOLD: Color = Color::Rgb(244, 196, 112);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "python")]
 pub(super) fn restore_for_exit() {
     if VISIBLE.load(Ordering::Relaxed) {
         let leave = b"\x1b[?1049l";

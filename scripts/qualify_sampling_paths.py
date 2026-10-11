@@ -69,8 +69,8 @@ def load_inputs(receipt_path, artifact_path):
 def cpu_case(artifact, rows, block_steps, policy, *, one_sample=False):
     import torch
 
-    from flare.components.sampling import philox4x32_reference
-    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from ignition.components.sampling import philox4x32_reference
+    from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 
     steps = 1 if one_sample else block_steps
     initial = DeviceRequestState.allocate("cpu")
@@ -148,9 +148,9 @@ class CapturedCase:
     def __init__(self, case, artifact, stream):
         import torch
 
-        from flare.components.sampling import PreparedSampling
-        from flare.components.token_state import PreparedTokenState
-        from flare.recipes.qwen38.sampling import DeviceRequestState
+        from ignition.components.sampling import PreparedSampling
+        from ignition.components.token_state import PreparedTokenState
+        from ignition.recipes.qwen38.sampling import DeviceRequestState
 
         self.case = case
         self.name = case["name"]
@@ -244,16 +244,16 @@ def check_outputs(expected, observed, artifacts, label):
 
 
 def measure(args, artifact, cases, receipt):
-    import flare_helios
+    import flare_heliopause
     import torch
 
-    from flare.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.graphs import PreparedGraphBundle
 
     if not args.gpu_uuid or os.environ.get("CUDA_VISIBLE_DEVICES") != args.gpu_uuid:
         raise ValueError("GPU execution requires --gpu-uuid matching the single assigned CUDA_VISIBLE_DEVICES UUID")
     if not args.gpu_uuid.startswith("GPU-"):
         raise ValueError("GPU selection must use its explicit UUID")
-    package = Path(flare_helios.__file__).resolve()
+    package = Path(flare_heliopause.__file__).resolve()
     extensions = [p for p in package.parent.iterdir() if any(p.name.endswith(s) for s in importlib.machinery.EXTENSION_SUFFIXES)]
     if len(extensions) != 1:
         raise ValueError("cannot identify one native extension")
@@ -368,7 +368,7 @@ def main():
     import importlib.metadata
     import importlib.util
     flashinfer_root = Path(importlib.util.find_spec("flashinfer").origin).resolve().parent
-    source_paths = [Path(__file__).resolve(), ROOT / "flare/recipes/qwen38/sampling.py", ROOT / "flare/preparation/graphs.py", *(
+    source_paths = [Path(__file__).resolve(), ROOT / "ignition/recipes/qwen38/sampling.py", ROOT / "ignition/preparation/graphs.py", *(
         flashinfer_root / relative for relative in ("sampling.py", "jit/sampling.py", "utils.py", "data/csrc/sampling.cu",
         "data/include/flashinfer/sampling.cuh", "data/include/flashinfer/air_top_p.cuh"))]
     receipt = {"schema": "flare-sampling-path-qualification-v2", "sampling_policy": "flashinfer_top_k_top_p_min_p_philox_v1", "flashinfer": importlib.metadata.version("flashinfer-python"), "historical_baseline": "sampling-paths-original.json", "started_at": datetime.now(timezone.utc).isoformat(),

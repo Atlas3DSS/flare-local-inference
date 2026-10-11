@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from flare import planning
-from flare.recipes import resolve
-from flare.recipes.declaration import Speculation
+from ignition import planning
+from ignition.recipes import resolve
+from ignition.recipes.declaration import Speculation
 
 HUB = Path.home() / ".cache/huggingface/hub"
 QWEN = resolve("qwen3.8-flash")
@@ -20,7 +20,7 @@ COPY = Speculation(3, proposal_source="copy")
 def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
     from b12x.attention import qsa
 
-    from flare.recipes.qwen38.state import HybridStateLayout
+    from ignition.recipes.qwen38.state import HybridStateLayout
 
     recipe = QWEN.recipe
     assert recipe.speculation == Speculation(draft_tokens=3) and recipe.speculative_rows == 7
@@ -44,7 +44,7 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_glm_state_rows_and_pages_match_the_continuation_pool(world_size):
-    from flare.recipes.glm53.pool import continuation_layout
+    from ignition.recipes.glm53.pool import continuation_layout
 
     recipe = GLM.recipe
     assert recipe.speculation == Speculation(draft_tokens=5) and recipe.speculative_rows == 7
@@ -74,7 +74,7 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
 def test_qwen_stored_bytes_match_the_cached_checkpoint():
     if not QWEN.cached(HUB):
         pytest.skip("the pinned Qwen revision is not in the hub cache")
-    from flare.preparation.checkpoint import inspect_qwen38_checkpoint
+    from ignition.preparation.checkpoint import inspect_qwen38_checkpoint
 
     sizes = Counter()
     for tensor in inspect_qwen38_checkpoint(QWEN.snapshot(HUB)).tensors.values():
@@ -89,7 +89,7 @@ def test_qwen_stored_bytes_match_the_cached_checkpoint():
 def test_glm_stored_bytes_match_the_cached_checkpoint():
     if not GLM.cached(HUB):
         pytest.skip("the pinned GLM revision is not in the hub cache")
-    from flare.preparation.checkpoint import inspect_indexed_checkpoint
+    from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 
     tensors = inspect_indexed_checkpoint(GLM.snapshot(HUB)).tensors.values()
     checkpoint = GLM.checkpoint
@@ -111,7 +111,7 @@ def fitted(model, gpus, **settings):
 @pytest.mark.parametrize("compile_forwards", [False, True])
 @pytest.mark.parametrize("concurrency", [1, 5, 64])
 def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path, compile_forwards, concurrency):
-    from flare.recipes.qwen38.state import HybridStateLayout
+    from ignition.recipes.qwen38.state import HybridStateLayout
 
     seen = {}
 
@@ -119,7 +119,7 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
         seen.update(snapshot=snapshot, config=config, compile_decoder=compile_decoder)
         return "prepared"
 
-    monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare_model)
+    monkeypatch.setattr("ignition.recipes.qwen38.bootstrap.prepare_model", prepare_model)
     plan = fitted(QWEN, 1, concurrency=concurrency, reserve_bytes=2 << 30)
     assert QWEN.recipe.prepare(tmp_path, plan, compile_forwards=compile_forwards, kernel_cache=tmp_path / "kernels",
                                progress=None) == "prepared"
@@ -140,10 +140,10 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
 
 
 def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
-    from flare.recipes.qwen38.state import HybridStateLayout
+    from ignition.recipes.qwen38.state import HybridStateLayout
 
     seen = []
-    monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model",
+    monkeypatch.setattr("ignition.recipes.qwen38.bootstrap.prepare_model",
                         lambda snapshot, config, *, progress, compile_decoder: seen.append(config))
 
     def configured(speculation):
@@ -169,10 +169,10 @@ def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
 
 def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     seen = []
-    monkeypatch.setattr("flare.preparation.rank_group.prepare_group",
+    monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, *, progress: seen.append((config, prepare)) or "group")
-    from flare.recipes.glm53 import bootstrap as glm
-    from flare.recipes.qwen38 import bootstrap as qwen
+    from ignition.recipes.glm53 import bootstrap as glm
+    from ignition.recipes.qwen38 import bootstrap as qwen
 
     plan = fitted(QWEN, 2)
     assert QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None) == "group"

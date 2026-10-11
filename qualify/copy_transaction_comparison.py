@@ -470,11 +470,11 @@ def main(argv=None):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
     import b12x
     import flashinfer
-    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-    from flare.recipes.qwen38.speculative_model import SpeculativePreparation
+    from ignition.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from ignition.recipes.qwen38.speculative_model import SpeculativePreparation
 
     paths = {Path(__file__), ROOT / "qualify/speculative_state_parity.py", ROOT / "qualify/provenance.py", ROOT / "qualify/graph_execution.py", ROOT / "qualify/checkpoint_state.py"}
-    for directory, pattern in ((ROOT / "flare", "*.py"), (Path(b12x.__file__).resolve().parent, "*.py")):
+    for directory, pattern in ((ROOT / "ignition", "*.py"), (Path(b12x.__file__).resolve().parent, "*.py")):
         paths.update(directory.rglob(pattern))
     fi = Path(flashinfer.__file__).resolve().parent
     paths.update(fi / name for name in ("sampling.py", "jit/sampling.py", "data/include/flashinfer/sampling.cuh"))

@@ -9,7 +9,7 @@ from b12x.moe import fused_moe
 from b12x.preparation import MemoryRequirements, Plan
 from b12x.preparation.types import _CompositePlan, _Prepared
 
-from flare.preparation.scratch import ScratchArena
+from ignition.preparation.scratch import ScratchArena
 from qualify import graph_execution
 
 
@@ -103,7 +103,7 @@ def test_arena_audit_checks_public_moe_views_but_excludes_weight_scales(audit_ty
 
 
 def test_arena_audit_rejects_projection_with_owned_scratch(audit_type):
-    from flare.components.linear import QuantizedProjection
+    from ignition.components.linear import QuantizedProjection
 
     arena = ScratchArena("cpu")
     arena.reserve(512)

@@ -1,4 +1,4 @@
-# Flare command-line interface
+# Ignition preparation and Flare serving commands
 
 Flare serves the model architectures its recipes support on NVIDIA SM120 and
 SM121 GPUs; each recipe pins qualified default checkpoints. Its command line accepts only what the engine cannot determine by itself,
@@ -10,7 +10,7 @@ parameter anywhere: not a flag, not a configuration key, not a debug override.
 
 - **Intent, not mechanism.** A parameter names a decision only the user can
   make: which GPUs, how many simultaneous requests, where to listen.
-- **The engine is the recipe.** Per-model knowledge lives in `flare/recipes/`
+- **The engine is the recipe.** Per-model knowledge lives in `ignition/recipes/`
   as qualified code. A recipe declares its checkpoints, their pinned revisions,
   supported tensor-parallel sizes, concurrency range, memory cost model, and
   template defaults. The command line never needs to know which model it runs.
@@ -41,30 +41,48 @@ parameter anywhere: not a flag, not a configuration key, not a debug override.
 
 ## 2. Commands
 
+The Python distribution and source package are named `ignition`. Install the
+preparation environment with `uv sync --locked --extra prepare --extra test`,
+then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
+
 ```
-flare run     [MODEL] [flags]     prepare and serve
-flare models                      list supported checkpoints and what fits on this host
-flare pull    MODEL               download a checkpoint into the hub cache
-flare status  [--url URL]         summarize a running server
-flare bench   [--url URL]         measure a running server
-flare config                      print the effective configuration and file locations
-flare skill                       print the agent guide
+ignition run     [MODEL] [flags]     cache a runtime package and launch Flare
+ignition export  [MODEL] --output DIR [flags]  prepare a native TP1 runtime package
 ```
 
 Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
 repository id with an optional `@revision`, or a local checkpoint directory;
-with no `MODEL`, `run` uses `defaults.model` from the configuration file and
-fails with a usage error if it is unset.
+with no `MODEL`, `run` and `export` use `defaults.model` from the configuration file and
+fail with a usage error if it is unset.
 
-`models`, `status`, `bench`, and `config` print a report and exit. A terminal
-receives the report with styled headings, labels, and status words. Redirected
-output is the same text without styles, wrapping, or trailing spaces, and
-`--json` replaces the report with one JSON document. Only `run` prints the
-banner.
+Ignition exposes preparation and development launch commands. It prints
+preparation progress without a banner. The Rust Flare executable displays the
+Flare banner on a terminal and reports model loading through Helios.
 
-No command previews or rehearses `run`. `models` answers what fits on the
-host; `run` performs the preparation, whose tuned kernels and compiled
-forwards later runs reuse, and states what it allocated.
+`export` imports the `flare_heliopause` CPython extension in Ignition's process.
+Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
+allocation contents, graph descriptions, and frontend assets to a directory
+that must not exist, then exits without opening a listener. `run` caches the resulting package in
+`paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
+include checkpoint identity, preparation settings, dependency versions, and
+preparation source contents. Export requires
+one GPU and a recipe with native package storage support; Qwen provides that
+support. API keys are excluded from the package.
+
+Build the public serving executable, which links the Helios library:
+
+```sh
+cargo build --release --manifest-path flare/Cargo.toml
+flare/target/release/flare run PACKAGE --device 0 --bind 127.0.0.1:8000
+```
+
+The native device ordinal follows CUDA's visible device enumeration. Optional
+`--api-key-file PATH` supplies authentication at launch. Native restore requires
+the package's GPU architecture and sufficient GPU and mapped host memory.
+Recorded addresses must be available; an address collision fails startup.
+The package records prepared concurrency, cache capacities, and the available
+prefill and speculation graphs. Flare uses the packaged settings; runtime
+reductions of concurrency and execution widths are not exposed yet.
 
 ## 3. Parameters
 
@@ -73,7 +91,8 @@ its home: the command line, the configuration file, or both.
 
 ### 3.1 Command-line flags
 
-`run` accepts these and nothing else.
+`run` accepts the following flags. `export` accepts the same preparation flags,
+requires `--output DIR`, and excludes `--host` and `--port`.
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -104,9 +123,7 @@ others. The `Select GPUs.` startup line states the settings in effect: `up to
 N draft tokens` while verification adapts, `exactly N draft tokens` when it is
 fixed.
 
-`models`, `status`, `bench`, and `config` accept `--json`.
-`status` and `bench` accept `--url`, defaulting to the configured host and
-port. Every command that reads the configuration file accepts `--config`.
+Both Ignition commands accept `--config`.
 
 Names follow one rule: the flag says what the user is deciding, in the word a
 user would use. `--gpus` rather than `--device` and `--tp`, because the user
@@ -138,6 +155,7 @@ max_concurrency = 2
 [paths]
 hub_cache = "~/.cache/huggingface/hub"
 kernel_cache = "~/.cache/flare/kernels"
+package_cache = "~/.cache/flare/packages"
 cuda = "/opt/cuda"                # used only when the toolkit is not found in installed packages
 ```
 
@@ -182,8 +200,8 @@ a field in a lil manifest. None is a parameter in Flare.
 | `--max-active` | Renamed | `--max-concurrency`. |
 | `--bind`, `--listen` | Renamed | `--host` and `--port`. |
 | `--thinking`, `--template-defaults FILE`, reasoning effort, sampling defaults, `--max-tokens` | Not command-line parameters | These are default request parameters, a separate mechanism not yet specified. Launch flags do not set per-request behavior. |
-| `--memory-report FILE` | Removed | `run` prints what it allocates and `status` reports the pool of a running server. |
-| `--prepare-only`, `prepare`, `plan` | Removed | `run` performs the preparation and leaves the same caches; `models` gives the estimate of what fits. A separate preview would print figures that allocation does not follow. |
+| `--memory-report FILE` | Removed | `run` prints the allocated capacities; the server exposes metrics over HTTP. |
+| `--prepare-only`, `prepare`, `plan` | Removed | `run` prepares and caches a runtime package; `export` writes one to an explicit destination. |
 | `--revision` | Part of `MODEL` | `org/name@revision`. An alias uses the revision its recipe pins. |
 | `--dtype`, `--quantization`, `--kv-cache-dtype`, `--block-size`, kernel backends, `cudagraph_mode`, `--enable-prefix-caching`, `--enable-chunked-prefill` | Not a parameter | Recipe decisions, qualified. |
 | `--served-model-name` | Not a parameter | Requests may name the alias or the repository id; `/v1/models` lists both. |
@@ -216,115 +234,49 @@ a field in a lil manifest. None is a parameter in Flare.
 
 ## 5. Command behavior
 
-### 5.1 `flare run`
+### 5.1 `ignition run`
 
-1. Resolve `MODEL`. Unknown: usage error listing supported aliases.
-2. Discover GPUs through NVML. Apply `--gpus`, or select the first GPUs whose
-   estimate fits at the smallest supported tensor-parallel size.
-3. Estimate memory from the recipe's declared sizes and the GPUs' free memory:
-   weights from the checkpoint index, a rough figure for graphs and scratch,
-   live state, the prefix-cache floor, and minimum pages. The estimate does not
-   fit: capacity error with options.
-4. Ensure the snapshot is cached; download with progress if not. Failure:
-   fetch error.
-5. Load, tune, warm, capture, allocate KV pages, freeze. Failure: preparation
-   error. Exhausted GPU memory, fewer than the minimum pages for
-   `--max-concurrency`, or less than `memory.reserve` left free: capacity
-   error.
-6. Bind `--host` and `--port`. Address in use: usage error.
+1. Resolve `MODEL`, discover GPUs through NVML, and derive the memory plan.
+   Package serving requires TP1. Validate the requested listener address.
+2. Select a package cache entry from the checkpoint, preparation settings,
+   dependencies, and preparation sources, holding a lock through publication.
+3. On a cache miss, import `flare_heliopause`, download missing weights, prepare
+   the model, export all resources, and close the prepared model. These steps
+   run in Ignition's process. Preparation failures leave no published package.
+   A cache hit skips preparation entirely.
+4. Apply the selected GPU visibility and replace ignition with `flare run PACKAGE`.
+   Pass the listener address and an anonymous file descriptor for the API key.
+5. Flare loads the model through Helios and starts HTTP. The completed
+   `Start server.` row reports the listening URL.
 
-The Qwen recipe sizes its KV pages from the free memory it measures after graph
-capture. The GLM recipe takes its page count from the estimate.
+The Qwen recipe sizes its KV pages from free memory after graph capture.
+The package retains that capacity on subsequent loads. Insufficient device
+memory or a recorded-address collision fails native startup.
 
-The completed `Start Helios.` line includes `listening on ADDR` in dim text before
-the elapsed time. Serving prints nothing
-per request. On a terminal, `run` then shows the native metrics dashboard;
-with stderr redirected it prints nothing further. No flag controls the
-dashboard. SIGINT and SIGTERM stop admission, give active responses five
-seconds to finish, drain GPU work, release, and exit 0. During preparation
-either signal ends the process immediately.
+Serving prints no per-request output. SIGINT and SIGTERM stop admission,
+give active responses five seconds to finish, drain GPU work, and exit 0.
+During preparation either signal ends Ignition immediately.
 
-Exit codes: 0 success, 2 usage, 3 fetch, 4 capacity, 5 preparation, 6 runtime.
+Preparation exit codes: 0 success, 2 usage, 3 fetch, 4 capacity, 5 preparation.
+Native startup and runtime failures exit 1.
 
-### 5.2 `flare models`
+### 5.2 `ignition export`
 
-```
-qwen3.8-flash
-  checkpoint     local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD@dc5b8ab2
-  architecture   Qwen4ExpForConditionalGeneration
-  size           95.1 GiB stored · 68.3 GiB on GPUs · 26.8 GiB PLE table in host memory
-  context        262,144 tokens
-  input          text and up to 4 images per request
-  speculation    up to 3 draft tokens per round · MTP module
-  GPUs           1, 2, or 4
-  concurrency    4 by default · at most 64
-  cached         yes
-  fits here      1 GPU · 4 requests of about 104K tokens, or 1 of 262K
+Resolve the model and preparation settings as for `run`, then prepare and write
+a runtime package to `--output DIR`. The destination must not exist. Export
+closes the prepared model and exits without starting a listener.
 
-glm-5.3-flash
-  checkpoint     local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@dec48abd
-  architecture   Glm5NextForConditionalGeneration
-  size           165.5 GiB stored · 165.1 GiB on GPUs
-  context        1,048,576 tokens
-  input          text
-  speculation    up to 5 draft tokens per round · MTP module
-  GPUs           2 or 4
-  concurrency    4 by default · at most 64
-  cached         no · downloaded by the first run
-  fits here      no
-                 glm-5.3-flash needs 2 or 4 SM120 or SM121 GPUs; this host has 1
+### 5.3 `flare run`
 
-MODEL also accepts org/name[@revision] on Hugging Face or a checkpoint directory of a listed architecture.
-```
-
-Each block describes one recipe through the checkpoint its alias names: the
-pinned repository and revision, the `config.json` architecture the recipe
-serves, where the stored tensors reside, the checkpoint's context, accepted
-inputs, speculation, and the supported GPU counts and concurrency range. The
-alias that `defaults.model` names is marked `defaults.model`. `fits here` is
-an estimate at the recipe's default concurrency and speculation: the GPUs it
-takes, about how many tokens each concurrent request gets, and how many
-requests could hold the full context instead. When the estimate does not fit,
-it reads `no` followed by the capacity error `run` would print. `--json` emits
-one object per alias with these declarations in full, including the complete
-revision, and the estimate or the error.
-
-### 5.3 `flare pull`
-
-Download `MODEL` into the hub cache with progress: an alias's pinned revision,
-or a repository at the named or current revision. Print the snapshot path.
-Cached files are not re-downloaded.
-
-### 5.4 `flare status`
-
-Read `/metrics` and print: model, uptime, active and queued requests, decode
-tokens per second over the last minute, prefix-cache hit rate and cached
-tokens, free pages and snapshots, speculative acceptance when enabled.
-
-### 5.5 `flare bench`
-
-Run the fixed workload from `qualify/performance.py` and print time to first
-token for a cold 512-token prompt, a cold 4,096-token prompt, and a
-cached-prefix request; inter-token latency median and p99 at concurrency 1,
-2, and 4; and decode throughput at each. Each figure carries its request
-count. `bench` reports what the server delivered and makes no claim about
-hardware limits. Time to first token is measured at the client; inter-token
-latency and throughput use the server's per-token completion timestamps, so
-tokens accepted in one speculative round show intervals near zero.
-
-The workload covers the Qwen recipe. `bench` renders its prompts with the
-checkpoint's tokenizer from the hub cache, and it imports `qualify`, which a
-source checkout provides and the installed package does not.
-
-### 5.6 `flare config`
-
-Print the effective configuration after precedence, each value labeled with
-its source, and the configuration file, hub cache, and kernel cache paths.
-
-### 5.7 `flare skill`
-
-Print the embedded agent guide: commands, the configuration file, how to add
-a recipe, how to read a capacity error. Works offline.
+Display the Flare banner on a terminal, then load the model configuration,
+initialize the GPU, load weights and kernels, prepare execution, load the
+tokenizer and frontend assets, and start the HTTP server. Helios reports each
+stage with a ten-column bracketed progress bar, a result, and elapsed time.
+Memory loading advances by bytes; kernel loading and execution preparation
+advance by resource counts. Stages with no known total show a cycling bar.
+Completed stages show `[    OK    ]`; a failed stage shows `[  FAILED  ]`.
+A narrow terminal truncates the description while preserving status and timing.
+Redirected output contains plain start and completion lines without animation.
 
 ## 6. Capacity errors
 
@@ -363,7 +315,7 @@ keyed by checkpoint revision, recipe version, GPU, and settings. A second
 and incur partial tuning.
 
 `run` prints the resolution, the selected GPUs with the settings in effect,
-and each preparation phase with its counts and elapsed time:
+and each preparation phase with its counts and elapsed time. For example:
 
 ```
 [    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.3s
@@ -380,10 +332,13 @@ and each preparation phase with its counts and elapsed time:
 [    OK    ] Allocate KV cache.  6.90 GiB per GPU · 270,016 tokens  0.3s
 [    OK    ] Warm compiled forwards.  17/17  53.5s
 [    OK    ] Prepare serving graphs.  30/30  4.2s
-[    OK    ] Start Helios.  listening on 127.0.0.1:8000  0.8s
+[    OK    ] Export native package.  /path/to/runtime-package  35.0s
 ```
 
-Phases come from `flare.progress.phase`; on a terminal each shows an activity
+After export, `run` replaces Ignition with Flare, which displays its banner and
+model-loading stages. A package cache hit skips the preparation stages.
+
+Preparation phases come from `ignition.progress.phase`; on a terminal each shows an activity
 bar while it runs. `Select GPUs.` names the GPUs by index, followed by
 `of CUDA_VISIBLE_DEVICES=...` when the caller restricted them, and reads
 `speculation off` under `--no-mtp`. `Allocate KV cache.` reports the pages

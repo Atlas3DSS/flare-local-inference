@@ -8,10 +8,10 @@ import pytest
 import torch
 from safetensors import safe_open
 
-from flare.components.parallel import TensorParallelShard
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
-from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader, _expert_scales
-from flare.reference.qwen38_quant import decode_csf_scales, decode_csf_slab_scales
+from ignition.components.parallel import TensorParallelShard
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader, _expert_scales
+from ignition.reference.qwen38_quant import decode_csf_scales, decode_csf_slab_scales
 
 
 @pytest.fixture(scope="module")

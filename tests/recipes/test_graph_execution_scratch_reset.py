@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from qualify import graph_execution
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38.vision_state import VisionFeatureState
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.qwen38.vision_state import VisionFeatureState
 
 
 @dataclass

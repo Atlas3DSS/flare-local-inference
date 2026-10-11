@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38.attention import QSAMetadata, QSAState, RotaryTables
-from flare.recipes.qwen38.mtp import MTPScratch, PreparedMTP, PreparedMTPFeedback
-from flare.recipes.qwen38.mtp_weights import MTPWeights
-from flare.recipes.qwen38.weights import QwenWeightLoader
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.qwen38.attention import QSAMetadata, QSAState, RotaryTables
+from ignition.recipes.qwen38.mtp import MTPScratch, PreparedMTP, PreparedMTPFeedback
+from ignition.recipes.qwen38.mtp_weights import MTPWeights
+from ignition.recipes.qwen38.weights import QwenWeightLoader
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an assigned CUDA_VISIBLE_DEVICES and FLARE_RUN_CUDA_TESTS=1")
@@ -99,7 +99,7 @@ def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs
         forward = op
         if compiled == "aot":
             import io
-            from flare.preparation.aot import aot_forward
+            from ignition.preparation.aot import aot_forward
 
             artifact = aot_forward(op)
             artifact(op)
@@ -107,7 +107,7 @@ def test_exact_weight_mtp_capture_replay_preserves_inputs_and_persistent_outputs
             restored = torch.compiler.load_compiled_function(io.BytesIO(data))
             forward = lambda: restored(op)
         elif compiled:
-            from flare.preparation.compilation import compile_forward
+            from ignition.preparation.compilation import compile_forward
 
             forward = compile_forward(op)
         stream = torch.cuda.Stream(); stream.wait_stream(torch.cuda.current_stream())
@@ -180,7 +180,7 @@ def test_cache_only_absorption_matches_full_mtp_cache_under_replay(weights, comp
                 forward = op
                 if compiled:
                     import io
-                    from flare.preparation.aot import aot_forward
+                    from ignition.preparation.aot import aot_forward
 
                     artifact = aot_forward(op)
                     artifact(op)

@@ -1,0 +1,208 @@
+# Runtime packages: the preparation boundary and native serving
+
+Flare serves a prepared model from a runtime package: a directory holding
+everything a Rust process needs to rebuild the model's CUDA graphs and
+storage without a Python interpreter. Preparation still happens in Python
+with PyTorch, Transformers, and b12x. Serving requires the NVIDIA driver,
+the package, the Rust `flare` executable, and its system library dependencies
+(including libturbojpeg). Python and preparation tools are not required.
+The [core design](core-design.md) defines the model contracts, scheduling,
+and cache behavior that the served process implements; this document defines
+how the prepared state leaves the Python process and how it is reconstructed.
+
+## 1. Components
+
+![Flare component relationships](images/component-architecture.png)
+
+| Component | Role | Implementation |
+|---|---|---|
+| ignition | Internal preparation command: plans, exports, and prepares cached packages for native serving | The Python command line under `ignition/cli/` |
+| heliopause | CPython extension imported by Ignition. It supplies the native preparation allocator and resource lifetime hooks | The `heliopause/` Rust crate; Python distribution `flare-heliopause`, import `flare_heliopause` |
+| Helios | Rust runtime library. It rebuilds a package into a live CUDA context and serves it | The `helios/` crate, including `src/runtime_package/` and the server |
+| flare | Public serving command. It links Helios to load a package and run the server | The `flare/` Rust crate; section 5 |
+
+Preparation knowledge, recipes, planning, hub access, the kernel cache,
+compilation, tuning, and capture stay on the preparation host. Ignition imports
+`flare_heliopause` and exports through `ignition/preparation/runtime_package.py`
+in its own Python process. `ignition run` exports a cached package when needed,
+closes the prepared model, and calls `execv` to replace its entire address space
+with the Rust `flare` executable. A cache hit goes directly to `execv`.
+`ignition export` writes the package and exits. Graphs and Python resource owners
+do not cross the executable boundary. Helios has no CPython dependency;
+heliopause owns the CPython hooks and preparation allocator and uses Helios's
+CUDA interfaces. Heliopause has no executable or embedded interpreter. `flare` and Helios are
+the public deployment surface. Ignition and heliopause are internal preparation
+tools. Dependency direction is `flare → Helios` and `heliopause → Helios`;
+Helios has no dependency on either preparation tool.
+
+## 2. The preparation boundary
+
+Ignition records four things while preparing a model, and refuses to
+write a package when any of them is incomplete.
+
+**Storage.** PyTorch's persistent device allocations come from one address range
+reserved before any other allocation: 1 TiB at `0x2000_0000_0000`, backed on
+demand with `cuMemCreate` and `cuMemMap` at allocation granularity. PyTorch
+allocates through a `MemPool` whose pluggable allocator is the Rust arena in
+`heliopause/src/allocator.rs`, so weights, state, pages, and the
+graph pool all live inside the range. Ordinary preparation and capture use
+separate PyTorch pools backed by that arena. Mapped host memory, including the PLE
+table, is placed by `mmap` at fixed addresses from `0x1000_0000_0000` and
+registered with the driver; under unified addressing the device pointer
+equals the host pointer, which the exporter checks. A CUPTI subscriber logs
+driver allocations and removes records when their context is destroyed.
+Persistent device allocations outside the arena are grouped into complete
+VMM pages and placed within additional GiB-aligned reservations. Only their
+live byte spans are copied; page gaps are zero. Before copying, the exporter
+checks that each external allocation belongs to the serving context.
+
+**Kernels.** The same subscriber copies the image of every module and library
+the driver loads, from the driver-API load calls and from the resource
+callback that also covers modules loaded internally by CUDA libraries. Each
+kernel node's function maps to its image through `cuFuncGetModule`. Resource
+callbacks during lazy loading are associated with the driver call that
+materializes the module, including launches using context-independent
+`CUkernel` handles. A unique symbol-name match is a fallback. The exporter records
+each function's parameter layout from `cuFuncGetParamInfo` and its dynamic
+shared-memory, carveout, and cluster attributes. ELF symbol enumeration and
+`cuModuleGetGlobal` capture initialized module globals and constants; native
+loading restores their contents after loading each cubin.
+Source-bearing debug sections and embedded PTX are erased without changing
+CUDA section or symbol indices. Assertion filename globals are replaced with
+`kernel`; assertion conditions and messages remain intact. Kernel symbols are
+retained for lookup, so packages do not conceal the compiler that emitted them.
+
+**Graphs.** Capture keeps the graph templates alive, and the walker records
+each template node by node: kernel nodes with grid, block, shared memory,
+every nonzero launch attribute, and the parameter bytes copied verbatim;
+memset and contiguous device-to-device copy nodes with their driver
+parameters; empty nodes; and every edge with its edge data. Nodes are ordered
+by the driver's local id. Host nodes, child graphs, event nodes, conditional
+nodes, kernels launched through the `extra` parameter path, and
+device-updatable nodes fail the export.
+
+**Contract.** The package carries the Helios execution manifest with buffer
+addresses rewritten as allocation references, the server configuration, the
+frontend assets, the device architecture, and the context flags, cache
+configuration, and limits. Parameter bytes are stored exactly as captured.
+Pointer and tensor-map fields may additionally be declared as relocations,
+which lets a loader place storage elsewhere and rewrite the fields, tensor
+maps through `cuTensorMapReplaceAddress`; the model export does not declare
+them and relies on identical addresses instead.
+
+## 3. Address rules
+
+Parameter bytes are replayed verbatim, so a rebuilt process must reproduce
+every recorded address. Three driver behaviors, measured on driver 610.57.04
+with the `cr-probe` experiments under `~/projects/flare-research`, fix how
+that is done.
+
+- The driver satisfies a `cuMemAddressReserve` request from its current
+  64 MiB block whenever the request fits, ignoring the requested address, and
+  maps a fresh block at the requested address only when the request does not
+  fit. Four 16 MiB fixed requests in a fresh process are all moved and the
+  fifth is honored; a first request of 64 MiB is moved and a first request of
+  128 MiB, 1 GiB, 64 GiB, or 1 TiB is honored anywhere from 8 TiB to 127 TiB.
+  A package therefore uses large enclosing reservations and maps allocations
+  at their recorded offsets inside them; it never relies on small fixed
+  reservations. The controlled arena uses 1 TiB and external spans use
+  GiB-aligned enclosing ranges.
+- Host memory mapped with `MAP_FIXED_NOREPLACE` and registered with the driver
+  receives the same device address in every process.
+- Tensor-map parameters embed a global address and are 128 opaque bytes;
+  module constant and global symbols hold whatever preparation wrote. With
+  identical addresses both replay unchanged.
+
+Conditions that break address reproduction fail loudly: the loader compares
+the reserved address with the recorded one and the registered host pointer
+with the recorded device pointer before it loads any contents.
+
+## 4. Rebuild and serving
+
+`NativeResources::load` in `helios/src/runtime_package/mod.rs` rebuilds a
+package in this order: create a context with the recorded flags, limits, and
+cache configuration; reserve the recorded range and compare addresses; back
+each device allocation at its recorded address and map each host region;
+upload contents or zero-fill; apply storage relocations; load modules and
+resolve functions, checking each kernel's parameter layout against the
+package; set function attributes; add nodes, attributes, and edges; and
+instantiate each graph with its recorded flags. The execution manifest is
+then rebased onto the live addresses and validated, and the server starts
+from this reconstructed contract. `flare run PACKAGE` in
+`flare/src/main.rs` performs this sequence for the Qwen contract.
+
+A rebuilt process holds no Python mapping, which its tests assert by reading
+`/proc/self/maps`. On a 16 MiB working set the rebuild costs 0.5 s, of which
+0.45 s is context creation and reservation; at model scale the cost is the
+contents transfer, bounded by storage read and PCIe upload.
+
+## 5. The flare command
+
+flare resolves its argument to a package, calls the linked Helios library,
+supplies the bind address and API key, handles signals, and reports readiness.
+Flare owns the terminal banner. Helios supplies loading stages with measured
+progress, cycling bars for indeterminate work, results, and elapsed time.
+Helios validates the package before reconstruction:
+the package's GPU architecture matches the selected device, the recorded
+address range is free, free device memory covers the recorded footprint, and
+the package's execution contract version is one the Helios build
+understands. It does not pin a driver version or a Helios build, because sm_120
+SASS loads on any driver that supports the architecture and a package stays
+valid across Helios builds that keep the contract.
+
+flare has no recipe catalog, no planner, no hub access, and no kernel cache.
+Those belong to ignition.
+
+## 6. Tensor-parallel ranks as threads
+
+Tensor-parallel package restore is not implemented. The intended runtime
+layout uses one rank per thread in a Helios process, each thread
+owning one device context, its graphs, and its arena at its own base address.
+Peer buffers are ordinary unified-addressing pointers: a VMM allocation is
+mapped with access descriptors for every device, and an allocation from
+`cuMemAlloc` is reachable after `cuCtxEnablePeerAccess`. Graphs captured on
+one GPU that write another GPU's memory replay unchanged in a rebuilt
+process, since the rebuilder assigns every rank's addresses itself. No IPC
+handles, exported shareable handles, or cross-process coordination exist,
+which also removes the one place where an importer could not choose an
+address. The package allocator serves device zero today; rank threads need an
+arena per device and multi-device access descriptors.
+
+## 7. Process images
+
+A CRIU image taken with the driver's process checkpoint support restores a
+loaded Helios process bit-exactly: every state class a prepared model holds
+was verified, including tensor maps, module symbols, pinned and registered
+host memory, two devices with peer access in one process, and legacy IPC
+across a process tree launched inside a cuda-checkpoint job. Images are not
+the production path. Restore moves the same bytes a package load moves, once
+into anonymous host pages and once to the device, so it is bandwidth-bound in
+the same way; measured at a 70 GB footprint, restore from an NVMe image took
+29 s and from RAM about 13 s. An image is valid only on the driver build that
+produced it, bakes in the Helios binary, needs root and CRIU on the host,
+holds the whole device footprint in host memory during dump and restore, and
+is corrupted if any thread touches GPU-side driver state during the
+checkpoint window, including a thread polling `cuEventQuery`.
+
+Images remain a validation tool: image a loaded Helios once, and after a
+kernel, driver, or loader change compare a fresh load's replay against the
+restored image. The probes, orchestration, and measurements live under
+`~/projects/flare-research`.
+
+## 8. Open items
+
+- Full-model relocation requires complete pointer and tensor-map bindings in
+  parameters, persistent storage, and module globals. The loader accepts typed
+  relocations, but the model exporter preserves addresses for opaque resources.
+- Contents upload uses 8 MiB pageable copies; a pinned or GPUDirect streaming
+  path is needed to reach storage and PCIe rates at model scale.
+- The sm_120 TMA tile path links against driver-provided code and reserves
+  about 3.6 GiB of device memory per context when loaded; the memory plan
+  should account for it once b12x kernels that use the path are identified.
+- Runtime selection: allow concurrency and execution-width reductions within
+  the package's graph catalog. Graphs carry kind, batch capacity, token or
+  verification width, and sampling mode. Select the required capacity buckets
+  before instantiating graphs; concurrency three can require a batch-four
+  graph. Preserve all model and MTP weights and shared storage. Runtime limits
+  must be separated from prepared buffer dimensions and catalog coverage;
+  reducing a scheduling limit does not imply reallocating model state.

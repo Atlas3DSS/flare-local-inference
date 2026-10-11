@@ -17,7 +17,7 @@ import struct
 import subprocess
 
 from qualify.provenance import digest, write_json
-from flare.preparation.qwen38 import (
+from ignition.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, INDEX_SHA256,
     MODEL_ID, REVISION, TRANSFORMERS_REVISION,
 )

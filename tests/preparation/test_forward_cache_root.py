@@ -4,7 +4,7 @@ import types
 
 import torch
 
-from flare.preparation import aot
+from ignition.preparation import aot
 
 
 def test_forward_cache_uses_the_configured_root(monkeypatch, tmp_path):

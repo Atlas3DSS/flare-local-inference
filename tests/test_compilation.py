@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from flare.preparation.compilation import ForwardTracer, compile_forward
+from ignition.preparation.compilation import ForwardTracer, compile_forward
 
 ForwardOutput = namedtuple("ForwardOutput", ("hidden", "auxiliary"))
 
@@ -257,7 +257,7 @@ def test_compilation_cache_survives_process_restart(tmp_path, monkeypatch, nativ
 import sys
 from unittest.mock import patch
 import torch
-from flare.preparation.compilation import compile_forward
+from ignition.preparation.compilation import compile_forward
 
 @torch.library.custom_op("flare_cache_test::fill", mutates_args=("out",))
 def fill(out: torch.Tensor, value: float) -> None:
@@ -272,7 +272,7 @@ output = torch.empty_like(source)
 if sys.argv[2] == "triton":
     sys.path.insert(0, sys.argv[3])
     from test_compilation import _cached_fill_triton, _cached_negate_triton
-    from flare.preparation.triton import prepare_triton
+    from ignition.preparation.triton import prepare_triton
     kernel = _cached_negate_triton if warm else _cached_fill_triton
     launch = prepare_triton(kernel, (source, 7. if warm else 3.), (1,))
 else:

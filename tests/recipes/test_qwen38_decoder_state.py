@@ -5,10 +5,10 @@ import os
 import pytest
 import torch
 
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.recipes.qwen38.state import HybridStatePool
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
+from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from ignition.recipes.qwen38.state import HybridStatePool
 
 
 def test_input_contract():
@@ -53,7 +53,7 @@ def test_native_metadata_exact_endpoints_and_terminal_guards(compile_forward):
     stream.wait_stream(torch.cuda.current_stream())
     for name, function in (("prefill", prefill), ("decode", step)):
         if compile_forward:
-            from flare.preparation.compilation import compile_forward as compile_model
+            from ignition.preparation.compilation import compile_forward as compile_model
 
             function = compile_model(function)
             compiled_calls.append(function)

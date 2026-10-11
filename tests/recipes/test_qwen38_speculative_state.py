@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.recipes.qwen38.draft_state import DraftMetadata
-from flare.recipes.qwen38.state import HybridStatePool
+from ignition.recipes.qwen38.draft_state import DraftMetadata
+from ignition.recipes.qwen38.state import HybridStatePool
 
 
 def test_draft_rows_pack_unequal_lengths_and_inactive_lanes():
@@ -50,9 +50,9 @@ CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 @CUDA
 @torch.no_grad()
 def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
-    from flare.recipes.qwen38.decoder_state import DecoderInputs
-    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from flare.recipes.qwen38.speculative_state import PreparedVerificationState
+    from ignition.recipes.qwen38.decoder_state import DecoderInputs
+    from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from ignition.recipes.qwen38.speculative_state import PreparedVerificationState
 
     device = torch.device("cuda", 0)
     pool = HybridStatePool.allocate(34, device, speculative_tokens=7)
@@ -112,8 +112,8 @@ def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
 @pytest.mark.parametrize("temperature", [0., 1.])
 @pytest.mark.parametrize("copy_epoch", [12, 13])
 def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature, copy_epoch):
-    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from flare.recipes.qwen38.speculative_model import PreparedSpeculativeRound
+    from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from ignition.recipes.qwen38.speculative_model import PreparedSpeculativeRound
 
     batch, width = 2, 4
     requests = DeviceRequestState.allocate("cpu", vocab_size=128)
@@ -200,9 +200,9 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
 @CUDA
 @torch.no_grad()
 def test_fixed_verification_masks_context_tail_without_changing_shape():
-    from flare.recipes.qwen38.decoder_state import DecoderInputs
-    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from flare.recipes.qwen38.speculative_state import PreparedVerificationState
+    from ignition.recipes.qwen38.decoder_state import DecoderInputs
+    from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from ignition.recipes.qwen38.speculative_state import PreparedVerificationState
 
     pool = HybridStatePool.allocate(34, "cuda", speculative_tokens=7)
     requests = DeviceRequestState.allocate("cuda", consumed_tokens=pool.consumed_tokens[1:5, 0],

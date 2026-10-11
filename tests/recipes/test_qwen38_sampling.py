@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from flare.components.sampling import (
+from ignition.components.sampling import (
     DUPLICATE_SLOT,
     ERROR,
     FINISHED,
@@ -20,9 +20,9 @@ from flare.components.sampling import (
     PreparedSampling,
     philox4x32_reference,
 )
-from flare.components.token_state import PreparedTokenState
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from ignition.components.token_state import PreparedTokenState
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 
 
 def test_philox_random123_zero_vector_and_uniform_distribution():

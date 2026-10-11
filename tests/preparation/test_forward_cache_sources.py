@@ -4,11 +4,11 @@ from types import SimpleNamespace
 
 import flashinfer
 
-from flare.preparation import aot
+from ignition.preparation import aot
 
 
 def test_presentation_edits_preserve_forward_cache_but_execution_edits_invalidate(tmp_path, monkeypatch):
-    package = tmp_path / "flare"
+    package = tmp_path / "ignition"
     preparation = package / "preparation"
     preparation.mkdir(parents=True)
     backend = preparation / "aot.py"

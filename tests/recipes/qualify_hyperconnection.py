@@ -9,12 +9,12 @@ from pathlib import Path
 import torch
 from b12x.preparation import PreparationSession
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import TRANSFORMERS_REVISION
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38 import create_model_tree
-from flare.recipes.qwen38.hyperconnection import HyperconnectionScratch, PreparedHyperconnection
-from flare.recipes.qwen38.weights import QwenWeightLoader
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.qwen38 import TRANSFORMERS_REVISION
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.recipes.qwen38 import create_model_tree
+from ignition.recipes.qwen38.hyperconnection import HyperconnectionScratch, PreparedHyperconnection
+from ignition.recipes.qwen38.weights import QwenWeightLoader
 
 
 def qualify(snapshot: Path) -> list[dict]:

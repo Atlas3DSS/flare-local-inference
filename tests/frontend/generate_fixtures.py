@@ -10,7 +10,7 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-from flare.preparation.qwen38 import FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION
+from ignition.preparation.qwen38 import FRONTEND_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION
 
 
 TRANSFORMERS_COMMIT = TRANSFORMERS_REVISION

@@ -15,14 +15,14 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 
 @torch.no_grad()
 def _rank(rank, world, rendezvous):
-    from flare.components.vocabulary import PreparedVocabularyProjection
-    from flare.preparation.collectives import (
+    from ignition.components.vocabulary import PreparedVocabularyProjection
+    from ignition.preparation.collectives import (
         CollectivePreparation,
         create_all_gather_runtime,
     )
-    from flare.preparation.compilation import compile_forward
-    from flare.preparation.execution import GraphSignature, PreparedExecution
-    from flare.preparation.tuning import RecordedPreparationSession
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.execution import GraphSignature, PreparedExecution
+    from ignition.preparation.tuning import RecordedPreparationSession
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)

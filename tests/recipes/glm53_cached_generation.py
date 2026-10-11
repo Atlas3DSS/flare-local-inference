@@ -4,9 +4,9 @@ import time
 
 import torch
 
-from flare.components.sampling import AdmissionBuffers, RequestAdmission
-from flare.components.state_transfer import StateCommands
-from flare.recipes.glm53.batch import BatchInputs
+from ignition.components.sampling import AdmissionBuffers, RequestAdmission
+from ignition.components.state_transfer import StateCommands
+from ignition.recipes.glm53.batch import BatchInputs
 
 
 def run_cached_generation(worker, bundle, pool, requests, scratch, resume, tokens, eos, capacity, progress):

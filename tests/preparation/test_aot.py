@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
 
-from flare.preparation.aot import ForwardCache, _guard_code_cache, aot_forward
+from ignition.preparation.aot import ForwardCache, _guard_code_cache, aot_forward
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="explicit CUDA assignment required")
@@ -66,10 +66,10 @@ class BufferForward:
 
 @torch.no_grad()
 def test_compile_before_materializing_storage(tmp_path, monkeypatch):
-    import flare.preparation.aot as aot
-    from flare.preparation.compile_pool import CompilePool
-    from flare.preparation.deferred import deferred_mode, deferred_tensor
-    from flare.preparation.execution import GraphSignature
+    import ignition.preparation.aot as aot
+    from ignition.preparation.compile_pool import CompilePool
+    from ignition.preparation.deferred import deferred_mode, deferred_tensor
+    from ignition.preparation.execution import GraphSignature
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     cache = ForwardCache(namespace={"model": "deferred-buffer"}, device="cuda:0")
@@ -107,7 +107,7 @@ def test_compile_before_materializing_storage(tmp_path, monkeypatch):
 
 @torch.no_grad()
 def test_compiled_forward_rebinds_cuda_device_without_tracing(tmp_path, monkeypatch):
-    from flare.preparation.device_binding import bind_device
+    from ignition.preparation.device_binding import bind_device
 
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two assigned GPUs")
@@ -142,7 +142,7 @@ def test_compiled_forward_rebinds_cuda_device_without_tracing(tmp_path, monkeypa
 
 @torch.no_grad()
 def test_uncompiled_capture_bypasses_forward_cache_and_replays_without_allocating(monkeypatch):
-    from flare.preparation import capture
+    from ignition.preparation import capture
 
     def unexpected(*args, **kwargs):
         raise AssertionError("uncompiled capture must not load or build compiled forwards")
@@ -221,8 +221,8 @@ def test_restored_forward_rejects_changed_storage_aliases(tmp_path, rebind, cach
 
 @torch.no_grad()
 def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_path, monkeypatch):
-    import flare.preparation.aot as aot
-    from flare.preparation.execution import GraphSignature
+    import ignition.preparation.aot as aot
+    from ignition.preparation.execution import GraphSignature
     from torch._dynamo.guards import PyExprCSEPass
 
     monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
@@ -260,10 +260,10 @@ def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_
 
 @torch.no_grad()
 def test_parallel_forward_preparation_captures_and_restores_without_workers(tmp_path, monkeypatch):
-    import flare.preparation.aot as aot
-    from flare.preparation.capture import capture_forwards
-    from flare.preparation.compile_pool import CompilePool
-    from flare.preparation.execution import GraphSignature
+    import ignition.preparation.aot as aot
+    from ignition.preparation.capture import capture_forwards
+    from ignition.preparation.compile_pool import CompilePool
+    from ignition.preparation.execution import GraphSignature
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     functions = {f"decode{index}": BufferForward(handle) for index, handle in enumerate((0, 73, 127), 1)}

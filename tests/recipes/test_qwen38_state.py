@@ -7,7 +7,7 @@ import os
 import pytest
 import torch
 
-from flare.recipes.qwen38.state import (
+from ignition.recipes.qwen38.state import (
     COPY,
     EOS_TOKEN_ID,
     GDN_LAYERS,
@@ -152,8 +152,8 @@ def _replay(worker, index):
 @CUDA
 @torch.no_grad()
 def test_native_full_state_copy_reset_restore_and_metadata_replay():
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.recipes.qwen38.attention import QSAState
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.recipes.qwen38.attention import QSAState
 
     device = _device()
     pool = HybridStatePool.allocate(6, device)
@@ -269,11 +269,11 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
     from b12x.preparation import PreparationSession
     from b12x.sequence import short_conv
 
-    from flare.components.recurrent import DeltaMetadata, prepare_sequence_binding
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.recipes.qwen38.gdn import GDNScratch, PreparedGDN
-    from flare.recipes.qwen38.ple import PLE_LAYER_PREFIX
-    from flare.recipes.qwen38.weights import QwenWeightLoader
+    from ignition.components.recurrent import DeltaMetadata, prepare_sequence_binding
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.recipes.qwen38.gdn import GDNScratch, PreparedGDN
+    from ignition.recipes.qwen38.ple import PLE_LAYER_PREFIX
+    from ignition.recipes.qwen38.weights import QwenWeightLoader
     from tests.recipes import test_qwen38_gdn as canonical
 
     device = _device()

@@ -16,12 +16,12 @@ def _rank(rank, world_size, rendezvous, rows, uneven=False):
     from b12x.comm.pcie import AllReduce
     from b12x.preparation import PreparationSession
 
-    from flare.components.collectives import PreparedAllReduce
-    from flare.components.linear import UnquantizedProjection
-    from flare.preparation.collectives import CollectivePreparation
-    from flare.preparation.compilation import compile_forward
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.preparation.tuning import RecordedPreparationSession
+    from ignition.components.collectives import PreparedAllReduce
+    from ignition.components.linear import UnquantizedProjection
+    from ignition.preparation.collectives import CollectivePreparation
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.tuning import RecordedPreparationSession
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)

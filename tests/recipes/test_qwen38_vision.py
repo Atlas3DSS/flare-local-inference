@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
-from flare.recipes.qwen38.weights import QwenWeightLoader
-from flare.reference.qwen38_quant import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
+from ignition.recipes.qwen38.weights import QwenWeightLoader
+from ignition.reference.qwen38_quant import (
     CheckpointTensors, decode_mxfp8, decode_nvfp4, quantize_mxfp8_activation,
     read_nvfp4_projection,
 )

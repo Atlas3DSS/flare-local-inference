@@ -87,7 +87,7 @@ class Commands:
     def __init__(self, model, fixture, artifacts):
         import torch
 
-        from flare.components.sampling import AdmissionBuffers
+        from ignition.components.sampling import AdmissionBuffers
 
         self.model, self.fixture, self.artifacts = model, fixture, artifacts
         self.host = {name: tensor.detach().cpu().clone() for name, tensor in model.buffers.items()}
@@ -126,7 +126,7 @@ class Commands:
             _mask(h["sampling_grammar_mask"][slot], [self.token])
 
     def prepare(self, operation):
-        from flare.recipes.qwen38.sampling import RequestAdmission
+        from ignition.recipes.qwen38.sampling import RequestAdmission
 
         h, kind, slots = self.host, operation["kind"], operation["slots"]
         active = [slot for slot in slots if slot >= 0]
@@ -291,10 +291,10 @@ class MutableState:
     def __init__(self, model, owner):
         import torch
 
-        from flare.preparation.scratch import ScratchArena
-        from flare.recipes.qwen38.decoder import DecoderScratch, ModelWeights
-        from flare.recipes.qwen38.vision import VisionScratch
-        from flare.recipes.qwen38.vision_state import VisionFeatureState
+        from ignition.preparation.scratch import ScratchArena
+        from ignition.recipes.qwen38.decoder import DecoderScratch, ModelWeights
+        from ignition.recipes.qwen38.vision import VisionScratch
+        from ignition.recipes.qwen38.vision_state import VisionFeatureState
 
         self.model, self.owner, self.storage = model, owner, {}
         self.features = next(x for x in model._resources if isinstance(x, VisionFeatureState))
@@ -403,7 +403,7 @@ def _allocated(device):
 
 def observe(evidence, side, stage, model, owner, pages, operation=None):
     """Copy persistent state after a completion fence, without GPU gather kernels."""
-    from flare.recipes.qwen38.vision_state import VisionFeatureState
+    from ignition.recipes.qwen38.vision_state import VisionFeatureState
 
     pool = owner.pool
     for row in range(pool.backing.shape[0]):
@@ -633,7 +633,7 @@ def main(argv=None):
     import torch
     from transformers import AutoTokenizer
 
-    from flare.preparation.qwen38 import MODEL_ID, REVISION
+    from ignition.preparation.qwen38 import MODEL_ID, REVISION
 
     snapshot = args.snapshot or Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
     tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
@@ -652,8 +652,8 @@ def main(argv=None):
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         parser.error("an explicitly assigned CUDA_VISIBLE_DEVICES is required")
 
-    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-    from flare.recipes.qwen38.speculative_model import SpeculativePreparation
+    from ignition.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from ignition.recipes.qwen38.speculative_model import SpeculativePreparation
     from qualify.graph_execution import Checks
 
     evidence = Checks(args.artifacts)

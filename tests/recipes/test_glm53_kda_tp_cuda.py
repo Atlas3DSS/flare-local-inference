@@ -16,18 +16,18 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 def _rank(rank, world, rendezvous, snapshot, mode):
     from b12x.comm.pcie import AllReduce
 
-    from flare.components.collectives import PreparedAllReduce
-    from flare.components.parallel import TensorParallelShard
-    from flare.components.recurrent import DeltaMetadata, DeltaState
-    from flare.preparation.checkpoint import inspect_indexed_checkpoint
-    from flare.preparation.collectives import CollectivePreparation
-    from flare.preparation.compilation import compile_forward
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.preparation.scratch import ScratchArena
-    from flare.preparation.tuning import RecordedPreparationSession
-    from flare.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
-    from flare.recipes.glm53.model import create_model_tree
-    from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
+    from ignition.components.collectives import PreparedAllReduce
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.components.recurrent import DeltaMetadata, DeltaState
+    from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+    from ignition.preparation.collectives import CollectivePreparation
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.tuning import RecordedPreparationSession
+    from ignition.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
+    from ignition.recipes.glm53.model import create_model_tree
+    from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)

@@ -35,9 +35,9 @@ class RankForward:
 
 
 def _rank(rank, world, rendezvous, sockets, fields, compilation):
-    from flare.components.collectives import PreparedAllReduce
-    from flare.components.parallel import TensorParallelShard
-    from flare.components.sampling import (
+    from ignition.components.collectives import PreparedAllReduce
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.components.sampling import (
         AdmissionBuffers,
         DeviceRequestState,
         PreparedAdmission,
@@ -45,15 +45,15 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
         PreparedSampling,
         RequestAdmission,
     )
-    from flare.preparation.collectives import (
+    from ignition.preparation.collectives import (
         CollectivePreparation,
         create_all_reduce_runtime,
     )
-    from flare.preparation.compilation import compile_forward
-    from flare.preparation.execution import GraphSignature, PreparedExecution
-    from flare.preparation.tuning import RecordedPreparationSession
-    from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
-    from flare.recipes.glm53.state import DecoderMetadata
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.execution import GraphSignature, PreparedExecution
+    from ignition.preparation.tuning import RecordedPreparationSession
+    from ignition.recipes.glm53.batch import BatchInputs, PreparedBatch
+    from ignition.recipes.glm53.state import DecoderMetadata
 
     peers = []
     for index, (root, peer) in enumerate(sockets, start=1):
@@ -111,9 +111,9 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
             session.tune()
             stream = torch.cuda.Stream(device=device)
             if compilation == "parallel":
-                from flare.preparation.capture import capture_forwards
+                from ignition.preparation.capture import capture_forwards
 
-                import flare.preparation.aot as aot
+                import ignition.preparation.aot as aot
 
                 def unexpected(*args, **kwargs):
                     raise AssertionError("serving ranks must not trace or compile")
@@ -129,7 +129,7 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
                     if compilation == "aot":
                         import io
                         from functools import partial
-                        from flare.preparation.aot import aot_forward
+                        from ignition.preparation.aot import aot_forward
 
                         artifact = aot_forward(operation)
                         artifact(operation)

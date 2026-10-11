@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from flare.preparation.collectives import CollectivePreparation, dist
+from ignition.preparation.collectives import CollectivePreparation, dist
 
 
 def coordinator(monkeypatch):

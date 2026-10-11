@@ -7,7 +7,7 @@ from contextlib import ExitStack, contextmanager
 import pytest
 import torch
 
-from flare.components.sampling import (
+from ignition.components.sampling import (
     DUPLICATE_SLOT,
     ERROR,
     FINISHED,
@@ -17,7 +17,7 @@ from flare.components.sampling import (
     PreparedSampling,
     RequestAdmission,
 )
-from flare.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.graphs import PreparedGraphBundle
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
@@ -49,7 +49,7 @@ class CapturedSampler:
         self.call = self.sampler
         if compile_forward == 'aot':
             import io
-            from flare.preparation.aot import aot_forward
+            from ignition.preparation.aot import aot_forward
 
             artifact = aot_forward(self.sampler)
             artifact(self.sampler)
@@ -57,7 +57,7 @@ class CapturedSampler:
                 io.BytesIO(type(artifact).serialize(artifact).serialized_data))
             self.call = lambda: restored(self.sampler)
         elif compile_forward:
-            from flare.preparation.compilation import compile_forward as compile_model
+            from ignition.preparation.compilation import compile_forward as compile_model
 
             self.call = compile_model(self.sampler)
             self.call()

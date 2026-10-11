@@ -6,13 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.preparation.fixtures import recurrent as gdn_fixtures
-from flare.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
-from flare.preparation.fixtures.recurrent import (
+from ignition.preparation.fixtures import recurrent as gdn_fixtures
+from ignition.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
+from ignition.preparation.fixtures.recurrent import (
     BenchmarkStateArena,
     RecurrentBenchmarkInputs,
 )
-from flare.components.moe import RouterScratch
+from ignition.components.moe import RouterScratch
 
 
 def _recurrent_args(mode, tokens, sequences):
@@ -178,7 +178,7 @@ def test_borrowed_arena_rejects_storage_contract_mismatch(kind):
 
 
 def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial_reset(monkeypatch):
-    from flare.components import recurrent
+    from ignition.components import recurrent
 
     args = _recurrent_args('prefill', 65, 1)
     resource_cache = {}
@@ -262,7 +262,7 @@ def test_moe_benchmark_covers_shared_routes_without_mutating_serving_operands():
 
 
 def test_prefill_benchmark_reuses_prepared_router_without_nested_preparation(monkeypatch):
-    from flare.recipes.qwen38 import moe
+    from ignition.recipes.qwen38 import moe
 
     source = torch.zeros(16, 32, dtype=torch.bfloat16)
     weight = torch.randn(512, 32, generator=torch.Generator().manual_seed(17)).bfloat16()

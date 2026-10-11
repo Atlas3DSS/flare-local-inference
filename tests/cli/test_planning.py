@@ -6,10 +6,10 @@ from types import MappingProxyType
 
 import pytest
 
-from flare import planning
-from flare.cli import display
-from flare.errors import CapacityError, UsageError
-from flare.recipes.declaration import Checkpoint, RankCosts, Recipe, Speculation
+from ignition import planning
+from ignition.cli import display
+from ignition.errors import CapacityError, UsageError
+from ignition.recipes.declaration import Checkpoint, RankCosts, Recipe, Speculation
 
 GIB, MIB = 1 << 30, 1 << 20
 
@@ -250,12 +250,8 @@ def test_automatic_selection_explains_the_closest_tensor_parallel_size():
     assert "= 37.1 GiB per GPU;" in str(error.value)
 
 
-def test_fit_summary_and_estimate_record():
+def test_estimate_record():
     plan = derive(reserve=2)
-    assert display.fit(plan) == "1 GPU · 4 requests of about 143K tokens, or 2 of 262K"
-    assert display.fit(derive(concurrency=1)) == "1 GPU · 1 request of about 262K tokens"
-    pair = derive(PAIR, tuple(gpu(index, 95) for index in range(2)))
-    assert display.fit(pair).startswith("2 GPUs · 4 requests of about ")
     record = json.loads(json.dumps(plan.to_dict()))
     assert record["pages"] == plan.pages == 8950 and record["snapshots"] == 44
     assert record["reserve_bytes"] == 2 * GIB and "measured" not in record

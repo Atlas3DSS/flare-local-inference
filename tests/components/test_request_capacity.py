@@ -5,10 +5,10 @@ import os
 import pytest
 import torch
 
-from flare.components.capacity import batch_capacities, request_capacity
-from flare.components.sampling import AdmissionBuffers, DeviceRequestState, PreparedAdmission, PreparedSampling, RequestAdmission
-from flare.components.token_state import PreparedTokenState
-from flare.preparation.graphs import PreparedGraphBundle
+from ignition.components.capacity import batch_capacities, request_capacity
+from ignition.components.sampling import AdmissionBuffers, DeviceRequestState, PreparedAdmission, PreparedSampling, RequestAdmission
+from ignition.components.token_state import PreparedTokenState
+from ignition.preparation.graphs import PreparedGraphBundle
 
 
 @pytest.mark.parametrize("limit", range(1, 65))

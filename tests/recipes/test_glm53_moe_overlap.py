@@ -7,13 +7,13 @@ import pytest
 import torch
 from b12x.preparation import PreparationSession
 
-from flare.components.parallel import TensorParallelShard
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
-from flare.preparation.compilation import compile_forward
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.glm53.model import create_model_tree
-from flare.recipes.glm53.moe import MoeScratch, PreparedGlmMoe
-from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
+from ignition.components.parallel import TensorParallelShard
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.glm53.model import create_model_tree
+from ignition.recipes.glm53.moe import MoeScratch, PreparedGlmMoe
+from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")

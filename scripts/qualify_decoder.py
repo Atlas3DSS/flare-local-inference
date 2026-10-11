@@ -68,29 +68,29 @@ def main():
     if args.steps < 1:
         parser.error("steps must be positive")
     if args.extension:
-        spec = importlib.util.spec_from_file_location("flare_helios", args.extension.resolve())
+        spec = importlib.util.spec_from_file_location("flare_heliopause", args.extension.resolve())
         module = importlib.util.module_from_spec(spec)
-        sys.modules["flare_helios"] = module
+        sys.modules["flare_heliopause"] = module
         spec.loader.exec_module(module)
 
     import torch
     from b12x.preparation import PreparationSession
     from transformers import AutoTokenizer
-    from flare.preparation import inspect_qwen38_checkpoint
-    from flare.preparation.execution import GraphSignature, PreparedExecution
-    from flare.preparation.qwen38 import MODEL_ID, REVISION
-    from flare.recipes.qwen38.attention import QSAState, RotaryTables
-    from flare.recipes.qwen38.decoder import ModelWeights, DecoderScratch, PreparedDecoder
-    from flare.preparation.scratch import ScratchArena
-    from flare.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
-    from flare.recipes.qwen38.ple import MappedPLETable
-    from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-    from flare.recipes.qwen38.state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool
+    from ignition.preparation import inspect_qwen38_checkpoint
+    from ignition.preparation.execution import GraphSignature, PreparedExecution
+    from ignition.preparation.qwen38 import MODEL_ID, REVISION
+    from ignition.recipes.qwen38.attention import QSAState, RotaryTables
+    from ignition.recipes.qwen38.decoder import ModelWeights, DecoderScratch, PreparedDecoder
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.recipes.qwen38.decoder_state import DecoderInputs, PreparedDecoderState
+    from ignition.recipes.qwen38.ple import MappedPLETable
+    from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+    from ignition.recipes.qwen38.state import SNAPSHOT_BASE, HybridStateLayout, HybridStatePool
 
     source_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted((ROOT / "flare/recipes/qwen38").glob("*.py"))}
+        for path in sorted((ROOT / "ignition/recipes/qwen38").glob("*.py"))}
     preparation_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted((ROOT / "flare/preparation").rglob("*.py"))}
+        for path in sorted((ROOT / "ignition/preparation").rglob("*.py"))}
 
     start = time.monotonic()
     def progress(message):
@@ -136,8 +136,8 @@ def main():
     buffers = {**inputs.buffers(), "frame_index": frame, "submission_sequence": sequence,
                "completion_records": completion}
     if args.tune:
-        from flare.preparation.qwen38 import CONFIG_SHA256, HEADERS_SHA256
-        from flare.recipes.qwen38.tuning import preparation_session
+        from ignition.preparation.qwen38 import CONFIG_SHA256, HEADERS_SHA256
+        from ignition.recipes.qwen38.tuning import preparation_session
         preparation = preparation_session(device=device, checkpoint=REVISION,
             namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
     else:
@@ -169,7 +169,7 @@ def main():
 
         def capture(mode, capacity, model):
             if args.compile:
-                from flare.preparation.compilation import compile_forward
+                from ignition.preparation.compilation import compile_forward
 
                 model = compile_forward(model)
                 prepared.append(model)

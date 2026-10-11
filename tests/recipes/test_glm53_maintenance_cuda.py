@@ -12,22 +12,22 @@ import torch.multiprocessing as mp
 def _run(rank, world, rendezvous=None):
     from b12x.preparation import PreparationSession
 
-    from flare.components.maintenance import PreparedMaintenance as LocalMaintenance
-    from flare.components.sampling import (
+    from ignition.components.maintenance import PreparedMaintenance as LocalMaintenance
+    from ignition.components.sampling import (
         AdmissionBuffers,
         DeviceRequestState,
         RequestAdmission,
     )
-    from flare.components.state_transfer import PreparedStateTransfer, StateCommands
-    from flare.preparation.collectives import (
+    from ignition.components.state_transfer import PreparedStateTransfer, StateCommands
+    from ignition.preparation.collectives import (
         CollectivePreparation,
         create_all_reduce_runtime,
     )
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.preparation.tuning import RecordedPreparationSession
-    from flare.recipes.glm53.batch import BatchInputs
-    from flare.recipes.glm53.maintenance import PreparedMaintenance
-    from flare.recipes.glm53.pool import ContinuationPool
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.tuning import RecordedPreparationSession
+    from ignition.recipes.glm53.batch import BatchInputs
+    from ignition.recipes.glm53.maintenance import PreparedMaintenance
+    from ignition.recipes.glm53.pool import ContinuationPool
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)

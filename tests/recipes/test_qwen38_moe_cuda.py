@@ -14,22 +14,22 @@ import torch.nn.functional as F
 from b12x.preparation import PreparationSession
 from b12x.preparation.types import require_prepared
 
-from flare.components.linear import UnquantizedProjection
-from flare.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
-from flare.components.parallel import TensorParallelShard
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38.moe import (
+from ignition.components.linear import UnquantizedProjection
+from ignition.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
+from ignition.components.parallel import TensorParallelShard
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.qwen38.moe import (
     PreparedQwenMoe,
     PreparedSharedExpert,
     QwenMoeScratch,
     QwenMoeWeights,
     SharedExpertWeights,
 )
-from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
-from flare.reference.qwen38_quant import (
+from ignition.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
+from ignition.reference.qwen38_quant import (
     CheckpointTensors,
     decode_mxfp8,
     nvfp4_expert_reference,
@@ -78,7 +78,7 @@ def _quant_scale_math(experts):
 
 @torch.no_grad()
 def test_compiled_shared_gate_preserves_bf16_rounding():
-    from flare.preparation.compilation import compile_forward
+    from ignition.preparation.compilation import compile_forward
 
     gates = torch.arange(65536, device="cuda", dtype=torch.int32).to(torch.int16).view(torch.bfloat16)
     gates = gates[torch.isfinite(gates)].view(-1, 1)
@@ -138,7 +138,7 @@ def test_actual_router_and_shared_expert_graph(manifest, tokens, world, compiled
 
         run()
         if compiled:
-            from flare.preparation.compilation import compile_forward
+            from ignition.preparation.compilation import compile_forward
 
             run = compile_forward(run)
             run()

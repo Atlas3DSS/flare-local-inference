@@ -5,10 +5,10 @@ import os
 import pytest
 import torch
 
-from flare.components.sampling import DeviceRequestState, RequestAdmission
-from flare.components.token_state import PreparedTokenState
-from flare.preparation.compilation import compile_forward
-from flare.preparation.graphs import PreparedGraphBundle
+from ignition.components.sampling import DeviceRequestState, RequestAdmission
+from ignition.components.token_state import PreparedTokenState
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.graphs import PreparedGraphBundle
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")

@@ -2,7 +2,7 @@
 
 import pytest
 
-from flare.recipes.glm53.bootstrap import PreparationConfig
+from ignition.recipes.glm53.bootstrap import PreparationConfig
 
 
 def test_default_catalog_covers_4096_prefill_and_four_requests():

@@ -10,8 +10,8 @@ import time
 import pytest
 import torch
 
-from flare.components.parallel import TensorParallelShard
-from flare.components.sampling import (
+from ignition.components.parallel import TensorParallelShard
+from ignition.components.sampling import (
     AdmissionBuffers,
     DeviceRequestState,
     PreparedAdmission,
@@ -19,10 +19,10 @@ from flare.components.sampling import (
     PreparedSampling,
     RequestAdmission,
 )
-from flare.preparation.compilation import compile_forward
-from flare.preparation.execution import GraphSignature, PreparedExecution
-from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
-from flare.recipes.glm53.state import DecoderMetadata
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.execution import GraphSignature, PreparedExecution
+from ignition.recipes.glm53.batch import BatchInputs, PreparedBatch
+from ignition.recipes.glm53.state import DecoderMetadata
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")

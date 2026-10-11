@@ -45,32 +45,32 @@ def _inputs(metadata, tokens, start):
 def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(), checkpoint=False):
     from transformers import AutoTokenizer
 
-    from flare.components.parallel import TensorParallelShard
-    from flare.components.sampling import (
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.components.sampling import (
         AdmissionBuffers,
         DeviceRequestState,
         RequestAdmission,
     )
-    from flare.components.state_transfer import StateCommands
-    from flare.preparation.checkpoint import inspect_indexed_checkpoint
-    from flare.preparation.collectives import (
+    from ignition.components.state_transfer import StateCommands
+    from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+    from ignition.preparation.collectives import (
         CollectivePreparation,
         create_all_gather_runtime,
         create_all_reduce_runtime,
     )
-    from flare.preparation.compilation import compile_forward
-    from flare.preparation.execution import GraphSignature, PreparedExecution
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.preparation.scratch import ScratchArena
-    from flare.preparation.tuning import RecordedPreparationSession
-    from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
-    from flare.recipes.glm53.generation import PreparedGeneration
-    from flare.recipes.glm53.maintenance import PreparedMaintenance
-    from flare.recipes.glm53.pool import ContinuationPool
-    from flare.recipes.glm53.resume import PreparedResume
-    from flare.recipes.glm53.stack import DecoderScratch, PreparedDecoder
-    from flare.recipes.glm53.state import DecoderMetadata
-    from flare.recipes.glm53.weights import ModelWeights
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.execution import GraphSignature, PreparedExecution
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.tuning import RecordedPreparationSession
+    from ignition.recipes.glm53.batch import BatchInputs, PreparedBatch
+    from ignition.recipes.glm53.generation import PreparedGeneration
+    from ignition.recipes.glm53.maintenance import PreparedMaintenance
+    from ignition.recipes.glm53.pool import ContinuationPool
+    from ignition.recipes.glm53.resume import PreparedResume
+    from ignition.recipes.glm53.stack import DecoderScratch, PreparedDecoder
+    from ignition.recipes.glm53.state import DecoderMetadata
+    from ignition.recipes.glm53.weights import ModelWeights
 
     peers = []
     for index, (root, peer) in enumerate(sockets, start=1):

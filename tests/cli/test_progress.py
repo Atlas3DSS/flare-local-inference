@@ -5,7 +5,7 @@ import re
 
 from rich.console import Console
 
-from flare.progress import StartupProgress, phase
+from ignition.progress import StartupProgress, phase
 
 
 def rows(width, detail):

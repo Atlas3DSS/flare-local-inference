@@ -2,7 +2,7 @@
 
 import pytest
 
-from flare.components.parallel import TensorParallelShard
+from ignition.components.parallel import TensorParallelShard
 
 
 @pytest.mark.parametrize("world", (1, 2, 4))

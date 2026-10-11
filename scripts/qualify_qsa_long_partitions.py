@@ -100,14 +100,14 @@ def execute(args, records, capture_receipt, receipt):
         raise RuntimeError(f'assigned GPU occupied before preparation: {processes}')
     import b12x.attention.paged._selected_forward as kernels
     import b12x.attention.qsa.reference as reference_module
-    import flare_helios
-    from flare.preparation.graphs import PreparedGraphBundle
+    import flare_heliopause
+    from ignition.preparation.graphs import PreparedGraphBundle
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.set_float32_matmul_precision('highest')
-    native = next(Path(flare_helios.__file__).parent.glob('*.so'))
+    native = next(Path(flare_heliopause.__file__).parent.glob('*.so'))
     root = Path(kernels.__file__).resolve().parents[2]
     receipt['installed_native'] = {'path': str(native), 'sha256': sha(native)}
     receipt['versions'] = {'torch': torch.__version__, 'cuda': torch.version.cuda,
@@ -119,7 +119,7 @@ def execute(args, records, capture_receipt, receipt):
         'callable': 'sparse_paged_gqa_reference', 'device': 'cpu', 'rtol': 0, 'atol': .02,
         'arithmetic': 'FP32 QK, FP32 softmax, FP32 PV, BF16 output; exact installed callable.'}
     receipt['sampling_sources'] = {str(path): sha(path) for path in (
-        ROOT / 'flare/recipes/qwen38/sampling.py',
+        ROOT / 'ignition/recipes/qwen38/sampling.py',
         Path(importlib.util.find_spec('flashinfer.sampling').origin),
     )}
     if receipt['b12x_sources'] != capture_receipt['b12x_sources']:

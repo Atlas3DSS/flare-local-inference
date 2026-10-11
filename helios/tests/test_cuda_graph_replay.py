@@ -159,7 +159,7 @@ class CudaGraphReplayTests(unittest.TestCase):
         workers.clear()
 
     def test_prepared_bundle_retains_entire_resource_set(self):
-        from flare.preparation.graphs import PreparedGraphBundle
+        from ignition.preparation.graphs import PreparedGraphBundle
 
         class AncillaryResource:
             pass
@@ -190,7 +190,7 @@ class CudaGraphReplayTests(unittest.TestCase):
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
     def test_prepared_bundle_validation_and_corrected_retry(self):
-        from flare.preparation.graphs import PreparedGraphBundle
+        from ignition.preparation.graphs import PreparedGraphBundle
 
         owner = GraphResources()
         uninstantiated = torch.cuda.CUDAGraph(keep_graph=True)
@@ -235,7 +235,7 @@ def main():
     parser.add_argument("--extension", type=Path, required=True)
     arguments = parser.parse_args()
     extension = arguments.extension.resolve(strict=True)
-    spec = importlib.util.spec_from_file_location("flare_helios", extension)
+    spec = importlib.util.spec_from_file_location("flare_heliopause", extension)
     native = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = native
     spec.loader.exec_module(native)

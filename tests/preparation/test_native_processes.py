@@ -10,16 +10,16 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("flare_helios")
+pytest.importorskip("flare_heliopause")
 
 DRIVER = r'''
 import json, os, subprocess, sys, time
-import flare_helios
-child = "import flare_helios,sys; flare_helios.bind_parent_lifetime(int(sys.argv[1])); print('ready',flush=True); sys.stdin.read(1)"
+import flare_heliopause
+child = "import flare_heliopause,sys; flare_heliopause.bind_parent_lifetime(int(sys.argv[1])); print('ready',flush=True); sys.stdin.read(1)"
 peers = [subprocess.Popen([sys.executable, '-c', child, str(os.getpid())], stdin=subprocess.PIPE, stdout=subprocess.PIPE) for _ in range(2)]
 for peer in peers:
     assert peer.stdout.readline() == b'ready\n'
-supervisor = flare_helios.RankSupervisor([peer.pid for peer in peers])
+supervisor = flare_heliopause.RankSupervisor([peer.pid for peer in peers])
 print(json.dumps([peer.pid for peer in peers]), flush=True)
 mode = sys.stdin.readline().strip()
 if mode == 'normal':
@@ -70,19 +70,19 @@ def test_rank_group_shutdown_and_failure_do_not_leave_live_peers(mode):
 
 
 def test_supervisor_rejects_unowned_process():
-    import flare_helios
+    import flare_heliopause
 
     with pytest.raises(ValueError):
-        flare_helios.RankSupervisor([os.getpid()])
+        flare_heliopause.RankSupervisor([os.getpid()])
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_cli_signals_exit_during_native_gil_hold_without_python_finalization(signum):
     code = r'''
 import atexit, ctypes, time
-import flare_helios
+import flare_heliopause
 atexit.register(lambda: print("finalizer ran", flush=True))
-with flare_helios.CliSignals():
+with flare_heliopause.CliSignals():
     print("ready", flush=True)
     ctypes.PyDLL(None).sleep(60)
 '''
@@ -103,14 +103,14 @@ with flare_helios.CliSignals():
 
 
 def test_cli_signal_scope_restores_embedded_python_handlers():
-    import flare_helios
+    import flare_heliopause
 
     observed = []
     previous = signal.signal(signal.SIGTERM, lambda signum, frame: observed.append(signum))
     try:
-        with flare_helios.CliSignals():
+        with flare_heliopause.CliSignals():
             with pytest.raises(RuntimeError, match="already installed"):
-                flare_helios.CliSignals()
+                flare_heliopause.CliSignals()
         os.kill(os.getpid(), signal.SIGTERM)
         assert observed == [signal.SIGTERM]
     finally:
@@ -121,9 +121,9 @@ def test_cli_interrupt_leaves_no_compiler_processes():
     code = r'''
 import json, os, time
 from pathlib import Path
-import flare_helios
+import flare_heliopause
 from torch._inductor.compile_worker.subproc_pool import SubprocPool
-with flare_helios.CliSignals():
+with flare_heliopause.CliSignals():
     pool = SubprocPool(1)
     pending = pool.submit(time.sleep, 60)
     coordinator = pool.process.pid

@@ -1,26 +1,32 @@
 # Helios
 
-Helios (`flare-helios`) is Flare's Rust serving core. It supplies a native
-frontend, prefix cache and live-request scheduler,
-and launches Python-prepared CUDA graph executables through direct driver calls.
-The raw `ReplayWorker` and the two-frame `execution::GraphExecutor` are usable
-from Rust without Python types. The `server` feature adds HTTP/SSE, native request
-preparation and direct scheduling of Qwen4Exp and Glm5Next prepared models. Python loads and
-captures the model before handing it to Rust.
+Helios (`flare-helios`) is Flare's Rust runtime library. It supplies a native
+frontend, prefix cache, live-request scheduler, CUDA package loader, and graph
+execution through direct driver calls. The `flare/` crate's binary links this library
+and serves a prepared package in the same process. Neither depends on Python
+or the internal preparation tools.
 
-On an interactive terminal, `flare run` starts a native metrics dashboard
-after preparation; redirected stderr stays plain.
-The dashboard uses a separate, lower-priority Rust thread and reads atomic
-counters twice per second without contacting the GPU or execution worker.
-Braille plots retain 120 seconds of history, with rates measured over a rolling
-two-second wall-clock window. During preparation, Ctrl-C and SIGTERM restore
-the terminal and exit the CLI process directly, bypassing Python finalizers and
-CUDA graph destruction; tensor-parallel peers are killed by their parent-death
-signal. While serving, `flare run` answers both signals by closing the server:
-admission stops, active responses get five seconds to finish, native execution
-drains, tensor-parallel peers shut down with rank zero, and the process exits 0.
-Embedded server `close()` drains native execution the same way before releasing
-caller-owned resources.
+The internal `ignition` command imports the `flare_heliopause` CPython extension
+to prepare and export a model in its own process. Heliopause depends on Helios;
+its crate owns the Python bindings and export allocator and builds no executable.
+`ignition run` caches the package, closes the prepared model, and replaces itself
+with `flare` through `execv`. See
+[runtime packages](../docs/runtime-package-design.md) for the resource contract.
+
+The `server` feature supplies HTTP/SSE and model scheduling. Native package
+serving supports the Qwen TP1 contract. The shared scheduler also supports
+Glm5Next, whose package export and tensor-parallel reconstruction remain
+unimplemented. Raw replay and two-frame graph execution are available through
+Rust APIs and heliopause's diagnostic Python bindings. In-process HTTP
+bindings require heliopause's `qualification` feature; normal installations
+serve only through a package.
+
+During export, Ctrl-C and SIGTERM terminate Ignition directly, bypassing
+Python finalizers and CUDA graph destruction. While serving, `flare run`
+stops admission, gives active responses five seconds to finish, drains native
+execution, and exits 0. Unexpected runtime failure exits 1. The library's
+optional terminal dashboard reads native metrics without contacting the GPU;
+the package command serves headlessly.
 
 Prefill throughput counts consumed prompt tokens, excluding padding and prefix
 reuse. Generation throughput counts committed output tokens, including EOS and
@@ -46,7 +52,7 @@ admission capacity and unavailable workers return 503. Context and capacity
 rejections append the configured `context_hint` or `capacity_hint`, which names
 the setting that raises the limit. A missing or wrong bearer token returns 401
 when the server configuration sets `api_key`; `/health` needs no token.
-Execution and presentation failures return 500. SSE terminal failures and Python exceptions serialize the same display
+Execution and presentation failures return 500. SSE terminal failures and diagnostic Python exceptions serialize the same display
 messages. Failed CUDA drains retain prepared resources. Worker recovery is unsupported.
 
 The server exposes `/health`, `/v1/models`, `/v1/chat/completions`, and `/metrics`.
@@ -55,7 +61,7 @@ requests may use any of them.
 HTTP admission reserves at most `queue_capacity + max_active` requests before
 reading JSON bodies. Admitted requests await a bounded CPU preparation worker;
 the default two workers can prepare four simultaneous generation requests.
-`flare run` sets the queue to four times the concurrency limit, one worker per
+`ignition` packages set the queue to four times the concurrency limit, one worker per
 concurrent request, and a body limit of the recipe's images plus 1 MiB.
 An admission permit survives CPU preparation and the streamed response lifetime.
 Disconnects cancel model scheduling, and slow consumers still face the bounded
@@ -78,7 +84,7 @@ require terminal responses followed by model quiescence, with no other traffic.
 
 ```sh
 cargo test --manifest-path helios/Cargo.toml --offline
-cargo build --manifest-path helios/Cargo.toml --features extension-module
+cargo build --manifest-path heliopause/Cargo.toml --features extension-module
 ```
 
 The `images` and `server` features require native **libturbojpeg >= 3.0** and
@@ -98,7 +104,7 @@ mirrored and axis-swapped images. Invalid orientation metadata is rejected.
 RGB conversion discards alpha and does not apply embedded color profiles.
 Pillow is used only to generate test fixtures, never by native image admission.
 
-The extension is named `flare_helios`. It requires the NVIDIA driver at runtime
+Heliopause builds the internal Python extension named `flare_heliopause`. It requires the NVIDIA driver at runtime
 and dynamically loads `libcuda.so.1`; building and running native unit tests does
 not require CUDA libraries. Tests exercise queueing and teardown using explicit
 Rust test functions. Production always calls the CUDA driver.
@@ -155,9 +161,9 @@ created or destroyed by this crate.
 Qualify real PyTorch-to-Rust graph replay on an explicitly assigned idle GPU:
 
 ```sh
-PYO3_PYTHON=/path/to/python cargo build --manifest-path helios/Cargo.toml --features extension-module,qualification
+PYO3_PYTHON=/path/to/python cargo build --manifest-path heliopause/Cargo.toml --features extension-module,qualification
 CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python helios/tests/test_cuda_graph_replay.py \
-  --extension helios/target/debug/libflare_helios.so
+  --extension heliopause/target/debug/libflare_heliopause.so
 ```
 
 The integration cases capture real PyTorch graphs, change device inputs between
@@ -211,10 +217,10 @@ reenter `close`. Production request processing belongs in Rust; Python control
 methods provide a qualification surface.
 
 ```bash
-PYO3_PYTHON=/path/to/python cargo build --manifest-path helios/Cargo.toml \
+PYO3_PYTHON=/path/to/python cargo build --manifest-path heliopause/Cargo.toml \
   --features extension-module --offline
 timeout 60s env CUDA_VISIBLE_DEVICES=GPU-UUID /path/to/python \
-  helios/tests/test_execution.py --extension helios/target/debug/libflare_helios.so
+  helios/tests/test_execution.py --extension heliopause/target/debug/libflare_heliopause.so
 ```
 
 The four CUDA integration cases cover physical-slot scatter, different graph

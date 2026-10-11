@@ -14,8 +14,7 @@ mod stops;
 pub use config::Bootstrap;
 pub use runtime::{Generation, GenerationEvent, ModelRuntime, Prompt};
 
-#[cfg(feature = "python")]
-pub(crate) fn restore_terminal_for_exit() {
+pub fn restore_terminal_for_exit() {
     dashboard::restore_for_exit();
 }
 

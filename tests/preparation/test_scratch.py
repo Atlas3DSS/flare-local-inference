@@ -8,8 +8,8 @@ import torch
 from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
 from b12x.preparation import PreparationSession
 
-from flare.preparation.scratch import ScratchArena, planned_scratch, scratch_storage
-from flare.preparation.tuning import register_finalizer
+from ignition.preparation.scratch import ScratchArena, planned_scratch, scratch_storage
+from ignition.preparation.tuning import register_finalizer
 
 
 def spec(nbytes, *, dtype=torch.uint8, shape=None, device="cpu"):
@@ -305,7 +305,7 @@ def test_trim_rejects_invalid_or_larger_requirements_without_mutation(nbytes):
 
 
 def test_priming_owners_retain_arena_instead_of_transient_views():
-    from flare.preparation.scratch import prime_owners
+    from ignition.preparation.scratch import prime_owners
 
     arena = ScratchArena("cpu")
     scratch = arena.reserve(1024)

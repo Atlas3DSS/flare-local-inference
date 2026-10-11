@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from flare.components.state import StateLayout, StateStorage, save_hidden
+from ignition.components.state import StateLayout, StateStorage, save_hidden
 
 
 def test_mixed_dtype_regions_alias_only_their_slot_bytes():

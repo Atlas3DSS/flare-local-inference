@@ -7,8 +7,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from flare.components.weights import DirectWeightLoader
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.components.weights import DirectWeightLoader
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                                reason="requires an explicitly assigned CUDA device")
@@ -42,7 +42,7 @@ def packed(rows, columns, fmt, generator):
 
 
 def mxfp4_activation(x):
-    from flare.reference.qwen38_quant import _FP4_VALUES
+    from ignition.reference.qwen38_quant import _FP4_VALUES
 
     groups = x.float().reshape(x.shape[0], -1, 32)
     amax = groups.abs().amax(-1, keepdim=True)
@@ -59,8 +59,8 @@ def mxfp4_activation(x):
 @pytest.mark.parametrize("fmt", ["nvfp4", "nvfp4_a4", "mxfp4"])
 def test_ordinary_fp4_linear_graph(tmp_path, rows, fmt):
     from b12x.preparation import PreparationSession
-    from flare.components.linear import QuantizedProjection
-    from flare.preparation.scratch import ScratchArena
+    from ignition.components.linear import QuantizedProjection
+    from ignition.preparation.scratch import ScratchArena
 
     gen = torch.Generator().manual_seed(871)
     tensors, weight = packed(256, 512, fmt, gen)
@@ -90,7 +90,7 @@ def test_ordinary_fp4_linear_graph(tmp_path, rows, fmt):
             source = mxfp4_activation(cpu * factor) if fmt == "mxfp4" else (cpu * factor).float()
             expected = source @ weight[128:256, 32:320].T
             if fmt == "nvfp4_a4":
-                from flare.reference.qwen38_quant import Nvfp4Projection, nvfp4_linear_reference
+                from ignition.reference.qwen38_quant import Nvfp4Projection, nvfp4_linear_reference
 
                 stored = Nvfp4Projection(tensors["weight"][128:256, 16:160],
                     tensors["weight_scale"][128:256, 2:20], tensors["weight_scale_2"], tensors["input_scale"])
@@ -101,8 +101,8 @@ def test_ordinary_fp4_linear_graph(tmp_path, rows, fmt):
 @pytest.mark.parametrize("fmt,mode", [("nvfp4", "a16"), ("nvfp4", "a4"), ("mxfp4", "a8")])
 def test_ordinary_fp4_experts_graph(tmp_path, fmt, mode):
     from b12x.preparation import PreparationSession
-    from flare.components.moe import PreparedRoutedExperts
-    from flare.reference.qwen38_quant import Nvfp4Projection, nvfp4_expert_reference, quantize_mxfp8_activation
+    from ignition.components.moe import PreparedRoutedExperts
+    from ignition.reference.qwen38_quant import Nvfp4Projection, nvfp4_expert_reference, quantize_mxfp8_activation
 
     gen = torch.Generator().manual_seed(192)
     tensors, decoded, serialized = {}, [], []

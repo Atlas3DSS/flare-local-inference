@@ -19,8 +19,9 @@ supports exactly one kernel library and has no backend abstraction.
   library's calling convention. b12x being pure Python therefore costs nothing
   in steady state. It costs startup time and preparation complexity, both
   bounded by the preparation lifecycle in section 2.
-- **Python prepares; Rust serves.** Python bootstraps the process, loads the
-  model, and captures its graphs. Rust starts the server and owns every request
+- **Python prepares; Rust serves.** Ignition loads the model, captures its graphs,
+  and exports a runtime package. The Rust Flare executable loads that package
+  through Helios, starts the server, and owns every request
   operation, including sockets, tokenization, chat templates, image
   preprocessing, scheduling, grammar advancement, output decoding, and
   streaming. Serving never invokes a Python callback.
@@ -122,14 +123,15 @@ single-GPU core.
 - Every admitted model execution runs through prepared CUDA graphs.
 - Preparation resolves kernels, allocates storage, warms execution paths, and
   captures every supported graph variant.
-- Python performs bootstrap, model loading, preparation, and capture, then hands
-  ownership of the prepared resources to the native core.
+- Ignition performs bootstrap, model loading, preparation, and capture, then
+  exports a runtime package. `ignition run` closes the prepared model and replaces
+  its Python process with the Rust Flare executable through `execv`.
 - Rust owns all runtime sockets, HTTP/SSE, queues, tokenization, chat-template
   rendering, image preprocessing, grammar advancement, sampling control,
   output decoding, cancellation, and health reporting.
 - Rust never invokes Python to process a request, execute a model step, prepare
-  attention metadata, update a cache, or sample a token. Strong Python resource
-  references remain alive in the same process until native shutdown completes.
+  attention metadata, update a cache, or sample a token. The serving process
+  contains no Python interpreter or Python resource owners.
 - Unsupported requests fail admission with a concrete capacity or feature error.
 - Graph executable handles, their captured storage, and their CUDA context remain
   alive together.
@@ -143,7 +145,7 @@ single-GPU core.
 | Active requests | 4 |
 | Decode graph capacities | 1, 2, 4 |
 | Prefill scheduling | One request per chunk, interleaved with decode |
-| Maximum prefill chunk | 4,096 tokens, set by each recipe; `flare run --prefill-chunk-size` overrides it |
+| Maximum prefill chunk | 4,096 tokens, set by each recipe; `ignition run --prefill-chunk-size` overrides it |
 | Prefill graph capacities | 128, 256, 512, 1,024, 2,048, 4,096 tokens |
 | Prefill tail placement | Smallest capacity that holds the tail |
 | Maximum context | Checkpoint limit: 262,144 tokens |
@@ -174,7 +176,7 @@ Every variant uses the common FlashInfer sampler. The
 catalog includes vision, prefill, resume, initialization, snapshot, and restore;
 startup rejects incomplete declarations.
 
-`flare run --no-compile` and `flare prepare --no-compile` skip PyTorch forward compilation and compiled-forward cache
+`ignition run --no-compile` and `ignition export --no-compile` skip PyTorch forward compilation and compiled-forward cache
 loading for development startup. b12x preparation and autotuning still run,
 and every serving path is captured as a CUDA graph. The option applies to Qwen
 and every GLM tensor-parallel rank; compiled forwards remain the default.
@@ -231,12 +233,12 @@ onto the cache object every step, and the vision model loops over images on the
 host.
 [Transformers implementation](https://github.com/huggingface/transformers/blob/4cc2aa84301c9aa210b5513dab9fefae03981f6e/src/transformers/models/qwen4_exp/modeling_qwen4_exp.py)
 
-The [Qwen3.8 recipe](../flare/recipes/qwen38/model.py) keeps the Transformers
+The [Qwen3.8 recipe](../ignition/recipes/qwen38/model.py) keeps the Transformers
 module tree and replaces its forwards with prepared operations.
 
 Recipes control checkpoint loading, model composition, memory policy, tuning,
 and graph-catalog construction. They compose concrete components from
-`flare/components` and select preparation helpers from `flare/preparation`.
+`ignition/components` and select preparation helpers from `ignition/preparation`.
 Shared components implement operations and resource ownership; each recipe
 defines its own orchestration. Compatibility is enforced at the native handoff
 through graph signatures, fixed device buffers, completion records, and owner
@@ -263,71 +265,71 @@ input packing. It computes row identities, query lengths, and final-prefill
 sampling eligibility once. Both adapters use shared incremental page-table
 uploads, with explicit page windows for target and shifted draft caches.
 
-[Prepared projection components](../flare/components/linear.py) provide BF16,
+[Prepared projection components](../ignition/components/linear.py) provide BF16,
 FP32, and block-scaled b12x execution, tuning declarations, caller-owned outputs,
 shared scratch, and captured projection overlap. Recipes supply weights and
 geometry; the components have no Qwen-specific dimensions or state layout.
-The shared [embedding component](../flare/components/embedding.py) prepares
+The shared [embedding component](../ignition/components/embedding.py) prepares
 b12x lookup into fixed output storage. Token IDs and live counts remain device
 inputs; counted lookup zeros inactive rows. Qwen text and MTP use this component,
 and checkpoint tests cover Qwen and GLM embeddings through native 4096-row
 replay with exact outputs and stable allocation counters.
-The shared [sampling component](../flare/components/sampling.py) owns request
+The shared [sampling component](../ignition/components/sampling.py) owns request
 epochs, Philox state, penalties, grammar masks, admission, FlashInfer sampling,
 and completion records. Vocabulary size and EOS tokens come from the recipe.
 Qwen extends request state with its PLE token history; the shared sampler has no
 model-history dependency. Admission and sampling remain captured device work.
-Shared [token-state operations](../flare/components/token_state.py) gather
+Shared [token-state operations](../ignition/components/token_state.py) gather
 pending tokens and positions, validate request epochs, and commit consumed
 spans. Recipes can supply two-token history storage for previous-token
 embeddings. Omitting history storage removes history loads and stores from
 the kernels. Qwen supplies its PLE history and padding token explicitly.
-Shared [routing and expert components](../flare/components/moe.py) retain FP32
+Shared [routing and expert components](../ignition/components/moe.py) retain FP32
 route weights, configurable scoring and correction bias, fixed output buffers,
 and b12x's default expert execution policy. Autotuning uses private activation
 and routing fixtures with the recipe's router precision and scaling.
 
-The shared [canonical constructor](../flare/components/model.py) creates meta
-module trees without initializing CUDA. The [GLM 5.3 Flash recipe](../flare/recipes/glm53/model.py)
+The shared [canonical constructor](../ignition/components/model.py) creates meta
+module trees without initializing CUDA. The [GLM 5.3 Flash recipe](../ignition/recipes/glm53/model.py)
 uses it for `Glm5NextForConditionalGeneration`. Its
-[weight loader](../flare/recipes/glm53/weights.py) partitions KDA and MLA heads,
+[weight loader](../ignition/recipes/glm53/weights.py) partitions KDA and MLA heads,
 dense/shared MLP intermediates, and NVFP4 routed-expert intermediates for TP2/TP4.
 Low-rank input projections, sparse indexers, normalization, and mHC weights are
 replicated. Dense MLPs retain BF16 checkpoint precision; attention and shared
 experts retain MXFP8. b12x slices compressed NVFP4 scales and rebases exceptions
 before preparing GPU weights. Packed weight slices transfer directly through the
-shared [weight loader](../flare/components/weights.py); scale expansion uses
+shared [weight loader](../ignition/components/weights.py); scale expansion uses
 caller-owned buffers that serialized layers can share. Loader contexts use one
 PyTorch CPU thread for small compressed-scale planes and restore the caller's
 thread count on exit. The shared
-[prepared MLP](../flare/components/mlp.py) executes BF16 dense and MXFP8 shared
+[prepared MLP](../ignition/components/mlp.py) executes BF16 dense and MXFP8 shared
 experts with the checkpoint's SwiGLU clamp and caller-owned intermediates.
-The [MLA branch](../flare/recipes/glm53/mla.py) combines the replicated query and
+The [MLA branch](../ignition/recipes/glm53/mla.py) combines the replicated query and
 KV low-rank inputs into one MXFP8 projection. Separate canonical RMSNorms read
 views of the fused output and write contiguous query and latent buffers.
-The [KDA branch](../flare/recipes/glm53/kda.py) packs Q/K/V, beta, and the
+The [KDA branch](../ignition/recipes/glm53/kda.py) packs Q/K/V, beta, and the
 forget-gate input into one MXFP8 projection. A shared
-[projection-chain component](../flare/components/projection_overlap.py) runs
+[projection-chain component](../ignition/components/projection_overlap.py) runs
 the two output-gate projections on an auxiliary stream, overlapping the fused
 input and forget-gate output projections. The branches use disjoint regions of
 the planned scratch arena and join before convolution and recurrence. Batch-one
 forget-gate input aliases the fused output; multirow graphs copy that slice into
 caller-owned contiguous storage required by b12x GEMM. Convolution and recurrence
 use b12x kernels and head-sharded FP32 recurrent state. Shared
-[recurrent components](../flare/components/recurrent.py) provide state allocation,
+[recurrent components](../ignition/components/recurrent.py) provide state allocation,
 device metadata, checkpoint export, and prepared bindings for Qwen GDN and GLM
 KDA. Compiled KDA prefill graphs support chunks through 4096 tokens. KDA decode,
 prefill, and MLP graphs include b12x output reductions and support native replay
-on TP2 and TP4. The shared [prepared mHC component](../flare/components/mhc.py)
+on TP2 and TP4. The shared [prepared mHC component](../ignition/components/mhc.py)
 uses FP32 mixing coefficients, BF16 residual streams, fused weighted RMSNorm,
-and caller-owned scratch. The [GLM decoder layer](../flare/recipes/glm53/decoder.py)
+and caller-owned scratch. The [GLM decoder layer](../ignition/recipes/glm53/decoder.py)
 composes mHC, head-sharded KDA or sparse MLA, an attention all-reduce, fused post/pre mixing,
 the sharded dense MLP or MoE, and a second all-reduce. MLP output and mixing
 coefficients feed the following layer's fused post/pre operation; the final
 layer materializes the residual streams for contraction. Graph variants support
 decode and prefill through 4096 tokens.
 Each rank hands its graph to its native replay worker. The
-[GLM MoE composition](../flare/recipes/glm53/moe.py) keeps replicated router weights
+[GLM MoE composition](../ignition/recipes/glm53/moe.py) keeps replicated router weights
 in their stored BF16 format and produces FP32 logits. Routing uses sigmoid scores,
 correction-biased top-8 selection, normalized weights
 scaled by 2.5, and all 288 experts partitioned along the intermediate dimension.
@@ -340,14 +342,14 @@ calls also differ. A 4096-token TP4 native replay preserves recurrent state,
 attention, router logits, selected experts, routing weights, shared-expert output,
 and replicated rank outputs exactly, but differs from the eager residual in
 0.1% of elements under that pointwise check (maximum absolute error 0.0048828125).
-The [complete text stack](../flare/recipes/glm53/stack.py) composes all 45 layers,
+The [complete text stack](../ignition/recipes/glm53/stack.py) composes all 45 layers,
 canonical token embeddings, final stream averaging and RMSNorm, and a sharded
 vocabulary projection. Each graph capacity uses one residual buffer and one set
 of mHC, KDA, MLA, dense-MLP, and MoE intermediates reused across serialized layers.
 Every layer owns separate recurrent or cache state; graph variants share that
 persistent state and the tuned operator arena. Embeddings and final normalization
 are replicated. Every rank loads a contiguous vocabulary weight partition.
-The shared [vocabulary component](../flare/components/vocabulary.py) projects
+The shared [vocabulary component](../ignition/components/vocabulary.py) projects
 replicated hidden rows locally and gathers BF16 logits with b12x PCIe kernels.
 Rank zero samples from the complete vocabulary. Local and gathered logit buffers
 are caller-owned and shared across serial graph variants.
@@ -362,11 +364,11 @@ handoff through coordinated drain, with stable allocator counters. The test's
 rank-zero Python harness submitted native uploads and inspected completion
 records; rank communication and replay were native. Replicated final hidden
 outputs and consumed-token counts agreed after drain.
-The shared [continuation storage](../flare/components/state.py) lays out aligned
+The shared [continuation storage](../ignition/components/state.py) lays out aligned
 typed regions in one byte row per null, live, or immutable slot. Qwen retains its
 117,291,776-byte ordinary continuation layout. GLM binds KDA recurrence, convolution
 history, and C4 index tails directly to strided views in the
-[continuation pool](../flare/recipes/glm53/pool.py). Request consumed-token counts
+[continuation pool](../ignition/recipes/glm53/pool.py). Request consumed-token counts
 alias its four live rows, and compiled generation saves each active request's
 final normalized hidden output. A GLM row includes one 256-token latent page and
 one C4 index page per MLA layer for unaligned endpoints. It occupies 75,420,672
@@ -374,7 +376,7 @@ bytes per TP2 rank or 38,515,712 bytes per TP4 rank; a 4-GiB snapshot budget hol
 56 or 111 rows, respectively, excluding null/live rows and shared KV pages.
 Complete TP2/TP4 generation passes with these strided bindings, saved hidden
 outputs, exact replicated-rank agreement, and stable replay allocation counters.
-Shared [state transfers](../flare/components/state_transfer.py) validate complete
+Shared [state transfers](../ignition/components/state_transfer.py) validate complete
 row copies, resets, exact consumed endpoints, destination conflicts, and partial
 page aliases before writing. A snapshot saves every KDA state, index tail, and
 the unaligned physical latent/index page; restore writes the saved page into the
@@ -383,7 +385,7 @@ Immutable snapshots can restore into multiple independent live slots. Native
 bytewise tests cover endpoints 1, 3, 4, 255, 256, 257, 511, 512, and 513 and verify
 that rejected commands leave all pool and cache bytes unchanged.
 
-[GLM maintenance](../flare/recipes/glm53/maintenance.py) composes shared request
+[GLM maintenance](../ignition/recipes/glm53/maintenance.py) composes shared request
 admission and continuation transfers into init, restore, and snapshot graphs.
 Eight BF16 flags carry per-command validation failures and participation through
 a b12x all-reduce before any persistent write. Any rank's rejection suppresses
@@ -394,9 +396,9 @@ endpoint, page, admission, or command-count fault on one rank. Replay allocation
 and segment counters remain stable. These maintenance tests use Python/Gloo to
 coordinate rank submissions to native replay workers.
 
-The shared [resume state](../flare/components/resume.py) validates consumed
+The shared [resume state](../ignition/components/resume.py) validates consumed
 endpoints, pending samples, epochs, and rank participation before gathering saved
-normalized hidden outputs. [GLM resume](../flare/recipes/glm53/resume.py) projects
+normalized hidden outputs. [GLM resume](../ignition/recipes/glm53/resume.py) projects
 the saved rows across vocabulary shards and gathers logits on every rank.
 Rank zero performs FlashInfer sampling; peers record completion without
 consuming tokens or changing continuation state.
@@ -432,7 +434,7 @@ cache reuse, four concurrent requests, SSE, a 6,639-token prompt spanning
 Python CLI handoff and the shared Rust server; independent full-model numerical
 qualification remains incomplete.
 
-The [GLM bootstrap](../flare/recipes/glm53/bootstrap.py) prepares 24 graphs per
+The [GLM bootstrap](../ignition/recipes/glm53/bootstrap.py) prepares 24 graphs per
 rank for four active requests and a 4096-token prefill limit. Decoder variants
 bind bounded views of one largest-capacity activation allocation; distinct
 layers reuse those intermediates while persistent continuation state remains
@@ -440,7 +442,7 @@ separate. Recurrent autotuning borrows inactive continuation storage and clears
 it before capture. The HTTP checks use 16,384-token context, 256 KV pages, a
 1 GiB snapshot budget, and 4 GiB of reserved headroom per rank.
 
-[GLM batch preparation](../flare/recipes/glm53/batch.py) converts native token,
+[GLM batch preparation](../ignition/recipes/glm53/batch.py) converts native token,
 slot, epoch, length, and page-table uploads into KDA and sparse-MLA metadata.
 Epoch, pending-token, vocabulary, context, and physical-page checks precede cache
 mutation. Eight BF16 flags represent per-slot validation errors and participation;
@@ -448,13 +450,13 @@ a b12x all-reduce makes every rank reject the same rows before packing tokens.
 Requests whose resident epochs do not match are left untouched. Native TP2/TP4
 tests cover a pending-token fault on rank zero and an epoch mismatch on one peer,
 with identical packed metadata on every rank and continued consumption by valid
-requests. The [generation composition](../flare/recipes/glm53/generation.py)
+requests. The [generation composition](../ignition/recipes/glm53/generation.py)
 joins this preparation with the complete decoder and shared token consumption.
 Rank zero samples through FlashInfer; peer ranks use shared completion recording
 without vocabulary tensors or RNG work. Native transport tests cover admission,
 65 live tokens in a 128-token prefill graph, decode, and both completion ABIs.
 
-Shared [sparse MLA components](../flare/components/sparse_mla.py) prepare b12x
+Shared [sparse MLA components](../ignition/components/sparse_mla.py) prepare b12x
 latent-cache writes and attention over caller-selected physical records. Recipes
 supply geometry and device metadata; results copy into caller-owned output
 storage before another operator reuses the arena. Arena finalization refreshes
@@ -462,7 +464,7 @@ bindings after tuning. Fixed-shape compiled graphs with 32-head decode and
 16-head 4096-token prefill run through the native replay worker with exact cache
 and output agreement against uncompiled execution and no allocator changes.
 b12x owns the sparse kernels, latent-record encoding, and pooled-selection
-expansion. The shared [sparse indexer](../flare/components/indexer.py) prepares
+expansion. The shared [sparse indexer](../ignition/components/indexer.py) prepares
 FP8 selection with private finite tuning operands, logical or physical output
 indices, device visibility lengths, and shared scratch. Prefill uses one shared
 page table; decode accepts a page table per query row. The prepared b12x call
@@ -477,7 +479,7 @@ BF16 key/gate tails carry incomplete pools between chunks. Nine consecutive
 65-token chunks crossing physical pages produce
 the same cache and tail as ordered decode over the combined input. The strict
 4096-token PyTorch pooling comparison remains failing at two FP8 bytes, each
-one representable step apart. The [GLM indexer recipe](../flare/recipes/glm53/indexer.py)
+one representable step apart. The [GLM indexer recipe](../ignition/recipes/glm53/indexer.py)
 composes checkpoint MXFP8 query/key/head-weight projections, BF16 pooling gates,
 canonical LayerNorm, rotated FP8 queries, C4 pool updates, selection, and physical
 slot expansion. A model page holds 256 raw tokens and one 64-record index page;
@@ -495,7 +497,7 @@ Its opaque compiler boundary exposes scale bytes as uint8 views. Checkpoint
 projection tests cover compiled native replay, allocation stability, and the
 BF16 matrix-product error bound against FP64.
 
-The [GLM MLA recipe](../flare/recipes/glm53/mla.py) composes canonical low-rank
+The [GLM MLA recipe](../ignition/recipes/glm53/mla.py) composes canonical low-rank
 normalization, head-sharded queries, native query absorption, latent-cache
 writes, C4 selection, sparse attention, value expansion, and the partial hidden
 output projection. Each rank retains identical latent/index cache geometry;
@@ -521,13 +523,13 @@ and 65-token cases. The 4096-token case first differs at the reduced attention
 output (maximum absolute error 0.00146484375). Dense KDA layer checks remain
 exact on TP2/TP4 through 4096 tokens.
 
-[Prepared PCIe reductions](../flare/components/collectives.py) embed b12x
+[Prepared PCIe reductions](../ignition/components/collectives.py) embed b12x
 single-channel TP2/TP4 all-reduce in compiled forwards with caller-owned outputs.
 A bootstrap-owned IPC runtime reserves the largest configured BF16 hidden
 activation: `max_tokens × hidden_size × 2` bytes. A 4096-token GLM prefill needs
 32 MiB per collective input. The runtime and its IPC buffers persist across
 serialized graph variants.
-A [Gloo bootstrap coordinator](../flare/preparation/collectives.py) matches
+A [Gloo bootstrap coordinator](../ignition/preparation/collectives.py) matches
 collective declarations and barriers before kernel preparation. Completed ranks
 continue exchanging readiness until all peers finish local preparation. Kernel
 preparation failures propagate through the control group before job cleanup.
@@ -564,10 +566,10 @@ error, terminates all four owned ranks, and releases their CUDA contexts. Forced
 exit leaves multiprocessing semaphore cleanup to Python's resource tracker.
 The bootstrap must retain each PCIe runtime until every rank has drained replay.
 
-The shared [tuning session](../flare/preparation/tuning.py) owns declaration
+The shared [tuning session](../ignition/preparation/tuning.py) owns declaration
 collection, candidate scratch reservation, autotuning, and binding finalization.
 Recipes supply the workload schema, numerical policy, and search-limit metadata;
-the [Qwen policy](../flare/recipes/qwen38/tuning.py) defines those values for its
+the [Qwen policy](../ignition/recipes/qwen38/tuning.py) defines those values for its
 operator catalog. Constructors declare operators without compiling or launching
 them. Each weight or cache-state batch containing collective declarations uses
 the coordinator until every rank finishes. Each rank tunes
@@ -664,7 +666,7 @@ storage, operator workspaces, the shared graph memory pool, live and speculative
 state slots, checkpoint snapshots, and page capacity.
 The preparation API reserves 4 GiB of GPU headroom and a 4 GiB checkpoint-state
 budget by default and allocates the remaining planned capacity to pages. The
-`flare` command instead passes the capacities of its memory plan, described in
+`ignition` command instead passes the capacities of its memory plan, described in
 the [command-line design](cli-design.md): pages that fill the free memory measured
 after graph capture, and a snapshot count derived from the concurrency limit. Fail
 preparation if the configured capacities cannot fit.
@@ -763,7 +765,7 @@ distance is diagnostic and does not select the recurrence policy.
 ### Preparation lifecycle
 
 `RecordedPreparationSession.declare()` collects requests without compiling,
-priming, or binding kernels. Components use `flare.preparation.tuning.declare()`
+priming, or binding kernels. Components use `ignition.preparation.tuning.declare()`
 to submit requests and `register_finalizer()` to defer serving bindings. After
 every admitted capacity has an owner, bootstrap prepares one b12x batch containing
 weight operations and operations that depend on cache or recurrent-state
@@ -795,7 +797,7 @@ storage through capacity views. Priming only reads that source; normalized and
 projected outputs occupy separate scratch. Autotuning retains private seeded
 fixtures.
 
-One `flare.preparation.scratch.ScratchArena` supplies byte storage to quantized
+One `ignition.preparation.scratch.ScratchArena` supplies byte storage to quantized
 projections, GDN, QSA, routed MoE, PLE, and vision attention across serialized
 layers and graph executions. `arena.views(*shapes_and_dtypes)` returns contiguous
 typed views with 256-byte-aligned, nonoverlapping regions for buffers needed by
@@ -860,7 +862,7 @@ release memory if another owner still references its previous storage; ownership
 qualification checks those references as well as the reported arena extent.
 
 Operator benchmark operands and trial-state arenas live in
-[`preparation/fixtures`](../flare/preparation/fixtures/). GDN, fused MoE,
+[`preparation/fixtures`](../ignition/preparation/fixtures/). GDN, fused MoE,
 hyperconnection, variable-length attention, blockscaled GEMM, and MTP feedback
 each provide a concrete fixture factory. Recipes retain plan declarations,
 priming, selected bindings, and finalizers. Fixture factories preserve checkpoint
@@ -933,23 +935,29 @@ numerical or performance acceptance.
 
 ## 3. Helios runtime and graph interface
 
-Helios is the Rust serving core, packaged as `flare-helios` and imported by
-Python as `flare_helios`.
+Helios is the pure Rust serving library, packaged as the `flare-helios` crate.
+The `flare/` crate links Helios into the public serving executable. The internal
+`heliopause/` crate also depends on Helios and builds the `flare_heliopause`
+CPython extension used by Ignition. Helios has no dependency on either caller.
 
 ### Process and ownership model
 
-Start with a Python process containing a PyO3 Rust extension and a dedicated
-native GPU worker. Python completes bootstrap and invokes native server startup;
-Rust binds the listening sockets and owns the server lifetime and request paths.
+Ignition prepares and exports a model in its own Python process. `ignition run`
+caches the package and calls `execv` to replace Python with the Rust Flare
+executable. Flare loads the package through `NativeResources`, binds listening
+sockets, and owns the server lifetime and request paths. The
+[runtime-package design](runtime-package-design.md) specifies storage, kernel,
+graph, and frontend reconstruction.
 
 `Server<M>` and `ModelRuntime<M>` statically select the
 [`ModelContract`](../helios/src/model.rs). Shared core code validates graph
 geometry, constructs admissions, schedules work, and retires completions. The
 contract supplies prepared-buffer declarations, model-specific constraints,
 input encoding, and completion checks. Its associated output protocol composes
-separate reasoning and tool parsers. The Python entrypoint selects
-[`Qwen4Exp`](../helios/src/model/qwen4exp.rs) or
-[`Glm5Next`](../helios/src/model/glm5next.rs) from the prepared input schema;
+separate reasoning and tool parsers. The Flare command selects
+[`Qwen4Exp`](../helios/src/model/qwen4exp.rs) for native TP1 packages. The diagnostic
+Python server binding also supports [`Glm5Next`](../helios/src/model/glm5next.rs)
+from the prepared input schema;
 there is no runtime backend registry or dynamic model dispatch per token.
 Unknown schema versions, fields, or capabilities fail before asset loading and
 CUDA worker construction.
@@ -960,7 +968,13 @@ and RNG state do not guarantee identical logits or sampled tokens. State transfe
 and request metadata remain exact; recomputed floating-point results use calibrated
 component bounds.
 
-The Python resource owner retains:
+`NativeResources` owns restored CUDA contexts, modules, graphs, device memory,
+and host mappings until the server confirms that all replay has drained.
+The live graph bundle contains process-local handles; packages serialize
+descriptions and data from which the loader creates those handles.
+
+Heliopause's optional `qualification` feature also supports in-process replay
+and HTTP diagnostics. In that diagnostic path, a Python resource owner retains:
 
 - Transformers modules and prepared b12x objects.
 - PyTorch tensors and captured graphs.
@@ -973,8 +987,7 @@ preparation and executes without acquiring the GIL. Native tokenizer, template,
 processor, and parser instances are constructed during startup and used without
 Python on every request.
 
-The graph bundle is an in-process execution object. CUDA handles are not
-serialized or passed between processes. Startup consumes the prepared model in
+The diagnostic graph bundle is an in-process execution object. Startup consumes the prepared model in
 this order:
 
 1. Validate bundle metadata, context, capacities, and native frontend assets;
@@ -999,9 +1012,9 @@ re-instantiation is permitted.
 Use direct CUDA bindings inside a small Rust module. The core does not require a
 Rust tensor framework or LibTorch model execution.
 
-### Public interface
+### Diagnostic Python interface
 
-The Python-facing interface contains only preparation and server lifetime:
+Heliopause's qualification binding exposes preparation and server lifetime:
 
 ```text
 prepare_model(model_spec, capacities) -> PreparedModel
@@ -1229,7 +1242,7 @@ ancestor pinning, and eviction preserve ownership across active branches.
 
 The [Rust prefix cache](../helios/src/cache.rs) manages ownership, readiness,
 pinning, and eviction. Python allocates backing storage during preparation;
-[captured maintenance operations](../flare/recipes/qwen38/maintenance.py)
+[captured maintenance operations](../ignition/recipes/qwen38/maintenance.py)
 reset, restore, and snapshot its contents.
 
 Use one logical page allocation to identify the corresponding storage across all
@@ -1466,7 +1479,7 @@ to recover either resource.
 The model-independent bundle contract is exercised by small captured graphs
 and the complete Qwen catalog. The [Rust scheduler](../helios/src/scheduler.rs)
 owns request policy; the [native executor](../helios/src/execution/transport.rs)
-owns metadata submission and replay. [Python graph preparation](../flare/preparation/graphs.py)
+owns metadata submission and replay. [Python graph preparation](../ignition/preparation/graphs.py)
 retains captured resources until native shutdown drains all work.
 
 ### Correctness acceptance

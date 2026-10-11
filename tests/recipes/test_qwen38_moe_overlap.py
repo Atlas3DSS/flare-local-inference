@@ -9,14 +9,14 @@ import pytest
 import torch
 from cuda.bindings import driver as cuda
 
-from flare.components.parallel import TensorParallelShard
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.compilation import compile_forward
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.preparation.scratch import ScratchArena
-from flare.preparation.tuning import RecordedPreparationSession
-from flare.recipes.qwen38.moe import PreparedQwenMoe, QwenMoeWeights
-from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
+from ignition.components.parallel import TensorParallelShard
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.recipes.qwen38.moe import PreparedQwenMoe, QwenMoeWeights
+from ignition.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
@@ -107,7 +107,7 @@ import importlib.util
 import sys
 from pathlib import Path
 import torch
-from flare.preparation import aot
+from ignition.preparation import aot
 
 mode, module_path, artifact = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("test_qwen38_moe_overlap", module_path)

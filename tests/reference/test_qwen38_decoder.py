@@ -11,20 +11,20 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.qwen38 import (
     MODEL_ID,
     REVISION,
     TEXT_PREFIX,
     TRANSFORMERS_REVISION,
 )
-from flare.reference.qwen38_decoder import (
+from ignition.reference.qwen38_decoder import (
     CanonicalTextReference,
     _SelectedEmbedding,
     _SelectedExperts,
     _StreamLinear,
 )
-from flare.reference.qwen38_quant import (
+from ignition.reference.qwen38_quant import (
     CheckpointTensors,
     mxfp8_linear_reference,
     nvfp4_expert_reference,

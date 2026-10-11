@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from flare.preparation.execution import GraphSignature, PreparedExecution
+from ignition.preparation.execution import GraphSignature, PreparedExecution
 
 
 def _tensor(dtype, shape):

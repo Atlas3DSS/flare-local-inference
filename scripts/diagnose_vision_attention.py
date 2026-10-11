@@ -25,9 +25,9 @@ from transformers.vision_utils import (
     get_vision_interpolation_indices_and_weights, get_vision_position_ids,
 )
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import MODEL_ID, REVISION
-from flare.reference.qwen38_quant import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.qwen38 import MODEL_ID, REVISION
+from ignition.reference.qwen38_quant import (
     CheckpointTensors, decode_mxfp8, decode_nvfp4, quantize_mxfp8_activation,
     read_nvfp4_projection,
 )

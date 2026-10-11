@@ -11,9 +11,9 @@ import torch
 from b12x.preparation import FrozenMapping, PreparationSession, MemoryRequirements, PreparedCall
 from b12x._lib.scratch import ScratchBufferSpec
 
-from flare.preparation.scratch import ScratchArena, scratch_storage
+from ignition.preparation.scratch import ScratchArena, scratch_storage
 
-from flare.preparation.tuning import (
+from ignition.preparation.tuning import (
     RecordedPreparationSession,
     benchmark_resource,
     declare,
@@ -303,7 +303,7 @@ def test_recipe_policy_owns_cache_identity_and_report_limits(backend):
 
 
 def test_qwen_recipe_preserves_preparation_cache_identity(backend):
-    from flare.recipes.qwen38.tuning import preparation_session
+    from ignition.recipes.qwen38.tuning import preparation_session
 
     session = preparation_session(device=0, checkpoint="revision", namespace={"headers": "digest"})
     assert session.namespace.to_dict() == {
@@ -458,7 +458,7 @@ def test_borrowed_registration_is_unique_collecting_only_and_restores_on_close(b
 
 
 def test_gdn_registration_reuses_exact_strided_key_and_drops_arena_before_reset(backend):
-    from flare.preparation.fixtures.recurrent import register_benchmark_state
+    from ignition.preparation.fixtures.recurrent import register_benchmark_state
 
     session = make_session(device=0, checkpoint="revision")
     storage = torch.full((2, 32), 7, dtype=torch.uint8)
@@ -918,7 +918,7 @@ def test_undeclared_candidate_growth_fails_before_freeze_finalization_or_capture
 @pytest.mark.parametrize("retain_arena_owner", [False, True])
 def test_published_priming_owners_can_release_candidate_storage_only_when_arena_is_retained(
         backend, monkeypatch, retain_arena_owner):
-    from flare.preparation.scratch import prime_owners
+    from ignition.preparation.scratch import prime_owners
 
     session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
@@ -968,10 +968,10 @@ def test_published_priming_owners_can_release_candidate_storage_only_when_arena_
 
 @pytest.mark.parametrize("operator", ["gdn", "fused_moe", "hyperconnection", "varlen_attention", "blockscaled_gemm", "bf16_gemv", "mtp_feedback"])
 def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
-    from flare.preparation.fixtures import (
+    from ignition.preparation.fixtures import (
         blockscaled_gemm, bf16_gemv, fused_moe, recurrent, hyperconnection, varlen_attention, mtp_feedback,
     )
-    from flare.components.moe import RouterScratch
+    from ignition.components.moe import RouterScratch
 
     events, controls = backend
     controls.retain_trials = True

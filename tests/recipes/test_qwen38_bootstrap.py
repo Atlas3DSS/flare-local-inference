@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from flare.preparation.execution import GraphSignature
-from flare.preparation.model import PreparedModel
+from ignition.preparation.execution import GraphSignature
+from ignition.preparation.model import PreparedModel
 
 
 class Resource:
@@ -42,7 +42,7 @@ def model_fixture(monkeypatch, *, synchronize=None, server=None):
     )
     monkeypatch.setattr(model, "manifest", lambda: {"test_manifest": True})
     monkeypatch.setattr("torch.cuda.synchronize", synchronize or (lambda device: events.append("synchronize")))
-    monkeypatch.setitem(sys.modules, "flare_helios", SimpleNamespace(Server=server))
+    monkeypatch.setitem(sys.modules, "flare_heliopause", SimpleNamespace(Server=server))
     return model, events, weights_ref
 
 
@@ -277,7 +277,7 @@ def test_peer_resources_release_only_after_native_rank_drains(monkeypatch, fails
         if fails:
             raise RuntimeError("peer drain failed")
 
-    monkeypatch.setattr("flare.preparation.execution.PreparedExecution.serve_rank", serve_rank)
+    monkeypatch.setattr("ignition.preparation.execution.PreparedExecution.serve_rank", serve_rank)
     model, events, weights = model_fixture(monkeypatch)
     if fails:
         with pytest.raises(RuntimeError, match="peer drain failed"):
@@ -295,8 +295,8 @@ def test_peer_resources_release_only_after_native_rank_drains(monkeypatch, fails
 
 @pytest.mark.parametrize("proposal", ["mtp", "copy"])
 def test_snapshot_budget_covers_the_selected_speculative_layout(proposal):
-    from flare.recipes.qwen38.bootstrap import PreparationConfig
-    from flare.recipes.qwen38.state import HybridStateLayout
+    from ignition.recipes.qwen38.bootstrap import PreparationConfig
+    from ignition.recipes.qwen38.state import HybridStateLayout
 
     ordinary = HybridStateLayout.build().row_bytes
     speculative = HybridStateLayout.build(speculative_tokens=7).row_bytes

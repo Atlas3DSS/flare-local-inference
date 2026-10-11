@@ -4,13 +4,13 @@ from types import SimpleNamespace
 
 import torch
 
-from flare.components.sampling import DeviceRequestState, RequestAdmission
-from flare.components.speculation import PreparedSpeculativeCommit, SpeculativeAcceptance
-from flare.recipes.glm53.batch import BatchInputs
-from flare.recipes.glm53.speculative import PreparedRound
-from flare.recipes.glm53.mtp import DraftMetadata
-from flare.recipes.glm53.state import DecoderMetadata
-from flare.components.recurrent import DeltaMetadata
+from ignition.components.sampling import DeviceRequestState, RequestAdmission
+from ignition.components.speculation import PreparedSpeculativeCommit, SpeculativeAcceptance
+from ignition.recipes.glm53.batch import BatchInputs
+from ignition.recipes.glm53.speculative import PreparedRound
+from ignition.recipes.glm53.mtp import DraftMetadata
+from ignition.recipes.glm53.state import DecoderMetadata
+from ignition.components.recurrent import DeltaMetadata
 
 
 def test_shared_commit_without_previous_token_embeddings():

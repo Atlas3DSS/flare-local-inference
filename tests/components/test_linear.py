@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.components import linear
-from flare.preparation.scratch import ScratchArena
+from ignition.components import linear
+from ignition.preparation.scratch import ScratchArena
 
 
 @dataclass

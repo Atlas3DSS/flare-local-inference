@@ -10,17 +10,17 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from flare.components.recurrent import DeltaMetadata
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.recipes.qwen38.gdn import (
+from ignition.components.recurrent import DeltaMetadata
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.recipes.qwen38.gdn import (
     GDNScratch,
     GDNState,
     PreparedGDN,
     _validate_geometry,
 )
-from flare.recipes.qwen38.weights import QwenWeightLoader
-from flare.reference.qwen38_quant import (
+from ignition.recipes.qwen38.weights import QwenWeightLoader
+from ignition.reference.qwen38_quant import (
     CheckpointTensors,
     decode_mxfp8,
     quantize_mxfp8_activation,
@@ -326,7 +326,7 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
             return decode(decode_input)
 
         if compiled:
-            from flare.preparation.compilation import compile_forward
+            from ignition.preparation.compilation import compile_forward
 
             prefill_call = compile_forward(prefill_call)
             decode_call = compile_forward(decode_call)
@@ -483,7 +483,7 @@ def test_actual_checkpoint_decode_accepts_selected_speculative_state(
             return adapter(inputs)
 
         if compiled:
-            from flare.preparation.compilation import compile_forward
+            from ignition.preparation.compilation import compile_forward
 
             call = compile_forward(call)
             call()

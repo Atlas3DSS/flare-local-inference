@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch._subclasses import FakeTensor
 
-from flare.preparation.forward_metadata import dumps, loads
+from ignition.preparation.forward_metadata import dumps, loads
 
 
 def test_metadata_preserves_tensor_aliases_and_offsets():

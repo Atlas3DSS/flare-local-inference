@@ -50,10 +50,10 @@ class ReplayCase:
     def __init__(self, model):
         import torch
 
-        from flare.components.sampling import AdmissionBuffers
-        from flare.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
-        from flare.recipes.qwen38.sampling import DeviceRequestState
-        from flare.recipes.qwen38.state import HybridStatePool
+        from ignition.components.sampling import AdmissionBuffers
+        from ignition.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
+        from ignition.recipes.qwen38.sampling import DeviceRequestState
+        from ignition.recipes.qwen38.state import HybridStatePool
 
         self.model = model
         self.state = next(value for value in model.resources if isinstance(value, HybridStatePool))
@@ -110,7 +110,7 @@ class ReplayCase:
     def prepare(self, cases):
         import torch
 
-        from flare.recipes.qwen38.sampling import RequestAdmission
+        from ignition.recipes.qwen38.sampling import RequestAdmission
 
         self.batch = len(cases)
         self.state.reset_for_preparation()
@@ -235,7 +235,7 @@ def measure(model, corpus, output):
     """Compare isolated and queued replay, then retain the model for native serving."""
     import torch
 
-    from flare.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.graphs import PreparedGraphBundle
 
     output.mkdir(parents=True, exist_ok=False)
     runner = ReplayCase(model)

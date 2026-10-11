@@ -1,0 +1,668 @@
+"""Captured vision staging, feature publication, and decoder embedding injection."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+import triton
+import triton.language as tl
+
+from ignition.components.sampling import _completion_fields, _write_completion
+from ignition.preparation.triton import prepare_triton
+
+from .sampling import DeviceRequestState
+from .vision import VisionMetadata
+
+FEATURES = 16384
+WIDTH = 2560
+PATCHES = 16384
+VISION_ERROR_BASE = 128
+INJECTION_ERROR_BASE = 256
+
+_JIT_FEATURES = tl.constexpr(FEATURES)
+_JIT_WIDTH = tl.constexpr(WIDTH)
+_JIT_PATCHES = tl.constexpr(PATCHES)
+_JIT_VISION_ERROR_BASE = tl.constexpr(VISION_ERROR_BASE)
+_JIT_INJECTION_ERROR_BASE = tl.constexpr(INJECTION_ERROR_BASE)
+
+
+@dataclass(frozen=True)
+class VisionFeatureState:
+    """Per-request feature storage; only rows below count in its epoch are valid."""
+
+    arena: torch.Tensor
+    generation: torch.Tensor
+    count: torch.Tensor
+
+    @classmethod
+    def allocate(cls, device, *, capacity=4):
+        return cls(
+            torch.empty((capacity, FEATURES, WIDTH), dtype=torch.bfloat16, device=device),
+            torch.zeros(capacity, dtype=torch.int64, device=device),
+            torch.zeros(capacity, dtype=torch.int32, device=device),
+        )
+
+
+@dataclass(frozen=True)
+class VisionInputs:
+    vision_pixel_values: torch.Tensor
+    vision_interpolation_indices: torch.Tensor
+    vision_interpolation_weights: torch.Tensor
+    vision_position_ids: torch.Tensor
+    vision_cu_seqlens: torch.Tensor
+    vision_num_patches: torch.Tensor
+    vision_slot: torch.Tensor
+    vision_generation: torch.Tensor
+    vision_feature_offset: torch.Tensor
+
+    @classmethod
+    def allocate(cls, device):
+        def zeros(shape, dtype):
+            return torch.zeros(shape, dtype=dtype, device=device)
+
+        return cls(
+            zeros((PATCHES, 1536), torch.float32),
+            zeros((PATCHES, 4), torch.int64),
+            zeros((PATCHES, 4), torch.float32),
+            zeros((PATCHES, 2), torch.int64),
+            zeros(2, torch.int32),
+            zeros(1, torch.int32),
+            torch.full((1,), -1, dtype=torch.int32, device=device),
+            zeros(1, torch.int64),
+            zeros(1, torch.int32),
+        )
+
+    def buffers(self):
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+def _require(tensor, shape, dtype, device, name):
+    if (
+        tensor.shape != shape
+        or tensor.dtype != dtype
+        or tensor.device != device
+        or not tensor.is_contiguous()
+    ):
+        raise ValueError(f"{name} requires contiguous {dtype} {shape} on {device}")
+
+
+def _compile(kernel, args, grid):
+    return prepare_triton(kernel, args, grid, num_warps=4)
+
+
+@triton.jit
+def _vision_validate(
+    Pixels,
+    Indices,
+    Weights,
+    Positions,
+    Cu,
+    Num,
+    Slot,
+    Epoch,
+    Offset,
+    Generation,
+    Status,
+    FeatureGeneration,
+    FeatureCount,
+    Errors,
+    CAPACITY: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
+):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    slot, epoch, count, offset = (
+        tl.load(Slot),
+        tl.load(Epoch),
+        tl.load(Num),
+        tl.load(Offset),
+    )
+    active = (slot != -1) | (count != 0)
+    slot_valid = (slot >= 0) & (slot < SLOTS)
+    epoch_valid = (epoch > 0) & (
+        tl.load(Generation + slot, slot_valid, other=0) == epoch
+    )
+    running = tl.load(Status + slot, slot_valid, other=0) == 1
+    error = tl.where(active & ~slot_valid, 1, 0)
+    error |= tl.where(active & (~epoch_valid | ~running), 2, 0)
+    geometry = (count > 0) & (count <= CAPACITY) & (count % 4 == 0)
+    geometry &= (tl.load(Cu) == 0) & (tl.load(Cu + 1) == count)
+    error |= tl.where(active & ~geometry, 4, 0)
+    same_features = tl.load(FeatureGeneration + slot, slot_valid, other=0) == epoch
+    previous_count = tl.load(FeatureCount + slot, slot_valid, other=0)
+    append = offset == tl.where(same_features, previous_count, 0)
+    append &= (offset >= 0) & (offset + count // 4 <= _JIT_FEATURES)
+    error |= tl.where(active & ~append, 8, 0)
+    live_patches = tl.minimum(tl.maximum(count, 0), CAPACITY)
+    metadata_mask = active & (index < live_patches * 4)
+    interpolation = tl.load(Indices + index, metadata_mask, other=0)
+    weight = tl.load(Weights + index, metadata_mask, other=0.0)
+    bad_metadata = metadata_mask & ((interpolation < 0) | (interpolation >= 2304))
+    bad_metadata |= metadata_mask & (~((weight >= 0.0) & (weight <= 1.0)))
+    position_mask = active & (index < live_patches * 2)
+    position = tl.load(Positions + index, position_mask, other=0)
+    bad_metadata |= position_mask & ((position < 0) | (position >= _JIT_PATCHES))
+    error |= tl.where(tl.sum(bad_metadata.to(tl.int32), 0) > 0, 16, 0)
+    pixel_mask = active & (index < live_patches * 1536)
+    pixel = tl.load(Pixels + index, pixel_mask, other=0.0)
+    bad_pixel = pixel_mask & ~(tl.abs(pixel) < float("inf"))
+    error |= tl.where(tl.sum(bad_pixel.to(tl.int32), 0) > 0, 32, 0)
+    if error != 0:
+        tl.atomic_or(Errors, error, sem="relaxed")
+
+
+@triton.jit
+def _vision_sanitize(
+    Pixels,
+    Indices,
+    Weights,
+    Positions,
+    Num,
+    Errors,
+    SafePixels,
+    SafeIndices,
+    SafeWeights,
+    SafePositions,
+    SafeCu,
+    SafeNum,
+    CAPACITY: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    count = tl.where(tl.load(Errors) == 0, tl.load(Num), 0)
+    pixel = tl.load(Pixels + index, index < count * 1536, other=0.0)
+    tl.store(SafePixels + index, pixel, index < CAPACITY * 1536)
+    value = tl.load(Indices + index, index < count * 4, other=0)
+    tl.store(SafeIndices + index, value, index < CAPACITY * 4)
+    weight = tl.load(Weights + index, index < count * 4, other=0.0)
+    tl.store(SafeWeights + index, weight, index < CAPACITY * 4)
+    position = tl.load(Positions + index, index < count * 2, other=0)
+    tl.store(SafePositions + index, position, index < CAPACITY * 2)
+    if tl.program_id(0) == 0:
+        tl.store(SafeNum, count)
+        tl.store(SafeCu, 0)
+        tl.store(SafeCu + 1, count)
+
+
+@triton.jit
+def _feature_validate(Output, Num, Errors, CAPACITY: tl.constexpr, BLOCK: tl.constexpr):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    count = tl.minimum(tl.maximum(tl.load(Num), 0), CAPACITY) // 4
+    valid = (tl.load(Errors) == 0) & (index < count * _JIT_WIDTH)
+    value = tl.load(Output + index, valid, other=0.0).to(tl.float32)
+    bad = valid & ~(tl.abs(value) < float("inf"))
+    if tl.sum(bad.to(tl.int32), 0) > 0:
+        tl.atomic_or(Errors, 64, sem="relaxed")
+
+
+@triton.jit
+def _feature_copy(
+    Output,
+    Arena,
+    Num,
+    Slot,
+    Offset,
+    Errors,
+    CAPACITY: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
+):
+    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    slot, count, offset = (
+        tl.load(Slot).to(tl.int64),
+        tl.load(Num),
+        tl.load(Offset).to(tl.int64),
+    )
+    valid = (
+        (tl.load(Errors) == 0)
+        & (slot >= 0)
+        & (slot < SLOTS)
+        & (index < count // 4 * _JIT_WIDTH)
+    )
+    value = tl.load(Output + index, valid, other=0)
+    tl.store(Arena + (slot * _JIT_FEATURES + offset) * _JIT_WIDTH + index, value, valid)
+
+
+@triton.jit
+def _vision_finish(
+    Slot,
+    Epoch,
+    Num,
+    Offset,
+    Errors,
+    FeatureGeneration,
+    FeatureCount,
+    Generation,
+    Consumed,
+    Generated,
+    Status,
+    StateError,
+    Records,
+    Frame,
+    Sequence,
+    CS: tl.constexpr,
+    RECORD_FIELDS: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
+):
+    slot = tl.program_id(0)
+    active = tl.load(Slot) == slot
+    epoch = tl.load(Epoch)
+    current = active & (epoch == tl.load(Generation + slot))
+    error = tl.load(Errors)
+    status, code = tl.full((), 0, tl.int32), tl.full((), 0, tl.int32)
+    if active:
+        if error == 0:
+            tl.store(FeatureGeneration + slot, epoch)
+            tl.store(FeatureCount + slot, tl.load(Offset) + tl.load(Num) // 4)
+            status = 1
+        else:
+            status, code = 3, _JIT_VISION_ERROR_BASE + error
+            if current & (tl.load(Status + slot) == 1):
+                tl.store(Status + slot, status)
+                tl.store(StateError + slot, code)
+    consumed = tl.load(Consumed + slot * CS, current, other=0)
+    generated = tl.load(Generated + slot, current, other=0)
+    _write_completion(Records, Frame, Sequence, slot, epoch, consumed, generated,
+                      -1, status, code, active, RECORD_FIELDS, SLOTS)
+
+
+class PreparedVisionHandoff:
+    """Validate/sanitize before encoding, then publish complete image features.
+
+    Call ``prepare()`` before capture. Record ``begin()``, the encoder over
+    ``pixels`` and ``metadata``, and ``finish()`` in that order. Invalid input
+    sanitizes every interpolation index and position as well as counts/pixels;
+    no malformed indexing payload reaches the encoder. Publication appends to
+    the feature count and never consumes tokens or samples. All graphs sharing
+    this arena and request state execute in one ordered stream.
+
+    Error bits: 1 slot, 2 epoch/status, 4 geometry, 8 feature append/bounds,
+    16 interpolation/position metadata, 32 nonfinite pixels, 64 nonfinite output.
+    Stale epochs do not alter a reused request's resident state. Slot -1 with
+    zero patches is inactive. Native admission must reject other invalid slots
+    because no physical completion lane can represent them.
+    """
+
+    def __init__(
+        self,
+        inputs: VisionInputs,
+        features: VisionFeatureState,
+        requests: DeviceRequestState,
+        output: torch.Tensor,
+        completion_records,
+        frame_index,
+        submission_sequence,
+    ):
+        device = features.arena.device
+        if device.type != "cuda" or output.ndim != 2 or output.shape[1] != WIDTH:
+            raise ValueError("vision handoff requires CUDA BF16 [features,2560] output")
+        capacity = output.shape[0] * 4
+        if capacity not in (256, 1024, 4096, PATCHES):
+            raise ValueError(
+                "vision handoff patch bucket must be 256, 1024, 4096 or 16384"
+            )
+        _require(
+            features.arena,
+            (requests.capacity, FEATURES, WIDTH),
+            torch.bfloat16,
+            device,
+            "feature arena",
+        )
+        _require(features.generation, (requests.capacity,), torch.int64, device, "feature generation")
+        _require(features.count, (requests.capacity,), torch.int32, device, "feature count")
+        _require(
+            output, (capacity // 4, WIDTH), torch.bfloat16, device, "vision output"
+        )
+        shapes = (
+            ((PATCHES, 1536), torch.float32),
+            ((PATCHES, 4), torch.int64),
+            ((PATCHES, 4), torch.float32),
+            ((PATCHES, 2), torch.int64),
+            ((2,), torch.int32),
+            ((1,), torch.int32),
+            ((1,), torch.int32),
+            ((1,), torch.int64),
+            ((1,), torch.int32),
+        )
+        for (name, tensor), (shape, dtype) in zip(
+            inputs.buffers().items(), shapes, strict=True
+        ):
+            _require(tensor, shape, dtype, device, name)
+        record_fields = _completion_fields(completion_records, device, requests.capacity)
+        for tensor, shape, dtype, name in (
+            (frame_index, (1,), torch.int32, "frame index"),
+            (submission_sequence, (1,), torch.int64, "submission sequence"),
+        ):
+            _require(tensor, shape, dtype, device, name)
+        self.inputs, self.features, self.requests, self.output = (
+            inputs,
+            features,
+            requests,
+            output,
+        )
+        self.metadata = VisionMetadata.allocate(capacity, 1, device)
+        self.pixels = torch.zeros((capacity, 1536), dtype=torch.float32, device=device)
+        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
+        self._prepared = False
+        i, m, f, r = inputs, self.metadata, features, requests
+        grid = (triton.cdiv(capacity * 1536, 1024), 1, 1)
+        self._kernels = [
+            (
+                _vision_validate,
+                (
+                    i.vision_pixel_values,
+                    i.vision_interpolation_indices,
+                    i.vision_interpolation_weights,
+                    i.vision_position_ids,
+                    i.vision_cu_seqlens,
+                    i.vision_num_patches,
+                    i.vision_slot,
+                    i.vision_generation,
+                    i.vision_feature_offset,
+                    r.generation,
+                    r.status,
+                    f.generation,
+                    f.count,
+                    self.errors,
+                    capacity,
+                    1024,
+                ),
+                grid,
+            ),
+            (
+                _vision_sanitize,
+                (
+                    i.vision_pixel_values,
+                    i.vision_interpolation_indices,
+                    i.vision_interpolation_weights,
+                    i.vision_position_ids,
+                    i.vision_num_patches,
+                    self.errors,
+                    self.pixels,
+                    m.interpolation_indices,
+                    m.interpolation_weights,
+                    m.position_ids,
+                    m.cu_seqlens,
+                    m.num_patches,
+                    capacity,
+                    1024,
+                ),
+                grid,
+            ),
+            (
+                _feature_validate,
+                (output, i.vision_num_patches, self.errors, capacity, 1024),
+                (triton.cdiv(capacity // 4 * WIDTH, 1024), 1, 1),
+            ),
+            (
+                _feature_copy,
+                (
+                    output,
+                    f.arena,
+                    i.vision_num_patches,
+                    i.vision_slot,
+                    i.vision_feature_offset,
+                    self.errors,
+                    capacity,
+                    1024,
+                ),
+                (triton.cdiv(capacity // 4 * WIDTH, 1024), 1, 1),
+            ),
+            (
+                _vision_finish,
+                (
+                    i.vision_slot,
+                    i.vision_generation,
+                    i.vision_num_patches,
+                    i.vision_feature_offset,
+                    self.errors,
+                    f.generation,
+                    f.count,
+                    r.generation,
+                    r.consumed_tokens,
+                    r.generated_tokens,
+                    r.status,
+                    r.error_code,
+                    completion_records,
+                    frame_index,
+                    submission_sequence,
+                    r.consumed_tokens.stride(0),
+                    record_fields,
+                ),
+                (requests.capacity, 1, 1),
+            ),
+        ]
+
+    def prepare(self):
+        self._calls = tuple(_compile(kernel, (*args, self.requests.capacity)
+            if kernel in (_vision_validate, _feature_copy, _vision_finish) else args, grid)
+            for kernel, args, grid in self._kernels)
+        self._prepared = True
+
+    def begin(self):
+        if not self._prepared:
+            raise RuntimeError("vision handoff prepare() must complete before capture")
+        self.errors.zero_()
+        self._calls[0]()
+        self._calls[1]()
+
+    def finish(self):
+        if not self._prepared:
+            raise RuntimeError("vision handoff prepare() must complete before capture")
+        for call in self._calls[2:]:
+            call()
+
+
+@triton.jit
+def _injection_validate(
+    Indices,
+    Slots,
+    Epochs,
+    Lengths,
+    Live,
+    Generation,
+    Status,
+    StateError,
+    FeatureGeneration,
+    FeatureCount,
+    Errors,
+    TOKENS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
+):
+    slot, epoch, length, live = (
+        tl.load(Slots),
+        tl.load(Epochs),
+        tl.load(Lengths),
+        tl.load(Live),
+    )
+    physical = (slot >= 0) & (slot < SLOTS)
+    current = (
+        physical
+        & (tl.load(Generation + slot, physical, other=0) == epoch)
+        & (epoch > 0)
+    )
+    running = tl.load(Status + slot, physical, other=0) == 1
+    active = (live > 0) & current & running
+    geometry = (live == 1) & (length > 0) & (length <= TOKENS)
+    index = tl.arange(0, BLOCK)
+    rows = active & (index < length) & (index < TOKENS)
+    feature = tl.load(Indices + index, rows, other=-1)
+    visual = rows & (feature >= 0)
+    count = tl.load(FeatureCount + slot, physical, other=0)
+    same_epoch = tl.load(FeatureGeneration + slot, physical, other=0) == epoch
+    invalid = rows & (feature < -1)
+    invalid |= visual & ((feature >= _JIT_FEATURES) | (feature >= count) | ~same_epoch)
+    error = tl.where(active & ~geometry, 1, 0)
+    error |= tl.where(tl.sum(invalid.to(tl.int32), 0) > 0, 2, 0)
+    tl.store(Errors, error)
+    if active & (error != 0):
+        tl.store(Status + slot, 3)
+        tl.store(StateError + slot, _JIT_INJECTION_ERROR_BASE + error)
+
+
+@triton.jit
+def _inject(
+    Embedding,
+    Arena,
+    Indices,
+    Slots,
+    Epochs,
+    Lengths,
+    Live,
+    Generation,
+    Status,
+    FeatureGeneration,
+    FeatureCount,
+    Errors,
+    TOKENS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SLOTS: tl.constexpr = 4,
+):
+    row, tile = tl.program_id(0), tl.program_id(1)
+    slot, epoch = tl.load(Slots), tl.load(Epochs)
+    physical = (slot >= 0) & (slot < SLOTS)
+    valid = (
+        physical
+        & (tl.load(Live) == 1)
+        & (tl.load(Errors) == 0)
+        & (row < tl.load(Lengths))
+    )
+    valid &= tl.load(Generation + slot, physical, other=0) == epoch
+    valid &= tl.load(Status + slot, physical, other=0) == 1
+    valid &= tl.load(FeatureGeneration + slot, physical, other=0) == epoch
+    feature = tl.load(Indices + row)
+    valid &= (
+        (feature >= 0)
+        & (feature < tl.load(FeatureCount + slot, physical, other=0))
+        & (feature < _JIT_FEATURES)
+    )
+    channel = tile * BLOCK + tl.arange(0, BLOCK)
+    value = tl.load(
+        Arena
+        + (slot.to(tl.int64) * _JIT_FEATURES + feature.to(tl.int64)) * _JIT_WIDTH
+        + channel,
+        valid & (channel < _JIT_WIDTH),
+        other=0,
+    )
+    tl.store(
+        Embedding + row * _JIT_WIDTH + channel, value, valid & (channel < _JIT_WIDTH)
+    )
+
+
+class PreparedEmbeddingInjection:
+    """Validate one packed prefill request before decoder-state gathering.
+
+    Call ``prepare()`` before capture. Record ``validate()`` before
+    ``PreparedDecoderState.begin()``, then ``inject()`` after token embedding and
+    before hyperconnection broadcast. Invalid visual indices set the matching
+    running request's error status, which the subsequent gather excludes from
+    every model-state update. Stale generations leave reused slots unchanged.
+    Text rows use -1 and do not require a feature epoch. No token is consumed.
+    """
+
+    def __init__(
+        self,
+        features: VisionFeatureState,
+        requests: DeviceRequestState,
+        vision_token_indices,
+        row_slot_ids,
+        row_generations,
+        query_lengths,
+        live_rows,
+        embedding,
+        *,
+        rows: int = 1,
+    ):
+        device = features.arena.device
+        if (
+            rows != 1
+            or device.type != "cuda"
+            or embedding.ndim != 2
+            or embedding.shape[1] != WIDTH
+        ):
+            raise ValueError(
+                "vision embedding injection requires one CUDA prefill request"
+            )
+        tokens = embedding.shape[0]
+        if tokens <= 0:
+            raise ValueError("vision embedding injection requires a positive prefill capacity")
+        _require(embedding, (tokens, WIDTH), torch.bfloat16, device, "embedding")
+        _require(
+            vision_token_indices, (tokens,), torch.int32, device, "vision token indices"
+        )
+        for tensor, dtype, name in (
+            (row_slot_ids, torch.int32, "row slots"),
+            (row_generations, torch.int64, "row generations"),
+            (query_lengths, torch.int32, "query lengths"),
+        ):
+            if tensor.ndim != 1 or tensor.numel() < 1:
+                raise ValueError(f"{name} must hold the prefill request")
+            _require(tensor, tensor.shape, dtype, device, name)
+        _require(live_rows, (1,), torch.int32, device, "live rows")
+        self.features, self.requests, self.embedding = features, requests, embedding
+        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
+        self._prepared = False
+        f, r = features, requests
+        self._validate_args = (
+            vision_token_indices,
+            row_slot_ids,
+            row_generations,
+            query_lengths,
+            live_rows,
+            r.generation,
+            r.status,
+            r.error_code,
+            f.generation,
+            f.count,
+            self.errors,
+            tokens,
+            triton.next_power_of_2(tokens),
+            requests.capacity,
+        )
+        self._inject_args = (
+            embedding,
+            f.arena,
+            vision_token_indices,
+            row_slot_ids,
+            row_generations,
+            query_lengths,
+            live_rows,
+            r.generation,
+            r.status,
+            f.generation,
+            f.count,
+            self.errors,
+            tokens,
+            512,
+            requests.capacity,
+        )
+        self._grid = (tokens, triton.cdiv(WIDTH, 512), 1)
+
+    def prepare(self):
+        self._validate = _compile(_injection_validate, self._validate_args, (1, 1, 1))
+        self._inject = _compile(_inject, self._inject_args, self._grid)
+        self._prepared = True
+
+    def validate(self):
+        if not self._prepared:
+            raise RuntimeError(
+                "vision injection prepare() must complete before capture"
+            )
+        self._validate()
+
+    def inject(self):
+        if not self._prepared:
+            raise RuntimeError(
+                "vision injection prepare() must complete before capture"
+            )
+        self._inject()
+
+
+__all__ = [
+    "PreparedEmbeddingInjection",
+    "PreparedVisionHandoff",
+    "VisionFeatureState",
+    "VisionInputs",
+]

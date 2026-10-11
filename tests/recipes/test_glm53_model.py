@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.recipes.glm53 import create_model_tree
+from ignition.recipes.glm53 import create_model_tree
 
 
 def test_checkpoint_constructs_canonical_meta_tree_without_cuda():

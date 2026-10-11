@@ -1,8 +1,11 @@
 # Flare design principles
 
-Flare is a local inference server for NVIDIA SM120/SM121 GPUs. Python prepares
-models with PyTorch, Transformers, and FlashInfer, including b12x. Helios, the
-Rust core in `helios/`, serves requests through prepared CUDA graphs.
+Flare is a local inference server for NVIDIA SM120/SM121 GPUs. Ignition, the
+Python package in `ignition/`, prepares models with PyTorch, Transformers, and
+FlashInfer, including b12x. Its `flare_heliopause` extension is built by the
+`heliopause/` crate. The Rust CLI in `flare/` links Helios, the runtime library
+in `helios/`, to serve requests through prepared CUDA graphs. Both Flare and
+Heliopause depend on Helios; Helios has no Python or preparation-tool dependency.
 
 ## Preserve canonical model implementations where they fit
 
@@ -29,10 +32,10 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 
 ## Flexible recipes, reusable components, shared native machinery
 
-- Recipes in `flare/recipes/` own model-specific composition, checkpoint mapping,
+- Recipes in `ignition/recipes/` own model-specific composition, checkpoint mapping,
   state layouts, and graph preparation. They may retain canonical forwards or
   compose prepared components as the model requires.
-- Put reusable execution mechanisms in `flare/components/`. Recipes should be
+- Put reusable execution mechanisms in `ignition/components/`. Recipes should be
   able to use components independently without adopting a rigid model framework.
   Shared/routed expert overlap, projections, collectives, and state transfers
   are examples of mechanisms that should not be copied between recipes.
@@ -44,7 +47,8 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 
 - Python loads weights, resolves and autotunes kernels, plans storage, warms
   execution paths, and captures supported graph variants before serving starts.
-  It then enters the blocking native server call.
+  Ignition exports a runtime package and closes the prepared model. `ignition run`
+  then replaces its Python process with the Rust Flare executable through `execv`.
 - Helios owns sockets, request processing, tokenization, chat templates,
   scheduling, cache operations, graph replay, and output streaming. Serving
   must not call back into Python.
@@ -67,7 +71,7 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   through the plan into the recipe's `PreparationConfig`, so the plan, its
   printed report, and its recorded measurements describe what was prepared.
 - `CUDA_VISIBLE_DEVICES` is the only variable Flare interprets: it renumbers the
-  GPUs that `--gpus` indexes. `flare.cli.environment` sets the variables that
+  GPUs that `--gpus` indexes. `ignition.cli.environment` sets the variables that
   PyTorch, b12x, Triton, and the Hugging Face hub read, from Flare's
   configuration, before importing them. Detecting a terminal's capabilities is
   not configuration.
@@ -85,12 +89,12 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   introducing custom implementations.
 - Use b12x's autotuning and warmup facilities during preparation. Do not pin
   kernel plans or tuning choices without a demonstrated requirement.
-- Constructors declare b12x requests through `flare.preparation.tuning.declare`;
+- Constructors declare b12x requests through `ignition.preparation.tuning.declare`;
   they must not compile or prime default plans. Submit all operators across the
   complete serving shape catalog to one preparation batch, then bind selected
   plans through `register_finalizer`. Scratch sizing and serving bindings must
   follow tuning.
-- Show startup work through `flare.progress.phase`. Weight loading and kernel
+- Show startup work through `ignition.progress.phase`. Weight loading and kernel
   preparation retain a phase activity bar while their detailed b12x panels are
   transient and share the phase's Rich console. Use `DirectWeightLoader` for
   loading progress, including draft-model weights. Only the root TP rank
@@ -142,15 +146,15 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 - **Overlap independent branches.** Shared experts should be considered for
   overlap with routing and routed experts; recurrent output-gate projections
   can overlap independent input projections. Use
-  [ConcurrentSharedExpert](flare/components/expert_overlap.py) and
-  [ConcurrentProjectionChain](flare/components/projection_overlap.py) where their
+  [ConcurrentSharedExpert](ignition/components/expert_overlap.py) and
+  [ConcurrentProjectionChain](ignition/components/projection_overlap.py) where their
   contracts fit. Measure the relevant row capacities: branches competing for
   bandwidth or SM capacity can make overlap slower. Graph node construction
   order also affects scheduling. `ConcurrentSharedExpert(..., defer_launch=True)`
   records routed kernels before shared kernels while preserving the fork and
   join dependencies; measure this ordering in the complete model graph.
 - **Make overlap safe through compilation.** Declare every concurrently live
-  plan with [ScratchArena.register_parallel](flare/preparation/scratch.py).
+  plan with [ScratchArena.register_parallel](ignition/preparation/scratch.py).
   Sequential work reuses storage; concurrent work gets disjoint storage sized
   from the tuned plans. Refresh bindings after arena resizing. The fork must
   follow input production, and the join must precede output consumption or
@@ -158,7 +162,7 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   dependencies so compilation preserves those lifetimes.
 - **Separate weight storage from arithmetic precision.** Keep BF16 weights in
   BF16 when the required accumulation/output is FP32; use
-  [UnquantizedProjection](flare/components/linear.py) for that contract. Do not
+  [UnquantizedProjection](ignition/components/linear.py) for that contract. Do not
   expand router weights to FP32 merely because routing requires FP32 logits.
   Preserve genuinely FP32 checkpoint weights and model-required arithmetic.
 - **Let b12x select activation precision and kernels.** Use
@@ -168,7 +172,7 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   pin tile shapes, split-K, MoE plans, or a GEMM implementation to conceal an
   integration defect. Check what the selected plan actually executes.
 - **Shard the vocabulary projection under TP.** Use
-  [PreparedVocabularyProjection](flare/components/vocabulary.py) to project
+  [PreparedVocabularyProjection](ignition/components/vocabulary.py) to project
   contiguous vocabulary partitions and gather logits before designated-rank
   sampling. Keep all ranks participating, including resume and other paths
   that produce logits. Respect the collective's supported geometry and retain
@@ -177,10 +181,10 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 - **Fuse residual and normalization boundaries.** Use b12x fused residual,
   normalization, activation, and mHC operations when their rounding matches the
   model contract. Consider adjacent layers as well as operations within a
-  layer; [PreparedMHC](flare/components/mhc.py) supports fused post/pre mixing.
+  layer; [PreparedMHC](ignition/components/mhc.py) supports fused post/pre mixing.
   Avoid materializing an intermediate solely because a Python module ends.
 - **Compile complete prepared forwards.** Use
-  [capture_forwards](flare/preparation/capture.py), which restores compiled
+  [capture_forwards](ignition/preparation/capture.py), which restores compiled
   forwards before tracing and compiles missing variants with static shapes and
   autotuning. Workers perform Dynamo tracing, storage lowering, and Inductor
   compilation from tensor and selected-plan metadata; CUDA resources remain in

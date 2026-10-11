@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from flare.errors import FetchError, UsageError
-from flare.recipes import aliases, recipes, resolve
+from ignition.errors import FetchError, UsageError
+from ignition.recipes import aliases, recipes, resolve
 
 ROOT = Path(__file__).resolve().parents[2]
 HUB = Path.home() / ".cache/huggingface/hub"
@@ -16,9 +16,9 @@ HUB = Path.home() / ".cache/huggingface/hub"
 
 def test_declarations_import_without_model_dependencies():
     result = subprocess.run(
-        [sys.executable, "-c", "import sys; from flare.recipes import aliases; from flare import planning;"
-         " import flare.cli.commands; assert aliases() == ('qwen3.8-flash', 'glm-5.3-flash');"
-         " assert not {'torch', 'transformers', 'flare_helios'} & set(sys.modules)"],
+        [sys.executable, "-c", "import sys; from ignition.recipes import aliases; from ignition import planning;"
+         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'glm-5.3-flash');"
+         " assert not {'torch', 'transformers', 'flare_heliopause'} & set(sys.modules)"],
         cwd=ROOT, check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 

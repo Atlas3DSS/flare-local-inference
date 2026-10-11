@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.components.parallel import TensorParallelShard
-from flare.recipes.glm53.model import create_model_tree
-from flare.recipes.glm53.stack import DecoderScratch
-from flare.recipes.glm53.state import DecoderMetadata, DecoderState
+from ignition.components.parallel import TensorParallelShard
+from ignition.recipes.glm53.model import create_model_tree
+from ignition.recipes.glm53.stack import DecoderScratch
+from ignition.recipes.glm53.state import DecoderMetadata, DecoderState
 
 
 def scratch_tensors(scratch, prefix=""):

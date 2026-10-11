@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.components.linear import UnquantizedProjection
-from flare.components.moe import PreparedRouter, RouterScratch
-from flare.components.parallel import TensorParallelShard
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
-from flare.preparation.compilation import compile_forward
-from flare.preparation.tuning import RecordedPreparationSession
-from flare.recipes.glm53.model import create_model_tree
-from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
+from ignition.components.linear import UnquantizedProjection
+from ignition.components.moe import PreparedRouter, RouterScratch
+from ignition.components.parallel import TensorParallelShard
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.recipes.glm53.model import create_model_tree
+from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="requires an explicitly assigned CUDA device")

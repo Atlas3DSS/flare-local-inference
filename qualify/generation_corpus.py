@@ -20,7 +20,7 @@ import struct
 import subprocess
 from typing import Any
 
-from flare.preparation.qwen38 import (
+from ignition.preparation.qwen38 import (
     CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, MODEL_ID, REVISION, TRANSFORMERS_REVISION,
 )
 
@@ -299,7 +299,7 @@ def generate(snapshot: Path, benchmark_root: Path, benchmark_python: Path, front
                                "long_context", source, tokenizer, {"add_generation_prompt": True}))
     paths = set(benchmark_root.glob("src/**/*.py")) | {
         Path(__file__).resolve(), frontend_fixture, frontend_fixture.parent / "generate_fixtures.py",
-        Path(__file__).resolve().parents[1] / "flare/preparation/qwen38.py",
+        Path(__file__).resolve().parents[1] / "ignition/preparation/qwen38.py",
         benchmark_root / "pyproject.toml", benchmark_root / "uv.lock",
     } | {snapshot / name for name in assets}
     result = {

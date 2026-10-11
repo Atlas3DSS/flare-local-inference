@@ -3,15 +3,14 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flare"
+name = "ignition"
 version = "0.1.0"
 description = "Python model preparation for the Helios CUDA graph serving core"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
 [project.scripts]
-flare = "flare.__main__:main"
-flare-inspect = "flare.preparation.__main__:main"
+ignition = "ignition.__main__:main"
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
@@ -26,7 +25,7 @@ prepare = [
     "huggingface-hub==1.33.0",
     "accelerate==1.14.0",
     "Pillow==12.3.0",
-    "flare-helios",
+    "flare-heliopause",
     "rich>=13",
 ]
 
@@ -39,16 +38,13 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 flashinfer-python = { path = "../flashinfer", editable = true }
-flare-helios = { path = "helios" }
+flare-heliopause = { path = "heliopause" }
 
-[tool.flare.source-revisions]
+[tool.ignition.source-revisions]
 flashinfer = "3a7a4db08768bf9ea47444b000d457949df49bde"
 
 [tool.setuptools.packages.find]
-include = ["flare*"]
-
-[tool.setuptools.package-data]
-"flare.cli" = ["skill.md"]
+include = ["ignition*"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

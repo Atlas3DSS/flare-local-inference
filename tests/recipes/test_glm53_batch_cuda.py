@@ -5,12 +5,12 @@ import os
 import pytest
 import torch
 
-from flare.components.parallel import TensorParallelShard
-from flare.components.sampling import DeviceRequestState, RequestAdmission
-from flare.preparation.compilation import compile_forward
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
-from flare.recipes.glm53.state import DecoderMetadata
+from ignition.components.parallel import TensorParallelShard
+from ignition.components.sampling import DeviceRequestState, RequestAdmission
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.recipes.glm53.batch import BatchInputs, PreparedBatch
+from ignition.recipes.glm53.state import DecoderMetadata
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 @pytest.mark.parametrize("slots", [1, 2])
 @torch.no_grad()
 def test_small_request_capacities_pad_rank_agreement(slots):
-    from flare.components.resume import PreparedResumeState
+    from ignition.components.resume import PreparedResumeState
 
     inputs = BatchInputs.allocate(128, 1, "cuda", capacity=slots)
     requests = DeviceRequestState.allocate("cuda", vocab_size=154880, capacity=slots)

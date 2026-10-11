@@ -13,18 +13,18 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 
 
 def _rank(rank, world, rendezvous):
-    from flare.components.collectives import PreparedAllReduce
-    from flare.components.parallel import TensorParallelShard
-    from flare.components.sampling import DeviceRequestState, RequestAdmission
-    from flare.preparation.collectives import (
+    from ignition.components.collectives import PreparedAllReduce
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.components.sampling import DeviceRequestState, RequestAdmission
+    from ignition.preparation.collectives import (
         CollectivePreparation,
         create_all_reduce_runtime,
     )
-    from flare.preparation.compilation import compile_forward
-    from flare.preparation.graphs import PreparedGraphBundle
-    from flare.preparation.tuning import RecordedPreparationSession
-    from flare.recipes.glm53.batch import BatchInputs, PreparedBatch
-    from flare.recipes.glm53.state import DecoderMetadata
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.tuning import RecordedPreparationSession
+    from ignition.recipes.glm53.batch import BatchInputs, PreparedBatch
+    from ignition.recipes.glm53.state import DecoderMetadata
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)

@@ -7,11 +7,11 @@ import torch
 from b12x.attention import dsa_indexer
 from b12x.attention.dsa_indexer.reference import pack_index_k_cache_reference
 
-from flare.components.indexer import PreparedSparseIndexer
-from flare.preparation.compilation import compile_forward
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.scratch import ScratchArena
-from flare.preparation.tuning import RecordedPreparationSession
+from ignition.components.indexer import PreparedSparseIndexer
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.tuning import RecordedPreparationSession
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")

@@ -7,10 +7,10 @@ from dataclasses import replace
 import pytest
 import torch
 
-from flare.components.sampling import FINISHED
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.components.speculation import (
+from ignition.components.sampling import FINISHED
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from ignition.components.speculation import (
     TARGET_RNG_DOMAIN,
     PreparedCopyProposals,
     PreparedSpeculativeCommit,
@@ -26,9 +26,9 @@ VOCAB = 248320
 
 @torch.no_grad()
 def test_compiled_commit_preserves_pooled_state_without_pool_copies():
-    from flare.preparation.compilation import compile_forward
-    from flare.components.speculation import SpeculativeAcceptance
-    from flare.recipes.qwen38.state import HybridStatePool
+    from ignition.preparation.compilation import compile_forward
+    from ignition.components.speculation import SpeculativeAcceptance
+    from ignition.recipes.qwen38.state import HybridStatePool
 
     state, slots, epochs, live, inputs, records, frame, sequence = tensors(4, 2)
     pool = HybridStatePool.allocate(34, "cuda", speculative_tokens=7)
@@ -256,7 +256,7 @@ def test_native_flashinfer_one_hot_all_prefix_lengths_and_clipping(width):
 @pytest.mark.parametrize("batch,width", [(1, 1), (1, 4), (2, 4)])
 @torch.no_grad()
 def test_compiled_distributions_match_eager_with_changed_parameters(batch, width):
-    from flare.preparation.compilation import compile_forward
+    from ignition.preparation.compilation import compile_forward
 
     args = tensors(batch, width)
     state, slots, epochs, live, inputs, *_ = args
@@ -340,7 +340,7 @@ def test_native_flashinfer_chain_accept_reject_rng_and_budget(width, compiled):
     def run():
         verify(); commit()
     if compiled:
-        from flare.preparation.compilation import compile_forward
+        from ignition.preparation.compilation import compile_forward
         run = compile_forward(run)
     with captured(run, (*args, verify, commit, rng), {"records": records}, restore) as replay:
         replay()
@@ -381,7 +381,7 @@ def test_native_chain_one_row_stream_is_invariant_to_packed_lane(compiled):
     def run():
         many(); one()
     if compiled:
-        from flare.preparation.compilation import compile_forward
+        from ignition.preparation.compilation import compile_forward
         run = compile_forward(run)
     with captured(run, (*args, many, one, rng), {"many": many.output.token_ids, "one": one.output.token_ids}) as replay:
         for offset in (0, 4, 20, 100):
@@ -425,7 +425,7 @@ def test_fixed_graph_commits_bounded_prefixes_at_batch_four(compiled):
         commit()
 
     if compiled:
-        from flare.preparation.compilation import compile_forward
+        from ignition.preparation.compilation import compile_forward
         run = compile_forward(run)
     with captured(run, (*args, limits, verify, commit, rng), {"records": records}, restore) as replay:
         replay()

@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
-from flare.reference.qwen38_quant import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
+from ignition.reference.qwen38_quant import (
     CheckpointTensors,
     mxfp8_linear_reference,
     nvfp4_expert_reference,
@@ -126,7 +126,7 @@ def test_batched_tensors_are_ready_before_loader_exit(manifest):
 @pytest.mark.parametrize("rank,world", [(0, 1), (1, 2), (3, 4)])
 def test_actual_csf_experts_prepared_graph_replay(manifest, rank, world):
     from dataclasses import replace
-    from flare.components.parallel import TensorParallelShard
+    from ignition.components.parallel import TensorParallelShard
 
     shard = TensorParallelShard(rank, world)
     first, last = shard.partition(640)
@@ -220,7 +220,7 @@ def test_packed_mxfp8_projections_preserve_serialized_rows(manifest, layer, regi
 
 
 def test_complete_layer_csf_load_and_captured_expansion(manifest):
-    from flare.reference.qwen38_quant import decode_csf_scales
+    from ignition.reference.qwen38_quant import decode_csf_scales
 
     scratch = allocate_expert_scale_scratch('cuda:0')
     prefix = f'{TEXT_PREFIX}.layers.0.mlp.experts.'
@@ -260,8 +260,8 @@ def test_mtp_expert_shards_match_checkpoint_arithmetic(manifest, rank, world):
     from dataclasses import replace
     from b12x.moe import fused_moe as moe
     from b12x.preparation import PreparationSession, PreparedCall
-    from flare.components.parallel import TensorParallelShard
-    from flare.recipes.qwen38.mtp_weights import MTPWeightLoader
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.recipes.qwen38.mtp_weights import MTPWeightLoader
 
     shard = TensorParallelShard(rank, world)
     first, last = shard.partition(640)
@@ -318,9 +318,9 @@ def test_mtp_expert_shards_match_checkpoint_arithmetic(manifest, rank, world):
 
 def test_csf_tuning_preserves_scales_across_graph_capacities(manifest):
     from b12x.moe import fused_moe
-    from flare.components.moe import PreparedRoutedExperts, RouterScratch
-    from flare.preparation.scratch import ScratchArena
-    from flare.preparation.tuning import RecordedPreparationSession
+    from ignition.components.moe import PreparedRoutedExperts, RouterScratch
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.tuning import RecordedPreparationSession
 
     prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts."
     scales = allocate_expert_scale_scratch("cuda:0")

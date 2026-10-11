@@ -11,10 +11,10 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.checkpoint import TensorMetadata
-from flare.preparation.qwen38 import PLE_PREFIX
-from flare.recipes.qwen38.ple import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.checkpoint import TensorMetadata
+from ignition.preparation.qwen38 import PLE_PREFIX
+from ignition.recipes.qwen38.ple import (
     PLE_LAYER_PREFIX,
     TABLE_BYTES,
     MappedPLETable,
@@ -26,8 +26,8 @@ from flare.recipes.qwen38.ple import (
     allocate_convolution_state,
     table_layout,
 )
-from flare.recipes.qwen38.weights import QwenWeightLoader
-from flare.reference.qwen38_quant import (
+from ignition.recipes.qwen38.weights import QwenWeightLoader
+from ignition.reference.qwen38_quant import (
     CheckpointTensors,
     read_ple_rows,
 )
@@ -138,7 +138,7 @@ def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
 def test_ple_mapping_checks_available_host_memory_before_allocation(
     manifest, monkeypatch
 ):
-    monkeypatch.setattr("flare.recipes.qwen38.ple._available_host_bytes", lambda: 0)
+    monkeypatch.setattr("ignition.recipes.qwen38.ple._available_host_bytes", lambda: 0)
     with pytest.raises(MemoryError, match="PLE mapping requires"):
         MappedPLETable.load(manifest, "cuda:0")
 
@@ -151,17 +151,17 @@ def test_ple_mapping_releases_storage_after_checkpoint_read_failure(
         weight_load_view=torch.empty(1), close=lambda: closed.append(True)
     )
     monkeypatch.setattr(
-        "flare.recipes.qwen38.ple._available_host_bytes", lambda: 2 * TABLE_BYTES
+        "ignition.recipes.qwen38.ple._available_host_bytes", lambda: 2 * TABLE_BYTES
     )
     monkeypatch.setattr(
-        "flare.recipes.qwen38.ple.ple_embedding.allocate_storage",
+        "ignition.recipes.qwen38.ple.ple_embedding.allocate_storage",
         lambda layout: storage,
     )
 
     def fail_read(*args, **kwargs):
         raise OSError("injected checkpoint read failure")
 
-    monkeypatch.setattr("flare.recipes.qwen38.ple._copy_plane", fail_read)
+    monkeypatch.setattr("ignition.recipes.qwen38.ple._copy_plane", fail_read)
     with pytest.raises(OSError, match="checkpoint read failure"):
         MappedPLETable.load(manifest, "cuda:0")
     assert closed == [True]
@@ -287,7 +287,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
 ):
     from b12x.preparation import PreparationSession
 
-    from flare.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.graphs import PreparedGraphBundle
 
     module, projections, table = cuda_components
     device = torch.device("cuda", 0)

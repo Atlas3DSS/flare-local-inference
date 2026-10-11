@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flare.components.sampling import ERROR, FINISHED, RUNNING
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.components.speculation import (
+from ignition.components.sampling import ERROR, FINISHED, RUNNING
+from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN,
     INVALID_SPECULATION,
     TARGET_RNG_DOMAIN,

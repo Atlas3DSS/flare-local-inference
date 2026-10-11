@@ -2,7 +2,7 @@
 
 import pytest
 
-from flare.recipes.qwen38.bootstrap import PreparationConfig
+from ignition.recipes.qwen38.bootstrap import PreparationConfig
 
 
 @pytest.mark.parametrize("size, expected", [
@@ -65,7 +65,7 @@ def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
 
 @pytest.mark.parametrize("drafts", range(8))
 def test_fixed_drafting_captures_exactly_one_graph_per_batch(drafts):
-    from flare.preparation.execution import GraphSignature
+    from ignition.preparation.execution import GraphSignature
 
     config = PreparationConfig(mtp=True, speculative_widths=tuple(range(1, 9)),
                                speculative_fixed_width=drafts + 1)

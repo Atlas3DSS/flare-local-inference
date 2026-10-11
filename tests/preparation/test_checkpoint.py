@@ -9,10 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from flare.preparation import CheckpointError, inspect_qwen38_checkpoint
-from flare.preparation import qwen38
-from flare.preparation.__main__ import main
-from flare.preparation.checkpoint import (
+from ignition.preparation import CheckpointError, inspect_qwen38_checkpoint
+from ignition.preparation import qwen38
+from ignition.preparation.checkpoint import (
     _inspect_frontend_assets, _parse_json, _read_header, _validate_config, _validate_tensors,
 )
 
@@ -187,7 +186,7 @@ def test_missing_quantization_recipe_rejected(snapshot):
     assert name in str(error.value)
 
 
-def test_cpu_only_cli(snapshot, capsys, monkeypatch):
+def test_checkpoint_metadata_does_not_import_torch(snapshot, monkeypatch):
     original_import = builtins.__import__
 
     def import_without_torch(name, *args, **kwargs):
@@ -196,15 +195,9 @@ def test_cpu_only_cli(snapshot, capsys, monkeypatch):
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", import_without_torch)
-    assert main([str(snapshot)]) == 0
-    report = json.loads(capsys.readouterr().out)
+    report = inspect_qwen38_checkpoint(snapshot).to_dict()
     assert report["reference_revision"] == qwen38.REVISION
     assert report["validation"]["tensor_payloads_read"] is False
-
-
-def test_cli_missing_snapshot_is_error(tmp_path, capsys):
-    assert main([str(tmp_path / "absent")]) == 1
-    assert "checkpoint inspection failed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("algo", ["NVFP4", "W4A16_NVFP4"])

@@ -2,8 +2,8 @@
 
 import pytest
 
-from flare.cli.config import Configuration, Setting, parse_size
-from flare.errors import UsageError
+from ignition.cli.config import Configuration, Setting, parse_size
+from ignition.errors import UsageError
 
 
 def load(tmp_path, text):
@@ -53,15 +53,11 @@ max_concurrency = 2
     assert configuration.max_concurrency("qwen3.8-flash", 4) == Setting(2, '[models."qwen3.8-flash"]')
     assert configuration.max_concurrency("glm-5.3-flash", 4) == Setting(6, "[defaults]")
     assert configuration.max_concurrency("qwen3.8-flash", 4, 9) == Setting(9, "flag")
-    settings = configuration.settings()
-    assert settings['models."qwen3.8-flash".max_concurrency'].value == 2
-    assert settings["defaults.model"].source == "[defaults]"
 
 
 def test_recipe_supplies_concurrency_when_the_file_is_silent(tmp_path):
     configuration = load(tmp_path, "[server]\nport = 8001\n")
     assert configuration.max_concurrency("qwen3.8-flash", 4) == Setting(4, "recipe")
-    assert configuration.settings()["defaults.max_concurrency"].source == "recipe"
 
 
 @pytest.mark.parametrize("text, message", [

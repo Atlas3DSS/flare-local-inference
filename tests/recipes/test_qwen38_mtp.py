@@ -3,9 +3,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38 import mtp, moe
+from ignition.preparation.fixtures import mtp_feedback as feedback_fixtures
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.qwen38 import mtp, moe
 
 
 @pytest.mark.parametrize("tokens,rows", [(0, 1), (2, 3), (True, 1), (2, 0)])
@@ -83,7 +83,7 @@ def test_feedback_refresh_and_private_benchmark_preserve_input_state(monkeypatch
 
 
 def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
-    from flare.components import embedding
+    from ignition.components import embedding
 
     scratch = mtp.MTPScratch.allocate(3, 2, "cpu")
     ids = torch.tensor([8, -1, 9], dtype=torch.int64)
@@ -180,7 +180,7 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
 
 
 def test_shared_bf16_expert_uses_bf16_projections_without_activation_quantization(monkeypatch):
-    from flare.components import mlp
+    from ignition.components import mlp
 
     source = torch.ones((1, 2560), dtype=torch.bfloat16)
     weights = moe.SharedExpertWeights(torch.empty((1280, 2560), dtype=torch.bfloat16, device="meta"),

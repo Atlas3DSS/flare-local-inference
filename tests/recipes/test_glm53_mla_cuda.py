@@ -8,16 +8,16 @@ import pytest
 import torch
 from b12x.attention import sparse_mla
 
-from flare.components.parallel import TensorParallelShard
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
-from flare.preparation.compilation import compile_forward
-from flare.preparation.execution import GraphSignature, PreparedExecution
-from flare.preparation.scratch import ScratchArena
-from flare.preparation.tuning import RecordedPreparationSession
-from flare.recipes.glm53.indexer import IndexMetadata
-from flare.recipes.glm53.mla import MLAScratch, MLAState, PreparedGlmMLA
-from flare.recipes.glm53.model import create_model_tree
-from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
+from ignition.components.parallel import TensorParallelShard
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.execution import GraphSignature, PreparedExecution
+from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.recipes.glm53.indexer import IndexMetadata
+from ignition.recipes.glm53.mla import MLAScratch, MLAState, PreparedGlmMLA
+from ignition.recipes.glm53.model import create_model_tree
+from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")

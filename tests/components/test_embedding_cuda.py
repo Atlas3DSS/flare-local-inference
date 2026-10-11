@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.components.embedding import PreparedEmbedding
-from flare.components.weights import DirectWeightLoader
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
-from flare.preparation.compilation import compile_forward
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.tuning import RecordedPreparationSession
+from ignition.components.embedding import PreparedEmbedding
+from ignition.components.weights import DirectWeightLoader
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.tuning import RecordedPreparationSession
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")

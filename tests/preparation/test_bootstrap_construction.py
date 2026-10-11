@@ -17,8 +17,8 @@ from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.utils._python_dispatch import TorchDispatchMode, _disable_current_modes
 from torch.utils._pytree import tree_leaves, tree_map
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.recipes.qwen38 import bootstrap
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.recipes.qwen38 import bootstrap
 
 
 class MetadataValues(TorchDispatchMode):
@@ -213,7 +213,7 @@ def checkpoint():
     if not snapshot.exists():
         pytest.skip("exact Qwen checkpoint metadata is not available")
     manifest = inspect_qwen38_checkpoint(snapshot)
-    from flare.recipes.qwen38.ple import table_layout
+    from ignition.recipes.qwen38.ple import table_layout
 
     config, layout = table_layout(manifest, "cuda:0")
     return manifest, config, layout
@@ -227,8 +227,8 @@ def _install_boundaries(monkeypatch, checkpoint):
     from b12x.preparation.types import DeviceIdentity
     from triton.runtime.jit import JITFunction
 
-    from flare.preparation import tuning
-    from flare.recipes.qwen38 import (
+    from ignition.preparation import tuning
+    from ignition.recipes.qwen38 import (
         attention,
         gdn,
         hyperconnection,
@@ -282,7 +282,7 @@ def _install_boundaries(monkeypatch, checkpoint):
     }.items():
         monkeypatch.setattr(torch.cuda, name, replacement)
 
-    from flare.preparation.scratch import ScratchArena
+    from ignition.preparation.scratch import ScratchArena
 
     monkeypatch.setattr(ScratchArena, "auxiliary_stream", property(lambda arena: DeclaredStream(arena.device)))
 
@@ -292,7 +292,7 @@ def _install_boundaries(monkeypatch, checkpoint):
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
     from flashinfer import sampling
 
-    from flare.components import flashinfer_sampling
+    from ignition.components import flashinfer_sampling
 
     monkeypatch.setattr(sampling, "get_sampling_module", lambda: SimpleNamespace(
         top_k_mask_logits=lambda tensor, *a: torch.empty_like(tensor),
@@ -609,7 +609,7 @@ def _install_boundaries(monkeypatch, checkpoint):
         "vision",
         "vision_state",
     )
-    for name in ("flare.components.linear", "flare.components.speculation", *("flare.recipes.qwen38." + name for name in modules)):
+    for name in ("ignition.components.linear", "ignition.components.speculation", *("ignition.recipes.qwen38." + name for name in modules)):
         module = importlib.import_module(name)
         for cls in vars(module).values():
             if not inspect.isclass(cls) or cls.__module__ != module.__name__:
@@ -768,7 +768,7 @@ def test_recording_metadata_preserves_values_and_rejects_unknown_scalars():
 def test_real_moe_constructor_rejects_incompatible_loaded_geometry(
     monkeypatch, checkpoint
 ):
-    from flare.recipes.qwen38.weights import QwenWeightLoader
+    from ignition.recipes.qwen38.weights import QwenWeightLoader
 
     session, _signatures, constructors = _install_boundaries(monkeypatch, checkpoint)
     load = QwenWeightLoader.load_tensor

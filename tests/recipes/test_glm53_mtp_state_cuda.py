@@ -7,16 +7,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.components.parallel import TensorParallelShard
-from flare.components.recurrent import DeltaMetadata
-from flare.preparation.checkpoint import inspect_indexed_checkpoint
-from flare.preparation.scratch import ScratchArena
-from flare.preparation.tuning import RecordedPreparationSession
-from flare.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
-from flare.recipes.glm53.model import create_model_tree
-from flare.recipes.glm53.pool import ContinuationPool
-from flare.recipes.glm53.speculative import PreparedRound
-from flare.recipes.glm53.weights import GlmWeightLoader, TEXT_PREFIX
+from ignition.components.parallel import TensorParallelShard
+from ignition.components.recurrent import DeltaMetadata
+from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
+from ignition.recipes.glm53.model import create_model_tree
+from ignition.recipes.glm53.pool import ContinuationPool
+from ignition.recipes.glm53.speculative import PreparedRound
+from ignition.recipes.glm53.weights import GlmWeightLoader, TEXT_PREFIX
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                                reason="requires an explicitly assigned CUDA device")

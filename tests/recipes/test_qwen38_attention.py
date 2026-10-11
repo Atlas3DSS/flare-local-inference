@@ -10,19 +10,19 @@ from pathlib import Path
 import pytest
 import torch
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38.attention import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.qwen38.attention import (
     PreparedAttention,
     QSAMetadata,
     QSAScratch,
     QSAState,
     RotaryTables,
 )
-from flare.recipes.qwen38.weights import QwenWeightLoader
-from flare.reference.qwen38_quant import (
+from ignition.recipes.qwen38.weights import QwenWeightLoader
+from ignition.reference.qwen38_quant import (
     CheckpointTensors,
     decode_mxfp8,
     quantize_mxfp8_activation,
@@ -173,7 +173,7 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
         for label, attention in prepared.items():
             call = partial(attention, sources[label])
             if compiled:
-                from flare.preparation.compilation import compile_forward
+                from ignition.preparation.compilation import compile_forward
 
                 call = compile_forward(call)
             calls[label] = call

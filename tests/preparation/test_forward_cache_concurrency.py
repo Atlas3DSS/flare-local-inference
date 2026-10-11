@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
 
-from flare.preparation.aot import ForwardCache
+from ignition.preparation.aot import ForwardCache
 
 
 def test_catalog_publication_waits_for_all_bindings(tmp_path, monkeypatch):

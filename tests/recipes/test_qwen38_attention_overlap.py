@@ -10,18 +10,18 @@ import torch
 from b12x.preparation import PreparationSession
 from cuda.bindings import driver as cuda
 
-from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.compilation import compile_forward
-from flare.preparation.qwen38 import TEXT_PREFIX
-from flare.preparation.scratch import ScratchArena
-from flare.recipes.qwen38.attention import (
+from ignition.preparation import inspect_qwen38_checkpoint
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.qwen38 import TEXT_PREFIX
+from ignition.preparation.scratch import ScratchArena
+from ignition.recipes.qwen38.attention import (
     PreparedAttention,
     QSAMetadata,
     QSAScratch,
     QSAState,
     RotaryTables,
 )
-from flare.recipes.qwen38.weights import QwenWeightLoader
+from ignition.recipes.qwen38.weights import QwenWeightLoader
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
@@ -56,7 +56,7 @@ def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
     def compile_call(fn):
         if compiled == "aot":
             import io
-            from flare.preparation.aot import aot_forward
+            from ignition.preparation.aot import aot_forward
 
             artifact = aot_forward(fn)
             artifact(fn)

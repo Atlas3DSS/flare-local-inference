@@ -5,7 +5,7 @@ import sys
 
 from torch._dynamo import guards
 
-from flare.preparation.aot import _guard_code_cache
+from ignition.preparation.aot import _guard_code_cache
 
 
 def test_cached_guard_source_binds_fresh_closures_in_another_process(tmp_path):
@@ -20,7 +20,7 @@ def test_cached_guard_source_binds_fresh_closures_in_another_process(tmp_path):
 import sys
 from pathlib import Path
 from torch._dynamo import guards
-from flare.preparation.aot import _guard_code_cache
+from ignition.preparation.aot import _guard_code_cache
 
 def forbid_build(*args, **kwargs):
     raise AssertionError('cached guard source must not be regenerated')

@@ -5,7 +5,7 @@ Flare's speculative engine supports the embedded MTP modules in
 `local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
-Each recipe's `PreparationConfig(mtp=True)` prepares it, and `flare run`
+Each recipe's `PreparationConfig(mtp=True)` prepares it, and `ignition run`
 prepares it for both recipes unless `--no-mtp` is given. The advanced flags
 select the draft-token count, fixed in place of adaptive verification, the
 graph budget, and the proposal source. Draft continuations from request history are
@@ -39,12 +39,12 @@ The MTP decoder has no GDN or PLE layer. Target verification still executes all
 
 MTP expert preparation must preserve W4A16 arithmetic. The target expert loader
 uses activation-quantized NVFP4 with CSF scales and cannot be applied unchanged.
-The [checkpoint manifest](../flare/preparation/qwen38.py) validates MTP
-headers; the [weight loader](../flare/recipes/qwen38/weights.py) excludes them.
+The [checkpoint manifest](../ignition/preparation/qwen38.py) validates MTP
+headers; the [weight loader](../ignition/recipes/qwen38/weights.py) excludes them.
 Header validation does not verify tensor payload hashes or model execution.
 
 Transformers `4cc2aa84301c9aa210b5513dab9fefae03981f6e` ignores `mtp.*`
-and has no MTP module. The [MTP recipe](../flare/recipes/qwen38/mtp.py) composes
+and has no MTP module. The [MTP recipe](../ignition/recipes/qwen38/mtp.py) composes
 b12x operators for feedback, attention, expert execution, and output mixing.
 Feedback arithmetic is checked against `b12x.sequence.mtp_feedback.reference`;
 state alignment and graph replay are exercised by the recipe tests.
@@ -86,7 +86,7 @@ there is no private eager model fallback.
 
 ## GLM learned proposals and continuation state
 
-The [GLM MTP layer](../flare/recipes/glm53/mtp.py) loads
+The [GLM MTP layer](../ignition/recipes/glm53/mtp.py) loads
 `model.language_model.layers.45`. It combines the shared token embedding with
 the normalized target output through separate RMS norms and an 8192-to-4096
 projection. The decoder uses indexed MLA and ordinary residuals, followed by

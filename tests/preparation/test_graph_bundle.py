@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from flare.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.graphs import PreparedGraphBundle
 
 
 def bundle(**overrides):
@@ -20,8 +20,8 @@ def bundle(**overrides):
 def test_import_does_not_load_torch_or_native_extension():
     subprocess.run([
         sys.executable, "-c",
-        "import sys; import flare.preparation.graphs; "
-        "assert 'torch' not in sys.modules; assert 'flare_helios' not in sys.modules",
+        "import sys; import ignition.preparation.graphs; "
+        "assert 'torch' not in sys.modules; assert 'flare_heliopause' not in sys.modules",
     ], check=True)
 
 
@@ -53,7 +53,7 @@ def test_registration_metadata_is_copied_and_read_only():
 
 def test_raw_replay_requires_qualification_binding_before_cuda(monkeypatch):
     prepared = bundle()
-    monkeypatch.setitem(sys.modules, "flare_helios", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "flare_heliopause", SimpleNamespace())
 
     def forbidden():
         pytest.fail("qualification feature rejection must precede CUDA validation")

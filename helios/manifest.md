@@ -1,9 +1,9 @@
 # Prepared execution manifest
 
 ABI versions `2` and `3` describe graph execution and transport over one existing CUDA
-context. Python prepares the graphs, allocations and manifest, then hands them
-to a native owner that retains every resource through shutdown. The model
-recipe remains responsible for the numerical behavior of each executable.
+context. A resource owner retains the context, graphs and allocations through
+shutdown. `NativeResources` reconstructs these resources from a runtime package written
+by Ignition before native serving starts. The model recipe defines the numerical behavior of each executable.
 
 The Python representation is a dictionary with these fields:
 
@@ -157,3 +157,51 @@ The manifest describes transport and graph capacities. The model recipe's
 request-state, page-table, positional and sampling input names are additional
 named buffers and bindings. A scheduler adapter checks those semantic names
 against the recipe before serving requests.
+
+## Native runtime package
+
+`ignition export MODEL --gpus N --output DIR` prepares a TP1 package for
+`flare run DIR`. Ignition exits or replaces its Python process through `execv` before the native server starts. The
+server loads CUDA machine code and data without Python, PyTorch, compilation,
+or graph capture. The CUDA driver creates fresh context, module, function,
+graph, and graph-executable handles.
+
+`package.json` version `1` contains:
+
+- GPU compute capability and CUDA context flags, limits, and cache preference.
+- Device address reservations and allocations, including mapped host regions.
+  Each allocation names a binary snapshot or a zero initializer.
+- Cubin files, kernel symbols, initialized globals and constants, parameter
+  sizes, and function attributes.
+- Graph nodes, dependency edges with CUDA edge data, kernel arguments and node
+  attributes, and graph instantiation flags.
+- An execution manifest with allocation-relative buffer references and graph
+  names in place of process-local handles.
+
+`server.json` contains the model contract, prepared capacities, request
+defaults, and package-local frontend assets. It excludes the API key;
+authentication and listener address are supplied when launching the native
+server. Package files are trusted executable input.
+
+Allocation references are an allocation name plus a byte offset. Explicit
+relocations support 64-bit pointers and 128-byte CUDA tensor maps in both
+kernel arguments and persistent device storage. Tensor maps are rebound with
+`cuTensorMapReplaceAddress`. Relocatable allocations require complete binding
+metadata; scanning bytes for values resembling pointers cannot supply it.
+
+The Qwen exporter preserves virtual addresses and copies opaque arguments and
+persistent allocation contents, including model weights and pointer tables.
+Preparation uses two PyTorch memory pools backed by one native VMM allocator:
+one for ordinary allocations and one for captured graphs. CUPTI records loaded
+cubins and driver allocations. Device allocations outside the controlled pool
+are grouped into complete VMM pages; only their live spans are copied and the
+remaining bytes are zero. Mapped host tables use explicitly owned registered
+host storage. Native restore reserves the recorded ranges before mapping or
+loading resources and rejects address collisions.
+
+Supported graph nodes are kernels, empty nodes, memset operations, and
+contiguous device-to-device copies. Unsupported node types and device-updatable
+kernel nodes reject export. TP, IPC resources, CUDA arrays, and texture objects
+require additional resource descriptions. The native server accepts the Qwen
+model contract. Resources remain owned until replay drains; a failed drain
+retains them until process termination.

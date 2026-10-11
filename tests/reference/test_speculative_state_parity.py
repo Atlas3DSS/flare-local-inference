@@ -7,10 +7,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.components.sampling import AdmissionBuffers
-from flare.preparation.execution import GraphSignature
-from flare.recipes.qwen38.decoder_state import DecoderInputs
-from flare.recipes.qwen38.state import StateTransferMetadata
+from ignition.components.sampling import AdmissionBuffers
+from ignition.preparation.execution import GraphSignature
+from ignition.recipes.qwen38.decoder_state import DecoderInputs
+from ignition.recipes.qwen38.state import StateTransferMetadata
 from qualify.speculative_state_parity import LEGAL_SHAPES, Commands, _mask, command_plan
 
 

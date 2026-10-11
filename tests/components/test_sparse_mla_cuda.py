@@ -6,11 +6,11 @@ import pytest
 import torch
 from b12x.attention import sparse_mla
 
-from flare.components.sparse_mla import PreparedLatentCacheWriter, PreparedSparseMLA
-from flare.preparation.compilation import compile_forward
-from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.scratch import ScratchArena
-from flare.preparation.tuning import RecordedPreparationSession
+from ignition.components.sparse_mla import PreparedLatentCacheWriter, PreparedSparseMLA
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.tuning import RecordedPreparationSession
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")

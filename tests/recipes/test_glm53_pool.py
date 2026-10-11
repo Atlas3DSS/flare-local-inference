@@ -2,8 +2,8 @@
 
 import pytest
 
-from flare.components.sampling import DeviceRequestState
-from flare.recipes.glm53.pool import ContinuationPool, continuation_layout
+from ignition.components.sampling import DeviceRequestState
+from ignition.recipes.glm53.pool import ContinuationPool, continuation_layout
 
 
 @pytest.mark.parametrize("world", [2, 4])

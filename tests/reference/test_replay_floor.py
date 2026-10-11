@@ -29,9 +29,9 @@ def test_init_stages_exact_empty_endpoint_before_first_replay(batch):
     from dataclasses import fields
     from types import SimpleNamespace
 
-    from flare.components.sampling import AdmissionBuffers
-    from flare.recipes.qwen38.sampling import DeviceRequestState
-    from flare.recipes.qwen38.state import StateTransferMetadata
+    from ignition.components.sampling import AdmissionBuffers
+    from ignition.recipes.qwen38.sampling import DeviceRequestState
+    from ignition.recipes.qwen38.state import StateTransferMetadata
     from qualify.replay_floor import ReplayCase
 
     runner = ReplayCase.__new__(ReplayCase)

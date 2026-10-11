@@ -19,9 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 from transformers import AutoTokenizer
 
-from flare.components.sampling import AdmissionBuffers
-from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-from flare.recipes.qwen38.sampling import RequestAdmission
+from ignition.components.sampling import AdmissionBuffers
+from ignition.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+from ignition.recipes.qwen38.sampling import RequestAdmission
 
 
 class Replay:

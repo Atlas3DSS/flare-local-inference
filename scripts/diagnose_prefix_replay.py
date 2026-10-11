@@ -102,7 +102,7 @@ class Layer3QSARecorder:
     def __enter__(self):
         import torch
 
-        from flare.recipes.qwen38.attention import PreparedAttention
+        from ignition.recipes.qwen38.attention import PreparedAttention
 
         self.attention_type = PreparedAttention
         self.original_init = PreparedAttention.__init__
@@ -232,17 +232,17 @@ def main():
     import b12x.attention.qsa._contract as qsa_contract
     import b12x.attention.varlen._preparation as varlen_preparation
     import b12x.sequence.gdn_prefill._impl as gdn_implementation
-    import flare_helios
+    import flare_heliopause
     import torch
     from transformers import AutoTokenizer
 
-    from flare.components.sampling import AdmissionBuffers
-    from flare.preparation.qwen38 import MODEL_ID, REVISION
-    from flare.recipes.qwen38.attention import PreparedAttention
-    from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
-    from flare.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
-    from flare.recipes.qwen38.sampling import RequestAdmission
-    from flare.recipes.qwen38.state import HybridStatePool
+    from ignition.components.sampling import AdmissionBuffers
+    from ignition.preparation.qwen38 import MODEL_ID, REVISION
+    from ignition.recipes.qwen38.attention import PreparedAttention
+    from ignition.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+    from ignition.recipes.qwen38.decoder import DecoderScratch, PreparedDecoder
+    from ignition.recipes.qwen38.sampling import RequestAdmission
+    from ignition.recipes.qwen38.state import HybridStatePool
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(8)
@@ -274,7 +274,7 @@ def main():
         parser.error(str(error))
     bucket = lambda tokens: next(size for size in config.prefill_capacities if size >= tokens)
     full_capacity, tail_capacity = bucket(len(prompt)), bucket(len(prompt) - boundary)
-    extensions = list(Path(flare_helios.__file__).parent.glob("*.so"))
+    extensions = list(Path(flare_heliopause.__file__).parent.glob("*.so"))
     if len(extensions) != 1:
         raise RuntimeError("expected one installed native extension for provenance")
     b12x_root = Path(qsa_contract.__file__).resolve().parents[2]
@@ -297,7 +297,7 @@ def main():
         "record_layer3_qsa": args.record_qsa,
         "native_extension_sha256": hashlib.sha256(extensions[0].read_bytes()).hexdigest(),
         "source_sha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted((ROOT / "flare/recipes/qwen38").glob("*.py"))},
+            for p in sorted((ROOT / "ignition/recipes/qwen38").glob("*.py"))},
         "diagnostic": "All model mutations use native graph submissions. CPU state readbacks occur after completed fences.",
         "checkpoint_source": "An independent execution of tokens [0, B) at the monolithic graph capacity supplies the live checkpoint at B. The monolithic [0, P) comparison remains separate.",
         "state_comparison": "All 77 continuation regions are compared; checkpoint-only qsa.* storage is retained raw and checked against logical live caches during snapshot/restore.",

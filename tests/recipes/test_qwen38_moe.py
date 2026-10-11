@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from flare.components import moe
-from flare.components.moe import PreparedRouter, RouterScratch
-from flare.recipes.qwen38.moe import PreparedQwenMoe, QwenMoeScratch, QwenMoeWeights
+from ignition.components import moe
+from ignition.components.moe import PreparedRouter, RouterScratch
+from ignition.recipes.qwen38.moe import PreparedQwenMoe, QwenMoeScratch, QwenMoeWeights
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 17, 4096])

@@ -7,8 +7,8 @@ import os
 import pytest
 import torch
 
-from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.recipes.qwen38.vision_state import (
+from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
+from ignition.recipes.qwen38.vision_state import (
     PreparedEmbeddingInjection,
     PreparedVisionHandoff,
     VisionFeatureState,
@@ -56,7 +56,7 @@ def _replay(worker, graph=0):
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
 def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
-    from flare.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.graphs import PreparedGraphBundle
 
     device = _device()
     features, inputs = (
@@ -78,7 +78,7 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         operation.finish()
 
     if compiled:
-        from flare.preparation.compilation import compile_forward
+        from ignition.preparation.compilation import compile_forward
 
         forward = compile_forward(forward)
         forward()
@@ -174,8 +174,8 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
 def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity, compiled):
-    from flare.components.token_state import PreparedTokenState
-    from flare.preparation.graphs import PreparedGraphBundle
+    from ignition.components.token_state import PreparedTokenState
+    from ignition.preparation.graphs import PreparedGraphBundle
 
     device = _device()
     features = VisionFeatureState.allocate(device)
@@ -202,7 +202,7 @@ def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity,
         operation.inject()
 
     if compiled:
-        from flare.preparation.compilation import compile_forward
+        from ignition.preparation.compilation import compile_forward
 
         forward = compile_forward(forward)
         forward()

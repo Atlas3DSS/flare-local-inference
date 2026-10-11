@@ -5,7 +5,7 @@ import os
 import pytest
 import torch
 
-from flare.preparation.scratch import ScratchArena
+from ignition.preparation.scratch import ScratchArena
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
