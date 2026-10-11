@@ -24,6 +24,17 @@ def restore_device(kind, index):
     return target if kind == "cuda" and target is not None else torch.device(kind, index)
 
 
+def restore_prepared_device(kind, state):
+    value = object.__new__(kind)
+    target = _DEVICE.get()
+    if target is not None:
+        state["ordinal"] = target.index
+        if isinstance(state.get("uuid"), str):
+            state["uuid"] = str(torch.cuda.get_device_properties(target).uuid).strip()
+    value.__dict__.update(state)
+    return value
+
+
 def _device_source(source, original, target):
     tree = ast.parse(source)
     lines = source.splitlines(keepends=True)

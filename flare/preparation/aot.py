@@ -22,7 +22,7 @@ from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
 from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, treespec_loads
 
 from .compilation import _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table, _byte_storage, _lower_storage
-from .device_binding import bind_device, relocate_inductor, restore_device
+from .device_binding import bind_device, relocate_inductor, restore_device, restore_prepared_device
 
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
@@ -65,6 +65,10 @@ class _GuardPickler(GuardsStatePickler):
             state = {key: value if id(value) in self.guard_tree_values
                      else _Missing('unguarded attribute')
                      for key, value in vars(obj).items()}
+            from b12x.preparation.device import DetectedDevice
+
+            if isinstance(obj, DetectedDevice):
+                return restore_prepared_device, (type(obj), state)
             return _guard_object, (type(obj),), state
         return super().reducer_override(obj)
 

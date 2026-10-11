@@ -39,8 +39,11 @@ def _unrelated(output):
 
 class BufferForward:
     def __init__(self, handle):
+        from b12x.preparation.device import DetectedDevice
+
         self.handle = handle
         self.storage = torch.zeros(1024, dtype=torch.uint8, device="cuda")
+        self.prepared_device = DetectedDevice(ordinal=self.storage.device.index, identity=None)
         self.part = self.storage.view(torch.float32)[16:48]
         self.alias = self.storage.view(torch.bfloat16)
         self.before = torch.empty_like(self.alias)
@@ -49,6 +52,8 @@ class BufferForward:
         self.negate = False
 
     def __call__(self):
+        if self.source.device.index != self.prepared_device.ordinal:
+            raise ValueError("prepared device differs from source")
         self.storage.zero_()
         _fill(self.part, self.handle)
         self.before.copy_(self.alias)
