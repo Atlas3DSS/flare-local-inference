@@ -7,6 +7,7 @@ import operator
 import os
 import pickle
 import tempfile
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from .compilation import _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_t
 
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
+_COMPILE_POOL = ContextVar("flare_compile_pool", default=None)
 
 
 class BindingMismatch(ValueError):
@@ -186,12 +188,28 @@ class StorageBackend(SerializableCallable):
         self.inputs = [bindings[node] for node in arguments]
         examples = [node.meta['val'] for node in arguments]
         module = torch.fx.GraphModule({}, graph)
-        self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
-            fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
-            aot=True, donate_graph_module=True)
+        self._pending = None
+        pool = _COMPILE_POOL.get()
+        if pool is None:
+            self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
+                fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
+                aot=True, donate_graph_module=True)
+        else:
+            self.artifact = None
+            self._pending = pool.submit(module, examples)
         self._bound = None
 
+    def _finish_compile(self):
+        if self._pending is not None:
+            from torch._inductor.standalone_compile import AOTCompiledArtifact
+
+            data = self._pending.result()
+            with _artifact_kernel_table():
+                self.artifact = AOTCompiledArtifact.deserialize(data)
+            self._pending = None
+
     def __call__(self, *args):
+        self._finish_compile()
         identity = tuple((id(value), value.untyped_storage()._cdata, value.storage_offset())
                          if isinstance(value, torch.Tensor) else value for value in args)
         if self._bound is None or identity != self._bound[0]:
@@ -209,6 +227,7 @@ class StorageBackend(SerializableCallable):
         from torch._library.custom_ops import _maybe_get_opdef
         from torch._dynamo.aot_compile_types import _serialize_triton_kernel
 
+        fn._finish_compile()
         with _artifact_kernel_table():
             artifact = fn.artifact.serialize()
         calls = []
@@ -259,6 +278,7 @@ class StorageBackend(SerializableCallable):
         with _artifact_kernel_table():
             fn.artifact = AOTCompiledArtifact.deserialize(artifact)
         fn._bound = None
+        fn._pending = None
         return fn
 
 
@@ -266,11 +286,15 @@ def _execute(forward):
     return forward()
 
 
-def aot_forward(forward):
+def aot_forward(forward, *, compiler=None):
     sources = r'.*\.(?:_?handle|stream_handle|plans\[\d+\])$'
-    with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
-        return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
-                             dynamic=False).aot_compile(((forward,), {}))
+    token = _COMPILE_POOL.set(compiler)
+    try:
+        with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
+            return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
+                                 dynamic=False).aot_compile(((forward,), {}))
+    finally:
+        _COMPILE_POOL.reset(token)
 
 
 @dataclass
@@ -290,12 +314,15 @@ class ForwardCache:
         import flashinfer
         from torch._inductor.codecache import torch_key
 
+        self.device = torch.device(device)
         properties = torch.cuda.get_device_properties(device)
         options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
         key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
             properties.name, properties.major, properties.minor, properties.multi_processor_count)))
         for root in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
             for path in sorted(root.rglob('*.py')):
+                if root.name == 'flare' and (path.name == '__main__.py' or path == root / 'progress.py'):
+                    continue
                 key.update(str(path.relative_to(root)).encode())
                 key.update(path.read_bytes())
         root = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
@@ -304,9 +331,33 @@ class ForwardCache:
     def prepare(self, forward, *, name, signature, progress=None):
         """Bind and warm one callable on the caller's preparation stream."""
         with _guard_code_cache(self.root / 'guards'):
-            return self._prepare(forward, name=name, signature=signature, progress=progress)
+            bound, path = self._prepare(forward, name=name, signature=signature, progress=progress)
+            return self._warm(bound, path, name=name, progress=progress)
 
-    def _prepare(self, forward, *, name, signature, progress=None):
+    def prepare_many(self, functions, signatures, *, progress=None):
+        """Pipeline tracing and compilation, then warm each shape on the owning rank."""
+        from flare.progress import phase
+        from .compile_pool import CompilePool
+
+        compiled, pending = {}, deque()
+        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device) as compiler:
+            def finish():
+                name, bound, path = pending.popleft()
+                with _guard_code_cache(self.root / 'guards'):
+                    compiled[name] = self._warm(bound, path, name=name, compiler=compiler)
+                stage.update(advance=1)
+
+            for name, forward in functions.items():
+                with _guard_code_cache(self.root / 'guards'):
+                    bound, path = self._prepare(forward, name=name, signature=signatures[name], compiler=compiler)
+                pending.append((name, bound, path))
+                if len(pending) >= compiler.workers:
+                    finish()
+            while pending:
+                finish()
+        return compiled
+
+    def _prepare(self, forward, *, name, signature, compiler=None, progress=None):
         def report(operation):
             if progress is not None:
                 progress.update(f"{name} · {operation}")
@@ -318,18 +369,28 @@ class ForwardCache:
                 artifact = torch.compiler.load_compiled_function(file)
             report("checking compiled bindings")
             if artifact.guard_check(forward):
-                try:
-                    report("warming restored forward")
-                    artifact(forward)
-                except BindingMismatch:
-                    pass
-                else:
-                    return BoundForward(artifact, forward, True)
+                return BoundForward(artifact, forward, True), path
         report("tracing and compiling forward")
-        artifact = aot_forward(forward)
+        artifact = aot_forward(forward, compiler=compiler)
+        return BoundForward(artifact, forward, False), path
+
+    def _warm(self, bound, path, *, name, compiler=None, progress=None):
+        def report(operation):
+            if progress is not None:
+                progress.update(f"{name} · {operation}")
+
+        if bound.cache_hit:
+            try:
+                report("warming restored forward")
+                bound()
+            except BindingMismatch:
+                report("tracing and compiling forward")
+                bound = BoundForward(aot_forward(bound.owner, compiler=compiler), bound.owner, False)
+            else:
+                return bound
         report("warming compiled forward")
-        artifact(forward)
+        bound()
         path.parent.mkdir(parents=True, exist_ok=True)
         report("saving compiled forward")
-        artifact.save_compiled_function(str(path))
-        return BoundForward(artifact, forward, False)
+        bound.artifact.save_compiled_function(str(path))
+        return bound

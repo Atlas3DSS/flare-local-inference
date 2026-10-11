@@ -32,16 +32,21 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     serving replays variants serially and may choose them in any order.
     """
     graphs, compiled = {}, {}
+    if compile_decoder:
+        cache = ForwardCache(namespace=session.namespace.to_dict(), device=device)
+        forwards = {name: function for name, function in functions.items()
+                    if signatures[name].kind in ("prefill", "decode", "resume", "speculative")}
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            compiled = cache.prepare_many(forwards, signatures, progress=progress)
+        stream.synchronize()
     with phase(progress, label, total=len(functions)) as stage:
-        cache = ForwardCache(namespace=session.namespace.to_dict(), device=device) if compile_decoder else None
         for name, function in functions.items():
             started = monotonic()
-            should_compile = compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative")
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
-                if should_compile:
-                    function = cache.prepare(function, name=name, signature=signatures[name])
-                    compiled[name] = function
+                if name in compiled:
+                    function = compiled[name]
                 else:
                     function()
             stream.synchronize()
