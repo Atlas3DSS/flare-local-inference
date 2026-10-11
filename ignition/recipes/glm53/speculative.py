@@ -1,6 +1,9 @@
 """Captured GLM proposals, packed target verification and accepted state commits."""
 
 import torch
+import triton
+import triton.language as tl
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ignition.components.collectives import PreparedAllReduce
 from ignition.components.flashinfer_sampling import sample_probabilities
@@ -15,6 +18,48 @@ from .batch import PreparedBatch
 from .mtp import DraftMetadata, PreparedMTP
 from .stack import PreparedDecoder
 from .state import DecoderMetadata
+
+
+@triton.jit
+def _commit_delta_rows(Words, Slots, Counts, Recurrent, Convolution, row_words, row_halves, extra_base,
+                       RECURRENT_WORDS: tl.constexpr, CHANNELS: tl.constexpr, COLUMNS: tl.constexpr,
+                       WORD_BLOCK: tl.constexpr, CHANNEL_BLOCK: tl.constexpr):
+    # One program copies a slice of one layer's accepted recurrent state into the live row and shifts the
+    # same slice of its convolution history. Rows that kept at most one token already hold their state.
+    layer, row, chunk = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    count = tl.load(Counts + row).to(tl.int64)
+    if count > 1:
+        slot = tl.load(Slots + row).to(tl.int64)
+        live, selected = slot + 1, extra_base + slot * 7 + count - 2
+        recurrent = tl.load(Recurrent + layer)
+        words = chunk * WORD_BLOCK + tl.arange(0, WORD_BLOCK)
+        inside = words < RECURRENT_WORDS
+        values = tl.load(Words + selected * row_words + recurrent + words, inside)
+        tl.store(Words + live * row_words + recurrent + words, values, inside)
+        channels = chunk * CHANNEL_BLOCK + tl.arange(0, CHANNEL_BLOCK)
+        present = channels < CHANNELS
+        halves = Words.to(tl.pointer_type(tl.bfloat16))
+        history = halves + live * row_halves + tl.load(Convolution + layer) + channels * COLUMNS
+        first = tl.load(history + count - 1, present)
+        second = tl.load(history + count, present)
+        third = tl.load(history + count + 1, present)
+        tl.store(history, first, present)
+        tl.store(history + 1, second, present)
+        tl.store(history + 2, third, present)
+
+
+def delta_regions(pool):
+    """Word offsets of every KDA recurrent region, half offsets of its convolution, and their extents."""
+    delta = [i for i, layer in enumerate(pool.decoder.layers) if isinstance(layer, DeltaState)]
+    recurrent = [pool.layout.region(f"layer{i}.recurrent") for i in delta]
+    convolution = [pool.layout.region(f"layer{i}.convolution") for i in delta]
+    if (len({(r.shape, r.dtype) for r in recurrent}) != 1 or len({(r.shape, r.dtype) for r in convolution}) != 1
+            or recurrent[0].dtype != torch.float32 or convolution[0].dtype != torch.bfloat16):
+        raise ValueError("KDA commits require uniform FP32 recurrent and BF16 convolution regions")
+    device = pool.backing.device
+    return (torch.tensor([r.offset // 4 for r in recurrent], dtype=torch.int64, device=device),
+            torch.tensor([r.offset // 2 for r in convolution], dtype=torch.int64, device=device),
+            recurrent[0].nbytes // 4, *convolution[0].shape)
 
 
 class SpeculativePreparation:
@@ -74,6 +119,7 @@ class PreparedRound:
         self.rows, self.columns = torch.arange(b, device=device), torch.arange(w, device=device)
         self.offsets = torch.arange(b * w, device=device)
         self.state_columns = torch.arange(8, device=device)
+        self.delta_regions = delta_regions(o.pool)
         self.metadata = DecoderMetadata.allocate(b * w, b, blocks, device)
         self.metadata = DecoderMetadata(self.metadata.token_ids, torch.arange(b * w, device=device),
             DeltaMetadata.allocate(b, device, verification_columns=8), self.metadata.indexed)
@@ -164,20 +210,17 @@ class PreparedRound:
         m.sample_indices.copy_((starts[:, None] + self.columns).clamp(0, b * w - 1).reshape(-1))
 
     def commit_state(self, slots, counts):
+        """Keep each live KDA row's state after its last emitted token in one launch for all layers."""
         o, w = self.owner, self.width
-        selected = torch.where(counts > 1, o.extra_base + slots * 7 + counts - 2, slots + 1)
-        live = torch.where(counts > 0, slots + 1, 0).long()
-        for layer in o.pool.decoder.layers:
-            if isinstance(layer, DeltaState):
-                values = layer.recurrent[selected.clamp(0, layer.recurrent.shape[0] - 1)]
-                values = torch.where((counts > 0)[:, None, None, None], values, layer.recurrent[live])
-                layer.recurrent.index_copy_(0, live, values)
-                conv = layer.convolution[live]
-                indices = ((counts - 1).clamp_min(0)[:, None, None]
-                           + torch.arange(3, device=slots.device)[None, None]).expand(-1, conv.shape[1], -1)
-                history = conv.gather(2, indices)
-                conv[:, :, :3].copy_(history)
-                layer.convolution.index_copy_(0, live, conv)
+        backing = o.pool.backing
+        words, halves, extent, channels, columns = self.delta_regions
+        args = (backing.view(torch.int32), slots, counts, words, halves, backing.shape[1] // 4,
+                backing.shape[1] // 2, o.extra_base, extent, channels, columns, 4096, 128)
+        grid = (words.numel(), self.batch, max(triton.cdiv(extent, 4096), triton.cdiv(channels, 128)))
+        if torch.compiler.is_compiling() or get_proxy_mode() is not None:
+            torch.library.wrap_triton(_commit_delta_rows)[grid](*args, num_warps=4)
+        else:
+            _commit_delta_rows[grid](*args, num_warps=4)
         hidden = self.decoder.scratch.hidden.view(self.batch, w, 4096)
         selected_hidden = hidden[self.rows, (counts - 1).clamp_min(0).long()]
         save_hidden(selected_hidden, o.pool.last_hidden[1:1 + o.requests.capacity],
