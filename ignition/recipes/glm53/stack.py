@@ -37,18 +37,32 @@ class DecoderScratch:
     mlp_output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows, context_ranks=1):
+    def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows, context_ranks=1,
+                 overlay_layers=False):
+        """Allocate layer scratch; with overlay_layers, KDA, MLA and MLP intermediates share storage.
+
+        A layer runs attention then its MLP, and layers run serially, so their intermediates are
+        never live together. Index scratch and router weights keep their own prepared constants.
+        """
         if type(sample_rows) is not int or not 0 < sample_rows <= tokens:
             raise ValueError("GLM sampling capacity must be positive and fit the token capacity")
         def buffer(*shape):
             return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+        layers = (KDAScratch.allocate(tokens, 64 // shard.world_size, device),
+            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device, context_ranks=context_ranks),
+            MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
+            MoeScratch.allocate(tokens, shard.world_size, device))
+        if overlay_layers:
+            from ignition.components.moe import RouterScratch
+            from ignition.preparation.scratch import overlay
+
+            from .indexer import IndexScratch
+
+            layers = overlay(layers, keep=(IndexScratch, RouterScratch))
         return cls(buffer(tokens, 4096), buffer(tokens, 4, 4096), buffer(sample_rows, 4, 4096),
             buffer(sample_rows, 4096), buffer(sample_rows, 154880 // shard.world_size), buffer(sample_rows, 154880),
             MHCScratch.allocate(tokens, 4096, device), MHCScratch.allocate(tokens, 4096, device),
-            KDAScratch.allocate(tokens, 64 // shard.world_size, device),
-            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device, context_ranks=context_ranks),
-            MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
-            MoeScratch.allocate(tokens, shard.world_size, device), buffer(tokens, 4096), buffer(tokens, 4096))
+            *layers, buffer(tokens, 4096), buffer(tokens, 4096))
 
     def rows(self, tokens, mode, *, sample_rows):
         """Bind a graph variant to storage shared by serial decoder replays."""

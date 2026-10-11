@@ -64,7 +64,7 @@ def delta_regions(pool):
 
 
 class SpeculativePreparation:
-    def __init__(self, weights, pool, requests, inputs, scratch, *, extra_base, session,
+    def __init__(self, weights, pool, requests, inputs, scratch, prefill_scratch, *, extra_base, session,
                  workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None,
                  prefill_tokens=None, decode_tokens=None, context=None, state_stride=7):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
@@ -74,7 +74,8 @@ class SpeculativePreparation:
         blocks, device = inputs.page_tables.shape[1], pool.backing.device
         self.draft_scratch = {}
         if prefill_tokens:
-            self.draft_scratch["prefill"] = MTPScratch.absorbing(scratch.rows(prefill_tokens, "prefill", sample_rows=1))
+            self.draft_scratch["prefill"] = MTPScratch.absorbing(
+                prefill_scratch.rows(prefill_tokens, "prefill", sample_rows=1))
         if decode_tokens:
             self.draft_scratch["decode"] = MTPScratch.allocate(decode_tokens, weights.shard.world_size, blocks,
                                                                "decode", device, context_ranks=self.shards.world)

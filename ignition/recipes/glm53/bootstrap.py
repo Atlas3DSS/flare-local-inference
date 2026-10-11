@@ -212,14 +212,20 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                                                      columns=2048 * shard.world_size),
                 coordinator=coordinator)
         shards = None if context is None else context.shards
-        decoder_storage = DecoderScratch.allocate(config.token_capacity, blocks, "decode", device,
-            shard=shard, sample_rows=sample_rows, context_ranks=1 if context is None else shard.world_size)
+        context_ranks = 1 if context is None else shard.world_size
+        # Prefill chunks overlay their layer intermediates; decode rows keep small separate scratch.
+        prefill_storage = DecoderScratch.allocate(config.prefill_chunk_size, blocks, "prefill", device,
+            shard=shard, sample_rows=1, context_ranks=context_ranks, overlay_layers=True)
+        decode_rows = max(config.request_capacity,
+                          max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1)
+        decoder_storage = DecoderScratch.allocate(decode_rows, blocks, "decode", device,
+            shard=shard, sample_rows=sample_rows, context_ranks=context_ranks)
 
         speculation = None
         if config.mtp:
             from .speculative import SpeculativePreparation
 
-            speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage,
+            speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage, prefill_storage,
                 extra_base=extra_base, session=session, workspace=arena, records=records, frame=frame,
                 sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                 max_cache_pages=max_cache_pages, prefill_tokens=config.prefill_chunk_size,
@@ -241,7 +247,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 rows = 1 if mode == "prefill" else capacity
                 name = f"{mode}{capacity}"
                 metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
-                scratch[name] = decoder_storage.rows(capacity, mode, sample_rows=rows)
+                storage = prefill_storage if mode == "prefill" else decoder_storage
+                scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
                     runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
@@ -355,7 +362,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             speculative_fixed_width=config.speculative_fixed_width, speculative_graph_budget=config.speculative_graph_budget)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
-        decoder_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
+        decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
         vocabulary_collective, coordinator, speculation, context)
     exchanges = () if context is None else (context.heads, context.candidates)
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,

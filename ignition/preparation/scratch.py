@@ -202,3 +202,56 @@ def prime_owners(workspace, *owners):
     own their finalized bindings; benchmark calls retain concrete trial views.
     """
     return (workspace,) if isinstance(workspace, ScratchArena) else owners
+
+
+def overlay(objects, *, keep=()):
+    """Place each scratch dataclass's tensors at the start of one shared byte buffer.
+
+    The objects overlap one another, so they must never be live at the same time.
+    Views within an object keep their relationships. Nested dataclasses of a `keep`
+    type retain their own storage, for example buffers holding prepared constants.
+    """
+    import dataclasses
+
+    def tensors(value, found):
+        if isinstance(value, keep):
+            return
+        if isinstance(value, torch.Tensor):
+            if value.numel():
+                found.append(value)
+        elif dataclasses.is_dataclass(value):
+            for field in dataclasses.fields(value):
+                tensors(getattr(value, field.name), found)
+
+    layouts, device = [], None
+    for value in objects:
+        found, offsets, size = [], {}, 0
+        tensors(value, found)
+        for tensor in found:
+            storage = tensor.untyped_storage()
+            if storage.data_ptr() not in offsets:
+                offsets[storage.data_ptr()] = size
+                size += (storage.nbytes() + 255) // 256 * 256
+            device = tensor.device
+        layouts.append((offsets, size))
+    if device is None:
+        return tuple(objects)
+    shared = torch.zeros(max(size for _, size in layouts), dtype=torch.uint8, device=device)
+    if shared.numel() % 8:
+        raise ValueError("overlaid scratch must keep 8-byte storage alignment")
+
+    def rebase(value, offsets):
+        if isinstance(value, keep):
+            return value
+        if isinstance(value, torch.Tensor):
+            if not value.numel():
+                return value
+            # as_strided offsets count elements from the start of the shared storage.
+            start = offsets[value.untyped_storage().data_ptr()] // value.element_size()
+            return shared.view(value.dtype).as_strided(value.shape, value.stride(), start + value.storage_offset())
+        if dataclasses.is_dataclass(value):
+            return dataclasses.replace(value, **{field.name: rebase(getattr(value, field.name), offsets)
+                                                 for field in dataclasses.fields(value) if field.init})
+        return value
+
+    return tuple(rebase(value, offsets) for value, (offsets, _) in zip(objects, layouts, strict=True))
