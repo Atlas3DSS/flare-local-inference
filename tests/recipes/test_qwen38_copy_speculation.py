@@ -7,7 +7,7 @@ import torch
 
 from flare.components.sampling import ERROR, RUNNING
 from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.recipes.qwen38.speculation import (
+from flare.components.speculation import (
     INVALID_SPECULATION,
     PreparedCopyProposals,
     PreparedSpeculativeDistributions,
@@ -177,9 +177,9 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
         operator.library_scratch = ()
         operator._prepared = True
 
-    monkeypatch.setattr("flare.recipes.qwen38.speculation.filter_probabilities",
+    monkeypatch.setattr("flare.components.speculation.filter_probabilities",
                         lambda scores, *args: torch.softmax(scores, -1))
-    monkeypatch.setattr("flare.recipes.qwen38.speculation.verify_chain", OneHotLibrary.chain_speculative_sampling)
+    monkeypatch.setattr("flare.components.speculation.verify_chain", OneHotLibrary.chain_speculative_sampling)
     monkeypatch.setattr(module.PreparedSpeculativeDistributions, "prepare", prepare_cpu)
     monkeypatch.setattr(module.PreparedStochasticVerification, "prepare", prepare_cpu)
     records = torch.full((2, 4, 24), -99, dtype=torch.int64)

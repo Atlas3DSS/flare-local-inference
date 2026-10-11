@@ -9,7 +9,7 @@ from flare.components.flashinfer_sampling import sample_probabilities
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
 from .mtp import MTPScratch, PreparedMTP
-from .speculation import (
+from flare.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedCopyProposals, PreparedSpeculativeCommit,
     PreparedSpeculativeDistributions, PreparedStochasticVerification, SpeculativeRngState,
 )

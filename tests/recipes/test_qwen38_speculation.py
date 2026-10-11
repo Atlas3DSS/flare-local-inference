@@ -5,7 +5,7 @@ import torch
 
 from flare.components.sampling import ERROR, FINISHED, RUNNING
 from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.recipes.qwen38.speculation import (
+from flare.components.speculation import (
     DRAFT_RNG_DOMAIN,
     INVALID_SPECULATION,
     TARGET_RNG_DOMAIN,

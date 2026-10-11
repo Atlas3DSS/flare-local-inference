@@ -147,16 +147,10 @@ class PreparationConfig:
 
     @property
     def speculative_shapes(self) -> tuple[tuple[int, int], ...]:
-        widths = ((self.speculative_fixed_width,) if self.speculative_fixed_width is not None
-                  else tuple(reversed(self.speculative_widths)))
-        remaining, exhausted, shapes = self.speculative_graph_budget, False, []
-        for index, batch in enumerate(self.batch_capacities):
-            available = remaining - (len(self.batch_capacities) - 1 - index)
-            selected = (1,) if exhausted else widths[:available]
-            exhausted |= len(selected) < len(widths)
-            shapes.extend((batch, width) for width in selected)
-            remaining -= len(selected)
-        return tuple(shapes)
+        from flare.components.capacity import speculative_shapes
+
+        return speculative_shapes(self.max_active, self.speculative_widths,
+                                  self.speculative_fixed_width, self.speculative_graph_budget)
 
     @property
     def prefill_capacities(self) -> tuple[int, ...]:

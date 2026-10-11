@@ -23,7 +23,7 @@ from flare.components.sampling import (
     RUNNING,
 )
 
-from .sampling import DeviceRequestState
+from flare.components.sampling import DeviceRequestState
 
 INVALID_SPECULATION = 6
 TARGET_RNG_DOMAIN = 0x4D54505F56455249
@@ -397,6 +397,7 @@ class PreparedSpeculativeCommit:
         if type(draft_cache_available) is not bool:
             raise ValueError("draft_cache_available must be boolean")
         self.draft_cache_available = draft_cache_available
+        self.history = getattr(requests, "ple_history", None)
         if token_limits is not None:
             _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
         self.token_limits = token_limits
@@ -437,7 +438,8 @@ class PreparedSpeculativeCommit:
             & (self.slots >= 0) & (self.slots < state.capacity) & (state.generation[safe] == self.generations))
         self.consumed_before.copy_(state.consumed_tokens[safe])
         self.generated_before.copy_(state.generated_tokens[safe])
-        self.history_before.copy_(state.ple_history[safe])
+        if self.history is not None:
+            self.history_before.copy_(self.history[safe])
         self.emitted_ids.fill_(-1)
         self.committed_input_ids.fill_(-1)
         self.emitted_count.zero_()
@@ -485,8 +487,9 @@ class PreparedSpeculativeCommit:
             pending = ids.gather(0, (emitted - 1).clamp(0, columns.numel() - 1).view(1))[0]
             consumed = state.consumed_tokens[slot] + emitted
             generated = state.generated_tokens[slot] + emitted
-            history = torch.cat((state.ple_history[slot], inputs))
-            tail = history.gather(0, emitted + self.history_columns)
+            if self.history is not None:
+                history = torch.cat((self.history[slot], inputs))
+                tail = history.gather(0, emitted + self.history_columns)
             terminal = (generated >= state.max_new_tokens[slot]) | (eos & take).any()
             failed = enabled & ~valid
             duplicate = count > 1
@@ -500,7 +503,8 @@ class PreparedSpeculativeCommit:
             state.generated_tokens[slot].copy_(generated)
             state.pending_token[slot].copy_(torch.where(emitted > 0, pending, state.pending_token[slot]))
             state.rng_counter.view(torch.int64)[slot].add_(emitted)
-            self.history_after[slot].copy_(torch.where(emitted > 0, tail, state.ple_history[slot]))
+            if self.history is not None:
+                self.history_after[slot].copy_(torch.where(emitted > 0, tail, self.history[slot]))
             state.status[slot].copy_(status)
             state.error_code[slot].copy_(error)
             if self.rng is not None:
@@ -533,6 +537,7 @@ class PreparedSpeculativeCommit:
             record[15].copy_(torch.where(participating, columns.numel(), 0))
             record[16:16 + columns.numel()].copy_(torch.where(take, ids, -1))
         state.consumed_tokens.copy_(self.consumed_after)
-        state.ple_history.copy_(self.history_after)
+        if self.history is not None:
+            self.history.copy_(self.history_after)
         self.records.index_copy_(0, self.frame.long(), self._records.unsqueeze(0))
         return self

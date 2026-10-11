@@ -10,7 +10,7 @@ import torch
 from flare.components.sampling import FINISHED
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
-from flare.recipes.qwen38.speculation import (
+from flare.components.speculation import (
     TARGET_RNG_DOMAIN,
     PreparedCopyProposals,
     PreparedSpeculativeCommit,
@@ -27,7 +27,7 @@ VOCAB = 248320
 @torch.no_grad()
 def test_compiled_commit_preserves_pooled_state_without_pool_copies():
     from flare.preparation.compilation import compile_forward
-    from flare.recipes.qwen38.speculation import SpeculativeAcceptance
+    from flare.components.speculation import SpeculativeAcceptance
     from flare.recipes.qwen38.state import HybridStatePool
 
     state, slots, epochs, live, inputs, records, frame, sequence = tensors(4, 2)
