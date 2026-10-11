@@ -20,6 +20,7 @@ from ignition.preparation.collectives import (
     CollectivePreparation,
     create_all_gather_runtime,
     create_all_reduce_runtime,
+    create_dma_all_reduce_runtime,
     create_head_exchange,
 )
 from ignition.preparation.execution import GraphSignature
@@ -41,6 +42,8 @@ from .weights import ModelWeights
 
 
 _COMPILED_KINDS = ("prefill", "decode", "resume", "speculative")
+# Prefill chunks of at least this many tokens all-reduce through the copy-engine ring.
+_DMA_PREFILL_TOKENS = 1024
 # Allocator granularity and fragmentation slack beyond the headroom kept after the final KV allocation.
 _KV_ALLOCATION_MARGIN = 64 << 20
 
@@ -199,6 +202,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         ipc = None if package_storage is None else package_storage.peer_storage
         collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=4096,
                                                ipc=ipc)
+        # Prefill chunks reduce their hidden activations through b12x's copy-engine ring.
+        prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
+                                                           hidden_size=4096, ipc=ipc)
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=sample_rows, columns=154880, ipc=ipc)
@@ -269,7 +275,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                    runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                    runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective,
+                    vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                     session=session, name=name, workspace=arena, feedback=feedback, max_cache_pages=max_cache_pages,
                     context=context)
                 batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages,
@@ -310,7 +317,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")
     report(f"after tuning: free={torch.cuda.mem_get_info(device)[0] >> 20} MiB, "
-           f"allocated={torch.cuda.memory_allocated(device) >> 20} MiB, reserved={torch.cuda.memory_reserved(device) >> 20} MiB")
+           f"allocated={torch.cuda.memory_allocated(device) >> 20} MiB, reserved={torch.cuda.memory_reserved(device) >> 20} MiB, "
+           f"weights={weights.allocated_bytes >> 20} MiB, continuation={pool.backing.nbytes >> 20} MiB, "
+           f"operator scratch={arena.nbytes >> 20} MiB")
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle() if package_storage is None else package_storage.graph_pool.id
 
@@ -390,11 +399,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
-        vocabulary_collective, coordinator, speculation, context)
+        prefill_collective, vocabulary_collective, coordinator, speculation, context)
     exchanges = () if context is None else (context.heads, context.candidates)
     # Operator scratch holds nothing between launches; a package stores it as zeros.
     disposable = ((arena.tensor.data_ptr(), arena.tensor.nbytes),) if arena.nbytes else ()
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session, export_zero_ranges=disposable,
-        close_resources=(*exchanges, *shared_pages, vocabulary_collective, collective),
+        close_resources=(*exchanges, *shared_pages, prefill_collective, vocabulary_collective, collective),
         server_config=server_config, memory_report=memory)

@@ -34,6 +34,33 @@ def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
         max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
+def create_dma_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
+    """Allocate a b12x copy-engine ring for prefill-sized BF16 reductions in caller-owned shared storage."""
+    import inspect
+
+    from b12x.comm.pcie import DmaAllReduce
+
+    if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size)):
+        raise ValueError("all-reduce capacities must be positive integers")
+    arguments = {"exchange_group": group, "device": device, "max_bytes": max_tokens * hidden_size * 2}
+    if ipc is None:
+        return DmaAllReduce(**arguments)
+    if "ipc" in inspect.signature(DmaAllReduce.__init__).parameters:
+        return DmaAllReduce(**arguments, ipc=ipc)
+    # The pinned b12x ring constructs its own legacy CUDA IPC allocator, whose mappings a runtime
+    # package cannot restore. Until it accepts a caller allocator like the other PCIe collectives,
+    # hand it this one for the duration of construction; it keeps the instance for its slab, copies
+    # and close.
+    from b12x.comm.pcie import pcie_dma
+
+    allocator = pcie_dma.CudaRTLibrary
+    pcie_dma.CudaRTLibrary = lambda: ipc
+    try:
+        return DmaAllReduce(**arguments)
+    finally:
+        pcie_dma.CudaRTLibrary = allocator
+
+
 def create_head_exchange(group, device, *, max_rows, heads, head_dim, ipc=None):
     """Allocate b12x staging for all-gathering head shards and LSE-combining partial attention."""
     from b12x.comm.pcie import DcpAllToAll
