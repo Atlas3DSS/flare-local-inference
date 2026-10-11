@@ -9,7 +9,7 @@ from b12x.preparation import PreparedCall
 from b12x.sequence import mtp_feedback
 
 from flare.components.embedding import PreparedEmbedding
-from flare.components.linear import UnquantizedProjection
+from flare.components.linear import QuantizedProjection, UnquantizedProjection
 from flare.preparation.fixtures import mtp_feedback as feedback_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from flare.preparation.tuning import declare, register_finalizer
@@ -180,7 +180,10 @@ class PreparedMTP:
             self.reductions = tuple(PreparedAllReduce(value, scratch.hidden, runtime=runtime,
                 session=session, coordinator=coordinator, name=f"{name}.{label}_reduce")
                 for label, value in (("attention", scratch.qsa.output), ("moe", self.moe.output)))
-        if vocabulary_runtime is None:
+        if vocabulary_runtime is None and weights.draft_head is not None:
+            self.lm_head = QuantizedProjection(scratch.selected_hidden, weights.draft_head, scratch.logits,
+                                               session=session, name=f"{name}.lm_head", activation_mode="a16")
+        elif vocabulary_runtime is None:
             self.lm_head = UnquantizedProjection(scratch.selected_hidden, weights.lm_head, scratch.logits,
                                          session=session, name=f"{name}.lm_head")
         else:

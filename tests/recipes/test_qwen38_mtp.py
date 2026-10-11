@@ -157,7 +157,7 @@ def test_mtp_forward_preserves_feedback_alignment_and_all_streams(monkeypatch):
     layer = SimpleNamespace(attn_hyper_connection=object(), mlp_hyper_connection=object(), self_attn=object())
     weights = SimpleNamespace(module=SimpleNamespace(layers=[layer], hyper_connection_mixer=object()),
                               attention={}, moe=object(), embedding=SimpleNamespace(device=torch.device("cpu")),
-                              lm_head=object())
+                              lm_head=object(), draft_head=None)
     operator = mtp.PreparedMTP(weights, scratch, ids, target, object(), metadata, object(),
         ScratchArena("cpu"), output_indices=selected, session=SimpleNamespace(prepare=lambda _: None), name="draft")
     for _ in range(2):
