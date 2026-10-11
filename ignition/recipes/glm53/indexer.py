@@ -12,6 +12,9 @@ from ignition.components.linear import QuantizedProjection, UnquantizedProjectio
 from ignition.preparation.tuning import declare
 
 
+_SELECT_ROWS = 512
+
+
 @dataclass(frozen=True)
 class IndexState:
     cache: torch.Tensor
@@ -158,12 +161,17 @@ class PreparedGlmIndexer:
                 PreparedCall(run=lambda: state.update(*self.pool_arguments))),
         ))
         page_table = scratch.page_table.expand(rows, -1) if mode == "prefill" else scratch.page_table
-        caps = dsa_indexer.Caps(device=source.device, num_q_heads=32, max_q_rows=rows,
+        # Prefill selection scratch grows with query rows (about 140 KB each), so long chunks select in slices.
+        step = _SELECT_ROWS if mode == "prefill" else rows
+        caps = dsa_indexer.Caps(device=source.device, num_q_heads=32, max_q_rows=min(rows, step),
             max_page_table_width=page_table.shape[1], topk=512, mode=mode)
-        self.selector = PreparedSparseIndexer(scratch.query_fp8.view(rows, 32, 128), scratch.weights,
-            state.cache.view(state.cache.shape[0], -1), page_table, scratch.pool_lengths,
-            scratch.active_width, scratch.pools, caps=caps, session=session, name=f"{name}.select", workspace=workspace,
-            scores=None if context is None else scratch.scores)
+        cache = state.cache.view(state.cache.shape[0], -1)
+        self.selectors = tuple(PreparedSparseIndexer(scratch.query_fp8[start:end].view(end - start, 32, 128),
+            scratch.weights[start:end], cache, page_table[start:end], scratch.pool_lengths[start:end],
+            scratch.active_width, scratch.pools[start:end], caps=caps, session=session,
+            name=f"{name}.select" if end - start == rows else f"{name}.select{start}", workspace=workspace,
+            scores=None if context is None else scratch.scores[start:end])
+            for start in range(0, rows, step) for end in (min(start + step, rows),))
         self.gathers = ()
         if context is not None:
             from ignition.components.collectives import PreparedAllGather
@@ -187,7 +195,8 @@ class PreparedGlmIndexer:
         """Address the state's current index cache; plans bound its page count from above."""
         cache = self.state.cache
         self.pool_arguments = (cache, *self.pool_arguments[1:])
-        self.selector.rebind_cache(cache.view(cache.shape[0], -1))
+        for selector in self.selectors:
+            selector.rebind_cache(cache.view(cache.shape[0], -1))
         self.expand_options["num_cache_blocks"] = cache.shape[0]
 
     def __call__(self):
@@ -204,7 +213,8 @@ class PreparedGlmIndexer:
             s.page_table.copy_(m.block_table)
         else:
             s.page_table.copy_(m.block_table[m.requests.long()])
-        self.selector()
+        for selector in self.selectors:
+            selector()
         if self.context is None:
             sparse_mla.expand_pooled_topk_to_physical_slots(*self.expand_arguments,
                 **self.expand_options, plan=self.expand_plan)
