@@ -56,6 +56,12 @@ with no `MODEL`, `run`, `prepare`, and
 `plan` use `defaults.model` from the configuration file and fail with a usage
 error if it is unset.
 
+`plan`, `models`, `status`, `bench`, and `config` print a report and exit, as
+does `prepare` after its startup phases. A terminal receives the report with
+styled headings, labels, and status words. Redirected output is the same text
+without styles, wrapping, or trailing spaces, and `--json` replaces the report
+with one JSON document. Only `run` and `prepare` print the banner.
+
 ## 3. Parameters
 
 This is the complete inventory. Everything a user can set is listed here with
@@ -234,43 +240,86 @@ Steps 1 through 3 of `run`, then print and exit. Does not require the
 snapshot to be cached and initializes no CUDA context beyond NVML.
 
 ```
-model          qwen3.8-flash   dc5b8ab2   Qwen4ExpForConditionalGeneration
-gpus           0  RTX PRO 6000 Blackwell  95.6 GiB free   tensor-parallel 1
-concurrency    4               context 262,144   prefill chunk 4,096
+qwen3.8-flash
+  checkpoint      local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD@dc5b8ab2
+  architecture    Qwen4ExpForConditionalGeneration
+  GPUs            0 · RTX PRO 6000 Blackwell · tensor-parallel 1
+  concurrency     4 requests
+  context         262,144 tokens
+  prefill chunk   4,096 tokens
+  host memory     26.8 GiB · PLE table mapped from the checkpoint
 
-needs    68.3 weights + 7.0 graphs + 5.2 live + 3.4 cache (30 states) + 26.8 pages (4 × 262,144) = 110.7 GiB
-has      95.6 free − 1.0 headroom − 0 reserve = 94.6 GiB
+  memory                GiB
+  ───────────────────────────────────────────────────────────────────────────────────────────
+  weights              68.3   checkpoint tensors
+  graphs and scratch    7.0   estimate; never prepared on this host
+  live state            5.2   4 active requests
+  prefix cache          3.4   30 states for prompt reuse
+  KV pages             10.7   418,880 tokens; full context for 4 requests would take 26.8 GiB
+  headroom              1.0   kept free through warm-up and graph capture
+  reserve               0.0   [memory] reserve
+  ───────────────────────────────────────────────────────────────────────────────────────────
+  free                 95.6   GPU 0
 
-weights              68.3 GiB   device
-PLE table            26.8 GiB   mapped host memory
-graphs and scratch    7.0 GiB   estimate; never prepared on this host
-live state            5.2 GiB   4 active requests
-prefix cache          3.4 GiB   30 states for prompt reuse
-KV pages             10.7 GiB   418,880 tokens
-
-guarantees 4 × 104,704 tokens at full concurrency; a single request up to 262,144
+  guarantees 4 × 104,704 tokens at full concurrency; a single request up to 262,144
 ```
 
+The memory rows account for the GPU's free memory: KV pages take what the rows
+above them, headroom, and the reserve leave. The KV pages row adds what full
+context for every active request would take when the pool is smaller than that.
 Weights include the draft model that speculation loads. Live state holds 45
 rows of 117 MiB at concurrency 4: a null row, four request rows, seven
 speculative rows per request, and three checkpoint rows per active request.
 The prefix cache would hold 32 states at this concurrency; a quarter of the
 14.1 GiB left for cache and pages limits it to 30.
-After a preparation on the host, the weights and graphs lines show the
-measured figures and the graphs line reads `measured on this host`. With
-several GPUs every figure is per GPU.
+After a preparation on the host, the weights and graphs rows show the
+measured figures and the graphs row reads `measured on this host`. With
+several GPUs the table is headed `memory per GPU` and its last row is the
+least free memory among them. When `CUDA_VISIBLE_DEVICES` is set, a line under
+`GPUs` says that indices follow it.
 
 ### 5.4 `flare models`
 
 ```
-ALIAS            SIZE      CACHED   FITS HERE
-qwen3.8-flash    95 GiB    yes      1 GPU: 4 × 104K, 1 × 262K
-glm-5.3-flash    165 GiB   no       2 GPUs: 4 × 200K
+qwen3.8-flash
+  checkpoint     local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD@dc5b8ab2
+  architecture   Qwen4ExpForConditionalGeneration
+  size           95.1 GiB stored · 68.3 GiB on GPUs · 26.8 GiB PLE table in host memory
+  context        262,144 tokens
+  input          text and up to 4 images per request
+  speculation    up to 7 draft tokens per step
+  GPUs           1, 2, or 4
+  concurrency    4 by default · at most 64
+  cached         yes
+  fits here      1 GPU · 4 requests of 104,704 tokens, or 1 of 262,144
+
+glm-5.3-flash
+  checkpoint     local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@dec48abd
+  architecture   Glm5NextForConditionalGeneration
+  size           165.5 GiB stored · 165.1 GiB on GPUs
+  context        1,048,576 tokens
+  input          text
+  speculation    none
+  GPUs           2 or 4
+  concurrency    4 by default · at most 64
+  cached         no · downloaded by the first run
+  fits here      no
+                 glm-5.3-flash needs 2 or 4 SM120 or SM121 GPUs; this host has 1
+
+MODEL also accepts org/name[@revision] on Hugging Face or a checkpoint directory of a listed architecture.
 ```
 
-The fits column is the plan at each recipe's default concurrency, so the table
-answers "what can I run here". `--json` emits objects with the repository id,
-revision, and the full plan.
+Each block describes one recipe through the checkpoint its alias names: the
+pinned repository and revision, the `config.json` architecture the recipe
+serves, where the stored tensors reside, the checkpoint's context, accepted
+inputs, speculation, and the supported GPU counts and concurrency range. The
+alias that `defaults.model` names is marked `defaults.model`. `fits here` is
+the plan at the recipe's default concurrency: the GPUs it takes, the tokens
+each concurrent request is guaranteed, and how many requests could hold the
+full context instead. When no plan fits, it reads `no` followed by the
+capacity error `flare plan` would print. `--json` emits one object per alias
+with these declarations in full, including the complete revision, and the plan
+or the error.
 
 ### 5.5 `flare pull`
 

@@ -8,6 +8,7 @@ import urllib.request
 from flare.errors import FlareError, UsageError
 from flare.recipes import recipes
 
+from . import display
 from .config import Configuration
 
 _SAMPLE = re.compile(r"(flare_\w+)\s+(\S+)")
@@ -82,16 +83,15 @@ def status(args) -> int:
         return 0
     hit_rate, cached = summary["prefix_cache_hit_rate"], summary["cached_tokens"]
     rows = [
-        ("model", "  ".join(reversed(names))),
+        ("model", " · ".join(reversed(names))),
         ("uptime", _duration(summary["uptime_seconds"])),
-        ("requests", f"{summary['active_requests']} active  {summary['queued_requests']} queued"),
+        ("requests", f"{summary['active_requests']} active · {summary['queued_requests']} queued"),
         ("decode", f"{summary['decode_tokens_per_second']:.1f} tokens/s over the last minute"),
         ("prefix cache", ("no lookups" if hit_rate is None else f"{hit_rate:.0%} hit rate")
-         + ("" if cached is None else f"  {cached:,} cached tokens")),
-        ("free", f"{summary['free_pages']:,} pages  {summary['free_snapshots']:,} snapshots"),
+         + ("" if cached is None else f" · {cached:,} cached tokens")),
+        ("free", f"{summary['free_pages']:,} pages · {summary['free_snapshots']:,} snapshots"),
     ]
     if summary["accepted_drafts_per_round"] is not None:
         rows.append(("speculation", f"{summary['accepted_drafts_per_round']:.2f} accepted drafts per round"))
-    for label, value in rows:
-        print(f"{label:<15}{value}")
+    display.show(display.section(display.title(url), display.fields(rows)))
     return 0

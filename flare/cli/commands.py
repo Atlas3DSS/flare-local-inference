@@ -10,6 +10,7 @@ from flare import planning
 from flare.errors import CapacityError, FetchError, UsageError
 from flare.recipes import ResolvedModel, recipes, resolve
 
+from . import display
 from .config import Configuration, Setting
 
 
@@ -70,37 +71,76 @@ def plan(args) -> int:
     if args.json:
         print(json.dumps({**result.to_dict(), "cuda_visible_devices": host.restriction}, indent=2))
     else:
-        print(planning.render(result, restriction=host.restriction))
+        display.show(display.plan(result, restriction=host.restriction))
     return 0
+
+
+def _listed(values) -> str:
+    """Join alternatives as `1`, `2 or 4`, or `1, 2, or 4`."""
+    names = [str(value) for value in values]
+    if len(names) < 3:
+        return " or ".join(names)
+    return f"{', '.join(names[:-1])}, or {names[-1]}"
+
+
+def _model(entry: dict, recipe, fit: str | None):
+    """Describe one recipe's default checkpoint, its serving range, and how it fits this host."""
+    sizes = [f"{display.gib(entry['stored_bytes'])} GiB stored", f"{display.gib(entry['device_bytes'])} GiB on GPUs"]
+    if entry["mapped_host_bytes"]:
+        sizes.append(f"{display.gib(entry['mapped_host_bytes'])} GiB {recipe.mapped_host_name} in host memory")
+    images, drafts = entry["max_images"], entry["speculative_tokens"]
+    cached = (display.styled("yes", display.GOOD) if entry["cached"]
+              else display.styled("no", display.CAUTION).append(" · downloaded by the first run", style="dim"))
+    fits = (display.styled("no", display.BAD).append(f"\n{entry['error']}", style="dim") if fit is None
+            else display.styled(fit, display.GOOD))
+    return display.section(
+        display.title(entry["alias"], "defaults.model" if entry["default"] else ""),
+        display.fields([
+            ("checkpoint", f"{entry['repository']}@{entry['revision'][:8]}"),
+            ("architecture", entry["architecture"]),
+            ("size", " · ".join(sizes)),
+            ("context", f"{entry['context']:,} tokens"),
+            ("input", f"text and up to {images} images per request" if images else "text"),
+            ("speculation", f"up to {drafts} draft tokens per step" if drafts else "none"),
+            ("GPUs", _listed(entry["tensor_parallel_sizes"])),
+            ("concurrency", f"{entry['default_concurrency']} by default · at most {entry['concurrency_limit']}"),
+            ("cached", cached),
+            ("fits here", fits),
+        ]))
 
 
 def models(args) -> int:
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
     host = Host.discover()
-    entries = []
+    entries, described = [], []
     for recipe in recipes():
         for checkpoint in recipe.checkpoints:
             model = ResolvedModel(recipe, checkpoint)
-            entry = {"alias": checkpoint.alias, "repository": checkpoint.repository,
-                     "revision": checkpoint.revision, "stored_bytes": checkpoint.stored_bytes,
-                     "cached": model.cached(hub_cache), "plan": None, "error": None}
+            entry = {
+                "alias": checkpoint.alias, "default": configuration.model == checkpoint.alias,
+                "recipe": recipe.name, "repository": checkpoint.repository, "revision": checkpoint.revision,
+                "architecture": checkpoint.architecture, "stored_bytes": checkpoint.stored_bytes,
+                "device_bytes": checkpoint.device_bytes, "mapped_host_bytes": checkpoint.mapped_host_bytes,
+                "cached": model.cached(hub_cache), "context": recipe.context, "max_images": recipe.max_images,
+                "speculative_tokens": recipe.speculative_rows,
+                "tensor_parallel_sizes": list(recipe.tensor_parallel),
+                "default_concurrency": recipe.concurrency, "concurrency_limit": recipe.max_concurrency,
+                "prefill_chunk": recipe.prefill_chunk, "plan": None, "error": None}
+            fit = None
             try:
                 fitted = derive(configuration, model, host, gpus=None,
                                 concurrency=Setting(recipe.concurrency, "recipe"))
-                entry.update(plan=fitted.to_dict(), fits=planning.summarize(fitted))
+                entry["plan"], fit = fitted.to_dict(), display.fit(fitted)
             except CapacityError as error:
-                entry.update(error=str(error), fits="no")
+                entry["error"] = str(error)
             entries.append(entry)
+            described.append((entry, recipe, fit))
     if args.json:
-        print(json.dumps([{key: value for key, value in entry.items() if key != "fits"} for entry in entries],
-                         indent=2))
+        print(json.dumps(entries, indent=2))
         return 0
-    width = max(len("ALIAS"), *(len(entry["alias"]) for entry in entries)) + 4
-    print(f"{'ALIAS':<{width}}{'SIZE':<10}{'CACHED':<9}FITS HERE")
-    for entry in entries:
-        size = f"{round(entry['stored_bytes'] / (1 << 30))} GiB"
-        print(f"{entry['alias']:<{width}}{size:<10}{'yes' if entry['cached'] else 'no':<9}{entry['fits']}")
+    display.show(*(_model(*model) for model in described), display.styled(
+        "MODEL also accepts org/name[@revision] on Hugging Face or a checkpoint directory of a listed architecture."))
     return 0
 
 
@@ -146,12 +186,10 @@ def config(args) -> int:
             key: {"value": shown(key, setting), "source": setting.source} for key, setting in settings.items()}},
             indent=2))
         return 0
-    for name, location in locations.items():
-        print(f"{name:<16}{location}")
-    print()
-    width = max(map(len, settings)) + 3
-    for key, setting in settings.items():
-        print(f"{key:<{width}}{str(shown(key, setting)):<28}{setting.source}")
+    display.show(
+        display.fields(locations.items()),
+        display.table(("setting", "value", "source"), [
+            (key, str(shown(key, setting)), display.styled(setting.source)) for key, setting in settings.items()]))
     return 0
 
 

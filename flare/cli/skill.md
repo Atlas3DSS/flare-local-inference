@@ -84,21 +84,36 @@ restricts and renumbers the GPUs that `--gpus` indexes; `plan` reports it.
 ## Reading a plan
 
 ```
-needs    weights + graphs + live + cache (N states) + pages (C × context) = total
-has      free − headroom − reserve = supply
+memory                GiB
+weights               ...   checkpoint tensors
+graphs and scratch    ...   estimate; never prepared on this host
+live state            ...   C active requests
+prefix cache          ...   N states for prompt reuse
+KV pages              ...   T tokens; full context for C requests would take ... GiB
+headroom              1.0   kept free through warm-up and graph capture
+reserve               ...   [memory] reserve
+free                  ...   GPU 0
 ```
 
-`needs` is what every active request at the checkpoint's maximum context would
-take. `has` is the GPU's free memory minus a fixed 1 GiB headroom and
-`memory.reserve`. KV pages take all of `has` that weights, graphs, live state,
-and the prefix cache leave; pages beyond the active requests' share hold cached
-prefixes. The prefix cache holds model states at prompt and answer boundaries so
-later requests that repeat a prefix skip recomputing it; it is sized at eight
-states per concurrent request, at most a quarter of the memory left after
-weights, graphs, and live state, and shrinks to 8 states when pages would fall
-below 8,192 tokens per active request. The last line states what is guaranteed:
-tokens per request at full concurrency, and the longest single request.
-Tensor-parallel plans print per-GPU figures.
+The rows account for the GPU's free memory. KV pages take everything that
+weights, graphs, live state, the prefix cache, a fixed 1 GiB headroom, and
+`memory.reserve` leave; pages beyond the active requests' share hold cached
+prefixes. The KV pages row adds what the checkpoint's maximum context for every
+active request would take when the pool is smaller than that. The prefix cache
+holds model states at prompt and answer boundaries so later requests that
+repeat a prefix skip recomputing it; it is sized at eight states per concurrent
+request, at most a quarter of the memory left after weights, graphs, and live
+state, and shrinks to 8 states when pages would fall below 8,192 tokens per
+active request. The last line states what is guaranteed: tokens per request at
+full concurrency, and the longest single request. Tensor-parallel plans print
+per-GPU figures. `graphs and scratch` reads `measured on this host` after a
+preparation on the host.
+
+`flare models` prints, for each alias, the pinned repository and revision, the
+architecture its recipe serves, sizes, context, inputs, supported GPU counts,
+the concurrency range, whether the checkpoint is cached, and under `fits here`
+the plan at default concurrency or the capacity error. Reports are plain text
+when redirected; `--json` carries the same facts with full precision.
 
 ## Reading a capacity error
 

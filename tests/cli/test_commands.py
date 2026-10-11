@@ -33,8 +33,10 @@ def configure(tmp_path, text):
 def test_plan_prints_the_table_and_json(host, capsys):
     assert main(["plan", "qwen3.8-flash"]) == 0
     output = capsys.readouterr().out
-    assert output.startswith("model          qwen3.8-flash   dc5b8ab2")
+    assert output.startswith("qwen3.8-flash\n  checkpoint      local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-"
+                             "CSF-QAD@dc5b8ab2\n")
     assert "tensor-parallel 1" in output and "guarantees 4 × " in output
+    assert not any(line != line.rstrip() for line in output.splitlines()) and "\x1b" not in output
     assert main(["plan", "qwen3.8-flash", "--gpus", "2-3", "--max-concurrency", "2", "--json"]) == 0
     record = json.loads(capsys.readouterr().out)
     assert [entry["index"] for entry in record["gpus"]] == [2, 3]
@@ -59,7 +61,7 @@ def test_plan_reports_a_caller_restriction(host, monkeypatch, capsys):
     record = json.loads(capsys.readouterr().out)
     assert record["gpus"][0]["uuid"] == "GPU-0003" and record["cuda_visible_devices"] == "3,1"
     assert main(["plan", "qwen3.8-flash"]) == 0
-    assert "GPU indices follow CUDA_VISIBLE_DEVICES=3,1" in capsys.readouterr().out
+    assert "\n                  indices follow CUDA_VISIBLE_DEVICES=3,1\n" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("arguments, code, message", [
@@ -94,17 +96,53 @@ def test_unknown_flags_and_abbreviations_are_usage_errors(host, capsys):
     capsys.readouterr()
 
 
-def test_models_lists_every_checkpoint(host, monkeypatch, capsys):
+def listed(output):
+    """Split a models listing into {alias: {label: value}}, joining continuation lines to their label."""
+    models = {}
+    for line in output.splitlines():
+        if line and not line.startswith(" "):
+            fields = models.setdefault(line, {})
+        elif line.startswith("  ") and line[2] != " ":
+            label, value = line[2:17].rstrip(), line[17:]
+            fields[label] = value
+        elif line:
+            fields[label] += "\n" + line.strip()
+    return models
+
+
+def test_models_describes_every_recipe(host, tmp_path, monkeypatch, capsys):
+    configure(tmp_path, '[defaults]\nmodel = "glm-5.3-flash"\n')
     assert main(["models"]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["ALIAS", "SIZE", "CACHED", "FITS", "HERE"]
-    assert lines[1].split()[:4] == ["qwen3.8-flash", "95", "GiB", "no"] and "1 GPU: 4 × " in lines[1]
-    assert lines[2].split()[:4] == ["glm-5.3-flash", "165", "GiB", "no"] and "2 GPUs: 4 × " in lines[2]
+    models = listed(capsys.readouterr().out)
+    assert list(models)[:2] == ["qwen3.8-flash", "glm-5.3-flash  defaults.model"]
+    assert "org/name[@revision]" in list(models)[2]
+    qwen, glm = models["qwen3.8-flash"], models["glm-5.3-flash  defaults.model"]
+    assert qwen["checkpoint"] == "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD@dc5b8ab2"
+    assert qwen["architecture"] == "Qwen4ExpForConditionalGeneration"
+    assert qwen["size"] == "95.1 GiB stored · 68.3 GiB on GPUs · 26.8 GiB PLE table in host memory"
+    assert (qwen["context"], qwen["input"]) == ("262,144 tokens", "text and up to 4 images per request")
+    assert (qwen["speculation"], qwen["GPUs"]) == ("up to 7 draft tokens per step", "1, 2, or 4")
+    assert qwen["concurrency"] == "4 by default · at most 64"
+    assert qwen["cached"] == "no · downloaded by the first run"
+    assert qwen["fits here"].startswith("1 GPU · 4 requests of ")
+    assert glm["checkpoint"] == "local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD@dec48abd"
+    assert glm["size"] == "165.5 GiB stored · 165.1 GiB on GPUs"
+    assert (glm["input"], glm["speculation"], glm["GPUs"]) == ("text", "none", "2 or 4")
+    assert glm["fits here"].startswith("2 GPUs · 4 requests of ")
+
     monkeypatch.setattr(planning, "discover_gpus", lambda: (gpu(0, 95),))
+    assert main(["models"]) == 0
+    glm = listed(capsys.readouterr().out)["glm-5.3-flash  defaults.model"]
+    assert glm["fits here"] == "no\nglm-5.3-flash needs 2 or 4 SM120 or SM121 GPUs; this host has 1"
     assert main(["models", "--json"]) == 0
     entries = {entry["alias"]: entry for entry in json.loads(capsys.readouterr().out)}
-    assert entries["qwen3.8-flash"]["plan"]["tensor_parallel"] == 1 and entries["qwen3.8-flash"]["error"] is None
-    assert entries["glm-5.3-flash"]["plan"] is None and "this host has 1" in entries["glm-5.3-flash"]["error"]
+    qwen, glm = entries["qwen3.8-flash"], entries["glm-5.3-flash"]
+    assert qwen["plan"]["tensor_parallel"] == 1 and qwen["error"] is None and not qwen["default"]
+    assert (qwen["recipe"], qwen["revision"]) == ("qwen38", "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2")
+    assert (qwen["context"], qwen["max_images"], qwen["speculative_tokens"]) == (262144, 4, 7)
+    assert (qwen["tensor_parallel_sizes"], qwen["default_concurrency"], qwen["concurrency_limit"]) == ([1, 2, 4], 4, 64)
+    assert qwen["device_bytes"] + qwen["mapped_host_bytes"] <= qwen["stored_bytes"] and qwen["prefill_chunk"] == 4096
+    assert glm["plan"] is None and "this host has 1" in glm["error"] and glm["default"]
 
 
 def test_config_labels_each_value_with_its_source(host, tmp_path, capsys):
@@ -114,6 +152,7 @@ def test_config_labels_each_value_with_its_source(host, tmp_path, capsys):
     assert "secret" not in output and "(set)" in output
     assert any(line.split() == ["server.port", "9000", "[server]"] for line in output.splitlines())
     assert any(line.split() == ["server.host", "127.0.0.1", "default"] for line in output.splitlines())
+    assert any(line.split() == ["setting", "value", "source"] for line in output.splitlines())
     assert f"configuration   {tmp_path / '.config/flare/config.toml'}" in output
     assert main(["config", "--json"]) == 0
     record = json.loads(capsys.readouterr().out)

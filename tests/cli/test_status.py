@@ -75,14 +75,16 @@ def test_summary_figures():
 def test_status_reads_the_configured_server(server, tmp_path, capsys):
     configure(tmp_path, server)
     assert main(["status"]) == 0
-    lines = dict(line.split(None, 1) for line in capsys.readouterr().out.splitlines())
-    assert lines["model"].split() == list(reversed(NAMES))
-    assert lines["uptime"] == "3h 12m"
-    assert lines["requests"] == "2 active  3 queued"
-    assert lines["decode"] == "41.3 tokens/s over the last minute"
-    assert lines["prefix"] == "cache   75% hit rate  19,200 cached tokens"
-    assert lines["free"] == "5,871 pages  34 snapshots"
-    assert lines["speculation"] == "1.90 accepted drafts per round"
+    assert capsys.readouterr().out.splitlines() == [
+        f"http://127.0.0.1:{server}",
+        f"  model          {' · '.join(reversed(NAMES))}",
+        "  uptime         3h 12m",
+        "  requests       2 active · 3 queued",
+        "  decode         41.3 tokens/s over the last minute",
+        "  prefix cache   75% hit rate · 19,200 cached tokens",
+        "  free           5,871 pages · 34 snapshots",
+        "  speculation    1.90 accepted drafts per round",
+    ]
     assert main(["status", "--url", f"http://127.0.0.1:{server}/", "--json"]) == 0
     record = json.loads(capsys.readouterr().out)
     assert record["url"] == f"http://127.0.0.1:{server}" and record["uptime_seconds"] == 11520

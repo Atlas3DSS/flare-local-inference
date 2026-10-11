@@ -1,5 +1,6 @@
-"""Plan sizing, GPU selection, and capacity errors from declared costs and injected free memory."""
+"""Plan sizing, GPU selection, capacity errors, and the plan report from declared costs and injected free memory."""
 
+import io
 import json
 import re
 from types import MappingProxyType
@@ -7,6 +8,7 @@ from types import MappingProxyType
 import pytest
 
 from flare import planning
+from flare.cli import display
 from flare.errors import CapacityError, UsageError
 from flare.recipes.declaration import Checkpoint, RankCosts, Recipe
 
@@ -46,6 +48,12 @@ def derive(model=SOLO, gpus=(gpu(0, 95),), *, selected=None, concurrency=4, rese
                          reserve_bytes=int(reserve * GIB), prefill_chunk=prefill_chunk, measured=measured)
 
 
+def report(plan, **options):
+    stream = io.StringIO()
+    display.show(display.plan(plan, **options), stream=stream)
+    return stream.getvalue()
+
+
 def test_pages_take_all_remaining_supply():
     limited = derive()
     assert limited.fits and limited.cache_states == limited.cache_target == 32
@@ -82,7 +90,7 @@ def test_prefix_cache_follows_concurrency_and_shrinks_under_pressure():
     tight = derive(gpus=two, selected=(0, 1), concurrency=32, reserve=34.8)
     assert tight.fits and (tight.cache_target, tight.cache_states) == (25, 19)
     assert tight.minimum_pages <= tight.pages < tight.minimum_pages + 50
-    assert "19 states for prompt reuse; 25 without memory pressure" in planning.render(tight)
+    assert "19 states for prompt reuse; 25 without memory pressure" in report(tight)
     floor = derive(reserve=20)
     assert floor.fits and floor.cache_states == planning.CACHE_FLOOR
 
@@ -108,7 +116,7 @@ def test_measured_bytes_replace_the_estimates():
 
     plan = derive(measured=measured)
     assert plan.measured and (plan.weights_bytes, plan.graph_bytes) == (62 * GIB, 6 * GIB)
-    assert "measured on this host" in planning.render(plan)
+    assert "measured on this host" in report(plan)
     assert (1, 4, 4096, "NVIDIA RTX PRO 6000 Blackwell") in seen
     estimate = derive()
     assert not estimate.measured and estimate.pages - plan.pages == 4 * GIB // (2 * MIB)
@@ -120,7 +128,7 @@ def test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size():
     assert [g.index for g in derive(gpus=(gpu(0, 95, (9, 0)), gpu(1, 95))).gpus] == [1]
     assert [g.index for g in derive(PAIR, (gpu(0, 95), gpu(1, 20), gpu(2, 95))).gpus] == [0, 2]
     split = derive(gpus=(gpu(0, 50), gpu(1, 50)))
-    assert split.world_size == 2 and split.weights_bytes == 30 * GIB and "per GPU" in planning.render(split)
+    assert split.world_size == 2 and split.weights_bytes == 30 * GIB and "memory per GPU" in report(split)
     assert derive(PAIR, tuple(gpu(index, 60) for index in range(4))).world_size == 4
 
 
@@ -201,31 +209,41 @@ def test_automatic_selection_explains_the_closest_tensor_parallel_size():
     assert "= 37.1 GiB per GPU;" in str(error.value)
 
 
-def test_rendered_plan_and_summary():
+def test_plan_report_and_fit_summary():
     plan = derive(reserve=2)
-    assert planning.render(plan, restriction="1").splitlines() == [
-        "model          solo   ab12cd34   DemoForCausalLM",
-        "gpus           0  RTX PRO 6000 Blackwell  95.0 GiB free   tensor-parallel 1",
-        "concurrency    4               context 262,144   prefill chunk 4,096",
-        "               GPU indices follow CUDA_VISIBLE_DEVICES=1",
+    rule = "  " + "─" * 91
+    assert report(plan, restriction="1").splitlines() == [
+        "solo",
+        "  checkpoint      lab/solo@ab12cd34",
+        "  architecture    DemoForCausalLM",
+        "  GPUs            0 · RTX PRO 6000 Blackwell · tensor-parallel 1",
+        "                  indices follow CUDA_VISIBLE_DEVICES=1",
+        "  concurrency     4 requests",
+        "  context         262,144 tokens",
+        "  prefill chunk   4,096 tokens",
+        "  host memory     4.0 GiB · lookup table mapped from the checkpoint",
         "",
-        "needs    60.0 weights + 4.0 graphs + 4.4 live + 3.1 cache (32 states) + 32.0 pages (4 × 262,144)"
-        " = 103.5 GiB",
-        "has      95.0 free − 4.0 headroom − 2.0 reserve = 89.0 GiB",
+        "  memory                GiB",
+        rule,
+        "  weights              60.0   checkpoint tensors",
+        "  graphs and scratch    4.0   estimate; never prepared on this host",
+        "  live state            4.4   4 active requests",
+        "  prefix cache          3.1   32 states for prompt reuse",
+        "  KV pages             17.5   572,800 tokens; full context for 4 requests would take 32.0 GiB",
+        "  headroom              4.0   kept free through warm-up and graph capture",
+        "  reserve               2.0   [memory] reserve",
+        rule,
+        "  free                 95.0   GPU 0",
         "",
-        "weights              60.0 GiB   device",
-        "lookup table          4.0 GiB   mapped host memory",
-        "graphs and scratch    4.0 GiB   estimate; never prepared on this host",
-        "live state            4.4 GiB   4 active requests",
-        "prefix cache          3.1 GiB   32 states for prompt reuse",
-        "KV pages             17.5 GiB   572,800 tokens",
-        "",
-        "guarantees 4 × 143,168 tokens at full concurrency; a single request up to 262,144",
+        "  guarantees 4 × 143,168 tokens at full concurrency; a single request up to 262,144",
     ]
-    assert planning.summarize(plan) == "1 GPU: 4 × 143K, 2 × 262K"
-    assert planning.summarize(derive(concurrency=1)) == "1 GPU: 1 × 262K"
-    assert planning.summarize(derive(PAIR, tuple(gpu(index, 95) for index in range(2)))).startswith("2 GPUs: 4 × ")
-    assert "0 reserve" in planning.render(derive()) and "1 active request\n" in planning.render(derive(concurrency=1))
+    assert display.fit(plan) == "1 GPU · 4 requests of 143,168 tokens, or 2 of 262,144"
+    assert display.fit(derive(concurrency=1)) == "1 GPU · 1 request of 262,144 tokens"
+    pair = derive(PAIR, tuple(gpu(index, 95) for index in range(2)))
+    assert display.fit(pair).startswith("2 GPUs · 4 requests of ")
+    assert "least free of GPUs 0-1" in report(pair) and "host memory" not in report(pair)
+    single = report(derive(concurrency=1))
+    assert "1 active request\n" in single and "full context" not in single
     record = json.loads(json.dumps(plan.to_dict()))
     assert record["pages"] == plan.pages == 8950 and record["snapshots"] == 44
     assert record["reserve_bytes"] == 2 * GIB and record["measured"] is False

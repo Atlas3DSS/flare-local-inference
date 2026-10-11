@@ -1,7 +1,6 @@
 """The `flare` command line: argument parsing and dispatch to command handlers."""
 
 import argparse
-import sys
 from pathlib import Path
 
 from flare.errors import FlareError
@@ -67,5 +66,7 @@ def main(argv=None) -> int:
     try:
         return args.handler(args) or 0
     except FlareError as error:
-        print("error: " + str(error).replace("\n", "\n       "), file=sys.stderr)
+        from . import display
+
+        display.error(str(error))
         return error.exit_code

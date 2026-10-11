@@ -124,7 +124,8 @@ def test_prepare_measures_and_prints_the_corrected_plan(host, tmp_path, capsys):
     assert phases[-1].startswith(
         f"[    OK    ] Measure memory.  {plan.pages:,} pages · {plan.tokens:,} tokens · {plan.cache_states} cached states")
     assert "measured on this host" in captured.out
-    assert "kernel selections   7 cached, 1 tuned   5 candidates measured" in captured.out
+    assert captured.out.startswith("qwen3.8-flash\n  checkpoint ")
+    assert captured.out.endswith("\nkernel selections   7 cached, 1 tuned · 5 candidates measured\n")
     record = json.loads(planning.measurement_path(tmp_path / ".cache/flare/kernels", plan.checkpoint, 1, 4,
                                                   4096).read_text())
     assert record == {"gpu": "NVIDIA RTX PRO 6000 Blackwell", "weights_bytes": plan.weights_bytes,

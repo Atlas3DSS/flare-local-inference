@@ -2,7 +2,7 @@
 
 import pytest
 
-from flare.cli import bench
+from flare.cli import bench, display
 from flare.errors import FlareError
 
 MS = 1_000_000
@@ -41,6 +41,24 @@ def test_figures_carry_medians_and_request_counts():
     assert summary["decode"][2]["tokens_per_second"] == 200 and summary["decode"][2]["requests"] == 2
     assert summary["decode"][4]["inter_token_p99_ms"] == 97 and summary["decode"][4]["requests"] == 8
     assert summary["decode"][4]["tokens_per_second"] == 160
+
+
+def test_report_tabulates_first_token_and_decode_figures(capsys):
+    display.show(bench.report(bench.summarize(results()), "qwen3.8-flash", "http://127.0.0.1:8000"))
+    assert capsys.readouterr().out.splitlines() == [
+        "qwen3.8-flash  http://127.0.0.1:8000",
+        "  time to first token           median   requests",
+        "  " + "─" * 47,
+        "  cold 512-token prompt        42.0 ms          3",
+        "  cold 4,096-token prompt     200.0 ms          2",
+        "  cached 4,096-token prefix    18.0 ms          1",
+        "",
+        "  decode          inter-token median       p99   tokens/s   requests",
+        "  " + "─" * 66,
+        "  concurrency 1               5.0 ms    5.0 ms      200.0          1",
+        "  concurrency 2              10.0 ms   10.0 ms      200.0          2",
+        "  concurrency 4              25.0 ms   97.0 ms      160.0          8",
+    ]
 
 
 def test_failed_workload_checks_are_runtime_errors():

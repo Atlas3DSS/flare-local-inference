@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from flare.errors import FlareError, UsageError
 from flare.recipes import resolve
 
+from . import display
 from .config import Configuration
 from .status import fetch, server_url
 
@@ -106,6 +107,20 @@ def summarize(results) -> dict:
     return summary
 
 
+def report(summary: dict, model: str, url: str):
+    """Tabulate time to first token by prompt and decode latency and throughput by concurrency."""
+    first_token = [(label, f"{figure['median_ms']:.1f} ms", str(figure["requests"]))
+                   for label, figure in ((label, summary["time_to_first_token"][kind]) for kind, label in _TTFT_KINDS)]
+    decode = [(f"concurrency {batch}", f"{figure['inter_token_median_ms']:.1f} ms",
+               f"{figure['inter_token_p99_ms']:.1f} ms", f"{figure['tokens_per_second']:.1f}",
+               str(figure["requests"])) for batch, figure in summary["decode"].items()]
+    return display.section(
+        display.title(model, url),
+        display.table(("time to first token", "median", "requests"), first_token, numeric={1, 2}),
+        display.table(("decode", "inter-token median", "p99", "tokens/s", "requests"), decode,
+                      numeric={1, 2, 3, 4}))
+
+
 def bench(args) -> int:
     configuration = Configuration.load(args.config)
     url = server_url(configuration, args.url)
@@ -130,11 +145,5 @@ def bench(args) -> int:
     if args.json:
         print(json.dumps({"url": url, "model": MODEL_ID, **summary}, indent=2))
         return 0
-    for kind, label in _TTFT_KINDS:
-        figure = summary["time_to_first_token"][kind]
-        print(f"time to first token   {label:<28}{figure['median_ms']:>8.1f} ms   {figure['requests']} requests")
-    for batch, figure in summary["decode"].items():
-        print(f"concurrency {batch}         inter-token median {figure['inter_token_median_ms']:.1f} ms"
-              f"  p99 {figure['inter_token_p99_ms']:.1f} ms   {figure['tokens_per_second']:.1f} tokens/s"
-              f"   {figure['requests']} requests")
+    display.show(report(summary, resolve(MODEL_ID).checkpoint.alias, url))
     return 0

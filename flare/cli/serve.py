@@ -10,7 +10,7 @@ from dataclasses import replace
 from flare import planning
 from flare.errors import CapacityError, FlareError, PreparationError, UsageError
 
-from . import environment
+from . import display, environment
 from .commands import Host, derive, fetch, resolve_model
 from .config import Configuration
 
@@ -150,10 +150,11 @@ def _serve(args, *, listen: bool) -> int:
                 if args.json:
                     print(json.dumps({**measured.to_dict(), "tuning": tuning}, indent=2))
                 else:
-                    print(planning.render(measured))
                     counts = tuning["selection_counts"] or {}
-                    print(f"\nkernel selections   {', '.join(f'{count:,} {source}' for source, count in counts.items())}"
-                          f"   {tuning['benchmarked_candidates'] or 0:,} candidates measured")
+                    selections = ", ".join(f"{count:,} {source}" for source, count in counts.items())
+                    display.show(display.plan(measured), display.fields([(
+                        "kernel selections",
+                        f"{selections} · {tuning['benchmarked_candidates'] or 0:,} candidates measured")]))
                 return 0
             with phase(progress, "Start Helios") as stage:
                 try:
