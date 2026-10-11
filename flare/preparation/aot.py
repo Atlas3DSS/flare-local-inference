@@ -1,6 +1,7 @@
 """Serializable compiled forwards with caller-owned storage and runtime handles."""
 
 import hashlib
+import fcntl
 import importlib
 import inspect
 import operator
@@ -349,12 +350,35 @@ class ForwardCache:
 
     def prepare(self, forward, *, name, signature, progress=None):
         """Bind and warm one callable on the caller's preparation stream."""
-        with _guard_code_cache(self.root / 'guards'):
+        with self._publication_lock(), _guard_code_cache(self.root / 'guards'):
             bound, path = self._prepare(forward, name=name, signature=signature, progress=progress)
             return self._warm(bound, path, name=name, progress=progress)
 
+    @contextmanager
+    def _publication_lock(self, coordinator=None):
+        if coordinator is not None:
+            import torch.distributed as dist
+
+            if dist.get_rank() != coordinator.ranks[0]:
+                yield
+                return
+        self.root.mkdir(parents=True, exist_ok=True)
+        # Cached variants share filenames. Hold publication through binding on
+        # every rank so another launch cannot replace a catalog still in use.
+        with (self.root / 'publication.lock').open('a+b') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
         """Trace and compile in workers, then bind and warm on the owning rank."""
+        with self._publication_lock(coordinator):
+            return self._prepare_many(functions, signatures, progress=progress,
+                                      coordinator=coordinator, materialize=materialize)
+
+    def _prepare_many(self, functions, signatures, *, progress, coordinator, materialize):
         from flare.progress import phase
         from .compile_pool import CompilePool
 
