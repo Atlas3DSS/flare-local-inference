@@ -3,8 +3,23 @@
 import importlib
 
 import torch
+from torch.fx._graph_pickler import GraphPickler, Options
 
 from .compilation import _OPTIONS, _artifact_kernel_table, _defer_full_collection
+
+
+def _restore_symbol(kind, expression, environment, pytype, hint):
+    from torch.fx.experimental.sym_node import SymNode
+
+    return kind(SymNode(expression, environment, pytype, hint))
+
+
+class _GraphPickler(GraphPickler):
+    def reducer_override(self, value):
+        if isinstance(value, (torch.SymBool, torch.SymFloat)):
+            node = value.node
+            return _restore_symbol, (type(value), node._expr, node.shape_env, node.pytype, node._hint)
+        return super().reducer_override(value)
 
 
 @_defer_full_collection()
@@ -39,7 +54,6 @@ class CompilePool:
     def submit(self, module, examples):
         from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool
         from torch._library.custom_ops import _maybe_get_opdef
-        from torch.fx._graph_pickler import GraphPickler, Options
 
         registrations = set()
         for node in module.graph.nodes:
@@ -47,7 +61,7 @@ class CompilePool:
                 definition = _maybe_get_opdef(node.target)
                 if definition is not None:
                     registrations.add(definition._init_fn.__module__)
-        payload = GraphPickler.dumps((module, examples), Options(ops_filter=None))
+        payload = _GraphPickler.dumps((module, examples), Options(ops_filter=None))
         if self.pool is None:
             self.pool = SubprocPool(self.workers, kind=SubprocKind.SPAWN)
         return self.pool.submit(_compile_graph, payload, tuple(sorted(registrations)), self.device, self.options)
