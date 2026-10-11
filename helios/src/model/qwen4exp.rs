@@ -39,6 +39,7 @@ impl Qwen4Exp {
                 patches_per_feature: 4,
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
+            page_tokens: None,
         }
     }
     fn validate_metadata(metadata: &ContractMetadata) -> Result<()> {

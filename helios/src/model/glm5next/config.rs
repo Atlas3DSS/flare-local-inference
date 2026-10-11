@@ -1,5 +1,4 @@
 use super::Glm5Next;
-use super::PAGE_TOKENS;
 use crate::{
     Result,
     execution::{ABI_VERSION, Dtype, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION},
@@ -7,7 +6,12 @@ use crate::{
 };
 
 pub(super) fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-    if config.contract != Glm5Next::metadata()
+    let contract = crate::model::ContractMetadata {
+        page_tokens: None,
+        ..config.contract.clone()
+    };
+    if contract != Glm5Next::metadata()
+        || !matches!(config.contract.page_tokens, None | Some(256 | 512 | 1024))
         || !matches!(manifest.abi_version, ABI_VERSION | SPECULATIVE_ABI_VERSION)
     {
         return Err(
@@ -39,7 +43,7 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         (
             "page_tables",
             I32,
-            vec![slots, config.limits.max_sequence_tokens / PAGE_TOKENS],
+            vec![slots, config.limits.max_sequence_tokens / Glm5Next::page_tokens(config)],
         ),
         ("sample_enabled", I32, vec![slots]),
         (
@@ -73,7 +77,7 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         buffers.push((
             "draft_page_tables",
             I32,
-            vec![slots, config.limits.max_sequence_tokens / PAGE_TOKENS],
+            vec![slots, config.limits.max_sequence_tokens / Glm5Next::page_tokens(config)],
         ));
     }
     buffers
