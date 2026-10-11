@@ -15,7 +15,7 @@ from ignition.components.speculation import (
 from ignition.components.state import save_hidden
 
 from .batch import PreparedBatch
-from .mtp import DraftMetadata, PreparedMTP
+from .mtp import DraftMetadata, MTPScratch, PreparedMTP
 from .stack import PreparedDecoder
 from .state import DecoderMetadata
 
@@ -64,9 +64,18 @@ def delta_regions(pool):
 
 class SpeculativePreparation:
     def __init__(self, weights, pool, requests, inputs, scratch, *, extra_base, session,
-                 workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None):
+                 workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None,
+                 prefill_tokens=None, decode_tokens=None):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
         self.max_cache_pages = max_cache_pages
+        # Draft passes and absorptions run serially, so each mode shares one scratch at its largest capacity.
+        blocks, device = inputs.page_tables.shape[1], pool.backing.device
+        self.draft_scratch = {}
+        if prefill_tokens:
+            self.draft_scratch["prefill"] = MTPScratch.absorbing(scratch.rows(prefill_tokens, "prefill", sample_rows=1))
+        if decode_tokens:
+            self.draft_scratch["decode"] = MTPScratch.allocate(decode_tokens, weights.shard.world_size, blocks,
+                                                               "decode", device)
         self.scratch, self.extra_base, self.session, self.workspace = scratch, extra_base, session, workspace
         self.records, self.frame, self.sequence = records, frame, sequence
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
@@ -76,9 +85,11 @@ class SpeculativePreparation:
         self.draft_offset = torch.zeros_like(requests.generation)
 
     def draft(self, metadata, name, *, cache_only=False, mode="decode"):
+        shared = self.draft_scratch.get(mode)
+        scratch = None if shared is None else shared.rows(metadata.token_ids.numel(), mode)
         return PreparedMTP(self.weights, self.pool.draft, metadata, mode=mode,
             session=self.session, name=name, workspace=self.workspace, cache_only=cache_only,
-            max_cache_pages=self.max_cache_pages, **self.collectives)
+            max_cache_pages=self.max_cache_pages, scratch=scratch, **self.collectives)
 
 
 class PreparedPrefill:

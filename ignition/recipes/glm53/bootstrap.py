@@ -198,7 +198,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage,
                 extra_base=extra_base, session=session, workspace=arena, records=records, frame=frame,
                 sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-                max_cache_pages=max_cache_pages)
+                max_cache_pages=max_cache_pages, prefill_tokens=config.prefill_chunk_size,
+                decode_tokens=max(b * w for b, w in config.speculative_shapes))
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 
