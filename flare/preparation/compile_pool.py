@@ -8,6 +8,7 @@ from .compilation import _OPTIONS, _artifact_kernel_table, _defer_full_collectio
 
 
 @_defer_full_collection()
+@torch.no_grad()
 def _compile_graph(payload, registrations, device, options):
     from torch._inductor import standalone_compile
     from torch._subclasses import FakeTensorMode

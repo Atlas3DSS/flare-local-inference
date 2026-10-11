@@ -343,8 +343,11 @@ class ForwardCache:
         with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device) as compiler:
             def finish():
                 name, bound, path = pending.popleft()
-                with _guard_code_cache(self.root / 'guards'):
-                    compiled[name] = self._warm(bound, path, name=name, compiler=compiler)
+                try:
+                    with _guard_code_cache(self.root / 'guards'):
+                        compiled[name] = self._warm(bound, path, name=name, compiler=compiler)
+                except Exception as error:
+                    raise RuntimeError(f"failed to prepare compiled forward {name}") from error
                 stage.update(advance=1)
 
             for name, forward in functions.items():
