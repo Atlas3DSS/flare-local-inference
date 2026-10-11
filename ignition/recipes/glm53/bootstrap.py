@@ -1,5 +1,6 @@
 """Prepare a GLM tensor-parallel rank before native serving takes ownership."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -168,6 +169,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     if config.expert_activation == "a16":
         # b12x retains activation scales for A4 prefill launches only while preparing with this switch.
         os.environ["B12X_W4A16_A4_PREFILL"] = "1"
+    # Loading, construction and tuning free most of what they allocate; a transient package pool returns
+    # that memory to the device once tuning completes, before graph measurement sizes the KV pages.
+    transient = contextlib.ExitStack()
+    if package_storage is not None:
+        transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp,
                                 expert_activation=config.expert_activation)
     with phase(progress, "Allocate model state and collectives") as stage:
@@ -304,7 +310,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                     page_tokens=config.page_tokens)
                 fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
                 add(name, operation, mode, capacity, 1, (*fields, "page_tables", *(("draft_page_tables",) if config.mtp else ()), *commands.buffers()))
-    with phase(progress, "Prepare and tune kernels") as stage:
+    with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")
     report(f"after tuning: free={torch.cuda.mem_get_info(device)[0] >> 20} MiB, "

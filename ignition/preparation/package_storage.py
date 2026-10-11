@@ -1,6 +1,7 @@
 """Preparation storage whose virtual addresses can be reserved by native restore."""
 
 import ctypes as C
+from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 import json
@@ -46,6 +47,7 @@ class PackageStorage:
         self.granularity = self._snapshot()["granularity"]
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
+        self._allocator = allocator
         self.pool = torch.cuda.MemPool(allocator.allocator())
         self.graph_pool = torch.cuda.MemPool(allocator.allocator())
         self._scope = torch.cuda.use_mem_pool(self.pool, device=device)
@@ -73,6 +75,26 @@ class PackageStorage:
     def error(self):
         message = self.library.flare_package_error()
         return None if message is None else RuntimeError(message.decode())
+
+    @contextmanager
+    def transient(self):
+        """Route allocations to a package-backed pool whose free segments return to the device on exit.
+
+        A live pool never releases cached segments, so work that frees most of
+        what it allocates, such as kernel tuning, would otherwise strand that
+        memory for the rest of preparation. Allocations still live on exit
+        stay valid, package-backed, and exported.
+        """
+        import torch
+
+        pool = torch.cuda.MemPool(self._allocator.allocator())
+        try:
+            with torch.cuda.use_mem_pool(pool, device=self.device):
+                yield
+        finally:
+            torch.cuda.synchronize(self.device)
+            del pool
+            torch.cuda.empty_cache()
 
     def host_allocate(self, name, shape, dtype):
         size = math.prod(shape) * dtype.itemsize
