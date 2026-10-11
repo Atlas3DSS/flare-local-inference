@@ -64,6 +64,16 @@ def test_explicit_capacity_fails_without_resizing(monkeypatch):
     assert events == ['fence', 'release']
 
 
+def test_compiled_capacity_retains_shape_below_headroom_target(monkeypatch):
+    caches = {3: Cache()}
+    events = accounting(monkeypatch, [(4 << 30) - (2 << 20)], caches)
+    pools, capacity = _allocate_page_pools(caches, 8196, page_bytes=1622016,
+        device='cuda:0', headroom_bytes=4 << 30, automatic=False, fixed_capacity=True,
+        report=lambda _: None)
+    assert capacity == 8196 and pools[3] is caches[3].owners[0]()
+    assert caches[3].capacities == [8196] and events == ['fence']
+
+
 @pytest.mark.parametrize('automatic', [True, False])
 def test_sufficient_headroom_keeps_capacity_and_live_pools(monkeypatch, automatic):
     caches = {3: Cache()}

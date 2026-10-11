@@ -57,14 +57,15 @@ def _minimum_across_ranks(value, group):
     return result.item()
 
 
-def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes, automatic, report, group=None):
+def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes, automatic, report,
+                         group=None, fixed_capacity=False):
     """Fit unbound KV pools to measured device consumption before graph capture."""
     while capacity > 0:
         pools = {index: value.resize_pages_for_preparation(capacity) for index, value in cache.items()}
         torch.cuda.synchronize(device)
         free = torch.cuda.mem_get_info(device)[0]
         free = _minimum_across_ranks(free, group)
-        if free >= headroom_bytes:
+        if free >= headroom_bytes or fixed_capacity:
             report(f"{capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {capacity * 64:,} tokens")
             return pools, capacity
         del pools
@@ -403,7 +404,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             with phase(progress, "Allocate KV cache"):
                 final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
                     device=device, headroom_bytes=config.headroom_bytes,
-                    automatic=config.pages is None and not compile_decoder, report=report, group=group)
+                    automatic=config.pages is None and not compile_decoder, fixed_capacity=compile_decoder,
+                    report=report, group=group)
                 rebind_cache(final_cache)
                 for owner in owners:
                     if isinstance(owner, PreparedMaintenance):
