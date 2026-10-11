@@ -8,16 +8,19 @@ from Rust without Python types. The `server` feature adds HTTP/SSE, native reque
 preparation and direct scheduling of Qwen4Exp and Glm5Next prepared models. Python loads and
 captures the model before handing it to Rust.
 
-On an interactive terminal, the `flare` CLI starts a native metrics dashboard
-after preparation. `--no-dashboard` disables it; redirected stderr stays plain.
+On an interactive terminal, `flare run` starts a native metrics dashboard
+after preparation; redirected stderr stays plain.
 The dashboard uses a separate, lower-priority Rust thread and reads atomic
 counters twice per second without contacting the GPU or execution worker.
 Braille plots retain 120 seconds of history, with rates measured over a rolling
-two-second wall-clock window. Ctrl-C and SIGTERM restore the terminal and exit
-the CLI process directly, including during preparation. They bypass Python
-finalizers, CUDA graph destruction, and request draining. Tensor-parallel peers
-are killed by their parent-death signal. Embedded server `close()` still drains
-native execution before releasing caller-owned resources.
+two-second wall-clock window. During preparation, Ctrl-C and SIGTERM restore
+the terminal and exit the CLI process directly, bypassing Python finalizers and
+CUDA graph destruction; tensor-parallel peers are killed by their parent-death
+signal. While serving, `flare run` answers both signals by closing the server:
+admission stops, active responses get five seconds to finish, native execution
+drains, tensor-parallel peers shut down with rank zero, and the process exits 0.
+Embedded server `close()` drains native execution the same way before releasing
+caller-owned resources.
 
 Prefill throughput counts consumed prompt tokens, excluding padding and prefix
 reuse. Generation throughput counts committed output tokens, including EOS and
@@ -36,15 +39,24 @@ worker failure, poison, and drain failures remain distinct through worker channe
 Errors retain their underlying source and CUDA operation/status code. Cloned
 errors share their underlying cause.
 
-HTTP request validation and unsupported features return 400. Exhausted HTTP
-ingress capacity returns 429; exhausted model admission capacity and unavailable
-workers return 503; execution and presentation failures return 500. SSE terminal failures and Python exceptions serialize the same display
+HTTP request validation and unsupported features return 400. A prompt and
+output limit beyond the prepared context return 400 with both token counts and
+the context. Exhausted HTTP ingress capacity returns 429; exhausted model
+admission capacity and unavailable workers return 503. Context and capacity
+rejections append the configured `context_hint` or `capacity_hint`, which names
+the setting that raises the limit. A missing or wrong bearer token returns 401
+when the server configuration sets `api_key`; `/health` needs no token.
+Execution and presentation failures return 500. SSE terminal failures and Python exceptions serialize the same display
 messages. Failed CUDA drains retain prepared resources. Worker recovery is unsupported.
 
 The server exposes `/health`, `/v1/models`, `/v1/chat/completions`, and `/metrics`.
+`/v1/models` lists the model identifier and each configured `served_names` entry;
+requests may use any of them.
 HTTP admission reserves at most `queue_capacity + max_active` requests before
 reading JSON bodies. Admitted requests await a bounded CPU preparation worker;
 the default two workers can prepare four simultaneous generation requests.
+`flare run` sets the queue to four times the concurrency limit, one worker per
+concurrent request, and a body limit of the recipe's images plus 1 MiB.
 An admission permit survives CPU preparation and the streamed response lifetime.
 Disconnects cancel model scheduling, and slow consumers still face the bounded
 per-request event queue. HTTP capacity and physical GPU slots are independent.
@@ -56,7 +68,8 @@ IDs. Counters cover model admission/completion/cancellation/failure, prefix
 lookups/hits/misses/reused tokens, successful launches by graph kind, ready
 checkpoint publications and logical evictions. Gauges expose live/free/retiring
 request slots, reusable pages/snapshots, cached checkpoints/pages, model pending
-requests and HTTP/frontend capacities. Prefix lookup counters include admission
+requests, HTTP/frontend capacities, seconds since the listener started, and tokens
+generated during the most recent minute, sampled every five seconds. Prefix lookup counters include admission
 attempts later rejected for resource pressure. Publication counts unique
 checkpoints, excluding duplicate proposals. Eviction precedes GPU retirement;
 free-resource gauges count only IDs whose fences have completed. Scrapes read

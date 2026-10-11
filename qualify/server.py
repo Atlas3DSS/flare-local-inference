@@ -991,7 +991,7 @@ def main() -> int:
         boundary = reserved_request("context-boundary", "x")
         boundary["max_tokens"] += 1
         invalid = run.request("kv-context-plus-one", boundary, stream=True, cancel=True)
-        valid_boundary = invalid.get("status") == 400 and invalid.get("body", {}).get("error", {}).get("message") == "prompt plus output limit exceeds prepared context capacity"
+        valid_boundary = invalid.get("status") == 400 and "exceeds this server's context of" in invalid.get("body", {}).get("error", {}).get("message", "")
         run.check("kv.prepared_context_upper_bound", valid_boundary, response=invalid)
         if not valid_boundary:
             run.metrics("kv-context-probe-cleanup")

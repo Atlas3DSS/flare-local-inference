@@ -90,6 +90,22 @@ pub fn validate_prompt<M: ModelContract>(
     prompt: &crate::server::Prompt<M>,
 ) -> Result<()> {
     prompt.sampling.validate()?;
+    if prompt
+        .tokens
+        .len()
+        .checked_add(prompt.max_new_tokens as usize)
+        .is_none_or(|end| end > config.limits.max_sequence_tokens)
+    {
+        return Err(crate::Error::admission(
+            crate::AdmissionError::Context,
+            format!(
+                "prompt of {} tokens plus an output limit of {} tokens exceeds this server's context of {} tokens",
+                prompt.tokens.len(),
+                prompt.max_new_tokens,
+                config.limits.max_sequence_tokens
+            ),
+        ));
+    }
     if prompt.tokens.is_empty()
         || prompt
             .system_boundary
@@ -101,15 +117,10 @@ pub fn validate_prompt<M: ModelContract>(
         || prompt.sampling.top_k > config.contract.vocabulary as i32
         || prompt.max_new_tokens == 0
         || prompt.max_new_tokens > i32::MAX as u32
-        || prompt
-            .tokens
-            .len()
-            .checked_add(prompt.max_new_tokens as usize)
-            .is_none_or(|end| end > config.limits.max_sequence_tokens)
         || (!config.contract.vision.enabled()
             && (prompt.images.is_some() || !prompt.conditioning.is_empty()))
     {
-        return Err("prompt and output limit exceed the prepared model contract".into());
+        return Err("prompt, output limit, or inputs violate the prepared model contract".into());
     }
     M::validate_prompt_data(config, &prompt.tokens, &prompt.data)
 }

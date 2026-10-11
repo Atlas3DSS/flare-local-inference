@@ -309,13 +309,19 @@ fn output_limit(
             error,
         )))
     })?;
-    if max_new_tokens == 0
-        || max_new_tokens > i32::MAX as u32
-        || prompt
-            .checked_add(max_new_tokens as usize)
-            .is_none_or(|count| count > context)
+    if max_new_tokens == 0 || max_new_tokens > i32::MAX as u32 {
+        return Err("output limit must be between 1 and 2147483647 tokens".into());
+    }
+    if prompt
+        .checked_add(max_new_tokens as usize)
+        .is_none_or(|count| count > context)
     {
-        return Err("prompt plus output limit exceeds prepared context capacity".into());
+        return Err(Error::admission(
+            AdmissionError::Context,
+            format!(
+                "prompt of {prompt} tokens plus an output limit of {max_new_tokens} tokens exceeds this server's context of {context} tokens"
+            ),
+        ));
     }
     Ok(max_new_tokens)
 }

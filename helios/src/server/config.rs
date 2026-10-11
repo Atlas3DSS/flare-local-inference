@@ -259,7 +259,25 @@ impl Bootstrap {
         } else {
             None
         };
+        let optional_text = |name: &str| match object.get(name) {
+            None => Ok(String::new()),
+            Some(Value::String(value)) => Ok(value.clone()),
+            Some(_) => Err(format!("server configuration {name} must be a string")),
+        };
+        let served_names = match object.get("served_names") {
+            None => Vec::new(),
+            Some(Value::Array(names)) => names
+                .iter()
+                .map(|name| name.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("served_names must contain strings")?,
+            Some(_) => return Err("served_names must be an array".into()),
+        };
         let server = ServerConfig {
+            api_key: Some(optional_text("api_key")?).filter(|key| !key.is_empty()),
+            served_names,
+            context_hint: optional_text("context_hint")?,
+            capacity_hint: optional_text("capacity_hint")?,
             bind: object
                 .get("bind")
                 .and_then(Value::as_str)

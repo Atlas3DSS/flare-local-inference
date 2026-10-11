@@ -264,7 +264,7 @@ def execute(args, tokenizer, plan, body):
             "snapshots": memory["snapshot_capacity"], "slots": 4}, observed=totals)
         invalid = run.request("context-total262145", {**body, "max_tokens": OUTPUT_TOKENS + 1})
         run.check("reject_total262145", invalid.get("status") == 400
-            and invalid.get("body", {}).get("error", {}).get("message") == "prompt plus output limit exceeds prepared context capacity",
+            and "exceeds this server's context of" in invalid.get("body", {}).get("error", {}).get("message", ""),
             response=invalid)
         rejected = idle(run, "after-rejection")
         reject_delta = metric_delta(before, rejected)

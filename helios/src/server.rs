@@ -38,6 +38,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::VecDeque,
     convert::Infallible,
     net::SocketAddr,
     sync::{
@@ -45,7 +46,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
@@ -56,6 +57,14 @@ pub struct ServerConfig {
     pub frontend_workers: usize,
     pub max_body_bytes: usize,
     pub qualification_token_trace: bool,
+    /// Bearer token required by every route except `/health`; `None` admits all callers.
+    pub api_key: Option<String>,
+    /// Names requests may use for the model in addition to its identifier.
+    pub served_names: Vec<String>,
+    /// Setting that raises the per-request context, appended to context rejections.
+    pub context_hint: String,
+    /// Setting that raises request or page capacity, appended to capacity rejections.
+    pub capacity_hint: String,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -66,9 +75,15 @@ impl Default for ServerConfig {
             frontend_workers: 2,
             max_body_bytes: 32 * 1024 * 1024,
             qualification_token_trace: false,
+            api_key: None,
+            served_names: Vec::new(),
+            context_hint: String::new(),
+            capacity_hint: String::new(),
         }
     }
 }
+const GENERATED_WINDOW: Duration = Duration::from_secs(60);
+const GENERATED_SAMPLE_PERIOD: Duration = Duration::from_secs(5);
 struct HttpState<M: ModelContract> {
     model: Arc<ModelRuntime<M>>,
     frontend: Arc<Frontend>,
@@ -79,6 +94,45 @@ struct HttpState<M: ModelContract> {
     frontend_capacity: usize,
     ingress_capacity: usize,
     ids: AtomicU64,
+    api_key: Option<String>,
+    served_names: Vec<String>,
+    context_hint: String,
+    capacity_hint: String,
+    started: Instant,
+    generated: Mutex<VecDeque<(Instant, u64)>>,
+}
+impl<M: ModelContract> HttpState<M> {
+    /// Records the generated-token counter, retaining one sample at or before the window start.
+    fn sample_generated(&self) {
+        let now = Instant::now();
+        let tokens = self.model.metrics().snapshot(false).generated_tokens;
+        let mut samples = self.generated.lock().unwrap_or_else(|e| e.into_inner());
+        samples.push_back((now, tokens));
+        while samples.len() > 2 && now.duration_since(samples[1].0) >= GENERATED_WINDOW {
+            samples.pop_front();
+        }
+    }
+
+    fn generated_last_minute(&self) -> u64 {
+        let samples = self.generated.lock().unwrap_or_else(|e| e.into_inner());
+        match (samples.front(), samples.back()) {
+            (Some(first), Some(last)) => last.1.saturating_sub(first.1),
+            _ => 0,
+        }
+    }
+
+    /// Reports an admission failure, naming the setting that raises an exceeded capacity.
+    fn rejection(&self, failure: Error) -> Response {
+        let hint = match &failure {
+            Error::Admission(AdmissionError::Context(_)) => &self.context_hint,
+            Error::Admission(AdmissionError::Capacity(_)) => &self.capacity_hint,
+            _ => return typed_error(failure),
+        };
+        if hint.is_empty() {
+            return typed_error(failure);
+        }
+        error(status(&failure), format!("{failure}; {hint}"))
+    }
 }
 
 pub struct Server<M: ModelContract> {
@@ -128,9 +182,9 @@ impl<M: ModelContract> Server<M> {
         if config.qualification_token_trace && !config.bind.ip().is_loopback() {
             return Err("token qualification requires a loopback listener".into());
         }
-        if !(1..=32).contains(&config.frontend_workers)
+        if !(1..=64).contains(&config.frontend_workers)
             || config.max_body_bytes == 0
-            || config.max_body_bytes > 128 * 1024 * 1024
+            || config.max_body_bytes > 256 * 1024 * 1024
         {
             return Err("invalid HTTP admission limits".into());
         }
@@ -167,6 +221,12 @@ impl<M: ModelContract> Server<M> {
             frontend_capacity: config.frontend_workers,
             ingress_capacity,
             ids: AtomicU64::new(1),
+            api_key: config.api_key.clone(),
+            served_names: config.served_names.clone(),
+            context_hint: config.context_hint.clone(),
+            capacity_hint: config.capacity_hint.clone(),
+            started: Instant::now(),
+            generated: Mutex::new(VecDeque::new()),
         });
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -181,8 +241,15 @@ impl<M: ModelContract> Server<M> {
                     .map_err(|error| Error::Execution(ExecutionError::Worker(Failure::caused_by(format!("cannot create HTTP runtime: {error}"), error))))?;
                 runtime.block_on(async move {
                     let shutdown_state = state.clone();
+                    let sampler = state.clone();
+                    tokio::spawn(async move {
+                        let mut ticks = tokio::time::interval(GENERATED_SAMPLE_PERIOD);
+                        loop {
+                            ticks.tick().await;
+                            sampler.sample_generated();
+                        }
+                    });
                     let mut router = Router::new()
-                        .route("/health", get(health::<M>))
                         .route("/metrics", get(metrics::<M>))
                         .route("/v1/models", get(models::<M>))
                         .route("/v1/chat/completions", post(chat::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
@@ -191,6 +258,8 @@ impl<M: ModelContract> Server<M> {
                             .layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
                     }
                     let router = router
+                        .route_layer(middleware::from_fn_with_state(state.clone(), authorize::<M>))
+                        .route("/health", get(health::<M>))
                         .layer(DefaultBodyLimit::max(config.max_body_bytes))
                         .with_state(state);
                     let listener = match tokio::net::TcpListener::bind(config.bind).await {
@@ -343,7 +412,12 @@ async fn health<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Res
     }
 }
 async fn models<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
-    Json(json!({"object":"list","data":[{"id":state.model.config().model_id,"object":"model","owned_by":"local"}]})).into_response()
+    let identifier = &state.model.config().model_id;
+    let data: Vec<Value> = std::iter::once(identifier)
+        .chain(state.served_names.iter().filter(|name| *name != identifier))
+        .map(|id| json!({"id":id,"object":"model","owned_by":"local"}))
+        .collect();
+    Json(json!({"object":"list","data":data})).into_response()
 }
 async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
     let mut text = state.model.metrics().render();
@@ -368,6 +442,16 @@ async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Re
             "Maximum simultaneous CPU preparation workers.",
             state.frontend_capacity,
         ),
+        (
+            "uptime_seconds",
+            "Seconds since the HTTP listener started.",
+            state.started.elapsed().as_secs() as usize,
+        ),
+        (
+            "generated_tokens_last_minute",
+            "Committed generated tokens during the most recent minute, sampled every five seconds.",
+            state.generated_last_minute() as usize,
+        ),
     ] {
         metrics::metric(&mut text, name, "gauge", help, value as u64);
     }
@@ -389,15 +473,48 @@ fn readiness_failure(
     ExecutionError::Worker(cause).into()
 }
 
-fn typed_error(failure: Error) -> Response {
-    let status = match &failure {
+fn status(failure: &Error) -> StatusCode {
+    match failure {
         Error::Admission(AdmissionError::Capacity(_) | AdmissionError::Unavailable(_)) => {
             StatusCode::SERVICE_UNAVAILABLE
         }
         Error::Admission(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    error(status, failure)
+    }
+}
+
+fn typed_error(failure: Error) -> Response {
+    error(status(&failure), failure)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+async fn authorize<M: ModelContract>(
+    State(state): State<Arc<HttpState<M>>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(key) = &state.api_key {
+        let presented = request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
+        if !presented.is_some_and(|presented| constant_time_eq(presented, key.as_bytes())) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error":{"message":"missing or invalid API key","type":"authentication_error"}})),
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 fn error(status: StatusCode, message: impl std::fmt::Display) -> Response {
@@ -422,10 +539,14 @@ async fn admit_http<M: ModelContract>(
     let ingress = match state.ingress_slots.clone().try_acquire_owned() {
         Ok(permit) => Arc::new(permit),
         Err(_) => {
-            return error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "native HTTP admission is full",
+            let mut message = format!(
+                "native HTTP admission is full: {} requests are active or queued",
+                state.ingress_capacity
             );
+            if !state.capacity_hint.is_empty() {
+                message = format!("{message}; {}", state.capacity_hint);
+            }
+            return error(StatusCode::TOO_MANY_REQUESTS, message);
         }
     };
     request.extensions_mut().insert(ingress);
@@ -435,10 +556,19 @@ async fn admit_http<M: ModelContract>(
 async fn chat<M: ModelContract>(
     State(state): State<Arc<HttpState<M>>>,
     Extension(ingress): Extension<Arc<OwnedSemaphorePermit>>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Response {
     let ingress_ns = (body.get("return_token_timestamps") == Some(&Value::Bool(true)))
         .then(observation::monotonic_ns);
+    // Requests may use any served name; preparation sees the model's identifier.
+    if let Some(model) = body.get_mut("model") {
+        let served = model
+            .as_str()
+            .is_some_and(|name| state.served_names.iter().any(|served| served == name));
+        if served {
+            *model = Value::String(state.model.config().model_id.clone());
+        }
+    }
     let permit = match state.frontend_slots.clone().acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -464,7 +594,7 @@ async fn chat<M: ModelContract>(
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(message)) => return typed_error(message),
+        Ok(Err(message)) => return state.rejection(message),
         Err(error_value) => {
             return error(StatusCode::INTERNAL_SERVER_ERROR, error_value.to_string());
         }
@@ -483,7 +613,7 @@ async fn chat<M: ModelContract>(
     };
     let generation = match submitted {
         Ok(generation) => generation,
-        Err(message) => return typed_error(message),
+        Err(message) => return state.rejection(message),
     };
     let enqueue_ns = generation.enqueue_ns;
     let id = format!("chatcmpl-{}", state.ids.fetch_add(1, Ordering::Relaxed));
@@ -579,7 +709,7 @@ async fn chat<M: ModelContract>(
                 }
                 GenerationEvent::AdmissionRejected(message) => {
                     presentation.abort(crate::output::Termination::ExecutionError);
-                    return typed_error(message);
+                    return state.rejection(message);
                 }
                 GenerationEvent::Finished {
                     prompt_tokens,
@@ -716,6 +846,10 @@ mod observation_tests {
             (
                 Error::admission(AdmissionError::Capacity, "native request queue is full"),
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Error::admission(AdmissionError::Context, "prompt exceeds the context"),
+                StatusCode::BAD_REQUEST,
             ),
             (
                 Error::admission(

@@ -54,6 +54,9 @@ pub enum AdmissionError {
     Invalid(Failure),
     #[error(transparent)]
     Capacity(Failure),
+    /// A request's prompt and output limit exceed the context one request may reach.
+    #[error(transparent)]
+    Context(Failure),
     #[error(transparent)]
     Feature(Failure),
     #[error(transparent)]
