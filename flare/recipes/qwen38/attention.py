@@ -193,8 +193,7 @@ class PreparedAttention:
                         max_speculative_tokens=draft_tokens, position_axes=3,
                         q_heads=self.q_heads, kv_heads=self.kv_heads,
                         mrope_sections=(11, 11, 10), mrope_interleaved=True,
-                        rms_norm_eps=module.config.rms_norm_eps,
-                        attention_splits=16)
+                        rms_norm_eps=module.config.rms_norm_eps)
         if rotary.cos.shape[0] < context:
             raise ValueError("rotary table capacity must cover the admitted context")
         self.projections = {}
