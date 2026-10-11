@@ -171,7 +171,8 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
         vocab_ids = torch.arange(128)
 
         def __call__(self):
-            pass
+            # Draft proposals draw into the round's shared sample buffer.
+            operation.sampled.copy_(self.probabilities[:, 0].argmax(-1))
 
     class Commit:
         emitted_count = torch.tensor([0, 1], dtype=torch.int32)
@@ -183,7 +184,6 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     operation.decoder = lambda: operation.state.token_ids.copy_(owner.candidates[:batch, :width].reshape(-1))
     operation.absorb = lambda: None
     operation.operations = (Proposal(), (Proposal(),) * 3, lambda: None, Commit(), ())
-    operation._draw = lambda probabilities: operation.sampled.copy_(probabilities.argmax(-1))
     operation()
     chosen = 27 if copy_epoch == 13 else 21
     assert operation.drafts[1].tolist() == [chosen, 21, 21]

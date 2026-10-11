@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from flare.components.flashinfer_sampling import sample_probabilities
+from flare.components.draft_sampling import PreparedDraftDistribution
 
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
@@ -189,8 +189,9 @@ class PreparedSpeculativeRound:
             grammar_masks=o.copy_grammar_mask if self.copy_only else None,
             grammar_mask_count=o.copy_grammar_mask_count if self.copy_only else None)
         proposals = (() if self.copy_only else
-            tuple(PreparedSpeculativeDistributions(self.draft.scratch.logits.view(b, 1, -1),
-            o.requests, slots, epochs, o.inputs.live_rows, self.drafts, prefix_offset=index) for index in range(w - 1)))
+            tuple(PreparedDraftDistribution(self.draft.scratch.logits.view(b, 1, -1),
+            o.requests, slots, epochs, o.inputs.live_rows, self.drafts, prefix_offset=index,
+            seed=self.seed, offset=self.offset, sampled=self.sampled) for index in range(w - 1)))
         target.prepare()
         for proposal in proposals:
             proposal.prepare()
@@ -198,10 +199,6 @@ class PreparedSpeculativeRound:
             o.requests, slots, epochs, o.inputs.live_rows, rng=o.rng,
             draft_valid=self.draft_valid, target_valid=target.valid, token_limits=self.token_limits)
         verify.prepare()
-        if not self.copy_only:
-            from flashinfer import sampling
-            self.flashinfer = sampling
-            self._draw()
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,
             o.completion, o.frame, o.sequence, rng=o.rng, copy_offered_mask=self.copy_mask,
@@ -210,16 +207,6 @@ class PreparedSpeculativeRound:
                                   self.target_residual, self.decoder.scratch.sample_hidden)
         model_commit = tuple(self.state._commit)
         self.operations = (target, proposals, verify, commit, model_commit)
-
-    def _draw(self, probabilities=None):
-        if probabilities is None:
-            probabilities = torch.zeros((self.batch, self.owner.requests.vocab_size),
-                                        dtype=torch.float32, device=self.seed.device)
-            probabilities[:, 0].fill_(1)
-        for row in range(self.batch):
-            sampled = sample_probabilities(probabilities[row:row + 1],
-                seed=self.seed[row:row + 1], offset=self.offset[row:row + 1])
-            self.sampled[row:row + 1].copy_(sampled)
 
     def __call__(self):
         o, b, w = self.owner, self.batch, self.width
@@ -257,6 +244,7 @@ class PreparedSpeculativeRound:
             self.draft_metadata.set(slots, draft_active.long(), self.before - 1 + index,
                 tokens, hidden, rope, o.draft_tables, capacity=1)
             self.draft()
+            self.offset.copy_(self.base_offset + 4 * index)
             proposal()
             copy = (self.active & (o.copy_generation[safe] == o.requests.generation[safe])
                     & (o.copy_expected[safe] == self.before)
