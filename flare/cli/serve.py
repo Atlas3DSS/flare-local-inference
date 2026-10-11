@@ -1,11 +1,10 @@
-"""Prepare one checkpoint for native serving or runtime-package export."""
+"""`flare run`: fetch, prepare, and serve one checkpoint."""
 
 import ipaddress
 import signal
 import socket
 import sys
 import traceback
-from contextlib import nullcontext
 
 from flare import planning
 from flare.errors import CapacityError, FlareError, PreparationError, UsageError
@@ -68,16 +67,6 @@ def _exhausted(error, plan) -> CapacityError | None:
 
 
 def run(args) -> int:
-    return _prepare(args)
-
-
-def export(args) -> int:
-    if args.output.exists():
-        raise UsageError(f"export destination already exists: {args.output}")
-    return _prepare(args, export_path=args.output)
-
-
-def _prepare(args, *, export_path=None) -> int:
     from flare.progress import StartupProgress, phase
 
     class Progress(StartupProgress):
@@ -89,9 +78,8 @@ def _prepare(args, *, export_path=None) -> int:
     progress = Progress()
     progress.splash()
     configuration = Configuration.load(args.config)
-    bind = None if export_path is not None else _address(
-        configuration.get("server.host", args.host).value,
-        configuration.get("server.port", args.port).value)
+    bind = _address(configuration.get("server.host", args.host).value,
+                    configuration.get("server.port", args.port).value)
     hub_cache = configuration.directory("hub_cache")
     with phase(progress, "Resolve checkpoint") as stage:
         model = resolve_model(configuration, args.model)
@@ -103,8 +91,6 @@ def _prepare(args, *, export_path=None) -> int:
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size)
-        if export_path is not None and plan.world_size != 1:
-            raise UsageError("native package export requires TP1; select one GPU with --gpus")
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -127,18 +113,9 @@ def _prepare(args, *, export_path=None) -> int:
     signals.__enter__()
     try:
         try:
-            recorder = nullcontext()
-            preparation_options = {}
-            if export_path is not None:
-                from flare.preparation.module_images import ModuleImages
-
-                recorder = ModuleImages()
-                preparation_options["retain_graphs"] = True
-            with recorder:
-                prepared = model.recipe.prepare(
-                    model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
-                    kernel_cache=configuration.directory("kernel_cache"), progress=progress,
-                    **preparation_options)
+            prepared = model.recipe.prepare(
+                model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
+                kernel_cache=configuration.directory("kernel_cache"), progress=progress)
         except FlareError:
             raise
         except MemoryError as error:
@@ -154,19 +131,6 @@ def _prepare(args, *, export_path=None) -> int:
             usage = model.recipe.usage(prepared)
             _keep_reserve(plan, usage)
             options = _server_options(configuration, model, plan, min(rank.pages for rank in usage))
-            if export_path is not None:
-                from flare.preparation.runtime_package import export_model
-
-                with phase(progress, "Export native package") as stage:
-                    try:
-                        options.pop("api_key")
-                        export_model(prepared, recorder, export_path, options=options)
-                    except Exception as error:
-                        if args.verbose:
-                            traceback.print_exc()
-                        raise PreparationError(f"native package export failed: {error}") from error
-                    stage.update(str(export_path))
-                return 0
             with phase(progress, "Start Helios") as stage:
                 try:
                     server = prepared.start_server(bind=bind, options=options)

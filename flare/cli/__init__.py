@@ -25,25 +25,6 @@ def _parser() -> argparse.ArgumentParser:
         return subparser
 
     running = command("run", serve.run, "prepare and serve")
-    exporting = command("export", serve.export, "prepare a native TP1 runtime package")
-    exporting.add_argument("--output", type=Path, required=True, metavar="DIR",
-                           help="destination package directory; must not already exist")
-    for preparing in (running, exporting):
-        _preparation_arguments(preparing)
-    running.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
-    running.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
-    command("models", commands.models, "list supported checkpoints and what fits on this host", json=True)
-    command("pull", commands.pull, "download the pinned revision").add_argument("model", metavar="MODEL")
-    command("status", status.status, "summarize a running server", json=True).add_argument(
-        "--url", metavar="URL", help="server address (default: the configured host and port)")
-    command("bench", bench.bench, "measure a running server", json=True).add_argument(
-        "--url", metavar="URL", help="server address (default: the configured host and port)")
-    command("config", commands.config, "print the effective configuration and file locations", json=True)
-    command("skill", commands.skill, "print the agent guide", configured=False)
-    return parser
-
-
-def _preparation_arguments(running):
     running.add_argument("model", nargs="?", metavar="MODEL",
                          help="recipe alias, repository id, or checkpoint directory (default: defaults.model)")
     running.add_argument("--gpus", metavar="LIST",
@@ -52,6 +33,8 @@ def _preparation_arguments(running):
     running.add_argument("--max-concurrency", type=int, metavar="N",
                          help="maximum simultaneously active requests (default: defaults.max_concurrency,"
                               " else the recipe default)")
+    running.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
+    running.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
     running.add_argument("--verbose", action="store_true", help="per-phase detail on stderr")
     advanced = running.add_argument_group("advanced options")
     advanced.add_argument("--prefill-chunk-size", type=int, metavar="N",
@@ -78,6 +61,15 @@ def _preparation_arguments(running):
                           help="also draft continuations copied from the request's own history")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
+    command("models", commands.models, "list supported checkpoints and what fits on this host", json=True)
+    command("pull", commands.pull, "download the pinned revision").add_argument("model", metavar="MODEL")
+    command("status", status.status, "summarize a running server", json=True).add_argument(
+        "--url", metavar="URL", help="server address (default: the configured host and port)")
+    command("bench", bench.bench, "measure a running server", json=True).add_argument(
+        "--url", metavar="URL", help="server address (default: the configured host and port)")
+    command("config", commands.config, "print the effective configuration and file locations", json=True)
+    command("skill", commands.skill, "print the agent guide", configured=False)
+    return parser
 
 
 def main(argv=None) -> int:
