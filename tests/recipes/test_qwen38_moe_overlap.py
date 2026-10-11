@@ -10,6 +10,7 @@ import torch
 from b12x.preparation import PreparationSession
 from cuda.bindings import driver as cuda
 
+from flare.components.parallel import TensorParallelShard
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.compilation import compile_forward
 from flare.preparation.qwen38 import TEXT_PREFIX
@@ -21,18 +22,19 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
 
 
-@pytest.fixture(scope="module")
-def weights():
+@pytest.fixture(scope="module", params=[1, 2], ids=["tp1", "tp2"])
+def weights(request):
     snapshot = os.environ.get("FLARE_QWEN38_SNAPSHOT")
     if snapshot is None:
         pytest.skip("FLARE_QWEN38_SNAPSHOT must identify the checkpoint")
     manifest = inspect_qwen38_checkpoint(Path(snapshot))
-    scales = allocate_expert_scale_scratch("cuda:0")
-    with QwenWeightLoader(manifest, "cuda:0", prefixes=(f"{TEXT_PREFIX}.layers.0.mlp.",)) as loader:
+    shard = TensorParallelShard(0, request.param)
+    scales = allocate_expert_scale_scratch("cuda:0", shard=shard)
+    with QwenWeightLoader(manifest, "cuda:0", prefixes=(f"{TEXT_PREFIX}.layers.0.mlp.",), shard=shard) as loader:
         return QwenMoeWeights.load(loader, 0, scale_scratch=scales), scales
 
 
-@pytest.mark.parametrize("rows", [1, 8])
+@pytest.mark.parametrize("rows", [1, 2, 8])
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
 def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
@@ -99,6 +101,7 @@ def test_aot_moe_restores_fresh_buffers_plans_and_streams_without_tracing(tmp_pa
         pytest.skip("FLARE_QWEN38_SNAPSHOT must identify the checkpoint")
     artifact = tmp_path / "moe.bin"
     script = r'''
+from types import SimpleNamespace
 import importlib.util
 import sys
 from pathlib import Path
@@ -129,7 +132,7 @@ def compile_forward(forward):
 
 module.compile_forward = compile_forward
 with torch.no_grad():
-    weights = module.weights.__wrapped__()
+    weights = module.weights.__wrapped__(SimpleNamespace(param=2))
     if mode == "load":
         module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, False)
     module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, True)

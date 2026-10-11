@@ -9,13 +9,14 @@ from b12x.gemm import blockscaled
 from b12x.moe import fused_moe
 from b12x.preparation import PreparationSession
 
-from flare.components.linear import UnquantizedProjection
 from flare.components.expert_overlap import ConcurrentSharedExpert
+from flare.components.linear import UnquantizedProjection
 from flare.components.mlp import PreparedMLP
-from flare.components.weights import MLPWeights
 from flare.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
+from flare.components.weights import MLPWeights
 from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
+from flare.preparation.tuning import register_finalizer
 
 from .weights import QwenWeightLoader
 
@@ -191,6 +192,12 @@ class PreparedQwenMoe:
             self.concurrent_shared = ConcurrentSharedExpert(self.shared,
                 parallel_plans=(self.router_projection.plan, self.routing.plan, self.experts.plan),
                 gate_projection=self.shared.gate_projection, session=session, workspace=workspace)
+
+            def finalize_overlap():
+                self.concurrent_shared.defer_launch = (
+                    source.shape[0] <= 2 and self.experts.binding.implementation == "micro")
+
+            register_finalizer(session, finalize_overlap, workspace=workspace)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         if source is not self.source and (
