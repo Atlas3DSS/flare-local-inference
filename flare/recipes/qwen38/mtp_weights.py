@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import hashlib
 import importlib.metadata
 import json
-import os
 
 import torch
 
@@ -167,7 +166,7 @@ class MTPWeights:
         # Drafts read the vocabulary through an NVFP4 copy of the BF16 head: a proposal
         # distribution only has to be the q that generated it; verification keeps BF16.
         draft_head = None
-        if shard.world_size == 1 and os.environ.get("FLARE_MTP_NVFP4_HEAD", "1") != "0":
+        if shard.world_size == 1:
             draft_head = nvfp4_draft_head(lm_head_weight)
         torch.cuda.synchronize(device)
         return cls(module, attention, moe, embedding_weight, lm_head_weight,

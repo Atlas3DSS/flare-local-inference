@@ -55,6 +55,26 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   context alive for their full native use. Model state and metadata must be
   explicit storage that Helios can manage without Python execution.
 
+## No environment-variable switches
+
+- Flare, Helios, recipes, and components never read an environment variable to
+  choose behavior. Feature toggles, experiment switches, tuning overrides,
+  debug modes, and alternate code paths selected through the environment are
+  prohibited, including temporary ones.
+- A setting has one of three homes: the recipe declaration, the configuration
+  file, or a command-line flag, as [the CLI design](docs/cli-design.md)
+  specifies. A setting that only experiments need is an advanced flag carried
+  through the plan into the recipe's `PreparationConfig`, so the plan, its
+  printed report, and its recorded measurements describe what was prepared.
+- `CUDA_VISIBLE_DEVICES` is the only variable Flare interprets: it renumbers the
+  GPUs that `--gpus` indexes. `flare.cli.environment` sets the variables that
+  PyTorch, b12x, Triton, and the Hugging Face hub read, from Flare's
+  configuration, before importing them. Detecting a terminal's capabilities is
+  not configuration.
+- Tests may read variables that opt into GPU tests and locate their
+  checkpoints, such as `FLARE_RUN_CUDA_TESTS`. A test variable must not change
+  what the code under test does.
+
 ## Use FlashInfer and plan memory explicitly
 
 - Flare is fully coupled to FlashInfer/b12x by design. It has no backend or
