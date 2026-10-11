@@ -288,7 +288,8 @@ class PreparedGDN:
             "recurrent_state": state.recurrent,
             "num_seqs": metadata.num_seqs,
             "num_tokens": metadata.num_tokens,
-            "output": scratch.recurrence.view(self.tokens, self.value_heads, 128),
+            "output": (scratch.gated if mode == "decode" else scratch.recurrence).view(
+                self.tokens, self.value_heads, 128),
             "a": scratch.a,
             "b": scratch.b,
         }
@@ -382,7 +383,6 @@ class PreparedGDN:
             gdn_decode.run(
                 self.recurrent_binding, eps=self.module.norm.variance_epsilon
             )
-            scratch.gated.copy_(scratch.recurrence)
         else:
             scratch.recurrence.zero_()
             gdn_prefill.run(self.recurrent_binding)

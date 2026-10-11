@@ -268,8 +268,9 @@ def _load_cuda(manifest):
 @CUDA
 @torch.no_grad()
 @pytest.mark.parametrize("initial_tokens", (17, 65))
+@pytest.mark.parametrize("compiled", (False, True))
 def test_actual_checkpoint_prefill_decode_continuation_graphs(
-    manifest, reference_module, initial_tokens, record_property
+    manifest, reference_module, initial_tokens, compiled, record_property
 ):
     from b12x.preparation import PreparationSession
 
@@ -318,12 +319,26 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
         decode(decode_input)
         torch.cuda.synchronize()
         session.freeze()
+        def prefill_call():
+            return prefill(prefill_input)
+
+        def decode_call():
+            return decode(decode_input)
+
+        if compiled:
+            from flare.preparation.compilation import compile_forward
+
+            prefill_call = compile_forward(prefill_call)
+            decode_call = compile_forward(decode_call)
+            prefill_call()
+            decode_call()
+            torch.cuda.synchronize()
         pool = torch.cuda.graph_pool_handle()
         prefill_graph, decode_graph = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
         with torch.cuda.graph(prefill_graph, pool=pool):
-            prefill(prefill_input)
+            prefill_call()
         with torch.cuda.graph(decode_graph, pool=pool):
-            decode(decode_input)
+            decode_call()
         caches = [_cache(), _cache()]
         generator = torch.Generator().manual_seed(741)
         errors = {}
@@ -372,11 +387,15 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
             expected = torch.cat(outputs)
             initial_state = state.recurrent.cpu()
             initial_convolution = state.convolution.cpu()
+            if mode == "decode":
+                scratch.recurrence.fill_(float("nan"))
             torch.cuda.synchronize()
             allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
             graph.replay()
             torch.cuda.synchronize()
             assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+            if mode == "decode":
+                assert torch.isnan(scratch.recurrence).all()
             label = f"{mode}_{lengths[0]}"
             actual = scratch.output[:sum(lengths)].float().cpu()
             # Output quantization can amplify recurrence rounding at bin boundaries.
@@ -422,8 +441,9 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
 
 @CUDA
 @torch.no_grad()
+@pytest.mark.parametrize("compiled", (False, True))
 def test_actual_checkpoint_decode_accepts_selected_speculative_state(
-    manifest, reference_module, record_property
+    manifest, reference_module, compiled, record_property
 ):
     from b12x.preparation import PreparationSession
 
@@ -459,9 +479,19 @@ def test_actual_checkpoint_decode_accepts_selected_speculative_state(
         expected_final = reference_module(source[3:4].unsqueeze(0), cache_params=cache)[0]
         adapter(inputs)
         session.freeze()
+        def call():
+            return adapter(inputs)
+
+        if compiled:
+            from flare.preparation.compilation import compile_forward
+
+            call = compile_forward(call)
+            call()
+            torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            adapter(inputs)
+            call()
+        scratch.recurrence.fill_(float("nan"))
         _metadata(metadata, [3], [1], fresh=True, columns=[[1, 2, 3]])
         inputs.copy_(source[:3])
         graph.replay()
@@ -487,5 +517,6 @@ def test_actual_checkpoint_decode_accepts_selected_speculative_state(
             state.convolution[1, :, :3], cache.layers[0].conv_states[0][0, :, -3:]
         )
         assert torch.count_nonzero(scratch.output[1:]) == 0
+        assert torch.isnan(scratch.recurrence).all()
         record_property("relative_l2", json.dumps(errors, sort_keys=True))
         graph.reset()
