@@ -6,7 +6,7 @@ import triton.language as tl
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ignition.components.collectives import PreparedAllReduce
-from ignition.components.flashinfer_sampling import sample_probabilities
+from ignition.components.draft_sampling import PreparedDraftDistribution
 from ignition.components.recurrent import DeltaMetadata, DeltaState
 from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
@@ -155,8 +155,9 @@ class PreparedRound:
         o, b, w = self.owner, self.batch, self.width
         args = (o.requests, o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows)
         target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1), *args, self.drafts)
-        proposals = tuple(PreparedSpeculativeDistributions(self.draft_logits.view(b, 1, -1), *args,
-            self.drafts, prefix_offset=i) for i in range(w - 1))
+        proposals = tuple(PreparedDraftDistribution(self.draft_logits.view(b, 1, -1), *args,
+            self.drafts, prefix_offset=i, seed=self.seed, offset=self.offset, sampled=self.sampled)
+            for i in range(w - 1))
         target.prepare()
         for proposal in proposals:
             proposal.prepare()
@@ -168,15 +169,6 @@ class PreparedRound:
             o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows,
             o.records, o.frame, o.sequence, rng=o.rng, token_limits=o.inputs.query_lengths[:b])
         self.operations = target, proposals, verify, commit
-        if w > 1:
-            dummy = torch.zeros((b, o.requests.vocab_size), dtype=torch.float32, device=self.seed.device)
-            dummy[:, 0].fill_(1)
-            self.draw(dummy)
-
-    def draw(self, probabilities):
-        for row in range(self.batch):
-            self.sampled[row:row + 1].copy_(sample_probabilities(probabilities[row:row + 1],
-                seed=self.seed[row:row + 1], offset=self.offset[row:row + 1]))
 
     def target_metadata(self, slots, limits):
         o, b, w, m = self.owner, self.batch, self.width, self.metadata
@@ -256,17 +248,18 @@ class PreparedRound:
                 token, hidden, o.draft_tables, capacity=1)
             self.draft()
             torch.index_select(self.draft.logits, 0, self.draft_metadata.output_indices, out=self.draft_logits)
+            self.offset.copy_(self.base_offset + 4 * i)
             proposal()
             self.probabilities[:, i].copy_(proposal.probabilities[:, 0])
-            self.offset.copy_(self.base_offset + 4 * i)
-            self.draw(self.probabilities[:, i])
             self.drafts[:, i].copy_(self.sampled)
             self.valid[:, i].copy_(proposal.valid[:, 0] & proposing)
-        for slot in range(o.requests.capacity):
-            match = self.active & (slots == slot)
-            base = torch.where(match, self.base_offset, 0).sum()
-            o.draft_offset[slot].copy_(torch.where(match.any(), base + 4 * (w - 1), o.draft_offset[slot]))
-            o.draft_generation[slot].copy_(torch.where(match.any(), o.requests.generation[slot], o.draft_generation[slot]))
+        # One masked update per tensor instead of one storage write per request slot.
+        slot_ids = torch.arange(o.requests.capacity, device=slots.device)
+        match = self.active[None, :] & (slots[None, :] == slot_ids[:, None])
+        matched = match.any(1)
+        base = torch.where(match, self.base_offset[None, :], 0).sum(1)
+        o.draft_offset.copy_(torch.where(matched, base + 4 * (w - 1), o.draft_offset))
+        o.draft_generation.copy_(torch.where(matched, o.requests.generation, o.draft_generation))
         self.candidates[:, 0].copy_(self.pending)
         self.candidates[:, 1:].copy_(self.drafts)
         self.target_metadata(slots, limits)
