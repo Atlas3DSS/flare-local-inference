@@ -220,6 +220,7 @@ class PreparedGDN:
                 output,
                 session=session,
                 name=f"{name}.{projection}",
+                activation_mode="auto",
                 workspace=projection_workspace,
             )
             for projection, output in (
@@ -233,6 +234,7 @@ class PreparedGDN:
             scratch.output,
             session=session,
             name=f"{name}.out_proj",
+            activation_mode="auto",
             workspace=projection_workspace,
         )
         self.parallel_projections = None

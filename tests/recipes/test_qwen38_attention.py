@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from functools import partial
 import os
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -13,11 +13,20 @@ import torch
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
 from flare.preparation.qwen38 import TEXT_PREFIX
+from flare.preparation.scratch import ScratchArena
 from flare.recipes.qwen38.attention import (
-    PreparedAttention, QSAMetadata, QSAScratch, QSAState, RotaryTables,
+    PreparedAttention,
+    QSAMetadata,
+    QSAScratch,
+    QSAState,
+    RotaryTables,
 )
 from flare.recipes.qwen38.weights import QwenWeightLoader
-from flare.reference.qwen38_quant import CheckpointTensors, decode_mxfp8, quantize_mxfp8_activation
+from flare.reference.qwen38_quant import (
+    CheckpointTensors,
+    decode_mxfp8,
+    quantize_mxfp8_activation,
+)
 
 CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                          reason="requires explicit GPU assignment and FLARE_RUN_CUDA_TESTS=1")
@@ -59,7 +68,9 @@ def test_qsa_metadata_and_state_geometry():
 
 
 def test_rotary_tables_match_canonical_multimodal_positions(manifest):
-    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRotaryEmbedding
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+        Qwen4ExpTextRotaryEmbedding,
+    )
     module = _module(manifest)
     tables = RotaryTables.allocate(module.config, 128, torch.device("cpu"))
     positions = torch.tensor([[0, 0, 0], [1, 2, 3], [80, 24, 73], [127, 126, 125]])
@@ -74,9 +85,14 @@ class ReferenceProjection(torch.nn.Module):
     def __init__(self, weight, scales):
         super().__init__()
         self.register_buffer("weight", decode_mxfp8(weight, scales))
+        self.activation_modes = ()
 
     def forward(self, source):
-        return (quantize_mxfp8_activation(source) @ self.weight.T).bfloat16()
+        value = quantize_mxfp8_activation(source)
+        if self.activation_modes:
+            a16 = torch.tensor([mode == "a16" for mode in self.activation_modes])
+            value = torch.where(a16[:, None], source.float(), value)
+        return (value @ self.weight.T).bfloat16()
 
 
 def _load_reference(manifest):
@@ -122,7 +138,9 @@ def _set_metadata(metadata, starts, lengths, positions, *, prefill):
 @torch.no_grad()
 def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
     from b12x.preparation import PreparationSession
-    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRotaryEmbedding
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+        Qwen4ExpTextRotaryEmbedding,
+    )
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         pytest.fail("assign a CUDA device explicitly")
     device = torch.device("cuda", 0)
@@ -140,14 +158,20 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
     graphs, sources, scratch, metadata, prepared, calls = {}, {}, {}, {}, {}, {}
     pool = torch.cuda.graph_pool_handle()
     stream = torch.cuda.Stream(device=device)
+    arena = ScratchArena(device)
     with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
         for label, capacity in (("prefill", 64), ("decode", 2)):
             sources[label] = torch.zeros((capacity, 2560), device=device, dtype=torch.bfloat16)
             scratch[label] = QSAScratch.allocate(capacity, device)
             metadata[label] = QSAMetadata.allocate(tokens=capacity, batch=2, context=128, device=device)
             prepared[label] = PreparedAttention(module, weights, sources[label], scratch[label], state,
-                metadata[label], rotary, session=session, name=label)
-            call = partial(prepared[label], sources[label])
+                metadata[label], rotary, session=session, name=label,
+                workspace=arena, projection_workspace=arena)
+        arena.finalize()
+        arena.freeze()
+        session.freeze()
+        for label, attention in prepared.items():
+            call = partial(attention, sources[label])
             if compiled:
                 from flare.preparation.compilation import compile_forward
 
@@ -174,6 +198,7 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
         positions[0][4:12, 1] -= 2
         positions[0][4:12, 2] += 3
         consumed = [0, 0]
+        projection_modes = {name: [[], []] for name in PROJECTIONS}
         try:
             for label, lengths in (("prefill", (17, 9)), ("decode", (1, 1)),
                                    ("prefill", (46, 12)), ("decode", (1, 1))):
@@ -191,6 +216,12 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
                 offset = 0
                 for request, length in enumerate(lengths):
                     total = consumed[request] + length
+                    for name in PROJECTIONS:
+                        packed = "qkv_proj" if name in ("q_proj", "k_proj", "v_proj") else name
+                        mode = prepared[label].projections[packed].plan.selection.config.mode
+                        modes = projection_modes[name][request]
+                        modes.extend([mode] * length)
+                        reference.get_submodule(name).activation_modes = modes
                     value = histories[request][:total][None]
                     rope = reference_rotary(value, positions[request][:total].T[:, None])
                     mask = torch.full((total, total), torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16).triu(1)[None, None]

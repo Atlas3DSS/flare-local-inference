@@ -201,7 +201,7 @@ class PreparedAttention:
             if isinstance(weight, torch.Tensor):
                 return UnquantizedProjection(source, weight, output, session=session, name=f"{name}.{key}")
             return QuantizedProjection(source, weight, output, session=session,
-                                       name=f"{name}.{key}", workspace=projection_workspace)
+                                       name=f"{name}.{key}", activation_mode="auto", workspace=projection_workspace)
 
         for key, output in (("qkv_proj", scratch.projected_qkv),
                             ("indexer.index_qk_proj", scratch.projected_index)):

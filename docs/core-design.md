@@ -602,6 +602,9 @@ the same Q/K/V grouping with BF16 weights. Loading concatenates serialized
 values and scale rows before b12x packs the scales; it does not requantize
 weights. Output slices share persistent packed scratch. The b12x convolution,
 recurrence, and KV writer consume row-strided views without unpacking copies.
+GDN and sparse-attention projection plans let b12x select BF16 or quantized
+activations for each prepared capacity. Concurrent projections retain separate
+workspaces sized from their selected plans.
 
 Operators that allocate their outputs per call, including standalone
 hyperconnection combine, are acceptable inside capture
@@ -887,9 +890,10 @@ The search preserves activation precision and arithmetic constraints. BF16
 projections search every eligible b12x backend and `rows_per_tile` configuration
 using private activation and output buffers with the serving tensor strides.
 Hyperconnection down and residual-injection weights share one packed projection;
-the canonical Transformers parameters remain views of that storage. Quantized MXFP8
-wrappers retain default inner dense-GEMM lowerings; their existing benchmark
-callbacks do not expose an inner search. Vision NVFP4 projections remain A16;
+the canonical Transformers parameters remain views of that storage. GDN and
+sparse-attention MXFP8 projections search BF16 and quantized activation paths.
+Quantized MXFP8 wrappers retain default inner dense-GEMM lowerings; their
+benchmark callbacks do not expose an inner search. Vision NVFP4 projections remain A16;
 routed MoE remains activation-quantized. QSA fixes `attention_splits=16`, and GDN
 prefill fixes sequential recurrence with one key split. The preparation report
 records these limits, selections, cache hits, measurements, and memory release.

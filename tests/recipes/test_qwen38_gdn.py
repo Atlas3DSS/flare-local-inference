@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from flare.components.recurrent import DeltaMetadata
 from flare.preparation import inspect_qwen38_checkpoint
@@ -111,9 +112,22 @@ class _ReferenceProjection(torch.nn.Module):
     def __init__(self, weight, scales):
         super().__init__()
         self.register_buffer("weight", decode_mxfp8(weight, scales))
+        self.activation_mode = "quantized"
 
     def forward(self, source):
-        return (quantize_mxfp8_activation(source) @ self.weight.T).to(torch.bfloat16)
+        value = source.float() if self.activation_mode == "a16" else quantize_mxfp8_activation(source)
+        return (value @ self.weight.T).to(torch.bfloat16)
+
+
+def _reference_precision(module, prepared):
+    for packed, names in (
+        ("in_proj_qkvz", ("in_proj_qkv", "in_proj_z")),
+        ("in_proj_ba", ("in_proj_b", "in_proj_a")),
+        ("out_proj", ("out_proj",)),
+    ):
+        mode = prepared.projections[packed].plan.selection.config.mode
+        for name in names:
+            module.get_submodule(name).activation_mode = mode
 
 
 @pytest.fixture(scope="module")
@@ -150,6 +164,55 @@ def _numerical(actual, expected, *, limit=0.015):
         actual, expected, rtol=0.025, atol=float(expected.abs().max()) * 0.015 + 1e-6
     )
     return float(error)
+
+
+def _projection_checks(reference, source, scratch, count):
+    for name, field in (
+        ("in_proj_qkv", "projected_qkv"), ("in_proj_z", "z"),
+        ("in_proj_b", "b"), ("in_proj_a", "a"),
+    ):
+        expected = reference.get_submodule(name)(source[:count].cpu())
+        _numerical(getattr(scratch, field)[:count], expected, limit=0.004)
+    expected = reference.out_proj(scratch.gated[:count].cpu())
+    _numerical(scratch.output[:count], expected, limit=0.004)
+
+
+def _prefill_checks(prepared, reference, initial_state, initial_convolution):
+    from b12x.sequence.gdn_prefill.reference import prefill_gdn
+    from b12x.testing.delta_prefill_cases import assert_close
+
+    scratch, metadata = prepared.scratch, prepared.metadata
+    count = int(metadata.num_tokens.item())
+    for seq in range(metadata.num_seqs.item()):
+        start, end = metadata.query_start_loc[seq:seq + 2].tolist()
+        slot = int(metadata.convolution_slots[seq].item())
+        history = initial_convolution[slot]
+        if metadata.fresh[seq].item():
+            history = torch.zeros_like(history)
+        source = torch.cat((history, scratch.projected_qkv[start:end].cpu().T), dim=-1)
+        convolved = F.silu(F.conv1d(source[None], reference.conv1d.weight, groups=source.shape[0]))
+        _numerical(scratch.convolved_qkv[start:end], convolved[0].T, limit=0.004)
+    q, k, v = scratch.convolved_qkv.cpu().split((2048, 2048, 6144), dim=-1)
+    expected_state = initial_state.clone()
+    expected = prefill_gdn(
+        q.view(-1, 16, 128), k.view(-1, 16, 128), v.view(-1, 48, 128),
+        scratch.a.cpu(), scratch.b.cpu(), reference.A_log, reference.dt_bias,
+        expected_state, metadata.query_start_loc.cpu(), metadata.initial_state_indices.cpu(),
+        metadata.final_state_indices.cpu(), metadata.checkpoint_state_indices.cpu(),
+        metadata.checkpoint_offsets.cpu(), metadata.num_seqs.cpu(), metadata.num_tokens.cpu(),
+        null_state_index=0,
+    )
+    assert_close("prefill recurrence", scratch.recurrence[:count].cpu(),
+                 expected[:count].reshape(count, -1), ratio=1e-2)
+    slots = set(metadata.final_state_indices[:metadata.num_seqs.item()].tolist())
+    slots.update(slot for slot, offset in zip(metadata.checkpoint_state_indices.tolist(),
+                                              metadata.checkpoint_offsets.tolist(), strict=True) if offset > 0)
+    for slot in slots - {0}:
+        assert_close(f"prefill state {slot}", prepared.state.recurrent[slot].cpu(),
+                     expected_state[slot], ratio=5e-3)
+    expected_norm = reference.norm(scratch.recurrence[:count].cpu().view(-1, 128),
+                                   scratch.z[:count].cpu().reshape(-1, 128))
+    _numerical(scratch.gated[:count], expected_norm.reshape(count, -1), limit=0.004)
 
 
 def _metadata(metadata, lengths, slots, *, fresh, initial=None, columns=None):
@@ -297,6 +360,7 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
             inputs[: source.shape[0]].copy_(source)
             outputs = []
             start = 0
+            _reference_precision(reference_module, prefill if mode == "prefill" else decode)
             for index, length in enumerate(lengths):
                 outputs.append(
                     reference_module(
@@ -306,15 +370,22 @@ def test_actual_checkpoint_prefill_decode_continuation_graphs(
                 )
                 start += length
             expected = torch.cat(outputs)
+            initial_state = state.recurrent.cpu()
+            initial_convolution = state.convolution.cpu()
             torch.cuda.synchronize()
             allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
             graph.replay()
             torch.cuda.synchronize()
             assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
             label = f"{mode}_{lengths[0]}"
-            errors[label + ".output"] = _numerical(
-                scratch.output[: sum(lengths)], expected
-            )
+            actual = scratch.output[:sum(lengths)].float().cpu()
+            # Output quantization can amplify recurrence rounding at bin boundaries.
+            errors[label + ".output"] = float((actual - expected.float()).norm() / expected.float().norm())
+            _projection_checks(reference_module, inputs, scratch, sum(lengths))
+            if mode == "prefill":
+                _prefill_checks(prefill, reference_module, initial_state, initial_convolution)
+            else:
+                _numerical(actual, expected)
             assert torch.count_nonzero(scratch.output[sum(lengths) :]) == 0
             for request, slot in enumerate((1, 2)):
                 reference_state = caches[request].layers[0]
@@ -366,11 +437,6 @@ def test_actual_checkpoint_decode_accepts_selected_speculative_state(
         torch.randn((4, 2560), generator=torch.Generator().manual_seed(192)) * 0.1
     ).to(torch.bfloat16)
     cache = _cache()
-    expected_tokens = [
-        reference_module(source[i : i + 1].unsqueeze(0), cache_params=cache)[0]
-        for i in range(2)
-    ]
-    expected_final = reference_module(source[3:4].unsqueeze(0), cache_params=cache)[0]
     with PreparationSession(
         device=device, autotune=False, compile_workers=1
     ) as session:
@@ -385,6 +451,12 @@ def test_actual_checkpoint_decode_accepts_selected_speculative_state(
             session=session,
             name="gdn.verify",
         )
+        _reference_precision(reference_module, adapter)
+        expected_tokens = [
+            reference_module(source[i : i + 1].unsqueeze(0), cache_params=cache)[0]
+            for i in range(2)
+        ]
+        expected_final = reference_module(source[3:4].unsqueeze(0), cache_params=cache)[0]
         adapter(inputs)
         session.freeze()
         graph = torch.cuda.CUDAGraph()
