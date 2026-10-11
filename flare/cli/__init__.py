@@ -43,14 +43,11 @@ def _parser() -> argparse.ArgumentParser:
     advanced.add_argument("--no-mtp", action="store_true",
                           help="disable multi-token speculation: load no draft model and decode one token"
                                " per step")
-    advanced.add_argument("--mtp-max-draft-tokens", type=int, metavar="N",
-                          help="most draft tokens verified in one round, 1 through 7; rounds adapt among"
+    advanced.add_argument("--mtp-draft-tokens", type=int, metavar="N",
+                          help="most draft tokens verified in one round, 0 through 7; rounds adapt among"
                                " 0 through N (default: the recipe's)")
-    advanced.add_argument("--mtp-draft-tokens", metavar="LIST",
-                          help="the draft-token counts to capture graphs for, such as 5 or 1,3,5; rounds adapt"
-                               " among them and zero; replaces --mtp-max-draft-tokens")
-    advanced.add_argument("--mtp-fixed-draft-tokens", type=int, metavar="N",
-                          help="verify exactly N draft tokens every round, 0 through 7, instead of adapting")
+    advanced.add_argument("--no-mtp-adaptive-verification", action="store_true",
+                          help="verify exactly the draft-token count every round instead of adapting")
     advanced.add_argument("--mtp-graph-budget", type=int, metavar="N",
                           help="most speculative graphs captured across batch sizes, small batches and deep"
                                " drafts first (default: the recipe's)")

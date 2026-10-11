@@ -6,9 +6,9 @@ Flare's speculative engine supports the embedded MTP modules in
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
 Each recipe's `PreparationConfig(mtp=True)` prepares it, and `flare run`
-prepares it for both recipes unless `--no-mtp` is given. The advanced
-`--mtp-*` flags select the captured draft counts, a fixed count, the graph
-budget, and the proposal source. Draft continuations from request history are
+prepares it for both recipes unless `--no-mtp` is given. The advanced flags
+select the draft-token count, fixed in place of adaptive verification, the
+graph budget, and the proposal source. Draft continuations from request history are
 disabled by default and enabled on the Qwen recipe with `--history-drafts`,
 which sets `PreparationConfig(history_drafts=True)`.
 

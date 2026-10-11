@@ -35,10 +35,10 @@ flare skill
   active requests wait for their next token.
 - Speculation is on for every recipe with an MTP module. Advanced flags on
   `run` override the recipe: `--no-mtp` disables it;
-  `--mtp-max-draft-tokens N` sets the deepest draft count,
-  `--mtp-draft-tokens 1,3,5` the exact counts beside zero,
-  `--mtp-fixed-draft-tokens N` a fixed count per round, and
-  `--mtp-graph-budget N` the number of speculative graphs captured. On
+  `--mtp-draft-tokens N` sets the most draft tokens per round, and
+  verification adapts among 0 through N; `--no-mtp-adaptive-verification`
+  verifies exactly N every round; `--mtp-graph-budget N` sets the number of
+  speculative graphs captured. On
   `qwen3.8-flash`, `--mtp-proposal-source copy` drafts from the request's own
   history without the draft model and `--history-drafts` adds such drafts to
   the MTP module's. `--no-mtp` frees the draft model's weights, its pages, and

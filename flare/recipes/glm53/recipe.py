@@ -58,7 +58,7 @@ RECIPE = Recipe(
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     # Rounds adapt among zero through five drafts. Verification retains recurrent
     # state for seven draft positions per request whatever the captured counts.
-    speculation=Speculation(draft_counts=(0, 1, 2, 3, 4, 5)), speculative_rows=7,
+    speculation=Speculation(draft_tokens=5), speculative_rows=7,
     ranks=MappingProxyType({
         2: _costs(81_464_576, _GRAPH_BYTES, speculating=True),
         4: _costs(41_635_072, _GRAPH_BYTES, speculating=True),

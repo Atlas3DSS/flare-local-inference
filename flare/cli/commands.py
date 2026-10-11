@@ -55,10 +55,10 @@ def speculation(args, model: ResolvedModel) -> Speculation | None:
     recipe, alias = model.recipe, model.checkpoint.alias
     default, limit = recipe.speculation, recipe.speculative_rows
     given = [flag for flag, value in (
-        ("--mtp-max-draft-tokens", args.mtp_max_draft_tokens), ("--mtp-draft-tokens", args.mtp_draft_tokens),
-        ("--mtp-fixed-draft-tokens", args.mtp_fixed_draft_tokens), ("--mtp-graph-budget", args.mtp_graph_budget),
-        ("--mtp-proposal-source", args.mtp_proposal_source), ("--history-drafts", args.history_drafts or None))
-        if value is not None]
+        ("--mtp-draft-tokens", args.mtp_draft_tokens),
+        ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None),
+        ("--mtp-graph-budget", args.mtp_graph_budget), ("--mtp-proposal-source", args.mtp_proposal_source),
+        ("--history-drafts", args.history_drafts or None)) if value is not None]
     if default is None:
         if args.no_mtp or given:
             raise UsageError(f"{alias} has no multi-token speculation; {(given or ['--no-mtp'])[0]} does not apply")
@@ -68,37 +68,17 @@ def speculation(args, model: ResolvedModel) -> Speculation | None:
             raise UsageError(f"--no-mtp disables speculation; {', '.join(given)} cannot accompany it")
         return None
 
-    maximum, fixed = args.mtp_max_draft_tokens, args.mtp_fixed_draft_tokens
-    if maximum is not None and not 1 <= maximum <= limit:
-        raise UsageError(f"--mtp-max-draft-tokens must be 1 through {limit}; --no-mtp disables speculation")
-    if fixed is not None and not 0 <= fixed <= limit:
-        raise UsageError(f"--mtp-fixed-draft-tokens must be 0 through {limit}")
-    if args.mtp_draft_tokens is not None:
-        if maximum is not None:
-            raise UsageError("--mtp-draft-tokens lists every draft count; --mtp-max-draft-tokens cannot accompany it")
-        try:
-            listed = {int(count) for count in args.mtp_draft_tokens.split(",")}
-        except ValueError:
-            listed = {-1}
-        if not all(0 <= count <= limit for count in listed):
-            raise UsageError(f"--mtp-draft-tokens takes draft counts from 1 through {limit} separated by commas,"
-                             f" such as 5 or 1,3,5; got {args.mtp_draft_tokens!r}")
-        # Every batch size keeps a zero-draft graph, so zero is always among the counts.
-        counts = tuple(sorted(listed | {0}))
-        if fixed is not None and fixed not in counts:
-            raise UsageError(f"--mtp-fixed-draft-tokens {fixed} is not among --mtp-draft-tokens {args.mtp_draft_tokens}")
-    else:
-        if maximum is not None and fixed is not None and fixed > maximum:
-            raise UsageError(f"--mtp-fixed-draft-tokens {fixed} exceeds --mtp-max-draft-tokens {maximum}")
-        # A fixed count deeper than the recipe's default extends the captured range to reach it.
-        counts = tuple(range((max(default.draft_counts[-1], fixed or 0) if maximum is None else maximum) + 1))
+    drafts = default.draft_tokens if args.mtp_draft_tokens is None else args.mtp_draft_tokens
+    if not 0 <= drafts <= limit:
+        raise UsageError(f"--mtp-draft-tokens must be 0 through {limit}; --no-mtp disables speculation")
+    adaptive = default.adaptive and not args.no_mtp_adaptive_verification
     source = default.proposal_source if args.mtp_proposal_source is None else args.mtp_proposal_source
     history = default.history_drafts or args.history_drafts
     if (source == "copy" or history) and not recipe.history_copy:
         flag = "--history-drafts" if args.history_drafts else "--mtp-proposal-source copy"
         raise UsageError(f"{alias} drafts only with its MTP module; {flag} does not apply")
     budget = default.graph_budget if args.mtp_graph_budget is None else args.mtp_graph_budget
-    return Speculation(counts, fixed, budget, source, history)
+    return Speculation(drafts, adaptive, budget, source, history)
 
 
 def _listed(values) -> str:
@@ -150,7 +130,7 @@ def models(args) -> int:
                 "device_bytes": checkpoint.device_bytes, "mapped_host_bytes": checkpoint.mapped_host_bytes,
                 "cached": model.cached(hub_cache), "context": recipe.context, "max_images": recipe.max_images,
                 "speculation": None if recipe.speculation is None else {
-                    "draft_counts": list(recipe.speculation.draft_counts),
+                    "draft_tokens": recipe.speculation.draft_tokens, "adaptive": recipe.speculation.adaptive,
                     "graph_budget": recipe.speculation.graph_budget,
                     "proposal_source": recipe.speculation.proposal_source,
                     "history_drafts": recipe.speculation.history_drafts, "history_copy": recipe.history_copy},

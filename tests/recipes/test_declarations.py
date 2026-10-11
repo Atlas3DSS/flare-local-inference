@@ -13,7 +13,7 @@ from flare.recipes.declaration import Speculation
 HUB = Path.home() / ".cache/huggingface/hub"
 QWEN = resolve("qwen3.8-flash")
 GLM = resolve("glm-5.3-flash")
-COPY = Speculation((0, 1, 2, 3), proposal_source="copy")
+COPY = Speculation(3, proposal_source="copy")
 
 
 @pytest.mark.parametrize("world_size", [1, 2, 4])
@@ -23,7 +23,8 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
     from flare.recipes.qwen38.state import HybridStateLayout
 
     recipe = QWEN.recipe
-    assert recipe.speculation == Speculation((0, 1, 2, 3)) and recipe.speculative_rows == 7 and recipe.history_copy
+    assert recipe.speculation == Speculation(draft_tokens=3) and recipe.speculative_rows == 7
+    assert recipe.speculation.adaptive and recipe.history_copy
 
     def layer(speculative_tokens):
         geometry = qsa.cache_requirements(main_page_size=recipe.page_tokens, position_axes=3,
@@ -46,7 +47,7 @@ def test_glm_state_rows_and_pages_match_the_continuation_pool(world_size):
     from flare.recipes.glm53.pool import continuation_layout
 
     recipe = GLM.recipe
-    assert recipe.speculation == Speculation((0, 1, 2, 3, 4, 5)) and recipe.speculative_rows == 7
+    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.speculative_rows == 7
     assert not recipe.history_copy and recipe.page_tokens == 256
     layer_types = tuple("indexed_attention" if index % 4 == 3 else "linear_attention" for index in range(45))
     target = layer_types.count("indexed_attention")
@@ -150,9 +151,9 @@ def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
         QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
         return plan, seen.pop()
 
-    plan, config = configured(Speculation((0, 2, 4), fixed_drafts=2, graph_budget=12, proposal_source="copy",
+    plan, config = configured(Speculation(2, adaptive=False, graph_budget=12, proposal_source="copy",
                                           history_drafts=True))
-    assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 3, 5), 3)
+    assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
     assert (config.speculative_graph_budget, config.speculative_proposal_source, config.history_drafts) == (
         12, "copy", True)
     assert config.speculative_shapes == ((1, 3), (2, 3), (4, 3))
@@ -188,10 +189,10 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
     assert config.speculative_graph_budget == 8
 
-    plan = fitted(GLM, 4, speculation=Speculation((0, 1, 2), fixed_drafts=1, graph_budget=5))
+    plan = fitted(GLM, 4, speculation=Speculation(2, adaptive=False, graph_budget=5))
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     config, _ = seen.pop()
-    assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 2)
+    assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
     assert config.speculative_graph_budget == 5
 
     plan = fitted(GLM, 4, speculation=None)

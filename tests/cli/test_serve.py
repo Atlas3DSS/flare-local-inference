@@ -140,8 +140,10 @@ def test_command_line_settings_reach_the_plan(host, tmp_path, monkeypatch, capsy
     assert (plan.concurrency, plan.world_size, plan.prefill_chunk) == (3, 2, 1024)
     assert "Select GPUs.  GPUs 0-1 · concurrency 3 · " in phases(capsys)[-2]
 
-    assert run("qwen3.8-flash", "--mtp-fixed-draft-tokens", "2", "--history-drafts") == 0
-    assert host["plan"].speculation.fixed_drafts == 2 and host["plan"].speculation.history_drafts
+    assert run("qwen3.8-flash", "--mtp-draft-tokens", "2", "--no-mtp-adaptive-verification",
+               "--history-drafts") == 0
+    drafting = host["plan"].speculation
+    assert (drafting.draft_tokens, drafting.adaptive, drafting.history_drafts) == (2, False, True)
     assert "· concurrency 2 · exactly 2 draft tokens with history drafts  " in phases(capsys)[1]
     assert run("qwen3.8-flash", "--no-mtp") == 0
     assert host["plan"].speculation is None and host["plan"].live_rows == 1 + 2 + 6

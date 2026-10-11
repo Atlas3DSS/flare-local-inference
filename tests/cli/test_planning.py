@@ -14,7 +14,7 @@ from flare.recipes.declaration import Checkpoint, RankCosts, Recipe, Speculation
 GIB, MIB = 1 << 30, 1 << 20
 
 
-DRAFTING = Speculation(draft_counts=(0, 1, 2, 3))
+DRAFTING = Speculation(draft_tokens=3)
 
 
 def recipe(name, device_gib, ranks, *, speculation=None, mapped_gib=0, draft_gib=0):
@@ -111,7 +111,7 @@ def test_speculation_settings_select_weights_rows_and_pages():
     assert plain.pages == (91 * GIB - 61 * GIB - 49 * 80 * MIB) * 2 // (3 * MIB) == 17866
     assert plain.to_dict()["speculation"] is None
     # Drafts copied from history keep the verification rows and load no draft model or draft pages.
-    copied = derive(speculation=Speculation((0, 1, 2, 3), proposal_source="copy"))
+    copied = derive(speculation=Speculation(3, proposal_source="copy"))
     assert (copied.weights_bytes, copied.live_rows, copied.costs.page_bytes) == (58 * GIB, 45, 3 * MIB // 2)
     assert copied.costs.state_row_bytes == drafting.costs.state_row_bytes and copied.pages == 14664
     split = derive(gpus=(gpu(0, 50), gpu(1, 50)), speculation=None)
@@ -120,28 +120,30 @@ def test_speculation_settings_select_weights_rows_and_pages():
 
 def test_speculation_settings_are_validated_and_described():
     assert DRAFTING.widths == (1, 2, 3, 4) and DRAFTING.fixed_width is None and DRAFTING.learned
-    fixed = Speculation((0, 1, 2, 3), fixed_drafts=2)
-    assert fixed.fixed_width == 3
-    record = derive(speculation=Speculation((0, 2, 4), graph_budget=12, history_drafts=True)).to_dict()["speculation"]
-    assert record == {"draft_counts": [0, 2, 4], "fixed_drafts": None, "graph_budget": 12, "proposal_source": "mtp",
+    fixed = Speculation(2, adaptive=False)
+    assert fixed.widths == (1, 2, 3) and fixed.fixed_width == 3
+    assert Speculation(0).widths == (1,) and Speculation(0, adaptive=False).fixed_width == 1
+    record = derive(speculation=Speculation(5, graph_budget=12, history_drafts=True)).to_dict()["speculation"]
+    assert record == {"draft_tokens": 5, "adaptive": True, "graph_budget": 12, "proposal_source": "mtp",
                       "history_drafts": True}
     # Concurrency 64 prepares seven batch sizes, each of which captures at least one graph.
     with pytest.raises(UsageError, match="--mtp-graph-budget must be 7 through 56 at --max-concurrency 64"):
-        derive(concurrency=64, speculation=Speculation((0, 1), graph_budget=6))
+        derive(concurrency=64, speculation=Speculation(1, graph_budget=6))
     for budget in (2, 57):
         with pytest.raises(UsageError, match="--mtp-graph-budget must be 3 through 56 at --max-concurrency 4"):
-            derive(speculation=Speculation((0, 1), graph_budget=budget))
+            derive(speculation=Speculation(1, graph_budget=budget))
     assert display.speculation(None) == "off"
     assert display.speculation(DRAFTING) == "up to 3 draft tokens per round · MTP module"
     assert display.speculation(fixed) == "exactly 2 draft tokens per round · MTP module"
+    assert display.speculation(Speculation(4, history_drafts=True)) == (
+        "up to 4 draft tokens per round · MTP module and request history")
+    assert display.speculation(Speculation(1, proposal_source="copy")) == (
+        "up to 1 draft token per round · request history")
     assert display.speculation(None, brief=True) == "speculation off"
     assert display.speculation(DRAFTING, brief=True) == "up to 3 draft tokens"
-    assert display.speculation(Speculation((0, 1), proposal_source="copy"), brief=True) == (
+    assert display.speculation(fixed, brief=True) == "exactly 2 draft tokens"
+    assert display.speculation(Speculation(1, proposal_source="copy"), brief=True) == (
         "up to 1 draft token from history")
-    assert display.speculation(Speculation((0, 2, 4), history_drafts=True)) == (
-        "0, 2 or 4 draft tokens per round · MTP module and request history")
-    assert display.speculation(Speculation((0, 1), proposal_source="copy")) == (
-        "up to 1 draft token per round · request history")
 
 
 def test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override():

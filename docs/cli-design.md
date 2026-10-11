@@ -92,16 +92,17 @@ value; the flag overrides it.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-max-draft-tokens N` | Most draft tokens verified in one round, 1 through 7. Rounds adapt among 0 through `N`. | The recipe's maximum: 3 for Qwen, 5 for GLM |
-| `--mtp-draft-tokens LIST` | The draft-token counts to capture graphs for, each 1 through 7, such as `5` or `1,3,5`. Rounds adapt among them and zero, which every batch size always captures. Replaces `--mtp-max-draft-tokens`. | 0 through the maximum |
-| `--mtp-fixed-draft-tokens N` | Verify exactly `N` draft tokens every round, 0 through 7, instead of adapting. `N` must be among the captured counts; without `--mtp-draft-tokens` or `--mtp-max-draft-tokens`, a deeper `N` extends the range to it. | Adaptive |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round, 0 through 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | The recipe's count: 3 for Qwen, 5 for GLM |
+| `--no-mtp-adaptive-verification` | Verify exactly the draft-token count every round. Only that count's graphs are captured. | Adaptive |
 | `--mtp-graph-budget N` | Most speculative graphs captured across batch sizes, at least one per batch size and at most 56. Small batches and deep drafts are captured first. | 8 |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
-others. The `Select GPUs.` startup line states the settings in effect.
+others. The `Select GPUs.` startup line states the settings in effect: `up to
+N draft tokens` while verification adapts, `exactly N draft tokens` when it is
+fixed.
 
 `models`, `status`, `bench`, and `config` accept `--json`.
 `status` and `bench` accept `--url`, defaulting to the configured host and
@@ -177,7 +178,7 @@ a field in a lil manifest. None is a parameter in Flare.
 | `--device`, `--tp` | Not a parameter | `--gpus` lists GPUs; tensor parallelism is their count. |
 | `max_num_batched_tokens` | Not a parameter | The recipe's prefill chunk; `--prefill-chunk-size` is the advanced override. |
 | `--headroom`, `--snapshot-budget`, `conversation_cache` | Not a parameter | Headroom is an engine constant, 1 GiB: the free memory kept after the final KV allocation for the transient working memory of compiled warm-up and graph capture, measured at 0.83 GiB for one Qwen rank. Serving allocates nothing, and the CUDA context is counted in graphs and scratch. The prefix cache is sized from `--max-concurrency`. |
-| `--mtp`, widths, fixed width, proposal source, copy | Advanced flags | Speculation is distribution-preserving and faster when the recipe prepares it, so every recipe with an MTP module enables it and adapts the draft count from measured rounds. `--no-mtp` and the `--mtp-*` flags override the recipe: to measure a setting, to pin one, or to free the draft model's memory on a host where it does not fit. There is no flag that turns speculation on. |
+| `--mtp`, width lists, fixed width, proposal source, copy | Advanced flags | Speculation is distribution-preserving and faster when the recipe prepares it, so every recipe with an MTP module enables it and adapts the draft count from measured rounds. `--no-mtp` and the `--mtp-*` flags override the recipe: to measure a setting, to pin one, or to free the draft model's memory on a host where it does not fit. One draft-token count sets the depth and `--no-mtp-adaptive-verification` pins it; there is no list of counts, no separate fixed count, and no flag that turns speculation on. |
 | `--max-active` | Renamed | `--max-concurrency`. |
 | `--bind`, `--listen` | Renamed | `--host` and `--port`. |
 | `--thinking`, `--template-defaults FILE`, reasoning effort, sampling defaults, `--max-tokens` | Not command-line parameters | These are default request parameters, a separate mechanism not yet specified. Launch flags do not set per-request behavior. |
@@ -190,7 +191,7 @@ a field in a lil manifest. None is a parameter in Flare.
 | `queue_capacity`, `event_capacity`, `frontend_workers`, `max_body_bytes` | Not a parameter | Derived: queue is four times concurrency, frontend workers equal concurrency, event capacity is fixed, body limit is the recipe's image count times its per-image limit plus 1 MiB. |
 | `compile_workers` | Not a parameter | Derived from CPU count. |
 | `CUDA_HOME` | Not a parameter | Located from installed packages, then `[paths].cuda`. |
-| `CUDA_VISIBLE_DEVICES` | Read only to interpret `--gpus` | `--gpus` selects. If the caller set it, integer entries are NVML indices, other entries are GPU UUID prefixes, `--gpus` indices are relative to that enumeration, and `plan` says so. Flare then exports the selected GPUs' UUIDs to its own processes. |
+| `CUDA_VISIBLE_DEVICES` | Read only to interpret `--gpus` | `--gpus` selects. If the caller set it, integer entries are NVML indices, other entries are GPU UUID prefixes, `--gpus` indices are relative to that enumeration, and the `Select GPUs.` startup line says so. Flare then exports the selected GPUs' UUIDs to its own processes. |
 | `--api-key` | Configuration only | Secrets do not go on command lines. |
 | `--seed`, `--temperature`, stop sequences | Request fields | Per request. |
 

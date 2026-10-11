@@ -32,18 +32,20 @@ class Checkpoint:
 
 @dataclass(frozen=True)
 class Speculation:
-    """Multi-token speculation: the draft counts a plan captures graphs for and where drafts come from.
+    """Multi-token speculation: how many draft tokens a round verifies and where drafts come from.
 
-    A round verifies the pending input and a captured number of draft tokens.
-    Rounds adapt among `draft_counts`, or always use `fixed_drafts`. Preparation
-    captures at most `graph_budget` speculative graphs across batch capacities,
-    small batches and deep drafts first. Drafts come from the checkpoint's MTP
-    module or, with the `copy` source, from continuations of the request's own
-    history; `history_drafts` adds those continuations to MTP drafts.
+    A round verifies the pending input and up to `draft_tokens` drafts. With
+    `adaptive` verification, graphs are captured for every count from zero
+    through `draft_tokens` and rounds adapt among them from measured acceptance;
+    without it every round verifies exactly `draft_tokens`. Preparation captures
+    at most `graph_budget` speculative graphs across batch capacities, small
+    batches and deep drafts first. Drafts come from the checkpoint's MTP module
+    or, with the `copy` source, from continuations of the request's own history;
+    `history_drafts` adds those continuations to MTP drafts.
     """
 
-    draft_counts: tuple[int, ...]
-    fixed_drafts: int | None = None
+    draft_tokens: int
+    adaptive: bool = True
     graph_budget: int = 8
     proposal_source: str = "mtp"
     history_drafts: bool = False
@@ -54,12 +56,12 @@ class Speculation:
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """Verification widths: each draft count plus the pending input."""
-        return tuple(count + 1 for count in self.draft_counts)
+        """Verification widths: each draft count from zero through `draft_tokens`, plus the pending input."""
+        return tuple(range(1, self.draft_tokens + 2))
 
     @property
     def fixed_width(self) -> int | None:
-        return None if self.fixed_drafts is None else self.fixed_drafts + 1
+        return None if self.adaptive else self.draft_tokens + 1
 
 
 @dataclass(frozen=True)

@@ -93,52 +93,49 @@ def speculation(*arguments, model="qwen3.8-flash"):
 def test_speculation_flags_override_the_recipe():
     default = speculation()
     assert default == resolve("qwen3.8-flash").recipe.speculation
-    assert (default.draft_counts, default.fixed_drafts) == ((0, 1, 2, 3), None)
+    assert (default.draft_tokens, default.adaptive, default.widths, default.fixed_width) == (
+        3, True, (1, 2, 3, 4), None)
     assert (default.graph_budget, default.proposal_source, default.history_drafts) == (8, "mtp", False)
     assert speculation("--no-mtp") is None
-    assert speculation("--mtp-max-draft-tokens", "5").draft_counts == (0, 1, 2, 3, 4, 5)
-    assert speculation("--mtp-max-draft-tokens", "1").draft_counts == (0, 1)
-    listed = speculation("--mtp-draft-tokens", "0,2,4", "--mtp-fixed-draft-tokens", "2")
-    assert (listed.draft_counts, listed.fixed_drafts, listed.widths, listed.fixed_width) == (
-        (0, 2, 4), 2, (1, 3, 5), 3)
-    # Zero is always captured, so a list names only the other counts, in any order.
-    assert speculation("--mtp-draft-tokens", "5").draft_counts == (0, 5)
-    assert speculation("--mtp-draft-tokens", "4,2,2").draft_counts == (0, 2, 4)
-    assert speculation("--mtp-draft-tokens", "7", "--mtp-fixed-draft-tokens", "7").fixed_drafts == 7
-    assert speculation("--mtp-draft-tokens", "0").draft_counts == (0,)
-    # A fixed count deeper than the recipe's range extends the range to it.
-    assert speculation("--mtp-fixed-draft-tokens", "5").draft_counts == (0, 1, 2, 3, 4, 5)
-    assert speculation("--mtp-fixed-draft-tokens", "0").draft_counts == (0, 1, 2, 3)
+    # Verification adapts among every count up to the draft-token setting unless it is fixed.
+    deeper = speculation("--mtp-draft-tokens", "5")
+    assert (deeper.draft_tokens, deeper.adaptive, deeper.widths, deeper.fixed_width) == (
+        5, True, (1, 2, 3, 4, 5, 6), None)
+    fixed = speculation("--mtp-draft-tokens", "5", "--no-mtp-adaptive-verification")
+    assert (fixed.draft_tokens, fixed.adaptive, fixed.fixed_width) == (5, False, 6)
+    assert speculation("--no-mtp-adaptive-verification").fixed_width == 4
+    assert speculation("--mtp-draft-tokens", "0").widths == (1,)
+    assert speculation("--mtp-draft-tokens", "7").draft_tokens == 7
     assert speculation("--mtp-graph-budget", "12").graph_budget == 12
     copied = speculation("--mtp-proposal-source", "copy")
     assert copied.proposal_source == "copy" and not copied.learned and not copied.history_drafts
     assert speculation("--history-drafts").history_drafts
-    assert speculation(model="glm-5.3-flash").draft_counts == (0, 1, 2, 3, 4, 5)
+    assert speculation(model="glm-5.3-flash").draft_tokens == 5
     assert speculation("--no-mtp", model="glm-5.3-flash") is None
 
 
 @pytest.mark.parametrize("arguments, message", [
-    (["--no-mtp", "--mtp-max-draft-tokens", "2"], "--no-mtp disables speculation; --mtp-max-draft-tokens cannot"),
+    (["--no-mtp", "--mtp-draft-tokens", "2"], "--no-mtp disables speculation; --mtp-draft-tokens cannot"),
+    (["--no-mtp", "--no-mtp-adaptive-verification"],
+     "--no-mtp disables speculation; --no-mtp-adaptive-verification cannot accompany it"),
     (["--no-mtp", "--history-drafts"], "--no-mtp disables speculation; --history-drafts cannot accompany it"),
-    (["--mtp-max-draft-tokens", "0"], "--mtp-max-draft-tokens must be 1 through 7; --no-mtp disables speculation"),
-    (["--mtp-max-draft-tokens", "8"], "--mtp-max-draft-tokens must be 1 through 7"),
-    (["--mtp-fixed-draft-tokens", "8"], "--mtp-fixed-draft-tokens must be 0 through 7"),
-    (["--mtp-max-draft-tokens", "2", "--mtp-fixed-draft-tokens", "3"],
-     "--mtp-fixed-draft-tokens 3 exceeds --mtp-max-draft-tokens 2"),
-    (["--mtp-draft-tokens", "0,2", "--mtp-max-draft-tokens", "2"], "--mtp-max-draft-tokens cannot accompany it"),
-    (["--mtp-draft-tokens", "2,8"],
-     "--mtp-draft-tokens takes draft counts from 1 through 7 separated by commas, such as 5 or 1,3,5; got '2,8'"),
-    (["--mtp-draft-tokens", "-1"], "takes draft counts from 1 through 7"),
-    (["--mtp-draft-tokens", "2,x"], "takes draft counts from 1 through 7"),
-    (["--mtp-draft-tokens", ""], "takes draft counts from 1 through 7"),
-    (["--mtp-draft-tokens", "0,2,4", "--mtp-fixed-draft-tokens", "3"],
-     "--mtp-fixed-draft-tokens 3 is not among --mtp-draft-tokens 0,2,4"),
+    (["--mtp-draft-tokens", "8"], "--mtp-draft-tokens must be 0 through 7; --no-mtp disables speculation"),
+    (["--mtp-draft-tokens", "-1"], "--mtp-draft-tokens must be 0 through 7"),
     (["--mtp-graph-budget", "2"], "--mtp-graph-budget must be 3 through 56 at --max-concurrency 4"),
     (["--max-concurrency", "64", "--mtp-graph-budget", "6"], "--mtp-graph-budget must be 7 through 56"),
 ])
 def test_invalid_speculation_flags_are_usage_errors(host, capsys, arguments, message):
     assert run("qwen3.8-flash", *arguments) == 2
     assert message in failure(capsys)[0]
+
+
+def test_speculation_flags_have_one_spelling(host, capsys):
+    for arguments in (["--mtp-draft-tokens", "1,3"], ["--mtp-max-draft-tokens", "5"],
+                      ["--mtp-fixed-draft-tokens", "2"], ["--mtp-draft-tokens", "x"]):
+        with pytest.raises(SystemExit) as exit:
+            main(["run", "qwen3.8-flash", *arguments])
+        assert exit.value.code == 2
+    capsys.readouterr()
 
 
 def test_history_copy_flags_apply_only_to_recipes_that_support_them(host, capsys):
@@ -197,9 +194,9 @@ def test_models_describes_every_recipe(host, tmp_path, monkeypatch, capsys):
     assert qwen["estimate"]["tensor_parallel"] == 1 and qwen["error"] is None and not qwen["default"]
     assert (qwen["recipe"], qwen["revision"]) == ("qwen38", "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2")
     assert (qwen["context"], qwen["max_images"]) == (262144, 4)
-    assert qwen["speculation"] == {"draft_counts": [0, 1, 2, 3], "graph_budget": 8, "proposal_source": "mtp",
+    assert qwen["speculation"] == {"draft_tokens": 3, "adaptive": True, "graph_budget": 8, "proposal_source": "mtp",
                                    "history_drafts": False, "history_copy": True}
-    assert glm["speculation"]["draft_counts"] == [0, 1, 2, 3, 4, 5] and not glm["speculation"]["history_copy"]
+    assert glm["speculation"]["draft_tokens"] == 5 and not glm["speculation"]["history_copy"]
     assert (qwen["tensor_parallel_sizes"], qwen["default_concurrency"], qwen["concurrency_limit"]) == ([1, 2, 4], 4, 64)
     assert qwen["device_bytes"] + qwen["mapped_host_bytes"] <= qwen["stored_bytes"] and qwen["prefill_chunk"] == 4096
     assert glm["estimate"] is None and "this host has 1" in glm["error"] and glm["default"]

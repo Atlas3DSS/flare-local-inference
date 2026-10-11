@@ -117,13 +117,8 @@ def speculation(settings, *, brief: bool = False) -> str:
     """
     if settings is None:
         return "speculation off" if brief else "off"
-    counts, fixed = settings.draft_counts, settings.fixed_drafts
-    if fixed is not None:
-        depth = f"exactly {fixed} draft token{'' if fixed == 1 else 's'}"
-    elif counts == tuple(range(len(counts))):
-        depth = f"up to {counts[-1]} draft token{'' if counts[-1] == 1 else 's'}"
-    else:
-        depth = f"{', '.join(map(str, counts[:-1]))} or {counts[-1]} draft tokens"
+    drafts = settings.draft_tokens
+    depth = f"{'up to' if settings.adaptive else 'exactly'} {drafts} draft token{'' if drafts == 1 else 's'}"
     if brief:
         source = " from history" if not settings.learned else " with history drafts" if settings.history_drafts else ""
         return depth + source

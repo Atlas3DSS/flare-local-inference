@@ -197,7 +197,7 @@ class Plan:
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
             "prefill_chunk": self.prefill_chunk,
             "speculation": None if self.speculation is None else {
-                "draft_counts": list(self.speculation.draft_counts), "fixed_drafts": self.speculation.fixed_drafts,
+                "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "graph_budget": self.speculation.graph_budget,
                 "proposal_source": self.speculation.proposal_source,
                 "history_drafts": self.speculation.history_drafts},
