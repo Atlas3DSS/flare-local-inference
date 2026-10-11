@@ -5,12 +5,47 @@ import sys
 from time import monotonic
 
 
+_BOOT_SPLASH = """
+       ·                                                     ✦
+                                                   ⢀⡴⠒⠒⠒⢦⡀
+                                                ⢀⡴⠋  ⣠⠤⡀  ⠹⡄
+     ███████╗██╗      █████╗ ██████╗ ███████╗    ⡴⠋  ⡴⠋  ⠹⡄  ⢹
+     ██╔════╝██║     ██╔══██╗██╔══██╗██╔════╝   ╱   ╱      ⢹  ⡼
+     █████╗  ██║     ███████║██████╔╝█████╗     ╱   ╱       ⡼⠊
+     ██╔══╝  ██║     ██╔══██║██╔══██╗██╔══╝    ╱  ⡴⠋
+     ██║     ███████╗██║  ██║██║  ██║███████╗  ╱ ⡴⠋
+     ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝  ⡿⠋
+                                             ⡼
+                   ⣀⣀⣀⣀⡠⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠋⠤⠤⠤⠤⢄⣀⣀⣀⣀
+       ⣀⣀⡠⠤⠔⠒⠉⠉      ·    ∿    ·   ·     ∿        ⠉⠉⠒⠢⠤⢄⣀⣀
+⣀⡠⠔⠒⠉⠁   ·  ∿    ·   ·     ∿    ·    ∿    ·     ·  ∿    ·   ⠈⠉⠒⠢⢄⣀
+  ·   ∿     ·   ∿    ·   ∿     ·    ·    ∿    ·      ·    ∿     ·
+""".strip("\n")
+
+
 class StartupProgress:
     def __init__(self, *, stream=None):
         from rich.console import Console
 
         self.console = Console(file=sys.stderr if stream is None else stream, highlight=False)
         self.active = None
+
+    def splash(self):
+        from rich.text import Text
+
+        if not self.console.is_terminal:
+            return
+        colors = ("#8996ad", "#e96538", "#f68b42", "#ffa94d", "#ffbf69", "#ffd58a",
+                  "#ffe5ad", "#fff0c7", "#ffe5ad", "#ffd58a", "#fff0c7", "#ffa94d",
+                  "#e96538", "#aa3e32")
+        art = Text(overflow="crop", no_wrap=True)
+        for index, (line, color) in enumerate(zip(_BOOT_SPLASH.splitlines(), colors, strict=True)):
+            row = Text(line, style=color)
+            if 3 <= index <= 8:
+                row.stylize("bold #fff0c7", 5, 44)
+            art.append_text(row)
+            art.append("\n")
+        self.console.print(art)
 
     def __call__(self, message):
         if self.active is not None:

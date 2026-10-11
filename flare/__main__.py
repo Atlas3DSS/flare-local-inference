@@ -72,6 +72,7 @@ def _run(args, parser, started):
     from flare.progress import StartupProgress, phase
 
     progress = StartupProgress()
+    progress.splash()
     defaults = {}
     if args.template_defaults is not None:
         defaults = json.loads(args.template_defaults.read_text())
