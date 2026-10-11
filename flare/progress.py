@@ -23,7 +23,7 @@ class _Phase:
         self.console = progress.console if isinstance(progress, StartupProgress) else None
         self.completed = 0
         self.finished = False
-        self.started = self.operation_started = monotonic()
+        self.started = monotonic()
         self.detail = ""
         self.live = None
         self.failed = False
@@ -31,13 +31,11 @@ class _Phase:
     def update(self, detail=None, *, advance=0):
         if detail is not None:
             self.detail = str(detail)
-            self.operation_started = monotonic()
         self.completed += advance
         if self.progress is not None and not isinstance(self.progress, StartupProgress) and detail is not None:
             self.progress(f"{self.label}: {self.detail}")
 
     def __rich__(self):
-        from rich.console import Group
         from rich.progress_bar import ProgressBar
         from rich.table import Table
         from rich.text import Text
@@ -52,18 +50,17 @@ class _Phase:
                                  pulse=self.total is None, complete_style="cyan",
                                  finished_style="green", pulse_style="cyan")
         label = Text(f"] {self.label}.", overflow="ellipsis", no_wrap=True)
+        if self.detail:
+            label.append(f"  {self.detail}", style="dim")
         count = f"{self.completed}/{self.total}  " if self.total is not None else ""
-        label.append(f"  {count}{now - self.started:.1f}s", style="dim")
+        timing = Text(f"  {count}{now - self.started:.1f}s", style="dim")
         row = Table.grid(padding=0)
         row.add_column(width=1, no_wrap=True)
         row.add_column(width=10, no_wrap=True)
         row.add_column(no_wrap=True)
-        row.add_row(Text("["), status, label)
-        if not self.detail:
-            return row
-        detail = Text(f"             {self.detail}", style="dim", overflow="ellipsis", no_wrap=True)
-        detail.append(f"  ·  {now - self.operation_started:.1f}s")
-        return Group(row, detail)
+        row.add_column(width=len(timing.plain), no_wrap=True)
+        row.add_row(Text("["), status, label, timing)
+        return row
 
 
 @contextmanager
