@@ -49,8 +49,8 @@ class ConcurrentAttention:
         for projection in self.projections:
             values, scales, gain, fp4 = _weight_parts(projection.weight)
             if (values.dtype not in (torch.float8_e4m3fn, torch.uint8) or gain is not None or fp4
-                    or projection.activation_mode != "quantized" or projection.bias is not None):
-                raise ValueError("concurrent attention projections require unbiased quantized MXFP8 or MXFP4 weights")
+                    or projection.bias is not None):
+                raise ValueError("concurrent attention projections require unbiased MXFP8 or MXFP4 weights")
             self.values.append(values)
             self.scales.append(scales.view(torch.uint8))
             self.outputs.append(projection.output)

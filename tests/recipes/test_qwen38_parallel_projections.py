@@ -9,6 +9,7 @@ from b12x.preparation import PreparationSession
 from cuda.bindings import driver as cuda
 
 from flare.components.linear import ParallelProjections, QuantizedProjection
+from flare.components.parallel import TensorParallelShard
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.compilation import compile_forward
 from flare.preparation.qwen38 import TEXT_PREFIX
@@ -19,21 +20,23 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
 
 
-@pytest.fixture(scope="module")
-def weights():
+@pytest.fixture(scope="module", params=[1, 2])
+def weights(request):
     snapshot = os.environ.get("FLARE_QWEN38_SNAPSHOT")
     if snapshot is None:
         pytest.skip("FLARE_QWEN38_SNAPSHOT must identify the checkpoint")
     manifest = inspect_qwen38_checkpoint(Path(snapshot))
     prefix = f"{TEXT_PREFIX}.layers.0.linear_attn"
-    with QwenWeightLoader(manifest, "cuda", prefixes=(prefix,)) as loader:
+    with QwenWeightLoader(manifest, "cuda", prefixes=(prefix,),
+                          shard=TensorParallelShard(0, request.param)) as loader:
         return loader.load_gdn_projections(prefix)
 
 
 @pytest.mark.parametrize("rows", [1, 8])
 @pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("activation_mode", ["quantized", "auto"])
 @torch.no_grad()
-def test_projection_fork_join_preserves_source_and_workspace_lifetimes(weights, rows, compiled):
+def test_projection_fork_join_preserves_source_and_workspace_lifetimes(weights, rows, compiled, activation_mode):
     arena = ScratchArena(torch.device("cuda", 0))
     source = torch.randn(rows, 2560, dtype=torch.bfloat16, device="cuda")
     input_copy = torch.empty_like(source)
@@ -42,7 +45,7 @@ def test_projection_fork_join_preserves_source_and_workspace_lifetimes(weights, 
     snapshots = [torch.empty_like(value) for value in output]
     with PreparationSession(device="cuda", autotune=False, compile_workers=0) as session:
         projections = [QuantizedProjection(input_copy, weights[name], value, session=session,
-                        name=name, workspace=arena)
+                        name=name, activation_mode=activation_mode, workspace=arena)
                        for name, value in zip(("in_proj_qkvz", "in_proj_ba"), output, strict=True)]
         parallel = ParallelProjections(*projections, session=session, workspace=arena)
         arena.freeze()
