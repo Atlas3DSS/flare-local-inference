@@ -39,7 +39,7 @@ def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
     slots = torch.tensor([0], dtype=torch.int32, device="cuda:0")
     counts = torch.ones(1, dtype=torch.int32, device="cuda:0")
     op = PreparedRound.__new__(PreparedRound)
-    op.owner = SimpleNamespace(pool=pool, extra_base=3, requests=SimpleNamespace(capacity=1),
+    op.owner = SimpleNamespace(pool=pool, extra_base=3, state_stride=7, requests=SimpleNamespace(capacity=1),
                               inputs=SimpleNamespace(row_slot_ids=slots))
     op.width, op.batch, op.rows = 6, 1, torch.arange(1, device="cuda:0")
     op.delta_regions = delta_regions(pool)

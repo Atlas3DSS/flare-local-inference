@@ -125,6 +125,11 @@ class PreparationConfig:
         return self.minimum_pages or (self.context // self.page_tokens + int(self.mtp)) * self.max_active
 
     @property
+    def speculative_state_rows(self):
+        """Recurrent states kept per request for every verified position after the first."""
+        return max(self.speculative_widths) - 1
+
+    @property
     def page_tokens(self):
         """Global positions per KV page: 256 local records on each rank that shares the context."""
         return 256 * (len(self.devices) if self.context_parallel else 1)
@@ -164,7 +169,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         slots = config.request_capacity
         extra_base = slots + 1 + snapshots
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
-            extra_base + (slots * 7 if config.mtp else 0), pages, device, mtp=config.mtp)
+            extra_base + (slots * config.speculative_state_rows if config.mtp else 0), pages, device, mtp=config.mtp)
         page_bytes = sum(cache.nbytes for _, cache in (*pool.partial_pages(), *pool.draft_pages())) // pages
         # Plans bound the page pools that replace the preparation pages after graph measurement.
         max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
@@ -218,7 +223,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 extra_base=extra_base, session=session, workspace=arena, records=records, frame=frame,
                 sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                 max_cache_pages=max_cache_pages, prefill_tokens=config.prefill_chunk_size,
-                decode_tokens=max(b * w for b, w in config.speculative_shapes), context=context)
+                decode_tokens=max(b * w for b, w in config.speculative_shapes), context=context,
+                state_stride=config.speculative_state_rows)
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 

@@ -22,7 +22,7 @@ from .state import DecoderMetadata
 
 
 @triton.jit
-def _commit_delta_rows(Words, Slots, Counts, Recurrent, Convolution, row_words, row_halves, extra_base,
+def _commit_delta_rows(Words, Slots, Counts, Recurrent, Convolution, row_words, row_halves, extra_base, stride,
                        RECURRENT_WORDS: tl.constexpr, CHANNELS: tl.constexpr, COLUMNS: tl.constexpr,
                        WORD_BLOCK: tl.constexpr, CHANNEL_BLOCK: tl.constexpr):
     # One program copies a slice of one layer's accepted recurrent state into the live row and shifts the
@@ -31,7 +31,7 @@ def _commit_delta_rows(Words, Slots, Counts, Recurrent, Convolution, row_words, 
     count = tl.load(Counts + row).to(tl.int64)
     if count > 1:
         slot = tl.load(Slots + row).to(tl.int64)
-        live, selected = slot + 1, extra_base + slot * 7 + count - 2
+        live, selected = slot + 1, extra_base + slot * stride + count - 2
         recurrent = tl.load(Recurrent + layer)
         words = chunk * WORD_BLOCK + tl.arange(0, WORD_BLOCK)
         inside = words < RECURRENT_WORDS
@@ -66,9 +66,9 @@ def delta_regions(pool):
 class SpeculativePreparation:
     def __init__(self, weights, pool, requests, inputs, scratch, *, extra_base, session,
                  workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None,
-                 prefill_tokens=None, decode_tokens=None, context=None):
+                 prefill_tokens=None, decode_tokens=None, context=None, state_stride=7):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
-        self.max_cache_pages, self.context = max_cache_pages, context
+        self.max_cache_pages, self.context, self.state_stride = max_cache_pages, context, state_stride
         self.shards = ContextShards() if context is None else context.shards
         # Draft passes and absorptions run serially, so each mode shares one scratch at its largest capacity.
         blocks, device = inputs.page_tables.shape[1], pool.backing.device
@@ -208,7 +208,9 @@ class PreparedRound:
         g.fresh.zero_()
         g.accepted_tokens.fill_(1)
         states = torch.where(self.state_columns == 0, slots[:, None] + 1,
-            o.extra_base + slots[:, None] * 7 + self.state_columns - 1)
+            o.extra_base + slots[:, None] * o.state_stride + self.state_columns - 1)
+        # Only the round's verification columns address rows; the rest stay on the null row.
+        states = torch.where(self.state_columns < w, states, 0)
         g.state_indices.copy_(torch.where(self.active[:, None], states, 0))
         g.num_seqs.copy_(o.inputs.live_rows.clamp(0, b))
         g.num_tokens.copy_(ends[-1:])
@@ -232,7 +234,7 @@ class PreparedRound:
         backing = o.pool.backing
         words, halves, extent, channels, columns = self.delta_regions
         args = (backing.view(torch.int32), slots, counts, words, halves, backing.shape[1] // 4,
-                backing.shape[1] // 2, o.extra_base, extent, channels, columns, 4096, 128)
+                backing.shape[1] // 2, o.extra_base, o.state_stride, extent, channels, columns, 4096, 128)
         grid = (words.numel(), self.batch, max(triton.cdiv(extent, 4096), triton.cdiv(channels, 128)))
         if torch.compiler.is_compiling() or get_proxy_mode() is not None:
             torch.library.wrap_triton(_commit_delta_rows)[grid](*args, num_warps=4)
