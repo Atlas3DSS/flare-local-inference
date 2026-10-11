@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from b12x.preparation import PreparationSession
 from cuda.bindings import driver as cuda
 
 from flare.components.parallel import TensorParallelShard
@@ -15,6 +14,7 @@ from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.compilation import compile_forward
 from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
+from flare.preparation.tuning import RecordedPreparationSession
 from flare.recipes.qwen38.moe import PreparedQwenMoe, QwenMoeWeights
 from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
 
@@ -44,11 +44,12 @@ def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
     input_copy = torch.empty_like(source)
     output_copy = torch.empty_like(source)
     shared_copy = torch.empty_like(source)
-    with PreparationSession(device="cuda:0", autotune=True, compile_workers=0) as session:
+    with RecordedPreparationSession(device="cuda:0", checkpoint="qwen38-moe-overlap",
+            workload_schema="qwen38-moe-overlap", numerical_policy="b12x") as session:
+        session.register_scratch(arena)
         moe = PreparedQwenMoe(input_copy, weights, session=session, name="overlap",
                               workspace=arena, projection_workspace=arena)
-        arena.freeze()
-        arena.finalize()
+        session.tune()
         session.freeze()
         assert moe.concurrent_shared is not None
         routed_bytes = moe.experts.plan.memory_requirements().scratch_nbytes
