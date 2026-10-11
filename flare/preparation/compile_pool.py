@@ -8,6 +8,10 @@ from torch.fx._graph_pickler import GraphPickler, Options
 from .compilation import _OPTIONS, _artifact_kernel_table, _defer_full_collection
 
 
+def _restore_fake_mode(state):
+    return state.fake_mode
+
+
 def _restore_symbol(kind, expression, environment, pytype, hint):
     from torch.fx.experimental.sym_node import SymNode
 
@@ -16,6 +20,9 @@ def _restore_symbol(kind, expression, environment, pytype, hint):
 
 class _GraphPickler(GraphPickler):
     def reducer_override(self, value):
+        # Tensor-view metadata retains the source fake mode on its base.
+        if isinstance(value, torch._subclasses.FakeTensorMode):
+            return _restore_fake_mode, (self._unpickle_state,)
         if isinstance(value, (torch.SymBool, torch.SymFloat)):
             node = value.node
             return _restore_symbol, (type(value), node._expr, node.shape_env, node.pytype, node._hint)
