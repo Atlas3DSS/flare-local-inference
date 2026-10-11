@@ -139,8 +139,7 @@ def prepare_group(snapshot, config, prepare, *, progress=None):
         model.manifest()
         with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
             reports = []
-            for rank, control in enumerate(controls, 1):
-                stage.update(f"rank {rank}")
+            for control in controls:
                 reports.append(control.recv())
                 stage.update(advance=1)
         return PreparedRankGroup(model, processes, connections, controls, supervisor, rendezvous, reports)
