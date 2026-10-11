@@ -9,12 +9,11 @@ plan that still does not fit is a capacity error naming the settings that would
 make it fit.
 """
 
-import json
 from dataclasses import dataclass, replace
-from pathlib import Path
 
+from flare.components.capacity import batch_capacities
 from flare.errors import CapacityError, UsageError
-from flare.recipes.declaration import Checkpoint, Recipe
+from flare.recipes.declaration import Checkpoint, Recipe, Speculation
 
 # Free memory kept after the final KV allocation. Serving allocates nothing, so
 # headroom covers the transient working memory of compiled warm-up and graph
@@ -30,6 +29,7 @@ CACHE_STATES_PER_REQUEST = 8
 CACHE_SHARE = 4
 CACHE_FLOOR = 8
 SUPPORTED_CAPABILITIES = ((12, 0), (12, 1))
+MAX_SPECULATIVE_GRAPHS = 56
 _GIB = 1 << 30
 
 
@@ -104,40 +104,6 @@ def format_gpus(indices) -> str:
     return ",".join(map(str, indices))
 
 
-def measurement_path(kernel_cache: Path, checkpoint: Checkpoint, world_size: int, concurrency: int,
-                     prefill_chunk: int) -> Path:
-    """Locate the weights and graph bytes measured by the last preparation of one plan shape."""
-    return (Path(kernel_cache) / "measurements" / (f"{checkpoint.alias}-{checkpoint.revision[:8]}"
-                                                   f"-tp{world_size}-c{concurrency}-p{prefill_chunk}.json"))
-
-
-@dataclass(frozen=True)
-class Measurement:
-    """Per-rank device bytes a preparation held beyond state rows and KV pages."""
-
-    weights_bytes: int
-    graph_bytes: int
-
-
-def read_measurement(path: Path, gpu_name: str) -> Measurement | None:
-    try:
-        record = json.loads(Path(path).read_text())
-        measurement = Measurement(record["weights_bytes"], record["graph_bytes"])
-        if record["gpu"] == gpu_name and all(type(value) is int and value >= 0 for value in (
-                measurement.weights_bytes, measurement.graph_bytes)):
-            return measurement
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return None
-
-
-def write_measurement(path: Path, gpu_name: str, measurement: Measurement) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"gpu": gpu_name, "weights_bytes": measurement.weights_bytes,
-                                "graph_bytes": measurement.graph_bytes}) + "\n")
-
-
 @dataclass(frozen=True)
 class Plan:
     """Per-rank memory demand and supply for one checkpoint on selected GPUs."""
@@ -147,13 +113,13 @@ class Plan:
     gpus: tuple[Gpu, ...]
     concurrency: int
     prefill_chunk: int
+    speculation: Speculation | None
     cache_target: int
     cache_states: int
     pages: int
     reserve_bytes: int
     weights_bytes: int
     graph_bytes: int
-    measured: bool
 
     @property
     def world_size(self) -> int:
@@ -161,11 +127,15 @@ class Plan:
 
     @property
     def costs(self):
-        return self.recipe.ranks[self.world_size]
+        return self.recipe.costs(self.world_size, self.speculation)
+
+    @property
+    def live_rows(self) -> int:
+        return self.recipe.live_rows(self.concurrency, self.speculation)
 
     @property
     def live_bytes(self) -> int:
-        return self.recipe.live_rows(self.concurrency) * self.costs.state_row_bytes
+        return self.live_rows * self.costs.state_row_bytes
 
     @property
     def cache_bytes(self) -> int:
@@ -226,9 +196,14 @@ class Plan:
                       "total_bytes": gpu.total_bytes} for gpu in self.gpus],
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
             "prefill_chunk": self.prefill_chunk,
+            "speculation": None if self.speculation is None else {
+                "draft_counts": list(self.speculation.draft_counts), "fixed_drafts": self.speculation.fixed_drafts,
+                "graph_budget": self.speculation.graph_budget,
+                "proposal_source": self.speculation.proposal_source,
+                "history_drafts": self.speculation.history_drafts},
             "context": self.context, "checkpoint_context": self.recipe.context,
             "weights_bytes": self.weights_bytes, "mapped_host_bytes": self.checkpoint.mapped_host_bytes,
-            "graph_bytes": self.graph_bytes, "measured": self.measured,
+            "graph_bytes": self.graph_bytes,
             "live_bytes": self.live_bytes, "prefix_cache_states": self.cache_states,
             "prefix_cache_target": self.cache_target, "prefix_cache_bytes": self.cache_bytes,
             "snapshots": self.snapshots,
@@ -240,18 +215,16 @@ class Plan:
 
 
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
-        prefill_chunk: int | None = None, measurement: Measurement | None = None) -> Plan:
+        speculation: Speculation | None, prefill_chunk: int | None = None) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
-    Without a measurement, weights come from the checkpoint's stored tensors and
-    graphs and scratch from the recipe's estimate.
+    Weights come from the checkpoint's stored tensors and graphs and scratch from
+    the recipe's estimate.
     """
-    costs = recipe.ranks[len(gpus)]
-    estimate = Measurement(recipe.weights_bytes(checkpoint, len(gpus)), costs.graph_bytes)
+    costs = recipe.costs(len(gpus), speculation)
     plan = Plan(recipe, checkpoint, gpus, concurrency, recipe.prefill_chunk if prefill_chunk is None else prefill_chunk,
-                0, 0, 0, reserve_bytes,
-                *((estimate.weights_bytes, estimate.graph_bytes, False) if measurement is None
-                  else (measurement.weights_bytes, measurement.graph_bytes, True)))
+                speculation, 0, 0, 0, reserve_bytes,
+                recipe.weights_bytes(checkpoint, len(gpus), speculation), costs.graph_bytes)
     available = plan.supply_bytes - plan.fixed_bytes
     target = min(CACHE_STATES_PER_REQUEST * concurrency,
                  max(CACHE_FLOOR, available // CACHE_SHARE // costs.state_row_bytes))
@@ -290,17 +263,22 @@ def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
 
 
 def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selected: tuple[int, ...] | None,
-         concurrency: int, reserve_bytes: int, prefill_chunk: int | None = None, measured=None) -> Plan:
+         concurrency: int, reserve_bytes: int, speculation: Speculation | None,
+         prefill_chunk: int | None = None) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
     for which enough GPUs fit, taking the first such GPUs in index order. Without
-    `prefill_chunk`, the recipe's chunk applies. `measured(world_size,
-    concurrency, prefill_chunk, gpu_name)` returns the `Measurement` recorded by
-    an earlier preparation on this host, or None.
+    `prefill_chunk`, the recipe's chunk applies. `speculation` is the drafting the
+    plan prepares, or None for none.
     """
     if not 1 <= concurrency <= recipe.max_concurrency:
         raise UsageError(f"--max-concurrency for {checkpoint.alias} must be 1 through {recipe.max_concurrency}")
+    if speculation is not None:
+        batches = len(batch_capacities(concurrency))
+        if not batches <= speculation.graph_budget <= MAX_SPECULATIVE_GRAPHS:
+            raise UsageError(f"--mtp-graph-budget must be {batches} through {MAX_SPECULATIVE_GRAPHS} at"
+                             f" --max-concurrency {concurrency}: every batch capacity captures at least one graph")
     chunk = recipe.prefill_chunk if prefill_chunk is None else prefill_chunk
     if chunk % 64 or not 64 <= chunk <= recipe.context:
         raise UsageError(f"--prefill-chunk-size for {checkpoint.alias} must be a multiple of 64"
@@ -313,7 +291,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
             raise UsageError(f"--gpus {format_gpus(selected)} names a GPU this host does not have;"
                              f" it has {len(gpus)}")
         chosen = tuple(gpus[index] for index in selected)
-        if len(chosen) not in recipe.ranks:
+        if len(chosen) not in recipe.tensor_parallel:
             size = min(recipe.tensor_parallel, key=lambda size: (size < len(chosen), size))
             first = max(0, min(selected[0], len(gpus) - size))
             example = format_gpus(range(first, first + size))
@@ -324,10 +302,9 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     elif len(supported) < recipe.tensor_parallel[0]:
         raise CapacityError(f"{checkpoint.alias} needs {sizes} SM120 or SM121 GPUs; this host has {len(supported)}")
 
-    def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes):
-        measurement = None if measured is None else measured(len(group), concurrency, chunk, group[0].name)
+    def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes, speculation=speculation):
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,
-                   prefill_chunk=chunk, measurement=measurement)
+                   speculation=speculation, prefill_chunk=chunk)
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""
@@ -364,6 +341,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
         if attempt(concurrency=limit) is not None:
             options.append(f"--max-concurrency {limit}")
             break
+    if speculation is not None and attempt(speculation=None) is not None:
+        options.append("--no-mtp")
     if chosen is not None:
         for size in recipe.tensor_parallel:
             if len(chosen) < size <= len(supported) and (larger := automatic(size)).fits:

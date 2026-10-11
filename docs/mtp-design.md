@@ -5,10 +5,12 @@ Flare's speculative engine supports the embedded MTP modules in
 `local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
-Each recipe's `PreparationConfig(mtp=True)` prepares it, and the Qwen serving
-catalog that `flare run` prepares includes it. Draft continuations from request
-history are disabled by default and enabled with the Qwen
-`PreparationConfig(history_drafts=True)`.
+Each recipe's `PreparationConfig(mtp=True)` prepares it, and `flare run`
+prepares it for both recipes unless `--no-mtp` is given. The advanced
+`--mtp-*` flags select the captured draft counts, a fixed count, the graph
+budget, and the proposal source. Draft continuations from request history are
+disabled by default and enabled on the Qwen recipe with `--history-drafts`,
+which sets `PreparationConfig(history_drafts=True)`.
 
 The design combines adaptive verification budgets, native MTP proposals and
 continuations copied from request history. Compact recurrent commit and token

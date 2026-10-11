@@ -1,17 +1,17 @@
-"""`flare run` and `flare prepare`: fetch, prepare, measure, and serve one checkpoint."""
+"""Prepare one checkpoint for native serving or runtime-package export."""
 
 import ipaddress
-import json
 import signal
 import socket
+import sys
 import traceback
-from dataclasses import replace
+from contextlib import nullcontext
 
 from flare import planning
 from flare.errors import CapacityError, FlareError, PreparationError, UsageError
 
 from . import display, environment
-from .commands import Host, derive, fetch, resolve_model
+from .commands import Host, derive, fetch, resolve_model, speculation
 from .config import Configuration
 
 
@@ -29,59 +29,55 @@ def _address(host: str, port: int) -> str:
     return f"[{host}]:{port}" if address.version == 6 else f"{host}:{port}"
 
 
-def _measure(configuration, plan, usage):
-    """Record what preparation held on each rank and return the plan with measured figures."""
-    costs = plan.costs
-    rows = plan.recipe.live_rows(plan.concurrency) + plan.cache_states
-    for rank in usage:
-        if rank.page_bytes != costs.page_bytes or rank.state_bytes != rows * costs.state_row_bytes:
-            raise PreparationError(
-                f"the {plan.recipe.name} recipe declares {costs.page_bytes} bytes per page and"
-                f" {rows * costs.state_row_bytes} bytes of state; preparation allocated {rank.page_bytes} and"
-                f" {rank.state_bytes}")
-    # The rank holding the most memory outside state rows and pages bounds every rank's supply.
-    held, rank = max(((gpu.free_bytes - rank.free_bytes - rank.state_bytes - rank.pages * rank.page_bytes, rank)
-                      for gpu, rank in zip(plan.gpus, usage, strict=True)), key=lambda item: item[0])
-    measurement = planning.Measurement(rank.weights_bytes, max(0, held - rank.weights_bytes))
-    planning.write_measurement(
-        planning.measurement_path(configuration.directory("kernel_cache"), plan.checkpoint, plan.world_size,
-                                  plan.concurrency, plan.prefill_chunk), plan.gpus[0].name, measurement)
-    measured = replace(plan, pages=min(rank.pages for rank in usage), weights_bytes=measurement.weights_bytes,
-                       graph_bytes=measurement.graph_bytes, measured=True)
-    # Headroom has served its purpose once capture ends; only the reserve must remain free.
+def _keep_reserve(plan, usage) -> None:
+    """Require that preparation left the configured reserve free on every GPU."""
     free = min(rank.free_bytes for rank in usage)
     if free < plan.reserve_bytes:
         gib = 1 << 30
-        raise CapacityError(
-            f"prepared graphs and scratch hold {(measurement.graph_bytes - plan.graph_bytes) / gib:.1f} GiB more"
-            f" than planned and leave {free / gib:.1f} GiB free;\n"
-            f"[memory] reserve requires {plan.reserve_bytes / gib:.1f} GiB.\n"
-            "The measured sizes are recorded: running again plans within them.")
-    return measured
+        raise CapacityError(f"preparation left {free / gib:.1f} GiB free;\n"
+                            f"[memory] reserve requires {plan.reserve_bytes / gib:.1f} GiB.")
 
 
-def _server_options(configuration, model, plan) -> dict:
-    """Derive the native server's names, HTTP limits, and rejection hints from the plan."""
+def _server_options(configuration, model, plan, pages: int) -> dict:
+    """Derive the native server's names, HTTP limits, and rejection hints from the settings and allocated pages."""
     recipe, checkpoint = plan.recipe, plan.checkpoint
+    whole = pages * recipe.page_tokens >= recipe.context
     return {
         "model_id": model.model_id, "served_names": [checkpoint.alias],
         "api_key": configuration.get("server.api_key").value,
         "queue_capacity": 4 * plan.concurrency, "frontend_workers": plan.concurrency,
         "max_body_bytes": recipe.max_images * recipe.image_bytes + (1 << 20),
         "context_hint": (
-            "this is the checkpoint's maximum context" if plan.context == recipe.context else
+            "this is the checkpoint's maximum context" if whole else
             "a lower --max-concurrency leaves more KV pages for each request"),
         "capacity_hint": "--max-concurrency sets the request limit; a lower [memory] reserve leaves more KV pages",
     }
 
 
-def _tuning(prepared) -> dict:
-    report = prepared.memory_report
-    tuning = report.get("ranks", (report,))[0].get("tuning") or {}
-    return {key: tuning.get(key) for key in ("requests", "cache_hits", "benchmarked_candidates", "selection_counts")}
+def _exhausted(error, plan) -> CapacityError | None:
+    """Describe a preparation that ran out of GPU memory, or return None for any other failure."""
+    torch = sys.modules.get("torch")
+    if torch is None or not isinstance(error, torch.OutOfMemoryError):
+        return None
+    relief = ["fewer concurrent requests", "more GPUs"]
+    if plan.speculation is not None:
+        relief.insert(1, "--no-mtp")
+    return CapacityError(
+        f"preparation ran out of GPU memory: {str(error).split(' Including non-PyTorch memory')[0]}\n"
+        f"{', '.join(relief[:-1]).capitalize()}, or {relief[-1]} need less memory.")
 
 
-def _serve(args, *, listen: bool) -> int:
+def run(args) -> int:
+    return _prepare(args)
+
+
+def export(args) -> int:
+    if args.output.exists():
+        raise UsageError(f"export destination already exists: {args.output}")
+    return _prepare(args, export_path=args.output)
+
+
+def _prepare(args, *, export_path=None) -> int:
     from flare.progress import StartupProgress, phase
 
     class Progress(StartupProgress):
@@ -93,23 +89,28 @@ def _serve(args, *, listen: bool) -> int:
     progress = Progress()
     progress.splash()
     configuration = Configuration.load(args.config)
-    bind = None
-    if listen:
-        bind = _address(configuration.get("server.host", args.host).value,
-                        configuration.get("server.port", args.port).value)
+    bind = None if export_path is not None else _address(
+        configuration.get("server.host", args.host).value,
+        configuration.get("server.port", args.port).value)
     hub_cache = configuration.directory("hub_cache")
     with phase(progress, "Resolve checkpoint") as stage:
         model = resolve_model(configuration, args.model)
         cached = model.cached(hub_cache)
         stage.update(f"{model.checkpoint.alias} · {model.source} · {'cached' if cached else 'not cached'}")
-    with phase(progress, "Plan memory") as stage:
+    with phase(progress, "Select GPUs") as stage:
         concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                     args.max_concurrency)
-        plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
-                      prefill_chunk=args.prefill_chunk_size)
-        stage.update(f"{plan.world_size} GPU{'s' if plan.world_size > 1 else ''} · concurrency {plan.concurrency}"
-                     f" · {plan.tokens:,} KV tokens")
-    if listen and args.config is None and not configuration.exists:
+        host = Host.discover()
+        plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
+                      speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size)
+        if export_path is not None and plan.world_size != 1:
+            raise UsageError("native package export requires TP1; select one GPU with --gpus")
+        indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
+        # A caller's restriction changes which GPU each index names.
+        restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
+        stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
+                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}")
+    if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
     if not cached:
         if model.directory is not None:
@@ -126,39 +127,49 @@ def _serve(args, *, listen: bool) -> int:
     signals.__enter__()
     try:
         try:
-            prepared = model.recipe.prepare(
-                model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
-                kernel_cache=configuration.directory("kernel_cache"), progress=progress)
+            recorder = nullcontext()
+            preparation_options = {}
+            if export_path is not None:
+                from flare.preparation.module_images import ModuleImages
+
+                recorder = ModuleImages()
+                preparation_options["retain_graphs"] = True
+            with recorder:
+                prepared = model.recipe.prepare(
+                    model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
+                    kernel_cache=configuration.directory("kernel_cache"), progress=progress,
+                    **preparation_options)
         except FlareError:
             raise
         except MemoryError as error:
             raise CapacityError(
                 f"{error};\nmeasured graphs and scratch leave fewer than the minimum {plan.minimum_pages:,} pages"
                 f" for {plan.concurrency} requests of {planning.MINIMUM_REQUEST_TOKENS:,} tokens.") from error
-        except Exception as error:  # noqa: BLE001 - Every preparation failure maps to one exit code.
+        except Exception as error:  # noqa: BLE001 - Every other preparation failure maps to one exit code.
             if args.verbose:
                 traceback.print_exc()
-            raise PreparationError(f"preparation failed: {type(error).__name__}: {error}") from error
+            raise (_exhausted(error, plan)
+                   or PreparationError(f"preparation failed: {type(error).__name__}: {error}")) from error
         with prepared:
-            with phase(progress, "Measure memory") as stage:
-                measured = _measure(configuration, plan, model.recipe.usage(prepared))
-                stage.update(f"{measured.pages:,} pages · {measured.tokens:,} tokens"
-                             f" · {measured.cache_states} cached states")
-            tuning = _tuning(prepared)
-            if not listen:
-                prepared.manifest()
-                if args.json:
-                    print(json.dumps({**measured.to_dict(), "tuning": tuning}, indent=2))
-                else:
-                    counts = tuning["selection_counts"] or {}
-                    selections = ", ".join(f"{count:,} {source}" for source, count in counts.items())
-                    display.show(display.plan(measured), display.fields([(
-                        "kernel selections",
-                        f"{selections} · {tuning['benchmarked_candidates'] or 0:,} candidates measured")]))
+            usage = model.recipe.usage(prepared)
+            _keep_reserve(plan, usage)
+            options = _server_options(configuration, model, plan, min(rank.pages for rank in usage))
+            if export_path is not None:
+                from flare.preparation.runtime_package import export_model
+
+                with phase(progress, "Export native package") as stage:
+                    try:
+                        options.pop("api_key")
+                        export_model(prepared, recorder, export_path, options=options)
+                    except Exception as error:
+                        if args.verbose:
+                            traceback.print_exc()
+                        raise PreparationError(f"native package export failed: {error}") from error
+                    stage.update(str(export_path))
                 return 0
             with phase(progress, "Start Helios") as stage:
                 try:
-                    server = prepared.start_server(bind=bind, options=_server_options(configuration, model, plan))
+                    server = prepared.start_server(bind=bind, options=options)
                 except Exception as error:  # noqa: BLE001 - Report native startup failures by exit code.
                     if "cannot bind HTTP listener" in str(error):
                         raise UsageError(f"cannot listen on {bind}: {error}") from error
@@ -183,11 +194,3 @@ def _serve(args, *, listen: bool) -> int:
             raise FlareError("the native server stopped unexpectedly")
     finally:
         signals.__exit__(None, None, None)
-
-
-def run(args) -> int:
-    return _serve(args, listen=True)
-
-
-def prepare(args) -> int:
-    return _serve(args, listen=False)

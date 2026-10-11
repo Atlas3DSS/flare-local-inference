@@ -9,8 +9,6 @@ where to listen. Everything else is derived and printed.
 
 ```
 flare run     [MODEL] [--gpus LIST] [--max-concurrency N] [--host ADDR] [--port N]
-flare prepare [MODEL] [--gpus LIST] [--max-concurrency N] [--json]
-flare plan    [MODEL] [--gpus LIST] [--max-concurrency N] [--json]
 flare models  [--json]
 flare pull    MODEL
 flare status  [--url URL] [--json]
@@ -21,21 +19,32 @@ flare skill
 
 - `MODEL` is an alias from `flare models`, a Hugging Face repository id such
   as `org/name` or `org/name@revision`, or a checkpoint directory. Without it,
-  `run`, `prepare`, and `plan` use `defaults.model`. A repository or directory
+  `run` uses `defaults.model`. A repository or directory
   that no recipe declares is served by the recipe for its `config.json`
   architecture, under that recipe's alias as well as its own name.
 - `--gpus` takes NVML indices: `0`, `0,1`, `0-3`. Their count is the
   tensor-parallel size. Without it, Flare takes the first GPUs that fit.
-- `plan` loads no weights and is the fastest way to learn what a host can
-  serve. `prepare` pays tuning and graph capture once and records the measured
-  memory so later plans are exact. `run` prepares and then serves.
-- `--prefill-chunk-size N` on `run`, `prepare`, and `plan` overrides the
+- `models` loads no weights and is the fastest way to learn what a host can
+  serve; its `fits here` line is a rough estimate. `run` prepares and then
+  serves: it tunes kernels and captures graphs, which later runs with the same
+  settings reuse from the kernel cache, and it allocates KV pages from the
+  memory the GPUs have free.
+- `--prefill-chunk-size N` on `run` overrides the
   recipe's prefill chunk: the most prompt tokens processed in one step. A larger
   chunk reaches the first token of a long prompt sooner; while it runs, other
   active requests wait for their next token.
-- `run`, `prepare`, and `plan` also accept `--verbose` and `--config PATH`.
-  `--no-compile` on `run` and `prepare` skips forward compilation for
-  development startup.
+- Speculation is on for every recipe with an MTP module. Advanced flags on
+  `run` override the recipe: `--no-mtp` disables it;
+  `--mtp-max-draft-tokens N` sets the deepest draft count,
+  `--mtp-draft-tokens 1,3,5` the exact counts beside zero,
+  `--mtp-fixed-draft-tokens N` a fixed count per round, and
+  `--mtp-graph-budget N` the number of speculative graphs captured. On
+  `qwen3.8-flash`, `--mtp-proposal-source copy` drafts from the request's own
+  history without the draft model and `--history-drafts` adds such drafts to
+  the MTP module's. `--no-mtp` frees the draft model's weights, its pages, and
+  seven state rows per request slot.
+- `run` also accepts `--verbose` and `--config PATH`. `--no-compile` skips
+  forward compilation for development startup.
 - `status` summarizes a running server from its metrics. `bench` runs a fixed
   workload against a running `qwen3.8-flash` server from a source checkout and
   prints time to first token, inter-token latency, and throughput.
@@ -75,45 +84,28 @@ cuda = "/opt/cuda"                # used when no toolkit is found in installed p
 
 With `api_key` set, every route except `/health` requires
 `Authorization: Bearer KEY`. Unknown keys are usage errors: context length,
-page counts, cache sizes, memory fractions, and speculation settings are not
-parameters.
+page counts, cache sizes, and memory fractions are not parameters, and
+speculation is set only by the advanced flags.
 
 Flare reads no environment variables except `CUDA_VISIBLE_DEVICES`, which
-restricts and renumbers the GPUs that `--gpus` indexes; `plan` reports it.
+restricts and renumbers the GPUs that `--gpus` indexes; the `Select GPUs.`
+startup line reports it.
 
-## Reading a plan
-
-```
-memory                GiB
-weights               ...   checkpoint tensors
-graphs and scratch    ...   estimate; never prepared on this host
-live state            ...   C active requests
-prefix cache          ...   N states for prompt reuse
-KV pages              ...   T tokens; full context for C requests would take ... GiB
-headroom              1.0   kept free through warm-up and graph capture
-reserve               ...   [memory] reserve
-free                  ...   GPU 0
-```
-
-The rows account for the GPU's free memory. KV pages take everything that
-weights, graphs, live state, the prefix cache, a fixed 1 GiB headroom, and
-`memory.reserve` leave; pages beyond the active requests' share hold cached
-prefixes. The KV pages row adds what the checkpoint's maximum context for every
-active request would take when the pool is smaller than that. The prefix cache
-holds model states at prompt and answer boundaries so later requests that
-repeat a prefix skip recomputing it; it is sized at eight states per concurrent
-request, at most a quarter of the memory left after weights, graphs, and live
-state, and shrinks to 8 states when pages would fall below 8,192 tokens per
-active request. The last line states what is guaranteed: tokens per request at
-full concurrency, and the longest single request. Tensor-parallel plans print
-per-GPU figures. `graphs and scratch` reads `measured on this host` after a
-preparation on the host.
+## What fits and what was allocated
 
 `flare models` prints, for each alias, the pinned repository and revision, the
-architecture its recipe serves, sizes, context, inputs, supported GPU counts,
-the concurrency range, whether the checkpoint is cached, and under `fits here`
-the plan at default concurrency or the capacity error. Reports are plain text
-when redirected; `--json` carries the same facts with full precision.
+architecture its recipe serves, sizes, context, inputs, speculation, supported
+GPU counts, the concurrency range, whether the checkpoint is cached, and under
+`fits here` an estimate at default settings or the capacity error. The estimate
+adds the checkpoint's weights, a rough figure for graphs and scratch, state for
+the concurrent requests, and a prefix cache, and gives KV pages the rest of the
+GPU's free memory less a fixed 1 GiB headroom and `memory.reserve`. Reports are
+plain text when redirected; `--json` carries the same facts in full.
+
+`flare run` states what it does as it starts: the `Select GPUs.` line names
+the GPUs, the concurrency limit, and the speculation settings, and the
+`Allocate KV cache.` line gives the pages actually allocated. `flare status`
+reports the free pages and cache use of a running server.
 
 ## Reading a capacity error
 
@@ -124,9 +116,12 @@ error: needs ... GiB weights + ... GiB graphs + ... GiB live state + ... GiB pre
        Options: [memory] reserve = "12G", or --max-concurrency 2, or --gpus 0-1.
 ```
 
-The first two lines are the smallest plan Flare accepts; the third is the
-supply. Each listed option makes the plan fit on its own: apply one and rerun.
-`No setting makes MODEL fit` means the weights exceed the selected GPUs.
+The first two lines are the smallest estimate Flare accepts; the third is the
+supply. Each listed option makes the estimate fit on its own: apply one and
+rerun; `--no-mtp` is listed when dropping speculation is enough. `No setting
+makes MODEL fit` means the weights exceed the selected GPUs. The estimate is
+rough: a model near the limit can pass it and run out of GPU memory during
+preparation, which `run` also reports as a capacity error.
 
 HTTP rejections use the same form. A 400 names the request's prompt and output
 limit against the server's context. A 429 or 503 names the exhausted request or
@@ -138,15 +133,13 @@ A recipe is a package under `flare/recipes/` with two parts:
 
 1. `recipe.py` declares a `Recipe`: each checkpoint's alias, repository id,
    pinned revision, architecture, and stored bytes by placement; the supported
-   tensor-parallel sizes; the concurrency range; and per-rank costs (bytes per
-   state row, bytes per KV page, and a cold-host estimate of graphs and
-   scratch). It supplies `prepare(snapshot, plan, ...)`, which builds the
-   bootstrap's configuration from a plan, and `usage(prepared)`, which reports
+   tensor-parallel sizes; the concurrency range; its speculation settings; and
+   per-rank costs with and without speculation (bytes per state row, bytes per
+   KV page, and a rough estimate of graphs and scratch). It supplies
+   `prepare(snapshot, plan, ...)`, which builds the bootstrap's configuration
+   from the selected GPUs and settings, and `usage(prepared)`, which reports
    each rank's device memory. The module must import without PyTorch.
 2. `bootstrap.py` loads weights, declares and tunes kernels, captures every
    serving graph, and returns a prepared model for the native server.
 
-Register the recipe in `flare.recipes.recipes()`. `flare prepare` rejects a
-recipe whose declared row or page size differs from what its bootstrap
-allocated, and records measured weights and graph memory under
-`[paths].kernel_cache`.
+Register the recipe in `flare.recipes.recipes()`.

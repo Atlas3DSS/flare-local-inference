@@ -5,9 +5,6 @@ without styles, wrapping, or trailing spaces.
 """
 
 import sys
-from pathlib import Path
-
-from flare import planning
 
 ACCENT = "bold #ff9c42"
 GOOD, CAUTION, BAD = "green", "yellow", "red"
@@ -72,16 +69,14 @@ def fields(rows):
     return grid
 
 
-def table(headings, rows, *, numeric=(), footer=None):
+def table(headings, rows, *, numeric=()):
     """Lay out rows under dim headings, right-aligning the columns indexed by `numeric`."""
     from rich import box
     from rich.table import Table
 
-    grid = Table(box=box.SIMPLE, show_edge=False, pad_edge=False, padding=(0, 2, 0, 0), header_style="dim",
-                 show_footer=footer is not None)
+    grid = Table(box=box.SIMPLE, show_edge=False, pad_edge=False, padding=(0, 2, 0, 0), header_style="dim")
     for index, heading in enumerate(headings):
-        grid.add_column(heading, footer="" if footer is None else footer[index],
-                        justify="right" if index in numeric else "left", overflow="fold",
+        grid.add_column(heading, justify="right" if index in numeric else "left", overflow="fold",
                         no_wrap=index == 0 or index in numeric)
     for row in rows:
         grid.add_row(*row)
@@ -101,74 +96,37 @@ def section(heading, *blocks):
     return Group(*parts)
 
 
-def checkpoint_name(checkpoint) -> str:
-    """Name a checkpoint by its directory, or by its repository and abbreviated revision."""
-    if Path(checkpoint.repository).is_absolute():
-        return checkpoint.repository
-    return f"{checkpoint.repository}@{checkpoint.revision[:8]}"
-
-
 def fit(plan) -> str:
-    """Summarize a plan as its GPU count and the tokens its concurrent requests are guaranteed."""
+    """Summarize an estimated plan: its GPU count and about how many tokens each concurrent request gets."""
+    def thousands(tokens):
+        return f"{tokens // 1000}K"
+
     recipe, noun = plan.recipe, "requests" if plan.concurrency > 1 else "request"
     text = (f"{plan.world_size} GPU{'s' if plan.world_size > 1 else ''} · {plan.concurrency} {noun}"
-            f" of {plan.guaranteed_tokens:,} tokens")
+            f" of about {thousands(plan.guaranteed_tokens)} tokens")
     whole = plan.tokens // recipe.context
     if plan.guaranteed_tokens < recipe.context and whole >= 1:
-        text += f", or {whole} of {recipe.context:,}"
+        text += f", or {whole} of {thousands(recipe.context)}"
     return text
 
 
-def plan(plan, *, restriction: str | None = None):
-    """Describe a fitting plan: its settings, where each GPU's memory goes, and what requests are guaranteed."""
-    recipe, checkpoint = plan.recipe, plan.checkpoint
-    indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
-    names = " / ".join(sorted({gpu.name.removeprefix("NVIDIA ") for gpu in plan.gpus}))
-    several = plan.world_size > 1
-    noun = "requests" if plan.concurrency > 1 else "request"
-    requests = f"{plan.concurrency} {noun}"
+def speculation(settings, *, brief: bool = False) -> str:
+    """Describe speculation settings: the drafts verified per round and where they come from.
 
-    settings = [
-        ("checkpoint", checkpoint_name(checkpoint)),
-        ("architecture", checkpoint.architecture),
-        ("GPUs", f"{indices} · {names} · tensor-parallel {plan.world_size}"),
-    ]
-    if restriction is not None:
-        settings.append(("", styled(f"indices follow CUDA_VISIBLE_DEVICES={restriction}")))
-    settings += [
-        ("concurrency", requests),
-        ("context", f"{recipe.context:,} tokens"),
-        ("prefill chunk", f"{plan.prefill_chunk:,} tokens"),
-    ]
-    if checkpoint.mapped_host_bytes:
-        settings.append(("host memory", (f"{gib(checkpoint.mapped_host_bytes)} GiB · {recipe.mapped_host_name}"
-                                         " mapped from the checkpoint")))
-
-    cache = f"{plan.cache_states} states for prompt reuse"
-    if plan.cache_states != plan.cache_target:
-        cache += f"; {plan.cache_target} without memory pressure"
-    pages = f"{plan.tokens:,} tokens"
-    if plan.pages < plan.demand_pages:
-        pages += (f"; full context for {requests} would take"
-                  f" {gib(plan.demand_pages * plan.costs.page_bytes)} GiB")
-    graphs = (styled("measured on this host", GOOD) if plan.measured
-              else styled("estimate; never prepared on this host", CAUTION))
-    memory = [
-        ("weights", plan.weights_bytes, styled("checkpoint tensors")),
-        ("graphs and scratch", plan.graph_bytes, graphs),
-        ("live state", plan.live_bytes, styled(f"{plan.concurrency} active {noun}")),
-        ("prefix cache", plan.cache_bytes, styled(cache)),
-        ("KV pages", plan.page_bytes, styled(pages)),
-        ("headroom", planning.HEADROOM_BYTES, styled("kept free through warm-up and graph capture")),
-        ("reserve", plan.reserve_bytes, styled("[memory] reserve")),
-    ]
-    free = styled(f"least free of GPUs {indices}" if several else f"GPU {indices}")
-    guarantee = (f"guarantees {plan.concurrency} × {plan.guaranteed_tokens:,} tokens at full concurrency;"
-                 f" a single request up to {plan.context:,}")
-    return section(
-        title(checkpoint.alias),
-        fields(settings),
-        table(("memory per GPU" if several else "memory", "GiB", ""),
-              [(name, gib(value), note) for name, value, note in memory], numeric={1},
-              footer=("free", gib(plan.free_bytes), free)),
-        guarantee)
+    The brief form fits a startup line and names the source only when it is not the MTP module alone.
+    """
+    if settings is None:
+        return "speculation off" if brief else "off"
+    counts, fixed = settings.draft_counts, settings.fixed_drafts
+    if fixed is not None:
+        depth = f"exactly {fixed} draft token{'' if fixed == 1 else 's'}"
+    elif counts == tuple(range(len(counts))):
+        depth = f"up to {counts[-1]} draft token{'' if counts[-1] == 1 else 's'}"
+    else:
+        depth = f"{', '.join(map(str, counts[:-1]))} or {counts[-1]} draft tokens"
+    if brief:
+        source = " from history" if not settings.learned else " with history drafts" if settings.history_drafts else ""
+        return depth + source
+    source = ("request history" if not settings.learned
+              else "MTP module and request history" if settings.history_drafts else "MTP module")
+    return f"{depth} per round · {source}"

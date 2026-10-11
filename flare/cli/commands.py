@@ -2,13 +2,13 @@
 
 import json
 import os
-import sys
 from dataclasses import dataclass
 from importlib import resources
 
 from flare import planning
 from flare.errors import CapacityError, FetchError, UsageError
 from flare.recipes import ResolvedModel, recipes, resolve
+from flare.recipes.declaration import Speculation
 
 from . import display
 from .config import Configuration, Setting
@@ -42,37 +42,63 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 
 
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
-           concurrency: Setting, prefill_chunk: int | None = None) -> planning.Plan:
-    """Plan one checkpoint on this host from the configuration and command-line intent."""
-    kernel_cache = configuration.directory("kernel_cache")
-
-    def measured(world_size, limit, chunk, gpu_name):
-        path = planning.measurement_path(kernel_cache, model.checkpoint, world_size, limit, chunk)
-        return planning.read_measurement(path, gpu_name)
-
+           concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None) -> planning.Plan:
+    """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     return planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
-        concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, prefill_chunk=prefill_chunk,
-        measured=measured)
+        concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
+        prefill_chunk=prefill_chunk)
 
 
-def plan(args) -> int:
-    configuration = Configuration.load(args.config)
-    model = resolve_model(configuration, args.model)
-    host = Host.discover()
-    if args.verbose:
-        for gpu in host.gpus:
-            print(f"gpu {gpu.index}  {gpu.name}  {gpu.free_bytes / (1 << 30):.1f} GiB free"
-                  f"  SM{gpu.capability[0]}{gpu.capability[1]}  {gpu.uuid}", file=sys.stderr)
-    concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
-                                                args.max_concurrency)
-    result = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
-                    prefill_chunk=args.prefill_chunk_size)
-    if args.json:
-        print(json.dumps({**result.to_dict(), "cuda_visible_devices": host.restriction}, indent=2))
+def speculation(args, model: ResolvedModel) -> Speculation | None:
+    """Apply the command line's speculation overrides to the recipe's settings; None disables speculation."""
+    recipe, alias = model.recipe, model.checkpoint.alias
+    default, limit = recipe.speculation, recipe.speculative_rows
+    given = [flag for flag, value in (
+        ("--mtp-max-draft-tokens", args.mtp_max_draft_tokens), ("--mtp-draft-tokens", args.mtp_draft_tokens),
+        ("--mtp-fixed-draft-tokens", args.mtp_fixed_draft_tokens), ("--mtp-graph-budget", args.mtp_graph_budget),
+        ("--mtp-proposal-source", args.mtp_proposal_source), ("--history-drafts", args.history_drafts or None))
+        if value is not None]
+    if default is None:
+        if args.no_mtp or given:
+            raise UsageError(f"{alias} has no multi-token speculation; {(given or ['--no-mtp'])[0]} does not apply")
+        return None
+    if args.no_mtp:
+        if given:
+            raise UsageError(f"--no-mtp disables speculation; {', '.join(given)} cannot accompany it")
+        return None
+
+    maximum, fixed = args.mtp_max_draft_tokens, args.mtp_fixed_draft_tokens
+    if maximum is not None and not 1 <= maximum <= limit:
+        raise UsageError(f"--mtp-max-draft-tokens must be 1 through {limit}; --no-mtp disables speculation")
+    if fixed is not None and not 0 <= fixed <= limit:
+        raise UsageError(f"--mtp-fixed-draft-tokens must be 0 through {limit}")
+    if args.mtp_draft_tokens is not None:
+        if maximum is not None:
+            raise UsageError("--mtp-draft-tokens lists every draft count; --mtp-max-draft-tokens cannot accompany it")
+        try:
+            listed = {int(count) for count in args.mtp_draft_tokens.split(",")}
+        except ValueError:
+            listed = {-1}
+        if not all(0 <= count <= limit for count in listed):
+            raise UsageError(f"--mtp-draft-tokens takes draft counts from 1 through {limit} separated by commas,"
+                             f" such as 5 or 1,3,5; got {args.mtp_draft_tokens!r}")
+        # Every batch size keeps a zero-draft graph, so zero is always among the counts.
+        counts = tuple(sorted(listed | {0}))
+        if fixed is not None and fixed not in counts:
+            raise UsageError(f"--mtp-fixed-draft-tokens {fixed} is not among --mtp-draft-tokens {args.mtp_draft_tokens}")
     else:
-        display.show(display.plan(result, restriction=host.restriction))
-    return 0
+        if maximum is not None and fixed is not None and fixed > maximum:
+            raise UsageError(f"--mtp-fixed-draft-tokens {fixed} exceeds --mtp-max-draft-tokens {maximum}")
+        # A fixed count deeper than the recipe's default extends the captured range to reach it.
+        counts = tuple(range((max(default.draft_counts[-1], fixed or 0) if maximum is None else maximum) + 1))
+    source = default.proposal_source if args.mtp_proposal_source is None else args.mtp_proposal_source
+    history = default.history_drafts or args.history_drafts
+    if (source == "copy" or history) and not recipe.history_copy:
+        flag = "--history-drafts" if args.history_drafts else "--mtp-proposal-source copy"
+        raise UsageError(f"{alias} drafts only with its MTP module; {flag} does not apply")
+    budget = default.graph_budget if args.mtp_graph_budget is None else args.mtp_graph_budget
+    return Speculation(counts, fixed, budget, source, history)
 
 
 def _listed(values) -> str:
@@ -88,7 +114,7 @@ def _model(entry: dict, recipe, fit: str | None):
     sizes = [f"{display.gib(entry['stored_bytes'])} GiB stored", f"{display.gib(entry['device_bytes'])} GiB on GPUs"]
     if entry["mapped_host_bytes"]:
         sizes.append(f"{display.gib(entry['mapped_host_bytes'])} GiB {recipe.mapped_host_name} in host memory")
-    images, drafts = entry["max_images"], entry["speculative_tokens"]
+    images = entry["max_images"]
     cached = (display.styled("yes", display.GOOD) if entry["cached"]
               else display.styled("no", display.CAUTION).append(" · downloaded by the first run", style="dim"))
     fits = (display.styled("no", display.BAD).append(f"\n{entry['error']}", style="dim") if fit is None
@@ -101,7 +127,7 @@ def _model(entry: dict, recipe, fit: str | None):
             ("size", " · ".join(sizes)),
             ("context", f"{entry['context']:,} tokens"),
             ("input", f"text and up to {images} images per request" if images else "text"),
-            ("speculation", f"up to {drafts} draft tokens per step" if drafts else "none"),
+            ("speculation", "none" if recipe.speculation is None else display.speculation(recipe.speculation)),
             ("GPUs", _listed(entry["tensor_parallel_sizes"])),
             ("concurrency", f"{entry['default_concurrency']} by default · at most {entry['concurrency_limit']}"),
             ("cached", cached),
@@ -123,15 +149,19 @@ def models(args) -> int:
                 "architecture": checkpoint.architecture, "stored_bytes": checkpoint.stored_bytes,
                 "device_bytes": checkpoint.device_bytes, "mapped_host_bytes": checkpoint.mapped_host_bytes,
                 "cached": model.cached(hub_cache), "context": recipe.context, "max_images": recipe.max_images,
-                "speculative_tokens": recipe.speculative_rows,
+                "speculation": None if recipe.speculation is None else {
+                    "draft_counts": list(recipe.speculation.draft_counts),
+                    "graph_budget": recipe.speculation.graph_budget,
+                    "proposal_source": recipe.speculation.proposal_source,
+                    "history_drafts": recipe.speculation.history_drafts, "history_copy": recipe.history_copy},
                 "tensor_parallel_sizes": list(recipe.tensor_parallel),
                 "default_concurrency": recipe.concurrency, "concurrency_limit": recipe.max_concurrency,
-                "prefill_chunk": recipe.prefill_chunk, "plan": None, "error": None}
+                "prefill_chunk": recipe.prefill_chunk, "estimate": None, "error": None}
             fit = None
             try:
                 fitted = derive(configuration, model, host, gpus=None,
-                                concurrency=Setting(recipe.concurrency, "recipe"))
-                entry["plan"], fit = fitted.to_dict(), display.fit(fitted)
+                                concurrency=Setting(recipe.concurrency, "recipe"), speculation=recipe.speculation)
+                entry["estimate"], fit = fitted.to_dict(), display.fit(fitted)
             except CapacityError as error:
                 entry["error"] = str(error)
             entries.append(entry)
