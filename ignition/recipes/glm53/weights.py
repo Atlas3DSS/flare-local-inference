@@ -250,7 +250,9 @@ class GlmWeightLoader(DirectWeightLoader):
 
     def load_residual(self, layer):
         prefix = self._layer(layer)
-        return {name: self.load_tensor(f"{prefix}.{name}") for name in (
+        # mHC parameters execute in FP32; converting once lets every prepared graph variant share them.
+        return {name: self.load_tensor(f"{prefix}.{name}").float() if name.startswith("hc_")
+                else self.load_tensor(f"{prefix}.{name}") for name in (
             "input_layernorm.weight", "post_attention_layernorm.weight",
             "hc_attn_base", "hc_attn_fn", "hc_attn_scale", "hc_ffn_base", "hc_ffn_fn", "hc_ffn_scale")}
 
