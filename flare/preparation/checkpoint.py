@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from . import qwen38
+from .quantization import linear_format, quantized_layers
 
 
 class CheckpointError(ValueError):
@@ -91,7 +92,6 @@ class CheckpointManifest(IndexedCheckpoint):
             "architecture": qwen38.ARCHITECTURE,
             "snapshot": str(self.snapshot),
             "validation": {
-                "metadata_matches_reference": True,
                 "tensor_payloads_read": False,
                 "tensor_payloads_verified": False,
                 "checks": [
@@ -128,7 +128,9 @@ class CheckpointManifest(IndexedCheckpoint):
             },
             "quantization": {
                 "module_counts": dict(Counter(
-                    entry["quant_algo"] for entry in qwen38.expected_quantization().values()
+                    entry["quant_algo"] for entry in quantized_layers(
+                        _parse_json((self.snapshot / "config.json").read_bytes(), "config.json")
+                    ).values()
                 )),
                 "excluded_mtp_aliases": [qwen38.EXCLUDED_QUANTIZATION_ALIAS],
                 "csf_stored_bytes": dict(csf_bytes),
@@ -247,30 +249,27 @@ def _validate_config(config: dict) -> None:
         raise CheckpointError(
             "text_config.layer_types: expected 36 GDN and 12 interleaved sparse-attention layers"
         )
-    quant = config.get("quantization_config")
-    if (
-        not isinstance(quant, dict) or quant.get("quant_method") != "modelopt"
-        or quant.get("quant_algo") != "MIXED_PRECISION"
-        or quant.get("kv_cache_quant_algo") is not None
-    ):
-        raise CheckpointError("expected modelopt MIXED_PRECISION with unquantized KV")
-    expected = qwen38.expected_quantization()
-    actual = quant.get("quantized_layers")
-    if not isinstance(actual, dict):
-        raise CheckpointError("missing quantized_layers mapping")
-    for name, recipe in expected.items():
-        if actual.get(name) != recipe:
-            raise CheckpointError(
-                f"quantized_layers.{name}: expected {recipe!r}, got {actual.get(name)!r}"
-            )
+    try:
+        actual = quantized_layers(config)
+        expected = qwen38.expected_quantization()
+        for name, recipe in expected.items():
+            if name.endswith(".experts") or name == f"{qwen38.PLE_PREFIX}.ngram_embedding":
+                if actual.get(name) != recipe:
+                    raise CheckpointError(
+                        f"quantized_layers.{name}: expected {recipe!r}, got {actual.get(name)!r}"
+                    )
+            else:
+                linear_format(actual, name)
+    except ValueError as exc:
+        raise CheckpointError(str(exc)) from exc
     extra = actual.keys() - expected.keys()
     if extra:
         raise CheckpointError(f"unmapped quantization entry: {min(extra)}")
 
 
-def _validate_tensors(tensors: Mapping[str, TensorMetadata]) -> None:
+def _validate_tensors(tensors: Mapping[str, TensorMetadata], quantization=None) -> None:
     unmatched = set(tensors)
-    for name, dtype, shape in qwen38.expected_tensors():
+    for name, dtype, shape in qwen38.expected_tensors(quantization):
         tensor = tensors.get(name)
         if tensor is None:
             raise CheckpointError(f"missing required tensor: {name}")
@@ -284,6 +283,16 @@ def _validate_tensors(tensors: Mapping[str, TensorMetadata]) -> None:
             )
         if shape == (None,) and tensor.shape[0] > 102400:
             raise CheckpointError(f"{name}: CSF exception count exceeds the scale element count")
+        unmatched.remove(name)
+    for name in tuple(unmatched):
+        if not name.endswith(".input_scale") or quantization is None:
+            continue
+        entry = quantization.get(name.removesuffix(".input_scale"), {})
+        if entry.get("quant_algo") != "NVFP4" or entry.get("weight_scale_encoding") is not None:
+            continue
+        tensor = tensors[name]
+        if tensor.dtype != "F32" or tensor.shape not in ((), (1,)):
+            raise CheckpointError(f"{name}: expected one F32 activation scale")
         unmatched.remove(name)
     if unmatched:
         raise CheckpointError(f"unmapped tensor: {min(unmatched)}")
@@ -350,7 +359,7 @@ def _inspect_indexed_checkpoint(snapshot: Path, index: dict) -> IndexedCheckpoin
 
 
 def inspect_qwen38_checkpoint(snapshot: str | Path) -> CheckpointManifest:
-    """Validate the pinned model's metadata; payload integrity is not verified.
+    """Validate model geometry and declared storage; tensor payloads are not read.
 
     The returned shard_paths and index_path can be passed to b12x's weight
     session. Exclude mtp.* while routing the remaining tensors into the recipe.
@@ -371,23 +380,10 @@ def inspect_qwen38_checkpoint(snapshot: str | Path) -> CheckpointManifest:
     generation = read_json("generation_config.json")
     indexed = _inspect_indexed_checkpoint(snapshot, index)
     tensors, shards = indexed.tensors, indexed.shards
-    _validate_tensors(tensors)
+    _validate_tensors(tensors, quantized_layers(config))
     header_digest = hashlib.sha256()
     for shard in shards:
         header_digest.update(shard.path.encode() + b"\0" + bytes.fromhex(shard.header_sha256))
-    for name, expected in (
-        ("config.json", qwen38.CONFIG_SHA256),
-        ("model.safetensors.index.json", qwen38.INDEX_SHA256),
-        ("generation_config.json", qwen38.GENERATION_SHA256),
-    ):
-        if metadata[name] != expected:
-            raise CheckpointError(
-                f"{name}: SHA256 does not match reference revision {qwen38.REVISION}"
-            )
-    if header_digest.hexdigest() != qwen38.HEADERS_SHA256:
-        raise CheckpointError(
-            f"safetensors headers: SHA256 does not match reference revision {qwen38.REVISION}"
-        )
     return CheckpointManifest(
         snapshot, MappingProxyType(tensors), tuple(shards), MappingProxyType(metadata),
         header_digest.hexdigest(), MappingProxyType(generation),

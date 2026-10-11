@@ -11,7 +11,7 @@ import torch
 
 from flare.components.parallel import TensorParallelShard
 from flare.preparation.checkpoint import CheckpointError, CheckpointManifest
-from flare.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
+from flare.preparation.qwen38 import TRANSFORMERS_REVISION
 
 from .moe import QwenMoeWeights, SharedExpertWeights
 from .hyperconnection import packed_down_projection
@@ -109,7 +109,7 @@ def create_mtp_modules(manifest: CheckpointManifest):
     if provenance.get("vcs_info", {}).get("commit_id") != TRANSFORMERS_REVISION:
         raise RuntimeError(f"MTP preparation requires Transformers {TRANSFORMERS_REVISION}")
     raw = (manifest.snapshot / "config.json").read_bytes()
-    if hashlib.sha256(raw).hexdigest() != CONFIG_SHA256:
+    if hashlib.sha256(raw).hexdigest() != manifest.metadata_sha256["config.json"]:
         raise CheckpointError("config.json changed after checkpoint inspection")
     from transformers import Qwen4ExpConfig
     from transformers.models.qwen4_exp.modeling_qwen4_exp import (

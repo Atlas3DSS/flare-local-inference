@@ -8,7 +8,7 @@ import json
 from typing import TYPE_CHECKING
 
 from flare.preparation.checkpoint import CheckpointError, CheckpointManifest
-from flare.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
+from flare.preparation.qwen38 import TRANSFORMERS_REVISION
 
 if TYPE_CHECKING:
     from transformers import Qwen4ExpForConditionalGeneration
@@ -26,7 +26,7 @@ def create_model_tree(manifest: CheckpointManifest) -> Qwen4ExpForConditionalGen
     if provenance.get("vcs_info", {}).get("commit_id") != TRANSFORMERS_REVISION:
         raise RuntimeError(f"Qwen preparation requires Transformers {TRANSFORMERS_REVISION}")
     raw = (manifest.snapshot / "config.json").read_bytes()
-    if hashlib.sha256(raw).hexdigest() != CONFIG_SHA256:
+    if hashlib.sha256(raw).hexdigest() != manifest.metadata_sha256["config.json"]:
         raise CheckpointError("config.json changed after checkpoint inspection")
 
     from transformers import Qwen4ExpConfig, Qwen4ExpForConditionalGeneration

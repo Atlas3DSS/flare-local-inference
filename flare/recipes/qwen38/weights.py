@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING
 
 from flare.components.parallel import TensorParallelShard
 from flare.components.weights import DirectWeightLoader
 from flare.preparation.checkpoint import CheckpointManifest
-from flare.preparation.qwen38 import TEXT_PREFIX, expected_quantization
+from flare.preparation.qwen38 import TEXT_PREFIX
 
 if TYPE_CHECKING:
     import torch
@@ -128,45 +128,6 @@ class QwenWeightLoader(DirectWeightLoader):
             if tensor.component not in ("mtp", "ple_tables")
             and (self.prefixes is None or name.startswith(self.prefixes))
         }
-
-    def load_linear(self, prefix: str, *, rows=None, columns=None) -> Weight:
-        from b12x.gemm.blockscaled import pack_weight
-
-        self._require_open()
-        recipe = expected_quantization().get(prefix, {}).get("quant_algo")
-        if recipe not in ("MXFP8", "W4A16_NVFP4") or prefix.startswith("mtp."):
-            raise ValueError(f"{prefix} is not a supported dense quantized projection")
-        if recipe == "MXFP8":
-            return self.load_mxfp8_group((prefix,), row_ranges=(rows,), column_range=columns)
-        if rows is not None or columns is not None:
-            raise ValueError("dense NVFP4 slicing requires an explicit packed-weight layout")
-        import torch
-        from b12x._lib.intrinsics import swizzle_block_scale
-
-        scalar = self._sources[f"{prefix}.weight_scale_2"]
-        if not bool(torch.isfinite(scalar).all() & (scalar > 0).all()):
-            raise ValueError(f"{prefix}.weight_scale_2 must be finite and positive")
-        source = self._sources[f"{prefix}.weight"]
-        rows, packed_columns = source.shape
-        logical_columns = packed_columns * 2
-        stored_columns = ((logical_columns + 127) // 128) * 128
-        values = torch.zeros((rows, stored_columns // 2), dtype=source.dtype, device=self.device)
-        self._copy(values[:, :packed_columns], source)
-        scales, global_scale = self.load_tensors((f"{prefix}.weight_scale", f"{prefix}.weight_scale_2"))
-        packed = pack_weight(
-            values, swizzle_block_scale(scales), recipe="nvfp4",
-            global_scale=global_scale, global_scale_kind="multiplier",
-        )
-        return replace(packed, in_features=logical_columns)
-
-    def load_mxfp8_group(self, prefixes: Sequence[str], *, row_ranges=None, column_range=None) -> Weight:
-        """Pack serialized projections along output rows before scale swizzling."""
-        recipes = expected_quantization()
-        if not prefixes or any(
-            recipes.get(prefix, {}).get("quant_algo") != "MXFP8" for prefix in prefixes
-        ):
-            raise ValueError("projection packing requires declared MXFP8 weights")
-        return super().load_mxfp8_group(prefixes, row_ranges=row_ranges, column_range=column_range)
 
     def load_gdn_projections(self, prefix: str) -> dict[str, Weight]:
         qkv = self.shard.fused_partitions((2048, 2048, 6144))

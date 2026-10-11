@@ -606,7 +606,6 @@ def _install_boundaries(monkeypatch, checkpoint):
         "mtp",
         "ple",
         "sampling",
-        "speculation",
         "speculative_model",
         "speculative_state",
         "draft_state",
@@ -614,7 +613,7 @@ def _install_boundaries(monkeypatch, checkpoint):
         "vision",
         "vision_state",
     )
-    for name in ("flare.components.linear", *("flare.recipes.qwen38." + name for name in modules)):
+    for name in ("flare.components.linear", "flare.components.speculation", *("flare.recipes.qwen38." + name for name in modules)):
         module = importlib.import_module(name)
         for cls in vars(module).values():
             if not inspect.isclass(cls) or cls.__module__ != module.__name__:

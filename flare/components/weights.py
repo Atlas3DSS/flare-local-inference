@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cached_property
+import json
 import sys
 from time import monotonic
 from typing import TYPE_CHECKING
 
 from flare.preparation.checkpoint import IndexedCheckpoint
 from flare.progress import phase
+from flare.preparation.quantization import linear_format, quantized_layers, require_mxfp8_group
 
 if TYPE_CHECKING:
     import torch
@@ -48,6 +51,50 @@ class DirectWeightLoader:
         self._session = None
         self._sources = {}
         self._stack = None
+
+    @cached_property
+    def quantization(self):
+        return quantized_layers(json.loads((self.manifest.snapshot / "config.json").read_text()))
+
+    def load_linear(self, prefix, *, rows=None, columns=None):
+        """Load one projection using its checkpoint quantization declaration."""
+        self._require_open()
+        if linear_format(self.quantization, prefix) == "mxfp8":
+            return self.load_mxfp8_group((prefix,), row_ranges=(rows,), column_range=columns)
+        return self._load_nvfp4_linear(prefix, rows=rows, columns=columns)
+
+    def _load_nvfp4_linear(self, prefix, *, rows=None, columns=None):
+        import torch
+        from b12x._lib.intrinsics import swizzle_block_scale
+        from b12x.gemm.blockscaled import pack_weight
+
+        source = self._sources[f"{prefix}.weight"]
+        scale = self._sources[f"{prefix}.weight_scale"]
+        scalar = self._sources[f"{prefix}.weight_scale_2"]
+        if source.ndim != 2 or source.dtype != torch.uint8:
+            raise ValueError(f"{prefix}: NVFP4 weight must be a packed uint8 matrix")
+        n, packed_k = source.shape
+        k = packed_k * 2
+        if (k % 16 or scale.ndim != 2 or scale.dtype != torch.float8_e4m3fn
+                or scale.shape[0] < n or scale.shape[1] < k // 16):
+            raise ValueError(f"{prefix}: NVFP4 block scale geometry or dtype mismatch")
+        if (scalar.dtype != torch.float32 or scalar.numel() != 1
+                or not bool((torch.isfinite(scalar) & (scalar > 0)).all())):
+            raise ValueError(f"{prefix}.weight_scale_2 must be a positive finite FP32 scalar")
+        r0, r1 = _aligned_range(rows, n, 1)
+        c0, c1 = _aligned_range(columns, k, 16)
+        logical_k = c1 - c0
+        stored_k = (logical_k + 127) // 128 * 128
+        values = torch.zeros((r1 - r0, stored_k // 2), dtype=torch.uint8, device=self.device)
+        scales = torch.zeros((r1 - r0, stored_k // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        gain = torch.empty(scalar.shape, dtype=torch.float32, device=self.device)
+        self._copy(values[:, :logical_k // 2], source[r0:r1, c0 // 2:c1 // 2])
+        self._copy(scales[:, :logical_k // 16], scale[r0:r1, c0 // 16:c1 // 16])
+        self._copy(gain, scalar)
+        self._session.flush()
+        weight = pack_weight(values, swizzle_block_scale(scales), recipe="nvfp4",
+                             global_scale=gain, global_scale_kind="multiplier")
+        return replace(weight, in_features=logical_k)
 
     def _selected_names(self):
         return {name for name in self.manifest.tensors
@@ -174,13 +221,11 @@ class DirectWeightLoader:
 
     def load_mxfp8_group(self, prefixes, *, row_ranges=None, column_range=None):
         """Pack selected MXFP8 projection rows directly into one GPU matrix."""
-        import torch
-        from b12x.gemm.blockscaled import pack_weight
-
         self._require_open()
         prefixes = tuple(prefixes)
-        if not prefixes:
-            raise ValueError("MXFP8 projection group must be nonempty")
+        require_mxfp8_group(self.quantization, prefixes)
+        import torch
+        from b12x.gemm.blockscaled import pack_weight
         if row_ranges is None:
             row_ranges = (None,) * len(prefixes)
         weights, block_scales = [], []
@@ -192,7 +237,7 @@ class DirectWeightLoader:
             rows, columns = weight.shape
             r0, r1 = _aligned_range(row_range, rows, 1)
             c0, c1 = _aligned_range(column_range, columns, 32)
-            if (scale.ndim != 2 or scale.element_size() != 1
+            if (scale.ndim != 2 or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu)
                     or scale.shape[0] < rows or scale.shape[1] < columns // 32):
                 raise ValueError(f"{prefix}: MXFP8 block scale geometry mismatch")
             weights.append(weight[r0:r1, c0:c1])

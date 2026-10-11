@@ -20,10 +20,7 @@ from flare.preparation.deferred import deferred_mode
 from flare.preparation.fixtures.recurrent import register_benchmark_state
 from flare.preparation.model import PreparedModel
 from flare.preparation.qwen38 import (
-    CONFIG_SHA256,
     FRONTEND_SHA256,
-    GENERATION_SHA256,
-    HEADERS_SHA256,
     MODEL_ID,
     REVISION,
 )
@@ -169,8 +166,8 @@ def _identity(manifest, world_size=1):
     components = Path(__file__).parents[2] / "components"
     sources.update({f"components/{path.name}": hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(components.glob("*.py"))})
-    value = {"checkpoint": REVISION, "headers": HEADERS_SHA256,
-             "config": CONFIG_SHA256, "recipe": sources, "kv_dtype": "bfloat16", "page_size": 64, "world_size": world_size}
+    value = {"checkpoint": REVISION, "headers": manifest.headers_sha256,
+             "config": manifest.metadata_sha256["config.json"], "recipe": sources, "kv_dtype": "bfloat16", "page_size": 64, "world_size": world_size}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -219,7 +216,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320) if group is not None else None
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
-        namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256, "world_size": shard.world_size})
+        namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size})
     session.__enter__()
     graphs = {}
     try:
@@ -433,7 +430,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             "tokenizer_config": ("tokenizer_config.json", FRONTEND_SHA256["tokenizer_config.json"]),
             "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"]),
             "preprocessor_config": ("preprocessor_config.json", FRONTEND_SHA256["preprocessor_config.json"]),
-            "model_config": ("config.json", CONFIG_SHA256), "generation_config": ("generation_config.json", GENERATION_SHA256)}
+            "model_config": ("config.json", manifest.metadata_sha256["config.json"]), "generation_config": ("generation_config.json", manifest.metadata_sha256["generation_config.json"])}
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "snapshots": snapshots,

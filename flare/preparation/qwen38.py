@@ -94,7 +94,11 @@ def expected_quantization():
     return entries
 
 
-def _linear(prefix, rows, columns, quant=None):
+def _linear(prefix, rows, columns, quant=None, *, quantization=None):
+    if quantization is not None and prefix in quantization:
+        from .quantization import linear_format
+
+        quant = "MXFP8" if linear_format(quantization, prefix) == "mxfp8" else "W4A16_NVFP4"
     if quant == "MXFP8":
         yield f"{prefix}.weight", "F8_E4M3", (rows, columns)
         yield f"{prefix}.weight_scale", "U8", (rows, columns // 32)
@@ -119,29 +123,30 @@ def _hyperconnection(prefix, *, block=True, norm_dtype="F32"):
         yield from _linear(f"{prefix}.block_inject_weight", 4, 10240)
 
 
-def _sparse_attention(prefix, quant):
+def _sparse_attention(prefix, quant, *, quantization=None):
     for proj, rows, cols in (
         ("q_proj", 12288, 2560), ("k_proj", 512, 2560),
         ("v_proj", 512, 2560), ("o_proj", 2560, 6144),
         ("indexer.index_qk_proj", 640, 2560),
     ):
-        yield from _linear(f"{prefix}.{proj}", rows, cols, quant)
+        yield from _linear(f"{prefix}.{proj}", rows, cols, quant, quantization=quantization)
     for norm in ("q_norm", "k_norm"):
         yield f"{prefix}.{norm}.weight", "BF16", (256,)
     for norm in ("q_layernorm", "k_layernorm"):
         yield f"{prefix}.indexer.{norm}.weight", "BF16", (128,)
 
 
-def _mlp(prefix, *, mtp=False):
+def _mlp(prefix, *, mtp=False, quantization=None):
     yield from _linear(f"{prefix}.gate", 512, 2560)
     yield from _linear(f"{prefix}.shared_expert_gate", 1, 2560)
     for proj, rows, columns in (("gate_proj", 640, 2560), ("up_proj", 640, 2560), ("down_proj", 2560, 640)):
-        yield from _linear(f"{prefix}.shared_expert.{proj}", rows, columns, None if mtp else "MXFP8")
+        yield from _linear(f"{prefix}.shared_expert.{proj}", rows, columns, None if mtp else "MXFP8",
+                           quantization=quantization)
         for expert in range(512):
             yield from _linear(f"{prefix}.experts.{expert}.{proj}", rows, columns, "W4A16_NVFP4" if mtp else "CSF")
 
 
-def expected_tensors():
+def expected_tensors(quantization=None):
     """Yield every required stored tensor; None marks the CSF exception count."""
     yield from _linear("lm_head", 248320, 2560)
     yield from _linear(f"{TEXT_PREFIX}.embed_tokens", 248320, 2560)
@@ -150,9 +155,9 @@ def expected_tensors():
         prefix = f"{TEXT_PREFIX}.layers.{i}"
         for region in ("attn_hyper_connection", "mlp_hyper_connection"):
             yield from _hyperconnection(f"{prefix}.{region}")
-        yield from _mlp(f"{prefix}.mlp")
+        yield from _mlp(f"{prefix}.mlp", quantization=quantization)
         if i % 4 == 3:
-            yield from _sparse_attention(f"{prefix}.self_attn", "MXFP8")
+            yield from _sparse_attention(f"{prefix}.self_attn", "MXFP8", quantization=quantization)
         else:
             prefix += ".linear_attn"
             for proj, rows, columns in (
@@ -160,7 +165,7 @@ def expected_tensors():
                 ("in_proj_qkv", 10240, 2560), ("in_proj_z", 6144, 2560),
                 ("out_proj", 2560, 6144),
             ):
-                yield from _linear(f"{prefix}.{proj}", rows, columns, "MXFP8")
+                yield from _linear(f"{prefix}.{proj}", rows, columns, "MXFP8", quantization=quantization)
             for name in ("A_log", "dt_bias"):
                 yield f"{prefix}.{name}", "BF16", (48,)
             yield f"{prefix}.conv1d.weight", "BF16", (10240, 1, 4)
@@ -187,13 +192,13 @@ def expected_tensors():
             ("mlp.linear_fc1", 4304, 1152, "W4A16_NVFP4"),
             ("mlp.linear_fc2", 1152, 4304, "W4A16_NVFP4"),
         ):
-            yield from _linear(f"{prefix}.{name}", rows, columns, quant)
+            yield from _linear(f"{prefix}.{name}", rows, columns, quant, quantization=quantization)
             yield f"{prefix}.{name}.bias", "BF16", (rows,)
         for norm in ("norm1", "norm2"):
             for field in ("weight", "bias"):
                 yield f"{prefix}.{norm}.{field}", "BF16", (1152,)
     for name, rows in (("linear_fc1", 4608), ("linear_fc2", 2560)):
-        yield from _linear(f"model.visual.merger.{name}", rows, 4608, "W4A16_NVFP4")
+        yield from _linear(f"model.visual.merger.{name}", rows, 4608, "W4A16_NVFP4", quantization=quantization)
         yield f"model.visual.merger.{name}.bias", "BF16", (rows,)
     for field in ("weight", "bias"):
         yield f"model.visual.merger.norm.{field}", "BF16", (1152,)

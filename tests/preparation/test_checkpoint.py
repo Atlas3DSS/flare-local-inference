@@ -205,3 +205,36 @@ def test_cpu_only_cli(snapshot, capsys, monkeypatch):
 def test_cli_missing_snapshot_is_error(tmp_path, capsys):
     assert main([str(tmp_path / "absent")]) == 1
     assert "checkpoint inspection failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("algo", ["NVFP4", "W4A16_NVFP4"])
+def test_dense_storage_follows_quantization_config(snapshot, manifest, algo):
+    config = json.loads((snapshot / "config.json").read_text())
+    prefix = "model.language_model.layers.0.linear_attn.out_proj"
+    config["quantization_config"]["quantized_layers"][prefix] = {"quant_algo": algo, "group_size": 16}
+    _validate_config(config)
+    weight = manifest.tensors[prefix + ".weight"]
+    rows, columns = weight.shape
+    tensors = dict(manifest.tensors)
+    tensors[weight.name] = replace(weight, dtype="U8", shape=(rows, columns // 2))
+    scales = tensors[prefix + ".weight_scale"]
+    tensors[scales.name] = replace(scales, dtype="F8_E4M3", shape=(rows, columns // 16))
+    name = prefix + ".weight_scale_2"
+    tensors[name] = replace(weight, name=name, dtype="F32", shape=())
+    _validate_tensors(tensors, config["quantization_config"]["quantized_layers"])
+    if algo == "NVFP4":
+        name = prefix + ".input_scale"
+        tensors[name] = replace(weight, name=name, dtype="F32", shape=())
+        _validate_tensors(tensors, config["quantization_config"]["quantized_layers"])
+    with pytest.raises(CheckpointError, match="expected U8"):
+        _validate_tensors(manifest.tensors, config["quantization_config"]["quantized_layers"])
+
+
+def test_inspection_accepts_semantically_identical_config(snapshot, tmp_path):
+    for path in snapshot.iterdir():
+        if path.name != "config.json":
+            (tmp_path / path.name).symlink_to(path)
+    config = json.loads((snapshot / "config.json").read_text())
+    (tmp_path / "config.json").write_text(json.dumps(config, sort_keys=True))
+    manifest = inspect_qwen38_checkpoint(tmp_path)
+    assert manifest.tensors["lm_head.weight"].shape == (248320, 2560)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -41,20 +42,23 @@ def _assert_numerical(actual, expected):
     torch.testing.assert_close(actual, expected, rtol=.015, atol=float(expected.abs().max()) * .01 + 1e-6)
 
 
-@pytest.mark.parametrize("prefix,mode", [
-    (f"{TEXT_PREFIX}.layers.0.linear_attn.in_proj_a", "quantized"),
-    ("model.visual.blocks.0.mlp.linear_fc1", "a16"),
-    ("model.visual.blocks.0.mlp.linear_fc2", "a16"),
+@pytest.mark.parametrize("prefix,mode,rows,columns", [
+    (f"{TEXT_PREFIX}.layers.0.linear_attn.in_proj_a", "quantized", None, None),
+    ("model.visual.blocks.0.mlp.linear_fc1", "a16", None, None),
+    ("model.visual.blocks.0.mlp.linear_fc2", "a16", None, None),
+    ("model.visual.blocks.0.mlp.linear_fc1", "a16", (2152, 4304), None),
+    ("model.visual.blocks.0.mlp.linear_fc2", "a16", None, (16, 144)),
+    ("model.visual.blocks.0.mlp.linear_fc2", "a16", (3, 131), (16, 160)),
 ])
-def test_actual_dense_weight_prepared_graph_replay(manifest, prefix, mode):
+def test_actual_dense_weight_prepared_graph_replay(manifest, prefix, mode, rows, columns):
     from b12x.gemm import blockscaled
     from b12x.gemm.blockscaled._a16 import _weight_parts
     from b12x.preparation import PreparationSession, PreparedCall
 
     with QwenWeightLoader(manifest, "cuda:0", prefixes=(prefix + ".",)) as loader:
-        packed = loader.load_linear(prefix)
+        packed = loader.load_linear(prefix, rows=rows, columns=columns)
         assert loader._session.torch_copy_bytes == 0
-    if prefix.endswith("linear_fc2"):
+    if prefix.endswith("linear_fc2") and columns is None:
         assert packed.in_features == 4304 and packed.padded_in_features == 4352
         assert torch.count_nonzero(packed.values[:, 2152:]) == 0
     cpu_input = torch.randn(3, packed.in_features, generator=torch.Generator().manual_seed(39)).to(torch.bfloat16)
@@ -83,7 +87,13 @@ def test_actual_dense_weight_prepared_graph_replay(manifest, prefix, mode):
                 if mode == "quantized":
                     expected = mxfp8_linear_reference(cpu_input * factor, reader.read(prefix + ".weight"), reader.read(prefix + ".weight_scale"))
                 else:
-                    expected = nvfp4_linear_reference(cpu_input * factor, read_nvfp4_projection(reader, prefix))
+                    projection = read_nvfp4_projection(reader, prefix)
+                    r0, r1 = rows or (0, projection.packed.shape[0])
+                    c0, c1 = columns or (0, projection.packed.shape[1] * 2)
+                    projection = replace(projection,
+                        packed=projection.packed[r0:r1, c0 // 2:c1 // 2],
+                        scales=projection.scales[r0:r1, c0 // 16:c1 // 16])
+                    expected = nvfp4_linear_reference(cpu_input * factor, projection)
             _assert_numerical(output, expected)
 
 

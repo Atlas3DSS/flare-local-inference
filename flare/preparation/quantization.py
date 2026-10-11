@@ -1,0 +1,39 @@
+"""Supported ModelOpt projection storage declarations."""
+
+from collections.abc import Mapping
+
+
+def quantized_layers(config):
+    quant = config.get("quantization_config")
+    if (not isinstance(quant, Mapping) or quant.get("quant_method") != "modelopt"
+            or quant.get("quant_algo") != "MIXED_PRECISION"
+            or quant.get("kv_cache_quant_algo") is not None):
+        raise ValueError("expected modelopt MIXED_PRECISION with unquantized KV")
+    layers = quant.get("quantized_layers")
+    if not isinstance(layers, Mapping):
+        raise ValueError("missing quantized_layers mapping")
+    return layers
+
+
+def linear_format(layers, prefix):
+    entry = layers.get(prefix)
+    if not isinstance(entry, Mapping):
+        raise ValueError(f"{prefix}: missing quantized_layers declaration")
+    algo = entry.get("quant_algo")
+    group = {"MXFP8": 32, "NVFP4": 16, "W4A16_NVFP4": 16}.get(algo)
+    if group is None or entry.get("group_size") != group:
+        raise ValueError(f"{prefix}: unsupported linear quantization {entry!r}")
+    if entry.get("weight_scale_encoding") is not None:
+        raise ValueError(f"{prefix}: dense projections require ordinary block scales")
+    return "mxfp8" if algo == "MXFP8" else "nvfp4"
+
+
+def require_mxfp8_group(layers, prefixes):
+    if not prefixes:
+        raise ValueError("projection group must be nonempty")
+    formats = [linear_format(layers, prefix) for prefix in prefixes]
+    if "nvfp4" in formats:
+        names = ", ".join(prefixes)
+        if len(prefixes) > 1:
+            raise ValueError(f"cannot fuse NVFP4 projections ({names}); only MoE expert w1/w3 fusion is supported")
+        raise ValueError(f"{names}: this operation requires MXFP8 weights")

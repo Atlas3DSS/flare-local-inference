@@ -119,7 +119,6 @@ class GlmWeightLoader(DirectWeightLoader):
         }.items():
             if text.get(key) != expected:
                 raise ValueError(f"GLM {key} requires {expected}, got {text.get(key)}")
-        self.quantization = config["quantization_config"]["quantized_layers"]
 
     def _selected_names(self):
         return {name for name in super()._selected_names()
@@ -130,15 +129,8 @@ class GlmWeightLoader(DirectWeightLoader):
             raise ValueError("GLM decoder layer must be in [0, 45]")
         return f"{TEXT_PREFIX}.layers.{layer}"
 
-    def load_mxfp8_group(self, prefixes, *, row_ranges=None, column_range=None):
-        prefixes = tuple(prefixes)
-        for prefix in prefixes:
-            if self.quantization.get(prefix, {}).get("quant_algo") != "MXFP8":
-                raise ValueError(f"{prefix}: expected declared MXFP8 quantization")
-        return super().load_mxfp8_group(prefixes, row_ranges=row_ranges, column_range=column_range)
-
     def _projection(self, prefix, *, rows=None, columns=None):
-        return self.load_mxfp8_group((prefix,), row_ranges=(rows,), column_range=columns)
+        return self.load_linear(prefix, rows=rows, columns=columns)
 
     def load_attention(self, layer):
         prefix = self._layer(layer) + ".self_attn"
@@ -152,8 +144,8 @@ class GlmWeightLoader(DirectWeightLoader):
         result["qkv_a_proj"] = self.load_mxfp8_group(
             tuple(f"{prefix}.{name}" for name in ("q_a_proj", "kv_a_proj_with_mqa")))
         result["q_b_proj"] = self._projection(f"{prefix}.q_b_proj", rows=head_channels)
-        result["kv_b_proj"] = self._projection(
-            f"{prefix}.kv_b_proj", rows=self.shard.partition(64 * 512, alignment=512))
+        result["kv_b_proj"] = self.load_mxfp8_group(
+            (f"{prefix}.kv_b_proj",), row_ranges=(self.shard.partition(64 * 512, alignment=512),))
         result["o_proj"] = self._projection(f"{prefix}.o_proj", columns=head_channels)
         for name in ("q_a_layernorm.weight", "kv_a_layernorm.weight", "indexer.k_norm.weight",
                      "indexer.k_norm.bias", "indexer.index_kpool_compress_ape", "indexer.index_kpool_compress_gate"):
