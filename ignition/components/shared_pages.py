@@ -19,18 +19,21 @@ class SharedPages:
     this process, as int64 device values that kernels convert to pointers. Peer
     buffers are written only by their owners; readers must order reads after the
     owner's writes through a collective. All ranks allocate and close together,
-    after native replay has drained.
+    after native replay has drained. `ipc` is the CudaRTLibrary-compatible allocator.
     """
 
-    def __init__(self, group, device, nbytes):
+    def __init__(self, group, device, nbytes, *, ipc=None):
         from b12x.comm.pcie._cuda_ipc import CudaRTLibrary
         from b12x.comm.pcie.pcie_oneshot import PCIeOneshotAllReduce
 
         if type(nbytes) is not int or nbytes <= 0 or nbytes % 16:
             raise ValueError("shared pages require a positive size of whole 16-byte packs")
         self.group, self.device, self.nbytes = group, torch.device(device), nbytes
-        self._ipc = CudaRTLibrary()
-        self._ipc.cudaSetDevice(self.device.index)
+        # Package preparation supplies symmetric mappings that native restore reproduces.
+        if ipc is None:
+            ipc = CudaRTLibrary()
+            ipc.cudaSetDevice(self.device.index)
+        self._ipc = ipc
         self._buffer = PCIeOneshotAllReduce._allocate_shared_buffer(group, nbytes, zero_fill=True, ipc=self._ipc)
         self.tensor = torch.as_tensor(_DeviceArray(self._buffer.local_ptr, nbytes), device=self.device)
         self.addresses = torch.tensor(self._buffer.peer_ptrs, dtype=torch.int64, device=self.device)

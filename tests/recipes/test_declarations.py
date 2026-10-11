@@ -57,6 +57,8 @@ def test_glm_state_rows_and_pages_match_the_continuation_pool(world_size):
         assert costs.state_row_bytes == continuation_layout(
             layer_types, world_size, mtp=speculation is not None).row_bytes
         assert costs.page_bytes == layers * (4 * 64 * 528 + 64 * 132)
+        # Context parallelism places 256 records of each page on every rank.
+        assert costs.page_tokens == 256 * world_size
 
 
 @pytest.mark.parametrize("model", [QWEN, GLM])
@@ -183,9 +185,12 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     assert GLM.recipe.prepare(tmp_path, plan, compile_forwards=False, kernel_cache=tmp_path, progress=None) == "group"
     config, prepare = seen.pop()
     assert prepare is glm.prepare_rank and config.devices == (0, 1, 2, 3)
-    assert (config.max_active, config.pages, config.context) == (2, plan.pages, plan.context)
-    assert config.compile_decoder is False and config.kernel_cache == tmp_path
-    assert config.context % 256 == 0 and config.page_capacity == plan.pages and config.prefill_chunk_size == 2048
+    # Like Qwen, GLM pages fill the memory measured after graph capture, at least the plan's minimum.
+    assert (config.max_active, config.pages, config.minimum_pages, config.context) == (
+        2, None, plan.minimum_pages, plan.context)
+    assert config.compile_decoder is False and config.kernel_cache == tmp_path and config.context_parallel
+    assert config.page_tokens == plan.page_tokens == 1024 and config.context % config.page_tokens == 0
+    assert config.page_capacity == plan.minimum_pages and config.prefill_chunk_size == 2048
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
     assert config.speculative_graph_budget == 8
 
@@ -198,4 +203,4 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     plan = fitted(GLM, 4, speculation=None)
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     config, _ = seen.pop()
-    assert config.mtp is False and config.page_capacity == plan.pages
+    assert config.mtp is False and config.page_capacity == plan.minimum_pages

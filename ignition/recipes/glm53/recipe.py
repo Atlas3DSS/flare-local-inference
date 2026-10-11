@@ -16,13 +16,15 @@ _TARGET_PAGE_LAYERS = 11
 _GRAPH_BYTES = 4864 << 20
 
 
-def _costs(state_row_bytes, graph_bytes, *, speculating):
+def _costs(state_row_bytes, graph_bytes, *, ranks, speculating):
     layers = _TARGET_PAGE_LAYERS + int(speculating)
+    # Decode context parallelism shards each page's latent records over the ranks.
     return RankCosts(state_row_bytes, layers * _PAGE_LAYER_BYTES, graph_bytes,
-                     draft_page_bytes=_PAGE_LAYER_BYTES if speculating else 0)
+                     draft_page_bytes=_PAGE_LAYER_BYTES if speculating else 0, page_tokens=256 * ranks)
 
 
-def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
+def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,
+            package_storage=None):
     """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1.
 
     KV pages fill the free memory measured after graph capture, not the plan's estimate.
@@ -36,12 +38,13 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
         "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width,
         "speculative_graph_budget": speculation.graph_budget}
     config = PreparationConfig(
-        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, max_active=plan.concurrency,
+        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
+        max_active=plan.concurrency, context_parallel=True,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
         mtp=speculation is not None, **drafting)
-    return prepare_group(snapshot, config, prepare_rank, progress=progress)
+    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 
 
 def usage(prepared):
@@ -60,14 +63,14 @@ RECIPE = Recipe(
         draft_bytes=4_301_658_112),),
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     # Rounds adapt among zero through five drafts. Verification retains recurrent
-    # state for seven draft positions per request whatever the captured counts.
+    # state for one position per draft token, at most seven.
     speculation=Speculation(draft_tokens=5), speculative_rows=7,
     ranks=MappingProxyType({
-        2: _costs(81_464_576, _GRAPH_BYTES, speculating=True),
-        4: _costs(41_635_072, _GRAPH_BYTES, speculating=True),
+        2: _costs(81_464_576, _GRAPH_BYTES, ranks=2, speculating=True),
+        4: _costs(41_635_072, _GRAPH_BYTES, ranks=4, speculating=True),
     }),
     plain_ranks=MappingProxyType({
-        2: _costs(75_420_672, _GRAPH_BYTES, speculating=False),
-        4: _costs(38_515_712, _GRAPH_BYTES, speculating=False),
+        2: _costs(75_420_672, _GRAPH_BYTES, ranks=2, speculating=False),
+        4: _costs(38_515_712, _GRAPH_BYTES, ranks=4, speculating=False),
     }),
 )

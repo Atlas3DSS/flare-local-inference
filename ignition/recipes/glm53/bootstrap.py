@@ -19,7 +19,6 @@ from ignition.preparation.collectives import (
     CollectivePreparation,
     create_all_gather_runtime,
     create_all_reduce_runtime,
-    create_dma_all_reduce_runtime,
     create_head_exchange,
 )
 from ignition.preparation.execution import GraphSignature
@@ -41,8 +40,6 @@ from .weights import ModelWeights
 
 
 _COMPILED_KINDS = ("prefill", "decode", "resume", "speculative")
-# Prefill chunks of at least this many tokens all-reduce through the copy-engine ring.
-_DMA_PREFILL_TOKENS = 1024
 # Allocator granularity and fragmentation slack beyond the headroom kept after the final KV allocation.
 _KV_ALLOCATION_MARGIN = 64 << 20
 
@@ -59,6 +56,7 @@ class PreparationConfig:
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
+    retain_graphs: bool = False
     kernel_cache: Path | None = None
     mtp: bool = False
     # Routed NVFP4-CSF experts: A16 activations with A4 prefill launches, or A4 throughout.
@@ -147,12 +145,15 @@ class PreparationConfig:
 
 
 @torch.no_grad()
-def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, progress=None) -> PreparedModel:
+def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, progress=None,
+                 package_storage=None) -> PreparedModel:
     """Load, tune and capture all text variants on one supervised TP rank.
 
     The caller must terminate the complete rank group if any preparation fails.
     Successful cleanup requires every rank to close its IPC runtime together,
-    after native replay drains. No eager execution path is exported.
+    after native replay drains. No eager execution path is exported. Package
+    storage backs device memory, collective mappings and graphs with addresses
+    that native restore reproduces.
     """
     def report(message):
         if progress is not None:
@@ -193,13 +194,12 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
         records = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
-        collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=4096)
-        # Prefill chunks reduce their hidden activations through b12x's copy-engine ring.
-        prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
-                                                           hidden_size=4096)
+        ipc = None if package_storage is None else package_storage.peer_storage
+        collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=4096,
+                                               ipc=ipc)
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
         vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=sample_rows, columns=154880)
+            max_rows=sample_rows, columns=154880, ipc=ipc)
         identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "glm5next.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -224,9 +224,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             exchange_rows = min(SLICE_ROWS, max(config.request_capacity,
                 max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1))
             context = ContextParallel(ContextShards.on(rank, shard.world_size, device),
-                heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512),
+                heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512, ipc=ipc),
                 candidates=create_all_gather_runtime(group, device, max_rows=min(config.token_capacity, SLICE_ROWS),
-                                                     columns=2048 * shard.world_size),
+                                                     columns=2048 * shard.world_size, ipc=ipc),
                 coordinator=coordinator)
         shards = None if context is None else context.shards
         # Prefill chunks overlay their layer intermediates; decode rows keep small separate scratch.
@@ -267,7 +267,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                    runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                    runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                     session=session, name=name, workspace=arena, feedback=feedback, max_cache_pages=max_cache_pages,
                     context=context)
                 batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages,
@@ -307,8 +307,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     with phase(progress, "Prepare and tune kernels") as stage:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")
+    report(f"after tuning: free={torch.cuda.mem_get_info(device)[0] >> 20} MiB, "
+           f"allocated={torch.cuda.memory_allocated(device) >> 20} MiB, reserved={torch.cuda.memory_reserved(device) >> 20} MiB")
     stream = torch.cuda.Stream(device=device)
-    graph_pool = torch.cuda.graph_pool_handle()
+    graph_pool = torch.cuda.graph_pool_handle() if package_storage is None else package_storage.graph_pool.id
 
     def rebind_pages(final_pages, *, compiled_only=False):
         for name, forward in forwards.items():
@@ -321,8 +323,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     measured, _ = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
         pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=False,
         progress=progress, label="Measure graph memory", cache_root=config.kernel_cache)
-    available = minimum_across_ranks(
-        torch.cuda.mem_get_info(device)[0] - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
+    free = torch.cuda.mem_get_info(device)[0]
+    report(f"after graph measurement: free={free >> 20} MiB, allocated={torch.cuda.memory_allocated(device) >> 20} MiB, "
+           f"reserved={torch.cuda.memory_reserved(device) >> 20} MiB, headroom={config.headroom_bytes >> 20} MiB")
+    available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
     pages = available // page_bytes if config.pages is None else config.pages
     if pages < (config.minimum_pages or 1) or pages * page_bytes > available:
         raise MemoryError(f"prepared graphs leave {max(available, 0) / (1 << 30):.2f} GiB for KV pages; "
@@ -343,7 +347,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             from ignition.components.shared_pages import SharedPages
 
             shared_pages.extend(pool.replace_pages(pages, ranks=context_ranks,
-                                                   share=lambda nbytes: SharedPages(group, device, nbytes)))
+                                                   share=lambda nbytes: SharedPages(group, device, nbytes, ipc=ipc)))
             rebind_pages(pages)
             for graph in measured.values():
                 graph.reset()
@@ -354,7 +358,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
         compile_decoder=config.compile_decoder, materialize=materialize, progress=progress,
-        cache_root=config.kernel_cache)
+        cache_root=config.kernel_cache, retain_graphs=config.retain_graphs)
     kv_bytes = pages * page_bytes
     session.freeze()
     pool.clear_for_preparation()
@@ -384,10 +388,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
-        prefill_collective,
         vocabulary_collective, coordinator, speculation, context)
     exchanges = () if context is None else (context.heads, context.candidates)
+    # Operator scratch holds nothing between launches; a package stores it as zeros.
+    disposable = ((arena.tensor.data_ptr(), arena.tensor.nbytes),) if arena.nbytes else ()
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
-        max_active=config.max_active, resources=resources, session=session,
-        close_resources=(*exchanges, *shared_pages, prefill_collective, vocabulary_collective, collective),
+        max_active=config.max_active, resources=resources, session=session, export_zero_ranges=disposable,
+        close_resources=(*exchanges, *shared_pages, vocabulary_collective, collective),
         server_config=server_config, memory_report=memory)
