@@ -84,7 +84,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
                  metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
-                 workspace, progress=None, feedback=None):
+                 workspace, progress=None, feedback=None, max_cache_pages=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
             raise ValueError("GLM text execution requires all 45 decoder layers")
@@ -105,13 +105,20 @@ class PreparedDecoder:
                 scratch.layer(module.block_type, sparse=isinstance(layer_weights.mlp, MoEWeights)), layer_state,
                 metadata.indexed if indexed else metadata.recurrent, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
-                carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1)
+                carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1,
+                max_cache_pages=max_cache_pages)
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")
         self.lm_head = PreparedVocabularyProjection(scratch.hidden, weights.tree.lm_head.weight,
             scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator,
             session=session, name=f"{name}.lm_head")
+
+    def rebind_pages(self):
+        """Rebind every sparse-attention layer to the continuation pool's current page pools."""
+        for layer in self.layers:
+            if hasattr(layer.attention, "rebind_pages"):
+                layer.attention.rebind_pages()
 
     def __call__(self):
         s, language = self.scratch, self.weights.tree.model.language_model

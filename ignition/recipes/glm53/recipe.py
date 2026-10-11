@@ -23,7 +23,10 @@ def _costs(state_row_bytes, graph_bytes, *, speculating):
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
-    """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1."""
+    """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1.
+
+    KV pages fill the free memory measured after graph capture, not the plan's estimate.
+    """
     from ignition.preparation.rank_group import prepare_group
 
     from .bootstrap import PreparationConfig, prepare_rank
@@ -34,7 +37,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
         "speculative_graph_budget": speculation.graph_budget}
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, max_active=plan.concurrency,
-        context=plan.context, prefill_chunk_size=plan.prefill_chunk, pages=plan.pages,
+        context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
         mtp=speculation is not None, **drafting)

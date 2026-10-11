@@ -100,7 +100,8 @@ class PreparedGlmIndexer:
     """
 
     def __init__(self, module, weights, source, query_residual, scratch: IndexScratch,
-                 state: IndexState, metadata: IndexMetadata, *, mode, session, name, workspace):
+                 state: IndexState, metadata: IndexMetadata, *, mode, session, name, workspace,
+                 max_cache_pages=None):
         rows = source.shape[0]
         if (source.shape != (rows, 4096) or query_residual.shape != (rows, 1536)
                 or source.dtype != torch.bfloat16 or query_residual.dtype != source.dtype
@@ -150,9 +151,17 @@ class PreparedGlmIndexer:
         self.expand_options = {"pool_size": 4, "block_size": 256, "block_stride_rows": 256,
                                "num_cache_blocks": state.cache.shape[0]}
         self.expand_plan = sparse_mla.plan_pooled_selection(device=source.device, max_rows=rows,
-            page_size=256, max_page_table_width=metadata.block_table.shape[1], num_cache_blocks=state.cache.shape[0])
+            page_size=256, max_page_table_width=metadata.block_table.shape[1],
+            num_cache_blocks=max(state.cache.shape[0], max_cache_pages or 0))
         declare(session, (self.expand_plan.request(name=f"{name}.expand", prepare_call=lambda state:
             PreparedCall(run=lambda: state.run(*self.expand_arguments, **self.expand_options))),))
+
+    def rebind_pages(self):
+        """Address the state's current index cache; plans bound its page count from above."""
+        cache = self.state.cache
+        self.pool_arguments = (cache, *self.pool_arguments[1:])
+        self.selector.rebind_cache(cache.view(cache.shape[0], -1))
+        self.expand_options["num_cache_blocks"] = cache.shape[0]
 
     def __call__(self):
         s, m = self.scratch, self.metadata

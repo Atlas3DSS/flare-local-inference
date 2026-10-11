@@ -12,6 +12,7 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
     CollectivePreparation,
@@ -21,6 +22,7 @@ from ignition.preparation.collectives import (
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
 from ignition.preparation.model import PreparedModel
+from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.progress import phase
 from ignition.preparation.tuning import RecordedPreparationSession
@@ -35,6 +37,11 @@ from .state import DecoderMetadata
 from .weights import ModelWeights
 
 
+_COMPILED_KINDS = ("prefill", "decode", "resume", "speculative")
+# Allocator granularity and fragmentation slack beyond the headroom kept after the final KV allocation.
+_KV_ALLOCATION_MARGIN = 64 << 20
+
+
 @dataclass(frozen=True)
 class PreparationConfig:
     devices: tuple[int, ...] = (0, 1)
@@ -42,6 +49,8 @@ class PreparationConfig:
     prefill_chunk_size: int = 4096
     max_active: int = 4
     pages: int | None = None
+    # Without fixed pages, KV pages fill the memory measured free after graph capture, at least this many.
+    minimum_pages: int | None = None
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
@@ -71,6 +80,9 @@ class PreparationConfig:
         request_capacity(self.max_active)
         if self.pages is not None and (type(self.pages) is not int or not 0 < self.pages <= 2147483647):
             raise ValueError("page capacity must be a positive signed 32-bit integer")
+        if self.minimum_pages is not None and (type(self.minimum_pages) is not int or self.minimum_pages <= 0
+                                               or self.pages is not None and self.minimum_pages > self.pages):
+            raise ValueError("minimum page capacity must be positive and at most the fixed page capacity")
         if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
             raise ValueError("snapshot budget must be positive and headroom nonnegative")
 
@@ -104,7 +116,15 @@ class PreparationConfig:
 
     @property
     def page_capacity(self):
-        return (self.context // 256 + int(self.mtp)) * self.max_active if self.pages is None else self.pages
+        """Fixed KV pages, or the context of every active request when memory does not size them."""
+        if self.pages is not None:
+            return self.pages
+        return self.minimum_pages or (self.context // 256 + int(self.mtp)) * self.max_active
+
+    @property
+    def preparation_pages(self):
+        """Pages held while tuning and measuring graphs; the final pools replace them before capture."""
+        return min(self.page_capacity, 2 * self.request_capacity)
 
 
 @torch.no_grad()
@@ -132,13 +152,14 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
         if snapshots < 1:
             raise ValueError("GLM snapshot budget must hold at least one continuation row")
-        pages, blocks = config.page_capacity, config.context // 256
+        pages, blocks = config.preparation_pages, config.context // 256
         slots = config.request_capacity
         extra_base = slots + 1 + snapshots
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
             extra_base + (slots * 7 if config.mtp else 0), pages, device, mtp=config.mtp)
-        kv_bytes = sum(cache.nbytes for _, cache in (*pool.partial_pages(), *pool.draft_pages()))
-        stage.update(f"KV cache: {kv_bytes / (1 << 30):.2f} GiB per GPU · {pages * 256:,} tokens")
+        page_bytes = sum(cache.nbytes for _, cache in (*pool.partial_pages(), *pool.draft_pages())) // pages
+        # Plans bound the page pools that replace the preparation pages after graph measurement.
+        max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
         requests = DeviceRequestState.allocate(device, vocab_size=154880, capacity=slots, consumed_tokens=pool.consumed_tokens[1:1 + slots, 0])
         inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=154880, capacity=slots)
@@ -176,7 +197,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
             speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage,
                 extra_base=extra_base, session=session, workspace=arena, records=records, frame=frame,
-                sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
+                sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                max_cache_pages=max_cache_pages)
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 
@@ -197,7 +219,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
                     runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-                    session=session, name=name, workspace=arena, feedback=feedback)
+                    session=session, name=name, workspace=arena, feedback=feedback, max_cache_pages=max_cache_pages)
                 batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages)
                 forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
                     pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation", replicated_sampling=config.mtp)
@@ -235,9 +257,48 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     report(f"selected kernels: {tuning['selection_counts']}")
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle()
+
+    def rebind_pages(final_pages, *, compiled_only=False):
+        for name, forward in forwards.items():
+            if compiled_only and signatures[name].kind not in _COMPILED_KINDS:
+                continue
+            if hasattr(forward, "rebind_pages"):
+                forward.rebind_pages(final_pages)
+
+    # Graphs captured over the preparation pages measure everything except the final page pools.
+    measured, _ = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
+        pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=False,
+        progress=progress, label="Measure graph memory", cache_root=config.kernel_cache)
+    available = minimum_across_ranks(
+        torch.cuda.mem_get_info(device)[0] - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
+    pages = available // page_bytes if config.pages is None else config.pages
+    if pages < (config.minimum_pages or 1) or pages * page_bytes > available:
+        raise MemoryError(f"prepared graphs leave {max(available, 0) / (1 << 30):.2f} GiB for KV pages; "
+                          f"{max(pages, config.minimum_pages or 1)} pages need "
+                          f"{max(pages, config.minimum_pages or 1) * page_bytes / (1 << 30):.2f} GiB")
+    if config.compile_decoder:
+        from b12x._lib.compile_plan import compile_only_launches
+
+        # Compiler workers trace the final pool shapes while the pools hold no device memory.
+        with compile_only_launches():
+            pool.replace_pages(pages, metadata_mode=deferred_mode())
+            rebind_pages(pages, compiled_only=True)
+
+    def materialize():
+        with phase(progress, "Allocate KV cache") as stage:
+            pool.replace_pages(pages)
+            rebind_pages(pages)
+            for graph in measured.values():
+                graph.reset()
+            measured.clear()
+            torch.cuda.synchronize(device)
+            stage.update(f"{pages * page_bytes / (1 << 30):.2f} GiB per GPU · {pages * 256:,} tokens")
+
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
-        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache)
+        compile_decoder=config.compile_decoder, materialize=materialize, progress=progress,
+        cache_root=config.kernel_cache)
+    kv_bytes = pages * page_bytes
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)

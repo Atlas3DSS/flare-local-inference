@@ -69,7 +69,7 @@ class PreparedGlmMLA:
     """
 
     def __init__(self, module, weights, source, scratch: MLAScratch, state: MLAState,
-                 metadata: IndexMetadata, *, mode, session, name, workspace):
+                 metadata: IndexMetadata, *, mode, session, name, workspace, max_cache_pages=None):
         rows, heads = scratch.query.shape[:2]
         if (source.shape != (rows, 4096) or source.dtype != torch.bfloat16
                 or source.device != scratch.query.device):
@@ -103,17 +103,25 @@ class PreparedGlmMLA:
             (values[:, 256:], scales[:, 256:]), scratch.expanded.transpose(0, 1), major="k",
             session=session, name=f"{name}.expand_value")
         self.indexer = PreparedGlmIndexer(module.indexer, weights, source, scratch.query_residual,
-            scratch.index, state.index, metadata, mode=mode, session=session, name=f"{name}.indexer", workspace=workspace)
+            scratch.index, state.index, metadata, mode=mode, session=session, name=f"{name}.indexer",
+            workspace=workspace, max_cache_pages=max_cache_pages)
         self.writer = PreparedLatentCacheWriter(scratch.latent, state.cache, metadata.token_slots,
             session=session, name=f"{name}.cache_write")
         caps = sparse_mla.Caps(device=source.device, num_q_heads=heads, max_q_rows=rows, max_width=2051,
-            softmax_scale=module.scaling, max_batch=rows, max_kv_rows=state.cache.shape[0] * 64,
+            softmax_scale=module.scaling, max_batch=rows,
+            max_kv_rows=max(state.cache.shape[0], 4 * (max_cache_pages or 0)) * 64,
             kv_dtype=torch.uint8, head_dim=512, v_head_dim=512, page_size=64,
             model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528,
             mode="decode" if mode == "decode" else "extend")
         self.attention = PreparedSparseMLA(scratch.absorbed_query, state.cache, scratch.index.physical,
             scratch.visible, scratch.index.selected_lengths, scratch.attended, caps=caps,
             session=session, name=f"{name}.attention", workspace=workspace)
+
+    def rebind_pages(self):
+        """Write and attend through the state's current page pools after they were replaced."""
+        self.writer.cache = self.state.cache
+        self.indexer.rebind_pages()
+        self.attention.rebind_cache(self.state.cache)
 
     def __call__(self, source):
         s, p = self.scratch, self.projections

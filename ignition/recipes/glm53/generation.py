@@ -40,6 +40,10 @@ class PreparedGeneration:
         self.peer_completion = PreparedCompletion(*arguments)
         self.peer_completion.prepare()
 
+    def rebind_pages(self, pages):
+        self.decoder.rebind_pages()
+        self.batch.pages = pages
+
     def compilation_variants(self):
         if self.replicated_sampling:
             return {"sample": self}

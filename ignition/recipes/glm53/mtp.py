@@ -58,7 +58,7 @@ class PreparedMTP:
     """
 
     def __init__(self, weights, state, metadata, *, mode, session, name, workspace,
-                 runtime, vocabulary_runtime, coordinator, cache_only=False):
+                 runtime, vocabulary_runtime, coordinator, cache_only=False, max_cache_pages=None):
         from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextAttention, Glm5NextTextMoE
 
         config = deepcopy(weights.tree.config.text_config)
@@ -82,7 +82,8 @@ class PreparedMTP:
         scratch = MLAScratch.allocate(rows, 64 // weights.shard.world_size,
             metadata.indexed.block_table.shape[1], mode, device)
         self.attention = PreparedGlmMLA(attention, weights.mtp.attention, self.normalized, scratch,
-            state, metadata.indexed, mode=mode, session=session, name=f"{name}.mla", workspace=workspace)
+            state, metadata.indexed, mode=mode, session=session, name=f"{name}.mla", workspace=workspace,
+            max_cache_pages=max_cache_pages)
         if not cache_only:
             self.attention_reduce = PreparedAllReduce(scratch.output, self.attention_output,
                 runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.attention_reduce")
@@ -97,6 +98,9 @@ class PreparedMTP:
             self.head = PreparedVocabularyProjection(self.hidden, head,
                 self.local_logits, self.logits, runtime=vocabulary_runtime, coordinator=coordinator,
                 session=session, name=f"{name}.lm_head")
+
+    def rebind_pages(self):
+        self.attention.rebind_pages()
 
     def __call__(self):
         w, m = self.weights.tensors, self.metadata

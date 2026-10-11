@@ -79,6 +79,31 @@ class ContinuationPool(StateStorage):
         return cls(storage.backing, storage.layout, DecoderState(tuple(layers)),
                    storage.region("consumed_tokens"), storage.region("last_hidden"), draft)
 
+    def replace_pages(self, pages, *, metadata_mode=None):
+        """Give every MLA state, including the draft layer, `pages` empty physical pages.
+
+        The states are updated in place, so their holders see the new pools; operators that
+        bound the previous pools must rebind before capture. A metadata mode describes the
+        pools without device memory for forward compilation.
+        """
+        if type(pages) is not int or pages <= 0:
+            raise ValueError("GLM continuation storage requires positive page capacity")
+        device = self.backing.device
+
+        def empty(shape):
+            if metadata_mode is not None:
+                from ignition.preparation.deferred import deferred_tensor
+
+                return deferred_tensor(shape, dtype=torch.uint8, device=device, mode=metadata_mode)
+            return torch.zeros(shape, dtype=torch.uint8, device=device)
+
+        states = [layer for layer in self.decoder.layers if isinstance(layer, MLAState)]
+        for state in (*states, *((self.draft,) if self.draft is not None else ())):
+            object.__setattr__(state, "cache", None)
+            object.__setattr__(state.index, "cache", None)
+            object.__setattr__(state, "cache", empty((pages * 4, 64, 528)))
+            object.__setattr__(state.index, "cache", empty((pages, 64, 132)))
+
     def clear_for_preparation(self):
         self.backing.zero_()
         for layer in (*self.decoder.layers, *((self.draft,) if self.draft is not None else ())):

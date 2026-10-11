@@ -14,6 +14,17 @@ import torch.multiprocessing as mp
 from ignition.progress import phase
 
 
+def minimum_across_ranks(value, group):
+    """The smallest integer any rank reports, for sizing storage every rank must allocate."""
+    if group is None:
+        return value
+    import torch
+
+    result = torch.tensor(value, dtype=torch.int64)
+    dist.all_reduce(result, op=dist.ReduceOp.MIN, group=group)
+    return result.item()
+
+
 def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare, packaged):
     import flare_heliopause
 

@@ -19,6 +19,7 @@ from ignition.preparation.execution import GraphSignature
 from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
 from ignition.preparation.model import PreparedModel
+from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.qwen38 import (
     FRONTEND_SHA256,
     MODEL_ID,
@@ -44,16 +45,6 @@ from .vision import PreparedVision, VisionScratch
 _KV_ALLOCATION_MARGIN = 64 << 20
 
 
-def _minimum_across_ranks(value, group):
-    if group is None:
-        return value
-    import torch.distributed as dist
-
-    result = torch.tensor(value, dtype=torch.int64)
-    dist.all_reduce(result, op=dist.ReduceOp.MIN, group=group)
-    return result.item()
-
-
 def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes, automatic, report,
                          group=None, fixed_capacity=False):
     """Fit unbound KV pools to measured device consumption before graph capture."""
@@ -61,7 +52,7 @@ def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes,
         pools = {index: value.resize_pages_for_preparation(capacity) for index, value in cache.items()}
         torch.cuda.synchronize(device)
         free = torch.cuda.mem_get_info(device)[0]
-        free = _minimum_across_ranks(free, group)
+        free = minimum_across_ranks(free, group)
         if free >= headroom_bytes or fixed_capacity:
             report(f"{capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {capacity * 64:,} tokens")
             return pools, capacity
@@ -251,7 +242,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                      for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}
             page_bytes = sum(sum(getattr(value, name).nbytes for name in
                 ("main_k_cache", "main_v_cache", "compressed_k_cache")) for value in cache.values())
-            planned_pages = _minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
+            planned_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
             admission = AdmissionBuffers.allocate(device, vocab_size=248320, capacity=slots)
             transfer = StateTransferMetadata.allocate(slots, device)
             frame = torch.zeros(1, dtype=torch.int32, device=device)
@@ -377,7 +368,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
 
         capture_catalog(compile_decoder=False, label="Measure graph memory")
         free, total = torch.cuda.mem_get_info(device)
-        available = _minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
+        available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
         page_capacity = available // page_bytes if config.pages is None else config.pages
         if config.minimum_pages is not None:
             page_capacity = min(page_capacity, available // page_bytes)

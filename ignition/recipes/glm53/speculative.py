@@ -64,8 +64,9 @@ def delta_regions(pool):
 
 class SpeculativePreparation:
     def __init__(self, weights, pool, requests, inputs, scratch, *, extra_base, session,
-                 workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator):
+                 workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
+        self.max_cache_pages = max_cache_pages
         self.scratch, self.extra_base, self.session, self.workspace = scratch, extra_base, session, workspace
         self.records, self.frame, self.sequence = records, frame, sequence
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
@@ -76,7 +77,8 @@ class SpeculativePreparation:
 
     def draft(self, metadata, name, *, cache_only=False, mode="decode"):
         return PreparedMTP(self.weights, self.pool.draft, metadata, mode=mode,
-            session=self.session, name=name, workspace=self.workspace, cache_only=cache_only, **self.collectives)
+            session=self.session, name=name, workspace=self.workspace, cache_only=cache_only,
+            max_cache_pages=self.max_cache_pages, **self.collectives)
 
 
 class PreparedPrefill:
@@ -91,6 +93,10 @@ class PreparedPrefill:
         self.previous = torch.zeros((1, 4096), dtype=torch.bfloat16, device=device)
         self.indices = torch.arange(tokens, device=device)
         self.before = torch.zeros(1, dtype=torch.int64, device=device)
+
+    def rebind_pages(self, pages):
+        self.absorb.rebind_pages()
+        self.generation.rebind_pages(pages)
 
     def __call__(self):
         o, g = self.owner, self.generation
@@ -131,7 +137,7 @@ class PreparedRound:
             session=o.session, name=f"{name}.validation")
         self.decoder = PreparedDecoder(o.weights, o.scratch.rows(b * w, "decode", sample_rows=b * w),
             o.pool.decoder, self.metadata, mode="decode", session=o.session, name=f"{name}.target",
-            workspace=o.workspace, **o.collectives)
+            workspace=o.workspace, max_cache_pages=o.max_cache_pages, **o.collectives)
         self.draft_metadata = DraftMetadata(b, b, blocks, device)
         self.draft = o.draft(self.draft_metadata, f"{name}.draft") if w > 1 else None
         self.draft_logits = torch.empty_like(self.draft.logits) if self.draft is not None else None
@@ -169,6 +175,13 @@ class PreparedRound:
             o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows,
             o.records, o.frame, o.sequence, rng=o.rng, token_limits=o.inputs.query_lengths[:b])
         self.operations = target, proposals, verify, commit
+
+    def rebind_pages(self, pages):
+        self.decoder.rebind_pages()
+        for draft in (self.draft, self.absorb):
+            if draft is not None:
+                draft.rebind_pages()
+        self.validator.pages = pages
 
     def target_metadata(self, slots, limits):
         o, b, w, m = self.owner, self.batch, self.width, self.metadata
