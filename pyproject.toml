@@ -42,7 +42,7 @@ flashinfer-python = { path = "../flashinfer", editable = true }
 flare-helios = { path = "helios" }
 
 [tool.flare.source-revisions]
-flashinfer = "7da3c36064eaf0b1450ddc983ddc9e7810ea7ff6"
+flashinfer = "ca05e4384728a151aabd54b9ec7e637e56afaa22"
 
 [tool.setuptools.packages.find]
 include = ["flare*"]
