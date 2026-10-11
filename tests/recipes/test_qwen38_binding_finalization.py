@@ -57,7 +57,7 @@ class Session:
         self.requests, self.finalizers, self.arenas = {}, [], []
         self.benchmark_resources = {}
 
-    def declare(self, requests, *, stage="weights", coordinator=None):
+    def declare(self, requests, *, coordinator=None):
         for request in requests:
             self.requests[request.name] = request
 

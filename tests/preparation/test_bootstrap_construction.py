@@ -72,7 +72,6 @@ class ConstructionComplete(Exception):
 class RecordingSession:
     def __init__(self, **kwargs):
         self.requests = {}
-        self.stages = {}
         self.finalizers = []
         self.arena = None
         self.closed = False
@@ -82,12 +81,11 @@ class RecordingSession:
     def __enter__(self):
         return self
 
-    def declare(self, requests, *, stage="weights", coordinator=None):
+    def declare(self, requests, *, coordinator=None):
         for request in requests:
             assert request.name not in self.requests
             self.memory[request.name] = request.plan.memory_requirements()
             self.requests[request.name] = request
-            self.stages[request.name] = stage
 
     def register_finalizer(self, callback):
         self.finalizers.append(callback)
@@ -294,6 +292,12 @@ def _install_boundaries(monkeypatch, checkpoint):
 
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
     from flashinfer import sampling
+    from flare.components import flashinfer_sampling
+
+    monkeypatch.setattr(sampling, "get_sampling_module", lambda: SimpleNamespace(
+        top_k_mask_logits=lambda tensor, *a: torch.empty_like(tensor),
+        softmax=lambda workspace, tensor, *a: torch.empty_like(tensor)))
+    monkeypatch.setattr(flashinfer_sampling, "device_support_pdl", lambda device: False)
 
     old_storage_pointer = torch.UntypedStorage.data_ptr
     monkeypatch.setattr(
@@ -392,11 +396,10 @@ def _install_boundaries(monkeypatch, checkpoint):
         "F8_E8M0": torch.float8_e8m0fnu,
     }
 
-    def load_tensor(loader, name):
+    def load_tensor(loader, name, *, extent=None):
         record = manifest.tensors[name]
-        return torch.empty(
-            record.shape, dtype=dtypes[record.dtype], device=loader.device
-        )
+        value = torch.empty(record.shape, dtype=dtypes[record.dtype], device=loader.device)
+        return value if extent is None else value[extent].contiguous()
 
     def pack(values, scales, *, recipe="mxfp8", **kwargs):
         n, k = values.shape[:2]
@@ -415,13 +418,13 @@ def _install_boundaries(monkeypatch, checkpoint):
             n,
         )
 
-    def load_linear(loader, prefix):
+    def load_linear(loader, prefix, *, rows=None, columns=None):
         record = manifest.tensors[prefix + ".weight"]
         n, k = record.shape
         if record.dtype == "F8_E4M3":
             return pack(
-                load_tensor(loader, prefix + ".weight"),
-                load_tensor(loader, prefix + ".weight_scale"),
+                load_tensor(loader, prefix + ".weight", extent=(slice(None) if rows is None else slice(*rows), slice(None) if columns is None else slice(*columns))),
+                load_tensor(loader, prefix + ".weight_scale", extent=(slice(None) if rows is None else slice(*rows), slice(None) if columns is None else slice(columns[0] // 32, columns[1] // 32))),
             )
         assert record.dtype == "U8"
         logical = k * 2
@@ -558,7 +561,7 @@ def _install_boundaries(monkeypatch, checkpoint):
     monkeypatch.setattr(loader, "load_experts", experts)
     monkeypatch.setattr(mtp_weights.MTPWeightLoader, "load_experts", experts)
 
-    def load_table(cls, manifest, device, *, progress=None):
+    def load_table(cls, manifest, device, *, progress=None, shard=None):
         geometry = ple.ple_embedding.allocate_geometry(
             table_layout.geometry, device=device
         )
@@ -740,10 +743,6 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         and session.arena._finalizers
         and not session.arena.frozen
     )
-    assert set(session.stages.values()) == {"weights", "state"}
-    for name, request in session.requests.items():
-        if request.plan.component_id in ("attention.qsa", "sequence.gdn_decode", "sequence.gdn_prefill"):
-            assert session.stages[name] == "state"
     assert len(session.resources) == 1
     borrowed, _ = next(iter(session.resources.values()))
     assert (

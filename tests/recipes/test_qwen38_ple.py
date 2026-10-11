@@ -130,6 +130,9 @@ def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
     destination = torch.empty_like(source)
     _copy_plane(manifest, "plane", destination)
     assert torch.equal(source.view(torch.uint8), destination.view(torch.uint8))
+    part = torch.empty((193, shape[1]), dtype=dtype)
+    _copy_plane(manifest, "plane", part, rows=(129, 322))
+    assert torch.equal(source[129:322].view(torch.uint8), part.view(torch.uint8))
     with pytest.raises(ValueError, match="checkpoint shape"):
         _copy_plane(manifest, "plane", destination[:-1])
     with (tmp_path / "part.safetensors").open("r+b") as stream:
@@ -161,7 +164,7 @@ def test_ple_mapping_releases_storage_after_checkpoint_read_failure(
         lambda layout: storage,
     )
 
-    def fail_read(*args):
+    def fail_read(*args, **kwargs):
         raise OSError("injected checkpoint read failure")
 
     monkeypatch.setattr("flare.recipes.qwen38.ple._copy_plane", fail_read)
@@ -437,3 +440,17 @@ def test_full_checkpoint_ple_native_graph_continuity(
             worker.close()
             for graph in graphs.values():
                 graph.reset()
+
+
+@pytest.mark.parametrize("world", (2, 4))
+def test_ple_rank_rows_cover_the_checkpoint_once(manifest, world):
+    layouts = [table_layout(manifest, "cuda:0", rank=rank, world_size=world)[1] for rank in range(world)]
+    assert layouts[0].shard_start == 0
+    assert layouts[-1].shard_end == 320001536
+    for rank, layout in enumerate(layouts):
+        assert layout.caps.tp_rank == rank and layout.caps.tp_size == world
+        assert layout.weight_shape == (320001536 // world, 80)
+        assert layout.weight_scale_shape == (320001536 // world, 10)
+        if rank:
+            assert layouts[rank - 1].shard_end == layout.shard_start
+    assert sum(layout.weight_shape[0] * 90 for layout in layouts) == TABLE_BYTES

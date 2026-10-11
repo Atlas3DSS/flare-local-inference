@@ -20,7 +20,9 @@ class StartupProgress:
 class _Phase:
     def __init__(self, progress, label, total):
         self.progress, self.label, self.total = progress, label, total
+        self.console = progress.console if isinstance(progress, StartupProgress) else None
         self.completed = 0
+        self.finished = False
         self.started = self.operation_started = monotonic()
         self.detail = ""
         self.live = None
@@ -36,25 +38,26 @@ class _Phase:
 
     def __rich__(self):
         from rich.console import Group
-        from rich.progress_bar import ProgressBar
-        from rich.table import Table
         from rich.text import Text
 
         now = monotonic()
-        status = "failed" if self.failed else self.label
-        color = "red" if self.failed else "cyan"
-        row = Table.grid(expand=True, padding=(0, 1))
-        row.add_column(no_wrap=True)
-        row.add_column(ratio=1)
-        row.add_column(no_wrap=True, justify="right")
+        row = Text("[", overflow="ellipsis", no_wrap=True)
+        if self.failed:
+            row.append("  FAILED  ", style="bold red")
+        elif self.finished:
+            row.append("    OK    ", style="bold green")
+        else:
+            position = int((now - self.started) * 8) % 16
+            position = min(position, 15 - position)
+            for index in range(10):
+                row.append("-", style="bold cyan" if position <= index < position + 3 else "dim")
+        row.append(f"] {self.label}")
         count = f"{self.completed}/{self.total}  " if self.total is not None else ""
-        row.add_row(Text(status, style=f"bold {color}"),
-            ProgressBar(total=self.total, completed=self.completed, pulse=self.total is None,
-                        complete_style=color, finished_style="green", pulse_style=color),
-            Text(f"{count}{now - self.started:.1f}s"))
-        detail = Text(self.detail, style="dim", overflow="ellipsis", no_wrap=True)
-        if self.detail:
-            detail.append(f"  ·  {now - self.operation_started:.1f}s")
+        row.append(f"  {count}{now - self.started:.1f}s", style="dim")
+        if not self.detail:
+            return row
+        detail = Text(f"             {self.detail}", style="dim", overflow="ellipsis", no_wrap=True)
+        detail.append(f"  ·  {now - self.operation_started:.1f}s")
         return Group(row, detail)
 
 
@@ -73,7 +76,7 @@ def phase(progress, label, *, total=None):
                               redirect_stdout=False, redirect_stderr=False)
             stage.live.start()
         else:
-            display.console.print(f"{label} started", markup=False)
+            display.console.print(stage)
     elif progress is not None:
         progress(f"{label} started")
     try:
@@ -82,9 +85,9 @@ def phase(progress, label, *, total=None):
         stage.failed = True
         raise
     else:
-        if stage.total is None:
-            stage.total = 1
-        stage.completed = stage.total
+        stage.finished = True
+        if stage.total is not None:
+            stage.completed = stage.total
     finally:
         if stage.live is not None:
             stage.live.stop()
@@ -93,6 +96,6 @@ def phase(progress, label, *, total=None):
             if display is None:
                 progress(message)
             else:
-                display.console.print(message, markup=False)
+                display.console.print(stage)
         if display is not None:
             display.active = previous

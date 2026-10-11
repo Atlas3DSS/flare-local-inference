@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import TYPE_CHECKING
 
+from flare.components.parallel import TensorParallelShard
 from flare.components.weights import DirectWeightLoader
 from flare.preparation.checkpoint import CheckpointManifest
 from flare.preparation.qwen38 import TEXT_PREFIX, expected_quantization
@@ -58,7 +59,7 @@ def expert_memory_plan(
 
 
 def allocate_expert_scale_scratch(
-    device: torch.device | str, expert_count: int = 512
+    device: torch.device | str, expert_count: int = 512, *, shard: TensorParallelShard = TensorParallelShard(0, 1)
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate scale expansion storage shared by serial decoder layer calls."""
     import torch
@@ -69,8 +70,8 @@ def allocate_expert_scale_scratch(
     if device.type != "cuda":
         raise ValueError("expert scale scratch requires a CUDA device")
     return (
-        torch.empty((expert_count, 1280, 160), dtype=torch.float8_e4m3fn, device=device),
-        torch.empty((expert_count, 2560, 40), dtype=torch.float8_e4m3fn, device=device),
+        torch.empty((expert_count, ((1280 // shard.world_size + 127) // 128) * 128, 160), dtype=torch.float8_e4m3fn, device=device),
+        torch.empty((expert_count, 2560, ((40 // shard.world_size + 3) // 4) * 4), dtype=torch.float8_e4m3fn, device=device),
     )
 
 
@@ -117,6 +118,10 @@ class QwenWeightLoader(DirectWeightLoader):
     layer of CUDA staging for layout conversion.
     """
 
+    def __init__(self, *args, shard=TensorParallelShard(0, 1), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.shard = shard
+
     def _selected_names(self):
         return {
             name for name, tensor in self.manifest.tensors.items()
@@ -124,7 +129,7 @@ class QwenWeightLoader(DirectWeightLoader):
             and (self.prefixes is None or name.startswith(self.prefixes))
         }
 
-    def load_linear(self, prefix: str) -> Weight:
+    def load_linear(self, prefix: str, *, rows=None, columns=None) -> Weight:
         from b12x.gemm.blockscaled import pack_weight
 
         self._require_open()
@@ -132,9 +137,9 @@ class QwenWeightLoader(DirectWeightLoader):
         if recipe not in ("MXFP8", "W4A16_NVFP4") or prefix.startswith("mtp."):
             raise ValueError(f"{prefix} is not a supported dense quantized projection")
         if recipe == "MXFP8":
-            return pack_weight(
-                *self.load_tensors((f"{prefix}.weight", f"{prefix}.weight_scale")), recipe="mxfp8",
-            )
+            return self.load_mxfp8_group((prefix,), row_ranges=(rows,), column_range=columns)
+        if rows is not None or columns is not None:
+            raise ValueError("dense NVFP4 slicing requires an explicit packed-weight layout")
         import torch
         from b12x._lib.intrinsics import swizzle_block_scale
 
@@ -154,26 +159,35 @@ class QwenWeightLoader(DirectWeightLoader):
         )
         return replace(packed, in_features=logical_columns)
 
-    def load_mxfp8_group(self, prefixes: Sequence[str]) -> Weight:
+    def load_mxfp8_group(self, prefixes: Sequence[str], *, row_ranges=None, column_range=None) -> Weight:
         """Pack serialized projections along output rows before scale swizzling."""
         recipes = expected_quantization()
         if not prefixes or any(
             recipes.get(prefix, {}).get("quant_algo") != "MXFP8" for prefix in prefixes
         ):
             raise ValueError("projection packing requires declared MXFP8 weights")
-        return super().load_mxfp8_group(prefixes)
+        return super().load_mxfp8_group(prefixes, row_ranges=row_ranges, column_range=column_range)
 
     def load_gdn_projections(self, prefix: str) -> dict[str, Weight]:
+        qkv = self.shard.fused_partitions((2048, 2048, 6144))
+        value = self.shard.partition(6144)
+        heads = self.shard.partition(48)
         return {
-            "in_proj_qkvz": self.load_mxfp8_group(tuple(f"{prefix}.{name}" for name in ("in_proj_qkv", "in_proj_z"))),
-            "in_proj_ba": self.load_mxfp8_group(tuple(f"{prefix}.{name}" for name in ("in_proj_b", "in_proj_a"))),
-            "out_proj": self.load_linear(f"{prefix}.out_proj"),
+            "in_proj_qkvz": self.load_mxfp8_group(
+                (f"{prefix}.in_proj_qkv",) * 3 + (f"{prefix}.in_proj_z",),
+                row_ranges=(*qkv, value)),
+            "in_proj_ba": self.load_mxfp8_group(
+                (f"{prefix}.in_proj_b", f"{prefix}.in_proj_a"), row_ranges=(heads, heads)),
+            "out_proj": self.load_linear(f"{prefix}.out_proj", columns=value),
         }
 
     def load_qsa_projections(self, prefix: str) -> dict[str, Weight]:
+        kv = tuple(head * 256 for head in self.shard.replicated_partition(2))
         return {
-            "qkv_proj": self.load_mxfp8_group(tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj"))),
-            "o_proj": self.load_linear(f"{prefix}.o_proj"),
+            "qkv_proj": self.load_mxfp8_group(
+                tuple(f"{prefix}.{name}" for name in ("q_proj", "k_proj", "v_proj")),
+                row_ranges=(self.shard.partition(12288), kv, kv)),
+            "o_proj": self.load_linear(f"{prefix}.o_proj", columns=self.shard.partition(6144)),
             "indexer.index_qk_proj": self.load_linear(f"{prefix}.indexer.index_qk_proj"),
         }
 
@@ -192,6 +206,7 @@ class QwenWeightLoader(DirectWeightLoader):
         return self.load_nvfp4_experts(
             tuple(f"{TEXT_PREFIX}.layers.{layer}.mlp.experts.{expert}" for expert in ids),
             hidden_size=2560, intermediate_size=640,
+            intermediate_range=self.shard.partition(640, alignment=16),
             scale_vectors=_expert_scale_vectors(self._sources, layer, ids),
             scale_scratch=scale_scratch,
         )

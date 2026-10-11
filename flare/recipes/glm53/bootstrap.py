@@ -106,7 +106,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress)
-    with phase(progress, "Allocate model state and collectives"):
+    with phase(progress, "Allocate model state and collectives") as stage:
         layer_types = weights.tree.config.text_config.layer_types
         layout = continuation_layout(layer_types, shard.world_size)
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
@@ -115,6 +115,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         pages, blocks = config.page_capacity, config.context // 256
         slots = config.request_capacity
         pool = ContinuationPool.allocate(layer_types, shard.world_size, slots + 1 + snapshots, pages, device)
+        kv_bytes = sum(cache.nbytes for _, cache in pool.partial_pages())
+        stage.update(f"KV cache: {kv_bytes / (1 << 30):.2f} GiB per GPU · {pages * 256:,} tokens")
         requests = DeviceRequestState.allocate(device, vocab_size=154880, capacity=slots, consumed_tokens=pool.consumed_tokens[1:1 + slots, 0])
         inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=154880, capacity=slots)
@@ -150,7 +152,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         def add(name, function, kind, rows, tokens, fields):
             forwards[name] = function
             signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields))
-            stage.update(name, advance=1)
+            stage.update(advance=1)
 
         for mode, capacities in (("prefill", reversed(config.prefill_capacities)), ("decode", config.batch_capacities)):
             for capacity in capacities:
@@ -179,8 +181,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                     capacity=capacity, admission_buffers=admission)
                 fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
                 add(name, operation, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()))
-    report("preparing weight kernels, then cache-state kernels")
-    tuning = session.tune(show_progress=progress is not None and rank == 0)
+    with phase(progress, "Prepare and tune kernels") as stage:
+        tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle()
@@ -193,9 +195,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     torch.cuda.empty_cache()
     free, total = torch.cuda.mem_get_info(device)
     if free < config.headroom_bytes:
-        raise MemoryError(f"GLM rank {rank} has {free} free bytes, below requested headroom {config.headroom_bytes}; "
-                          f"pages={pages}, snapshots={snapshots}")
-    kv_bytes = sum(cache.nbytes for _, cache in pool.partial_pages())
+        raise MemoryError(f"GLM rank {rank} has {free / (1 << 30):.3f} GiB free, "
+                          f"below requested headroom {config.headroom_bytes / (1 << 30):.3f} GiB; "
+                          f"KV cache: {kv_bytes / (1 << 30):.2f} GiB per GPU, {pages * 256:,} tokens; "
+                          f"snapshots={snapshots}")
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "weights_bytes": weights.allocated_bytes, "continuation_bytes": pool.backing.nbytes,
         "snapshot_capacity": snapshots, "pages": pages, "page_bytes": kv_bytes // pages, "kv_bytes": kv_bytes,

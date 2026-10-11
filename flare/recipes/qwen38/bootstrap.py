@@ -9,6 +9,8 @@ from pathlib import Path
 
 import torch
 
+from flare.components.parallel import TensorParallelShard
+from flare.preparation.collectives import CollectivePreparation, create_all_reduce_runtime, create_all_gather_runtime
 from flare.components.capacity import batch_capacities, request_capacity
 from flare.components.sampling import AdmissionBuffers
 from flare.preparation import inspect_qwen38_checkpoint
@@ -44,30 +46,42 @@ from .vision import PreparedVision, VisionScratch
 _KV_ALLOCATION_MARGIN = 64 << 20
 
 
-def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes, automatic, report):
+def _minimum_across_ranks(value, group):
+    if group is None:
+        return value
+    import torch.distributed as dist
+
+    result = torch.tensor(value, dtype=torch.int64)
+    dist.all_reduce(result, op=dist.ReduceOp.MIN, group=group)
+    return result.item()
+
+
+def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes, automatic, report, group=None):
     """Fit unbound KV pools to measured device consumption before graph capture."""
     while capacity > 0:
         pools = {index: value.resize_pages_for_preparation(capacity) for index, value in cache.items()}
         torch.cuda.synchronize(device)
         free = torch.cuda.mem_get_info(device)[0]
-        report(f"KV allocation: pages={capacity}, free={free}, "
-               f"allocated={torch.cuda.memory_allocated(device)}, reserved={torch.cuda.memory_reserved(device)}")
+        free = _minimum_across_ranks(free, group)
         if free >= headroom_bytes:
+            report(f"{capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {capacity * 64:,} tokens")
             return pools, capacity
         del pools
         torch.cuda.empty_cache()
         if not automatic:
-            raise MemoryError(f"requested KV pages violate configured GPU headroom: pages={capacity}, "
-                              f"free={free}, required={headroom_bytes}")
+            raise MemoryError(f"requested KV cache ({capacity * 64:,} tokens, "
+                              f"{capacity * page_bytes / (1 << 30):.2f} GiB per GPU) violates configured GPU headroom: "
+                              f"{free / (1 << 30):.3f} GiB free, {headroom_bytes / (1 << 30):.3f} GiB required")
         reduction = (headroom_bytes - free + _KV_ALLOCATION_MARGIN + page_bytes - 1) // page_bytes
         capacity -= reduction
-        report(f"adjusted automatic KV capacity to {capacity} pages after measured allocator overhead")
     raise MemoryError("prepared graph catalog leaves insufficient memory for KV pages and headroom")
 
 
 @dataclass(frozen=True)
 class PreparationConfig:
     device: int = 0
+    devices: tuple[int, ...] | None = None
+    compile_decoder: bool = True
     max_active: int = 4
     context: int = 262144
     prefill_chunk_size: int = 4096
@@ -82,6 +96,11 @@ class PreparationConfig:
     history_drafts: bool = False
 
     def __post_init__(self):
+        if self.devices is not None and (
+                not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
+                or len(set(self.devices)) != len(self.devices)
+                or any(type(device) is not int or device < 0 for device in self.devices)):
+            raise ValueError("tensor parallelism requires one, two or four distinct CUDA devices")
         request_capacity(self.max_active)
         for name in ("device", "context", "prefill_chunk_size", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
@@ -94,7 +113,8 @@ class PreparationConfig:
             raise ValueError("explicit page capacity must be a positive integer")
         if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
             raise TypeError("MTP and history draft switches must be booleans")
-        minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0).row_bytes
+        minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
+            world_size=1 if self.devices is None else len(self.devices)).row_bytes
         if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
             raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
         if self.speculative_proposal_source not in ("mtp", "copy"):
@@ -147,20 +167,25 @@ class PreparationConfig:
 
 
 
-def _identity(manifest):
+def _identity(manifest, world_size=1):
     sources = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                for path in sorted(Path(__file__).parent.glob("*.py"))}
     components = Path(__file__).parents[2] / "components"
     sources.update({f"components/{path.name}": hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(components.glob("*.py"))})
     value = {"checkpoint": REVISION, "headers": HEADERS_SHA256,
-             "config": CONFIG_SHA256, "recipe": sources, "kv_dtype": "bfloat16", "page_size": 64}
+             "config": CONFIG_SHA256, "recipe": sources, "kv_dtype": "bfloat16", "page_size": 64, "world_size": world_size}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def prepare_rank(snapshot, config, *, rank, group, progress=None):
+    return prepare_model(snapshot, config, progress=progress, compile_decoder=config.compile_decoder,
+                         rank=rank, group=group)
 
 
 @torch.no_grad()
 def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, progress=None,
-                  compile_decoder: bool = True) -> PreparedModel:
+                  compile_decoder: bool = True, rank: int = 0, group=None) -> PreparedModel:
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
     from .vision_state import (
@@ -175,11 +200,14 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             progress(message)
 
     config = PreparationConfig() if config is None else config
-    device = torch.device("cuda", config.device)
+    shard = TensorParallelShard(rank, 1 if config.devices is None else len(config.devices))
+    if (shard.world_size > 1) != (group is not None):
+        raise ValueError("tensor parallel preparation requires an established control group")
+    device = torch.device("cuda", config.device if config.devices is None else config.devices[rank])
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_qwen38_checkpoint(snapshot)
-    weights = ModelWeights.load(manifest, device, progress=progress)
+    weights = ModelWeights.load(manifest, device, progress=progress, shard=shard)
     mtp_weights = None
     has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
     if has_mtp:
@@ -187,21 +215,26 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
 
         mtp_weights = MTPWeights.load(manifest, device,
             embedding_weight=weights.tree.model.language_model.embed_tokens.weight,
-            lm_head_weight=weights.tree.lm_head.weight, progress=progress)
-    table = MappedPLETable.load(manifest, device, progress=progress)
-    session = preparation_session(device=device, checkpoint=REVISION,
-        namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256})
+            lm_head_weight=weights.tree.lm_head.weight, progress=progress, shard=shard)
+    table = MappedPLETable.load(manifest, device, progress=progress, shard=shard)
+    sample_rows = max(batch * width for batch, width in config.speculative_shapes) if config.mtp else config.request_capacity
+    coordinator = CollectivePreparation(group) if group is not None else None
+    collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560) if group is not None else None
+    vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320) if group is not None else None
+    collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
+    session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
+        namespace={"config": CONFIG_SHA256, "headers": HEADERS_SHA256, "world_size": shard.world_size})
     session.__enter__()
     graphs = {}
     try:
         with phase(progress, "Allocate model state"):
             speculative_tokens = 7 if config.mtp else 0
-            layout = HybridStateLayout.build(speculative_tokens=speculative_tokens)
+            layout = HybridStateLayout.build(speculative_tokens=speculative_tokens, world_size=shard.world_size)
             snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
             slots = config.request_capacity
             extra_base = 1 + slots + snapshots
             state = HybridStatePool.allocate(extra_base + (slots * 7 if config.mtp else 0), device,
-                                             speculative_tokens=speculative_tokens)
+                                             speculative_tokens=speculative_tokens, world_size=shard.world_size)
             register_benchmark_state(
                 session, next(iter(state.gdn.values())).recurrent,
                 storage=state.backing, restore=state.reset_for_preparation,
@@ -209,14 +242,14 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             requests = DeviceRequestState.allocate(device, capacity=slots,
                 consumed_tokens=state.consumed_tokens[1:1 + slots, 0], ple_history=state.ple_history[1:1 + slots])
             inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size, capacity=slots)
-            scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=max(batch * width for batch, width in config.speculative_shapes) if config.mtp else slots)
+            scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=sample_rows, world_size=shard.world_size)
             workspaces = ScratchArena(device)
             rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
-            cache = {index: QSAState.allocate(pages=1, slots=slots + 1, device=device, draft_tokens=speculative_tokens)
+            cache = {index: QSAState.allocate(pages=1, slots=slots + 1, device=device, draft_tokens=speculative_tokens, kv_heads=max(1, 2 // shard.world_size))
                      for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}
             page_bytes = sum(sum(getattr(value, name).nbytes for name in
                 ("main_k_cache", "main_v_cache", "compressed_k_cache")) for value in cache.values())
-            planned_pages = torch.cuda.mem_get_info(device)[1] // page_bytes
+            planned_pages = _minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
             admission = AdmissionBuffers.allocate(device, vocab_size=248320, capacity=slots)
             transfer = StateTransferMetadata.allocate(slots, device)
             frame = torch.zeros(1, dtype=torch.int32, device=device)
@@ -240,14 +273,14 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     rotary=rotary, cache=cache, table=table, session=session, completion=completion,
                     frame=frame, sequence=sequence, extra_base=extra_base, context=config.context,
                     prefill_capacity=config.token_capacity, max_cache_pages=planned_pages,
-                    proposal_source=config.speculative_proposal_source)
+                    proposal_source=config.speculative_proposal_source, **collectives)
                 buffers.update(speculation.buffers())
         graph_count = 4 + len(config.prefill_capacities) + (len(config.speculative_shapes) if config.mtp else len(config.batch_capacities)) + 4 * len(config.batch_capacities)
         with phase(progress, "Construct graph catalog", total=graph_count) as stage:
             def add(name, function, kind, batch, tokens, fields):
                 functions[name] = function
                 signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields))
-                stage.update(name, advance=1)
+                stage.update(advance=1)
 
             vision_fields = tuple(vision_inputs.__dataclass_fields__)
             for capacity in (16384, 4096, 1024, 256):
@@ -285,7 +318,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                         injection.prepare()
                     decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
                         completion, frame, sequence, session=session, name=f"{mode}{capacity}",
-                        embedding_injection=injection, max_cache_pages=planned_pages)
+                        embedding_injection=injection, max_cache_pages=planned_pages, **collectives)
                     forward = decoder if speculation is None else speculation.prefill(decoder, f"{mode}{capacity}")
                     add(f"{mode}{capacity}", forward, mode, rows,
                         capacity if mode == "prefill" else 1, forward_fields)
@@ -306,7 +339,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             for capacity in reversed(config.batch_capacities):
                 resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
                     scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
-                    session=session, name=f"resume{capacity}")
+                    session=session, name=f"resume{capacity}", vocabulary_runtime=vocabulary_collective,
+                    local_logits=None if scratch.local_logits is None else scratch.local_logits[:capacity], coordinator=coordinator)
                 forward = resume if speculation is None else speculation.resume(resume)
                 add(f"resume{capacity}", forward, "resume", capacity, 1, forward_fields)
                 owners.append(resume)
@@ -322,8 +356,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
                     owners.append(maintenance)
         session.register_scratch(workspaces)
-        report("preparing weight kernels, then cache-state kernels")
-        tuning = session.tune(show_progress=progress is not None)
+        with phase(progress, "Prepare and tune kernels") as stage:
+            tuning = session.tune(show_progress=progress is not None, console=stage.console)
         report(f"selected prepared kernels: {tuning['selection_counts']}")
         report(f"preparation allocated bytes: before tuning={tuning['allocated_before_tuning']}, "
                f"after trial release={tuning['allocated_after_trial_release']}")
@@ -332,7 +366,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         compiled_functions = {}
         def capture_catalog(*, compile_decoder, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
-                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress, label=label)
+                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress, label=label, collective=collective)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
@@ -340,15 +374,13 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         capture_catalog(compile_decoder=False, label="Measure graph memory")
         with phase(progress, "Allocate KV cache"):
             free, total = torch.cuda.mem_get_info(device)
-            available = free - config.headroom_bytes - _KV_ALLOCATION_MARGIN
+            available = _minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
             page_capacity = available // page_bytes if config.pages is None else config.pages
             if page_capacity <= 0 or page_capacity * page_bytes > available:
                 raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
-            report(f"KV sizing: free={free}, allocated={torch.cuda.memory_allocated(device)}, "
-                   f"reserved={torch.cuda.memory_reserved(device)}, pages={page_capacity}, "
-                   f"page_bytes={page_bytes}, headroom={config.headroom_bytes}")
+            report(f"{page_capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {page_capacity * 64:,} tokens")
             final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
-                device=device, headroom_bytes=config.headroom_bytes, automatic=config.pages is None, report=report)
+                device=device, headroom_bytes=config.headroom_bytes, automatic=config.pages is None, report=report, group=group)
             for decoder in decoders:
                 for index in range(3, 48, 4):
                     decoder.layers[index][1].rebind_pages_for_preparation(final_cache[index])
@@ -365,10 +397,10 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         session.freeze()
         free, total = torch.cuda.mem_get_info(device)
         if free < config.headroom_bytes:
-            raise MemoryError(f"captured model violates configured GPU headroom: free={free}, "
-                f"required={config.headroom_bytes}, pages={page_capacity}, "
-                f"allocated={torch.cuda.memory_allocated(device)}, reserved={torch.cuda.memory_reserved(device)}")
-        memory = {"weights_bytes": weights.allocated_bytes, "mapped_ple_bytes": 28800138240,
+            raise MemoryError(f"captured model violates configured GPU headroom: {free / (1 << 30):.3f} GiB free, "
+                f"{config.headroom_bytes / (1 << 30):.3f} GiB required; KV cache: "
+                f"{page_capacity * page_bytes / (1 << 30):.2f} GiB per GPU, {page_capacity * 64:,} tokens")
+        memory = {"weights_bytes": weights.allocated_bytes, "mapped_ple_bytes": table.storage.mapped_host_nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "snapshot_capacity": snapshots,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
             "cached_token_capacity": page_capacity * 64, "headroom_bytes": config.headroom_bytes,
@@ -376,7 +408,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
             "operator_scratch_bytes": workspaces.nbytes, "graphs": len(graphs), "tuning": tuning,
             "prefill_chunk_size": config.prefill_chunk_size, "prefill_capacities": config.prefill_capacities,
-            "compiled_decoder": compile_decoder}
+            "compiled_decoder": compile_decoder, "rank": rank, "world_size": shard.world_size}
         if speculation is not None:
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
                 speculative_widths=config.speculative_widths,
@@ -391,7 +423,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"]),
             "preprocessor_config": ("preprocessor_config.json", FRONTEND_SHA256["preprocessor_config.json"]),
             "model_config": ("config.json", CONFIG_SHA256), "generation_config": ("generation_config.json", GENERATION_SHA256)}
-        server_config = {"model_id": MODEL_ID, "identity": _identity(manifest),
+        server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "snapshots": snapshots,
             "eos_token_ids": [248046, 248044],
@@ -407,10 +439,10 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 speculative_graph_budget=config.speculative_graph_budget, history_drafts=config.history_drafts)
         resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
-            functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights)
+            functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights, collective, vocabulary_collective, coordinator)
         report(f"prepared {len(graphs)} graphs and {page_capacity * 64} cached-token capacity")
-        return PreparedModel(device=config.device, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
-            resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table,))
+        return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
+            resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
     except BaseException:
         torch.cuda.synchronize(device)
         for graph in graphs.values():

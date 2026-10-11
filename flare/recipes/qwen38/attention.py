@@ -59,10 +59,10 @@ class QSAState:
 
     @classmethod
     def allocate(cls, *, pages: int, slots: int, device: torch.device,
-                 page_size: int = 64, draft_tokens: int = 0) -> QSAState:
+                 page_size: int = 64, draft_tokens: int = 0, kv_heads: int = 2) -> QSAState:
         if pages <= 0 or slots <= 0:
             raise ValueError("QSA page and state capacities must be positive")
-        geometry = qsa.cache_requirements(main_page_size=page_size, position_axes=3,
+        geometry = qsa.cache_requirements(main_page_size=page_size, position_axes=3, kv_heads=kv_heads,
                                          max_speculative_tokens=draft_tokens)
         def zeros(shape):
             return torch.zeros(shape, device=device, dtype=torch.bfloat16)
@@ -134,17 +134,19 @@ class QSAScratch:
     projected_qkv: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device) -> QSAScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> QSAScratch:
         if tokens <= 0:
             raise ValueError("QSA token capacity must be positive")
         def zeros(*shape):
             return torch.zeros(shape, device=device, dtype=torch.bfloat16)
-        qkv = zeros(tokens, 13312)
-        return cls(qkv[:, :12288], qkv[:, 12288:12800], qkv[:, 12800:],
-                   zeros(tokens, 640), zeros(tokens, 24, 256), zeros(tokens, 2, 256),
-                   zeros(tokens, 24, 256),
+        q_heads, kv_heads = 24 // world_size, max(1, 2 // world_size)
+        q_width, kv_width = q_heads * 512, kv_heads * 256
+        qkv = zeros(tokens, q_width + 2 * kv_width)
+        return cls(qkv[:, :q_width], qkv[:, q_width:q_width + kv_width], qkv[:, q_width + kv_width:],
+                   zeros(tokens, 640), zeros(tokens, q_heads, 256), zeros(tokens, kv_heads, 256),
+                   zeros(tokens, q_heads, 256),
                    torch.full((tokens, 2051), -1, device=device, dtype=torch.int32),
-                   zeros(tokens, 6144), zeros(tokens, 2560), qkv)
+                   zeros(tokens, q_heads * 256), zeros(tokens, 2560), qkv)
 
 
 class PreparedAttention:
@@ -162,6 +164,7 @@ class PreparedAttention:
                  draft_tokens: int = 0, workspace: ScratchArena | torch.Tensor | None = None,
                  projection_workspace: ScratchArena | torch.Tensor | None = None,
                  max_cache_pages: int | None = None, cache_only: bool = False) -> None:
+        self.q_heads, self.kv_heads = scratch.query.shape[1], scratch.key.shape[1]
         self.cache_only = cache_only
         self.module, self.scratch, self.state = module, scratch, state
         self.metadata, self.rotary = metadata, rotary
@@ -183,6 +186,7 @@ class PreparedAttention:
                         num_compressed_cache_pages=cache_pages,
                         main_page_size=page_size, compressed_page_size=page_size // 4,
                         max_speculative_tokens=draft_tokens, position_axes=3,
+                        q_heads=self.q_heads, kv_heads=self.kv_heads,
                         mrope_sections=(11, 11, 10), mrope_interleaved=True,
                         rms_norm_eps=module.config.rms_norm_eps,
                         attention_splits=16)
@@ -224,19 +228,19 @@ class PreparedAttention:
             return PreparedCall(run=lambda: materialized.run_for_preparation(binding, **self.dynamic()),
                                 owners=prime_owners(workspace, storage, binding))
 
-        declare(session, (self.plan.request(name=f"{name}.qsa", prepare_call=prepare),), stage="state")
+        declare(session, (self.plan.request(name=f"{name}.qsa", prepare_call=prepare),))
         def refresh():
             self.workspace = planned_scratch(self.plan.scratch_specs(), workspace)
             self.binding = qsa.bind(self.plan, scratch=self.workspace, **self.binding_kwargs)
 
         register_finalizer(session, refresh, workspace=workspace)
         self.writer = paged_kv_write.plan(paged_kv_write.Caps(device=source.device,
-            num_kv_heads=2, head_dim_k=256, head_dim_v=256, page_size=page_size))
-        self.write_kwargs = {"key": scratch.key, "value": scratch.projected_v.view(self.tokens, 2, 256),
+            num_kv_heads=self.kv_heads, head_dim_k=256, head_dim_v=256, page_size=page_size))
+        self.write_kwargs = {"key": scratch.key, "value": scratch.projected_v.view(self.tokens, self.kv_heads, 256),
                              "k_cache": state.main_k_cache, "v_cache": state.main_v_cache,
                              "slot_mapping": metadata.slot_mapping}
         declare(session, (self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
-            PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),), stage="state")
+            PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),))
         self.concurrent = None
         if (not cache_only and self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
                 and workspace is projection_workspace
@@ -275,9 +279,9 @@ class PreparedAttention:
             self.projections["qkv_proj"](source)
         else:
             self.concurrent.project(source)
-        projected = s.projected_q.view(self.tokens, 24, 512)
+        projected = s.projected_q.view(self.tokens, self.q_heads, 512)
         query, gate = projected[..., :256], projected[..., 256:]
-        key = s.projected_k.view(self.tokens, 2, 256)
+        key = s.projected_k.view(self.tokens, self.kv_heads, 256)
         cos, sin = self.rotary.gather(self.metadata.rope_positions)
         query, key = apply_rotary_pos_emb(self.module.q_norm(query), self.module.k_norm(key), cos, sin,
                                          unsqueeze_dim=1)
@@ -288,7 +292,7 @@ class PreparedAttention:
             qsa.run(self.binding, **self.dynamic(), cache_only=True)
             return None
         attention = qsa.run(self.binding, **self.dynamic()) if self.concurrent is None else self.concurrent.attend(source)
-        s.gated.copy_(attention.flatten(1) * torch.sigmoid(gate.reshape(self.tokens, 6144)))
+        s.gated.copy_(attention.flatten(1) * torch.sigmoid(gate.reshape(self.tokens, self.q_heads * 256)))
         output = self.projections["o_proj"](s.gated)
         output.masked_fill_((self.metadata.request_ids < 0)[:, None], 0)
         return output

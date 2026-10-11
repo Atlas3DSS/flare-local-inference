@@ -66,10 +66,15 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 - Use b12x's autotuning and warmup facilities during preparation. Do not pin
   kernel plans or tuning choices without a demonstrated requirement.
 - Constructors declare b12x requests through `flare.preparation.tuning.declare`;
-  they must not compile or prime default plans. Put cache-dependent operations
-  in the `state` stage and other operations in `weights`. Submit the complete
-  serving shape catalog to batched preparation, then bind selected plans through
-  `register_finalizer`. Scratch sizing and serving bindings must follow tuning.
+  they must not compile or prime default plans. Submit all operators across the
+  complete serving shape catalog to one preparation batch, then bind selected
+  plans through `register_finalizer`. Scratch sizing and serving bindings must
+  follow tuning.
+- Show startup work through `flare.progress.phase`. Weight loading and kernel
+  preparation retain a phase activity bar while their detailed b12x panels are
+  transient and share the phase's Rich console. Use `DirectWeightLoader` for
+  loading progress, including draft-model weights. Only the root TP rank
+  renders progress.
 - Supply caller-owned scratch through the kernel planning interfaces. Reuse
   storage across sequential work; preserve separate storage for overlapping
   operations and persistent state. Aliasing must follow actual lifetimes and

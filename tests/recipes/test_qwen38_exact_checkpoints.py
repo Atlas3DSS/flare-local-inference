@@ -231,6 +231,7 @@ def test_admission_failure_does_not_reset_other_speculative_state():
     operation.filtered = SimpleNamespace(destination_slots=torch.tensor([0, 3, 0, 0]))
     operation.requests = SimpleNamespace(generation=generations)
     operation.speculation = SimpleNamespace(previous_accepted=previous, accepted_generation=accepted_generation)
+    operation.slots = 4
     operation._rows = torch.arange(4)
     operation()
     assert previous.tolist() == [8, 7, 1, 5]

@@ -92,18 +92,22 @@ def _run(args, parser, started):
             max_active=args.concurrency, compile_decoder=not args.no_compile, **budgets)
         model = prepare_group(args.snapshot, config, prepare_rank, progress=progress)
     elif architecture == "qwen4_exp":
-        if args.tp != 1:
-            parser.error("Qwen tensor parallel preparation is not yet configured")
         with phase(progress, "Initialize model runtime"):
-            from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model
+            from flare.recipes.qwen38.bootstrap import PreparationConfig, prepare_model, prepare_rank
 
-        config = PreparationConfig(device=args.device, max_active=args.concurrency, context=args.context, pages=args.pages,
+        config = PreparationConfig(device=args.device, devices=tuple(range(args.device, args.device + args.tp)),
+            compile_decoder=not args.no_compile, max_active=args.concurrency, context=args.context, pages=args.pages,
             prefill_chunk_size=args.prefill_chunk_size,
             mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
             speculative_proposal_source=args.mtp_proposal_source,
             speculative_fixed_width=args.mtp_fixed_width, speculative_graph_budget=args.mtp_graph_budget,
             history_drafts=args.history_drafts, **budgets)
-        model = prepare_model(args.snapshot, config, progress=progress, compile_decoder=not args.no_compile)
+        if args.tp == 1:
+            model = prepare_model(args.snapshot, config, progress=progress, compile_decoder=not args.no_compile)
+        else:
+            from flare.preparation.rank_group import prepare_group
+
+            model = prepare_group(args.snapshot, config, prepare_rank, progress=progress)
     else:
         parser.error(f"unsupported checkpoint model_type {architecture!r}")
     with model:

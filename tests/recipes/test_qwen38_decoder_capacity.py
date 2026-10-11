@@ -33,7 +33,7 @@ def tensors(value):
         member = getattr(value, field.name)
         if is_dataclass(member):
             yield from tensors(member)
-        else:
+        elif member is not None:
             yield member
 
 
@@ -126,3 +126,17 @@ def test_one_arena_follows_actual_public_plan_extents(metadata_device, tokens):
     arena.freeze()
     for nbytes in required:
         assert arena.reserve(nbytes) is arena.tensor
+
+
+@pytest.mark.parametrize("world", (2, 4))
+def test_rank_scratch_keeps_residuals_replicated_and_projects_local_heads(world):
+    scratch = DecoderScratch.allocate(128, "meta", sample_rows=8, world_size=world)
+    view = scratch.rows(7, 2)
+    assert view.residual.shape == (7, 10240)
+    assert view.hidden.shape == (7, 2560)
+    assert view.gdn.recurrence.shape == (7, 6144 // world)
+    assert view.qsa.query.shape == (7, 24 // world, 256)
+    assert view.qsa.key.shape == (7, 1, 256)
+    assert view.logits.shape == (2, 248320)
+    assert view.local_logits.shape == (2, 248320 // world)
+    assert view.moe.shared.intermediate.shape == (7, 640 // world)

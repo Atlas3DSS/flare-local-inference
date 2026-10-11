@@ -63,7 +63,7 @@ class ModelWeights:
         before = torch.cuda.memory_allocated(device)
         layers = []
         with GlmWeightLoader(manifest, device, shard=shard,
-                             show_progress=progress is not None and shard.rank == 0) as loader:
+                             progress=progress if shard.rank == 0 else None) as loader:
             names = [f"{TEXT_PREFIX}.embed_tokens.weight", f"{TEXT_PREFIX}.norm.weight"]
             for name in names:
                 path, attribute = name.rsplit(".", 1)
@@ -90,9 +90,9 @@ class GlmWeightLoader(DirectWeightLoader):
     """
 
     def __init__(self, manifest: IndexedCheckpoint, device, *, shard: TensorParallelShard,
-                 prefixes=None, show_progress=False):
+                 prefixes=None, progress=None):
         super().__init__(manifest, device, prefixes=prefixes,
-                         show_progress=show_progress)
+                         progress=progress)
         self.shard = shard
         config = json.loads((manifest.snapshot / "config.json").read_text())
         if (config.get("model_type") != "glm5_next"

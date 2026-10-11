@@ -31,13 +31,11 @@ class SharedExpertWeights:
         if type(layer) is not int or not 0 <= layer < 48:
             raise ValueError("decoder layer must be an integer in [0, 48)")
         prefix = f"{TEXT_PREFIX}.layers.{layer}.mlp"
-        gate, up = (loader.load_linear(f"{prefix}.shared_expert.{projection}")
-                    for projection in ("gate_proj", "up_proj"))
-        values = torch.cat((gate.weight.values, up.weight.values))
-        scales = torch.cat((gate.weight.scale_rows[0], up.weight.scale_rows[0]))
+        extent = loader.shard.partition(640, alignment=32)
         return cls(
-            blockscaled.pack_weight(values, scales, recipe="mxfp8"),
-            loader.load_linear(f"{prefix}.shared_expert.down_proj"),
+            loader.load_mxfp8_group(tuple(f"{prefix}.shared_expert.{name}" for name in ("gate_proj", "up_proj")),
+                                    row_ranges=(extent, extent)),
+            loader.load_linear(f"{prefix}.shared_expert.down_proj", columns=extent),
             loader.load_tensor(f"{prefix}.shared_expert_gate.weight"),
         )
 
@@ -68,11 +66,11 @@ class SharedExpertScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device) -> SharedExpertScratch:
+    def allocate(cls, tokens: int, device, *, intermediate=640) -> SharedExpertScratch:
         if tokens <= 0:
             raise ValueError("shared expert capacity must be positive")
         return cls(*(torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
-                     for width in (1280, 640, 2560, 1, 1, 2560)))
+                     for width in (2 * intermediate, intermediate, 2560, 1, 1, 2560)))
 
     def rows(self, tokens: int) -> SharedExpertScratch:
         if not 0 < tokens <= self.gate_up.shape[0]:
@@ -96,14 +94,14 @@ class QwenMoeScratch:
     shared: SharedExpertScratch
 
     @classmethod
-    def allocate(cls, tokens: int, device) -> QwenMoeScratch:
+    def allocate(cls, tokens: int, device, *, intermediate=640) -> QwenMoeScratch:
         if tokens <= 0:
             raise ValueError("MoE capacity must be positive")
         return cls(torch.zeros((tokens, 512), dtype=torch.bfloat16, device=device),
             RouterScratch.allocate(tokens, device, experts=512, top_k=10),
             torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device),
             torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device),
-            SharedExpertScratch.allocate(tokens, device))
+            SharedExpertScratch.allocate(tokens, device, intermediate=intermediate))
 
     def rows(self, tokens: int) -> QwenMoeScratch:
         if not 0 < tokens <= self.router_logits.shape[0]:
@@ -122,15 +120,16 @@ class PreparedSharedExpert(PreparedMLP):
         def geometry(weight):
             return tuple(reversed(weight.shape)) if isinstance(weight, torch.Tensor) else (weight.in_features, weight.out_features)
 
-        if geometry(weights.gate_up) != (2560, 1280):
-            raise ValueError("shared gate/up projection must have geometry [1280, 2560]")
-        if geometry(weights.down) != (640, 2560):
-            raise ValueError("shared down projection must have geometry [2560, 640]")
+        intermediate = geometry(weights.down)[0]
+        if geometry(weights.gate_up) != (2560, 2 * intermediate):
+            raise ValueError("shared gate/up projection must have geometry [2*intermediate,2560]")
+        if geometry(weights.down) != (intermediate, 2560):
+            raise ValueError("shared down projection must have geometry [2560,intermediate]")
         if tuple(weights.gate.shape) != (1, 2560):
             raise ValueError("shared expert gate must have geometry [1, 2560]")
         tokens, device = source.shape[0], source.device
-        scratch = SharedExpertScratch.allocate(tokens, device) if scratch is None else scratch.rows(tokens)
-        for field, width in zip(scratch.__dataclass_fields__, (1280, 640, 2560, 1, 1, 2560), strict=True):
+        scratch = SharedExpertScratch.allocate(tokens, device, intermediate=intermediate) if scratch is None else scratch.rows(tokens)
+        for field, width in zip(scratch.__dataclass_fields__, (2 * intermediate, intermediate, 2560, 1, 1, 2560), strict=True):
             tensor = getattr(scratch, field)
             if tensor.shape != (tokens, width) or tensor.dtype != torch.bfloat16 or tensor.device != device or not tensor.is_contiguous():
                 raise ValueError(f"shared expert {field} requires contiguous BF16 [{tokens}, {width}] on {device}")
@@ -165,15 +164,14 @@ class PreparedQwenMoe:
     def __init__(self, source, weights: QwenMoeWeights, *, session: PreparationSession, name: str,
                  scratch: QwenMoeScratch | None = None, workspace: ScratchArena | torch.Tensor | None = None,
                  projection_workspace: ScratchArena | torch.Tensor | None = None):
-        if (weights.experts.num_experts, weights.experts.hidden_size,
-            weights.experts.intermediate_size) != (512, 2560, 640):
-            raise ValueError("Qwen MoE requires all 512 experts with hidden/intermediate sizes 2560/640")
+        if (weights.experts.num_experts, weights.experts.hidden_size) != (512, 2560):
+            raise ValueError("Qwen MoE requires all 512 experts with hidden size 2560")
         if tuple(weights.router.shape) != (512, 2560):
             raise ValueError("Qwen router weight must have geometry [512, 2560]")
         if source.ndim != 2 or source.shape[1] != 2560 or source.dtype != torch.bfloat16:
             raise ValueError("Qwen MoE source must be BF16 [tokens, 2560]")
         self.source = source
-        scratch = QwenMoeScratch.allocate(source.shape[0], source.device) if scratch is None else scratch.rows(source.shape[0])
+        scratch = QwenMoeScratch.allocate(source.shape[0], source.device, intermediate=weights.experts.intermediate_size) if scratch is None else scratch.rows(source.shape[0])
         for tensor, width in ((scratch.router_logits, 512), (scratch.routed_output, 2560), (scratch.output, 2560)):
             if tensor.shape != (source.shape[0], width) or tensor.dtype != torch.bfloat16 or tensor.device != source.device or not tensor.is_contiguous():
                 raise ValueError("MoE scratch geometry, BF16 dtype and device must match source")

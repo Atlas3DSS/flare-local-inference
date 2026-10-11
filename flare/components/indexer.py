@@ -36,7 +36,7 @@ class PreparedSparseIndexer:
 
         declare(session, (self.plan.request(name=name, prepare_call=prepare,
             benchmark_call=partial(fixtures.benchmark_call, arguments=self.inputs,
-                                   session=session, workspace=workspace)),), stage="state")
+                                   session=session, workspace=workspace)),))
 
         def finalize():
             self.binding = dsa_indexer.bind(self.plan,

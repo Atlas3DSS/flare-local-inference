@@ -113,14 +113,20 @@ def test_batched_tensors_are_ready_before_loader_exit(manifest):
                 torch.testing.assert_close(value.cpu(), reader.read(name), rtol=0, atol=0)
 
 
-def test_actual_csf_experts_prepared_graph_replay(manifest):
+@pytest.mark.parametrize("rank,world", [(0, 1), (1, 2), (3, 4)])
+def test_actual_csf_experts_prepared_graph_replay(manifest, rank, world):
+    from dataclasses import replace
+    from flare.components.parallel import TensorParallelShard
+
+    shard = TensorParallelShard(rank, world)
+    first, last = shard.partition(640)
     from b12x.moe import fused_moe as moe
     from b12x.preparation import PreparationSession, PreparedCall
 
     ids = (0, 511)
     prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts"
-    shared = allocate_expert_scale_scratch("cuda:0", len(ids))
-    with QwenWeightLoader(manifest, "cuda:0", prefixes=tuple(f"{prefix}.{expert}." for expert in ids)) as loader:
+    shared = allocate_expert_scale_scratch("cuda:0", len(ids), shard=shard)
+    with QwenWeightLoader(manifest, "cuda:0", prefixes=tuple(f"{prefix}.{expert}." for expert in ids), shard=shard) as loader:
         experts = loader.load_experts(0, expert_ids=ids, scale_scratch=shared)
         assert loader._session.torch_copy_bytes == 0
     assert experts._impl.w1_blockscale.data_ptr() == shared[0].data_ptr()
@@ -132,12 +138,17 @@ def test_actual_csf_experts_prepared_graph_replay(manifest):
         projections = []
         for expert in ids:
             projections.append(tuple(read_nvfp4_projection(reader, f"{prefix}.{expert}.{name}") for name in ("gate_proj", "up_proj", "down_proj")))
-    for storage, rows, columns in ((shared[0], 1280, 160), (shared[1], 2560, 40)):
+    projections = [(replace(gate, packed=gate.packed[first:last], scales=gate.scales[first:last]),
+                    replace(up, packed=up.packed[first:last], scales=up.scales[first:last]),
+                    replace(down, packed=down.packed[:, first // 2:last // 2], scales=down.scales[:, first // 16:last // 16]))
+                   for gate, up, down in projections]
+    for storage in shared:
+        _, rows, columns = storage.shape
         logical = storage.view(torch.uint8).reshape(len(ids), rows // 128, columns // 4, 32, 4, 4)
         cpu_scales.append(logical.permute(0, 1, 4, 3, 2, 5).reshape(len(ids), rows, columns).cpu())
     for local, (gate, up, down) in enumerate(projections):
-        assert torch.equal(cpu_scales[0][local], torch.cat((up.scales, gate.scales)).view(torch.uint8))
-        assert torch.equal(cpu_scales[1][local], down.scales.view(torch.uint8))
+        assert torch.equal(cpu_scales[0][local, :2 * (last - first)], torch.cat((up.scales, gate.scales)).view(torch.uint8))
+        assert torch.equal(cpu_scales[1][local, :, :(last - first) // 16], down.scales.view(torch.uint8))
     cpu_input = (torch.randn(2, 2560, generator=torch.Generator().manual_seed(63)) * .1).to(torch.bfloat16)
     source = cpu_input.cuda()
     routes = torch.tensor([[0], [1]], dtype=torch.int32, device="cuda")
@@ -232,3 +243,64 @@ def test_complete_layer_csf_load_and_captured_expansion(manifest):
                     actual = storage[expert].view(torch.uint8).reshape(rows // 128, columns // 4, 32, 4, 4)
                     actual = actual.permute(0, 3, 2, 1, 4).reshape(rows, columns).cpu()
                     assert torch.equal(actual, expected.view(torch.uint8))
+
+
+@pytest.mark.parametrize("rank,world", [(0, 1), (1, 2), (3, 4)])
+def test_mtp_expert_shards_match_checkpoint_arithmetic(manifest, rank, world):
+    from dataclasses import replace
+    from b12x.moe import fused_moe as moe
+    from b12x.preparation import PreparationSession, PreparedCall
+    from flare.components.parallel import TensorParallelShard
+    from flare.recipes.qwen38.mtp_weights import MTPWeightLoader
+
+    shard = TensorParallelShard(rank, world)
+    first, last = shard.partition(640)
+    ids = (0, 511)
+    prefix = "mtp.layers.0.mlp.experts"
+    with MTPWeightLoader(manifest, "cuda:0", shard=shard,
+            prefixes=tuple(f"{prefix}.{expert}." for expert in ids)) as loader:
+        experts = loader.load_experts(expert_ids=ids)
+    with CheckpointTensors(manifest, byte_budget=16 << 20) as reader:
+        projections = [tuple(read_nvfp4_projection(reader, f"{prefix}.{expert}.{name}")
+                       for name in ("gate_proj", "up_proj", "down_proj")) for expert in ids]
+    projections = [(replace(gate, packed=gate.packed[first:last], scales=gate.scales[first:last]),
+                    replace(up, packed=up.packed[first:last], scales=up.scales[first:last]),
+                    replace(down, packed=down.packed[:, first // 2:last // 2], scales=down.scales[:, first // 16:last // 16]))
+                   for gate, up, down in projections]
+    inputs = (torch.randn(2, 2560, generator=torch.Generator().manual_seed(63)) * .1).bfloat16()
+    source = inputs.cuda()
+    routes = torch.tensor([[0], [1]], device="cuda", dtype=torch.int32)
+    probabilities = torch.ones((2, 1), device="cuda", dtype=torch.float32)
+    output = torch.empty_like(source)
+    plan = moe.plan_execution(experts=experts, capacity=moe.ExecutionCapacity(max_tokens=2, top_k=1),
+                              routing=moe.RoutingSpec(deterministic_output=True))
+
+    def prepare(state):
+        scratch = tuple(torch.empty(spec.shape, dtype=spec.dtype, device="cuda") for spec in state.scratch.scratch_specs())
+        binding = state.bind(a=source, topk_ids=routes, topk_weights=probabilities, output=output, scratch=scratch)
+        return PreparedCall(run=lambda: state.run(binding), owners=(scratch, binding))
+
+    with PreparationSession(device="cuda:0", autotune=False, compile_workers=0) as session:
+        session.prepare((plan.request(name=f"mtp.experts.tp{world}", prepare_call=prepare),))
+        scratch = tuple(torch.empty(spec.shape, dtype=spec.dtype, device="cuda") for spec in plan.scratch_specs())
+        binding = moe.bind(plan, a=source, topk_ids=routes, topk_weights=probabilities, output=output, scratch=scratch)
+        session.freeze()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            moe.run(binding=binding)
+        for order in ((0, 1), (1, 0)):
+            routes.copy_(torch.tensor(order, dtype=torch.int32)[:, None])
+            output.fill_(float("nan"))
+            allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+            expected = []
+            for row, expert in enumerate(order):
+                gate, up, down = projections[expert]
+                gate_output = nvfp4_linear_reference(inputs[row:row + 1], gate)
+                up_output = nvfp4_linear_reference(inputs[row:row + 1], up)
+                intermediate = (torch.nn.functional.silu(gate_output) * up_output).bfloat16()
+                expected.append(nvfp4_linear_reference(intermediate, down))
+            expected = torch.cat(expected)
+            _assert_numerical(output, expected)

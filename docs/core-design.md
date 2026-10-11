@@ -871,10 +871,10 @@ Preparation proceeds in a fixed order:
    PLE storage.
 3. Allocate persistent state, live activation/output buffers, one operator scratch
    arena, and a one-page KV sizing pool. Construct every admitted variant and
-   collect its weight and cache-state declarations without priming kernels.
+   collect all kernel declarations without priming kernels.
 4. Reserve the maximum candidate scratch envelope and keep its extent stable
-   throughout the weight and cache-state preparation batches. Both batches
-   enable autotuning.
+   throughout one preparation batch covering every declared kernel, with
+   autotuning enabled.
 5. Synchronize, trim the arena to the maximum selected scratch requirement,
    freeze its retained extent, and refresh selected bindings and aliases.
    Release trial owners, restore borrowed state, synchronize, and release

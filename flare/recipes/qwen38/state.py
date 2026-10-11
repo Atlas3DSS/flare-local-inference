@@ -32,17 +32,20 @@ class HybridStateLayout(StateLayout):
     draft_ring_capacity: int = 0
 
     @classmethod
-    def build(cls, *, speculative_tokens: int = 0) -> HybridStateLayout:
+    def build(cls, *, speculative_tokens: int = 0, world_size: int = 1) -> HybridStateLayout:
         if type(speculative_tokens) is not int or not 0 <= speculative_tokens <= 7:
             raise ValueError("hybrid state supports zero through seven speculative tokens")
+        from flare.components.parallel import TensorParallelShard
+
+        TensorParallelShard(0, world_size)
         specifications = []
 
         def add(name, shape, dtype):
             specifications.append((name, shape, dtype))
 
         for layer in GDN_LAYERS:
-            add(f"gdn.{layer}.recurrent", (48, 128, 128), torch.float32)
-            add(f"gdn.{layer}.convolution", (10240, 3 + speculative_tokens), torch.bfloat16)
+            add(f"gdn.{layer}.recurrent", (48 // world_size, 128, 128), torch.float32)
+            add(f"gdn.{layer}.convolution", (10240 // world_size, 3 + speculative_tokens), torch.bfloat16)
         add("ple_convolution", (10240, 9 + speculative_tokens), torch.bfloat16)
         add("last_hidden", (2560,), torch.bfloat16)
         add("consumed_tokens", (1,), torch.int64)
@@ -50,7 +53,7 @@ class HybridStateLayout(StateLayout):
         add("rope_delta", (1,), torch.int64)
         from b12x.attention import qsa
 
-        geometry = qsa.cache_requirements(main_page_size=64, position_axes=3,
+        geometry = qsa.cache_requirements(main_page_size=64, position_axes=3, kv_heads=max(1, 2 // world_size),
                                          max_speculative_tokens=speculative_tokens)
         for layer in QSA_LAYERS:
             add(f"qsa.{layer}.raw_keys", geometry.raw_k_ring_shape, torch.bfloat16)
@@ -101,10 +104,10 @@ class HybridStatePool(StateStorage):
     rope_delta: torch.Tensor
 
     @classmethod
-    def allocate(cls, slots: int, device, *, speculative_tokens: int = 0) -> HybridStatePool:
+    def allocate(cls, slots: int, device, *, speculative_tokens: int = 0, world_size: int = 1) -> HybridStatePool:
         if type(slots) is not int or slots < 2:
             raise ValueError("hybrid state requires null and live slots")
-        layout = HybridStateLayout.build(speculative_tokens=speculative_tokens)
+        layout = HybridStateLayout.build(speculative_tokens=speculative_tokens, world_size=world_size)
         backing = torch.zeros(
             (slots, layout.row_bytes), dtype=torch.uint8, device=device
         )
@@ -434,7 +437,8 @@ class PreparedStateTransfers:
             if pointers
             else None
         )
-        self._grid = (capacity, triton.cdiv(pool.layout.row_bytes, 4096), 1)
+        block = exact.copy_block if exact is not None else 4096
+        self._grid = (capacity, triton.cdiv(pool.layout.row_bytes, block), 1)
         self._transfer_args = (
             pool.backing,
             pool.consumed_tokens,
@@ -462,7 +466,7 @@ class PreparedStateTransfers:
             raw_slots,
             pool.layout.region("ple_history").offset,
             pool.consumed_tokens.stride(0),
-            4096,
+            block,
             triton.next_power_of_2(capacity),
             exact.tables.shape[0] if exact is not None else capacity,
         )
@@ -614,7 +618,13 @@ class PreparedCheckpointCaches:
         self.draft_tables = speculation.draft_tables if self.draft is not None else None
         self.previous_accepted = speculation.previous_accepted if speculation is not None else None
         self.extra_base = speculation.extra_base if speculation is not None else 0
-        self.copy_layout = checkpoint_copy_layout(pool.layout).to(pool.backing.device)
+        from math import gcd
+
+        self.copy_block = 4096
+        for region in pool.layout.regions:
+            if region.name.endswith((".recurrent", ".convolution")) or region.name == "ple_convolution":
+                self.copy_block = gcd(self.copy_block, region.offset, region.nbytes)
+        self.copy_layout = checkpoint_copy_layout(pool.layout, self.copy_block).to(pool.backing.device)
         if len(self.states) != len(QSA_LAYERS):
             raise ValueError("exact checkpoints require all twelve target QSA states")
         if pool.layout.speculative_tokens and speculation is None:

@@ -10,6 +10,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from flare.preparation.checkpoint import IndexedCheckpoint
+from flare.progress import phase
 
 if TYPE_CHECKING:
     import torch
@@ -33,14 +34,15 @@ class DirectWeightLoader:
     def __init__(
         self, manifest: IndexedCheckpoint, device: torch.device | str,
         *, prefixes: Sequence[str] | None = None,
-        show_progress: bool = False,
+        progress=None,
+        progress_label: str = "Load weights",
     ):
         self.manifest = manifest
         self.device = device
         self.prefixes = None if prefixes is None else tuple(prefixes)
         if self.prefixes is not None and not self.prefixes:
             raise ValueError("prefixes must be nonempty when supplied")
-        self.show_progress = show_progress
+        self.progress, self.progress_label = progress, progress_label
         self._display = None
         self._load_stats = None
         self._session = None
@@ -55,7 +57,9 @@ class DirectWeightLoader:
     def _loading_display(self):
         from b12x.loader import CheckpointDisplay
 
-        with CheckpointDisplay() as display:
+        with phase(self.progress, self.progress_label) as stage, CheckpointDisplay(
+            console=stage.console, transient=True,
+        ) as display:
             self._display = display
             started = monotonic()
             stats = {}
@@ -76,7 +80,7 @@ class DirectWeightLoader:
         self.device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         stack = ExitStack()
         try:
-            if self.show_progress:
+            if self.progress is not None:
                 self._load_stats = stack.enter_context(self._loading_display())
             # Small CPU scale planes do not amortize intra-op thread dispatch.
             stack.callback(torch.set_num_threads, torch.get_num_threads())

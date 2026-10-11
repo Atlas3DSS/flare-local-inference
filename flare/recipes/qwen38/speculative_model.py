@@ -21,9 +21,11 @@ class SpeculativePreparation:
 
     def __init__(self, *, weights, mtp_weights, pool, requests, inputs, scratch,
                  workspaces, rotary, cache, table, session, completion, frame, sequence,
-                 extra_base, context, prefill_capacity, max_cache_pages, proposal_source="mtp"):
+                 extra_base, context, prefill_capacity, max_cache_pages, proposal_source="mtp",
+                 runtime=None, vocabulary_runtime=None, coordinator=None):
         if proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
+        self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
         self.proposal_source = proposal_source
         self.weights, self.mtp_weights, self.pool, self.requests = weights, mtp_weights, pool, requests
         self.inputs, self.scratch, self.workspaces, self.rotary = inputs, scratch, workspaces, rotary
@@ -45,7 +47,7 @@ class SpeculativePreparation:
         self.rng = SpeculativeRngState.allocate(device, capacity=requests.capacity)
         self.draft_rng_generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.draft_rng_offset = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
-        self.mtp_scratch = MTPScratch.allocate(prefill_capacity, requests.capacity, device) if proposal_source == "mtp" else None
+        self.mtp_scratch = MTPScratch.allocate(prefill_capacity, requests.capacity, device, world_size=weights.shard.world_size) if proposal_source == "mtp" else None
         self.owners, self.decoders, self.mtp_modules = [], [], []
 
     def buffers(self):
@@ -63,7 +65,7 @@ class SpeculativePreparation:
         module = PreparedMTP(self.mtp_weights, self.mtp_scratch.rows(metadata.tokens, metadata.rows),
             metadata.token_ids, metadata.hidden, self.cache[48], metadata.qsa, self.rotary,
             self.workspaces, output_indices=metadata.output_indices, session=self.session,
-            name=name, draft_tokens=7, max_cache_pages=self.max_cache_pages, cache_only=cache_only)
+            name=name, draft_tokens=7, max_cache_pages=self.max_cache_pages, cache_only=cache_only, **self.collectives)
         self.mtp_modules.append(module)
         return module
 
@@ -141,7 +143,7 @@ class PreparedSpeculativeRound:
         self.decoder = PreparedDecoder(owner.weights, scratch, self.state, owner.cache, owner.rotary,
             owner.table, owner.workspaces, owner.completion, owner.frame, owner.sequence,
             session=owner.session, name=f"{name}.target", max_cache_pages=owner.max_cache_pages,
-            residual_output=self.target_residual, verification=True)
+            residual_output=self.target_residual, verification=True, **owner.collectives)
         owner.decoders.append(self.decoder)
         self.copy_only = owner.proposal_source == "copy"
         self.draft_metadata = (DraftMetadata(tokens=batch, rows=batch, context=owner.context, device=device)

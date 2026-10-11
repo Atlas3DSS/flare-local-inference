@@ -33,9 +33,10 @@ class MTPScratch:
     hyperconnection: HyperconnectionScratch
     qsa: QSAScratch
     moe: QwenMoeScratch
+    local_logits: torch.Tensor | None = None
 
     @classmethod
-    def allocate(cls, tokens: int, output_rows: int, device):
+    def allocate(cls, tokens: int, output_rows: int, device, *, world_size=1):
         if (type(tokens) is not int or type(output_rows) is not int
                 or not 0 < output_rows <= tokens):
             raise ValueError("MTP requires positive output rows no greater than token capacity")
@@ -46,8 +47,9 @@ class MTPScratch:
         return cls(torch.zeros(tokens, dtype=torch.int64, device=device),
             zeros(tokens, 2560), zeros(tokens, 10240), zeros(tokens, 2560),
             zeros(output_rows, 2560), zeros(output_rows, 248320),
-            HyperconnectionScratch.allocate(tokens, device), QSAScratch.allocate(tokens, device),
-            QwenMoeScratch.allocate(tokens, device))
+            HyperconnectionScratch.allocate(tokens, device), QSAScratch.allocate(tokens, device, world_size=world_size),
+            QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size),
+            zeros(output_rows, 248320 // world_size) if world_size > 1 else None)
 
     def rows(self, tokens: int, output_rows: int):
         if (type(tokens) is not int or type(output_rows) is not int
@@ -57,7 +59,8 @@ class MTPScratch:
         qsa = QSAScratch(*(getattr(self.qsa, field)[:tokens] for field in self.qsa.__dataclass_fields__))
         return type(self)(self.embedding_ids[:tokens], self.embedding[:tokens], self.residual[:tokens],
             self.hidden[:tokens], self.selected_hidden[:output_rows], self.logits[:output_rows],
-            self.hyperconnection.rows(tokens), qsa, self.moe.rows(tokens))
+            self.hyperconnection.rows(tokens), qsa, self.moe.rows(tokens),
+            None if self.local_logits is None else self.local_logits[:output_rows])
 
 
 @dataclass(frozen=True)
@@ -127,7 +130,8 @@ class PreparedMTP:
 
     def __init__(self, weights: MTPWeights, scratch: MTPScratch, token_ids, target_hidden,
                  qsa_state, metadata, rotary, workspace: ScratchArena, *, output_indices,
-                 session, name: str, draft_tokens: int = 7, max_cache_pages=None, cache_only: bool = False):
+                 session, name: str, draft_tokens: int = 7, max_cache_pages=None, cache_only: bool = False,
+                 runtime=None, vocabulary_runtime=None, coordinator=None):
         tokens, device = scratch.residual.shape[0], scratch.residual.device
         if (target_hidden.shape != (tokens, 10240) or target_hidden.dtype != torch.bfloat16
                 or target_hidden.device != device or not target_hidden.is_contiguous()):
@@ -169,8 +173,22 @@ class PreparedMTP:
             priming_state=scratch.residual, session=session, name=f"{name}.final_mixer")
         self.attn_hc.prepare_combine_norm(self.mlp_hc, priming_state=scratch.residual,
             session=session, name=f"{name}.attn_combine_norm")
-        self.lm_head = UnquantizedProjection(scratch.selected_hidden, weights.lm_head, scratch.logits,
-                                     session=session, name=f"{name}.lm_head")
+        self.reductions = ()
+        if runtime is not None:
+            from flare.components.collectives import PreparedAllReduce
+
+            self.reductions = tuple(PreparedAllReduce(value, scratch.hidden, runtime=runtime,
+                session=session, coordinator=coordinator, name=f"{name}.{label}_reduce")
+                for label, value in (("attention", scratch.qsa.output), ("moe", self.moe.output)))
+        if vocabulary_runtime is None:
+            self.lm_head = UnquantizedProjection(scratch.selected_hidden, weights.lm_head, scratch.logits,
+                                         session=session, name=f"{name}.lm_head")
+        else:
+            from flare.components.vocabulary import PreparedVocabularyProjection
+
+            self.lm_head = PreparedVocabularyProjection(scratch.selected_hidden, weights.lm_head,
+                scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, session=session,
+                coordinator=coordinator, name=f"{name}.lm_head")
 
     def rebind_pages_for_preparation(self, state):
         self.attention.rebind_pages_for_preparation(state)
@@ -187,9 +205,13 @@ class PreparedMTP:
         block = self.attention(mixed)
         if self.cache_only:
             return None
+        if self.reductions:
+            block = self.reductions[0](block)
         self.attn_hc.combine_norm(s.residual, block)
         mixed = self.mlp_hc.mix(s.residual, pre_normalized=True)
         block = self.moe(mixed)
+        if self.reductions:
+            block = self.reductions[1](block)
         s.residual.copy_(self.mlp_hc.combine(s.residual, block))
         s.residual.masked_fill_(~active[:, None], 0)
         s.hidden.copy_(self.final_mixer.mix(s.residual))

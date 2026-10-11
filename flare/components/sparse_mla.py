@@ -21,7 +21,7 @@ class PreparedLatentCacheWriter:
         self.plan = sparse_mla.plan_cache_writer(source, cache, slots)
         declare(session, (self.plan.request(name=name,
             prepare_call=lambda state: PreparedCall(
-                run=lambda: state.run(source, cache, slots), owners=(source, cache, slots))),), stage="state")
+                run=lambda: state.run(source, cache, slots), owners=(source, cache, slots))),))
 
     def __call__(self):
         sparse_mla.concat_and_cache_glm_next_mla(self.source, self.cache, self.slots, plan=self.plan)
@@ -58,7 +58,7 @@ class PreparedSparseMLA:
             return PreparedCall(run=lambda: state.run(runtime, kv_cache=cache, attention_sink=attention_sink),
                                 owners=prime_owners(workspace, storage, runtime))
 
-        declare(session, (self.plan.request(name=name, prepare_call=prepare),), stage="state")
+        declare(session, (self.plan.request(name=name, prepare_call=prepare),))
 
         def finalize():
             self.binding = sparse_mla.bind(self.plan,

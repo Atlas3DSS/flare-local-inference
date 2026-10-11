@@ -3,9 +3,9 @@
 from flare.preparation.tuning import RecordedPreparationSession
 
 
-def preparation_session(*, device, checkpoint, namespace=None):
+def preparation_session(*, device, checkpoint, namespace=None, coordinator=None):
     return RecordedPreparationSession(
-        device=device, checkpoint=checkpoint, namespace=namespace,
+        device=device, checkpoint=checkpoint, namespace=namespace, coordinator=coordinator,
         workload_schema="qwen38-active-operators-v1",
         numerical_policy="qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-route-fp32",
         search_limits={

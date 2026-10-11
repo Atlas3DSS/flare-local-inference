@@ -23,7 +23,7 @@ from flare.preparation.scratch import ScratchArena
 class GDNState(DeltaState):
     """Persistent chronological convolution history and transposed FP32 recurrence.
 
-    Recurrence slots have physical shape ``[slot, 48, value_dim=128, key_dim=128]``.
+    Recurrence slots have shape ``[slot, local_value_heads, 128, 128]``.
     The canonical Transformers cache transposes the final two dimensions.
     Slot zero is reserved as the recurrence null index. Fresh decode slots must
     be zeroed by cache maintenance before replay; prefill selects null initial
@@ -32,9 +32,10 @@ class GDNState(DeltaState):
 
     @classmethod
     def allocate(
-        cls, slots: int, device: torch.device, *, speculative_tokens: int = 0
+        cls, slots: int, device: torch.device, *, speculative_tokens: int = 0,
+        world_size: int = 1,
     ) -> GDNState:
-        return super().allocate(slots, device, heads=48, channels=10240,
+        return super().allocate(slots, device, heads=48 // world_size, channels=10240 // world_size,
                                 speculative_tokens=speculative_tokens)
 
 
@@ -54,15 +55,15 @@ class GDNScratch:
     projected_ba: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device) -> GDNScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> GDNScratch:
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("GDN token capacity must be positive")
-        qkvz = torch.zeros((tokens, 16384), device=device, dtype=torch.bfloat16)
-        ba = torch.zeros((tokens, 96), device=device, dtype=torch.bfloat16)
+        qkvz = torch.zeros((tokens, 16384 // world_size), device=device, dtype=torch.bfloat16)
+        ba = torch.zeros((tokens, 96 // world_size), device=device, dtype=torch.bfloat16)
         convolved, recurrence, gated, output = (
             torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
-            for width in (10240, 6144, 6144, 2560))
-        return cls(qkvz[:, :10240], convolved, qkvz[:, 10240:], ba[:, 48:], ba[:, :48],
+            for width in (10240 // world_size, 6144 // world_size, 6144 // world_size, 2560))
+        return cls(qkvz[:, :10240 // world_size], convolved, qkvz[:, 10240 // world_size:], ba[:, 48 // world_size:], ba[:, :48 // world_size],
                    recurrence, gated, output, qkvz, ba)
 
     def rows(self, tokens: int) -> GDNScratch:
@@ -73,14 +74,14 @@ class GDNScratch:
         )
 
 
-def _validate_geometry(module: torch.nn.Module) -> None:
+def _validate_geometry(module: torch.nn.Module, world_size=1) -> None:
     required = {
         "hidden_size": 2560,
-        "num_k_heads": 16,
-        "num_v_heads": 48,
+        "num_k_heads": 16 // world_size,
+        "num_v_heads": 48 // world_size,
         "head_k_dim": 128,
         "head_v_dim": 128,
-        "conv_dim": 10240,
+        "conv_dim": 10240 // world_size,
         "conv_kernel_size": 4,
     }
     if any(getattr(module, name, None) != value for name, value in required.items()):
@@ -128,7 +129,10 @@ class PreparedGDN:
         workspace: torch.Tensor | None = None,
         projection_workspace: torch.Tensor | None = None,
     ) -> None:
-        _validate_geometry(module)
+        self.world_size = 48 // module.num_v_heads
+        self.key_heads, self.value_heads = module.num_k_heads, module.num_v_heads
+        world_size = self.world_size
+        _validate_geometry(module, world_size)
         if mode not in ("decode", "prefill"):
             raise ValueError("GDN graph mode must be decode or prefill")
         self.module, self.scratch, self.state, self.metadata = (
@@ -147,8 +151,10 @@ class PreparedGDN:
             raise ValueError("GDN source must be BF16 [token_capacity, 2560]")
         if self.device.type != "cuda":
             raise ValueError("prepared GDN requires CUDA")
-        widths = (10240, 10240, 6144, 48, 48, 6144, 6144, 2560, 16384, 96)
-        strides = (16384, 10240, 16384, 96, 96, 6144, 6144, 2560, 16384, 96)
+        widths = tuple(width if index == 7 else width // world_size for index, width in
+                       enumerate((10240, 10240, 6144, 48, 48, 6144, 6144, 2560, 16384, 96)))
+        strides = tuple(stride if index == 7 else stride // world_size for index, stride in
+                        enumerate((16384, 10240, 16384, 96, 96, 6144, 6144, 2560, 16384, 96)))
         for field, width, stride in zip(fields(scratch), widths, strides, strict=True):
             tensor = getattr(scratch, field.name)
             if (
@@ -170,9 +176,9 @@ class PreparedGDN:
                 raise ValueError(
                     "canonical GDN parameters and graph buffers must share a device"
                 )
-        if state.convolution.ndim != 3 or state.convolution.shape[1] != 10240:
+        if state.convolution.ndim != 3 or state.convolution.shape[1] != module.conv_dim:
             raise ValueError(
-                "GDN convolution history must have shape [slots, 10240, 3 + drafts]"
+                f"GDN convolution history must have shape [slots, {module.conv_dim}, 3 + drafts]"
             )
         self.speculative_tokens = state.convolution.shape[2] - 3
         if not 0 <= self.speculative_tokens <= 7:
@@ -180,11 +186,11 @@ class PreparedGDN:
                 "GDN history supports zero through seven speculative tokens"
             )
         if state.recurrent.ndim != 4 or tuple(state.recurrent.shape[1:]) != (
-            48,
+            self.value_heads,
             128,
             128,
         ):
-            raise ValueError("GDN recurrence must have shape [slots, 48, 128, 128]")
+            raise ValueError(f"GDN recurrence must have shape [slots, {self.value_heads}, 128, 128]")
         self.sequences = metadata.query_start_loc.numel() - 1
         if (
             self.sequences <= 0
@@ -252,7 +258,7 @@ class PreparedGDN:
         conv_caps = short_conv.Caps(
             device=self.device,
             mode=mode,
-            channels=10240,
+            channels=module.conv_dim,
             kernel_size=4,
             max_tokens=self.tokens,
             max_seqs=self.sequences,
@@ -280,7 +286,7 @@ class PreparedGDN:
             "recurrent_state": state.recurrent,
             "num_seqs": metadata.num_seqs,
             "num_tokens": metadata.num_tokens,
-            "output": scratch.recurrence.view(self.tokens, 48, 128),
+            "output": scratch.recurrence.view(self.tokens, self.value_heads, 128),
             "a": scratch.a,
             "b": scratch.b,
         }
@@ -290,8 +296,8 @@ class PreparedGDN:
                 max_tokens=self.tokens,
                 max_seqs=self.sequences,
                 max_state_slots=state.recurrent.shape[0],
-                key_heads=16,
-                value_heads=48,
+                key_heads=self.key_heads,
+                value_heads=self.value_heads,
                 state_index_columns=columns,
                 state_dtype=torch.float32,
                 gate_activation=module.norm.activation,
@@ -300,7 +306,7 @@ class PreparedGDN:
             args = dict(
                 **common,
                 mixed_qkv=scratch.convolved_qkv,
-                z=scratch.z.view(self.tokens, 48, 128),
+                z=scratch.z.view(self.tokens, self.value_heads, 128),
                 norm_weight=module.norm.weight,
                 query_start_loc=metadata.query_start_loc,
                 num_accepted_tokens=metadata.accepted_tokens,
@@ -317,18 +323,18 @@ class PreparedGDN:
                 max_tokens=self.tokens,
                 max_seqs=self.sequences,
                 max_state_slots=state.recurrent.shape[0],
-                key_heads=16,
-                value_heads=48,
+                key_heads=self.key_heads,
+                value_heads=self.value_heads,
                 checkpoint_export=checkpoint_export,
                 null_state_index=0,
                 recurrence_policy="sequential_k1",
             )
-            q, k, v = scratch.convolved_qkv.split((2048, 2048, 6144), dim=-1)
+            q, k, v = scratch.convolved_qkv.split((2048 // world_size, 2048 // world_size, 6144 // world_size), dim=-1)
             args = dict(
                 **common,
-                q=q.view(self.tokens, 16, 128),
-                k=k.view(self.tokens, 16, 128),
-                v=v.view(self.tokens, 48, 128),
+                q=q.view(self.tokens, self.key_heads, 128),
+                k=k.view(self.tokens, self.key_heads, 128),
+                v=v.view(self.tokens, self.value_heads, 128),
                 cu_seqlens=metadata.query_start_loc,
                 initial_state_indices=metadata.initial_state_indices,
                 final_state_indices=metadata.final_state_indices,
@@ -379,9 +385,9 @@ class PreparedGDN:
             scratch.recurrence.zero_()
             gdn_prefill.run(self.recurrent_binding)
             normalized = self.module.norm(
-                scratch.recurrence.view(self.tokens, 48, 128), scratch.z.view(self.tokens, 48, 128)
+                scratch.recurrence.view(self.tokens, self.value_heads, 128), scratch.z.view(self.tokens, self.value_heads, 128)
             )
-            scratch.gated.copy_(normalized.view(self.tokens, 6144))
+            scratch.gated.copy_(normalized.view(self.tokens, 6144 // self.world_size))
             torch.ge(self.row_ids, self.metadata.num_tokens, out=self.inactive_rows)
             scratch.gated.masked_fill_(self.inactive_rows, 0)
         return self.projections["out_proj"](scratch.gated)

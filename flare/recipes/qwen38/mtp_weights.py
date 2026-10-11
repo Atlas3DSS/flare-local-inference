@@ -9,6 +9,7 @@ import json
 
 import torch
 
+from flare.components.parallel import TensorParallelShard
 from flare.preparation.checkpoint import CheckpointError, CheckpointManifest
 from flare.preparation.qwen38 import CONFIG_SHA256, TRANSFORMERS_REVISION
 
@@ -46,30 +47,35 @@ class MTPWeightLoader(QwenWeightLoader):
                 and (self.prefixes is None or name.startswith(self.prefixes))}
 
     def load_experts(self, *, expert_ids=None):
-        """Prepare plain E4M3 scale planes and A16 activations, without CSF or QDQ.
+        """Prepare checkpoint E4M3 scales in native layout for A16 execution.
 
         Explicit expert subsets are component-test inputs. The executable MTP
         layer requires all 512 experts in checkpoint order.
         """
         from b12x.moe import fused_moe
+        from b12x._lib.intrinsics import swizzle_block_scale
 
         self._require_open()
         ids = _expert_ids(0, expert_ids)
         scales = _global_scales(self._sources, ids)
         count = len(ids)
-        w13 = torch.empty((count, 1280, 1280), dtype=torch.uint8, device=self.device)
-        w2 = torch.empty((count, 2560, 320), dtype=torch.uint8, device=self.device)
-        s13 = torch.empty((count, 1280, 160), dtype=torch.float8_e4m3fn, device=self.device)
-        s2 = torch.empty((count, 2560, 40), dtype=torch.float8_e4m3fn, device=self.device)
-        for local, expert in enumerate(ids):
+        first, last = self.shard.partition(640, alignment=16)
+        local = last - first
+        w13 = torch.empty((count, 2 * local, 1280), dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((count, 2560, local // 2), dtype=torch.uint8, device=self.device)
+        s13 = torch.empty((count, 2 * local, 160), dtype=torch.float8_e4m3fn, device=self.device)
+        s2 = torch.empty((count, 2560, local // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        for index, expert in enumerate(ids):
             prefix = f"mtp.layers.0.mlp.experts.{expert}"
             for projection, values, blocks in (
-                ("up_proj", w13[local, :640], s13[local, :640]),
-                ("gate_proj", w13[local, 640:], s13[local, 640:]),
-                ("down_proj", w2[local], s2[local]),
+                ("up_proj", w13[index, :local], s13[index, :local]),
+                ("gate_proj", w13[index, local:], s13[index, local:]),
+                ("down_proj", w2[index], s2[index]),
             ):
-                self._copy(values, self._sources[f"{prefix}.{projection}.weight"])
-                self._copy(blocks, self._sources[f"{prefix}.{projection}.weight_scale"])
+                weight = self._sources[f"{prefix}.{projection}.weight"]
+                scale = self._sources[f"{prefix}.{projection}.weight_scale"]
+                self._copy(values, weight[:, first // 2:last // 2] if projection == "down_proj" else weight[first:last])
+                self._copy(blocks, scale[:, first // 16:last // 16] if projection == "down_proj" else scale[first:last])
         device_scales = []
         for value in scales:
             destination = torch.empty_like(value, device=self.device)
@@ -79,21 +85,20 @@ class MTPWeightLoader(QwenWeightLoader):
         plan = fused_moe.plan_weights(
             source=fused_moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
             activation=fused_moe.ActivationSpec(mode="a16", nonlinearity="silu", io_dtype=torch.bfloat16),
-            geometry=fused_moe.MoEGeometry(num_experts=count, hidden_size=2560, intermediate_size=640),
+            geometry=fused_moe.MoEGeometry(num_experts=count, hidden_size=2560, intermediate_size=local),
         )
         return fused_moe.prepare_weights(plan=plan, weights=fused_moe.PackedWeights(
-            w13=w13, w2=w2, w13_block_scales=s13, w2_block_scales=s2,
+            w13=w13, w2=w2, w13_block_scales=swizzle_block_scale(s13), w2_block_scales=swizzle_block_scale(s2),
             w13_global_scales=device_scales[0], w2_global_scales=device_scales[1],
         ))
 
     def load_shared(self):
         prefix = "mtp.layers.0.mlp"
-        gate_up = torch.empty((1280, 2560), dtype=torch.bfloat16, device=self.device)
-        for projection, output in (("gate_proj", gate_up[:640]), ("up_proj", gate_up[640:])):
-            self._copy(output, self._sources[f"{prefix}.shared_expert.{projection}.weight"])
-        self._session.flush()
+        first, last = self.shard.partition(640, alignment=16)
+        gate_up = torch.cat(self.load_tensors(tuple(f"{prefix}.shared_expert.{p}.weight"
+            for p in ("gate_proj", "up_proj")), extents=(slice(first, last),) * 2))
         return SharedExpertWeights(gate_up,
-            self.load_tensor(f"{prefix}.shared_expert.down_proj.weight"),
+            self.load_tensor(f"{prefix}.shared_expert.down_proj.weight", extent=(slice(None), slice(first, last))),
             self.load_tensor(f"{prefix}.shared_expert_gate.weight"))
 
 
@@ -140,23 +145,33 @@ class MTPWeights:
     lm_head: torch.Tensor
     stored_bytes: int
     allocated_bytes: int
+    shard: TensorParallelShard = TensorParallelShard(0, 1)
 
     @classmethod
-    def load(cls, manifest: CheckpointManifest, device, *, embedding_weight, lm_head_weight, progress=None):
+    def load(cls, manifest: CheckpointManifest, device, *, embedding_weight, lm_head_weight, progress=None, shard: TensorParallelShard = TensorParallelShard(0, 1)):
         device = torch.device(device)
         if device.type != "cuda":
             raise ValueError("MTP weights require a CUDA device")
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         for label, tensor in (("embedding", embedding_weight), ("lm_head", lm_head_weight)):
-            if (tensor.shape != (248320, 2560) or tensor.dtype != torch.bfloat16
+            rows = 248320 if label == "embedding" else 248320 // shard.world_size
+            if (tensor.shape != (rows, 2560) or tensor.dtype != torch.bfloat16
                     or tensor.device != device or not tensor.is_contiguous()):
-                raise ValueError(f"shared MTP {label} must be contiguous BF16 [248320,2560] on {device}")
+                raise ValueError(f"shared MTP {label} must be contiguous BF16 [{rows},2560] on {device}")
         stored = sum(t.nbytes for t in manifest.tensors.values() if t.component == "mtp")
         module = create_mtp_modules(manifest)
         before = torch.cuda.memory_allocated(device)
-        with MTPWeightLoader(manifest, device, show_progress=progress is not None) as loader:
+        with MTPWeightLoader(manifest, device, progress=progress, progress_label="Load MTP weights", shard=shard) as loader:
             names = tuple(name for name, _ in module.named_parameters())
-            values = loader.load_tensors(tuple(f"mtp.{name}" for name in names))
+            kv = tuple(head * 256 for head in shard.replicated_partition(2))
+            extents = {
+                "layers.0.self_attn.q_proj.weight": slice(*shard.partition(12288)),
+                "layers.0.self_attn.k_proj.weight": slice(*kv),
+                "layers.0.self_attn.v_proj.weight": slice(*kv),
+                "layers.0.self_attn.o_proj.weight": (slice(None), slice(*shard.partition(6144))),
+            }
+            values = loader.load_tensors(tuple(f"mtp.{name}" for name in names),
+                                        extents=tuple(extents.get(name) for name in names))
             for name, value in zip(names, values, strict=True):
                 parent, _, attribute = name.rpartition(".")
                 setattr(module.get_submodule(parent), attribute, torch.nn.Parameter(value, requires_grad=False))
@@ -169,11 +184,11 @@ class MTPWeights:
         attention_module = module.layers[0].self_attn
         qkv = torch.cat([attention_module.get_submodule(name).weight.detach()
                          for name in ("q_proj", "k_proj", "v_proj")])
-        for name, value in zip(("q_proj", "k_proj", "v_proj"), qkv.split((12288, 512, 512)), strict=True):
+        for name, value in zip(("q_proj", "k_proj", "v_proj"), qkv.split((12288 // shard.world_size, max(1, 2 // shard.world_size) * 256, max(1, 2 // shard.world_size) * 256)), strict=True):
             attention_module.get_submodule(name).weight = torch.nn.Parameter(value, requires_grad=False)
         attention_module.register_buffer("packed_qkv", qkv, persistent=False)
         attention = {"qkv_proj": qkv, **{name: attention_module.get_submodule(name).weight
                      for name in ("o_proj", "indexer.index_qk_proj")}}
         torch.cuda.synchronize(device)
         return cls(module, attention, moe, embedding_weight, lm_head_weight,
-                   stored, torch.cuda.memory_allocated(device) - before)
+                   stored, torch.cuda.memory_allocated(device) - before, shard)

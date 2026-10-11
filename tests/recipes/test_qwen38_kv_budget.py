@@ -51,13 +51,13 @@ def test_auto_capacity_releases_rejected_pools_before_reallocation(monkeypatch):
     assert all(cache.capacities == [8196, 8154] for cache in caches.values())
     assert all(cache.owners[0]() is None and cache.owners[1]() is pools[index]
                for index, cache in caches.items())
-    assert any('8154 pages' in message for message in messages)
+    assert messages[-1] == '12.32 GiB per GPU · 521,856 tokens'
 
 
 def test_explicit_capacity_fails_without_resizing(monkeypatch):
     caches = {3: Cache()}
     events = accounting(monkeypatch, [4293984256], caches)
-    with pytest.raises(MemoryError, match='requested KV pages.*pages=8196'):
+    with pytest.raises(MemoryError, match=r'requested KV cache \(524,544 tokens, 12.38 GiB per GPU\)'):
         _allocate_page_pools(caches, 8196, page_bytes=1622016,
             device='cuda:0', headroom_bytes=4 << 30, automatic=False, report=lambda _: None)
     assert caches[3].capacities == [8196]

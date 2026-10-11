@@ -285,7 +285,8 @@ class PreparedResume:
     """Sample directly from an exact restored prefix's final hidden vector."""
 
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
-                 completion_records, frame_index, submission_sequence, *, session, name):
+                 completion_records, frame_index, submission_sequence, *, session, name,
+                 local_logits=None, vocabulary_runtime=None, coordinator=None):
         from flare.components.linear import UnquantizedProjection
         from flare.components.sampling import PreparedSampling
 
@@ -298,7 +299,13 @@ class PreparedResume:
              requests.pending_token, pool.last_hidden.stride(0), requests.consumed_tokens.stride(0), 4096, requests.capacity),
             (rows, 1, 1))
         self.sample_hidden = sample_hidden
-        self.projection = UnquantizedProjection(sample_hidden, lm_head_weight, logits, session=session, name=name)
+        if vocabulary_runtime is None:
+            self.projection = UnquantizedProjection(sample_hidden, lm_head_weight, logits, session=session, name=name)
+        else:
+            from flare.components.vocabulary import PreparedVocabularyProjection
+
+            self.projection = PreparedVocabularyProjection(sample_hidden, lm_head_weight, local_logits, logits,
+                runtime=vocabulary_runtime, session=session, coordinator=coordinator, name=name)
         self.sampler = PreparedSampling(logits, requests, inputs.row_slot_ids[:rows],
             inputs.row_generations[:rows], inputs.live_rows, completion_records, frame_index, submission_sequence,
             sample_enabled=inputs.sample_enabled[:rows])

@@ -40,7 +40,7 @@ def test_tp_partitions_cover_checkpoint_exactly(world):
         assert all(a % alignment == b % alignment == 0 for a, b in partitions)
 
 
-@pytest.mark.parametrize("rank,world", [(0, 1), (0, 3), (-1, 2), (2, 2), (True, 2)])
+@pytest.mark.parametrize("rank,world", [(1, 1), (0, 3), (-1, 2), (2, 2), (True, 2)])
 def test_invalid_tp(rank, world):
     with pytest.raises(ValueError, match="valid rank"):
         TensorParallelShard(rank, world)

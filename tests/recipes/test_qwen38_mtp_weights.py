@@ -69,17 +69,24 @@ def test_unequal_gate_up_and_nonscalar_rejected():
         _global_scales(sources, (4,))
 
 
-def test_actual_packed_experts_use_a16_and_plain_scales_in_up_gate_order(manifest, monkeypatch):
+@pytest.mark.parametrize("rank,world", [(0, 1), (1, 2), (3, 4)])
+def test_actual_packed_experts_use_a16_and_native_scales_in_up_gate_order(manifest, monkeypatch, rank, world):
+    from flare.components.parallel import TensorParallelShard
+    from b12x.moe._shared.kernels.w4a16.host import unswizzle_expert_scales
+
+    shard = TensorParallelShard(rank, world)
+    first, last = shard.partition(640)
+    width = last - first
     from b12x.moe import fused_moe
     from safetensors import safe_open
 
     ids = (7, 4)
     names = [n for n in manifest.tensors if any(n.startswith(f"mtp.layers.0.mlp.experts.{i}.") for i in ids)]
     sources = {}
-    for shard in {manifest.tensors[name].shard for name in names}:
-        with safe_open(manifest.snapshot / shard, framework="pt", device="cpu") as handle:
+    for filename in {manifest.tensors[name].shard for name in names}:
+        with safe_open(manifest.snapshot / filename, framework="pt", device="cpu") as handle:
             sources.update((name, handle.get_tensor(name).clone()) for name in names
-                           if manifest.tensors[name].shard == shard)
+                           if manifest.tensors[name].shard == filename)
     captured = {}
 
     def plan_weights(**kwargs):
@@ -88,7 +95,7 @@ def test_actual_packed_experts_use_a16_and_plain_scales_in_up_gate_order(manifes
 
     monkeypatch.setattr(fused_moe, "plan_weights", plan_weights)
     monkeypatch.setattr(fused_moe, "prepare_weights", lambda **kwargs: kwargs["weights"])
-    loader = MTPWeightLoader(manifest, "cpu")
+    loader = MTPWeightLoader(manifest, "cpu", shard=shard)
     loader._session = SimpleNamespace(flush=lambda: None)
     loader._sources = sources
     loader._copy = lambda destination, source: destination.copy_(source)
@@ -98,13 +105,17 @@ def test_actual_packed_experts_use_a16_and_plain_scales_in_up_gate_order(manifes
     assert captured["source"].w13_layout.value == "w13"
     assert weights.input_scale is None and weights.intermediate_scale is None
     assert captured["geometry"].num_experts == 2
+    scales13 = unswizzle_expert_scales(weights.w13_block_scales, rows=2 * width, cols=2560)
+    scales2 = unswizzle_expert_scales(weights.w2_block_scales, rows=2560, cols=width)
     for local, expert in enumerate(ids):
-        for projection, values, scales in (("up_proj", weights.w13[local, :640], weights.w13_block_scales[local, :640]),
-                                          ("gate_proj", weights.w13[local, 640:], weights.w13_block_scales[local, 640:]),
-                                          ("down_proj", weights.w2[local], weights.w2_block_scales[local])):
+        for projection, values, scales in (("up_proj", weights.w13[local, :width], scales13[local, :width]),
+                                          ("gate_proj", weights.w13[local, width:], scales13[local, width:]),
+                                          ("down_proj", weights.w2[local], scales2[local])):
             prefix = f"mtp.layers.0.mlp.experts.{expert}.{projection}"
-            assert torch.equal(values, sources[f"{prefix}.weight"])
-            assert torch.equal(scales.view(torch.uint8), sources[f"{prefix}.weight_scale"].view(torch.uint8))
+            source = sources[f"{prefix}.weight"]
+            scale = sources[f"{prefix}.weight_scale"].view(torch.uint8)
+            assert torch.equal(values, source[:, first // 2:last // 2] if projection == "down_proj" else source[first:last])
+            assert torch.equal(scales.view(torch.uint8), scale[:, first // 16:last // 16] if projection == "down_proj" else scale[first:last])
         assert weights.w13_global_scales[local] == sources[f"mtp.layers.0.mlp.experts.{expert}.up_proj.weight_scale_2"]
         assert weights.w2_global_scales[local] == sources[f"mtp.layers.0.mlp.experts.{expert}.down_proj.weight_scale_2"]
     assert not torch.cuda.is_initialized()

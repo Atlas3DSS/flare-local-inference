@@ -123,19 +123,18 @@ def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_si
                            benchmark_call=benchmark, retain_benchmark_call=False)
 
 
-def test_declarations_do_no_work_and_prepare_in_two_tuned_batches(backend):
+def test_declarations_do_no_work_and_prepare_in_one_tuned_batch(backend):
     events, _ = backend
     session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
     session.register_scratch(arena)
     calls = []
     requests = []
-    for name, stage in (("projection", "weights"), ("attention", "state"),
-                        ("experts", "weights"), ("recurrence", "state")):
+    for name in ("projection", "attention", "experts", "recurrence"):
         request = declaration(name, prepare=lambda state: calls.append("prime"),
                               benchmark=lambda state: calls.append("benchmark"))
         requests.append(request)
-        declare(session, (request,), stage=stage)
+        declare(session, (request,))
     register_finalizer(session, lambda: calls.append("bind"), workspace=arena)
     assert not events and not calls and arena.nbytes == 0
     assert all(request.plan.selection is None for request in requests)
@@ -144,34 +143,27 @@ def test_declarations_do_no_work_and_prepare_in_two_tuned_batches(backend):
             pass
     report = session.tune()
     assert [event for event in events if event[0] == "prepare"] == [
-        ("prepare", True, ("projection", "experts")),
-        ("prepare", True, ("attention", "recurrence")),
+        ("prepare", True, ("projection", "attention", "experts", "recurrence")),
     ]
     assert calls == ["benchmark", "prime"] * 4 + ["bind"]
-    assert report["stages"] == {"weights": 2, "state": 2}
-    assert report["cache_hits"] == 4 and report["benchmarked_candidates"] == 14
-    assert events.count(("result_close", True)) == 2
+    assert report["cache_hits"] == 2 and report["benchmarked_candidates"] == 7
+    assert events.count(("result_close", True)) == 1
     assert arena.frozen
 
 
-def test_state_failure_closes_weight_result_without_binding_or_capture(backend, monkeypatch):
+def test_preparation_failure_prevents_binding_or_capture(backend):
     events, _ = backend
     session = make_session(device=0, checkpoint="revision")
-    session.declare((declaration("weights"),))
-    session.declare((declaration("cache"),), stage="state")
-    session.register_finalizer(lambda: pytest.fail("binding before state preparation succeeded"))
-    original = PreparationSession.prepare
+    session.declare((declaration("projection"),))
 
-    def prepare(self, requests, **kwargs):
-        if requests[0].name == "cache":
-            raise RuntimeError("cache preparation failed")
-        return original(self, requests, **kwargs)
+    def fail(state):
+        raise RuntimeError("cache preparation failed")
 
-    monkeypatch.setattr(PreparationSession, "prepare", prepare)
+    session.declare((declaration("cache", prepare=fail),))
+    session.register_finalizer(lambda: pytest.fail("binding before kernel preparation succeeded"))
     with pytest.raises(RuntimeError, match="cache preparation failed"):
         session.tune()
-    assert events.count(("result_close", True)) == 1
-    assert not session._request_stages and not session._recorded_requests
+    assert not session._recorded_requests
     with pytest.raises(RuntimeError, match="completed tuning"):
         session.freeze()
 
@@ -267,8 +259,6 @@ def test_names_registration_and_one_shot_lifecycle_are_strict(backend):
     session.declare((item,))
     with pytest.raises(ValueError, match="unique"):
         session.declare((item,))
-    with pytest.raises(ValueError, match="stage must be"):
-        session.declare((declaration("later"),), stage="unknown")
     session.tune()
     for action in (lambda: session.tune(), lambda: session.declare((declaration("late"),)),
                    lambda: session.register_finalizer(lambda: None)):

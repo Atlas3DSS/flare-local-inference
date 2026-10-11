@@ -108,7 +108,7 @@ def prepare_sequence_binding(
         )
 
     declare(session, (plan.request(name=name, prepare_call=prepare_call,
-        benchmark_call=benchmark_call),), stage="state")
+        benchmark_call=benchmark_call),))
     selected = None
 
     def finalize():
