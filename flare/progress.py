@@ -1,6 +1,7 @@
 """Terminal progress for model preparation; callbacks retain plain log output."""
 
 from contextlib import contextmanager
+from math import sqrt
 import sys
 from time import monotonic
 
@@ -16,11 +17,19 @@ _BOOT_SPLASH = """
      ██║     ███████╗██║  ██║██║  ██║███████╗ ⣿⣧⡾⠃       ⢀⡴⠋  ·  ⠊
      ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ ⣿⡿⠁   ⢀⣠⠴⠚⠉    ⠄
                                           ⢀⣾⣿⡇ ⣠⡾⠋    ⠂    ✧
-                           ⣀⣀⣀⡠⠤⠤⠴⠶⠶⣶⣾⣿⣿⣷⡿⠋⠶⠤⢄⣀⣀
-            ⣀⣀⡠⠤⠔⠒⠋⠉⠉⡲⢔⢎⢕⡕⢜⡪⣠⡴⠛⠋⣠⣾⡿⠿⠿⣷⣄⢎⢕⠈⠙⠲⣄⡲⠉⠉⠒⠢⠤⢄⣀⣀
-⣀⣀⡠⠤⠔⠒⠉⠉⢎⢕⡕⠠⣄⣀⡠⠔⠋⢕⡕⢜⡪⡱⡲⢔⠊⢕⡕⣠⠞⠋⡲⢔⠈⠙⢦⣄⠈⠙⠷⣤⡀⢕⡕⢜⡪⠈⠢⡀⢎⢕⡕⢜⡪⡱⡲⢔⠉⠉⠒⠤⢄⣀
-⢔⢎⢕⡕⢜⡪⠤⠤⠒⠋⢕⡕⢜⡪⡱⡲⢔⢎⣀⡠⠤⠤⠒⠋⢔⢎⢕⡕⢜⡪⡱⡲⢔⢎⢕⡕⠈⠑⠢⣄⢔⢎⢕⠉⠓⠦⣄⣀⢔⢎⢕⠈⠂⡪⡱⡲⢔⢎⢕⡕⢜⡪
+                  ⣀⣀⣀⣀⣠⠤⢤⠤⢤⡤⠤⣶⡒⢒⣒⠒⢒⡒⣶⣾⣿⣿⣷⡿⠋⡤⠤⣤⠤⠤⠤⣄⣀⣀⣀⣀
+      ⢀⣀⣀⡤⢤⢴⢲⠒⡞⡽⡫⣉⢗⢦⢠⠒⡄⡴⡢⢀⢖⢆⣠⡴⠛⠋⣠⣾⡿⠿⠿⣷⣄⡔⡢⠈⠙⠲⣄⡲⡄⡔⣢⢠⢖⢄⠰⡺⡍⡝⢫⢳⢖⢖⠦⡤⢤⣀⣀⡀
+⡠⢤⠔⡒⢊⡭⣭⢚⡒⢿⠶⠠⣄⣀⡠⠔⠋⣿⠖⡋⢠⠭⡄⢉⠊⣿⢖⣠⠞⠋⡀⢉⠈⠙⢦⣄⠈⠙⠷⣤⡀⡾⢒⠚⣦⠈⠢⡀⠥⡞⢓⠺⡷⢌⠁⣨⢥⡜⣓⠺⡷⢎⠁⡨⢥⡉⣛⢵⡶⢢⠤⢄
+⣊⣸⠮⠞⠈⠪⠤⠤⠒⠋⠮⠼⠈⣊⣼⣮⡚⠈⣀⡠⠤⠤⠒⠋⠔ ⠣⢵⣇⣓⣁⠧⠵⠁⢓⣵⠈⠑⠢⣄⠵⠃⣓⠉⠓⠦⣄⣀⠥⣇⣑⠈⠂⠵⠃⠑⢥⣧⣑⡃⠳⠥⠇⢑⣡⣷⣕⠃⠱⠥⢇⣑
 """.strip("\n")
+
+
+_SUN_FLARE_SPANS = {
+    10: ((36, 43),),
+    11: ((28, 45),),
+    12: ((11, 17), (24, 25), (27, 41), (45, 48)),
+    13: ((6, 10), (18, 24), (36, 40), (43, 48), (51, 53)),
+}
 
 
 class StartupProgress:
@@ -41,13 +50,12 @@ class StartupProgress:
         art = Text(overflow="crop", no_wrap=True)
         for index, (line, color) in enumerate(zip(_BOOT_SPLASH.splitlines(), colors, strict=True)):
             row = Text(line, style=color)
-            if index in (11, 12):
-                left, right = (21, 46) if index == 11 else (8, 56)
-                row.stylize("#ffd27b", 0, left)
-                row.stylize("#ffd27b", right, len(line))
             for column, character in enumerate(line):
-                if character in "⡪⢕⡲⢜⢎⡱⡕⢔":
-                    row.stylize(("#c47636", "#a64d2d", "#71332a")[index - 11], column, column + 1)
+                if index >= 10 and not any(start <= column < end for start, end in _SUN_FLARE_SPANS[index]):
+                    limb = 41.2 + 275 - sqrt(275 ** 2 - (column * 2 + 0.5 - 71.5) ** 2)
+                    depth = index * 4 + 1.5 - limb
+                    surface = "#fff1a8" if depth < 2 else "#ffd15c" if depth < 6 else "#ffad38"
+                    row.stylize(surface, column, column + 1)
                 if not (3 <= index <= 8 and 5 <= column < 44) and character in "⣿⣾⣷✦":
                     row.stylize("bold #fff8e7", column, column + 1)
             if 3 <= index <= 8:
