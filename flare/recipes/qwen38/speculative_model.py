@@ -253,17 +253,18 @@ class PreparedSpeculativeRound:
             point_mass = (target.vocab_ids == o.copy_ids[safe, index, None]).float()
             self.draft_probabilities[:, index].copy_(torch.where(copy[:, None], point_mass,
                                                                 proposal.probabilities[:, 0]))
-            self.offset.copy_(self.base_offset + 4 * index)
-            self._draw(self.draft_probabilities[:, index])
+            self.sampled.copy_(torch.where(copy, o.copy_ids[safe, index], self.sampled))
             self.copy_mask.bitwise_or_(copy.long() * (1 << index))
             self.drafts[:, index].copy_(self.sampled)
             self.draft_valid[:, index].copy_(copy | proposal.valid[:, 0])
         if w > 1 and not self.copy_only:
-            for slot in range(o.requests.capacity):
-                match = self.active & (slots == slot)
-                base = torch.where(match, self.base_offset, 0).sum()
-                o.draft_rng_offset[slot].copy_(torch.where(match.any(), base + 4 * (w - 1), o.draft_rng_offset[slot]))
-                o.draft_rng_generation[slot].copy_(torch.where(match.any(), o.requests.generation[slot], o.draft_rng_generation[slot]))
+            # One masked update per tensor instead of one storage write per request slot.
+            slot_ids = torch.arange(o.requests.capacity, device=slots.device)
+            match = self.active[None, :] & (slots[None, :] == slot_ids[:, None])
+            matched = match.any(1)
+            base = torch.where(match, self.base_offset[None, :], 0).sum(1)
+            o.draft_rng_offset.copy_(torch.where(matched, base + 4 * (w - 1), o.draft_rng_offset))
+            o.draft_rng_generation.copy_(torch.where(matched, o.requests.generation, o.draft_rng_generation))
         if self.token_limits is not None:
             self.drafts.masked_fill_(self.columns[None, :-1] >= self.token_limits[:, None] - 1, 0)
         o.candidates[:b, 0].copy_(self.pending)
