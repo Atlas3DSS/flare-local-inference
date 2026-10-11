@@ -34,6 +34,15 @@ def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
         max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
+def create_dma_all_reduce_runtime(group, device, *, max_tokens, hidden_size):
+    """Allocate a b12x copy-engine ring for prefill-sized BF16 reductions."""
+    from b12x.comm.pcie import DmaAllReduce
+
+    if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size)):
+        raise ValueError("all-reduce capacities must be positive integers")
+    return DmaAllReduce(exchange_group=group, device=device, max_bytes=max_tokens * hidden_size * 2)
+
+
 def create_head_exchange(group, device, *, max_rows, heads, head_dim):
     """Allocate b12x staging for all-gathering head shards and LSE-combining partial attention."""
     from b12x.comm.pcie import DcpAllToAll

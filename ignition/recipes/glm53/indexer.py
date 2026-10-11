@@ -219,13 +219,17 @@ class PreparedGlmIndexer:
             sparse_mla.expand_pooled_topk_to_physical_slots(*self.expand_arguments,
                 **self.expand_options, plan=self.expand_plan)
             return s.physical
-        from .dcp import expand_local, merge_candidates, pack_candidates
+        from .dcp import expand_local, expand_tokens, merge_candidates, pack_candidates
 
         # Every rank merges identical global candidates, then keeps the records it owns.
         pack_candidates(s.pools, s.scores, s.candidates, self.context.shards)
         for gather, (start, end) in zip(self.gathers, self.context.slices(s.pools.shape[0]), strict=True):
             gather(s.candidates[start:end].view(torch.bfloat16).view(end - start, -1))
         merge_candidates(s.gathered, s.global_pools)
-        expand_local(s.global_pools, m.positions, m.requests, m.block_table, s.physical, s.selected_lengths,
-                     self.context.shards)
+        if self.mode == "prefill":
+            # Prefill attends over gathered context blocks addressed by global position.
+            expand_tokens(s.global_pools, m.positions, s.physical, s.selected_lengths)
+        else:
+            expand_local(s.global_pools, m.positions, m.requests, m.block_table, s.physical, s.selected_lengths,
+                         self.context.shards)
         return s.physical

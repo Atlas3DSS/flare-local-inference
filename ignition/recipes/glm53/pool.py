@@ -79,30 +79,47 @@ class ContinuationPool(StateStorage):
         return cls(storage.backing, storage.layout, DecoderState(tuple(layers)),
                    storage.region("consumed_tokens"), storage.region("last_hidden"), draft)
 
-    def replace_pages(self, pages, *, metadata_mode=None):
+    def replace_pages(self, pages, *, metadata_mode=None, ranks=1, share=None):
         """Give every MLA state, including the draft layer, `pages` empty physical pages.
 
         The states are updated in place, so their holders see the new pools; operators that
         bound the previous pools must rebind before capture. A metadata mode describes the
-        pools without device memory for forward compilation.
+        pools without device memory for forward compilation. With several context ranks,
+        `share(nbytes)` allocates decoder latent caches that peers read through CUDA IPC;
+        the shared allocations are returned for closing after native replay drains.
         """
         if type(pages) is not int or pages <= 0:
             raise ValueError("GLM continuation storage requires positive page capacity")
         device = self.backing.device
 
-        def empty(shape):
+        def empty(shape, dtype=torch.uint8):
             if metadata_mode is not None:
                 from ignition.preparation.deferred import deferred_tensor
 
-                return deferred_tensor(shape, dtype=torch.uint8, device=device, mode=metadata_mode)
-            return torch.zeros(shape, dtype=torch.uint8, device=device)
+                return deferred_tensor(shape, dtype=dtype, device=device, mode=metadata_mode)
+            return torch.zeros(shape, dtype=dtype, device=device)
 
+        shared = []
         states = [layer for layer in self.decoder.layers if isinstance(layer, MLAState)]
         for state in (*states, *((self.draft,) if self.draft is not None else ())):
             object.__setattr__(state, "cache", None)
             object.__setattr__(state.index, "cache", None)
-            object.__setattr__(state, "cache", empty((pages * 4, 64, 528)))
+            shape, peers = (pages * 4, 64, 528), None
+            if ranks > 1 and state is not self.draft and metadata_mode is None and share is not None:
+                pool = share(pages * 4 * 64 * 528)
+                shared.append(pool)
+                cache, peers = pool.tensor.view(shape), pool.addresses
+            else:
+                cache = empty(shape)
+                if ranks > 1 and state is not self.draft:
+                    peers = empty((ranks,), torch.int64)
+                    if metadata_mode is None:
+                        # Unshared preparation pools: every rank's address points at this rank's cache.
+                        peers.fill_(cache.data_ptr())
+            object.__setattr__(state, "cache", cache)
+            object.__setattr__(state, "peers", peers)
             object.__setattr__(state.index, "cache", empty((pages, 64, 132)))
+        return shared
 
     def clear_for_preparation(self):
         self.backing.zero_()

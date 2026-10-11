@@ -95,7 +95,8 @@ class PreparedGlmLayer:
             mlp_mhc, scratch.mlp_hc, session=session, name=f"{name}.ffn_hc", workspace=workspace, **options)
         if isinstance(mlp_weights, MoEWeights):
             self.mlp = PreparedGlmMoe(module.mlp, scratch.mlp_hc.normalized, mlp_weights, scratch.mlp,
-                                      session=session, name=f"{name}.moe", workspace=workspace)
+                                      session=session, name=f"{name}.moe", workspace=workspace,
+                                      prefill=mode == "prefill")
         else:
             self.mlp = PreparedMLP(scratch.mlp_hc.normalized, mlp_weights, scratch.mlp.gate_up,
                 scratch.mlp.intermediate, scratch.mlp.output, session=session, name=f"{name}.mlp", workspace=workspace,

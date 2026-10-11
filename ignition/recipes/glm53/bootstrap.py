@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from ignition.preparation.collectives import (
     CollectivePreparation,
     create_all_gather_runtime,
     create_all_reduce_runtime,
+    create_dma_all_reduce_runtime,
     create_head_exchange,
 )
 from ignition.preparation.execution import GraphSignature
@@ -39,6 +41,8 @@ from .weights import ModelWeights
 
 
 _COMPILED_KINDS = ("prefill", "decode", "resume", "speculative")
+# Prefill chunks of at least this many tokens all-reduce through the copy-engine ring.
+_DMA_PREFILL_TOKENS = 1024
 # Allocator granularity and fragmentation slack beyond the headroom kept after the final KV allocation.
 _KV_ALLOCATION_MARGIN = 64 << 20
 
@@ -57,6 +61,8 @@ class PreparationConfig:
     compile_decoder: bool = True
     kernel_cache: Path | None = None
     mtp: bool = False
+    # Routed NVFP4-CSF experts: A16 activations with A4 prefill launches, or A4 throughout.
+    expert_activation: str = "a16"
     # Shard latent records and C4 pools across the tensor-parallel ranks (decode context parallelism).
     context_parallel: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
@@ -158,7 +164,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
-    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp)
+    if config.expert_activation == "a16":
+        # b12x retains activation scales for A4 prefill launches only while preparing with this switch.
+        os.environ["B12X_W4A16_A4_PREFILL"] = "1"
+    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp,
+                                expert_activation=config.expert_activation)
     with phase(progress, "Allocate model state and collectives") as stage:
         layer_types = weights.tree.config.text_config.layer_types
         layout = continuation_layout(layer_types, shard.world_size, mtp=config.mtp)
@@ -170,6 +180,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         extra_base = slots + 1 + snapshots
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
             extra_base + (slots * config.speculative_state_rows if config.mtp else 0), pages, device, mtp=config.mtp)
+        context_ranks = shard.world_size if config.context_parallel else 1
+        pool.replace_pages(pages, ranks=context_ranks)
         page_bytes = sum(cache.nbytes for _, cache in (*pool.partial_pages(), *pool.draft_pages())) // pages
         # Plans bound the page pools that replace the preparation pages after graph measurement.
         max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
@@ -182,6 +194,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         records = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
         collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=4096)
+        # Prefill chunks reduce their hidden activations through b12x's copy-engine ring.
+        prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
+                                                           hidden_size=4096)
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=sample_rows, columns=154880)
@@ -205,14 +220,15 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         if config.context_parallel:
             from .dcp import SLICE_ROWS, ContextParallel, ContextShards
 
-            exchange_rows = min(config.token_capacity, SLICE_ROWS)
+            # Only decode exchanges heads; prefill gathers context blocks instead.
+            exchange_rows = min(SLICE_ROWS, max(config.request_capacity,
+                max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1))
             context = ContextParallel(ContextShards.on(rank, shard.world_size, device),
                 heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512),
-                candidates=create_all_gather_runtime(group, device, max_rows=exchange_rows,
+                candidates=create_all_gather_runtime(group, device, max_rows=min(config.token_capacity, SLICE_ROWS),
                                                      columns=2048 * shard.world_size),
                 coordinator=coordinator)
         shards = None if context is None else context.shards
-        context_ranks = 1 if context is None else shard.world_size
         # Prefill chunks overlay their layer intermediates; decode rows keep small separate scratch.
         prefill_storage = DecoderScratch.allocate(config.prefill_chunk_size, blocks, "prefill", device,
             shard=shard, sample_rows=1, context_ranks=context_ranks, overlay_layers=True)
@@ -251,7 +267,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                    runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                    runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                     session=session, name=name, workspace=arena, feedback=feedback, max_cache_pages=max_cache_pages,
                     context=context)
                 batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages,
@@ -317,12 +333,17 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
         # Compiler workers trace the final pool shapes while the pools hold no device memory.
         with compile_only_launches():
-            pool.replace_pages(pages, metadata_mode=deferred_mode())
+            pool.replace_pages(pages, metadata_mode=deferred_mode(), ranks=context_ranks)
             rebind_pages(pages, compiled_only=True)
+
+    shared_pages = []
 
     def materialize():
         with phase(progress, "Allocate KV cache") as stage:
-            pool.replace_pages(pages)
+            from ignition.components.shared_pages import SharedPages
+
+            shared_pages.extend(pool.replace_pages(pages, ranks=context_ranks,
+                                                   share=lambda nbytes: SharedPages(group, device, nbytes)))
             rebind_pages(pages)
             for graph in measured.values():
                 graph.reset()
@@ -363,9 +384,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
+        prefill_collective,
         vocabulary_collective, coordinator, speculation, context)
     exchanges = () if context is None else (context.heads, context.candidates)
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
-        close_resources=(*exchanges, vocabulary_collective, collective),
+        close_resources=(*exchanges, *shared_pages, prefill_collective, vocabulary_collective, collective),
         server_config=server_config, memory_report=memory)

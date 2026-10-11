@@ -387,7 +387,7 @@ class DirectWeightLoader:
 
     def load_nvfp4_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_vectors,
-        intermediate_range=None, scale_scratch=None, swiglu_limit=None,
+        intermediate_range=None, scale_scratch=None, swiglu_limit=None, activation_mode="a4",
     ):
         """Prepare routed A4 experts from packed rank-local checkpoint views.
 
@@ -454,7 +454,7 @@ class DirectWeightLoader:
             self._display.update(self._session.payload_bytes)
         plan = moe.plan_weights(
             source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
-            activation=moe.ActivationSpec(mode="a4", nonlinearity="silu", io_dtype=torch.bfloat16,
+            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local),
         )

@@ -134,6 +134,85 @@ def _expand_local(Pools, Positions, Requests, Tables, Output, Counts, table_stri
     tl.store(Counts + row, count)
 
 
+@triton.jit
+def _expand_tokens(Pools, Positions, Output, Counts, TOPK: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    # Selected pools and the incomplete tail as global positions, compacted to the front.
+    row = tl.program_id(0)
+    column = tl.arange(0, BLOCK)
+    length = tl.load(Positions + row).to(tl.int64) + 1
+    complete = length // 4
+    selected = tl.minimum(complete, TOPK)
+    history = column < selected * 4
+    pool = tl.load(Pools + row * TOPK + column // 4, mask=history, other=-1).to(tl.int64)
+    tail = column - selected * 4
+    in_tail = (tail >= 0) & (tail < length - complete * 4)
+    token = tl.where(history, tl.where(pool >= 0, pool * 4 + column % 4, -1),
+                     tl.where(in_tail, complete * 4 + tail, -1))
+    live = (token >= 0) & (column < WIDTH)
+    position = tl.cumsum(live.to(tl.int32), 0) - 1
+    tl.store(Output + row * WIDTH + column, tl.full((BLOCK,), -1, tl.int32), mask=column < WIDTH)
+    tl.debug_barrier()
+    tl.store(Output + row * WIDTH + position, token.to(tl.int32), mask=live)
+    tl.store(Counts + row, tl.sum(live.to(tl.int32), 0))
+
+
+@triton.jit
+def _pull_block(Addresses, Table, End, Slab, start, columns, WORLD: tl.constexpr, TOKENS: tl.constexpr,
+                WORDS: tl.constexpr, WORD_BLOCK: tl.constexpr):
+    # Copy the latent records of global positions [start, start + grid * TOKENS) below End into the slab,
+    # reading each from its owner's cache: this rank's own memory or a peer's through CUDA IPC.
+    first = start + tl.program_id(0) * TOKENS
+    end = tl.load(End).to(tl.int64)
+    if first < end:
+        word = tl.arange(0, WORD_BLOCK)
+        for offset in tl.range(0, TOKENS):
+            token = first + offset
+            if token < end:
+                owner = (token // 4) % WORLD
+                local = (token // (4 * WORLD)) * 4 + token % 4
+                page = tl.load(Table + tl.minimum(local // 256, columns - 1)).to(tl.int64)
+                source = tl.load(Addresses + owner).to(tl.pointer_type(tl.int32))
+                record = (page * 256 + local % 256) * WORDS
+                values = tl.load(source + record + word, mask=word < WORDS)
+                tl.store(Slab + (token - start) * WORDS + word, values, mask=word < WORDS)
+
+
+@triton.jit
+def _select_block(Tokens, Counts, Positions, Selected, Selections, Visible, start, SLAB: tl.constexpr,
+                  WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    # This row's selected positions inside the slab's block, as compacted slab records.
+    row = tl.program_id(0)
+    column = tl.arange(0, BLOCK)
+    count = tl.load(Counts + row)
+    token = tl.load(Tokens + row * WIDTH + column, mask=column < count, other=-1).to(tl.int64)
+    live = (token >= start) & (token < start + SLAB) & (column < count)
+    position = tl.cumsum(live.to(tl.int32), 0) - 1
+    tl.store(Selected + row * WIDTH + column, tl.full((BLOCK,), -1, tl.int32), mask=column < WIDTH)
+    tl.debug_barrier()
+    tl.store(Selected + row * WIDTH + position, (token - start).to(tl.int32), mask=live)
+    tl.store(Selections + row, tl.sum(live.to(tl.int32), 0))
+    visible = tl.load(Positions + row).to(tl.int64) + 1 - start
+    tl.store(Visible + row, tl.minimum(tl.maximum(visible, 0), SLAB).to(tl.int32))
+
+
+@triton.jit
+def _merge_partials(Output, Running, Partial, Lse, HEADS: tl.constexpr, DIM: tl.constexpr):
+    # Online softmax across slab blocks: rescale the running output and add this block's partial.
+    row, head = tl.program_id(0), tl.program_id(1)
+    running = tl.load(Running + row * HEADS + head)
+    lse = tl.load(Lse + row * HEADS + head)
+    if lse > -float("inf"):
+        merged = tl.maximum(running, lse) + tl.log(1 + tl.exp(-tl.abs(running - lse)))
+        merged = tl.where(running > -float("inf"), merged, lse)
+        index = tl.arange(0, DIM)
+        offset = (row * HEADS + head) * DIM + index
+        previous = tl.load(Output + offset).to(tl.float32)
+        partial = tl.load(Partial + offset).to(tl.float32)
+        value = previous * tl.exp(running - merged) + partial * tl.exp(lse - merged)
+        tl.store(Output + offset, value.to(Output.dtype.element_ty))
+        tl.store(Running + row * HEADS + head, merged)
+
+
 def _launch(kernel, grid, args, **meta):
     from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
@@ -164,8 +243,40 @@ def expand_local(pools, positions, requests, tables, output, counts, shards):
             WORLD=shards.world, TOPK=POOL_TOPK, WIDTH=width, BLOCK=triton.next_power_of_2(width), num_warps=8)
 
 
+def expand_tokens(pools, positions, output, counts):
+    """Expand global pools and each row's incomplete pool into compacted global positions."""
+    width = output.shape[1]
+    _launch(_expand_tokens, (pools.shape[0],), (pools, positions, output, counts),
+            TOPK=POOL_TOPK, WIDTH=width, BLOCK=triton.next_power_of_2(width), num_warps=8)
+
+
+_PULL_TOKENS = 16
+
+
+def pull_block(addresses, table, end, slab, start, shards):
+    """Gather every rank's records of positions [start, start + slab rows) before `end` into the slab."""
+    rows = slab.shape[0]
+    _launch(_pull_block, (triton.cdiv(rows, _PULL_TOKENS),), (addresses, table, end, slab, start, table.shape[0]),
+            WORLD=shards.world, TOKENS=_PULL_TOKENS, WORDS=132, WORD_BLOCK=256, num_warps=4)
+
+
+def select_block(tokens, counts, positions, selected, selections, visible, start, slab_rows):
+    width = tokens.shape[1]
+    _launch(_select_block, (tokens.shape[0],), (tokens, counts, positions, selected, selections, visible, start),
+            SLAB=slab_rows, WIDTH=width, BLOCK=triton.next_power_of_2(width), num_warps=8)
+
+
+def merge_partials(output, running, partial, lse):
+    rows, heads, dim = output.shape
+    _launch(_merge_partials, (rows, heads), (output, running, partial, lse), HEADS=heads, DIM=dim, num_warps=4)
+
+
 # Rows per collective slice: bounds exchange staging and gathered-head scratch for chunked prefill.
 SLICE_ROWS = 512
+# Prefill attention under context parallelism gathers whole context blocks of this many positions
+# into a local slab, then attends with this rank's heads only; query slices bound its scratch.
+PREFILL_SLAB_TOKENS = 1 << 18
+PREFILL_SLICE_ROWS = 2048
 
 
 @dataclass(frozen=True)

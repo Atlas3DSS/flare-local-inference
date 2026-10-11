@@ -34,19 +34,33 @@ class PreparedAllReduce:
 
     def __init__(self, source, output, *, runtime, session, coordinator, name):
         import torch.distributed as dist
+        from b12x.comm import pcie
 
-        if (runtime.world_size not in (2, 4) or runtime.algorithm != "oneshot"
-                or not runtime.single_channel):
-            raise ValueError("prepared PCIe reductions require single-channel b12x TP2 or TP4 all-reduce")
         self.runtime, self.output = runtime, output
-        self.plan = runtime.plan(source, out=output)
+        if isinstance(runtime, pcie.DmaAllReduce):
+            # Copy-engine ring for prefill-sized activations.
+            from b12x.comm.pcie._dma_preparation import query_from_metadata
 
-        def prepare(state):
-            state.bind_input(source)
-            return PreparedCall(run=lambda: state.run_plain(source, output),
-                                output=output, owners=(runtime, source, output))
+            self.plan = pcie.plan(query_from_metadata(runtime, shape=tuple(source.shape), dtype=source.dtype),
+                                  runtime=runtime)
+            group = runtime.group
 
-        ranks = tuple(dist.get_process_group_ranks(runtime.exchange_group))
+            def prepare(state):
+                return PreparedCall(run=lambda: state.run(source, out=output), output=output,
+                                    owners=(runtime, source, output))
+        else:
+            if (runtime.world_size not in (2, 4) or runtime.algorithm != "oneshot"
+                    or not runtime.single_channel):
+                raise ValueError("prepared PCIe reductions require single-channel b12x TP2 or TP4 all-reduce")
+            self.plan = runtime.plan(source, out=output)
+            group = runtime.exchange_group
+
+            def prepare(state):
+                state.bind_input(source)
+                return PreparedCall(run=lambda: state.run_plain(source, output),
+                                    output=output, owners=(runtime, source, output))
+
+        ranks = tuple(dist.get_process_group_ranks(group))
         request = self.plan.request(name=name, prepare_call=prepare,
             collective=CollectiveRequirement(key=name, ranks=ranks))
         declare(session, (request,), coordinator=coordinator)
