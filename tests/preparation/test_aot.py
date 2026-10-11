@@ -60,6 +60,41 @@ class BufferForward:
 
 
 @torch.no_grad()
+def test_compiled_forward_rebinds_cuda_device_without_tracing(tmp_path, monkeypatch):
+    from flare.preparation.device_binding import bind_device
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two assigned GPUs")
+    with torch.cuda.device(0):
+        original = BufferForward(19)
+        compiled = aot_forward(original)
+        compiled(original)
+        path = tmp_path / "forward.bin"
+        compiled.save_compiled_function(str(path))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("device rebinding must not trace or compile")
+
+    monkeypatch.setattr(torch, "compile", unexpected)
+    with torch.cuda.device(1):
+        fresh = BufferForward(73)
+        with bind_device("cuda:1"), _guard_code_cache(tmp_path / "guards"), path.open("rb") as file:
+            restored = torch.compiler.load_compiled_function(file)
+        restored(fresh)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=torch.cuda.Stream(device=1)):
+            restored(fresh)
+        for value in (2., -3.):
+            fresh.source.fill_(value)
+            allocations = [torch.cuda.memory_stats(device)["allocation.all.allocated"] for device in (0, 1)]
+            graph.replay()
+            torch.cuda.synchronize()
+            assert allocations == [torch.cuda.memory_stats(device)["allocation.all.allocated"] for device in (0, 1)]
+            torch.testing.assert_close(fresh.output, torch.full_like(fresh.output, value + 73.25))
+            torch.testing.assert_close(fresh.before, fresh.alias, rtol=0, atol=0)
+
+
+@torch.no_grad()
 def test_uncompiled_capture_bypasses_forward_cache_and_replays_without_allocating(monkeypatch):
     from flare.preparation import capture
 

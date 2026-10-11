@@ -59,6 +59,7 @@ class PreparedBatch:
             raise ValueError("GLM batches require positive cache capacity and a 154880-token vocabulary")
         self.inputs, self.requests, self.metadata = inputs, requests, metadata
         self.rows, self.tokens, self.pages, self.mode, self.shard = rows, tokens, pages, mode, shard
+        self.accept_unsampled = shard.rank != 0
         device = metadata.token_ids.device
         self.row_ids = torch.arange(rows, device=device)
         self.slot_ids = torch.arange(self.capacity, device=device)
@@ -92,7 +93,7 @@ class PreparedBatch:
             valid &= (pending < 0) & ~invalid_tokens.any()
         else:
             valid &= (uploaded >= 0) & (uploaded < r.vocab_size)
-            valid &= (pending == uploaded) | ((self.shard.rank != 0) & (pending < 0))
+            valid &= (pending == uploaded) | (self.accept_unsampled & (pending < 0))
         present = resident & (r.status[safe_slots] == RUNNING)
         bad = present & ~valid
         bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & bad[None, :]).any(1)

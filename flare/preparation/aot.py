@@ -22,6 +22,7 @@ from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
 from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, treespec_loads
 
 from .compilation import _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table, _byte_storage, _lower_storage
+from .device_binding import bind_device, relocate_inductor, restore_device
 
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
@@ -54,6 +55,8 @@ class _GuardPickler(GuardsStatePickler):
         from triton.runtime import JITFunction
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
 
+        if isinstance(obj, torch.device):
+            return restore_device, (obj.type, obj.index)
         if isinstance(obj, JITFunction):
             return _deserialize_triton_kernel, (_serialize_triton_kernel(obj),)
         if (hasattr(obj, '__dict__')
@@ -258,6 +261,12 @@ class StorageBackend(SerializableCallable):
 
         fn = cls.__new__(cls)
         artifact, fn.inputs, calls, fn.signature = pickle.loads(data)
+        devices = {item[4] for item in fn.signature if isinstance(item, tuple) and item[4].type == "cuda"}
+        if len(devices) != 1:
+            raise ValueError("compiled forwards require exactly one CUDA device")
+        artifact = relocate_inductor(artifact, devices.pop())
+        fn.signature = tuple((*item[:4], restore_device(item[4].type, item[4].index), item[5])
+                             if isinstance(item, tuple) else item for item in fn.signature)
         fn.invocations = []
         for name, leaves, tree, operands, integers in calls:
             tree = treespec_loads(tree)
@@ -334,11 +343,13 @@ class ForwardCache:
             bound, path = self._prepare(forward, name=name, signature=signature, progress=progress)
             return self._warm(bound, path, name=name, progress=progress)
 
-    def prepare_many(self, functions, signatures, *, progress=None):
+    def prepare_many(self, functions, signatures, *, progress=None, coordinator=None):
         """Pipeline tracing and compilation, then warm each shape on the owning rank."""
         from flare.progress import phase
         from .compile_pool import CompilePool
 
+        if coordinator is not None:
+            return self._prepare_ranks(functions, signatures, coordinator, progress=progress)
         compiled, pending = {}, deque()
         with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device) as compiler:
             def finish():
@@ -360,6 +371,78 @@ class ForwardCache:
                 finish()
         return compiled
 
+    def _prepare_ranks(self, functions, signatures, coordinator, *, progress):
+        import torch.distributed as dist
+        from flare.progress import phase
+        from .compile_pool import CompilePool
+
+        group, root = coordinator.group, coordinator.ranks[0]
+        primary = dist.get_rank() == root
+        selected, publication = {}, [None]
+        if primary:
+            try:
+                variants = {name: function.compilation_variants() if hasattr(function, "compilation_variants")
+                            else {"shared": function} for name, function in functions.items()}
+                pending, paths = deque(), {}
+                with phase(progress, "Compile model forwards", total=sum(map(len, variants.values()))) as stage, CompilePool(self.device) as compiler:
+                    def finish():
+                        name, variant, bound, path = pending.popleft()
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        if not bound.cache_hit:
+                            bound.artifact.save_compiled_function(str(path))
+                        paths[name, variant] = str(path)
+                        if variant == getattr(functions[name], "compilation_variant", "shared"):
+                            selected[name] = bound
+                        stage.update(advance=1)
+
+                    for name, choices in variants.items():
+                        for variant, forward in choices.items():
+                            with _guard_code_cache(self.root / 'guards'):
+                                bound, path = self._prepare(forward, name=f"{name}.{variant}",
+                                    signature=signatures[name], compiler=compiler)
+                            pending.append((name, variant, bound, path))
+                            if len(pending) >= compiler.workers:
+                                finish()
+                    while pending:
+                        finish()
+                publication[0] = paths, None
+            except Exception as error:
+                publication[0] = None, f"{type(error).__name__}: {error}"
+        dist.broadcast_object_list(publication, src=root, group=group)
+        paths, failure = publication[0]
+        if failure is not None:
+            raise RuntimeError(f"rank-zero forward compilation failed: {failure}")
+        error = None
+        try:
+            if not primary:
+                with phase(progress, "Load compiled forwards", total=len(functions)) as stage:
+                    for name, forward in functions.items():
+                        path = paths[name, getattr(forward, "compilation_variant", "shared")]
+                        with _guard_code_cache(self.root / 'guards'):
+                            selected[name] = self._load(forward, Path(path), required=True)
+                        stage.update(advance=1)
+        except Exception as failure:
+            error = f"{type(failure).__name__}: {failure}"
+        errors = [None] * len(coordinator.ranks)
+        dist.all_gather_object(errors, error, group=group)
+        if any(errors):
+            raise RuntimeError(f"compiled forward binding failed: {errors}")
+        with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
+            for name in functions:
+                selected[name]()
+                stage.update(advance=1)
+        return selected
+
+    def _load(self, forward, path, *, required=False):
+        with bind_device(self.device), path.open('rb') as file:
+            artifact = torch.compiler.load_compiled_function(file)
+        if artifact.guard_check(forward):
+            return BoundForward(artifact, forward, True)
+        if required:
+            reason = artifact._artifacts.guard_manager.check_verbose(artifact.prepare_f_locals(forward))
+            raise BindingMismatch(f"rank-local forward does not match compiled guards: {reason}")
+        return None
+
     def _prepare(self, forward, *, name, signature, compiler=None, progress=None):
         def report(operation):
             if progress is not None:
@@ -368,11 +451,10 @@ class ForwardCache:
         path = self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
         if path.is_file():
             report("restoring compiled forward")
-            with path.open('rb') as file:
-                artifact = torch.compiler.load_compiled_function(file)
+            bound = self._load(forward, path)
             report("checking compiled bindings")
-            if artifact.guard_check(forward):
-                return BoundForward(artifact, forward, True), path
+            if bound is not None:
+                return bound, path
         report("tracing and compiling forward")
         artifact = aot_forward(forward, compiler=compiler)
         return BoundForward(artifact, forward, False), path

@@ -1,5 +1,7 @@
 """Sample from GLM's cached final normalized hidden output without token consumption."""
 
+from copy import copy
+
 import torch
 
 from flare.components.collectives import PreparedAllReduce
@@ -28,6 +30,14 @@ class PreparedResume:
                      records, frame, sequence)
         self.completion = PreparedCompletion(*arguments) if weights.shard.rank != 0 else PreparedSampling(self.logits, *arguments)
         self.completion.prepare()
+        self.compilation_variant = "sample" if weights.shard.rank == 0 else "consume"
+        self.peer_completion = PreparedCompletion(*arguments)
+        self.peer_completion.prepare()
+
+    def compilation_variants(self):
+        peer = copy(self)
+        peer.completion = self.peer_completion
+        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.validation(self.state.validate())

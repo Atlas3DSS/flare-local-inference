@@ -1,5 +1,7 @@
 """Compose a GLM rank's text forward, request consumption, and completion."""
 
+from copy import copy
+
 from flare.components.collectives import PreparedAllReduce
 from flare.components.sampling import PreparedCompletion, PreparedSampling
 from flare.components.state import save_hidden
@@ -33,6 +35,16 @@ class PreparedGeneration:
         self.completion = PreparedCompletion(*arguments) if decoder.weights.shard.rank != 0 else PreparedSampling(
             decoder.scratch.logits, *arguments, sample_enabled=b.sample_enabled[:rows])
         self.completion.prepare()
+        self.compilation_variant = "sample" if decoder.weights.shard.rank == 0 else "consume"
+        self.peer_completion = PreparedCompletion(*arguments)
+        self.peer_completion.prepare()
+
+    def compilation_variants(self):
+        peer = copy(self)
+        peer.batch = copy(self.batch)
+        peer.batch.accept_unsampled = True
+        peer.completion = self.peer_completion
+        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.batch.begin(self.validation(self.batch.validate()))

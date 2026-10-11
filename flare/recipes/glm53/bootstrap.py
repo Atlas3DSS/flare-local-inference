@@ -187,7 +187,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle()
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
-        stream=stream, pool=graph_pool, collective=collective,
+        stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
         compile_decoder=config.compile_decoder, progress=progress)
     session.freeze()
     pool.clear_for_preparation()

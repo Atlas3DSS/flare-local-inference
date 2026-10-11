@@ -3,6 +3,7 @@
 import os
 import socket
 import time
+from copy import copy
 from datetime import timedelta
 
 import pytest
@@ -14,7 +15,26 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
     reason="requires four assigned GPUs and FLARE_RUN_TP_CUDA_TESTS=1")
 
 
-def _rank(rank, world, rendezvous, sockets, fields, persistent):
+class RankForward:
+    def __init__(self, batch, agreement, completion, peer_completion, rank):
+        self.batch, self.agreement, self.completion = batch, agreement, completion
+        self.peer_completion = peer_completion
+        self.compilation_variant = "sample" if rank == 0 else "consume"
+
+    def compilation_variants(self):
+        peer = copy(self)
+        peer.batch = copy(self.batch)
+        peer.batch.accept_unsampled = True
+        peer.completion = self.peer_completion
+        return {"sample": self, "consume": peer}
+
+    def __call__(self):
+        self.batch.begin(self.agreement(self.batch.validate()))
+        self.batch.finish()
+        self.completion()
+
+
+def _rank(rank, world, rendezvous, sockets, fields, compilation):
     from flare.components.collectives import PreparedAllReduce
     from flare.components.parallel import TensorParallelShard
     from flare.components.sampling import (
@@ -82,38 +102,51 @@ def _rank(rank, world, rendezvous, sockets, fields, persistent):
                 else:
                     completion = PreparedCompletion(*arguments)
                 completion.prepare()
-
-                def forward(batch=batch, agreement=agreement, completion=completion):
-                    batch.begin(agreement(batch.validate()))
-                    batch.finish()
-                    completion()
-
+                peer_completion = PreparedCompletion(*arguments)
+                peer_completion.prepare()
+                forward = RankForward(batch, agreement, completion, peer_completion, rank)
                 operations[mode] = forward
                 owners.extend((batch, metadata, agreement, completion))
                 signatures[mode] = GraphSignature(mode, 1, capacity, tuple(inputs.buffers()))
             session.tune()
             stream = torch.cuda.Stream(device=device)
-            for name, operation in operations.items():
-                if persistent:
-                    import io
-                    from functools import partial
-                    from flare.preparation.aot import aot_forward
+            if compilation == "parallel":
+                from flare.preparation.capture import capture_forwards
 
-                    artifact = aot_forward(operation)
-                    artifact(operation)
-                    restored = torch.compiler.load_compiled_function(
-                        io.BytesIO(type(artifact).serialize(artifact).serialized_data))
-                    call = partial(restored, operation)
-                else:
-                    call = compile_forward(operation)
-                operations[name] = call
-                call()
-                torch.cuda.synchronize(device)
-                stream.wait_stream(torch.cuda.current_stream(device))
-                graph = torch.cuda.CUDAGraph()
-                with runtime.capture(stream=stream), session.capture(), torch.cuda.graph(graph, stream=stream):
+                if rank:
+                    import flare.preparation.aot as aot
+
+                    def unexpected(*args, **kwargs):
+                        raise AssertionError("peer ranks must not trace or compile")
+
+                    aot.aot_forward = aot.make_fx = torch.compile = unexpected
+                captured, compiled = capture_forwards(operations, signatures, session=session,
+                    device=device, stream=stream, pool=torch.cuda.graph_pool_handle(), collective=runtime,
+                    coordinator=coordinator)
+                graphs.update(captured)
+                operations.update(compiled)
+            else:
+                for name, operation in operations.items():
+                    if compilation == "aot":
+                        import io
+                        from functools import partial
+                        from flare.preparation.aot import aot_forward
+
+                        artifact = aot_forward(operation)
+                        artifact(operation)
+                        restored = torch.compiler.load_compiled_function(
+                            io.BytesIO(type(artifact).serialize(artifact).serialized_data))
+                        call = partial(restored, operation)
+                    else:
+                        call = compile_forward(operation)
+                    operations[name] = call
                     call()
-                graphs[name] = graph
+                    torch.cuda.synchronize(device)
+                    stream.wait_stream(torch.cuda.current_stream(device))
+                    graph = torch.cuda.CUDAGraph()
+                    with runtime.capture(stream=stream), session.capture(), torch.cuda.graph(graph, stream=stream):
+                        call()
+                    graphs[name] = graph
             session.freeze()
             buffers = inputs.buffers()
             buffers.update({name: getattr(admission, name) for name in admission.__dataclass_fields__})
@@ -185,11 +218,12 @@ def _rank(rank, world, rendezvous, sockets, fields, persistent):
 
 
 @pytest.mark.parametrize("world,fields", [(2, 8), (4, 24)])
-@pytest.mark.parametrize("persistent", [False, True])
-def test_native_rank_coordination(world, fields, persistent, tmp_path):
+@pytest.mark.parametrize("compilation", ["lowered", "aot", "parallel"])
+def test_native_rank_coordination(world, fields, compilation, tmp_path, monkeypatch):
     assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     sockets = [socket.socketpair() for _ in range(world - 1)]
-    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), sockets, fields, persistent),
+    processes = mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), sockets, fields, compilation),
                          nprocs=world, join=False)
     for pair in sockets:
         for connection in pair:

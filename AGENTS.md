@@ -157,6 +157,14 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
   bind process-local kernel handles and caller-owned tensors at startup. Complete
   b12x preparation, tuning, binding refresh, and compiled warmup before capturing
   each serving graph. Retain compiled kernel owners until native replay has drained.
+- **Compile tensor-parallel forwards on rank zero.** Pass the preparation
+  coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
+  tensors and native handles, and participate in ordered warmup and local capture.
+  Keep shard offsets and native handles in runtime bindings when they do not
+  change the computation. For distinct rank behavior, expose
+  `compilation_variants()` on the rank-zero forward and select its key through
+  `compilation_variant` on each rank. Rank zero must supply every selected variant
+  before collective warmup; peers must not retrace or compile on a binding mismatch.
 - **Prepare the whole serving shape range.** Include batch-one decode, packed
   decode, partial/inactive rows, and configurable chunked prefill through at
   least 4096 tokens. Test alternating graph variants with shared scratch and

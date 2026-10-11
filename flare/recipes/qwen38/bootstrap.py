@@ -366,7 +366,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         compiled_functions = {}
         def capture_catalog(*, compile_decoder, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
-                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress, label=label, collective=collective)
+                stream=stream, pool=graph_pool, compile_decoder=compile_decoder, progress=progress, label=label,
+                collective=collective, coordinator=coordinator)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
