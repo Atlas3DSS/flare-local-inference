@@ -4,9 +4,11 @@ Flare's speculative engine supports the embedded MTP modules in
 `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD` and
 `local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
-graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract and an
-explicit `--mtp` preparation option. Draft continuations from request history
-are disabled by default and enabled with `--history-drafts`.
+graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
+Each recipe's `PreparationConfig(mtp=True)` prepares it, and the Qwen serving
+catalog that `flare run` prepares includes it. Draft continuations from request
+history are disabled by default and enabled with the Qwen
+`PreparationConfig(history_drafts=True)`.
 
 The design combines adaptive verification budgets, native MTP proposals and
 continuations copied from request history. Compact recurrent commit and token
@@ -209,8 +211,9 @@ rerunning the model.
 
 The chain catalog has request capacities `B ∈ {1,2,4}` and integer verification
 widths `1 <= W <= K_max + 1`, where `K=W-1`.
-`--mtp-max-draft-tokens` sets `K_max` and defaults to three for Qwen or five for GLM.
-`--mtp-graph-budget` limits the total number of speculative captures, including
+`PreparationConfig.speculative_widths` lists the prepared widths; its largest entry is
+`K_max + 1`, and its default gives three drafts for Qwen or five for GLM.
+`PreparationConfig.speculative_graph_budget` limits the total number of speculative captures, including
 zero-draft fallbacks, and defaults to eight. Preparation visits batch capacities
 one, two, and four in order. It reserves one fallback capture for each remaining
 batch, then selects the largest requested draft counts first. If a batch gets
@@ -220,12 +223,11 @@ The default three-draft maximum and eight-graph budget capture draft counts
 The zero-draft path continues absorbing target feedback into the MTP cache so
 requests can resume drafting when concurrency falls. The native adaptive
 controller chooses only among that batch's captured counts.
-`--mtp-draft-tokens` selects an explicit increasing set of draft counts, including
-zero, instead of a draft-token limit; the options are mutually exclusive.
-`--mtp-fixed-draft-tokens 3` captures exactly three speculative graphs: one for
-each batch capacity, each evaluating three drafts plus the pending input. An
-explicit fixed count expands the default limit when necessary, but must fit an
-explicit maximum or count catalog. Fixed drafting has no aggregate row cap;
+`speculative_widths` may be any increasing set of widths that includes one, so
+the prepared draft counts need not be contiguous.
+`speculative_fixed_width=4` captures exactly three speculative graphs: one for
+each batch capacity, each evaluating three drafts plus the pending input. A
+fixed width must belong to `speculative_widths`. Fixed drafting has no aggregate row cap;
 batch four with three drafts evaluates sixteen target rows. Context tails,
 host stop boundaries, and grammar constraints limit each request's valid prefix
 inside that same graph. Masked positions cannot write KV or commit request state.

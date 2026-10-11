@@ -1,0 +1,126 @@
+"""Declared recipe costs against the layouts and checkpoints they describe."""
+
+import math
+from collections import Counter
+from pathlib import Path
+
+import pytest
+
+from flare import planning
+from flare.recipes import resolve
+
+HUB = Path.home() / ".cache/huggingface/hub"
+QWEN = resolve("qwen3.8-flash")
+GLM = resolve("glm-5.3-flash")
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 4])
+def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
+    from b12x.attention import qsa
+
+    from flare.recipes.qwen38.state import HybridStateLayout
+
+    costs = QWEN.recipe.ranks[world_size]
+    layout = HybridStateLayout.build(speculative_tokens=QWEN.recipe.speculative_rows, world_size=world_size)
+    assert costs.state_row_bytes == layout.row_bytes
+    geometry = qsa.cache_requirements(main_page_size=QWEN.recipe.page_tokens, position_axes=3,
+                                      kv_heads=max(1, 2 // world_size),
+                                      max_speculative_tokens=QWEN.recipe.speculative_rows)
+    layer = sum(math.prod(shape) * 2 for shape in (
+        geometry.main_k_page_shape, geometry.main_v_page_shape, geometry.compressed_page_shape))
+    # Layers 3, 7, ..., 47 and the draft layer each own one page pool.
+    assert costs.page_bytes == (len(range(3, 48, 4)) + 1) * layer
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_glm_state_rows_and_pages_match_the_continuation_pool(world_size):
+    from flare.recipes.glm53.pool import continuation_layout
+
+    layer_types = tuple("indexed_attention" if index % 4 == 3 else "linear_attention" for index in range(45))
+    costs = GLM.recipe.ranks[world_size]
+    assert costs.state_row_bytes == continuation_layout(layer_types, world_size).row_bytes
+    assert costs.page_bytes == layer_types.count("indexed_attention") * (4 * 64 * 528 + 64 * 132)
+    assert GLM.recipe.page_tokens == 256
+
+
+def test_qwen_stored_bytes_match_the_cached_checkpoint():
+    if not QWEN.cached(HUB):
+        pytest.skip("the pinned Qwen revision is not in the hub cache")
+    from flare.preparation.checkpoint import inspect_qwen38_checkpoint
+
+    sizes = Counter()
+    for tensor in inspect_qwen38_checkpoint(QWEN.snapshot(HUB)).tensors.values():
+        sizes[tensor.component] += tensor.nbytes
+    checkpoint = QWEN.checkpoint
+    assert checkpoint.stored_bytes == sum(sizes.values())
+    assert checkpoint.mapped_host_bytes == sizes["ple_tables"]
+    assert checkpoint.device_bytes == sum(sizes.values()) - sizes["ple_tables"]
+
+
+def test_glm_stored_bytes_match_the_cached_checkpoint():
+    if not GLM.cached(HUB):
+        pytest.skip("the pinned GLM revision is not in the hub cache")
+    from flare.preparation.checkpoint import inspect_indexed_checkpoint
+
+    tensors = inspect_indexed_checkpoint(GLM.snapshot(HUB)).tensors.values()
+    checkpoint = GLM.checkpoint
+    assert checkpoint.stored_bytes == sum(tensor.nbytes for tensor in tensors)
+    assert checkpoint.device_bytes == sum(
+        tensor.nbytes for tensor in tensors if not tensor.name.startswith("model.visual."))
+    assert checkpoint.mapped_host_bytes == 0
+
+
+def fitted(model, gpus, **settings):
+    devices = tuple(planning.Gpu(index, "NVIDIA RTX PRO 6000 Blackwell", f"GPU-{index}", 96 << 30, 95 << 30, (12, 0))
+                    for index in range(gpus))
+    arguments = {"concurrency": 4, "reserve_bytes": 0, **settings}
+    return planning.fit(model.recipe, model.checkpoint, devices, **arguments)
+
+
+@pytest.mark.parametrize("compile_forwards", [False, True])
+@pytest.mark.parametrize("concurrency", [1, 5, 64])
+def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path, compile_forwards, concurrency):
+    from flare.recipes.qwen38.state import HybridStateLayout
+
+    seen = {}
+
+    def prepare_model(snapshot, config, *, progress, compile_decoder):
+        seen.update(snapshot=snapshot, config=config, compile_decoder=compile_decoder)
+        return "prepared"
+
+    monkeypatch.setattr("flare.recipes.qwen38.bootstrap.prepare_model", prepare_model)
+    plan = fitted(QWEN, 1, concurrency=concurrency, reserve_bytes=2 << 30)
+    assert QWEN.recipe.prepare(tmp_path, plan, compile_forwards=compile_forwards, kernel_cache=tmp_path / "kernels",
+                               progress=None) == "prepared"
+    config = seen["config"]
+    assert seen["compile_decoder"] is compile_forwards and config.compile_decoder is compile_forwards
+    assert config.devices == (0,) and config.max_active == concurrency and config.mtp
+    # Pages fill the free memory measured after capture, at least the plan's minimum.
+    assert (config.pages, config.minimum_pages, config.context) == (None, plan.minimum_pages, plan.context)
+    assert config.prefill_chunk_size == plan.prefill_chunk == 4096 and config.kernel_cache == tmp_path / "kernels"
+    assert config.headroom_bytes == planning.HEADROOM_BYTES + (2 << 30)
+    layout = HybridStateLayout.build(speculative_tokens=7, world_size=1)
+    assert layout.snapshot_capacity(config.snapshot_budget_bytes) == plan.snapshots
+    # The pool holds a null row, live and speculative rows per slot, and the snapshot rows.
+    assert 1 + config.request_capacity * 8 + plan.snapshots == QWEN.recipe.live_rows(concurrency) + plan.cache_states
+
+
+def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr("flare.preparation.rank_group.prepare_group",
+                        lambda snapshot, config, prepare, *, progress: seen.append((config, prepare)) or "group")
+    from flare.recipes.glm53 import bootstrap as glm
+    from flare.recipes.qwen38 import bootstrap as qwen
+
+    plan = fitted(QWEN, 2)
+    assert QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None) == "group"
+    config, prepare = seen.pop()
+    assert prepare is qwen.prepare_rank and config.devices == (0, 1) and config.pages is None
+
+    plan = fitted(GLM, 4, concurrency=2, prefill_chunk=2048)
+    assert GLM.recipe.prepare(tmp_path, plan, compile_forwards=False, kernel_cache=tmp_path, progress=None) == "group"
+    config, prepare = seen.pop()
+    assert prepare is glm.prepare_rank and config.devices == (0, 1, 2, 3)
+    assert (config.max_active, config.pages, config.context) == (2, plan.pages, plan.context)
+    assert config.compile_decoder is False and config.mtp is False and config.kernel_cache == tmp_path
+    assert config.context % 256 == 0 and config.page_capacity == plan.pages and config.prefill_chunk_size == 2048

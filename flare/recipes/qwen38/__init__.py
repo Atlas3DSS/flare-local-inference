@@ -15,6 +15,13 @@ prevent rebinding, not writes to their tensors. Mutable tensor metadata follows
 the upload/graph contract; Python must not change it after native handoff.
 """
 
-from .model import create_model_tree
-
 __all__ = ["create_model_tree"]
+
+
+def __getattr__(name):
+    # Recipe declarations import without the model tree's PyTorch dependencies.
+    if name == "create_model_tree":
+        from .model import create_model_tree
+
+        return create_model_tree
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

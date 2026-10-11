@@ -54,5 +54,5 @@ def test_server_cli_help_does_not_prepare_model():
         cwd=ROOT, check=False, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "--prefill-chunk-size" in result.stdout
-    assert "--bind" in result.stdout
+    for command in ("run", "prepare", "plan", "models", "pull", "status", "bench", "config", "skill"):
+        assert f"\n    {command} " in result.stdout

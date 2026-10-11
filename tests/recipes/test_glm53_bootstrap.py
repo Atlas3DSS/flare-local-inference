@@ -26,35 +26,6 @@ def test_invalid_prepared_geometry_rejects_before_gpu_use(values):
         PreparationConfig(**values)
 
 
-@pytest.mark.parametrize("concurrency", [1, 5, 64])
-@pytest.mark.parametrize("no_compile", [False, True])
-def test_cli_passes_compile_policy_to_rank_group(monkeypatch, tmp_path, no_compile, concurrency):
-    from flare.__main__ import main
-
-    (tmp_path / "config.json").write_text('{"model_type":"glm5_next"}')
-    configs = []
-
-    class Model:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def manifest(self):
-            return {}
-
-    def prepare_group(snapshot, config, prepare, *, progress):
-        configs.append(config)
-        return Model()
-
-    monkeypatch.setattr("flare.preparation.rank_group.prepare_group", prepare_group)
-    assert main(["--snapshot", str(tmp_path), "--tp", "2", "--prepare-only", "--concurrency", str(concurrency),
-                 *(["--no-compile"] if no_compile else [])]) == 0
-    assert configs[0].compile_decoder is not no_compile
-    assert configs[0].max_active == concurrency
-
-
 def test_mtp_catalog_defaults_to_five_drafts_and_reserves_draft_pages():
     config = PreparationConfig(mtp=True)
     assert config.speculative_widths == (1, 2, 3, 4, 5, 6)

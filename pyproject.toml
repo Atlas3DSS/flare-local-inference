@@ -47,6 +47,9 @@ flashinfer = "d019c06357ba22009f8112c2f8606b1edd174fcc"
 [tool.setuptools.packages.find]
 include = ["flare*"]
 
+[tool.setuptools.package-data]
+"flare.cli" = ["skill.md"]
+
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 pythonpath = ["."]

@@ -143,7 +143,7 @@ single-GPU core.
 | Active requests | 4 |
 | Decode graph capacities | 1, 2, 4 |
 | Prefill scheduling | One request per chunk, interleaved with decode |
-| Maximum prefill chunk | 4,096 tokens; configurable with `--prefill-chunk-size` |
+| Maximum prefill chunk | 4,096 tokens, set by each recipe; `flare run --prefill-chunk-size` overrides it |
 | Prefill graph capacities | 128, 256, 512, 1,024, 2,048, 4,096 tokens |
 | Prefill tail placement | Smallest capacity that holds the tail |
 | Maximum context | Checkpoint limit: 262,144 tokens |
@@ -153,7 +153,7 @@ single-GPU core.
 | Checkpoint boundaries | Exact rendered instruction, final prompt, and terminal consumed endpoints |
 | Structured output | Host grammar engine; one submission in flight, with per-candidate masks during copy speculation |
 | Vision acceptance | Images; video qualification deferred |
-| Speculative decoding | Optional copy or learned-MTP preparation; one round in flight; qualification requirements in the MTP design |
+| Speculative decoding | Learned-MTP verification in the Qwen serving catalog; copy proposals and non-speculative catalogs through the preparation API; one round in flight; qualification requirements in the MTP design |
 
 The configured prefill chunk size must be a multiple of 64 between 64 and the
 configured context limit. Its graph capacities are powers of two starting at
@@ -174,7 +174,7 @@ Every variant uses the common FlashInfer sampler. The
 catalog includes vision, prefill, resume, initialization, snapshot, and restore;
 startup rejects incomplete declarations.
 
-`--no-compile` skips PyTorch forward compilation and compiled-forward cache
+`flare run --no-compile` and `flare prepare --no-compile` skip PyTorch forward compilation and compiled-forward cache
 loading for development startup. b12x preparation and autotuning still run,
 and every serving path is captured as a CUDA graph. The option applies to Qwen
 and every GLM tensor-parallel rank; compiled forwards remain the default.
@@ -659,9 +659,12 @@ and caches require additional memory.
 Preparation produces a memory report covering persistent weights, mapped host
 storage, operator workspaces, the shared graph memory pool, live and speculative verification
 state slots, checkpoint snapshots, and page capacity.
-Reserve 4 GiB of GPU headroom and a 4 GiB checkpoint-state budget by default;
-allocate the remaining planned capacity to pages. Fail preparation if the
-configured capacities cannot fit.
+The preparation API reserves 4 GiB of GPU headroom and a 4 GiB checkpoint-state
+budget by default and allocates the remaining planned capacity to pages. The
+`flare` command instead passes the capacities of its memory plan, described in
+the [command-line design](cli-design.md): pages that fill the free memory measured
+after graph capture, and a snapshot count derived from the concurrency limit. Fail
+preparation if the configured capacities cannot fit.
 
 ### Gated DeltaNet convolution
 
