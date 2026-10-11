@@ -10,6 +10,7 @@ import json
 import torch
 
 from ignition.components.parallel import TensorParallelShard
+from ignition.components.vocabulary import nvfp4_draft_head
 from ignition.preparation.checkpoint import CheckpointError, CheckpointManifest
 from ignition.preparation.qwen38 import TRANSFORMERS_REVISION
 
@@ -172,31 +173,3 @@ class MTPWeights:
         return cls(module, attention, moe, embedding_weight, lm_head_weight,
                    stored, torch.cuda.memory_allocated(device) - before, shard, draft_head)
 
-
-_E2M1_BOUNDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
-
-
-@torch.no_grad()
-def nvfp4_draft_head(weight: torch.Tensor, *, rows_per_chunk: int = 8192):
-    """Quantize a BF16 [vocab, hidden] head to NVFP4 (E4M3 scales per 16 values, one FP32 gain)."""
-    from b12x._lib.intrinsics import swizzle_block_scale
-    from b12x.gemm.blockscaled import pack_weight
-
-    rows, columns = weight.shape
-    if weight.dtype != torch.bfloat16 or columns % 128 or rows % 128 or not weight.is_contiguous():
-        raise ValueError("NVFP4 draft head requires a contiguous BF16 head with 128-aligned dimensions")
-    global_scale = (6.0 * 448.0) / weight.abs().amax().float().clamp_min(1e-8)
-    values = torch.empty((rows, columns // 2), dtype=torch.uint8, device=weight.device)
-    scales = torch.empty((rows, columns // 16), dtype=torch.float8_e4m3fn, device=weight.device)
-    bounds = torch.tensor(_E2M1_BOUNDS, device=weight.device)
-    for start in range(0, rows, rows_per_chunk):
-        block = weight[start:start + rows_per_chunk].float().view(-1, columns // 16, 16)
-        scale = (block.abs().amax(-1) / 6.0 * global_scale).clamp(max=448.0).to(torch.float8_e4m3fn)
-        effective = scale.float() / global_scale
-        quantized = block / torch.where(effective > 0, effective, torch.ones_like(effective)).unsqueeze(-1)
-        codes = (torch.bucketize(quantized.abs(), bounds) | ((quantized < 0).long() << 3)).to(torch.uint8)
-        codes = codes.view(-1, columns)
-        values[start:start + rows_per_chunk] = codes[:, 0::2] | (codes[:, 1::2] << 4)
-        scales[start:start + rows_per_chunk] = scale.view(-1, columns // 16)
-    return pack_weight(values, swizzle_block_scale(scales), recipe="nvfp4",
-                       global_scale=(1.0 / global_scale).reshape(1).float(), global_scale_kind="multiplier")

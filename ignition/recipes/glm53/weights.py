@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ignition.components.parallel import TensorParallelShard
@@ -37,6 +38,8 @@ class MTPWeights:
     attention: dict[str, object]
     mlp: MoEWeights
     tensors: dict[str, torch.Tensor]
+    # NVFP4 copy of this rank's vocabulary shard for draft proposals; None keeps the BF16 head.
+    draft_head: object | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,10 @@ class ModelWeights:
                 layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),
                                            loader.load_residual(index)))
             draft = loader.load_mtp(scales) if mtp else None
+            if draft is not None and os.environ.get("FLARE_MTP_NVFP4_HEAD", "1") != "0":
+                from ignition.components.vocabulary import nvfp4_draft_head
+
+                draft = replace(draft, draft_head=nvfp4_draft_head(tree.lm_head.weight))
         torch.cuda.synchronize(device)
         return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before, draft)
 
