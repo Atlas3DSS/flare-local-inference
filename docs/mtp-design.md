@@ -1,8 +1,8 @@
 # Multi-token prediction and speculative execution
 
-Flare's speculative engine targets the embedded MTP module in
-`local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`, revision
-`dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2`, on SM120/121. Python prepares
+Flare's speculative engine supports the embedded MTP modules in
+`local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD` and
+`local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract and an
 explicit `--mtp` preparation option. Draft continuations from request history
@@ -17,7 +17,7 @@ checkpoint's MTP weights.
 The [core design](core-design.md) defines ownership, admission and graph
 lifetime.
 
-## Checkpoint model and reference
+## Qwen checkpoint model and reference
 
 The exact checkpoint has one MTP decoder layer, 512 routed experts with top-10
 routing, four 2,560-wide hidden streams, and a hyperconnection output mixer.
@@ -79,6 +79,34 @@ Library kernels remain the compute implementation. Server-owned captured
 operations pack metadata, select committed state and update request records.
 Missing tree or compact-state semantics require a public library contract;
 there is no private eager model fallback.
+
+## GLM learned proposals and continuation state
+
+The [GLM MTP layer](../flare/recipes/glm53/mtp.py) loads
+`model.language_model.layers.45`. It combines the shared token embedding with
+the normalized target output through separate RMS norms and an 8192-to-4096
+projection. The decoder uses indexed MLA and ordinary residuals, followed by
+288 routed experts with top-eight routing, a shared expert, and a final norm.
+It shares the target's vocabulary projection. Its experts use NVFP4 weights
+with E4M3 block scales and BF16 activations; target experts use CSF storage.
+The draft decoder has no mHC streams, KDA recurrence, or rotary positions.
+
+GLM prepares TP2 or TP4 graphs and defaults to a maximum of five draft tokens.
+With concurrency four and the eight-graph budget, batch one captures draft
+counts `{5,4,3,2,1,0}`, batch two captures `{5}`, and batch four captures `{0}`.
+The shared native controller selects among the available counts. All ranks
+sample identical gathered distributions with identical device RNG state.
+History-copy proposals are not part of the GLM recipe.
+
+Target KDA layers retain one recurrent checkpoint per verification input.
+Commit selects the accepted checkpoint and convolution suffix. Indexed
+attention uses twelve-entry C4 tail rings so speculative writes preserve the
+preceding accepted tail. Prompt absorption and post-verification absorption
+write only the draft layer's latent KV and C4 state, using target feedback.
+The draft cache contains `max(consumed_tokens - 1, 0)` pairs. Exact-prefix
+snapshots therefore preserve the draft partial page at that endpoint as well
+as target pages and recurrent state. Absorption, proposals, verification,
+sampling, and commit execute inside prepared CUDA graphs.
 
 ## A speculative round is a state transaction
 
@@ -181,7 +209,7 @@ rerunning the model.
 
 The chain catalog has request capacities `B ∈ {1,2,4}` and integer verification
 widths `1 <= W <= K_max + 1`, where `K=W-1`.
-`--mtp-max-draft-tokens` sets `K_max` and defaults to three for Qwen.
+`--mtp-max-draft-tokens` sets `K_max` and defaults to three for Qwen or five for GLM.
 `--mtp-graph-budget` limits the total number of speculative captures, including
 zero-draft fallbacks, and defaults to eight. Preparation visits batch capacities
 one, two, and four in order. It reserves one fallback capture for each remaining

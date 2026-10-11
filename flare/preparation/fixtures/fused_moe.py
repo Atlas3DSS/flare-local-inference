@@ -67,7 +67,8 @@ class ExpertBenchmarkInputs:
         self.source.copy_(fixture)
         if self.projection_source is not self.source:
             self.projection_source.copy_(self.source)
-        torch.mm(self.projection_source, self.router_weight.T, out=self.logits)
+        options = {} if self.projection_source.dtype == self.logits.dtype else {"out_dtype": self.logits.dtype}
+        torch.mm(self.projection_source, self.router_weight.T, out=self.logits, **options)
         fused_moe.route_topk(self.router_plan, self.logits, self.router.selected_logits,
                              self.router.ids, self.router.weights, **self.route_options)
 

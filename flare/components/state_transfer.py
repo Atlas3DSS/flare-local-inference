@@ -97,6 +97,34 @@ def _validate(Sources, Destinations, Operations, Expected, Count, Errors, Consum
 
 
 @triton.jit
+def _validate_trailing(Sources, Destinations, Operations, Expected, Count, Errors, Tables,
+                       WIDTH: tl.constexpr, PAGES: tl.constexpr, PAGE_TOKENS: tl.constexpr,
+                       LIVE: tl.constexpr):
+    row = tl.program_id(0)
+    source, destination = tl.load(Sources + row), tl.load(Destinations + row)
+    endpoint = tl.maximum(0, tl.load(Expected + row) - 1)
+    snapshot = source < LIVE + 1
+    active = (row < tl.load(Count)) & (tl.load(Errors + row) == 0) & (tl.load(Operations + row) == 0)
+    tail = active & (endpoint % PAGE_TOKENS != 0)
+    slot = tl.where(snapshot, source, destination) - 1
+    page = tl.load(Tables + slot * WIDTH + endpoint // PAGE_TOKENS, tail, other=-1)
+    others = tl.arange(0, LIVE)
+    other_source, other_dest = tl.load(Sources + others), tl.load(Destinations + others)
+    other_snapshot = other_source < LIVE + 1
+    other_endpoint = tl.maximum(0, tl.load(Expected + others) - 1)
+    other_slot = tl.where(other_snapshot, other_source, other_dest) - 1
+    other_active = (others < tl.load(Count)) & (others != row) & (tl.load(Operations + others) == 0)
+    other_active &= (other_slot >= 0) & (other_slot < LIVE) & (other_endpoint // PAGE_TOKENS < WIDTH)
+    other_active &= other_endpoint % PAGE_TOKENS != 0
+    other_page = tl.load(Tables + other_slot * WIDTH + other_endpoint // PAGE_TOKENS, other_active, other=-1)
+    conflict = tl.sum((other_active & (page == other_page) & (~snapshot | ~other_snapshot)).to(tl.int32), 0) > 0
+    error = tl.load(Errors + row)
+    error = tl.where(tail & ((page < 0) | (page >= PAGES)), 6, error)
+    error = tl.where(tail & conflict, 4, error)
+    tl.store(Errors + row, error)
+
+
+@triton.jit
 def _copy_rows(Backing, Sources, Destinations, Operations, Count, Errors,
                ROW_BYTES: tl.constexpr, BLOCK: tl.constexpr):
     row, tile = tl.program_id(0), tl.program_id(1)
@@ -111,10 +139,11 @@ def _copy_rows(Backing, Sources, Destinations, Operations, Count, Errors,
 @triton.jit
 def _copy_pages(Pointers, Backing, Tables, Sources, Destinations, Operations, Expected, Count, Errors,
                 ROW_BYTES: tl.constexpr, PAGE_BYTES: tl.constexpr, WIDTH: tl.constexpr,
-                PAGE_TOKENS: tl.constexpr, BLOCK: tl.constexpr, LIVE: tl.constexpr = 4):
+                PAGE_TOKENS: tl.constexpr, BLOCK: tl.constexpr, LIVE: tl.constexpr = 4,
+                ENDPOINT_SHIFT: tl.constexpr = 0):
     row, region, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     source, destination = tl.load(Sources + row), tl.load(Destinations + row)
-    endpoint = tl.load(Expected + row)
+    endpoint = tl.maximum(0, tl.load(Expected + row) + ENDPOINT_SHIFT)
     snapshot = source < LIVE + 1
     active = (row < tl.load(Count)) & (tl.load(Errors + row) == 0)
     active &= (tl.load(Operations + row) == 0) & (endpoint % PAGE_TOKENS != 0)
@@ -144,7 +173,8 @@ class PreparedStateTransfer:
     A nonzero command error suppresses both row and external-page writes.
     """
 
-    def __init__(self, pool: StateStorage, commands: StateCommands, tables, *, pages, page_tokens):
+    def __init__(self, pool: StateStorage, commands: StateCommands, tables, *, pages, page_tokens,
+                 trailing_pages=(), trailing_tables=None):
         self.capacity = commands.source_slots.numel()
         device = pool.backing.device
         if device.type != "cuda" or pool.backing.shape[0] < self.capacity + 2:
@@ -175,6 +205,20 @@ class PreparedStateTransfer:
             groups[region.nbytes].append((cache.data_ptr(), region.offset))
         if page_count is None:
             raise ValueError("state transfer requires physical KV page bindings")
+        trailing_pages = tuple(trailing_pages)
+        self.trailing_tables = trailing_tables
+        trailing_groups = defaultdict(list)
+        if trailing_pages:
+            _check_tensor(trailing_tables, tables.shape, torch.int32, device, "trailing_page_tables")
+            for name, cache in trailing_pages:
+                region = pool.layout.region(name)
+                if name in names or region.dtype != torch.uint8 or cache.shape != (page_count, region.nbytes):
+                    raise ValueError("trailing partial pages must match the model page capacity and state regions")
+                _check_tensor(cache, cache.shape, torch.uint8, device, name)
+                names.add(name)
+                trailing_groups[region.nbytes].append((cache.data_ptr(), region.offset))
+        self.trailing_pointers = {size: torch.tensor(values, dtype=torch.int64, device=device)
+                                 for size, values in trailing_groups.items()}
         self.pointers = {size: torch.tensor(values, dtype=torch.int64, device=device) for size, values in groups.items()}
         c = commands
         self.validate_args = (c.source_slots, c.destination_slots, c.operation, c.expected_consumed, c.num_ops,
@@ -184,12 +228,21 @@ class PreparedStateTransfer:
         self.page_args = [(pointer, pool.backing, tables, c.source_slots, c.destination_slots, c.operation,
             c.expected_consumed, c.num_ops, c.errors, pool.layout.row_bytes, size, tables.shape[1], page_tokens, 1024, self.capacity)
             for size, pointer in self.pointers.items()]
+        self.page_args.extend((pointer, pool.backing, trailing_tables, c.source_slots, c.destination_slots, c.operation,
+            c.expected_consumed, c.num_ops, c.errors, pool.layout.row_bytes, size, tables.shape[1], page_tokens,
+            1024, self.capacity, -1) for size, pointer in self.trailing_pointers.items())
+        self.trailing_validation_args = None if not trailing_pages else (
+            c.source_slots, c.destination_slots, c.operation, c.expected_consumed, c.num_ops, c.errors,
+            trailing_tables, tables.shape[1], page_count, page_tokens, self.capacity)
+        self._trailing_validate = None
         self._validate, self._copies = None, []
 
     def prepare(self):
         if self.commands.num_ops.item() != 0:
             raise ValueError("state transfer preparation requires zero live commands")
         self._validate = _compile(_validate, self.validate_args, (self.capacity, 1, 1))
+        if self.trailing_validation_args is not None:
+            self._trailing_validate = _compile(_validate_trailing, self.trailing_validation_args, (self.capacity, 1, 1))
         self._copies = [_compile(_copy_rows, self.row_args, (self.capacity, triton.cdiv(self.pool.layout.row_bytes, 4096), 1))]
         for args in self.page_args:
             self._copies.append(_compile(_copy_pages, args, (self.capacity, args[0].shape[0], triton.cdiv(args[10], 1024))))
@@ -198,6 +251,8 @@ class PreparedStateTransfer:
         if self._validate is None:
             raise RuntimeError("state transfer prepare() must complete before capture")
         self._validate()
+        if self._trailing_validate is not None:
+            self._trailing_validate()
 
     def apply(self):
         if self._validate is None:

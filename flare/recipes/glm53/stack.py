@@ -84,7 +84,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
                  metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
-                 workspace, progress=None):
+                 workspace, progress=None, feedback=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
             raise ValueError("GLM text execution requires all 45 decoder layers")
@@ -93,6 +93,7 @@ class PreparedDecoder:
         if metadata.sample_indices.shape != scratch.hidden.shape[:1]:
             raise ValueError("GLM sample indices and hidden-output capacities differ")
         self.weights, self.scratch, self.state, self.metadata = weights, scratch, state, metadata
+        self.feedback = feedback
         self.embedding = PreparedEmbedding(language.embed_tokens.weight, metadata.token_ids, scratch.embedding,
             num_rows=metadata.recurrent.num_tokens, session=session, name=f"{name}.embedding")
         self.layers = []
@@ -118,9 +119,15 @@ class PreparedDecoder:
         value = s.residual
         for layer in self.layers:
             value = layer(value)
-        torch.index_select(s.residual, 0, self.metadata.sample_indices, out=s.selected_residual)
-        collapsed = language.hc_head(s.selected_residual[:, None]).squeeze(1)
-        rms_norm(collapsed, language.norm.weight, s.hidden, language.norm.variance_epsilon,
-            round_before_weight=True)
+        if self.feedback is None:
+            torch.index_select(s.residual, 0, self.metadata.sample_indices, out=s.selected_residual)
+            collapsed = language.hc_head(s.selected_residual[:, None]).squeeze(1)
+            rms_norm(collapsed, language.norm.weight, s.hidden, language.norm.variance_epsilon,
+                round_before_weight=True)
+        else:
+            collapsed = language.hc_head(s.residual[:, None]).squeeze(1)
+            rms_norm(collapsed, language.norm.weight, self.feedback, language.norm.variance_epsilon,
+                round_before_weight=True)
+            torch.index_select(self.feedback, 0, self.metadata.sample_indices, out=s.hidden)
         self.lm_head(s.hidden)
         return s.hidden

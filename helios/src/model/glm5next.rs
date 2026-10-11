@@ -42,8 +42,14 @@ impl ModelContract for Glm5Next {
     fn required_buffers(config: &ModelConfig) -> Vec<crate::model::catalog::BufferSpec> {
         config::required_buffers(config)
     }
-    fn required_inputs(_: &ModelConfig, kind: GraphKind) -> impl Iterator<Item = &'static str> {
-        config::required_inputs(kind).iter().copied()
+    fn required_inputs(
+        config: &ModelConfig,
+        kind: GraphKind,
+    ) -> impl Iterator<Item = &'static str> {
+        config::required_inputs(kind).iter().copied().chain(
+            (config.has_draft_cache() && kind != GraphKind::Resume && kind != GraphKind::Vision)
+                .then_some("draft_page_tables"),
+        )
     }
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
         SchedulerCapabilities {
@@ -51,7 +57,7 @@ impl ModelContract for Glm5Next {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             live_state_base: 1,
-            draft_pages_per_request: 0,
+            draft_pages_per_request: usize::from(config.has_draft_cache()),
         }
     }
 
@@ -63,17 +69,32 @@ impl ModelContract for Glm5Next {
     }
     fn validate_completion(
         config: &ModelConfig,
-        _: GraphKind,
+        kind: GraphKind,
         record: &CompletionRecord,
     ) -> Result<()> {
-        if record.vector.is_some()
-            || ((record.status == 1 || record.status == 2)
-                && record.token_id >= config.contract.vocabulary as i64)
+        if (record.status == 1 || record.status == 2)
+            && record.token_id >= config.contract.vocabulary as i64
         {
             return Err(crate::Error::execution(
                 crate::ExecutionError::Completion,
-                "completion exceeds the GLM scalar-token contract",
+                "completion token exceeds the GLM vocabulary",
             ));
+        }
+        if let Some(vector) = record.vector {
+            if vector.model_reserved != -1
+                || vector
+                    .tokens
+                    .iter()
+                    .any(|id| *id >= config.contract.vocabulary as i64)
+                || (record.status != 3
+                    && kind == GraphKind::Speculative
+                    && vector.draft_cache_consumed != (record.consumed_tokens - 1).max(0))
+            {
+                return Err(crate::Error::execution(
+                    crate::ExecutionError::Completion,
+                    "GLM speculative completion disagrees with committed draft state",
+                ));
+            }
         }
         Ok(())
     }

@@ -2,22 +2,23 @@ use super::Glm5Next;
 use super::PAGE_TOKENS;
 use crate::{
     Result,
-    execution::{ABI_VERSION, Dtype, ExecutionManifest, GraphKind},
+    execution::{ABI_VERSION, Dtype, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION},
     model::ModelConfig,
 };
 
 pub(super) fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-    if config.contract != Glm5Next::metadata() || manifest.abi_version != ABI_VERSION {
+    if config.contract != Glm5Next::metadata()
+        || !matches!(manifest.abi_version, ABI_VERSION | SPECULATIVE_ABI_VERSION)
+    {
         return Err(
             "unsupported GLM graph-input schema, vocabulary, capabilities, or completion ABI"
                 .into(),
         );
     }
-    if !config.speculative_widths.is_empty()
-        || config.speculative_fixed_width.is_some()
-        || config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
+    if config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
+        || config.history_drafts
     {
-        return Err("prepared GLM catalog does not support speculative execution".into());
+        return Err("GLM speculation requires learned MTP proposals".into());
     }
     if config.limits.max_sequence_tokens > 1048576 {
         return Err("invalid prepared GLM context capacity".into());
@@ -29,7 +30,7 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
     let slots = config.limits.request_capacity();
     use Dtype::{Float32 as F32, Int32 as I32, Int64 as I64};
     let vocabulary = config.contract.vocabulary;
-    vec![
+    let mut buffers = vec![
         ("row_slot_ids", I32, vec![slots]),
         ("row_generations", I64, vec![slots]),
         ("live_rows", I32, vec![1]),
@@ -67,7 +68,15 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
         ("state_destination_slots", I64, vec![slots]),
         ("state_operation", I32, vec![slots]),
         ("state_num_ops", I32, vec![1]),
-    ]
+    ];
+    if config.has_draft_cache() {
+        buffers.push((
+            "draft_page_tables",
+            I32,
+            vec![slots, config.limits.max_sequence_tokens / PAGE_TOKENS],
+        ));
+    }
+    buffers
 }
 
 pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
@@ -103,7 +112,7 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "state_operation",
             "state_num_ops",
         ],
-        GraphKind::Prefill | GraphKind::Decode => &[
+        GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative => &[
             "row_slot_ids",
             "row_generations",
             "live_rows",
@@ -119,6 +128,6 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "live_rows",
             "sampling_grammar_mask",
         ],
-        GraphKind::Vision | GraphKind::Speculative => &[],
+        GraphKind::Vision => &[],
     }
 }

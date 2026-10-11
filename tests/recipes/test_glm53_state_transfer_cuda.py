@@ -139,3 +139,41 @@ def test_rejected_commands_preserve_every_state_and_cache_byte(transfers, fault)
     assert torch.equal(pool.backing, before)
     for name, cache in pool.partial_pages():
         assert torch.equal(cache, caches[name])
+
+
+@pytest.mark.parametrize("endpoint", [1, 4, 255, 256, 257, 512])
+def test_mtp_trailing_partial_page_restores_at_target_page_boundaries(endpoint):
+    pool = ContinuationPool.allocate(("linear_attention", "indexed_attention"), 4, 8, 6, "cuda:0", mtp=True)
+    commands = StateCommands.allocate("cuda:0")
+    tables = torch.tensor([[0, 1, 2], [3, 4, 5], [-1, -1, -1], [-1, -1, -1]], device="cuda:0", dtype=torch.int32)
+    draft_tables = tables.clone()
+    operation = PreparedStateTransfer(pool, commands, tables, pages=pool.partial_pages(), page_tokens=256,
+        trailing_pages=pool.draft_pages(), trailing_tables=draft_tables)
+    operation.prepare()
+    pool.backing[1].random_(0, 256)
+    pool.consumed_tokens[1] = endpoint
+    for _, cache in (*pool.partial_pages(), *pool.draft_pages()):
+        cache.random_(0, 256)
+    expected = {name: cache[(endpoint - 1) // 256].clone() for name, cache in pool.draft_pages()}
+    graph = torch.cuda.CUDAGraph()
+    _commands(commands, [(1, 5, 0, endpoint)])
+    with torch.cuda.graph(graph):
+        operation.validate()
+        operation.apply()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert not commands.errors.count_nonzero()
+    _commands(commands, [(5, 2, 0, endpoint)])
+    graph.replay()
+    torch.cuda.synchronize()
+    assert not commands.errors.count_nonzero()
+    for name, cache in pool.draft_pages():
+        if (endpoint - 1) % 256:
+            torch.testing.assert_close(cache[3 + (endpoint - 1) // 256], expected[name], rtol=0, atol=0)
+    if (endpoint - 1) % 256:
+        before = pool.backing.clone()
+        draft_tables[1, (endpoint - 1) // 256] = -1
+        graph.replay()
+        torch.cuda.synchronize()
+        assert commands.errors[0] == 6
+        torch.testing.assert_close(pool.backing, before, rtol=0, atol=0)

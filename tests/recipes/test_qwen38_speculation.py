@@ -173,9 +173,10 @@ def test_conditional_penalties_include_only_prior_drafts():
 
 
 def test_invalid_conditional_id_does_not_index_histogram_out_of_bounds():
+    initialized = torch.cuda.is_initialized()
     state, _, commit, _ = example()
     op = PreparedSpeculativeDistributions(torch.zeros(1, 4, 16), state,
         commit.slots, commit.generations, commit.live, torch.tensor([[4, 99, 5]]))
     op.prepare_scores()
     assert op.valid.tolist() == [[True, True, False, False]]
-    assert not torch.cuda.is_initialized()
+    assert torch.cuda.is_initialized() == initialized

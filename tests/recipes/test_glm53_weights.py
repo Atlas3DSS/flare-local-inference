@@ -171,3 +171,43 @@ def test_actual_nvfp4_shards_and_shared_scale_storage(manifest, world, rank):
         assert torch.equal(experts._impl.w2_fp4[index].cpu(), weights["down_proj"])
         assert torch.equal(decoded[0][index], torch.cat((scales["up_proj"], scales["gate_proj"])))
         assert torch.equal(decoded[1][index], scales["down_proj"])
+
+
+@cuda
+@pytest.mark.parametrize("world,rank", [(2, 1), (4, 3)])
+def test_mtp_experts_preserve_packed_weights_and_e4m3_scales(manifest, world, rank, monkeypatch):
+    from b12x._lib.intrinsics import swizzle_block_scale
+    from b12x.moe import fused_moe
+
+    packed = {}
+    prepare = fused_moe.prepare_weights
+
+    def capture(*, plan, weights):
+        for name in ("w13", "w2", "w13_block_scales", "w2_block_scales"):
+            packed[name] = getattr(weights, name).clone()
+        return prepare(plan=plan, weights=weights)
+
+    monkeypatch.setattr(fused_moe, "prepare_weights", capture)
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
+    shard = TensorParallelShard(rank, world)
+    ids = (0, 287)
+    prefix = f"{TEXT_PREFIX}.layers.45.mlp.experts"
+    with GlmWeightLoader(manifest, "cuda:0", shard=shard,
+                         prefixes=tuple(f"{prefix}.{i}." for i in ids)) as loader:
+        experts = loader.load_experts(45, expert_ids=ids)
+        assert loader._session.torch_copy_bytes == 0
+    assert experts.plan.activation.mode == "a16"
+    first, last = shard.partition(2048)
+    weights, scales = {}, {}
+    for projection in ("up_proj", "gate_proj", "down_proj"):
+        extent = (slice(None), slice(first // 2, last // 2)) if projection == "down_proj" else slice(first, last)
+        scale_extent = (slice(None), slice(first // 16, last // 16)) if projection == "down_proj" else slice(first, last)
+        weights[projection] = torch.stack([read(manifest, f"{prefix}.{expert}.{projection}.weight", extent) for expert in ids])
+        scales[projection] = torch.stack([read(manifest, f"{prefix}.{expert}.{projection}.weight_scale", scale_extent) for expert in ids])
+    assert torch.equal(packed["w13"].cpu(), torch.cat((weights["up_proj"], weights["gate_proj"]), dim=1))
+    assert torch.equal(packed["w2"].cpu(), weights["down_proj"])
+    for actual, expected in ((packed["w13_block_scales"], torch.cat((scales["up_proj"], scales["gate_proj"]), dim=1)),
+                             (packed["w2_block_scales"], scales["down_proj"])):
+        expected = swizzle_block_scale(expected.cuda())
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))

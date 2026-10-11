@@ -13,6 +13,7 @@ pub type Admission = crate::model::Admission<super::Glm5Next>;
 pub struct Inputs {
     staging: UploadBatch,
     page_counts: [(u64, usize); REQUEST_LANES],
+    draft_page_counts: [(u64, usize); REQUEST_LANES],
 }
 
 impl Default for Inputs {
@@ -20,6 +21,7 @@ impl Default for Inputs {
         Self {
             staging: UploadBatch::default(),
             page_counts: [(0, 0); REQUEST_LANES],
+            draft_page_counts: [(0, 0); REQUEST_LANES],
         }
     }
 }
@@ -42,7 +44,7 @@ impl Inputs {
         } = *frame;
         let capacity = config.limits.request_capacity();
         self.staging.clear();
-        if matches!(step.kind, GraphKind::Vision | GraphKind::Speculative) {
+        if step.kind == GraphKind::Vision {
             return Err("unsupported GLM graph kind".into());
         }
         let admit = matches!(step.kind, GraphKind::Init | GraphKind::Restore);
@@ -63,8 +65,19 @@ impl Inputs {
                     "page_tables",
                     live,
                     capacity,
-                    0..live.pages().count(),
+                    0..live.pages().count().min(capacity),
                 )?;
+                if config.has_draft_cache() {
+                    let available = live.pages().count().saturating_sub(1).min(capacity);
+                    append_pages(
+                        &mut self.staging,
+                        &mut self.draft_page_counts,
+                        "draft_page_tables",
+                        live,
+                        capacity,
+                        1..1 + available,
+                    )?;
+                }
             }
         }
         if step.kind.samples() {
@@ -111,11 +124,13 @@ impl Inputs {
                 .ok_or("GLM prefill exceeds prompt")?;
             self.staging
                 .i64("token_ids", 0, tokens.iter().map(|t| *t as i64));
-        } else if step.kind == GraphKind::Decode {
+        } else if matches!(step.kind, GraphKind::Decode | GraphKind::Speculative) {
             let mut tokens = [0; REQUEST_LANES];
             for (row, lane) in step.lanes.iter().enumerate() {
                 let live = scheduler.request(lane.request)?;
-                if lane.tokens != 1 || live.generated_tokens == 0 {
+                if (step.kind == GraphKind::Decode && lane.tokens != 1)
+                    || live.generated_tokens == 0
+                {
                     return Err("GLM decode requires one pending sampled token per request".into());
                 }
                 tokens[row] = *live

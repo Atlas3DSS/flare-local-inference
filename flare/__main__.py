@@ -32,7 +32,7 @@ def main(argv=None):
         help="proposal source for speculative graphs; copy loads no MTP weights")
     catalog = parser.add_mutually_exclusive_group()
     catalog.add_argument("--mtp-max-draft-tokens", type=int, choices=range(1, 8),
-        help="maximum draft tokens per request; adaptive speculation may use fewer (Qwen default: 3)")
+        help="maximum draft tokens per request; adaptive speculation may use fewer (Qwen default: 3; GLM default: 5)")
     catalog.add_argument("--mtp-draft-tokens", type=int, nargs="+", choices=range(8),
         help="explicit increasing draft-token counts including zero; overrides the default draft limit")
     parser.add_argument("--mtp-fixed-draft-tokens", type=int, choices=range(8),
@@ -54,7 +54,8 @@ def main(argv=None):
     if args.mtp_draft_tokens is None:
         maximum = args.mtp_max_draft_tokens
         if maximum is None:
-            maximum = max(3, args.mtp_fixed_draft_tokens or 0)
+            architecture = json.loads((args.snapshot / "config.json").read_text()).get("model_type")
+            maximum = max(5 if architecture == "glm5_next" else 3, args.mtp_fixed_draft_tokens or 0)
         args.mtp_draft_tokens = list(range(maximum + 1))
     if args.mtp_draft_tokens[0] != 0 or sorted(set(args.mtp_draft_tokens)) != args.mtp_draft_tokens:
         parser.error("--mtp-draft-tokens must be increasing unique counts including zero")
@@ -82,15 +83,19 @@ def _run(args, parser, started):
     budgets = {"snapshot_budget_bytes": int(args.snapshot_budget_gib * (1 << 30)),
                "headroom_bytes": int(args.headroom_gib * (1 << 30))}
     if architecture == "glm5_next":
-        if args.tp not in (2, 4) or args.mtp:
-            parser.error("GLM requires --tp 2 or --tp 4 and has no prepared MTP catalog")
+        if args.tp not in (2, 4):
+            parser.error("GLM requires --tp 2 or --tp 4")
+        if args.mtp and (args.mtp_proposal_source != "mtp" or args.history_drafts):
+            parser.error("GLM MTP uses the learned draft model; history proposals are not supported")
         with phase(progress, "Initialize model runtime"):
             from flare.preparation.rank_group import prepare_group
             from flare.recipes.glm53.bootstrap import PreparationConfig, prepare_rank
 
         config = PreparationConfig(devices=tuple(range(args.device, args.device + args.tp)),
             context=args.context, pages=args.pages, prefill_chunk_size=args.prefill_chunk_size,
-            max_active=args.concurrency, compile_decoder=not args.no_compile, **budgets)
+            max_active=args.concurrency, compile_decoder=not args.no_compile,
+            mtp=args.mtp, speculative_widths=tuple(args.mtp_widths),
+            speculative_fixed_width=args.mtp_fixed_width, speculative_graph_budget=args.mtp_graph_budget, **budgets)
         model = prepare_group(args.snapshot, config, prepare_rank, progress=progress)
     elif architecture == "qwen4_exp":
         with phase(progress, "Initialize model runtime"):

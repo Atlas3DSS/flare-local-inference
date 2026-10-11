@@ -1,0 +1,76 @@
+"""GLM packed verification and shared commit semantics."""
+
+from types import SimpleNamespace
+
+import torch
+
+from flare.components.sampling import DeviceRequestState, RequestAdmission
+from flare.components.speculation import PreparedSpeculativeCommit, SpeculativeAcceptance
+from flare.recipes.glm53.batch import BatchInputs
+from flare.recipes.glm53.speculative import PreparedRound
+from flare.recipes.glm53.mtp import DraftMetadata
+from flare.recipes.glm53.state import DecoderMetadata
+from flare.components.recurrent import DeltaMetadata
+
+
+def test_shared_commit_without_previous_token_embeddings():
+    state = DeviceRequestState.allocate("cpu", vocab_size=32, capacity=2)
+    state.admit(1, RequestAdmission(generation=7, seed=19, temperature=0.7, max_new_tokens=100), [1, 2], consumed_tokens=2)
+    state.pending_token[1] = 3
+    state.generated_tokens[1] = 1
+    acceptance = SpeculativeAcceptance.allocate(1, 6, "cpu")
+    acceptance.token_ids[0, :3] = torch.tensor([4, 5, 17])
+    acceptance.proposed_count.fill_(3)
+    acceptance.accepted_drafts.fill_(2)
+    acceptance.offered_drafts.fill_(5)
+    acceptance.valid.fill_(True)
+    records = torch.zeros((2, 2, 24), dtype=torch.int64)
+    commit = PreparedSpeculativeCommit(state, acceptance, torch.tensor([[3, 4, 5, 6, 7, 8]]),
+        torch.tensor([1], dtype=torch.int32), torch.tensor([7]), torch.tensor([1], dtype=torch.int32),
+        records, torch.tensor([0], dtype=torch.int32), torch.tensor([1]))
+    commit()
+    assert state.consumed_tokens.tolist() == [0, 5]
+    assert state.pending_token[1] == 17
+    assert records[0, 1, 13] == 4
+    assert records[0, 1, 16:19].tolist() == [4, 5, 17]
+
+
+def test_verification_packs_unequal_lengths_and_retains_request_output_rows():
+    op = PreparedRound.__new__(PreparedRound)
+    op.batch, op.width = 2, 6
+    inputs = BatchInputs.allocate(128, 2, "cpu", capacity=2)
+    inputs.page_tables.copy_(torch.tensor([[10, 11], [20, 21]]))
+    inputs.live_rows.fill_(2)
+    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2), extra_base=8)
+    m = DecoderMetadata.allocate(12, 2, 2, "cpu")
+    op.metadata = DecoderMetadata(m.token_ids, torch.zeros(12, dtype=torch.int64),
+        DeltaMetadata.allocate(2, "cpu", verification_columns=8), m.indexed)
+    op.active = torch.tensor([True, True])
+    op.before = torch.tensor([255, 510])
+    op.offsets, op.columns, op.state_columns = torch.arange(12), torch.arange(6), torch.arange(8)
+    op.candidates = torch.arange(12).view(2, 6)
+    op.target_metadata(torch.tensor([0, 1]), torch.tensor([6, 2], dtype=torch.int32))
+    assert op.metadata.recurrent.query_start_loc.tolist() == [0, 6, 8]
+    assert op.metadata.recurrent.num_tokens.item() == 8
+    assert op.metadata.indexed.positions.tolist() == [255, 256, 257, 258, 259, 260, 510, 511, -1, -1, -1, -1]
+    assert op.metadata.indexed.token_slots.tolist()[:8] == [10 * 256 + 255, *range(11 * 256, 11 * 256 + 5), 21 * 256 + 254, 21 * 256 + 255]
+    assert op.metadata.recurrent.state_indices.tolist() == [[1, 8, 9, 10, 11, 12, 13, 14], [2, 15, 16, 17, 18, 19, 20, 21]]
+
+
+def test_draft_rows_exclude_exhausted_requests_and_restore_output_order():
+    metadata = DraftMetadata(3, 3, 2, "cpu")
+    slots = torch.tensor([2, 0, 1])
+    tables = torch.tensor([[10, 11], [20, 21], [30, 31]])
+    hidden = torch.arange(3, dtype=torch.bfloat16)[:, None].expand(3, 4096)
+    metadata.set(slots, torch.tensor([0, 1, 1]), torch.tensor([512, 255, 510]),
+                 torch.tensor([7, 8, 9]), hidden, tables, capacity=1)
+    assert metadata.indexed.query_start_loc.tolist() == [0, 0, 1, 2]
+    assert metadata.indexed.positions.tolist() == [255, 510, -1]
+    assert metadata.indexed.token_slots.tolist() == [10 * 256 + 255, 21 * 256 + 254, -1]
+    assert metadata.token_ids[:2].tolist() == [8, 9]
+    assert metadata.hidden[metadata.output_indices][1:, 0].tolist() == [1, 2]
+    metadata.set(slots, torch.zeros(3, dtype=torch.int64), torch.full((3,), 512),
+                 torch.tensor([7, 8, 9]), hidden, tables, capacity=1)
+    assert metadata.num_tokens.item() == 0
+    assert metadata.indexed.positions.tolist() == [-1, -1, -1]
+    assert metadata.indexed.token_slots.tolist() == [-1, -1, -1]

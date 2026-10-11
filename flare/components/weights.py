@@ -212,6 +212,56 @@ class DirectWeightLoader:
         self._session.flush()
         return pack_weight(values, scales, recipe="mxfp8")
 
+    def load_nvfp4_a16_experts(self, prefixes, *, hidden_size, intermediate_size,
+                               intermediate_range=None, swiglu_limit=None):
+        """Load packed NVFP4 weights with ordinary E4M3 scales for BF16 activations."""
+        import torch
+        from b12x.moe import fused_moe as moe
+        from b12x._lib.intrinsics import swizzle_block_scale
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        first, last = _aligned_range(intermediate_range, intermediate_size, 16)
+        local, count = last - first, len(prefixes)
+        w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((count, hidden_size, local // 2), dtype=torch.uint8, device=self.device)
+        s13 = torch.empty((count, 2 * local, hidden_size // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        s2 = torch.empty((count, hidden_size, local // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        globals13, globals2 = [], []
+        for index, prefix in enumerate(prefixes):
+            scales = {}
+            for projection, values, blocks in (
+                ("up_proj", w13[index, :local], s13[index, :local]),
+                ("gate_proj", w13[index, local:], s13[index, local:]),
+                ("down_proj", w2[index], s2[index]),
+            ):
+                source = self._sources[f"{prefix}.{projection}.weight"]
+                scale = self._sources[f"{prefix}.{projection}.weight_scale"]
+                self._copy(values, source[:, first // 2:last // 2] if projection == "down_proj" else source[first:last])
+                self._copy(blocks, scale[:, first // 16:last // 16] if projection == "down_proj" else scale[first:last])
+                value = self._sources[f"{prefix}.{projection}.weight_scale_2"]
+                if value.dtype != torch.float32 or value.numel() != 1 or not bool(torch.isfinite(value) & (value > 0)):
+                    raise ValueError(f"{prefix}.{projection}: expected a positive FP32 global weight scale")
+                scales[projection] = value.item()
+            if scales["gate_proj"] != scales["up_proj"]:
+                raise ValueError(f"{prefix}: gate/up global scales differ")
+            globals13.append(scales["up_proj"])
+            globals2.append(scales["down_proj"])
+        device_scales = []
+        for values in (globals13, globals2):
+            target = torch.empty(count, dtype=torch.float32, device=self.device)
+            self._copy(target, torch.tensor(values, dtype=torch.float32))
+            device_scales.append(target)
+        self._session.flush()
+        plan = moe.plan_weights(
+            source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
+            activation=moe.ActivationSpec(mode="a16", nonlinearity="silu", io_dtype=torch.bfloat16,
+                                          swiglu_limit=swiglu_limit),
+            geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
+        return moe.prepare_weights(plan=plan, weights=moe.PackedWeights(
+            w13=w13, w2=w2, w13_block_scales=swizzle_block_scale(s13), w2_block_scales=swizzle_block_scale(s2),
+            w13_global_scales=device_scales[0], w2_global_scales=device_scales[1]))
+
     def load_nvfp4_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_vectors,
         intermediate_range=None, scale_scratch=None, swiglu_limit=None,

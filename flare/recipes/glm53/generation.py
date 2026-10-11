@@ -18,7 +18,7 @@ class PreparedGeneration:
     """
 
     def __init__(self, decoder: PreparedDecoder, batch: PreparedBatch, completion_records,
-                 frame_index, submission_sequence, *, pool, runtime, coordinator, session, name):
+                 frame_index, submission_sequence, *, pool, runtime, coordinator, session, name, replicated_sampling=False):
         if decoder.metadata is not batch.metadata or decoder.weights.shard != batch.shard:
             raise ValueError("GLM generation requires the decoder's metadata and rank")
         if decoder.state is not pool.decoder:
@@ -32,14 +32,17 @@ class PreparedGeneration:
         b, rows = batch.inputs, batch.rows
         arguments = (batch.requests, b.row_slot_ids[:rows], b.row_generations[:rows], b.live_rows,
                      completion_records, frame_index, submission_sequence)
-        self.completion = PreparedCompletion(*arguments) if decoder.weights.shard.rank != 0 else PreparedSampling(
+        self.completion = PreparedCompletion(*arguments) if decoder.weights.shard.rank != 0 and not replicated_sampling else PreparedSampling(
             decoder.scratch.logits, *arguments, sample_enabled=b.sample_enabled[:rows])
         self.completion.prepare()
-        self.compilation_variant = "sample" if decoder.weights.shard.rank == 0 else "consume"
+        self.compilation_variant = "sample" if decoder.weights.shard.rank == 0 or replicated_sampling else "consume"
+        self.replicated_sampling = replicated_sampling
         self.peer_completion = PreparedCompletion(*arguments)
         self.peer_completion.prepare()
 
     def compilation_variants(self):
+        if self.replicated_sampling:
+            return {"sample": self}
         peer = copy(self)
         peer.batch = copy(self.batch)
         peer.batch.accept_unsampled = True

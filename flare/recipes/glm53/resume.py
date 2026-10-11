@@ -12,7 +12,7 @@ from flare.components.vocabulary import PreparedVocabularyProjection
 
 class PreparedResume:
     def __init__(self, weights, requests, pool, inputs, records, frame, sequence, *, rows,
-                 runtime, vocabulary_runtime, coordinator, session, name):
+                 runtime, vocabulary_runtime, coordinator, session, name, replicated_sampling=False):
         counts = pool.consumed_tokens[1:1 + requests.capacity, 0]
         if requests.consumed_tokens.data_ptr() != counts.data_ptr() or requests.consumed_tokens.stride() != counts.stride():
             raise ValueError("GLM resume counts must alias continuation storage live rows")
@@ -28,13 +28,16 @@ class PreparedResume:
             session=session, name=f"{name}.lm_head")
         arguments = (requests, inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows,
                      records, frame, sequence)
-        self.completion = PreparedCompletion(*arguments) if weights.shard.rank != 0 else PreparedSampling(self.logits, *arguments)
+        self.completion = PreparedCompletion(*arguments) if weights.shard.rank != 0 and not replicated_sampling else PreparedSampling(self.logits, *arguments)
         self.completion.prepare()
-        self.compilation_variant = "sample" if weights.shard.rank == 0 else "consume"
+        self.compilation_variant = "sample" if weights.shard.rank == 0 or replicated_sampling else "consume"
+        self.replicated_sampling = replicated_sampling
         self.peer_completion = PreparedCompletion(*arguments)
         self.peer_completion.prepare()
 
     def compilation_variants(self):
+        if self.replicated_sampling:
+            return {"sample": self}
         peer = copy(self)
         peer.completion = self.peer_completion
         return {"sample": self, "consume": peer}

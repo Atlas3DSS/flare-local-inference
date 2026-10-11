@@ -39,7 +39,19 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
     descriptions.extend([
         ("frame_index", Dtype::Int32, vec![1]),
         ("submission_sequence", Dtype::Int64, vec![1]),
-        ("completion_records", Dtype::Int64, vec![2, 4, 8]),
+        (
+            "completion_records",
+            Dtype::Int64,
+            vec![
+                2,
+                4,
+                if config.speculative_widths.is_empty() {
+                    8
+                } else {
+                    24
+                },
+            ],
+        ),
     ]);
     let (mut address, mut host) = (0x10000, 0);
     let mut bindings = Vec::new();
@@ -86,10 +98,36 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
         GraphKind::Resume,
         GraphKind::Decode,
         GraphKind::Prefill,
+        GraphKind::Speculative,
     ] {
+        if (kind == GraphKind::Speculative && config.speculative_widths.is_empty())
+            || (kind == GraphKind::Decode && !config.speculative_widths.is_empty())
+        {
+            continue;
+        }
         let capacities: Vec<_> = if kind == GraphKind::Prefill {
             prefill_capacities(config.limits.prefill_chunk_size)
                 .map(|n| (1, n))
+                .collect()
+        } else if kind == GraphKind::Speculative {
+            let masks = crate::scheduler::speculation::graph_width_masks(
+                &config.speculative_widths,
+                config.speculative_fixed_width,
+                config.speculative_graph_budget,
+                config.limits.max_active.next_power_of_two(),
+            );
+            [1usize, 2, 4]
+                .into_iter()
+                .flat_map(|batch| {
+                    config
+                        .speculative_widths
+                        .iter()
+                        .copied()
+                        .filter_map(move |width| {
+                            ((masks[batch.trailing_zeros() as usize] & (1 << (width - 1))) != 0)
+                                .then_some((batch, width))
+                        })
+                })
                 .collect()
         } else {
             [1, 2, 4]
@@ -109,7 +147,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 input_bindings: bindings
                     .iter()
                     .filter(|b| {
-                        super::config::required_inputs(kind).contains(&b.buffer_name.as_str())
+                        Glm5Next::required_inputs(config, kind).any(|name| name == b.buffer_name)
                             || ["frame_index", "submission_sequence"]
                                 .contains(&b.buffer_name.as_str())
                     })
@@ -119,7 +157,11 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
         }
     }
     ExecutionManifest {
-        abi_version: ABI_VERSION,
+        abi_version: if config.speculative_widths.is_empty() {
+            ABI_VERSION
+        } else {
+            crate::execution::SPECULATIVE_ABI_VERSION
+        },
         context: 1,
         device: 0,
         max_active: config.limits.max_active,
@@ -173,7 +215,7 @@ fn catalog_requires_each_capacity_and_semantic_binding() {
     duplicate.graphs.push(graph);
     assert!(validate::<Glm5Next>(&config, &duplicate).is_err());
     config.speculative_widths = vec![1, 2];
-    assert!(validate::<Glm5Next>(&config, &manifest(&config)).is_err());
+    validate::<Glm5Next>(&config, &manifest(&config)).unwrap();
 }
 
 #[test]
@@ -427,4 +469,51 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         values(&inputs, "row_generations")[0],
         exact.generation as i64
     );
+}
+
+#[test]
+fn mtp_catalog_requires_shifted_draft_pages_and_budgeted_widths() {
+    let mut config = config();
+    config.speculative_widths = (1..=6).collect();
+    config.speculative_graph_budget = 8;
+    let catalog = manifest(&config);
+    validate::<Glm5Next>(&config, &catalog).unwrap();
+    assert_eq!(
+        Glm5Next::scheduler_capabilities(&config).draft_pages_per_request,
+        1
+    );
+    let shapes: Vec<_> = catalog
+        .graphs
+        .iter()
+        .filter(|g| g.kind == GraphKind::Speculative)
+        .map(|g| (g.batch_capacity, g.token_capacity))
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (1, 6),
+            (2, 6),
+            (4, 1)
+        ]
+    );
+    for index in 0..catalog.graphs.len() {
+        if catalog.graphs[index].kind == GraphKind::Resume {
+            continue;
+        }
+        let mut invalid = catalog.clone();
+        invalid.graphs[index]
+            .input_bindings
+            .retain(|b| b.buffer_name != "draft_page_tables");
+        assert!(validate::<Glm5Next>(&config, &invalid).is_err());
+    }
+    config.speculative_fixed_width = Some(6);
+    config.speculative_graph_budget = 3;
+    validate::<Glm5Next>(&config, &manifest(&config)).unwrap();
+    config.history_drafts = true;
+    assert!(validate::<Glm5Next>(&config, &manifest(&config)).is_err());
 }

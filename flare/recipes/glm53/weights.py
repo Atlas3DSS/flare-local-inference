@@ -33,12 +33,19 @@ class LayerWeights:
 
 
 @dataclass(frozen=True)
+class MTPWeights:
+    attention: dict[str, object]
+    mlp: MoEWeights
+    tensors: dict[str, torch.Tensor]
+
+
+@dataclass(frozen=True)
 class ModelWeights:
     """One text rank's canonical modules and all packed decoder weights.
 
     Embeddings and normalization are replicated. Vocabulary weights partition
     their output rows. Routed layers share one scale-expansion workspace and
-    execute serially. Vision and MTP weights are outside this text stack.
+    execute serially. Vision weights are outside this text stack.
     """
 
     tree: torch.nn.Module
@@ -46,9 +53,10 @@ class ModelWeights:
     layers: tuple[LayerWeights, ...]
     expert_scale_scratch: tuple[torch.Tensor, torch.Tensor]
     allocated_bytes: int
+    mtp: MTPWeights | None = None
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None):
+    def load(cls, manifest, device, *, shard, progress=None, mtp=False):
         import torch
 
         from .model import create_model_tree
@@ -76,8 +84,9 @@ class ModelWeights:
             for index in range(len(tree.model.language_model.layers)):
                 layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),
                                            loader.load_residual(index)))
+            draft = loader.load_mtp(scales) if mtp else None
         torch.cuda.synchronize(device)
-        return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before)
+        return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before, draft)
 
 
 class GlmWeightLoader(DirectWeightLoader):
@@ -117,8 +126,8 @@ class GlmWeightLoader(DirectWeightLoader):
                 if name.startswith(TEXT_PREFIX + ".") or name == "lm_head.weight"}
 
     def _layer(self, layer):
-        if type(layer) is not int or not 0 <= layer < 45:
-            raise ValueError("GLM decoder layer must be in [0, 45)")
+        if type(layer) is not int or not 0 <= layer <= 45:
+            raise ValueError("GLM decoder layer must be in [0, 45]")
         return f"{TEXT_PREFIX}.layers.{layer}"
 
     def load_mxfp8_group(self, prefixes, *, row_ranges=None, column_range=None):
@@ -133,7 +142,7 @@ class GlmWeightLoader(DirectWeightLoader):
 
     def load_attention(self, layer):
         prefix = self._layer(layer) + ".self_attn"
-        if layer % 4 != 3:
+        if layer < 45 and layer % 4 != 3:
             return self._load_kda(prefix)
         head_channels = self.shard.partition(64 * 256, alignment=256)
         result = {
@@ -207,6 +216,9 @@ class GlmWeightLoader(DirectWeightLoader):
             raise ValueError("GLM expert IDs must be distinct integers in [0, 288)")
         prefixes = tuple(f"{prefix}.{i}" for i in ids)
         recipe = self.quantization.get(prefix, {})
+        if layer == 45 and recipe == {"quant_algo": "W4A16_NVFP4", "group_size": 16}:
+            return self.load_nvfp4_a16_experts(prefixes, hidden_size=4096, intermediate_size=2048,
+                intermediate_range=self.shard.partition(2048, alignment=128), swiglu_limit=10.0)
         if (recipe.get("quant_algo") != "NVFP4" or recipe.get("group_size") != 16
                 or recipe.get("weight_scale_encoding") != "csf"):
             raise ValueError(f"{prefix}: expected declared NVFP4 CSF quantization")
@@ -225,6 +237,12 @@ class GlmWeightLoader(DirectWeightLoader):
         local = 2048 // self.shard.world_size
         return tuple(torch.empty(shape, dtype=torch.float8_e4m3fn, device=self.device) for shape in (
             (expert_count, 2 * local, 256), (expert_count, 4096, local // 16)))
+
+    def load_mtp(self, scale_scratch):
+        prefix = self._layer(45)
+        return MTPWeights(self.load_attention(45), self.load_mlp(45, scale_scratch=scale_scratch),
+            {name: self.load_tensor(f"{prefix}.{name}.weight") for name in (
+                "enorm", "hnorm", "eh_proj", "input_layernorm", "post_attention_layernorm", "shared_head.norm")})
 
     def load_residual(self, layer):
         prefix = self._layer(layer)

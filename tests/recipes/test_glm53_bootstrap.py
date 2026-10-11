@@ -53,3 +53,15 @@ def test_cli_passes_compile_policy_to_rank_group(monkeypatch, tmp_path, no_compi
                  *(["--no-compile"] if no_compile else [])]) == 0
     assert configs[0].compile_decoder is not no_compile
     assert configs[0].max_active == concurrency
+
+
+def test_mtp_catalog_defaults_to_five_drafts_and_reserves_draft_pages():
+    config = PreparationConfig(mtp=True)
+    assert config.speculative_widths == (1, 2, 3, 4, 5, 6)
+    assert config.speculative_shapes == tuple((1, w) for w in range(6, 0, -1)) + ((2, 6), (4, 1))
+    assert config.page_capacity == PreparationConfig().page_capacity + 4
+    fixed = PreparationConfig(mtp=True, speculative_fixed_width=6, speculative_graph_budget=3)
+    assert fixed.speculative_shapes == ((1, 6), (2, 6), (4, 6))
+    large = PreparationConfig(mtp=True, max_active=64)
+    assert len(large.speculative_shapes) == 8
+    assert large.speculative_shapes[-1] == (64, 1)
