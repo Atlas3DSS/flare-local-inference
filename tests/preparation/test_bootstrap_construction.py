@@ -282,11 +282,16 @@ def _install_boundaries(monkeypatch, checkpoint):
     }.items():
         monkeypatch.setattr(torch.cuda, name, replacement)
 
+    from flare.preparation.scratch import ScratchArena
+
+    monkeypatch.setattr(ScratchArena, "auxiliary_stream", property(lambda arena: DeclaredStream(arena.device)))
+
     def forbidden(*args, **kwargs):
         raise AssertionError("constructor smoke must not initialize CUDA")
 
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
     from flashinfer import sampling
+
     from flare.components import flashinfer_sampling
 
     monkeypatch.setattr(sampling, "get_sampling_module", lambda: SimpleNamespace(
@@ -461,8 +466,12 @@ def _install_boundaries(monkeypatch, checkpoint):
 
     def experts(loader, *args, **kwargs):
 
+        from b12x._lib.quant.csf_blocks import (
+            BlockStorageLayout,
+            CsfBlockPayload,
+            Nvfp4CompactBlockPlane,
+        )
         from b12x._lib.quant.nvfp4_csf import Nvfp4CsfDecoder
-        from b12x._lib.quant.csf_blocks import BlockStorageLayout, CsfBlockPayload, Nvfp4CompactBlockPlane
         from b12x.moe._shared.kernels.w4a16.prepare import W4A16PackedWeights
         from b12x.moe.fused_moe._impl import (
             B12XFP4ExpertWeights,
