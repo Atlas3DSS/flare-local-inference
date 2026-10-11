@@ -6,6 +6,7 @@ import gc
 from collections import Counter
 from collections.abc import Hashable
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from threading import get_ident
 
 import torch
@@ -135,6 +136,10 @@ class RecordedPreparationSession(PreparationSession):
         for request in requests:
             key = _declaration_key(request.plan)
             keys[id(request.plan)] = key
+            # Memory bounds are independent of execution order. Each subset must
+            # stand alone while the tuning batch retains its dependency graph.
+            if request.dependencies:
+                request = replace(request, dependencies=())
             groups.setdefault(key, []).append(request)
 
         def scratch_bytes(plan):
@@ -145,7 +150,7 @@ class RecordedPreparationSession(PreparationSession):
             return envelopes[key].scratch_nbytes
 
         parallel = arena.parallel_nbytes(scratch_bytes)
-        remaining = [request for request in requests if keys[id(request.plan)] not in envelopes]
+        remaining = [request for key, group in groups.items() if key not in envelopes for request in group]
         requirements = list(envelopes.values())
         if remaining:
             requirements.append(self.candidate_memory_envelope(remaining))

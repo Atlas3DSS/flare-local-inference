@@ -70,7 +70,7 @@ def expected_quantization():
     for i in range(48):
         prefix = f"{TEXT_PREFIX}.layers.{i}"
         entries[f"{prefix}.mlp.experts"] = {
-            "quant_algo": "NVFP4", "group_size": 16, "weight_scale_encoding": "csf"
+            "quant_algo": "NVFP4", "group_size": 16, "weight_scale_encoding": "csf_32x2_v1"
         }
         for proj in ("gate_proj", "up_proj", "down_proj"):
             entries[f"{prefix}.mlp.shared_expert.{proj}"] = {"quant_algo": "MXFP8", "group_size": 32}
@@ -105,13 +105,25 @@ def _linear(prefix, rows, columns, quant=None, *, quantization=None):
     elif quant == "MXFP8":
         yield f"{prefix}.weight", "F8_E4M3", (rows, columns)
         yield f"{prefix}.weight_scale", "U8", (rows, columns // 32)
-    elif quant in ("CSF", "NVFP4", "W4A16_NVFP4"):
+    elif quant in ("CSF", "CSF_SLAB", "NVFP4", "W4A16_NVFP4"):
         yield f"{prefix}.weight", "U8", (rows, columns // 2)
         yield f"{prefix}.weight_scale_2", "F32", ()
-        if quant == "CSF":
+        if quant == "CSF_SLAB":
             yield f"{prefix}.input_scale", "F32", ()
-            yield f"{prefix}.weight_scale.nvfp4_csf_fixed", "U8", (rows // 16, columns // 2 + 16)
+            yield f"{prefix}.weight_scale.nvfp4_csf_fixed", "U8", (rows // 16, 16 * (1 + columns // 32))
             yield f"{prefix}.weight_scale.nvfp4_csf_exceptions", "U32", (None,)
+        elif quant == "CSF":
+            yield f"{prefix}.input_scale", "F32", ()
+            scale_columns = columns // 16
+            groups = ((rows + 127) // 128) * ((scale_columns + 3) // 4)
+            pages = (groups + 31) // 32
+            blocks = (rows // 32) * ((scale_columns + 1) // 2)
+            for field, dtype, size in (
+                ("bases", "U8", rows), ("codes", "U8", rows * scale_columns // 2),
+                ("page_bases", "U32", pages), ("offsets", "U16", blocks + pages),
+                ("exceptions", "U16", None),
+            ):
+                yield f"{prefix}.weight_scale.csf32_{field}", dtype, (size,)
         else:
             yield f"{prefix}.weight_scale", "F8_E4M3", (rows, columns // 16)
             if quant == "NVFP4":
@@ -149,7 +161,7 @@ def _mlp(prefix, *, mtp=False, quantization=None):
         from .quantization import expert_format
 
         fmt, mode = expert_format(quantization, f"{prefix}.experts")
-        expert_quant = "CSF" if fmt == "nvfp4_csf" else "MXFP4" if fmt == "mxfp4" else "W4A16_NVFP4" if mode == "a16" else "NVFP4"
+        expert_quant = ("CSF_SLAB" if quantization[f"{prefix}.experts"]["weight_scale_encoding"] == "csf" else "CSF") if fmt == "nvfp4_csf" else "MXFP4" if fmt == "mxfp4" else "W4A16_NVFP4" if mode == "a16" else "NVFP4"
     for proj, rows, columns in (("gate_proj", 640, 2560), ("up_proj", 640, 2560), ("down_proj", 2560, 640)):
         yield from _linear(f"{prefix}.shared_expert.{proj}", rows, columns, None if mtp else "MXFP8",
                            quantization=quantization)

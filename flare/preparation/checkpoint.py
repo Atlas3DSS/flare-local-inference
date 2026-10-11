@@ -83,7 +83,7 @@ class CheckpointManifest(IndexedCheckpoint):
         for tensor in self.tensors.values():
             sizes[tensor.component] += tensor.nbytes
             counts[tensor.component] += 1
-            if "nvfp4_csf_" in tensor.name:
+            if ".csf32_" in tensor.name or ".nvfp4_csf_" in tensor.name:
                 csf_bytes[tensor.name.rsplit(".", 1)[1]] += tensor.nbytes
         gpu_bytes = sum(sizes[key] for key in ("decoder_experts", "decoder_other", "vision"))
         return {
@@ -174,7 +174,7 @@ def _parse_json(raw: bytes, source: str) -> dict:
     return value
 
 
-_DTYPE_BYTES = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "U8": 1, "U32": 4, "I64": 8}
+_DTYPE_BYTES = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "U8": 1, "U16": 2, "U32": 4, "I64": 8}
 
 
 def _read_header(path: Path, shard: str) -> tuple[ShardMetadata, dict[str, TensorMetadata]]:

@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.recipes.qwen38.weights import QwenWeightLoader, allocate_expert_scale_scratch
 from flare.reference.qwen38_quant import (
     CheckpointTensors,
@@ -31,7 +31,7 @@ def manifest():
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         pytest.fail("assign a CUDA device explicitly")
     assert torch.cuda.get_device_capability(0) in ((12, 0), (12, 1))
-    default = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     return inspect_qwen38_checkpoint(Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default)))
 
 
@@ -243,9 +243,9 @@ def test_complete_layer_csf_load_and_captured_expansion(manifest):
             for expert in selected:
                 scales = []
                 for projection in ('up_proj', 'gate_proj', 'down_proj'):
-                    name = f'{prefix}{expert}.{projection}.weight_scale.nvfp4_csf_'
+                    name = f'{prefix}{expert}.{projection}.weight_scale.csf32_'
                     rows, columns = (2560, 40) if projection == 'down_proj' else (640, 160)
-                    scales.append(decode_csf_scales(reader.read(name + 'fixed'), reader.read(name + 'exceptions'),
+                    scales.append(decode_csf_scales(*(reader.read(name + field) for field in ('bases', 'codes', 'page_bases', 'offsets', 'exceptions')),
                                                    rows=rows, columns=columns))
                 for storage, rows, columns, expected in (
                     (scratch[0], 1280, 160, torch.cat(scales[:2])), (scratch[1], 2560, 40, scales[2]),
@@ -314,3 +314,88 @@ def test_mtp_expert_shards_match_checkpoint_arithmetic(manifest, rank, world):
                 expected.append(nvfp4_linear_reference(intermediate, down))
             expected = torch.cat(expected)
             _assert_numerical(output, expected)
+
+
+def test_csf_tuning_preserves_scales_across_graph_capacities(manifest):
+    from b12x.moe import fused_moe
+    from flare.components.moe import PreparedRoutedExperts, RouterScratch
+    from flare.preparation.scratch import ScratchArena
+    from flare.preparation.tuning import RecordedPreparationSession
+
+    prefix = f"{TEXT_PREFIX}.layers.0.mlp.experts."
+    scales = allocate_expert_scale_scratch("cuda:0")
+    with QwenWeightLoader(manifest, "cuda:0", prefixes=(prefix,)) as loader:
+        experts = loader.load_experts(0, scale_scratch=scales)
+    fused_moe.expand_scales(experts)
+    expected_scales = tuple(buffer.view(torch.uint8).cpu() for buffer in scales)
+    source = (torch.randn((4096, 2560), device="cuda") * .1).bfloat16()
+    output = torch.empty_like(source)
+    routes = RouterScratch.allocate(4096, "cuda:0", experts=512, top_k=10)
+    arena = ScratchArena("cuda:0")
+    with RecordedPreparationSession(
+        device=source.device, checkpoint=str(manifest.snapshot),
+        workload_schema="csf_graph_capacities", numerical_policy="native_nvfp4",
+    ) as session:
+        session.register_scratch(arena)
+        operators = {tokens: PreparedRoutedExperts(
+            source[:tokens], experts, routes.ids[:tokens], routes.weights[:tokens], output[:tokens],
+            session=session, name=f"experts:{tokens}", workspace=arena,
+        ) for tokens in (1, 8, 128, 4096)}
+        assert len(session._recorded_requests) == 8
+        assert all(request.dependencies == (f"experts:{tokens}/scales",)
+                   for tokens in operators
+                   for request in (session._recorded_requests[f"experts:{tokens}"],))
+        session.tune()
+        assert not session._benchmark_resources
+        assert all(operator.scale_plan.selection is not None for operator in operators.values())
+        session.freeze()
+        graphs = {}
+        for tokens, operator in operators.items():
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                operator()
+            graphs[tokens] = graph
+        for tokens in (4096, 1, 128, 8, 1):
+            ids = (torch.arange(tokens)[:, None] + torch.arange(10)[None, :] + tokens) % 512
+            routes.ids[:tokens].copy_(ids)
+            graphs[tokens].replay()
+            expected = output[:tokens].clone()
+            for buffer in scales:
+                buffer.view(torch.uint8).fill_(0xD6)
+            arena.tensor.fill_(0xA5)
+            output.fill_(float("nan"))
+            allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
+            graphs[tokens].replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+            selected = ids.unique()
+            for actual, reference in zip(scales, expected_scales, strict=True):
+                assert torch.equal(actual.view(torch.uint8).cpu()[selected], reference[selected])
+            actual, reference = output[:tokens].float(), expected.float()
+            error = actual - reference
+            assert torch.isfinite(actual).all()
+            assert float(torch.nn.functional.cosine_similarity(actual.flatten(), reference.flatten(), dim=0)) >= .9999
+            assert float(error.abs().max()) <= .05
+            assert float(error.square().mean().sqrt()) <= .0075
+            assert float(error.abs().mean()) <= .005
+            if tokens == 1:
+                assert all(bool((buffer[511].view(torch.uint8) == 0xD6).all()) for buffer in scales)
+        for graph in graphs.values():
+            graph.reset()
+
+
+@pytest.mark.parametrize("rank,world", [(0, 1), (1, 2), (3, 4)])
+def test_slab_csf_experts_use_compact_gpu_preparation(rank, world, monkeypatch):
+    import b12x.loader._csf_blocks as cpu_blocks
+
+    snapshot = Path("/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
+    if not snapshot.is_dir():
+        pytest.skip("slab CSF checkpoint is unavailable")
+    manifest = inspect_qwen38_checkpoint(snapshot)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("production CSF loading must not decode or regroup CPU scale arrays")
+
+    for name in ("logical_csf_components", "slice_csf_blocks", "concatenate_csf_blocks", "transform_csf_blocks"):
+        monkeypatch.setattr(cpu_blocks, name, forbidden)
+    test_actual_csf_experts_prepared_graph_replay(manifest, rank, world)

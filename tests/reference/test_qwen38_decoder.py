@@ -34,13 +34,7 @@ from flare.reference.qwen38_quant import (
 
 @pytest.fixture(scope="module")
 def manifest():
-    default = (
-        Path.home()
-        / ".cache/huggingface/hub"
-        / ("models--" + MODEL_ID.replace("/", "--"))
-        / "snapshots"
-        / REVISION
-    )
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     snapshot = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default))
     if not snapshot.is_dir():
         pytest.skip("exact Qwen checkpoint is unavailable")

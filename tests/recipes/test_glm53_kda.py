@@ -37,7 +37,7 @@ def test_rank_state_and_scratch_geometry(world):
 def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity):
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     manifest = inspect_indexed_checkpoint(snapshot)

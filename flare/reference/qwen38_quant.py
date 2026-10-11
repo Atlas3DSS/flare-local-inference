@@ -87,7 +87,7 @@ def _dtype(name):
     return {
         "BF16": torch.bfloat16, "F32": torch.float32,
         "F8_E4M3": torch.float8_e4m3fn, "U8": torch.uint8,
-        "U32": torch.uint32, "I64": torch.int64,
+        "U16": torch.uint16, "U32": torch.uint32, "I64": torch.int64,
     }[name]
 
 
@@ -106,6 +106,63 @@ def _positive_scalar(value: torch.Tensor, name: str) -> torch.Tensor:
 
 
 def decode_csf_scales(
+    bases: torch.Tensor, codes: torch.Tensor, page_bases: torch.Tensor,
+    offsets: torch.Tensor, exceptions: torch.Tensor, *, rows: int, columns: int,
+) -> torch.Tensor:
+    """Decode csf_32x2_v1 NVFP4 scales independently into logical E4M3 bytes."""
+    import numpy as np
+
+    if rows <= 0 or rows % 32 or columns <= 0:
+        raise ValueError("CSF requires positive 32-row extents and positive columns")
+    groups = ((rows + 127) // 128) * ((columns + 3) // 4)
+    pages = (groups + 31) // 32
+    blocks = rows // 32 * ((columns + 1) // 2)
+    for tensor, dtype, shape in (
+        (bases, torch.uint8, (rows,)), (codes, torch.uint8, (rows * columns // 2,)),
+        (page_bases, torch.uint32, (pages,)), (offsets, torch.uint16, (blocks + pages,)),
+        (exceptions, torch.uint16, (exceptions.numel(),)),
+    ):
+        if tensor.device.type != "cpu" or tensor.dtype != dtype or tensor.shape != shape:
+            raise ValueError("CSF component shape, dtype, or CPU placement mismatch")
+    if bool((bases > 240).any()):
+        raise ValueError("CSF row palette exceeds a byte")
+    base, packed, records = bases.numpy(), codes.numpy(), exceptions.numpy()
+    fields = ((packed[:, None] >> np.array([0, 4], dtype=np.uint8)) & 15).ravel()
+    decoded = np.empty((rows, columns), dtype=np.uint8)
+    prefixes, origins = offsets.tolist(), page_bases.tolist()
+    group = index = cursor = record_cursor = 0
+    for row in range(0, rows, 128):
+        for column in range(0, columns, 4):
+            if group % 32 == 0:
+                if origins[group // 32] != 2 * record_cursor or prefixes[index] != 0:
+                    raise ValueError("CSF page origin or prefix is not consecutive")
+                page_origin = record_cursor
+            for pair in range(column, min(column + 4, columns), 2):
+                width = min(2, columns - pair)
+                for block_row in range(row, min(row + 128, rows), 32):
+                    tile = decoded[block_row:block_row + 32, pair:pair + width]
+                    tile[:] = base[block_row:block_row + 32, None] + fields[cursor:cursor + 32 * width].reshape(32, width)
+                    cursor += 32 * width
+                    end = page_origin + prefixes[index + 1]
+                    if not record_cursor <= end <= min(record_cursor + 32 * width, records.size):
+                        raise ValueError("CSF exception prefix exceeds the block extent")
+                    words = records[record_cursor:end]
+                    positions = (words & 255).astype(np.int64)
+                    if (np.any(positions >= 64) or np.any(positions % 2 >= width)
+                            or np.any(positions[1:] <= positions[:-1])):
+                        raise ValueError("CSF exception positions must be sorted, unique, and in range")
+                    tile[positions // 2, positions % 2] = (words >> 8).astype(np.uint8)
+                    record_cursor = end
+                    index += 1
+            group += 1
+            if group % 32 == 0 or group == groups:
+                index += 1
+    if record_cursor != records.size:
+        raise ValueError("CSF exceptions are not covered by the index")
+    return torch.from_numpy(decoded)
+
+
+def decode_csf_slab_scales(
     fixed: torch.Tensor, exceptions: torch.Tensor, *, rows: int, columns: int
 ) -> torch.Tensor:
     """Decode byte-window4-fixed-stream-u24-exceptions/1 into E4M3 bytes.
@@ -249,11 +306,17 @@ def read_nvfp4_projection(reader: CheckpointTensors, prefix: str) -> Nvfp4Projec
     """Read one bounded expert or vision projection, including CSF when present."""
     packed = reader.read(f"{prefix}.weight")
     scale_name = f"{prefix}.weight_scale"
-    if f"{scale_name}.nvfp4_csf_fixed" in reader.manifest.tensors:
-        fixed = reader.read(f"{scale_name}.nvfp4_csf_fixed")
-        exceptions = reader.read(f"{scale_name}.nvfp4_csf_exceptions")
+    if f"{scale_name}.csf32_bases" in reader.manifest.tensors:
+        components = [reader.read(f"{scale_name}.csf32_{field}")
+                      for field in ("bases", "codes", "page_bases", "offsets", "exceptions")]
         scales = decode_csf_scales(
-            fixed, exceptions, rows=packed.shape[0], columns=packed.shape[1] // 8
+            *components, rows=packed.shape[0], columns=packed.shape[1] // 8,
+        ).view(torch.float8_e4m3fn)
+    elif f"{scale_name}.nvfp4_csf_fixed" in reader.manifest.tensors:
+        scales = decode_csf_slab_scales(
+            reader.read(f"{scale_name}.nvfp4_csf_fixed"),
+            reader.read(f"{scale_name}.nvfp4_csf_exceptions"),
+            rows=packed.shape[0], columns=packed.shape[1] // 8,
         ).view(torch.float8_e4m3fn)
     else:
         scales = reader.read(scale_name)

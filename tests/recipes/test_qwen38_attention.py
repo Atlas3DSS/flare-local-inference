@@ -12,7 +12,7 @@ import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.recipes.qwen38.attention import (
     PreparedAttention, QSAMetadata, QSAScratch, QSAState, RotaryTables,
 )
@@ -28,7 +28,7 @@ NORMS = ("q_norm", "k_norm", "indexer.q_layernorm", "indexer.k_layernorm")
 
 @pytest.fixture(scope="module")
 def manifest():
-    path = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
+    path = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     path = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", path))
     if not path.exists():
         pytest.skip("exact checkpoint is unavailable")

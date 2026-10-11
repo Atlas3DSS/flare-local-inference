@@ -11,7 +11,6 @@ import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.qwen38 import MODEL_ID, REVISION
 from flare.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
 from flare.recipes.qwen38.weights import QwenWeightLoader
 from flare.reference.qwen38_quant import (
@@ -38,7 +37,7 @@ def test_vision_buffer_geometry():
 
 @pytest.fixture(scope="module")
 def manifest():
-    path = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
+    path = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     path = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", path))
     if not path.exists():
         pytest.skip("exact checkpoint is unavailable")

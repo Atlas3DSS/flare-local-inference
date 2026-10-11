@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 @torch.no_grad()
 def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     manifest = inspect_indexed_checkpoint(snapshot)
     module = create_model_tree(snapshot).model.language_model.layers[0].self_attn
     with GlmWeightLoader(manifest, "cuda:0", shard=TensorParallelShard(0, 4),

@@ -2,6 +2,7 @@
 
 import importlib
 import inspect
+import os
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from contextlib import nullcontext
@@ -17,7 +18,6 @@ from torch.utils._python_dispatch import TorchDispatchMode, _disable_current_mod
 from torch.utils._pytree import tree_leaves, tree_map
 
 from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import MODEL_ID, REVISION
 from flare.recipes.qwen38 import bootstrap
 
 
@@ -208,13 +208,8 @@ class CompiledKernel:
 
 @pytest.fixture(scope="module")
 def checkpoint():
-    snapshot = (
-        Path.home()
-        / ".cache/huggingface/hub"
-        / ("models--" + MODEL_ID.replace("/", "--"))
-        / "snapshots"
-        / REVISION
-    )
+    snapshot = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT",
+        "/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.exists():
         pytest.skip("exact Qwen checkpoint metadata is not available")
     manifest = inspect_qwen38_checkpoint(snapshot)
@@ -465,9 +460,9 @@ def _install_boundaries(monkeypatch, checkpoint):
     monkeypatch.setattr(moe.blockscaled, "pack_weight", pack)
 
     def experts(loader, *args, **kwargs):
-        from dataclasses import replace
 
-        from b12x._lib.quant.nvfp4_csf import Nvfp4CsfBatch, Nvfp4CsfDecoder
+        from b12x._lib.quant.nvfp4_csf import Nvfp4CsfDecoder
+        from b12x._lib.quant.csf_blocks import BlockStorageLayout, CsfBlockPayload, Nvfp4CompactBlockPlane
         from b12x.moe._shared.kernels.w4a16.prepare import W4A16PackedWeights
         from b12x.moe.fused_moe._impl import (
             B12XFP4ExpertWeights,
@@ -499,7 +494,6 @@ def _install_boundaries(monkeypatch, checkpoint):
         ):
             data[name] = torch.empty(shape, dtype=dtype, device=loader.device)
         if mode == "a4":
-            plan = replace(plan, _impl=replace(plan._impl, nvfp4_inline_scales=True))
             planes = []
             for rows, columns, projections in (
                 (1280, 160, ("up_proj", "gate_proj")),
@@ -507,24 +501,19 @@ def _install_boundaries(monkeypatch, checkpoint):
             ):
                 count = sum(
                     manifest.tensors[
-                        f"model.language_model.layers.{args[0]}.mlp.experts.{e}.{proj}.weight_scale.nvfp4_csf_exceptions"
+                        f"model.language_model.layers.{args[0]}.mlp.experts.{e}.{proj}.weight_scale.csf32_exceptions"
                     ].nbytes
                     for e in range(512)
                     for proj in projections
                 )
-                plane = Nvfp4CsfBatch(
-                    torch.empty(
-                        (512, rows // 128, 128 * (1 + columns // 2)),
-                        dtype=torch.uint8,
-                        device=loader.device,
-                    ),
-                    torch.empty(count, dtype=torch.uint8, device=loader.device),
-                    torch.empty(
-                        (512, rows // 128 + 1), dtype=torch.int64, device=loader.device
-                    ),
-                    rows,
-                    columns,
-                )
+                records = count // 2
+                layout = BlockStorageLayout(rows, columns, 512, "nvfp4", group_records=True)
+                values = (layout.source_records + records * 2 + 15) // 16 * 16
+                size = (values + records + 15) // 16 * 16
+                plane = Nvfp4CompactBlockPlane(CsfBlockPayload(
+                    torch.empty(size, dtype=torch.uint8, device=loader.device),
+                    rows, columns, 512, "nvfp4", native_codes=True, group_record_bytes=3,
+                ))
                 plane.validate()
                 planes.append(plane)
             data["nvfp4_csf"] = Nvfp4CsfDecoder(
@@ -532,8 +521,6 @@ def _install_boundaries(monkeypatch, checkpoint):
                 (),
                 (),
                 torch.empty(512, dtype=torch.int32, device=loader.device),
-                inline_scales=(),
-                indexed_programs=(),
             )
         else:
             packed = W4A16PackedWeights(

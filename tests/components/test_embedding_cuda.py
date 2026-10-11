@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 @pytest.fixture(scope="module", params=["Qwen3.8-Flash-Next", "GLM-5.3-Flash"])
 def weight(request):
-    snapshot = Path("/data/checkpoints-masters") / f"{request.param}-NVFP4-MXFP8-CSF-QAD"
+    snapshot = Path("/data/checkpoint-releases") / f"{request.param}-NVFP4-MXFP8-CSF-QAD"
     if not snapshot.is_dir():
         pytest.skip("model checkpoint is not available")
     name = "model.language_model.embed_tokens.weight"

@@ -16,7 +16,7 @@ from flare.components.linear import UnquantizedProjection
 from flare.components.moe import PreparedRoutedExperts, RouterScratch
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.graphs import PreparedGraphBundle
-from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.preparation.scratch import ScratchArena
 from flare.recipes.qwen38.moe import (
     PreparedQwenMoe,
@@ -44,7 +44,7 @@ def manifest():
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         pytest.fail("assign a CUDA device explicitly")
     assert torch.cuda.get_device_capability(0) in ((12, 0), (12, 1))
-    default = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     return inspect_qwen38_checkpoint(Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default)))
 
 

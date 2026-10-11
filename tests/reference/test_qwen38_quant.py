@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import MODEL_ID, PLE_PREFIX, REVISION
+from flare.preparation.qwen38 import PLE_PREFIX
 from flare.reference.qwen38_quant import (
     CheckpointTensors,
     Nvfp4Projection,
@@ -50,21 +50,26 @@ def test_mxfp8_scale_bytes_are_exponents():
 
 
 def test_csf_decodes_base_offsets_and_exception_positions():
-    fixed = torch.full((1, 48), 0x21, dtype=torch.uint8)
-    fixed[0, :16] = torch.arange(16, dtype=torch.uint8)
-    exceptions = torch.tensor([(19 << 24) | 0, (30 << 24) | 63], dtype=torch.uint32)
-    expected = torch.arange(16, dtype=torch.uint8)[:, None] + torch.tensor([[1, 2, 1, 2]], dtype=torch.uint8)
+    bases = torch.arange(32, dtype=torch.uint8)
+    codes = torch.full((64,), 0x21, dtype=torch.uint8)
+    pages = torch.zeros(1, dtype=torch.uint32)
+    offsets = torch.tensor([0, 1, 2], dtype=torch.uint16)
+    exceptions = torch.tensor([(19 << 8) | 0, (30 << 8) | 63], dtype=torch.uint16)
+    expected = bases[:, None] + torch.tensor([[1, 2, 1, 2]], dtype=torch.uint8)
     expected[0, 0] = 19
     expected[-1, -1] = 30
-    assert torch.equal(decode_csf_scales(fixed, exceptions, rows=16, columns=4), expected)
+    assert torch.equal(decode_csf_scales(bases, codes, pages, offsets, exceptions, rows=32, columns=4), expected)
 
 
 @pytest.mark.parametrize("positions", [[0, 0], [10, 3], [64]])
 def test_csf_rejects_invalid_exception_positions(positions):
-    fixed = torch.zeros((1, 48), dtype=torch.uint8)
-    exceptions = torch.tensor(positions, dtype=torch.uint32)
+    bases = torch.zeros(32, dtype=torch.uint8)
+    codes = torch.zeros(64, dtype=torch.uint8)
+    pages = torch.zeros(1, dtype=torch.uint32)
+    offsets = torch.tensor([0, len(positions), len(positions)], dtype=torch.uint16)
+    exceptions = torch.tensor(positions, dtype=torch.uint16)
     with pytest.raises(ValueError, match="sorted, unique, and in range"):
-        decode_csf_scales(fixed, exceptions, rows=16, columns=4)
+        decode_csf_scales(bases, codes, pages, offsets, exceptions, rows=32, columns=4)
 
 
 def test_e2m1_ties_round_to_even_and_saturate():
@@ -130,7 +135,7 @@ def test_w4a4_projection_is_not_bf16_dequantized_linear():
 
 @pytest.fixture(scope="module")
 def manifest():
-    default = Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     configured = os.environ.get("FLARE_QWEN38_SNAPSHOT")
     snapshot = Path(configured) if configured else default
     if not snapshot.is_dir():
@@ -154,19 +159,24 @@ def test_actual_csf_expert_and_activation_projection(manifest):
         gate = read_nvfp4_projection(reader, f"{prefix}.gate_proj")
         up = read_nvfp4_projection(reader, f"{prefix}.up_proj")
         down = read_nvfp4_projection(reader, f"{prefix}.down_proj")
-        fixed = reader.read(f"{prefix}.gate_proj.weight_scale.nvfp4_csf_fixed")
-        exceptions = reader.read(f"{prefix}.gate_proj.weight_scale.nvfp4_csf_exceptions")
+        components = {field: reader.read(f"{prefix}.gate_proj.weight_scale.csf32_{field}")
+                      for field in ("bases", "codes", "page_bases", "offsets", "exceptions")}
         assert reader.bytes_read < 4 << 20
     assert gate.weight_scale_2.item() == 6.648472481174394e-05
     assert gate.input_scale.item() == 0.0035807292442768812
     assert torch.equal(gate.weight_scale_2, up.weight_scale_2)
     assert torch.equal(gate.input_scale, up.input_scale)
     assert down.input_scale.item() == 0.00730096735060215
-    exception_map = {word & 0xFFFFFF: word >> 24 for word in exceptions.tolist()}
     for row, column in [(0, 0), (1, 31), (15, 159), (16, 0), (639, 159)]:
-        pair = fixed[row // 16, 16 + (row % 16) * 80 + column // 2].item()
+        group = (row // 128) * 40 + column // 4
+        block = group * 8 + (column % 4 // 2) * 4 + row % 128 // 32
+        page = group // 32
+        origin = components["page_bases"][page].item() // 2
+        begin, end = [origin + components["offsets"][block + page + i].item() for i in (0, 1)]
+        exception_map = {word & 255: word >> 8 for word in components["exceptions"][begin:end].tolist()}
+        pair = components["codes"][block * 32 + row % 32].item()
         code = (pair >> (4 * (column % 2))) & 15
-        expected = exception_map.get(row * 160 + column, fixed[row // 16, row % 16].item() + code)
+        expected = exception_map.get(2 * (row % 32) + column % 2, components["bases"][row].item() + code)
         assert gate.scales.view(torch.uint8)[row, column].item() == expected
     values = torch.linspace(-2, 2, 2560).reshape(1, -1).to(torch.bfloat16)
     trace = nvfp4_expert_reference(values, gate, up, down)

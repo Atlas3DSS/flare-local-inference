@@ -101,7 +101,7 @@ def test_duplicate_json_keys_rejected():
 
 @pytest.fixture(scope="module")
 def snapshot():
-    default = Path.home() / ".cache/huggingface/hub" / ("models--" + qwen38.MODEL_ID.replace("/", "--")) / "snapshots" / qwen38.REVISION
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     configured = os.environ.get("FLARE_QWEN38_SNAPSHOT")
     path = Path(configured) if configured else default
     if not path.is_dir():
@@ -118,10 +118,10 @@ def manifest(snapshot):
 
 def test_actual_checkpoint_accounting(manifest):
     report = manifest.to_dict()
-    assert report["tensor_count"] == 375487
+    assert report["tensor_count"] == 596671
     assert report["shard_count"] == 21
-    assert report["payload_bytes"] == 102138950916
-    assert report["gpu_stored_bytes"] == 71742092032
+    assert report["payload_bytes"] == 102329644144
+    assert report["gpu_stored_bytes"] == 71932785260
     assert report["mapped_host_stored_bytes"] == 28800138244
     assert report["excluded_stored_bytes"] == 1596720640
     assert sum(report[key] for key in ("gpu_stored_bytes", "mapped_host_stored_bytes", "excluded_stored_bytes")) == report["payload_bytes"]
@@ -143,8 +143,8 @@ def test_modified_frontend_artifact_rejected(snapshot, tmp_path, changed):
 
 @pytest.mark.parametrize("name,dtype,shape", [
     ("model.language_model.layers.0.linear_attn.in_proj_qkv.weight", "F8_E4M3", (10240, 1280)),
-    ("model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale.nvfp4_csf_fixed", "U8", (40, 1280)),
-    ("model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale.nvfp4_csf_exceptions", "I64", (200,)),
+    ("model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale.csf32_codes", "U8", (40, 1280)),
+    ("model.language_model.layers.0.mlp.experts.0.gate_proj.weight_scale.csf32_exceptions", "I64", (200,)),
     ("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_127.weight_scale", "U8", (2500012, 10)),
     ("model.visual.blocks.26.mlp.linear_fc2.weight", "U8", (1152, 4304)),
 ])

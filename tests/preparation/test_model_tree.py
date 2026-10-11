@@ -3,14 +3,13 @@ from pathlib import Path
 import pytest
 
 from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import MODEL_ID, REVISION
 from flare.recipes.qwen38 import create_model_tree
 
 
 def test_exact_checkpoint_constructs_canonical_meta_tree_without_cuda():
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
-    snapshot = Path.home() / ".cache/huggingface/hub" / ("models--" + MODEL_ID.replace("/", "--")) / "snapshots" / REVISION
+    snapshot = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     if not snapshot.exists():
         pytest.skip("exact Qwen3.8 checkpoint is not cached")
     initialized = torch.cuda.is_initialized()

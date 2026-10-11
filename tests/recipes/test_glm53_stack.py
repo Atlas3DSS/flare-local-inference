@@ -60,7 +60,7 @@ def test_scratch_views_reject_unavailable_token_sample_and_request_capacity():
 @pytest.mark.parametrize("world,rank", [(2, 0), (4, 3)])
 def test_canonical_layers_share_intermediates_and_own_distinct_state(world, rank):
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM checkpoint is not available")
     tree = create_model_tree(snapshot)

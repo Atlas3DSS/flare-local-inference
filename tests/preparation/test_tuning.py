@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, replace
 from threading import Event
 from types import SimpleNamespace
 import weakref
@@ -107,6 +108,17 @@ def backend(monkeypatch):
     return events, controls
 
 
+@dataclass
+class Request:
+    name: str
+    plan: object
+    prepare_call: object
+    benchmark_call: object = None
+    collective: object = None
+    retain_benchmark_call: bool = False
+    dependencies: tuple[str, ...] = ()
+
+
 def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_size=None, source="tuned",
                 prepare=lambda state: None, benchmark=None):
     requirement = MemoryRequirements(scratch=(ScratchBufferSpec(name="workspace",
@@ -119,7 +131,7 @@ def declaration(name, *, component="sequence.gdn_prefill", size=128, selected_si
             config_schema_version=1, semantic_version=1, candidate_contract_version=1,
             encode_query=lambda query: {"size": query},
             config_payload=lambda config: FrozenMapping(config)))
-    return SimpleNamespace(name=name, plan=plan, prepare_call=prepare, collective=None,
+    return Request(name=name, plan=plan, prepare_call=prepare, collective=None,
                            benchmark_call=benchmark, retain_benchmark_call=False)
 
 
@@ -607,6 +619,37 @@ def test_parallel_candidate_envelope_bounds_all_equivalent_bindings_once(backend
     assert ("envelope", ("b",)) not in events
 
 
+def test_parallel_scratch_subsets_preserve_dependencies_in_tuning(backend, monkeypatch):
+    session = make_session(device=0, checkpoint="revision")
+    arena = ScratchArena("cpu")
+    session.register_scratch(arena)
+    scales = declaration("experts/scales", size=64)
+    experts = replace(declaration("experts", size=700), dependencies=(scales.name,))
+    shared = declaration("shared", size=300)
+    following = replace(declaration("following", size=1600), dependencies=(experts.name,))
+    session.declare((scales, experts, shared, following))
+    arena.register_parallel(experts.plan, shared.plan)
+    envelope = session.candidate_memory_envelope
+    prepare = session._prepare_job
+
+    def inspect(requests):
+        names = {request.name for request in requests}
+        assert all(set(request.dependencies) <= names for request in requests)
+        return envelope(requests)
+
+    def tune(requests, **kwargs):
+        assert requests == (scales, experts, shared, following)
+        assert experts.dependencies == (scales.name,)
+        assert following.dependencies == (experts.name,)
+        return prepare(requests, **kwargs)
+
+    monkeypatch.setattr(session, "candidate_memory_envelope", inspect)
+    monkeypatch.setattr(session, "_prepare_job", tune)
+    report = session.tune()["scratch_arena"]
+    assert report["parallel_candidate_scratch_bytes"] == 1280
+    assert report["candidate_scratch_bytes"] == 1792
+
+
 def test_default_storage_released_after_alias_rebind_and_trial_cleanup_before_report(backend, monkeypatch):
     session = make_session(device=0, checkpoint="revision")
     arena = ScratchArena("cpu")
@@ -959,7 +1002,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
                 run_options={}, binding_plan=object())
         elif operator == "fused_moe":
             call = fused_moe.benchmark_call(state, source=source,
-                experts=SimpleNamespace(num_experts=512), top_k=10, session=session, name="op",
+                experts=SimpleNamespace(num_experts=512, has_csf_blocks=False), top_k=10, session=session, name="op",
                 workspace=None, allocate_router=RouterScratch.allocate, router_weight=None, router_plan=None)
         elif operator == "hyperconnection":
             call = hyperconnection.benchmark_call(state, "scaled_silu", (source, output), {})

@@ -7,7 +7,7 @@ from functools import partial
 
 import torch
 from b12x.moe import fused_moe
-from b12x.preparation import PreparationSession, PreparedCall
+from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
 from flare.preparation.fixtures import fused_moe as moe_fixtures
 from flare.preparation.scratch import ScratchArena, planned_scratch, prime_owners
@@ -94,10 +94,15 @@ class PreparedRoutedExperts:
         self.source = source
         self.output = output
         self.scratch = None
+        invocation = FrozenMapping({"tuning_execution": "cuda_graph"}) if experts.has_csf_blocks else FrozenMapping()
+        self.scale_plan = fused_moe.plan_scale_expansion(
+            experts, routes=ids.numel(), ids_dtype=ids.dtype, invocation=invocation,
+        ) if experts.has_csf_blocks else None
         self.plan = fused_moe.plan_execution(
             experts=experts,
             capacity=fused_moe.ExecutionCapacity(
                 max_tokens=source.shape[0], top_k=ids.shape[1], route_num_experts=0),
+            scale_expansion=self.scale_plan, invocation=invocation,
         )
 
         def prepare_call(state):
@@ -107,7 +112,15 @@ class PreparedRoutedExperts:
                 output=output, scratch=scratch, input_scales_static=True)
             return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(workspace, scratch, binding))
 
-        declare(session, (self.plan.request(name=name, prepare_call=prepare_call,
+        scale_requests = () if self.scale_plan is None else (self.scale_plan.request(
+            name=f"{name}/scales",
+            prepare_call=partial(moe_fixtures.scale_expansion_call, ids=ids, experts=experts),
+            benchmark_call=partial(moe_fixtures.scale_expansion_benchmark_call,
+                source=source, experts=experts, top_k=ids.shape[1], session=session, name=name,
+                allocate_router=RouterScratch.allocate, router_weight=router_weight,
+                router_plan=router_plan, correction_bias=correction_bias)),)
+        declare(session, (*scale_requests, self.plan.request(name=name, prepare_call=prepare_call,
+            dependencies=tuple(request.name for request in scale_requests),
             benchmark_call=partial(moe_fixtures.benchmark_call, source=source, experts=experts,
                 top_k=ids.shape[1], session=session, name=name, workspace=workspace,
                 allocate_router=RouterScratch.allocate, router_weight=router_weight,

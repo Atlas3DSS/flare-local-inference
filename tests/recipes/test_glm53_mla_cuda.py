@@ -52,7 +52,7 @@ def assert_selection(actual, expected, indexer):
 @pytest.fixture(scope="module", params=[2, 4])
 def model_weights(request):
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     tree = create_model_tree(snapshot)
     manifest = inspect_indexed_checkpoint(snapshot)
     world = request.param

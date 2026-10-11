@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 
 from flare.preparation import inspect_qwen38_checkpoint
 from flare.preparation.checkpoint import TensorMetadata
-from flare.preparation.qwen38 import MODEL_ID, PLE_PREFIX, REVISION
+from flare.preparation.qwen38 import PLE_PREFIX
 from flare.recipes.qwen38.ple import (
     PLE_LAYER_PREFIX,
     TABLE_BYTES,
@@ -40,13 +40,7 @@ CUDA = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def manifest():
-    default = (
-        Path.home()
-        / ".cache/huggingface/hub"
-        / f"models--{MODEL_ID.replace('/', '--')}"
-        / "snapshots"
-        / REVISION
-    )
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     path = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default))
     if not path.exists():
         pytest.skip("exact Qwen checkpoint snapshot is unavailable")

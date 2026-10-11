@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 @torch.no_grad()
 def test_checkpoint_absorbed_projections_native_replay(world_size, rows):
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     manifest = inspect_indexed_checkpoint(snapshot)
     device = torch.device("cuda:0")
     shard = TensorParallelShard(world_size - 1, world_size)

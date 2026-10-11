@@ -51,10 +51,13 @@ def expert_memory_plan(
             for suffix, kind in (
                 ("weight", "packed"), ("weight_scale_2", "scalar"),
                 ("input_scale", "scalar"),
-                ("weight_scale.nvfp4_csf_fixed", "csf"),
-                ("weight_scale.nvfp4_csf_exceptions", "csf"),
+                ("weight_scale.nvfp4_csf_fixed", "csf"), ("weight_scale.nvfp4_csf_exceptions", "csf"),
+                *((f"weight_scale.csf32_{field}", "csf")
+                  for field in ("bases", "codes", "page_bases", "offsets", "exceptions")),
             ):
-                sizes[kind] += manifest.tensors[f"{prefix}.{suffix}"].nbytes
+                tensor = manifest.tensors.get(f"{prefix}.{suffix}")
+                if tensor is not None:
+                    sizes[kind] += tensor.nbytes
     return ExpertMemoryPlan(ids, sizes["packed"], sizes["csf"], sizes["scalar"], len(ids) * 307200)
 
 
@@ -116,7 +119,7 @@ class QwenWeightLoader(DirectWeightLoader):
     ``prefixes`` bounds component qualification; omit it for a complete recipe.
     MTP and PLE table payloads are excluded. Returned tensors own GPU storage
     beyond this context's lifetime. Compressed expert scales use at most one
-    layer of CUDA staging for layout conversion.
+    layer of GPU staging for partitioning and native-layout preparation.
     """
 
     def __init__(self, *args, shard=TensorParallelShard(0, 1), **kwargs):

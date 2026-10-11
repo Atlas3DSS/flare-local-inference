@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from flare.preparation import inspect_qwen38_checkpoint
-from flare.preparation.qwen38 import MODEL_ID, REVISION, TEXT_PREFIX
+from flare.preparation.qwen38 import TEXT_PREFIX
 from flare.recipes.qwen38.weights import (
     QwenWeightLoader,
     _expert_ids,
@@ -20,7 +20,7 @@ from flare.reference.qwen38_quant import CheckpointTensors
 
 @pytest.fixture(scope="module")
 def manifest():
-    default = Path.home() / ".cache/huggingface/hub" / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / REVISION
+    default = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     snapshot = Path(os.environ.get("FLARE_QWEN38_SNAPSHOT", default))
     if not snapshot.exists():
         pytest.skip("exact Qwen checkpoint snapshot is unavailable")

@@ -83,6 +83,33 @@ def benchmark_call(state, *, source, experts, top_k, session, name, workspace,
     binding = state.bind(a=operands.source, topk_ids=operands.router.ids,
         topk_weights=operands.router.weights, output=operands.output,
         scratch=scratch, input_scales_static=True)
-    return PreparedCall(run=lambda: state.run(binding), output=operands.output,
+    call = PreparedCall(run=lambda: state.run(binding), output=operands.output,
         produce=operands.producers[0], benchmark_producers=operands.producers,
         owners=(operands, scratch, binding, experts))
+    if experts.has_csf_blocks:
+        from b12x.preparation._measurement import capture_benchmark_call
+
+        call = capture_benchmark_call(call)
+    return call
+
+
+def scale_expansion_call(state, *, ids, experts):
+    active = torch.empty(experts.num_experts, dtype=torch.int32, device=ids.device)
+    binding = state.bind(ids=ids, out13=experts._impl.w1_blockscale,
+        out2=experts._impl.w2_blockscale, scratch=active)
+    return PreparedCall(run=binding.run, owners=(binding, active, experts))
+
+
+def scale_expansion_benchmark_call(state, *, source, experts, top_k, session, name,
+                                 allocate_router, router_weight, router_plan, correction_bias=None):
+    from dataclasses import replace
+    from b12x.preparation._measurement import capture_benchmark_call
+
+    operands = benchmark_resource(session, ("moe_inputs", name),
+        lambda: ExpertBenchmarkInputs(source, experts=experts.num_experts,
+            top_k=top_k, allocate_router=allocate_router, router_weight=router_weight,
+            router_plan=router_plan, correction_bias=correction_bias))
+    call = scale_expansion_call(state, ids=operands.router.ids, experts=experts)
+    return capture_benchmark_call(replace(call,
+        produce=operands.producers[0], benchmark_producers=operands.producers,
+        owners=(*call.owners, operands)))

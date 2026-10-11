@@ -44,7 +44,7 @@ def test_nvfp4_fusion_rejected_before_tensor_access(tmp_path, formats):
 @pytest.mark.parametrize("entry", [None, {}, {"quant_algo": "AWQ", "group_size": 128},
     {"quant_algo": "MXFP8", "group_size": 16},
     {"quant_algo": "NVFP4", "group_size": 32},
-    {"quant_algo": "NVFP4", "group_size": 16, "weight_scale_encoding": "csf"}])
+    {"quant_algo": "NVFP4", "group_size": 16, "weight_scale_encoding": "csf_32x2_v1"}])
 def test_unsupported_projection_encodings_rejected(entry):
     with pytest.raises(ValueError, match="projection|quantization|declaration"):
         linear_format({"proj": entry}, "proj")
@@ -57,6 +57,7 @@ def test_quantization_config_requires_supported_schema():
 
 @pytest.mark.parametrize("algo,group,encoding,expected", [
     ("NVFP4", 16, None, ("nvfp4", "a4")),
+    ("NVFP4", 16, "csf_32x2_v1", ("nvfp4_csf", "a4")),
     ("NVFP4", 16, "csf", ("nvfp4_csf", "a4")),
     ("W4A16_NVFP4", 16, None, ("nvfp4", "a16")),
     ("MXFP4", 32, None, ("mxfp4", "a8")),

@@ -11,13 +11,13 @@ from safetensors import safe_open
 from flare.components.parallel import TensorParallelShard
 from flare.preparation.checkpoint import inspect_indexed_checkpoint
 from flare.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader, _expert_scales
-from flare.reference.qwen38_quant import decode_csf_scales
+from flare.reference.qwen38_quant import decode_csf_scales, decode_csf_slab_scales
 
 
 @pytest.fixture(scope="module")
 def manifest():
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     return inspect_indexed_checkpoint(snapshot)
@@ -161,9 +161,15 @@ def test_actual_nvfp4_shards_and_shared_scale_storage(manifest, world, rank):
         scales, weights = {}, {}
         for name, rows, columns in (("up_proj", 2048, 256), ("gate_proj", 2048, 256), ("down_proj", 4096, 128)):
             name_prefix = f"{prefix}.{expert}.{name}"
-            planes = [read(manifest, f"{name_prefix}.weight_scale.nvfp4_csf_{suffix}")
-                      for suffix in ("fixed", "exceptions")]
-            full = decode_csf_scales(*planes, rows=rows, columns=columns)
+            if f"{name_prefix}.weight_scale.csf32_bases" in manifest.tensors:
+                planes = [read(manifest, f"{name_prefix}.weight_scale.csf32_{suffix}")
+                          for suffix in ("bases", "codes", "page_bases", "offsets", "exceptions")]
+                full = decode_csf_scales(*planes, rows=rows, columns=columns)
+            else:
+                full = decode_csf_slab_scales(
+                    read(manifest, f"{name_prefix}.weight_scale.nvfp4_csf_fixed"),
+                    read(manifest, f"{name_prefix}.weight_scale.nvfp4_csf_exceptions"),
+                    rows=rows, columns=columns)
             scales[name] = full[:, first // 16:last // 16] if name == "down_proj" else full[first:last]
             extent = (slice(None), slice(first // 2, last // 2)) if name == "down_proj" else slice(first, last)
             weights[name] = read(manifest, f"{name_prefix}.weight", extent)

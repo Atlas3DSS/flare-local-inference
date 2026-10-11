@@ -11,7 +11,7 @@ from flare.recipes.glm53 import create_model_tree
 
 def test_checkpoint_constructs_canonical_meta_tree_without_cuda():
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     initialized = torch.cuda.is_initialized()

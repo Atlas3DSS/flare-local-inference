@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 def test_actual_sigmoid_router_compiled_graph(tokens):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     model = create_model_tree(snapshot)
     module = model.model.language_model.layers[4].mlp.gate
     manifest = inspect_indexed_checkpoint(snapshot)

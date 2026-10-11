@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 @pytest.fixture(scope="module")
 def model_weights():
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     tree = create_model_tree(snapshot)
     module = tree.model.language_model.layers[3].self_attn.indexer
     manifest = inspect_indexed_checkpoint(snapshot)

@@ -44,7 +44,7 @@ def expert_format(layers, prefix):
     entry = layers.get(prefix)
     if not isinstance(entry, Mapping):
         raise ValueError(f"{prefix}: missing expert quantization declaration")
-    if entry.get("weight_scale_encoding") == "csf":
+    if entry.get("weight_scale_encoding") in ("csf", "csf_32x2_v1"):
         if entry.get("quant_algo") == "NVFP4" and entry.get("group_size") == 16:
             return "nvfp4_csf", "a4"
         raise ValueError(f"{prefix}: unsupported compressed expert scales")

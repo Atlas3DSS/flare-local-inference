@@ -132,7 +132,7 @@ def test_actual_kda_native_tp_graph(world, mode, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     assert torch.cuda.device_count() == 4
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), mode),

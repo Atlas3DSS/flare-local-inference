@@ -324,7 +324,7 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
 def test_complete_text_stack_native_tp_replay(world, capacity, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), str(snapshot), capacity),
@@ -335,7 +335,7 @@ def test_complete_text_stack_native_tp_replay(world, capacity, tmp_path):
 def test_complete_generation_native_tp_replay(world, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     sockets = [socket.socketpair() for _ in range(world - 1)]
@@ -352,7 +352,7 @@ def test_complete_generation_native_tp_replay(world, tmp_path):
 def test_complete_cached_generation_native_tp_replay(world, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
-        "/data/checkpoints-masters/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
+        "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
     if not snapshot.is_dir():
         pytest.skip("GLM 5.3 Flash checkpoint is not available")
     sockets = [socket.socketpair() for _ in range(world - 1)]

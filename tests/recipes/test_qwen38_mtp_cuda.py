@@ -24,7 +24,7 @@ FEEDBACK = Path(__file__).resolve().parents[1] / "fixtures/qwen38_mtp_feedback.p
 def weights():
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     assert torch.cuda.device_count() == 1 and torch.cuda.get_device_capability(0) in ((12, 0), (12, 1))
-    manifest = inspect_qwen38_checkpoint("/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
+    manifest = inspect_qwen38_checkpoint("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     with QwenWeightLoader(manifest, "cuda:0", prefixes=(f"{TEXT_PREFIX}.embed_tokens.", "lm_head.")) as loader:
         embedding = loader.load_tensor(f"{TEXT_PREFIX}.embed_tokens.weight")
         head = loader.load_tensor("lm_head.weight")

@@ -11,7 +11,7 @@ from flare.recipes.qwen38.weights import QwenWeightLoader
 
 @pytest.fixture(scope="module")
 def manifest():
-    snapshot = Path("/data/checkpoints-masters/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
+    snapshot = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
     if not snapshot.exists():
         pytest.skip("exact MTP checkpoint unavailable")
     return inspect_qwen38_checkpoint(snapshot)

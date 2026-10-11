@@ -1,4 +1,4 @@
-"""Direct checkpoint transfers and CUDA compressed-scale preparation."""
+"""Direct checkpoint transfers and compressed-scale preparation."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class DirectWeightLoader:
 
     Recipe subclasses select tensors and validate model-specific quantization.
     Source views may partition weight rows or columns without CPU weight copies.
-    Compressed scale payloads are converted on CUDA one layer at a time.
+    Compressed scale payloads are gathered and indexed on CUDA one layer at a time.
     """
 
     def __init__(
@@ -139,7 +139,7 @@ class DirectWeightLoader:
         try:
             if self.progress is not None:
                 self._load_stats = stack.enter_context(self._loading_display())
-            # Small CPU scale planes do not amortize intra-op thread dispatch.
+            # Scalar calibration checks do not amortize intra-op thread dispatch.
             stack.callback(torch.set_num_threads, torch.get_num_threads())
             torch.set_num_threads(1)
             self._session = stack.enter_context(DirectWeightSession(device=self.device.index))
@@ -371,14 +371,13 @@ class DirectWeightLoader:
         layers; both buffers remain caller-owned through replay.
         """
         import torch
-        from b12x.loader._nvfp4_csf import queue_nvfp4_csf
         from b12x.moe import fused_moe as moe
 
         self._require_open()
         prefixes = tuple(prefixes)
         if not prefixes or hidden_size <= 0 or hidden_size % 128:
             raise ValueError("NVFP4 experts require nonempty prefixes and 128-aligned hidden width")
-        first, last = _aligned_range(intermediate_range, intermediate_size, 16)
+        first, last = _aligned_range(intermediate_range, intermediate_size, 32)
         local = last - first
         count = len(prefixes)
         shapes = ((count, (2 * local + 127) // 128 * 128, hidden_size // 16),
@@ -415,22 +414,16 @@ class DirectWeightLoader:
             target = torch.empty_like(scale, device=self.device)
             self._copy(target, scale)
             device_scales.append(target)
-        transfers = []
-        for projections, rows, columns, row_range, column_range in (
-            (("up_proj", "gate_proj"), intermediate_size, hidden_size // 16, (first, last), None),
-            (("down_proj",), hidden_size, intermediate_size // 16, None, (first // 16, last // 16)),
-        ):
-            names = [f"{prefix}.{projection}.weight_scale.nvfp4_csf_"
-                     for prefix in prefixes for projection in projections]
-            transfers.append(queue_nvfp4_csf(
-                self._session, [self._sources[name + "fixed"] for name in names],
-                [self._sources[name + "exceptions"] for name in names],
-                rows=rows, columns=columns, join=len(projections),
-                row_range=row_range, column_range=column_range,
-            ))
+        scales13 = self._queue_csf_sources(
+            [f"{prefix}.{projection}.weight_scale" for prefix in prefixes
+             for projection in ("up_proj", "gate_proj")],
+            rows=intermediate_size, columns=hidden_size // 16, join=2,
+            row_range=(first, last))
+        scales2 = self._queue_csf_sources(
+            [f"{prefix}.down_proj.weight_scale" for prefix in prefixes],
+            rows=hidden_size, columns=intermediate_size // 16,
+            column_range=(first // 16, last // 16))
         self._session.flush()
-        planes = tuple(transfer.convert() for transfer in transfers)
-        del transfers
         if self._display is not None:
             self._display.update(self._session.payload_bytes)
         plan = moe.plan_weights(
@@ -446,7 +439,19 @@ class DirectWeightLoader:
             immutable_input_scales=True,
         )
         return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
-            packed=packed, w13_scales=planes[0], w2_scales=planes[1]))
+            packed=packed, w13_scales=scales13, w2_scales=scales2))
+
+    def _queue_csf_sources(self, prefixes, *, rows, columns, **selection):
+        from b12x.loader._csf_source import stage_csf_sources
+
+        encoding = "csf_32x2_v1" if f"{prefixes[0]}.csf32_bases" in self._sources else "csf"
+        suffixes = (tuple(f"csf32_{field}" for field in
+                    ("bases", "codes", "page_bases", "offsets", "exceptions"))
+                    if encoding == "csf_32x2_v1" else ("nvfp4_csf_fixed", "nvfp4_csf_exceptions"))
+        return stage_csf_sources(
+            [tuple(self._sources[f"{prefix}.{suffix}"] for suffix in suffixes) for prefix in prefixes],
+            rows=rows, columns=columns, quantization="nvfp4", device=self.device,
+            encoding=encoding, copy=self._session, **selection)
 
 
 def _aligned_range(selected, extent, alignment):
