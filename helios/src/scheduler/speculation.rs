@@ -96,10 +96,38 @@ struct Cost {
     emitted: f64,
 }
 
+/// Conditional acceptance of one draft depth given that every shallower draft was accepted.
+/// Starts from a 0.5 prior worth two observations and averages at most the last 16.
+#[derive(Clone, Copy)]
+struct DepthAcceptance {
+    probability: f64,
+    weight: f64,
+}
+impl Default for DepthAcceptance {
+    fn default() -> Self {
+        Self {
+            probability: 0.5,
+            weight: 2.0,
+        }
+    }
+}
+impl DepthAcceptance {
+    fn observe(&mut self, accepted: bool) {
+        self.weight = (self.weight + 1.0).min(16.0);
+        self.probability += (if accepted { 1.0 } else { 0.0 } - self.probability) / self.weight;
+    }
+}
+/// Completed rounds observed before measured acceptance replaces whole-round sampling.
+const MODEL_ROUNDS: u64 = 8;
+/// Every this many completed rounds, the widest legal width refreshes deep acceptance.
+const MODEL_EXPLORATION: u64 = 16;
+
 #[derive(Default)]
 pub struct WidthController {
     costs: [[[Cost; 8]; 3]; 7],
     completed: u64,
+    depths: [DepthAcceptance; 7],
+    acceptance_rounds: u64,
 }
 impl WidthController {
     fn coordinates(batch: usize, context: u64) -> (usize, usize) {
@@ -129,6 +157,21 @@ impl WidthController {
         if let Some(width) = legal().find(|w| self.costs[b][c][*w - 1].rounds == 0) {
             return Some(width);
         }
+        if self.acceptance_rounds >= MODEL_ROUNDS {
+            // Expected tokens per round follow from per-depth acceptance measured in every
+            // round; only round time comes from each width's own measurements.
+            if self.completed.is_multiple_of(MODEL_EXPLORATION) {
+                return legal().max();
+            }
+            return legal().max_by(|left, right| {
+                let score = |width: usize| {
+                    self.expected_tokens(width) / self.costs[b][c][width - 1].nanos
+                };
+                score(*left)
+                    .total_cmp(&score(*right))
+                    .then_with(|| right.cmp(left))
+            });
+        }
         if self.completed > 0 && self.completed.is_multiple_of(64) {
             let count = legal().count();
             if count > 0 {
@@ -144,6 +187,39 @@ impl WidthController {
                 .total_cmp(&score(*right))
                 .then_with(|| right.cmp(left))
         })
+    }
+    /// Expected tokens one row emits at `width`: the pending token plus each draft prefix
+    /// whose drafts are all accepted.
+    fn expected_tokens(&self, width: usize) -> f64 {
+        let mut chain = 1.0;
+        let mut total = 1.0;
+        for depth in &self.depths[..width.saturating_sub(1).min(7)] {
+            chain *= depth.probability;
+            total += chain;
+        }
+        total
+    }
+    /// Records each row's chain outcome: drafts 1..=accepted were accepted and, when a draft
+    /// remained, the next one was rejected. Deeper drafts were not evaluated.
+    pub fn observe_acceptance(&mut self, rows: &[(usize, usize)]) {
+        let mut observed = false;
+        for &(offered, accepted) in rows {
+            let offered = offered.min(7);
+            if offered == 0 {
+                continue;
+            }
+            let accepted = accepted.min(offered);
+            for depth in 0..accepted {
+                self.depths[depth].observe(true);
+            }
+            if accepted < offered {
+                self.depths[accepted].observe(false);
+            }
+            observed = true;
+        }
+        if observed {
+            self.acceptance_rounds += 1;
+        }
     }
     pub fn observe(
         &mut self,

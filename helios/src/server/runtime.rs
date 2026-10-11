@@ -666,6 +666,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         let mut prefill = 0;
         let mut accepted = 0;
         let mut draft_rounds = 0;
+        let mut acceptance_rows = Vec::new();
         if matches!(kind, GraphKind::Prefill | GraphKind::Speculative) {
             let step = self.scheduler.submitted_step(completion.fence)?;
             for lane in &step.lanes {
@@ -684,6 +685,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     if let Some(vector) = record.vector.filter(|v| v.offered_drafts > 0) {
                         accepted += vector.accepted_drafts as u64;
                         draft_rounds += 1;
+                        acceptance_rows.push((
+                            vector.offered_drafts as usize,
+                            vector.accepted_drafts.max(0) as usize,
+                        ));
                     }
                 }
             }
@@ -697,6 +702,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             .complete(completion.fence, &completion.records)?;
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
+        if !acceptance_rows.is_empty() {
+            self.scheduler.observe_acceptance(&acceptance_rows);
+        }
         if let (Some(step), Some(nanos)) = (measured_step, completion.elapsed_ns) {
             self.scheduler
                 .observe_round(&step, nanos, generated.len())?;

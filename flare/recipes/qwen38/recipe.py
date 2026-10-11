@@ -1,5 +1,6 @@
 """Qualified checkpoint, serving range, and memory costs of the Qwen 3.8 recipe."""
 
+import os
 from types import MappingProxyType
 
 from flare.planning import HEADROOM_BYTES
@@ -26,7 +27,9 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, max_active=plan.concurrency,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache, mtp=True)
+        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache, mtp=True,
+        # Local experiment knob: maximum MTP draft tokens (verification widths 1..drafts+1).
+        speculative_widths=tuple(range(1, int(os.environ.get("FLARE_MTP_MAX_DRAFTS", "3")) + 2)))
     if plan.world_size == 1:
         return prepare_model(snapshot, config, progress=progress, compile_decoder=compile_forwards)
     from flare.preparation.rank_group import prepare_group

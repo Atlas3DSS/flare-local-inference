@@ -1050,6 +1050,34 @@ fn copied_continuations_are_observed_tokens_and_controller_never_exceeds_catalog
 }
 
 #[test]
+fn measured_acceptance_selects_the_width_with_most_tokens_per_round_time() {
+    use super::speculation::WidthController;
+    let widths = [1, 2, 3, 4, 5, 6];
+    let measured = || {
+        let mut c = WidthController::default();
+        for w in widths {
+            // Round time grows 1.2 ms per draft from 8.8 ms at width one.
+            c.observe(1, 100, w, 8_800_000 + 1_200_000 * (w as u64 - 1), 1).unwrap();
+        }
+        c
+    };
+    let mut accepting = measured();
+    for _ in 0..16 {
+        accepting.observe_acceptance(&[(5, 5)]);
+    }
+    assert_eq!(accepting.choose(&widths, 1, 100, 8), Some(6));
+    assert_eq!(accepting.choose(&widths, 1, 100, 4), Some(4));
+    let mut rejecting = measured();
+    for _ in 0..16 {
+        rejecting.observe_acceptance(&[(5, 1), (5, 0)]);
+    }
+    assert_eq!(rejecting.choose(&widths, 1, 100, 8), Some(2));
+    let mut unobserved = measured();
+    unobserved.observe_acceptance(&[(5, 5)]);
+    assert_eq!(unobserved.choose(&widths, 1, 100, 8), Some(1));
+}
+
+#[test]
 fn draft_boundary_page_remains_private_across_published_prefix_branches() {
     let mut scheduler = scheduler(2, 16, 4);
     scheduler.enable_speculation(&[1, 2, 4, 8]).unwrap();

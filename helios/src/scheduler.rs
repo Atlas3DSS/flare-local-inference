@@ -413,6 +413,10 @@ impl RequestScheduler {
             emitted,
         )
     }
+    /// Per-row `(offered, accepted)` draft outcomes of a completed speculative round.
+    pub fn observe_acceptance(&mut self, rows: &[(usize, usize)]) {
+        self.controller.observe_acceptance(rows);
+    }
     pub fn submitted_step(&self, fence: Fence) -> Result<&ScheduledStep> {
         self.submissions
             .get(&fence)
