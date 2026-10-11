@@ -179,6 +179,14 @@ loading for development startup. b12x preparation and autotuning still run,
 and every serving path is captured as a CUDA graph. The option applies to Qwen
 and every GLM tensor-parallel rank; compiled forwards remain the default.
 
+Forward compilation uses a bounded process pipeline. The owning rank traces and
+lowers each static shape; up to four worker processes compile FX graphs containing
+tensor metadata. Weights, mutable state, and native kernel bindings remain in the
+owning rank. `TORCHINDUCTOR_COMPILE_THREADS` is divided across these workers.
+Warmup and CUDA graph capture run serially against shared scratch and state.
+Warm forward-cache hits do not start compiler workers. Terminal presentation
+sources do not invalidate compiled forwards.
+
 A context limit is distinct from aggregate cache capacity. Admission must reserve
 enough resources for each request's prompt and permitted output. Aggregate page
 capacity is the GPU memory remaining after prepared weights, operator
@@ -733,9 +741,9 @@ distance is diagnostic and does not select the recurrence policy.
 `RecordedPreparationSession.declare()` collects requests without compiling,
 priming, or binding kernels. Components use `flare.preparation.tuning.declare()`
 to submit requests and `register_finalizer()` to defer serving bindings. After
-every admitted capacity has an owner, bootstrap prepares two b12x batches:
-weight operations, then operations that depend on cache or recurrent-state
-layout. Both batches enable autotuning and coalesce equivalent declarations
+every admitted capacity has an owner, bootstrap prepares one b12x batch containing
+weight operations and operations that depend on cache or recurrent-state
+layout. The batch enables autotuning and coalesces equivalent declarations
 across layers, target and draft models, and graph capacities. On the target
 RTX PRO 6000, preparation defaults to eight compiler workers;
 `B12X_COMPILE_WORKERS` overrides the count.
@@ -744,8 +752,9 @@ Qwen declares attention against bounded cache capacities and temporary page
 pools. Its selected plans support replacement page pools with the same layout.
 Bootstrap measures graph memory with uncompiled captures before allocating the
 final pools, rebinds attention to those pools, then compiles and captures the
-serving graphs. GLM's configured
-page pools are allocated before its cache-state batch.
+serving graphs. GLM's configured page pools are allocated before kernel
+preparation. GPU headroom guides cache sizing; falling below the requested
+reserve after capture does not abort startup.
 
 Searchable operations use deterministic finite fixtures with active metadata at
 their declared geometry. Weighted operations use the actual checkpoint weights.
