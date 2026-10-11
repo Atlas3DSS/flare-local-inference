@@ -102,7 +102,7 @@ class PreparedMaintenance:
             _check_tensor(value, shape, dtype, device, name)
         fields = _completion_fields(records, device, self.slots)
         self.transfer, self.requests, self.admission = transfer, requests, None
-        self.validation_input = torch.zeros((1, 2 * self.slots), dtype=torch.bfloat16, device=device)
+        self.validation_input = torch.zeros((1, max(8, 2 * self.slots)), dtype=torch.bfloat16, device=device)
         self.validation_sum = torch.zeros_like(self.validation_input)
         if mode != "snapshot":
             if admission_buffers is None:

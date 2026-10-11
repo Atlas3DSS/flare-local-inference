@@ -16,6 +16,34 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")
 
 
+@pytest.mark.parametrize("slots", [1, 2])
+@torch.no_grad()
+def test_small_request_capacities_pad_rank_agreement(slots):
+    from flare.components.resume import PreparedResumeState
+
+    inputs = BatchInputs.allocate(128, 1, "cuda", capacity=slots)
+    requests = DeviceRequestState.allocate("cuda", vocab_size=154880, capacity=slots)
+    metadata = DecoderMetadata.allocate(1, 1, 1, "cuda")
+    batch = PreparedBatch(inputs, requests, metadata, mode="decode", shard=TensorParallelShard(0, 2), pages=1)
+    requests.admit(0, RequestAdmission(7, 13), [3], consumed_tokens=1)
+    requests.pending_token[0] = 5
+    inputs.row_slot_ids[0], inputs.row_generations[0], inputs.live_rows[0] = 0, 7, 1
+    inputs.token_ids[0] = 5
+    inputs.page_tables[0, 0] = 0
+    batch.begin(batch.validate() * 2)
+    assert batch.validation_input.nbytes == 16
+    assert metadata.indexed.positions.tolist() == [1]
+    assert requests.error_code[0] == 0
+
+    requests.pending_token[0] = -1
+    hidden = torch.randn((slots, 16), dtype=torch.bfloat16, device="cuda")
+    resume = PreparedResumeState(requests, hidden, inputs.row_slot_ids[:1],
+                                 inputs.row_generations[:1], inputs.live_rows, world_size=2)
+    resume.validation_sum.copy_(resume.validate() * 2)
+    assert resume.validation_input.nbytes == 16
+    torch.testing.assert_close(resume.gather(), hidden[:1], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("rank,world", [(0, 2), (3, 4)])
 @pytest.mark.parametrize("mode,capacity", [("prefill", 65), ("prefill", 4096), ("decode", 4)])
 @torch.no_grad()

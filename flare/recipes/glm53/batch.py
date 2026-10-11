@@ -65,7 +65,7 @@ class PreparedBatch:
         self.slot_ids = torch.arange(self.capacity, device=device)
         self.token_offsets = torch.arange(tokens, device=device)
         self.block_ids = torch.arange(inputs.page_tables.shape[1], device=device)
-        self.validation_input = torch.zeros((1, 2 * self.capacity), dtype=torch.bfloat16, device=device)
+        self.validation_input = torch.zeros((1, max(8, 2 * self.capacity)), dtype=torch.bfloat16, device=device)
         self.validation_sum = torch.zeros_like(self.validation_input)
         self.present = torch.zeros(self.capacity, dtype=torch.bool, device=device)
         self.token_state = PreparedTokenState(requests, metadata.token_ids, metadata.recurrent.query_start_loc,
@@ -99,11 +99,11 @@ class PreparedBatch:
         bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & bad[None, :]).any(1)
         self.present.copy_(((self.slot_ids[:, None] == slots[None, :]) & present[None, :]).any(1))
         self.validation_input[0, :self.capacity].copy_(bad_slots)
-        self.validation_input[0, self.capacity:].copy_(self.present)
+        self.validation_input[0, self.capacity:2 * self.capacity].copy_(self.present)
         return self.validation_input
 
     def begin(self, validation_sum):
-        participants = validation_sum[0, self.capacity:]
+        participants = validation_sum[0, self.capacity:2 * self.capacity]
         mismatch = (participants > 0) & (participants < self.shard.world_size)
         bad_slots = self.present & ((validation_sum[0, :self.capacity] > 0) | mismatch)
         self.requests.status.copy_(torch.where(bad_slots, ERROR, self.requests.status))

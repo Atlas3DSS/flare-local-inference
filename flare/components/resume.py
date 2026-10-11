@@ -30,7 +30,7 @@ class PreparedResumeState:
         self.requests, self.saved_hidden = requests, saved_hidden
         self.slots, self.epochs, self.count, self.world_size = slots, epochs, count, world_size
         self.row_ids, self.slot_ids = torch.arange(rows, device=device), torch.arange(self.capacity, device=device)
-        self.validation_input = torch.zeros((1, 2 * self.capacity), dtype=torch.bfloat16, device=device)
+        self.validation_input = torch.zeros((1, max(8, 2 * self.capacity)), dtype=torch.bfloat16, device=device)
         self.validation_sum = torch.zeros_like(self.validation_input)
         self.present = torch.zeros(self.capacity, dtype=torch.bool, device=device)
         self.hidden = torch.zeros((rows, saved_hidden.shape[1]), dtype=torch.bfloat16, device=device)
@@ -46,12 +46,12 @@ class PreparedResumeState:
         slot_rows = self.slot_ids[:, None] == slots[None, :]
         self.present.copy_((slot_rows & present[None, :]).any(1))
         self.validation_input[0, :self.capacity].copy_((slot_rows & (present & ~valid)[None, :]).any(1))
-        self.validation_input[0, self.capacity:].copy_(self.present)
+        self.validation_input[0, self.capacity:2 * self.capacity].copy_(self.present)
         return self.validation_input
 
     def gather(self):
         r = self.requests
-        participants = self.validation_sum[0, self.capacity:]
+        participants = self.validation_sum[0, self.capacity:2 * self.capacity]
         mismatch = (participants > 0) & (participants != self.world_size)
         bad = self.present & ((self.validation_sum[0, :self.capacity] > 0) | mismatch)
         r.status.copy_(torch.where(bad, ERROR, r.status))
