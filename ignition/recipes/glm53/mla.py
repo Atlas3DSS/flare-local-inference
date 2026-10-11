@@ -40,20 +40,17 @@ class MLAScratch:
     visible: torch.Tensor
     index: IndexScratch
     # Context-parallel decode exchanges every rank's heads for one slice of rows; context-parallel
-    # prefill gathers whole context blocks into the slab and keeps per-slice partials of its own heads.
+    # prefill gathers every rank's records of the whole prepared context into the slab.
     gathered: torch.Tensor
     partial: torch.Tensor
     lse: torch.Tensor
     slab: torch.Tensor
-    running: torch.Tensor
-    selected: torch.Tensor
-    selections: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1):
         if heads not in (16, 32):
             raise ValueError("GLM MLA scratch requires TP2 or TP4 head partitions")
-        from .dcp import PREFILL_SLAB_TOKENS, PREFILL_SLICE_ROWS, SLICE_ROWS
+        from .dcp import PREFILL_SLICE_ROWS, SLICE_ROWS
 
         index = IndexScratch.allocate(tokens, blocks, mode, device, context_ranks=context_ranks)
         def zeros(*shape, dtype=torch.bfloat16):
@@ -63,19 +60,15 @@ class MLAScratch:
         projected = buffer(2048)
         prefill = context_ranks > 1 and mode == "prefill"
         exchange = min(tokens, SLICE_ROWS) if context_ranks > 1 and not prefill else 0
-        partials = min(tokens, PREFILL_SLICE_ROWS) if prefill else exchange
-        partial_heads = heads if prefill else heads * context_ranks
-        # Decode exchange absorbs, attends and expands one slice at a time; prefill keeps every row.
-        absorbed = exchange or tokens
+        # Context-parallel rows absorb, attend and expand one slice at a time; otherwise every row at once.
+        absorbed = exchange or (min(tokens, PREFILL_SLICE_ROWS) if prefill else tokens)
+        # One 528-byte record per global position: `blocks` pages of 256 records on every rank.
+        positions = blocks * 256 * context_ranks if prefill else 0
         return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:], buffer(512),
             buffer(heads, 256), zeros(absorbed, heads, 512), zeros(absorbed, heads, 512), buffer(heads, 256),
             buffer(4096), zeros(tokens, dtype=torch.int32), index,
-            zeros(exchange, heads * context_ranks, 512), zeros(partials, partial_heads, 512),
-            zeros(partials, partial_heads, dtype=torch.float32),
-            zeros(PREFILL_SLAB_TOKENS if prefill else 0, 528, dtype=torch.uint8),
-            zeros(tokens if prefill else 0, heads, dtype=torch.float32),
-            zeros(partials if prefill else 0, 2051, dtype=torch.int32),
-            zeros(partials if prefill else 0, dtype=torch.int32))
+            zeros(exchange, heads * context_ranks, 512), zeros(exchange, heads * context_ranks, 512),
+            zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8))
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
@@ -84,8 +77,7 @@ class MLAScratch:
             self.query_residual[:tokens], self.latent_input[:tokens],
             self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
             self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode),
-            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab, self.running[:tokens],
-            self.selected[:tokens], self.selections[:tokens])
+            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab)
 
 
 class PreparedGlmMLA:
@@ -127,7 +119,7 @@ class PreparedGlmMLA:
         values, scales = packed.values.view(heads, 512, 512), packed.scale_rows.view(heads, 512, 16)
         self.absorb_weights, self.expand_weights = (values[:, :256], scales[:, :256]), (values[:, 256:], scales[:, 256:])
         self.mode = mode
-        if context is None or mode == "prefill":
+        if context is None:
             self.query_absorption = BatchedQuantizedProjection(scratch.query.transpose(0, 1),
                 self.absorb_weights, scratch.absorbed_query.transpose(0, 1), major="n",
                 session=session, name=f"{name}.absorb_query")
@@ -155,26 +147,32 @@ class PreparedGlmMLA:
                 session=session, name=f"{name}.attention", workspace=workspace)
             return
         if mode == "prefill":
-            # Prefill gathers every rank's records of each context block into the slab and attends with this
-            # rank's heads, so neither queries nor partial outputs cross ranks.
-            from .dcp import PREFILL_SLAB_TOKENS, PREFILL_SLICE_ROWS
+            # Prefill gathers every rank's records of the context into the slab, where a record's index is its
+            # global position, and attends with this rank's heads, so neither queries nor outputs cross ranks.
+            from .dcp import PREFILL_SLICE_ROWS
 
             step = min(rows, PREFILL_SLICE_ROWS)
             slab_caps = sparse_mla.Caps(device=source.device, num_q_heads=heads, max_q_rows=step, max_width=2051,
-                softmax_scale=module.scaling, max_batch=step, max_kv_rows=PREFILL_SLAB_TOKENS,
+                softmax_scale=module.scaling, max_batch=step, max_kv_rows=scratch.slab.shape[0],
                 kv_dtype=torch.uint8, head_dim=512, v_head_dim=512, page_size=64,
-                model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528, mode="extend",
-                return_lse=True, lse_scale="natural")
-            positions = metadata.block_table.shape[1] * context.shards.page_tokens
-            self.blocks = tuple(range(0, positions, PREFILL_SLAB_TOKENS))
+                model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528, mode="extend")
+            if scratch.slab.shape[0] != metadata.block_table.shape[1] * context.shards.page_tokens:
+                raise ValueError("GLM prefill slab must hold every position of the prepared context")
             self.slices = []
             for start in range(0, rows, step):
                 end = min(start + step, rows)
-                attention = PreparedSparseMLA(scratch.absorbed_query[start:end], scratch.slab.view(-1, 64, 528),
-                    scratch.selected[:end - start], scratch.visible[start:end], scratch.selections[:end - start],
-                    scratch.partial[:end - start], caps=slab_caps, session=session, name=f"{name}.attention{start}",
-                    workspace=workspace, lse=scratch.lse[:end - start])
-                self.slices.append((start, end, attention))
+                count = end - start
+                absorbed, attended = scratch.absorbed_query[:count], scratch.attended[:count]
+                absorb = BatchedQuantizedProjection(scratch.query[start:end].transpose(0, 1), self.absorb_weights,
+                    absorbed.transpose(0, 1), major="n", session=session, name=f"{name}.absorb_query{start}")
+                attention = PreparedSparseMLA(absorbed, scratch.slab.view(-1, 64, 528),
+                    scratch.index.physical[start:end], scratch.visible[start:end],
+                    scratch.index.selected_lengths[start:end], attended, caps=slab_caps, session=session,
+                    name=f"{name}.attention{start}", workspace=workspace)
+                expand = BatchedQuantizedProjection(attended.transpose(0, 1), self.expand_weights,
+                    scratch.expanded[start:end].transpose(0, 1), major="k", session=session,
+                    name=f"{name}.expand_value{start}")
+                self.slices.append((start, end, absorb, attention, expand))
             return
         # Each slice gathers every rank's query heads, attends to local records, and keeps this rank's heads.
         from ignition.components.collectives import PreparedAllGather, PreparedLseReduceScatter
@@ -200,25 +198,19 @@ class PreparedGlmMLA:
             self.slices.append((start, end, absorb, gather, attention, combine, expand))
 
     def attend_gathered_context(self):
-        """Attend one prefill request over context blocks gathered from every rank, merging by LSE."""
-        from .dcp import PREFILL_SLAB_TOKENS, merge_partials, pull_block, select_block
+        """Attend one prefill request over its context gathered from every rank, one query slice at a time."""
+        from .dcp import pull_context
 
-        s, m, shards = self.scratch, self.metadata, self.context.shards
-        end = (m.positions.max() + 1).reshape(1)
-        table = m.block_table[0]
-        s.attended.zero_()
-        s.running.fill_(-float("inf"))
-        for block in self.blocks:
-            # The indexer's candidate gather orders this layer's peer cache writes before these reads.
-            pull_block(self.state.peers, table, end, s.slab.view(torch.int32), block, shards)
-            for start, stop, attention in self.slices:
-                count = stop - start
-                select_block(s.index.physical[start:stop], s.index.selected_lengths[start:stop],
-                             m.positions[start:stop], s.selected[:count], s.selections[:count],
-                             s.visible[start:stop], block, PREFILL_SLAB_TOKENS)
-                attention()
-                merge_partials(s.attended[start:stop], s.running[start:stop], s.partial[:count], s.lse[:count])
-        self.value_expansion(s.attended.transpose(0, 1))
+        s, m = self.scratch, self.metadata
+        # The indexer's candidate gather orders this layer's peer cache writes before these reads.
+        pull_context(self.state.peers, m.block_table[0], (m.positions.max() + 1).reshape(1),
+                     s.slab.view(torch.int32), self.context.shards)
+        # Selected indices are global positions, which index the slab directly.
+        s.visible.copy_(m.positions + 1)
+        for start, end, absorb, attention, expand in self.slices:
+            absorb(s.query[start:end].transpose(0, 1))
+            attention()
+            expand(s.attended[:end - start].transpose(0, 1))
 
     def rebind_pages(self):
         """Write and attend through the state's current page pools after they were replaced."""
@@ -236,7 +228,7 @@ class PreparedGlmMLA:
         rms_norm(s.query_input, self.module.q_a_layernorm.weight, s.query_residual,
             self.module.q_a_layernorm.variance_epsilon, round_before_weight=True)
         p["q_b_proj"](s.query_residual)
-        if self.context is None or self.mode == "prefill":
+        if self.context is None:
             self.query_absorption(s.query.transpose(0, 1))
         rms_norm(s.latent_input, self.module.kv_a_layernorm.weight, s.latent,
             self.module.kv_a_layernorm.variance_epsilon, round_before_weight=True)
