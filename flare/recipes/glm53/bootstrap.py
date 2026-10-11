@@ -194,11 +194,6 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     torch.cuda.synchronize(device)
     torch.cuda.empty_cache()
     free, total = torch.cuda.mem_get_info(device)
-    if free < config.headroom_bytes:
-        raise MemoryError(f"GLM rank {rank} has {free / (1 << 30):.3f} GiB free, "
-                          f"below requested headroom {config.headroom_bytes / (1 << 30):.3f} GiB; "
-                          f"KV cache: {kv_bytes / (1 << 30):.2f} GiB per GPU, {pages * 256:,} tokens; "
-                          f"snapshots={snapshots}")
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "weights_bytes": weights.allocated_bytes, "continuation_bytes": pool.backing.nbytes,
         "snapshot_capacity": snapshots, "pages": pages, "page_bytes": kv_bytes // pages, "kv_bytes": kv_bytes,

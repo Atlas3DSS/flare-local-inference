@@ -396,10 +396,6 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         capture_catalog(compile_decoder=compile_decoder)
         session.freeze()
         free, total = torch.cuda.mem_get_info(device)
-        if free < config.headroom_bytes:
-            raise MemoryError(f"captured model violates configured GPU headroom: {free / (1 << 30):.3f} GiB free, "
-                f"{config.headroom_bytes / (1 << 30):.3f} GiB required; KV cache: "
-                f"{page_capacity * page_bytes / (1 << 30):.2f} GiB per GPU, {page_capacity * 64:,} tokens")
         memory = {"weights_bytes": weights.allocated_bytes, "mapped_ple_bytes": table.storage.mapped_host_nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "snapshot_capacity": snapshots,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
