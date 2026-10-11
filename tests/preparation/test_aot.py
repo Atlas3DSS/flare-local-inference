@@ -268,10 +268,16 @@ def test_parallel_forward_preparation_captures_and_restores_without_workers(tmp_
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     functions = {f"decode{index}": BufferForward(handle) for index, handle in enumerate((0, 73, 127), 1)}
     functions["decode2"].negate = True
+    functions["decode1"].source = torch.nn.Parameter(functions["decode1"].source, requires_grad=False)
     signatures = {name: GraphSignature("decode", index, 1) for index, name in enumerate(functions, 1)}
     session = SimpleNamespace(capture=nullcontext, namespace=SimpleNamespace(to_dict=lambda: {"model": "parallel-buffer"}))
     options = dict(session=session, device=torch.device("cuda:0"), stream=torch.cuda.Stream(),
                    pool=torch.cuda.graph_pool_handle())
+    def forbidden(*args, **kwargs):
+        raise AssertionError("parent must not trace or lower prepared forwards")
+
+    monkeypatch.setattr(aot, "aot_forward", forbidden)
+    monkeypatch.setattr(aot, "make_fx", forbidden)
     graphs, compiled = capture_forwards(functions, signatures, **options)
     assert len(compiled) == 3 and all(not value.cache_hit for value in compiled.values())
     for _ in range(2):
@@ -294,6 +300,7 @@ def test_parallel_forward_preparation_captures_and_restores_without_workers(tmp_
     monkeypatch.setattr(CompilePool, "submit", unexpected)
     fresh = {name: BufferForward(19) for name in functions}
     fresh["decode2"].negate = True
+    fresh["decode1"].source = torch.nn.Parameter(fresh["decode1"].source, requires_grad=False)
     restored_graphs, restored = capture_forwards(fresh, signatures, **options)
     assert all(value.cache_hit for value in restored.values())
     for name, forward in fresh.items():

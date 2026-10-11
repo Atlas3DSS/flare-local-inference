@@ -7,7 +7,7 @@ import operator
 import os
 import pickle
 import tempfile
-from collections import deque
+from concurrent.futures import FIRST_COMPLETED, wait
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -26,7 +26,6 @@ from .device_binding import bind_device, relocate_inductor, restore_device, rest
 
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
-_COMPILE_POOL = ContextVar("flare_compile_pool", default=None)
 _DEFERRED_BINDINGS = ContextVar("flare_deferred_bindings", default=False)
 
 
@@ -64,8 +63,12 @@ class _GuardPickler(GuardsStatePickler):
             with torch._C._DisableTorchDispatch():
                 meta = torch.empty_strided(obj.shape, obj.stride(), dtype=obj.dtype,
                                           device="meta", requires_grad=obj.requires_grad)
-            return type(self)._unpickle_tensor, (meta, obj.device, torch.Tensor,
-                torch._C._dispatch_keys(obj).raw_repr(), obj.grad, True)
+            from .forward_metadata import _TENSOR_KINDS
+            kinds = _TENSOR_KINDS.get()
+            kind = torch._subclasses.FakeTensor if kinds is None else kinds.get(obj, torch._subclasses.FakeTensor)
+            deferred = kind is torch._subclasses.FakeTensor
+            return type(self)._unpickle_tensor, (meta, obj.device, torch.Tensor if deferred else kind,
+                torch._C._dispatch_keys(obj).raw_repr(), obj.grad, deferred)
         if isinstance(obj, JITFunction):
             return _deserialize_triton_kernel, (_serialize_triton_kernel(obj),)
         if (hasattr(obj, '__dict__')
@@ -204,28 +207,12 @@ class StorageBackend(SerializableCallable):
         self.inputs = [bindings[node] for node in arguments]
         examples = [node.meta['val'] for node in arguments]
         module = torch.fx.GraphModule({}, graph)
-        self._pending = None
-        pool = _COMPILE_POOL.get()
-        if pool is None:
-            self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
-                fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
-                aot=True, donate_graph_module=True)
-        else:
-            self.artifact = None
-            self._pending = pool.submit(module, examples)
+        self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
+            fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
+            aot=True, donate_graph_module=True)
         self._bound = None
 
-    def _finish_compile(self):
-        if self._pending is not None:
-            from torch._inductor.standalone_compile import AOTCompiledArtifact
-
-            data = self._pending.result()
-            with _artifact_kernel_table():
-                self.artifact = AOTCompiledArtifact.deserialize(data)
-            self._pending = None
-
     def __call__(self, *args):
-        self._finish_compile()
         identity = tuple((id(value), value.untyped_storage()._cdata, value.storage_offset())
                          if isinstance(value, torch.Tensor) else value for value in args)
         if self._bound is None or identity != self._bound[0]:
@@ -243,7 +230,6 @@ class StorageBackend(SerializableCallable):
         from torch._library.custom_ops import _maybe_get_opdef
         from torch._dynamo.aot_compile_types import _serialize_triton_kernel
 
-        fn._finish_compile()
         with _artifact_kernel_table():
             artifact = fn.artifact.serialize()
         calls = []
@@ -300,7 +286,6 @@ class StorageBackend(SerializableCallable):
         with _artifact_kernel_table():
             fn.artifact = AOTCompiledArtifact.deserialize(artifact)
         fn._bound = None
-        fn._pending = None
         return fn
 
 
@@ -308,15 +293,11 @@ def _execute(forward):
     return forward()
 
 
-def aot_forward(forward, *, compiler=None):
+def aot_forward(forward):
     sources = r'.*\.(?:_?handle|stream_handle|plans\[\d+\])$'
-    token = _COMPILE_POOL.set(compiler)
-    try:
-        with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
-            return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
-                                 dynamic=False).aot_compile(((forward,), {}))
-    finally:
-        _COMPILE_POOL.reset(token)
+    with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
+        return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
+                             dynamic=False).aot_compile(((forward,), {}))
 
 
 @dataclass
@@ -324,9 +305,19 @@ class BoundForward:
     artifact: object
     owner: object
     cache_hit: bool
+    pending: object = None
 
     def __call__(self):
         return self.artifact(self.owner)
+
+
+def _completed(pending):
+    while True:
+        for index, item in enumerate(pending):
+            future = item[-2].pending
+            if future is None or future.done():
+                return pending.pop(index)
+        wait([item[-2].pending for item in pending], return_when=FIRST_COMPLETED)
 
 
 class ForwardCache:
@@ -357,24 +348,27 @@ class ForwardCache:
             return self._warm(bound, path, name=name, progress=progress)
 
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
-        """Pipeline tracing and compilation, then warm each shape on the owning rank."""
+        """Trace and compile in workers, then bind and warm on the owning rank."""
         from flare.progress import phase
         from .compile_pool import CompilePool
 
         if coordinator is not None:
             return self._prepare_ranks(functions, signatures, coordinator, progress=progress, materialize=materialize)
-        compiled, paths, pending = {}, {}, deque()
+        compiled, paths, pending = {}, {}, []
         with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device) as compiler:
             def finish():
-                name, bound, path = pending.popleft()
+                name, bound, path = _completed(pending)
                 try:
                     with _guard_code_cache(self.root / 'guards'):
+                        if bound.pending is not None:
+                            bound.pending.result()
                         if materialize is None:
-                            compiled[name] = self._warm(bound, path, name=name, compiler=compiler)
-                        else:
-                            path.parent.mkdir(parents=True, exist_ok=True)
                             if not bound.cache_hit:
-                                bound.artifact.save_compiled_function(str(path))
+                                bound = self._load(bound.owner, path, required=True)
+                                bound.cache_hit = False
+                            bound()
+                            compiled[name] = bound
+                        else:
                             paths[name] = path
                 except Exception as error:
                     raise RuntimeError(f"failed to prepare compiled forward {name}") from error
@@ -411,13 +405,16 @@ class ForwardCache:
             try:
                 variants = {name: function.compilation_variants() if hasattr(function, "compilation_variants")
                             else {"shared": function} for name, function in functions.items()}
-                pending, paths = deque(), {}
+                pending, paths = [], {}
                 with phase(progress, "Compile model forwards", total=sum(map(len, variants.values()))) as stage, CompilePool(self.device) as compiler:
                     def finish():
-                        name, variant, bound, path = pending.popleft()
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        if not bound.cache_hit:
-                            bound.artifact.save_compiled_function(str(path))
+                        name, variant, bound, path = _completed(pending)
+                        if bound.pending is not None:
+                            bound.pending.result()
+                            if materialize is None:
+                                with _guard_code_cache(self.root / 'guards'):
+                                    bound = self._load(bound.owner, path, required=True)
+                                bound.cache_hit = False
                         paths[name, variant] = str(path)
                         if variant == getattr(functions[name], "compilation_variant", "shared"):
                             selected[name] = bound
@@ -490,10 +487,11 @@ class ForwardCache:
             if bound is not None:
                 return bound, path
         report("tracing and compiling forward")
-        artifact = aot_forward(forward, compiler=compiler)
-        return BoundForward(artifact, forward, False), path
+        if compiler is not None:
+            return BoundForward(None, forward, False, compiler.submit(forward, path)), path
+        return BoundForward(aot_forward(forward), forward, False), path
 
-    def _warm(self, bound, path, *, name, compiler=None, progress=None):
+    def _warm(self, bound, path, *, name, progress=None):
         def report(operation):
             if progress is not None:
                 progress.update(f"{name} · {operation}")
@@ -504,7 +502,7 @@ class ForwardCache:
                 bound()
             except BindingMismatch:
                 report("tracing and compiling forward")
-                bound = BoundForward(aot_forward(bound.owner, compiler=compiler), bound.owner, False)
+                bound = BoundForward(aot_forward(bound.owner), bound.owner, False)
             else:
                 return bound
         report("warming compiled forward")

@@ -1,77 +1,53 @@
-"""Compile lowered FX graphs in isolated processes without model storage."""
+"""Trace and compile prepared forwards in workers without model storage."""
 
-import importlib
+import os
+import tempfile
+from pathlib import Path
 
 import torch
-from torch.fx._graph_pickler import GraphPickler, Options
 
-from .compilation import _OPTIONS, _artifact_kernel_table, _defer_full_collection
-
-
-def _restore_fake_mode(state):
-    return state.fake_mode
-
-
-def _restore_symbol(kind, expression, environment, pytype, hint):
-    from torch.fx.experimental.sym_node import SymNode
-
-    return kind(SymNode(expression, environment, pytype, hint))
-
-
-class _GraphPickler(GraphPickler):
-    def reducer_override(self, value):
-        # Tensor-view metadata retains the source fake mode on its base.
-        if isinstance(value, torch._subclasses.FakeTensorMode):
-            return _restore_fake_mode, (self._unpickle_state,)
-        if isinstance(value, (torch.SymBool, torch.SymFloat)):
-            node = value.node
-            return _restore_symbol, (type(value), node._expr, node.shape_env, node.pytype, node._hint)
-        return super().reducer_override(value)
+from .compilation import _OPTIONS, _defer_full_collection
 
 
 @_defer_full_collection()
-@torch.no_grad()
-def _compile_graph(payload, registrations, device, options):
-    from torch._inductor import standalone_compile
-    from torch._subclasses import FakeTensorMode
-    from torch.fx._graph_pickler import GraphPickler
-    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
+    from .aot import aot_forward
+    from .forward_metadata import loads
 
-    torch.set_num_threads(1)
+    torch.set_num_threads(num_threads)
+    torch.set_grad_enabled(grad_enabled)
     torch.cuda.set_device(device)
-    for module in registrations:
-        importlib.import_module(module)
-    mode = FakeTensorMode(shape_env=ShapeEnv(), allow_non_fake_inputs=True)
-    module, examples = GraphPickler.loads(payload, mode)
-    module.recompile()
-    artifact = standalone_compile(module, examples, dynamic_shapes="from_example_inputs",
-        fake_mode=mode, options={"config_patches": options}, aot=True, donate_graph_module=True)
-    with _artifact_kernel_table():
-        return artifact.serialize()
+    _OPTIONS.update(options)
+    forward = loads(payload)
+    artifact = aot_forward(forward)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix='.tmp', delete=False) as file:
+        temporary = Path(file.name)
+    try:
+        artifact.save_compiled_function(str(temporary))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class CompilePool:
     def __init__(self, device):
         self.device = torch.device(device)
-        budget = max(1, _OPTIONS["compile_threads"])
+        budget = max(1, _OPTIONS['compile_threads'])
         self.workers = min(8, budget)
         self.options = dict(_OPTIONS, compile_threads=max(1, budget // self.workers))
         self.pool = None
 
-    def submit(self, module, examples):
+    def submit(self, forward, path):
         from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool
-        from torch._library.custom_ops import _maybe_get_opdef
+        from .forward_metadata import dumps
 
-        registrations = set()
-        for node in module.graph.nodes:
-            if isinstance(node.target, torch._ops.OpOverload):
-                definition = _maybe_get_opdef(node.target)
-                if definition is not None:
-                    registrations.add(definition._init_fn.__module__)
-        payload = _GraphPickler.dumps((module, examples), Options(ops_filter=None))
+        payload = dumps(forward)
         if self.pool is None:
             self.pool = SubprocPool(self.workers, kind=SubprocKind.SPAWN)
-        return self.pool.submit(_compile_graph, payload, tuple(sorted(registrations)), self.device, self.options)
+        return self.pool.submit(_compile_forward, payload, self.device, self.options, str(path),
+                                torch.get_num_threads(), torch.is_grad_enabled())
 
     def __enter__(self):
         return self

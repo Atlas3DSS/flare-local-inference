@@ -153,7 +153,9 @@ Rust core in `helios/`, serves requests through prepared CUDA graphs.
 - **Compile complete prepared forwards.** Use
   [capture_forwards](flare/preparation/capture.py), which restores compiled
   forwards before tracing and compiles missing variants with static shapes and
-  autotuning. Preserve native mutations, storage aliases, and stream dependencies;
+  autotuning. Workers perform Dynamo tracing, storage lowering, and Inductor
+  compilation from tensor and selected-plan metadata; CUDA resources remain in
+  the owning rank. Preserve native mutations, storage aliases, and stream dependencies;
   bind process-local kernel handles and caller-owned tensors at startup. Complete
   b12x preparation, tuning, binding refresh, and compiled warmup before capturing
   each serving graph. Retain compiled kernel owners until native replay has drained.

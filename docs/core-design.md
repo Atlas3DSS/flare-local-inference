@@ -179,8 +179,11 @@ loading for development startup. b12x preparation and autotuning still run,
 and every serving path is captured as a CUDA graph. The option applies to Qwen
 and every GLM tensor-parallel rank; compiled forwards remain the default.
 
-Rank zero traces and lowers each static forward variant; up to eight worker
-processes compile FX graphs containing tensor metadata. Other ranks load the
+Rank zero dispatches each static forward variant to one of up to eight worker
+processes. Workers perform Dynamo tracing, storage lowering, and Inductor
+compilation using tensor metadata with preserved storage aliases. Weights, KV
+storage, and native CUDA resources remain in the owning rank; compiled forwards
+bind that rank's live tensors and kernel handles. Other ranks load the
 compiled forwards without running Dynamo or Inductor. Recipes with different
 rank behavior supply compilation variants on rank zero and select a variant on
 each rank. GLM supplies sampling and consumption variants; Qwen shares one variant.

@@ -113,13 +113,12 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
             if compilation == "parallel":
                 from flare.preparation.capture import capture_forwards
 
-                if rank:
-                    import flare.preparation.aot as aot
+                import flare.preparation.aot as aot
 
-                    def unexpected(*args, **kwargs):
-                        raise AssertionError("peer ranks must not trace or compile")
+                def unexpected(*args, **kwargs):
+                    raise AssertionError("serving ranks must not trace or compile")
 
-                    aot.aot_forward = aot.make_fx = torch.compile = unexpected
+                aot.aot_forward = aot.make_fx = torch.compile = unexpected
                 captured, compiled = capture_forwards(operations, signatures, session=session,
                     device=device, stream=stream, pool=torch.cuda.graph_pool_handle(), collective=runtime,
                     coordinator=coordinator)
