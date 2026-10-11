@@ -33,22 +33,18 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     """
     graphs, compiled = {}, {}
     with phase(progress, label, total=len(functions)) as stage:
-        stage.update("initializing compiled-forward cache" if compile_decoder else "initializing graph pool")
         cache = ForwardCache(namespace=session.namespace.to_dict(), device=device) if compile_decoder else None
         for name, function in functions.items():
             started = monotonic()
             should_compile = compile_decoder and signatures[name].kind in ("prefill", "decode", "resume", "speculative")
-            stage.update(f"{name} · preparing forward")
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
                 if should_compile:
-                    function = cache.prepare(function, name=name, signature=signatures[name], progress=stage)
+                    function = cache.prepare(function, name=name, signature=signatures[name])
                     compiled[name] = function
                 else:
-                    stage.update(f"{name} · warming forward")
                     function()
             stream.synchronize()
-            stage.update(f"{name} · capturing CUDA graph")
             graph = torch.cuda.CUDAGraph()
             communication = nullcontext() if collective is None else collective.capture(stream=stream)
             with communication, session.capture(), torch.cuda.graph(graph, pool=pool, stream=stream):
