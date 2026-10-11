@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from math import prod
+from weakref import finalize
 
 import torch
 
@@ -30,7 +31,16 @@ class ScratchArena:
     @property
     def auxiliary_stream(self):
         if self._auxiliary_stream is None:
-            self._auxiliary_stream = torch.cuda.Stream(device=self.device)
+            from cuda.bindings import driver as cuda
+
+            # PyTorch's round-robin stream pool can alias a later capture stream.
+            with torch.cuda.device(self.device):
+                status, handle = cuda.cuStreamCreate(cuda.CUstream_flags.CU_STREAM_NON_BLOCKING)
+                if status != cuda.CUresult.CUDA_SUCCESS:
+                    raise RuntimeError(f"cannot create overlap stream: {status}")
+                stream = torch.cuda.ExternalStream(int(handle), device=self.device)
+            finalize(stream, cuda.cuStreamDestroy, handle).atexit = False
+            self._auxiliary_stream = stream
         return self._auxiliary_stream
 
     def register_parallel(self, *plans):
