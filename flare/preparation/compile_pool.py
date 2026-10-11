@@ -4,9 +4,10 @@ import importlib
 
 import torch
 
-from .compilation import _OPTIONS, _artifact_kernel_table
+from .compilation import _OPTIONS, _artifact_kernel_table, _defer_full_collection
 
 
+@_defer_full_collection()
 def _compile_graph(payload, registrations, device, options):
     from torch._inductor import standalone_compile
     from torch._subclasses import FakeTensorMode

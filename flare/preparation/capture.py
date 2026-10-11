@@ -1,7 +1,6 @@
 """Compile prepared text forwards and capture one native executable per shape."""
 
-import gc
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from time import monotonic
 
 import torch
@@ -9,17 +8,7 @@ import torch
 from flare.progress import StartupProgress, phase
 
 from .aot import ForwardCache
-
-
-@contextmanager
-def _defer_full_collection():
-    thresholds = gc.get_threshold()
-    # Repeated full-heap scans dominate collection while FX graphs are constructed.
-    gc.set_threshold(thresholds[0], thresholds[1], max(thresholds[2], 1000))
-    try:
-        yield
-    finally:
-        gc.set_threshold(*thresholds)
+from .compilation import _defer_full_collection
 
 
 @_defer_full_collection()

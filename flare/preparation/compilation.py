@@ -1,6 +1,7 @@
 """Compile prepared forwards with explicit storage mutation boundaries."""
 
 import hashlib
+import gc
 import math
 import operator
 import os
@@ -19,6 +20,17 @@ _INVOCATIONS = ContextVar('flare_storage_invocations')
 _OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
             'triton.cudagraphs': False, 'triton.autotune_at_compile_time': False,
             'compile_threads': int(os.environ.get('TORCHINDUCTOR_COMPILE_THREADS', '4'))}
+
+
+@contextmanager
+def _defer_full_collection():
+    thresholds = gc.get_threshold()
+    # Repeated full-heap scans dominate collection while FX graphs are constructed.
+    gc.set_threshold(thresholds[0], thresholds[1], max(thresholds[2], 1000))
+    try:
+        yield
+    finally:
+        gc.set_threshold(*thresholds)
 
 
 @dataclass
