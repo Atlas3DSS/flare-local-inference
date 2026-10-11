@@ -18,6 +18,7 @@ from ignition.preparation.collectives import (
     CollectivePreparation,
     create_all_gather_runtime,
     create_all_reduce_runtime,
+    create_head_exchange,
 )
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
@@ -56,6 +57,8 @@ class PreparationConfig:
     compile_decoder: bool = True
     kernel_cache: Path | None = None
     mtp: bool = False
+    # Shard latent records and C4 pools across the tensor-parallel ranks (decode context parallelism).
+    context_parallel: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
     speculative_graph_budget: int = 8
@@ -73,8 +76,8 @@ class PreparationConfig:
         for name in ("context", "prefill_chunk_size", "max_active", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an integer")
-        if not 256 <= self.context <= 1048576 or self.context % 256:
-            raise ValueError("GLM context must be 256-aligned in [256,1048576]")
+        if not self.page_tokens <= self.context <= 1048576 or self.context % self.page_tokens:
+            raise ValueError(f"GLM context must be {self.page_tokens}-aligned in [{self.page_tokens},1048576]")
         if not 64 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         request_capacity(self.max_active)
@@ -119,7 +122,12 @@ class PreparationConfig:
         """Fixed KV pages, or the context of every active request when memory does not size them."""
         if self.pages is not None:
             return self.pages
-        return self.minimum_pages or (self.context // 256 + int(self.mtp)) * self.max_active
+        return self.minimum_pages or (self.context // self.page_tokens + int(self.mtp)) * self.max_active
+
+    @property
+    def page_tokens(self):
+        """Global positions per KV page: 256 local records on each rank that shares the context."""
+        return 256 * (len(self.devices) if self.context_parallel else 1)
 
     @property
     def preparation_pages(self):
@@ -152,7 +160,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
         if snapshots < 1:
             raise ValueError("GLM snapshot budget must hold at least one continuation row")
-        pages, blocks = config.preparation_pages, config.context // 256
+        pages, blocks = config.preparation_pages, config.context // config.page_tokens
         slots = config.request_capacity
         extra_base = slots + 1 + snapshots
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
@@ -188,8 +196,19 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
             submission_sequence=sequence, completion_records=records)
         forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
+        context = None
+        if config.context_parallel:
+            from .dcp import SLICE_ROWS, ContextParallel, ContextShards
+
+            exchange_rows = min(config.token_capacity, SLICE_ROWS)
+            context = ContextParallel(ContextShards.on(rank, shard.world_size, device),
+                heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512),
+                candidates=create_all_gather_runtime(group, device, max_rows=exchange_rows,
+                                                     columns=2048 * shard.world_size),
+                coordinator=coordinator)
+        shards = None if context is None else context.shards
         decoder_storage = DecoderScratch.allocate(config.token_capacity, blocks, "decode", device,
-            shard=shard, sample_rows=sample_rows)
+            shard=shard, sample_rows=sample_rows, context_ranks=1 if context is None else shard.world_size)
 
         speculation = None
         if config.mtp:
@@ -199,7 +218,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 extra_base=extra_base, session=session, workspace=arena, records=records, frame=frame,
                 sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                 max_cache_pages=max_cache_pages, prefill_tokens=config.prefill_chunk_size,
-                decode_tokens=max(b * w for b, w in config.speculative_shapes))
+                decode_tokens=max(b * w for b, w in config.speculative_shapes), context=context)
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 
@@ -220,8 +239,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
                     runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-                    session=session, name=name, workspace=arena, feedback=feedback, max_cache_pages=max_cache_pages)
-                batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages)
+                    session=session, name=name, workspace=arena, feedback=feedback, max_cache_pages=max_cache_pages,
+                    context=context)
+                batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pages,
+                                      shards=shards)
                 forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
                     pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation", replicated_sampling=config.mtp)
                 if speculation is not None:
@@ -250,7 +271,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
                     runtime=collective, coordinator=coordinator, session=session, name=name,
                     capacity=capacity, admission_buffers=admission,
-                    draft_tables=None if speculation is None else speculation.draft_tables)
+                    draft_tables=None if speculation is None else speculation.draft_tables,
+                    page_tokens=config.page_tokens)
                 fields = row_inputs if mode == "snapshot" else tuple(admission.__dataclass_fields__)
                 add(name, operation, mode, capacity, 1, (*fields, "page_tables", *(("draft_page_tables",) if config.mtp else ()), *commands.buffers()))
     with phase(progress, "Prepare and tune kernels") as stage:
@@ -293,7 +315,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 graph.reset()
             measured.clear()
             torch.cuda.synchronize(device)
-            stage.update(f"{pages * page_bytes / (1 << 30):.2f} GiB per GPU · {pages * 256:,} tokens")
+            stage.update(f"{pages * page_bytes / (1 << 30):.2f} GiB per GPU · {pages * config.page_tokens:,} tokens")
 
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
@@ -320,15 +342,17 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "snapshots": snapshots,
         "eos_token_ids": generation["eos_token_id"], "assets": assets,
         "model_contract": {"schema": "glm5next.graph-inputs.v1", "vocabulary": 154880,
-            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []}}}
+            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
+            **({"page_tokens": config.page_tokens} if config.context_parallel else {})}}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
             speculative_fixed_width=config.speculative_fixed_width, speculative_graph_budget=config.speculative_graph_budget)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
-        vocabulary_collective, coordinator, speculation)
+        vocabulary_collective, coordinator, speculation, context)
+    exchanges = () if context is None else (context.heads, context.candidates)
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
-        close_resources=(vocabulary_collective, collective),
+        close_resources=(*exchanges, vocabulary_collective, collective),
         server_config=server_config, memory_report=memory)

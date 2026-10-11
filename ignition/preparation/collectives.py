@@ -34,6 +34,17 @@ def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
         max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
+def create_head_exchange(group, device, *, max_rows, heads, head_dim):
+    """Allocate b12x staging for all-gathering head shards and LSE-combining partial attention."""
+    from b12x.comm.pcie import DcpAllToAll
+
+    world_size = dist.get_world_size(group)
+    if world_size not in (2, 4) or max_rows <= 0 or heads % world_size or head_dim % 8:
+        raise ValueError("head exchanges require TP2 or TP4 head shards and positive capacity")
+    return DcpAllToAll.from_exchange_group(exchange_group=group, device=device,
+        max_batch_size=max_rows, total_heads=heads, head_dim=head_dim, stream_affine=False)
+
+
 class CollectivePreparation:
     """Authorize matching collective declarations and synchronize kernel entry.
 

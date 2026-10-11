@@ -37,7 +37,7 @@ class DecoderScratch:
     mlp_output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows):
+    def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows, context_ranks=1):
         if type(sample_rows) is not int or not 0 < sample_rows <= tokens:
             raise ValueError("GLM sampling capacity must be positive and fit the token capacity")
         def buffer(*shape):
@@ -46,7 +46,7 @@ class DecoderScratch:
             buffer(sample_rows, 4096), buffer(sample_rows, 154880 // shard.world_size), buffer(sample_rows, 154880),
             MHCScratch.allocate(tokens, 4096, device), MHCScratch.allocate(tokens, 4096, device),
             KDAScratch.allocate(tokens, 64 // shard.world_size, device),
-            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device),
+            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device, context_ranks=context_ranks),
             MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
             MoeScratch.allocate(tokens, shard.world_size, device), buffer(tokens, 4096), buffer(tokens, 4096))
 
@@ -84,7 +84,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
                  metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
-                 workspace, progress=None, feedback=None, max_cache_pages=None):
+                 workspace, progress=None, feedback=None, max_cache_pages=None, context=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
             raise ValueError("GLM text execution requires all 45 decoder layers")
@@ -106,7 +106,7 @@ class PreparedDecoder:
                 metadata.indexed if indexed else metadata.recurrent, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
                 carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1,
-                max_cache_pages=max_cache_pages)
+                max_cache_pages=max_cache_pages, context=context)
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")

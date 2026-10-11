@@ -15,6 +15,7 @@ from ignition.components.speculation import (
 from ignition.components.state import save_hidden
 
 from .batch import PreparedBatch
+from .dcp import ContextShards
 from .mtp import DraftMetadata, MTPScratch, PreparedMTP
 from .stack import PreparedDecoder
 from .state import DecoderMetadata
@@ -65,9 +66,10 @@ def delta_regions(pool):
 class SpeculativePreparation:
     def __init__(self, weights, pool, requests, inputs, scratch, *, extra_base, session,
                  workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None,
-                 prefill_tokens=None, decode_tokens=None):
+                 prefill_tokens=None, decode_tokens=None, context=None):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
-        self.max_cache_pages = max_cache_pages
+        self.max_cache_pages, self.context = max_cache_pages, context
+        self.shards = ContextShards() if context is None else context.shards
         # Draft passes and absorptions run serially, so each mode shares one scratch at its largest capacity.
         blocks, device = inputs.page_tables.shape[1], pool.backing.device
         self.draft_scratch = {}
@@ -75,7 +77,7 @@ class SpeculativePreparation:
             self.draft_scratch["prefill"] = MTPScratch.absorbing(scratch.rows(prefill_tokens, "prefill", sample_rows=1))
         if decode_tokens:
             self.draft_scratch["decode"] = MTPScratch.allocate(decode_tokens, weights.shard.world_size, blocks,
-                                                               "decode", device)
+                                                               "decode", device, context_ranks=self.shards.world)
         self.scratch, self.extra_base, self.session, self.workspace = scratch, extra_base, session, workspace
         self.records, self.frame, self.sequence = records, frame, sequence
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
@@ -89,7 +91,7 @@ class SpeculativePreparation:
         scratch = None if shared is None else shared.rows(metadata.token_ids.numel(), mode)
         return PreparedMTP(self.weights, self.pool.draft, metadata, mode=mode,
             session=self.session, name=name, workspace=self.workspace, cache_only=cache_only,
-            max_cache_pages=self.max_cache_pages, scratch=scratch, **self.collectives)
+            max_cache_pages=self.max_cache_pages, scratch=scratch, context=self.context, **self.collectives)
 
 
 class PreparedPrefill:
@@ -99,7 +101,7 @@ class PreparedPrefill:
         self.owner, self.generation, self.feedback = owner, generation, feedback
         tokens = feedback.shape[0]
         device = feedback.device
-        self.metadata = DraftMetadata(tokens, 1, owner.inputs.page_tables.shape[1], device)
+        self.metadata = DraftMetadata(tokens, 1, owner.inputs.page_tables.shape[1], device, shards=owner.shards)
         self.absorb = owner.draft(self.metadata, f"{name}.absorb", cache_only=True, mode="prefill")
         self.previous = torch.zeros((1, 4096), dtype=torch.bfloat16, device=device)
         self.indices = torch.arange(tokens, device=device)
@@ -141,18 +143,18 @@ class PreparedRound:
         self.metadata = DecoderMetadata(self.metadata.token_ids, torch.arange(b * w, device=device),
             DeltaMetadata.allocate(b, device, verification_columns=8), self.metadata.indexed)
         self.validator = PreparedBatch(o.inputs, o.requests, DecoderMetadata.allocate(b, b, blocks, device),
-            mode="decode", shard=o.weights.shard, pages=o.pool.draft.index.cache.shape[0])
+            mode="decode", shard=o.weights.shard, pages=o.pool.draft.index.cache.shape[0], shards=o.shards)
         self.validator.accept_unsampled = False
         self.validation = PreparedAllReduce(self.validator.validation_input, self.validator.validation_sum,
             runtime=o.collectives['runtime'], coordinator=o.collectives['coordinator'],
             session=o.session, name=f"{name}.validation")
         self.decoder = PreparedDecoder(o.weights, o.scratch.rows(b * w, "decode", sample_rows=b * w),
             o.pool.decoder, self.metadata, mode="decode", session=o.session, name=f"{name}.target",
-            workspace=o.workspace, max_cache_pages=o.max_cache_pages, **o.collectives)
-        self.draft_metadata = DraftMetadata(b, b, blocks, device)
+            workspace=o.workspace, max_cache_pages=o.max_cache_pages, context=o.context, **o.collectives)
+        self.draft_metadata = DraftMetadata(b, b, blocks, device, shards=o.shards)
         self.draft = o.draft(self.draft_metadata, f"{name}.draft") if w > 1 else None
         self.draft_logits = torch.empty_like(self.draft.logits) if self.draft is not None else None
-        self.absorb_metadata = DraftMetadata(b * w, b, blocks, device)
+        self.absorb_metadata = DraftMetadata(b * w, b, blocks, device, shards=o.shards)
         self.absorb = o.draft(self.absorb_metadata, f"{name}.absorb", cache_only=True)
         self.before = torch.zeros(b, dtype=torch.int64, device=device)
         self.pending = torch.zeros_like(self.before)
@@ -219,8 +221,7 @@ class PreparedRound:
         pos = self.before[row] + column
         index.requests.copy_(row)
         index.positions.copy_(torch.where(active, pos, -1))
-        page = index.block_table[row, (pos // 256).clamp(0, index.block_table.shape[1] - 1)]
-        index.token_slots.copy_(torch.where(active, page.long() * 256 + pos % 256, -1))
+        index.token_slots.copy_(torch.where(active, o.shards.token_slots(pos, index.block_table[row]), -1))
         source = (row * w + column).clamp(0, b * w - 1)
         m.token_ids.copy_(torch.where(active, self.candidates.reshape(-1)[source], 0))
         m.sample_indices.copy_((starts[:, None] + self.columns).clamp(0, b * w - 1).reshape(-1))
@@ -250,9 +251,10 @@ class PreparedRound:
         limits = o.inputs.query_lengths[:b]
         self.validator.validate()
         end = o.requests.consumed_tokens[safe] + limits
-        bad = (limits < 1) | (limits > w) | (end > o.inputs.page_tables.shape[1] * 256)
+        page_tokens = o.shards.page_tokens
+        bad = (limits < 1) | (limits > w) | (end > o.inputs.page_tables.shape[1] * page_tokens)
         pages = o.inputs.page_tables[safe]
-        required = self.validator.block_ids < (end[:, None] + 255) // 256
+        required = self.validator.block_ids < (end[:, None] + page_tokens - 1) // page_tokens
         bad |= (required & ((pages < 0) | (pages >= self.validator.pages))).any(1)
         bad_slots = ((self.validator.slot_ids[:, None] == slots[None]) & bad[None]).any(1)
         self.validator.validation_input[0, :o.requests.capacity].add_(bad_slots)

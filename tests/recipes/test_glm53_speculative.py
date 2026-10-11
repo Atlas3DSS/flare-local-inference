@@ -7,6 +7,7 @@ import torch
 from ignition.components.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import PreparedSpeculativeCommit, SpeculativeAcceptance
 from ignition.recipes.glm53.batch import BatchInputs
+from ignition.recipes.glm53.dcp import ContextShards
 from ignition.recipes.glm53.speculative import PreparedRound
 from ignition.recipes.glm53.mtp import DraftMetadata
 from ignition.recipes.glm53.state import DecoderMetadata
@@ -41,7 +42,8 @@ def test_verification_packs_unequal_lengths_and_retains_request_output_rows():
     inputs = BatchInputs.allocate(128, 2, "cpu", capacity=2)
     inputs.page_tables.copy_(torch.tensor([[10, 11], [20, 21]]))
     inputs.live_rows.fill_(2)
-    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2), extra_base=8)
+    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2), extra_base=8,
+                               shards=ContextShards())
     m = DecoderMetadata.allocate(12, 2, 2, "cpu")
     op.metadata = DecoderMetadata(m.token_ids, torch.zeros(12, dtype=torch.int64),
         DeltaMetadata.allocate(2, "cpu", verification_columns=8), m.indexed)

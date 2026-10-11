@@ -7,8 +7,10 @@ from ignition.components.state_transfer import PreparedStateTransfer
 
 class PreparedMaintenance:
     def __init__(self, mode, requests, pool, commands, inputs, records, frame, sequence, *,
-                 runtime, coordinator, session, name, capacity=4, admission_buffers=None, draft_tables=None):
+                 runtime, coordinator, session, name, capacity=4, admission_buffers=None, draft_tables=None,
+                 page_tokens=256):
         self.pool, self.commands, self.tables, self.draft_tables = pool, commands, inputs.page_tables, draft_tables
+        self.page_tokens = page_tokens
         transfer = self._transfer()
         if mode == "snapshot":
             slots, epochs, count = inputs.row_slot_ids, inputs.row_generations, inputs.live_rows
@@ -25,7 +27,7 @@ class PreparedMaintenance:
 
     def _transfer(self):
         return PreparedStateTransfer(self.pool, self.commands, self.tables, pages=self.pool.partial_pages(),
-            page_tokens=256, trailing_pages=self.pool.draft_pages(), trailing_tables=self.draft_tables)
+            page_tokens=self.page_tokens, trailing_pages=self.pool.draft_pages(), trailing_tables=self.draft_tables)
 
     def rebind_pages(self, pages):
         """Copy partial pages of the continuation pool's current page pools."""

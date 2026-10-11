@@ -32,11 +32,11 @@ class MTPScratch:
     moe: MoeScratch | None
 
     @classmethod
-    def allocate(cls, tokens, world_size, blocks, mode, device, *, moe=True):
+    def allocate(cls, tokens, world_size, blocks, mode, device, *, moe=True, context_ranks=1):
         def buffer(width):
             return torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
         return cls(buffer(4096), buffer(8192), buffer(4096), buffer(4096), buffer(4096), buffer(4096), buffer(4096),
-                   MLAScratch.allocate(tokens, 64 // world_size, blocks, mode, device),
+                   MLAScratch.allocate(tokens, 64 // world_size, blocks, mode, device, context_ranks=context_ranks),
                    MoeScratch.allocate(tokens, world_size, device) if moe else None)
 
     @classmethod
@@ -61,7 +61,10 @@ class MTPScratch:
 
 
 class DraftMetadata:
-    def __init__(self, tokens, rows, blocks, device):
+    def __init__(self, tokens, rows, blocks, device, *, shards=None):
+        from .dcp import ContextShards
+
+        self.shards = ContextShards() if shards is None else shards
         self.indexed = IndexMetadata.allocate(tokens, rows, blocks, device)
         self.token_ids = torch.zeros(tokens, dtype=torch.int64, device=device)
         self.hidden = torch.zeros((tokens, 4096), dtype=torch.bfloat16, device=device)
@@ -89,8 +92,7 @@ class DraftMetadata:
         position = starts[row] + local
         m.positions.copy_(torch.where(active, position, -1))
         m.block_table.copy_(tables[slots.long().clamp(0, tables.shape[0] - 1)])
-        page = m.block_table[row, (position // 256).clamp(0, tables.shape[1] - 1)]
-        m.token_slots.copy_(torch.where(active, page.long() * 256 + position % 256, -1))
+        m.token_slots.copy_(torch.where(active, self.shards.token_slots(position, m.block_table[row]), -1))
 
 
 class PreparedMTP:
@@ -102,7 +104,8 @@ class PreparedMTP:
     """
 
     def __init__(self, weights, state, metadata, *, mode, session, name, workspace,
-                 runtime, vocabulary_runtime, coordinator, cache_only=False, max_cache_pages=None, scratch=None):
+                 runtime, vocabulary_runtime, coordinator, cache_only=False, max_cache_pages=None, scratch=None,
+                 context=None):
         from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextAttention, Glm5NextTextMoE
 
         config = deepcopy(weights.tree.config.text_config)
@@ -117,7 +120,8 @@ class PreparedMTP:
             return torch.zeros(shape, dtype=torch.bfloat16, device=device)
         if scratch is None:
             scratch = MTPScratch.allocate(rows, weights.shard.world_size, metadata.indexed.block_table.shape[1],
-                                          mode, device, moe=not cache_only)
+                                          mode, device, moe=not cache_only,
+                                          context_ranks=1 if context is None else context.shards.world)
         self.embedded, self.joined = scratch.embedded, scratch.joined
         self.residual, self.normalized = scratch.residual, scratch.normalized
         self.attention_output, self.mlp_output = scratch.attention_output, scratch.mlp_output
@@ -128,7 +132,7 @@ class PreparedMTP:
             session=session, name=f"{name}.eh_proj")
         self.attention = PreparedGlmMLA(attention, weights.mtp.attention, self.normalized, scratch.attention,
             state, metadata.indexed, mode=mode, session=session, name=f"{name}.mla", workspace=workspace,
-            max_cache_pages=max_cache_pages)
+            max_cache_pages=max_cache_pages, context=context)
         if not cache_only:
             self.attention_reduce = PreparedAllReduce(scratch.attention.output, self.attention_output,
                 runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.attention_reduce")
