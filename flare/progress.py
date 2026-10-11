@@ -17,9 +17,9 @@ _BOOT_SPLASH = """
      ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ ⣿⡿⠁   ⢀⣠⠴⠚⠉    ⠄
                                           ⢀⣾⣿⡇ ⣠⡾⠋    ⠂    ✧
                            ⣀⣀⣀⡠⠤⠤⠴⠶⠶⣶⣾⣿⣿⣷⡿⠋⠶⠤⢄⣀⣀
-            ⣀⣀⡠⠤⠔⠒⠋⠉⠉       ⣠⡴⠛⠋⣠⣾⡿⠿⠿⣷⣄  ⠈⠙⠲⣄ ⠉⠉⠒⠢⠤⢄⣀⣀
-⣀⣀⡠⠤⠔⠒⠉⠉   ⠠⣄⣀⡠⠔⠋   ∿   ⠊  ⣠⠞⠋  ⠈⠙⢦⣄⠈⠙⠷⣤⡀    ⠈⠢⡀   ∿    ⠉⠉⠒⠤⢄⣀
-  ∿   ⠤⠤⠒⠋   ·    ⣀⡠⠤⠤⠒⠋   ·    ∿   ⠈⠑⠢⣄   ⠉⠓⠦⣄⣀   ⠈⠂    ·   ∿
+            ⣀⣀⡠⠤⠔⠒⠋⠉⠉▒⠐░▒⠁░░⣠⡴⠛⠋⣠⣾⡿⠿⠿⣷⣄░⠂⠈⠙⠲⣄▒⠉⠉⠒⠢⠤⢄⣀⣀
+⣀⣀⡠⠤⠔⠒⠉⠉░▒⠁⠠⣄⣀⡠⠔⠋░▒⠐░▒⠁░⠊⠂▒⣠⠞⠋▒⠐⠈⠙⢦⣄⠈⠙⠷⣤⡀░▒⠐░⠈⠢⡀░⠂▒░⠄░▒⠐⠉⠉⠒⠤⢄⣀
+░⠄░▒⠐░⠤⠤⠒⠋⠂▒░⠄░▒⠐░⣀⡠⠤⠤⠒⠋░⠄░▒⠐░▒⠁░░⠂▒⠈⠑⠢⣄⠐░▒⠉⠓⠦⣄⣀░⠄░⠈⠂░▒⠁░░⠂▒░⠄
 """.strip("\n")
 
 
@@ -41,7 +41,13 @@ class StartupProgress:
         art = Text(overflow="crop", no_wrap=True)
         for index, (line, color) in enumerate(zip(_BOOT_SPLASH.splitlines(), colors, strict=True)):
             row = Text(line, style=color)
+            if index in (11, 12):
+                left, right = (21, 46) if index == 11 else (8, 56)
+                row.stylize("#ffd27b", 0, left)
+                row.stylize("#ffd27b", right, len(line))
             for column, character in enumerate(line):
+                if character in "░▒":
+                    row.stylize("#8f3227" if character == "░" else "#c34e2a", column, column + 1)
                 if not (3 <= index <= 8 and 5 <= column < 44) and character in "⣿⣾⣷✦":
                     row.stylize("bold #fff8e7", column, column + 1)
             if 3 <= index <= 8:
