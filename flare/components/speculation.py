@@ -498,20 +498,8 @@ class PreparedSpeculativeCommit:
             error = torch.where(duplicate, DUPLICATE_SLOT,
                 torch.where(failed, torch.where(shape_valid, INVALID_DISTRIBUTION, INVALID_SPECULATION), state.error_code[slot]))
 
-            state.histogram[slot].scatter_add_(0, ids.clamp(0, state.vocab_size - 1), take.to(torch.int32))
-            self.consumed_after[slot].copy_(consumed)
-            state.generated_tokens[slot].copy_(generated)
-            state.pending_token[slot].copy_(torch.where(emitted > 0, pending, state.pending_token[slot]))
-            state.rng_counter.view(torch.int64)[slot].add_(emitted)
-            if self.history is not None:
-                self.history_after[slot].copy_(torch.where(emitted > 0, tail, self.history[slot]))
-            state.status[slot].copy_(status)
-            state.error_code[slot].copy_(error)
-            if self.rng is not None:
-                base = torch.where(self.rng.generation[slot] == state.generation[slot], self.rng.target_offset[slot], 0)
-                self.rng.target_offset[slot].copy_(torch.where((emitted > 0) & (increment > 0), base + increment, self.rng.target_offset[slot]))
-                self.rng.generation[slot].copy_(torch.where((emitted > 0) & (increment > 0), state.generation[slot], self.rng.generation[slot]))
-
+            # Records and per-row outputs precede request-state mutation: compiled graphs must not
+            # re-derive enabled/valid fields from the status and token counts this round rewrites.
             self.emitted_ids.copy_(torch.where(matches[:, None] & take[None, :], ids, self.emitted_ids))
             self.committed_input_ids.copy_(torch.where(matches[:, None] & take[None, :], inputs, self.committed_input_ids))
             for output, value in ((self.emitted_count, emitted), (self.accepted_count, emitted),
@@ -536,6 +524,19 @@ class PreparedSpeculativeCommit:
                 record[13].fill_(-1)
             record[15].copy_(torch.where(participating, columns.numel(), 0))
             record[16:16 + columns.numel()].copy_(torch.where(take, ids, -1))
+            state.histogram[slot].scatter_add_(0, ids.clamp(0, state.vocab_size - 1), take.to(torch.int32))
+            self.consumed_after[slot].copy_(consumed)
+            state.generated_tokens[slot].copy_(generated)
+            state.pending_token[slot].copy_(torch.where(emitted > 0, pending, state.pending_token[slot]))
+            state.rng_counter.view(torch.int64)[slot].add_(emitted)
+            if self.history is not None:
+                self.history_after[slot].copy_(torch.where(emitted > 0, tail, self.history[slot]))
+            state.status[slot].copy_(status)
+            state.error_code[slot].copy_(error)
+            if self.rng is not None:
+                base = torch.where(self.rng.generation[slot] == state.generation[slot], self.rng.target_offset[slot], 0)
+                self.rng.target_offset[slot].copy_(torch.where((emitted > 0) & (increment > 0), base + increment, self.rng.target_offset[slot]))
+                self.rng.generation[slot].copy_(torch.where((emitted > 0) & (increment > 0), state.generation[slot], self.rng.generation[slot]))
         state.consumed_tokens.copy_(self.consumed_after)
         if self.history is not None:
             self.history.copy_(self.history_after)
