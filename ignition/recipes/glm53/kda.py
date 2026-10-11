@@ -119,7 +119,8 @@ class PreparedGlmKDA:
             "raw_g": scratch.raw_g.view(self.tokens, self.heads, 128), "raw_beta": scratch.raw_beta,
             "A_log": weights["A_log"], "dt_bias": weights["dt_bias"].view(self.heads, 128),
             "recurrent_state": state.recurrent, "num_seqs": metadata.num_seqs, "num_tokens": metadata.num_tokens,
-            "output": scratch.recurrence.view(self.tokens, self.heads, 128),
+            # Decode writes normalized output straight into the output projection's input.
+            "output": (scratch.gated if mode == "decode" else scratch.recurrence).view(self.tokens, self.heads, 128),
         }
         self.run_options = {"lower_bound": -5.0}
         if mode == "decode":
@@ -160,7 +161,6 @@ class PreparedGlmKDA:
         short_conv.run(self.conv_binding)
         if self.mode == "decode":
             gdn_decode.run_kda(self.recurrent_binding, **self.run_options)
-            s.gated.copy_(s.recurrence)
         else:
             s.recurrence.zero_()
             kda_prefill.run(self.recurrent_binding, **self.run_options)
