@@ -244,7 +244,9 @@ event, and receives jobs over a channel as page id lists, a state slot, and
 slab addresses. The thread expands them into device and host addresses from
 its rank's geometry, so descriptor construction never runs on the worker
 thread. It issues batched copies through `cuMemcpyBatchAsync`, records its
-event, waits on it, and replies with the job id and rank. Each batch call
+event, created with blocking synchronization so the wait sleeps instead of
+spinning a core, waits on it, and replies with the job id and rank. Each batch
+call
 carries at most 16 MiB and at most 4,096 entries. These bounds limit submitted
 work; section 4 measures the resulting delays on shared copy engines. A
 failure is reported only after the thread has synchronized its stream, so
@@ -473,10 +475,14 @@ Offload limits interference through bounded work and explicit ownership:
   orders transfers and scheduler visibility. Shared bandwidth and copy engines
   still require the interference measurements in section 4.
 - Copy engine queueing: offload batches are bounded to 16 MiB per call and the
-  offload streams have the lowest priority. Measure delays to input uploads,
-  completion downloads, and Engram row copies on shared copy engines through
-  per-token latency. Batch size and stream priority alone do not bound those
-  delays.
+  offload streams are created at the least stream priority. Every other Helios
+  stream uses the default priority, which CUDA defines as the least priority
+  as well, so priority separates offload work from model work only once the
+  model and copy streams are created at a greater priority; the section 4
+  measurements decide whether that change is worthwhile. Measure delays to
+  input uploads, completion downloads, and Engram row copies on shared copy
+  engines through per-token latency. Batch size and stream priority alone do
+  not bound those delays.
 - CPU: transfer threads sleep on event waits and channel receives; the disk
   thread computes checksums and submits I/O. Both use `SCHED_BATCH` with a
   positive nice value to reduce contention with the model worker, HTTP runtime,
