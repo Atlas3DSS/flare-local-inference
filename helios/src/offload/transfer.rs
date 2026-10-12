@@ -625,6 +625,22 @@ impl Drop for Transfers {
 }
 
 #[cfg(test)]
+impl Transfers {
+    /// A handle with no rank threads: every `submit` fails and `poll` returns
+    /// nothing, for tests of transports that never submit a transfer or
+    /// expect every submission to fail.
+    pub(crate) fn stopped(geometry: &[CacheGeometry]) -> Result<Self> {
+        let (_, receiver) = mpsc::channel();
+        Ok(Self {
+            layout: Layout::new(geometry)?,
+            ranks: Vec::new(),
+            receiver,
+            pending: HashMap::new(),
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{super::geometry::tests::geometry, *};
 
