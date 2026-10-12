@@ -149,15 +149,9 @@ impl Header {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_secs()),
         };
-        header.page_segment = header.checksum_segment() + header.checksum_bytes();
-        header.row_segment = header
-            .page_segment
-            .checked_add(
-                (header.tail_pages as u64)
-                    .checked_mul(header.page_record_bytes())
-                    .ok_or_else(|| invalid("record page segment size overflows"))?,
-            )
-            .ok_or_else(|| invalid("record row segment offset overflows"))?;
+        let derived = header.derive()?;
+        header.page_segment = derived.page_segment;
+        header.row_segment = derived.row_segment;
         header.validate()?;
         Ok(header)
     }
@@ -280,7 +274,9 @@ impl Header {
 
     /// Every field agrees with the layout rules: nonzero sizes, a key that
     /// extends its parent by exactly the tail pages, derived segment offsets,
-    /// and rank entries that fit in the header block.
+    /// and rank entries that fit in the header block. The derived sizes are
+    /// computed with overflow checks here, so the unchecked size accessors are
+    /// safe on any header `new` or `decode` returned.
     fn validate(&self) -> Result<()> {
         if self.ranks.is_empty() {
             return Err(invalid("record header rank count is zero"));
@@ -340,24 +336,68 @@ impl Header {
                 self.tail_pages
             )));
         }
-        let page_segment = self.checksum_segment() + self.checksum_bytes();
-        if self.page_segment != page_segment {
+        let derived = self.derive()?;
+        if self.page_segment != derived.page_segment {
             return Err(invalid(format!(
-                "record header page segment offset {} is not the derived offset {page_segment}",
-                self.page_segment
+                "record header page segment offset {} is not the derived offset {}",
+                self.page_segment, derived.page_segment
             )));
         }
-        let row_segment = (self.tail_pages as u64)
-            .checked_mul(self.page_record_bytes())
-            .and_then(|pages| page_segment.checked_add(pages))
-            .ok_or_else(|| invalid("record header segment sizes overflow"))?;
-        if self.row_segment != row_segment {
+        if self.row_segment != derived.row_segment {
             return Err(invalid(format!(
-                "record header row segment offset {} is not the derived offset {row_segment}",
-                self.row_segment
+                "record header row segment offset {} is not the derived offset {}",
+                self.row_segment, derived.row_segment
             )));
         }
         Ok(())
+    }
+
+    /// Segment offsets derived from the rank entries and tail page count with
+    /// overflow checks; the error names the field whose size overflows. The
+    /// file length with the row is checked as well, so `length_with_row`
+    /// cannot overflow on a validated header.
+    fn derive(&self) -> Result<Derived> {
+        let mut page_record_bytes = 0u64;
+        let mut row_record_bytes = 0u64;
+        for (index, rank) in self.ranks.iter().enumerate() {
+            for size in &rank.planes {
+                page_record_bytes = checked_padded(*size)
+                    .and_then(|padded| page_record_bytes.checked_add(padded))
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "record header rank {index} plane size {size} overflows the page record"
+                        ))
+                    })?;
+            }
+            row_record_bytes = checked_padded(rank.row_bytes)
+                .and_then(|padded| row_record_bytes.checked_add(padded))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "record header rank {index} row size {} overflows the row record",
+                        rank.row_bytes
+                    ))
+                })?;
+        }
+        let page_segment = self.checksum_segment() + self.checksum_bytes();
+        let row_segment = (self.tail_pages as u64)
+            .checked_mul(page_record_bytes)
+            .and_then(|pages| page_segment.checked_add(pages))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "record header tail page count {} of {page_record_bytes}-byte page records \
+                     overflows the row segment offset",
+                    self.tail_pages
+                ))
+            })?;
+        if row_segment.checked_add(row_record_bytes).is_none() {
+            return Err(invalid(format!(
+                "record header row record size {row_record_bytes} overflows the file length"
+            )));
+        }
+        Ok(Derived {
+            page_segment,
+            row_segment,
+        })
     }
 
     /// Offset of the per-page checksum segment.
@@ -370,7 +410,10 @@ impl Header {
         (self.tail_pages as u64 * 8).div_ceil(BLOCK_BYTES) * BLOCK_BYTES
     }
 
-    /// Bytes of one page record across ranks under this header's sizes.
+    /// Bytes of one page record across ranks under this header's sizes. This
+    /// and the other size accessors rely on the overflow checks of `new` and
+    /// `decode`; a header whose public fields were changed afterwards must be
+    /// re-validated through `encode` or `layout` before they are used.
     pub fn page_record_bytes(&self) -> u64 {
         self.ranks.iter().map(RankSizes::page_record_bytes).sum()
     }
@@ -432,8 +475,18 @@ impl Header {
     }
 }
 
+/// Segment offsets a header's sizes imply, computed without overflow.
+struct Derived {
+    page_segment: u64,
+    row_segment: u64,
+}
+
 fn padded(bytes: u64) -> u64 {
     bytes.div_ceil(BLOCK_BYTES) * BLOCK_BYTES
+}
+
+fn checked_padded(bytes: u64) -> Option<u64> {
+    bytes.div_ceil(BLOCK_BYTES).checked_mul(BLOCK_BYTES)
 }
 
 struct Cursor<'a> {
@@ -570,6 +623,9 @@ pub struct Scanned {
 /// shorter than its page segment cannot supply its pages and is deleted; a
 /// file covering the page segment but not the row segment is a page-only
 /// record. A file that vanishes while the scan runs is treated as absent.
+/// Only a file whose contents fail a check is deleted: a `.ckpt` file the
+/// scan cannot open or read for another reason, such as a permission or
+/// device error, fails the scan with an error naming it and stays in place.
 pub fn scan(
     directory: &Path,
     identity: &[u8; 32],
@@ -638,9 +694,10 @@ pub fn scan(
             continue;
         }
         match inspect(&path, name, &metadata, identity, fingerprint, geometry) {
-            Ok(Some(scanned)) => records.push(scanned),
-            Ok(None) => {}
-            Err(_) => remove(&path)?,
+            Inspection::Record(scanned) => records.push(scanned),
+            Inspection::Absent => {}
+            Inspection::Invalid => remove(&path)?,
+            Inspection::Unreadable(error) => return Err(error),
         }
     }
     loop {
@@ -664,8 +721,17 @@ pub fn scan(
     Ok(records)
 }
 
-/// `Ok(None)` when the file vanished; `Err` when it is not a valid record for
-/// this directory and must be deleted.
+/// What the scan found a `.ckpt` file to be.
+enum Inspection {
+    Record(Scanned),
+    /// The file vanished while the scan ran.
+    Absent,
+    /// The file's name or contents fail a record check; the scan deletes it.
+    Invalid,
+    /// The file could not be opened or read; the scan fails and keeps it.
+    Unreadable(Error),
+}
+
 fn inspect(
     path: &Path,
     name: &str,
@@ -673,39 +739,47 @@ fn inspect(
     identity: &[u8; 32],
     fingerprint: &[u8; 16],
     geometry: &[CacheGeometry],
-) -> Result<Option<Scanned>> {
+) -> Inspection {
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_failure("open record", error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Inspection::Absent,
+        Err(error) => {
+            return Inspection::Unreadable(io_failure(
+                format!("open record file {}", path.display()),
+                error,
+            ));
+        }
     };
     let mut block = [0u8; HEADER_BYTES];
-    file.read_exact(&mut block)
-        .map_err(|error| io_failure("read record header", error))?;
-    let header = Header::decode(&block)?;
-    if header.identity != *identity {
-        return Err(invalid("record belongs to another model identity"));
+    if let Err(error) = file.read_exact(&mut block) {
+        return if error.kind() == io::ErrorKind::UnexpectedEof {
+            Inspection::Invalid
+        } else {
+            Inspection::Unreadable(io_failure(
+                format!("read record header of {}", path.display()),
+                error,
+            ))
+        };
     }
-    if header.fingerprint != *fingerprint {
-        return Err(invalid("record belongs to another layout fingerprint"));
-    }
-    if !header.matches(geometry) {
-        return Err(invalid("record sizes differ from the cache geometry"));
-    }
-    if parse_file_name(name) != Some(header.key) {
-        return Err(invalid("record file name differs from its header key"));
-    }
+    let Ok(header) = Header::decode(&block) else {
+        return Inspection::Invalid;
+    };
     let bytes = metadata.len();
-    if bytes < header.row_segment {
-        return Err(invalid("record file is shorter than its page segment"));
+    let belongs_here = header.identity == *identity
+        && header.fingerprint == *fingerprint
+        && header.matches(geometry);
+    let named_by_key = parse_file_name(name) == Some(header.key);
+    let covers_pages = bytes >= header.row_segment;
+    if !belongs_here || !named_by_key || !covers_pages {
+        return Inspection::Invalid;
     }
-    Ok(Some(Scanned {
+    Inspection::Record(Scanned {
         row: header.row_present(bytes),
         header,
         path: path.to_path_buf(),
         bytes,
         modified: metadata.modified().unwrap_or(UNIX_EPOCH),
-    }))
+    })
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -734,7 +808,11 @@ pub fn checksum(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::offload::{geometry::tests::geometry, index::Index};
-    use std::{fs::File, io::Write as _, os::unix::fs::symlink};
+    use std::{
+        fs::File,
+        io::Write as _,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
 
     const IDENTITY: [u8; 32] = [0xab; 32];
     const FINGERPRINT: [u8; 16] = [0xcd; 16];
@@ -943,6 +1021,48 @@ mod tests {
         );
     }
 
+    /// Byte offsets of rank 0's entries in a one-rank, three-plane header:
+    /// the plane count at 177, the plane sizes at 181, 189, and 197, and the
+    /// row size at 205.
+    const PLANE_0: usize = 181;
+    const PLANE_1: usize = 189;
+    const ROW_0: usize = 205;
+
+    #[test]
+    fn decode_rejects_overflowing_sizes_without_panicking() {
+        let geometry = geometries().remove(0);
+        let header = header(&geometry, 640, Some(100));
+        assert_eq!(header.tail_pages, 9);
+        let encoded = header.encode().unwrap();
+        let patched = |fields: &[(usize, u64)]| {
+            let mut bytes = encoded;
+            for (offset, value) in fields {
+                bytes[*offset..*offset + 8].copy_from_slice(&value.to_le_bytes());
+            }
+            Header::decode(&bytes).unwrap_err().to_string()
+        };
+        let message = patched(&[(PLANE_0, u64::MAX)]);
+        assert!(message.contains("rank 0 plane size"), "{message}");
+        let message = patched(&[(PLANE_0, 1 << 63), (PLANE_1, 1 << 63)]);
+        assert!(message.contains("rank 0 plane size"), "{message}");
+        let message = patched(&[(ROW_0, u64::MAX - 1)]);
+        assert!(message.contains("rank 0 row size"), "{message}");
+        let message = patched(&[(PLANE_0, 1 << 61)]);
+        assert!(message.contains("tail page count 9"), "{message}");
+        let message = patched(&[(PLANE_0, 1 << 60), (ROW_0, 1 << 63)]);
+        assert!(message.contains("overflows the file length"), "{message}");
+        let mut widened = header.clone();
+        widened.ranks[0].row_bytes = u64::MAX;
+        assert!(
+            widened
+                .encode()
+                .unwrap_err()
+                .to_string()
+                .contains("row size")
+        );
+        assert!(widened.layout().is_err());
+    }
+
     #[test]
     fn names_round_trip() {
         let key = PrefixKey {
@@ -1080,8 +1200,12 @@ mod tests {
                 child.row_segment - 1,
             ),
             directory.join("junk.ckpt"),
+            directory.join(file_name(&key(290, 29))),
         ];
         fs::write(&deleted[8], b"not a record").unwrap();
+        let mut overflowing = header(&geometry, 290, None).encode().unwrap();
+        overflowing[PLANE_0..PLANE_0 + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        fs::write(&deleted[9], overflowing).unwrap();
         let foreign = directory.join("README");
         fs::write(&foreign, b"ignored").unwrap();
         let subdirectory = directory.join("nested.ckpt");
@@ -1162,6 +1286,40 @@ mod tests {
         let file = directory.join("file");
         fs::write(&file, b"").unwrap();
         assert!(scan(&file, &IDENTITY, &FINGERPRINT, &geometry).is_err());
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn scan_keeps_a_record_it_cannot_read_and_fails() {
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: file modes do not restrict the superuser");
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "flare-record-unreadable-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let geometry = geometries().remove(0);
+        let root = header(&geometry, 200, None);
+        let path = write_record(
+            &directory,
+            &root,
+            &file_name(&root.key),
+            root.length_with_row(),
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let error = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&file_name(&root.key)), "{error}");
+        assert!(path.exists());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let records = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        assert_eq!(names(&records), [file_name(&root.key)]);
         fs::remove_dir_all(&directory).unwrap();
     }
 }

@@ -11,11 +11,13 @@
 //! Jobs execute one at a time in submission order, so a record's `Create`,
 //! page and row writes, and `Commit` or `Abort` form a sequence under one id,
 //! as do `Open`, reads, and `Close`. Every job produces exactly one [`Reply`].
-//! A job that fails leaves no partial record behind: a failed `Commit` closes
-//! and unlinks the temporary file. The thread allocates its ring and its
-//! aligned scratch block once at start; the scratch holds the header block and
-//! a checksum segment of up to [`MAX_TAIL_PAGES`] pages, which bounds the
-//! records the thread accepts.
+//! A job that fails leaves no partial record behind: a page or row write that
+//! fails leaves its pages or row unwritten, `Commit` refuses a record with an
+//! unwritten page or row, and a failed `Commit` closes and unlinks the
+//! temporary file, as does thread exit for every record still being written.
+//! The thread allocates its ring and its aligned scratch block once at start;
+//! the scratch holds the header block and a checksum segment of up to
+//! [`MAX_TAIL_PAGES`] pages, which bounds the records the thread accepts.
 
 use std::{
     cell::Cell,
@@ -27,7 +29,7 @@ use std::{
     sync::mpsc::{self, Receiver, SyncSender, TrySendError},
 };
 
-use io_uring::{IoUring, opcode, types};
+use io_uring::{EnterFlags, IoUring, opcode, types};
 
 use crate::{Error, Result};
 
@@ -196,7 +198,9 @@ impl DiskThread {
 
     /// Finish outstanding jobs and join the thread. The thread answers every
     /// queued job before it exits, and those replies remain available through
-    /// `poll` after this returns.
+    /// `poll` after this returns. Records still being written when the thread
+    /// exits are closed and their temporary files unlinked; records open for
+    /// reading are closed.
     pub fn close(&mut self) -> Result<()> {
         self.sender.take();
         let Some(thread) = self.thread.take() else {
@@ -279,6 +283,16 @@ struct Worker {
     ring: Ring,
     scratch: AlignedBuffer,
     records: HashMap<JobId, Record>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        for record in self.records.values() {
+            if let Record::Writing(writing) = record {
+                let _ = fs::remove_file(&writing.temporary);
+            }
+        }
+    }
 }
 
 impl Worker {
@@ -369,25 +383,32 @@ impl Worker {
         Ok(0)
     }
 
+    /// Pages count as written, and their checksums are recorded, only after
+    /// the transfer completed, so a failed write keeps `Commit` from renaming
+    /// a record with an unwritten page into place.
     fn write_pages(&mut self, id: JobId, first: u32, buffers: &[usize]) -> Result<u64> {
         let writing = writing(&mut self.records, id)?;
         let page_bytes = writing.header.page_record_bytes();
         let pages = page_range(&writing.header, first, buffers.len())?;
-        let mut spans = Vec::with_capacity(buffers.len());
+        let spans: Vec<Span> = pages
+            .clone()
+            .zip(buffers)
+            .map(|(page, address)| Span {
+                address: *address,
+                offset: writing.header.page_segment + page as u64 * page_bytes,
+                length: page_bytes as usize,
+            })
+            .collect();
+        let moved = self.ring.transfer(&writing.file, &spans, true)?;
         for (page, address) in pages.zip(buffers) {
-            // SAFETY: The caller keeps the slab at `address` valid and unchanged
-            // for `page_bytes` until this job's reply.
+            // SAFETY: The transfer checked the span's alignment and completed;
+            // the caller keeps the slab at `address` valid and unchanged for
+            // `page_bytes` until this job's reply.
             let bytes =
                 unsafe { std::slice::from_raw_parts(*address as *const u8, page_bytes as usize) };
             writing.checksums[page] = checksum(bytes);
             writing.written[page] = true;
-            spans.push(Span {
-                address: *address,
-                offset: writing.header.page_segment + page as u64 * page_bytes,
-                length: page_bytes as usize,
-            });
         }
-        let moved = self.ring.transfer(&writing.file, &spans, true)?;
         writing.bytes += moved;
         Ok(moved)
     }
@@ -395,16 +416,16 @@ impl Worker {
     fn write_row(&mut self, id: JobId, buffer: usize) -> Result<u64> {
         let writing = writing(&mut self.records, id)?;
         let row_bytes = writing.header.row_record_bytes();
-        // SAFETY: As for page buffers.
-        let bytes = unsafe { std::slice::from_raw_parts(buffer as *const u8, row_bytes as usize) };
-        writing.header.row_checksum = checksum(bytes);
-        writing.row_written = true;
         let span = Span {
             address: buffer,
             offset: writing.header.row_segment,
             length: row_bytes as usize,
         };
         let moved = self.ring.transfer(&writing.file, &[span], true)?;
+        // SAFETY: As for page buffers.
+        let bytes = unsafe { std::slice::from_raw_parts(buffer as *const u8, row_bytes as usize) };
+        writing.header.row_checksum = checksum(bytes);
+        writing.row_written = true;
         writing.bytes += moved;
         Ok(moved)
     }
@@ -746,8 +767,9 @@ struct Ring {
     ring: IoUring,
     slots: Vec<Chunk>,
     free: Vec<usize>,
-    /// Set when a submission failed with chunks possibly still in flight; the
-    /// ring is not used again, and its slots stay reserved until it is dropped.
+    /// Set when `io_uring_enter` failed outright. The ring is not used again:
+    /// entries it never consumed stay in the submission queue and their slots
+    /// stay reserved until the ring is dropped.
     broken: Option<String>,
 }
 
@@ -764,10 +786,9 @@ impl Ring {
     }
 
     /// Move every span, keeping up to [`RING_DEPTH`] chunks in flight, and
-    /// return the bytes moved. Returns after every issued chunk has completed,
-    /// so the caller's buffers are quiescent whatever the outcome, except when
-    /// a submission fails outright: that marks the ring broken and no later
-    /// transfer is attempted.
+    /// return the bytes moved. Returns after every chunk the kernel holds has
+    /// completed, so the caller's buffers are quiescent whatever the outcome;
+    /// see `abandon` for the one case that cannot establish this.
     fn transfer(&mut self, file: &File, spans: &[Span], write: bool) -> Result<u64> {
         if let Some(reason) = &self.broken {
             return Err(invalid(format!(
@@ -811,32 +832,30 @@ impl Ring {
                 }
                 .user_data(slot as u64);
                 // SAFETY: The buffer stays valid until this function returns,
-                // which happens only after the chunk's completion is consumed.
+                // which happens only after the chunk's completion is consumed
+                // or `abandon` established that the kernel never saw the entry.
                 if unsafe { self.ring.submission().push(&entry) }.is_err() {
                     self.free.push(slot);
+                    // The queue holds one entry per slot, so a free slot
+                    // always has room; a refused push is a bookkeeping fault.
+                    failure.get_or_insert_with(|| {
+                        invalid(format!(
+                            "disk thread ring refused a submission entry with {} free slots",
+                            self.free.len()
+                        ))
+                    });
                     break;
                 }
                 self.slots[slot] = chunk;
                 pending = chunks.next();
             }
-            if self.free.len() == RING_DEPTH {
+            if self.free.len() == RING_DEPTH && (pending.is_none() || failure.is_some()) {
                 break;
             }
             match self.ring.submit_and_wait(1) {
                 Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => {
-                    let reason = format!("submit direct {verb}: {error}");
-                    self.broken = Some(reason.clone());
-                    return Err(invalid(reason));
-                }
+                Err(error) if retryable(&error) => std::thread::yield_now(),
+                Err(error) => return Err(self.abandon(verb, error)),
             }
             for completion in self.ring.completion() {
                 let slot = completion.user_data() as usize;
@@ -870,6 +889,50 @@ impl Ring {
             Some(error) => Err(error),
         }
     }
+
+    /// `io_uring_enter` failed outright, so it consumed no entries: the ones
+    /// still in the submission queue were never seen by the kernel, while the
+    /// others may still be in flight. Wait for those to complete so the
+    /// caller's buffers are quiescent, then leave the ring unusable. If
+    /// waiting fails as well, the kernel may still write into a buffer of this
+    /// transfer after the reply; the store must then stop using the thread.
+    fn abandon(&mut self, verb: &str, error: io::Error) -> Error {
+        let reason = format!("submit direct {verb}: {error}");
+        self.broken = Some(reason.clone());
+        let unconsumed = self.ring.submission().len();
+        let mut held = (RING_DEPTH - self.free.len()).saturating_sub(unconsumed);
+        while held > 0 {
+            held = held.saturating_sub(self.ring.completion().count());
+            if held == 0 {
+                break;
+            }
+            // SAFETY: Nothing is submitted and no argument is passed; the call
+            // only waits for one completion.
+            match unsafe {
+                self.ring.submitter().enter::<libc::sigset_t>(
+                    0,
+                    1,
+                    EnterFlags::GETEVENTS.bits(),
+                    None,
+                )
+            } {
+                Ok(_) => {}
+                Err(error) if retryable(&error) => std::thread::yield_now(),
+                Err(_) => break,
+            }
+        }
+        invalid(reason)
+    }
+}
+
+/// `io_uring_enter` errors after which the call is repeated: an interrupting
+/// signal, or the kernel asking for a retry because a request could not be
+/// allocated or the completion queue has overflowed.
+fn retryable(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
+    )
 }
 
 /// Heap memory aligned to [`BLOCK_BYTES`], zero-filled, usable as a direct-I/O buffer.
@@ -1301,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_and_failed_commit_remove_the_temporary_file() {
+    fn failed_writes_abort_and_exit_leave_no_record_behind() {
         let Some(directory) = test_directory("abort") else {
             return;
         };
@@ -1311,11 +1374,70 @@ mod tests {
         };
         let header = header(key, 3);
         let page = buffer(header.page_record_bytes() as usize, 5);
+        let row = buffer(header.row_record_bytes() as usize, 6);
         let temporary = directory.join(temporary_name(&key));
         let path = directory.join(file_name(&key));
         let thread = DiskThread::start("flare-offload-disk").unwrap();
 
+        // A failed page write leaves its page unwritten, so a commit queued
+        // behind it is refused and removes the temporary file.
         let id = JobId(1);
+        thread
+            .submit(Job::Create {
+                id,
+                temporary: temporary.clone(),
+                header: header.clone(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::WritePages {
+                id,
+                window: 0,
+                first: 0,
+                buffers: vec![page.address()],
+            })
+            .unwrap();
+        thread
+            .submit(Job::WritePages {
+                id,
+                window: 1,
+                first: 1,
+                buffers: vec![page.address() + 1],
+            })
+            .unwrap();
+        thread
+            .submit(Job::WritePages {
+                id,
+                window: 2,
+                first: 2,
+                buffers: vec![page.address()],
+            })
+            .unwrap();
+        thread
+            .submit(Job::WriteRow {
+                id,
+                buffer: row.address(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::Commit {
+                id,
+                path: path.clone(),
+                sync: false,
+            })
+            .unwrap();
+        let replies = wait(&thread, 6);
+        succeeded(&replies[0]);
+        succeeded(&replies[1]);
+        assert!(failed(&replies[2]).contains("aligned"));
+        assert_eq!(replies[2].window, 1);
+        succeeded(&replies[3]);
+        succeeded(&replies[4]);
+        let message = failed(&replies[5]);
+        assert!(message.contains("1 of 3 page records"), "{message}");
+        assert!(!temporary.exists());
+        assert!(!path.exists());
+
         thread
             .submit(Job::Create {
                 id,
@@ -1337,14 +1459,6 @@ mod tests {
         assert!(temporary.exists());
         thread
             .submit(Job::WritePages {
-                id,
-                window: 1,
-                first: 1,
-                buffers: vec![page.address() + 1],
-            })
-            .unwrap();
-        thread
-            .submit(Job::WritePages {
                 id: JobId(9),
                 window: 0,
                 first: 0,
@@ -1354,19 +1468,18 @@ mod tests {
         thread.submit(Job::Close { id }).unwrap();
         thread.submit(Job::Abort { id }).unwrap();
         thread.submit(Job::Abort { id }).unwrap();
-        let replies = wait(&thread, 5);
-        assert!(failed(&replies[0]).contains("aligned"));
-        assert!(failed(&replies[1]).contains("names no open record"));
-        assert!(failed(&replies[2]).contains("being written"));
-        succeeded(&replies[3]);
+        let replies = wait(&thread, 4);
+        assert!(failed(&replies[0]).contains("names no open record"));
+        assert!(failed(&replies[1]).contains("being written"));
+        succeeded(&replies[2]);
         assert!(!temporary.exists());
-        assert!(failed(&replies[4]).contains("names no open record"));
+        assert!(failed(&replies[3]).contains("names no open record"));
 
         thread
             .submit(Job::Create {
                 id,
                 temporary: temporary.clone(),
-                header,
+                header: header.clone(),
             })
             .unwrap();
         thread
@@ -1392,7 +1505,252 @@ mod tests {
         assert!(message.contains("its row"), "{message}");
         assert!(!temporary.exists());
         assert!(!path.exists());
+
+        // Dropping the thread with a record still being written unlinks its
+        // temporary file.
+        thread
+            .submit(Job::Create {
+                id,
+                temporary: temporary.clone(),
+                header,
+            })
+            .unwrap();
+        succeeded(&wait(&thread, 1)[0]);
+        assert!(temporary.exists());
+        drop(thread);
+        assert!(!temporary.exists());
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn transfers_cross_the_chunk_size_and_the_ring_depth() {
+        let Some(directory) = test_directory("chunked") else {
+            return;
+        };
+        // One page record per ring slot plus seven, so one write exhausts the
+        // ring's slots, and a row of three chunks, two of them full.
+        let tail = RING_DEPTH as u32 + 7;
+        let geometry = [geometry(64, &[("k", 4096)], 2 * CHUNK_BYTES as u64 + 4096)];
+        let key = PrefixKey {
+            consumed_tokens: 64 * tail as u64,
+            digest: [9; 16],
+        };
+        let header = Header::new(
+            &geometry,
+            [1; 32],
+            [2; 16],
+            key,
+            None,
+            [3; 16],
+            tail,
+            SystemTime::now(),
+        )
+        .unwrap();
+        let page_bytes = header.page_record_bytes() as usize;
+        let row_bytes = header.row_record_bytes() as usize;
+        assert_eq!(page_bytes, 4096);
+        assert_eq!(row_bytes, 2 * CHUNK_BYTES + 4096);
+        let pages: Vec<AlignedBuffer> = (0..tail)
+            .map(|index| buffer(page_bytes, index as u8))
+            .collect();
+        let row = buffer(row_bytes, 77);
+        let temporary = directory.join(temporary_name(&key));
+        let path = directory.join(file_name(&key));
+
+        let mut thread = DiskThread::start("flare-offload-disk").unwrap();
+        let writer = JobId(1);
+        thread
+            .submit(Job::Create {
+                id: writer,
+                temporary,
+                header: header.clone(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::WritePages {
+                id: writer,
+                window: 0,
+                first: 0,
+                buffers: pages.iter().map(AlignedBuffer::address).collect(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::WriteRow {
+                id: writer,
+                buffer: row.address(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::Commit {
+                id: writer,
+                path: path.clone(),
+                sync: false,
+            })
+            .unwrap();
+        let replies = wait(&thread, 4);
+        succeeded(&replies[0]);
+        assert_eq!(succeeded(&replies[1]), tail as u64 * page_bytes as u64);
+        assert_eq!(succeeded(&replies[2]), row_bytes as u64);
+        assert_eq!(
+            succeeded(&replies[3]),
+            tail as u64 * page_bytes as u64 + row_bytes as u64 + 2 * HEADER_BYTES as u64
+        );
+        assert_eq!(fs::metadata(&path).unwrap().len(), header.length_with_row());
+
+        let reader = JobId(2);
+        let fresh: Vec<AlignedBuffer> = (0..tail).map(|_| buffer(page_bytes, 0xee)).collect();
+        let fresh_row = buffer(row_bytes, 0xee);
+        thread
+            .submit(Job::Open {
+                id: reader,
+                path: path.clone(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::ReadPages {
+                id: reader,
+                window: 0,
+                first: 0,
+                buffers: fresh.iter().map(AlignedBuffer::address).collect(),
+            })
+            .unwrap();
+        thread
+            .submit(Job::ReadRow {
+                id: reader,
+                buffer: fresh_row.address(),
+            })
+            .unwrap();
+        thread.submit(Job::Close { id: reader }).unwrap();
+        thread
+            .submit(Job::Unlink {
+                id: JobId(3),
+                path: path.clone(),
+            })
+            .unwrap();
+        let replies = wait(&thread, 5);
+        assert_eq!(succeeded(&replies[0]), 2 * HEADER_BYTES as u64);
+        assert_eq!(replies[0].header.as_ref().unwrap().tail_pages, tail);
+        assert_eq!(succeeded(&replies[1]), tail as u64 * page_bytes as u64);
+        assert_eq!(succeeded(&replies[2]), row_bytes as u64);
+        succeeded(&replies[3]);
+        succeeded(&replies[4]);
+        for (copy, page) in fresh.iter().zip(&pages) {
+            assert_eq!(copy.as_slice(), page.as_slice());
+        }
+        assert_eq!(fresh_row.as_slice(), row.as_slice());
+        assert!(!path.exists());
+        thread.close().unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn open_and_create_reject_files_and_headers_outside_the_contract() {
+        let Some(directory) = test_directory("reject") else {
+            return;
+        };
+        let short = directory.join("short.ckpt");
+        fs::write(&short, [7u8; 100]).unwrap();
+        let zeroed = directory.join("zeroed.ckpt");
+        fs::write(&zeroed, [0u8; HEADER_BYTES]).unwrap();
+        let wide_key = PrefixKey {
+            consumed_tokens: 64 * (MAX_TAIL_PAGES as u64 + 1),
+            digest: [4; 16],
+        };
+        let wide = header(wide_key, MAX_TAIL_PAGES + 1);
+        let wide_path = directory.join(file_name(&wide_key));
+        fs::write(&wide_path, wide.encode().unwrap()).unwrap();
+        let wide_temporary = directory.join(temporary_name(&wide_key));
+        let page = buffer(wide.page_record_bytes() as usize, 1);
+
+        let mut thread = DiskThread::start("flare-offload-disk").unwrap();
+        thread
+            .submit(Job::Open {
+                id: JobId(1),
+                path: short,
+            })
+            .unwrap();
+        thread
+            .submit(Job::Open {
+                id: JobId(2),
+                path: zeroed,
+            })
+            .unwrap();
+        thread
+            .submit(Job::Open {
+                id: JobId(3),
+                path: wide_path,
+            })
+            .unwrap();
+        thread
+            .submit(Job::Open {
+                id: JobId(4),
+                path: directory.join("missing.ckpt"),
+            })
+            .unwrap();
+        thread
+            .submit(Job::Create {
+                id: JobId(5),
+                temporary: wide_temporary.clone(),
+                header: wide,
+            })
+            .unwrap();
+        for id in 1..=5 {
+            thread
+                .submit(Job::ReadPages {
+                    id: JobId(id),
+                    window: 0,
+                    first: 0,
+                    buffers: vec![page.address()],
+                })
+                .unwrap();
+        }
+        let replies = wait(&thread, 10);
+        let message = failed(&replies[0]);
+        assert!(
+            message.contains("short direct read of 100 bytes"),
+            "{message}"
+        );
+        let message = failed(&replies[1]);
+        assert!(message.contains("magic"), "{message}");
+        let message = failed(&replies[2]);
+        assert!(
+            message.contains(&format!("at most {MAX_TAIL_PAGES}")),
+            "{message}"
+        );
+        failed(&replies[3]);
+        let message = failed(&replies[4]);
+        assert!(
+            message.contains(&format!("at most {MAX_TAIL_PAGES}")),
+            "{message}"
+        );
+        assert!(!wide_temporary.exists());
+        for reply in &replies[5..] {
+            assert!(reply.header.is_none());
+            assert!(failed(reply).contains("names no open record"));
+        }
+        thread.close().unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn direct_open_failure_names_a_filesystem_refusing_direct_io() {
+        let path = Path::new("/records/example.ckpt");
+        let refused = direct_open_failure(
+            "open record file",
+            path,
+            io::Error::from_raw_os_error(libc::EINVAL),
+        )
+        .to_string();
+        assert!(refused.contains("refuses direct I/O"), "{refused}");
+        assert!(refused.contains("/records/example.ckpt"), "{refused}");
+        let missing = direct_open_failure(
+            "open record file",
+            path,
+            io::Error::from_raw_os_error(libc::ENOENT),
+        )
+        .to_string();
+        assert!(!missing.contains("refuses direct I/O"), "{missing}");
+        assert!(missing.contains("/records/example.ckpt"), "{missing}");
     }
 
     #[test]
