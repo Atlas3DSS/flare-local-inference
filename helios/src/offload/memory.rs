@@ -11,9 +11,16 @@
 //!
 //! A checkpoint whose parent's copy-out is still in flight is held back until
 //! that copy-out finishes, then stored as the parent's child, or as a root
-//! record holding its whole chain when the parent's copy-out failed. Index
-//! edges therefore only ever point at ready records, so a failed copy-out can
-//! always remove its node.
+//! record holding its whole chain when the parent's copy-out failed. A
+//! held-back checkpoint that cannot start fails with an event and releases
+//! the checkpoints held back behind it the same way. Index edges therefore
+//! only ever point at ready records, so a failed copy-out can always remove
+//! its node, and a parent is pinned while its child's slabs are allocated so
+//! eviction cannot remove the record the child extends.
+//!
+//! Restores are submitted before copy-outs whenever the queue has room, and
+//! `close` waits up to [`CLOSE_TIMEOUT`] for transfers in progress before
+//! stopping the threads.
 //!
 //! Inside a composite store the memory index holds no tree: every node is a
 //! root whose slabs hold only the checkpoint's tail pages, the disk index
@@ -23,7 +30,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -38,7 +45,7 @@ use super::{
     geometry::invalid,
     index::{Eviction, Index, Match},
     slab::{PageSlab, RowSlab, SlabPool, WINDOW_PAGES},
-    transfer::{Direction, Job, Reply, Transfers},
+    transfer::{CLOSE_TIMEOUT, Direction, Job, Reply, Transfers},
 };
 
 /// Windows of one record submitted to the transfer threads at a time.
@@ -77,21 +84,21 @@ impl Pending {
         }
     }
 
-    /// Submit queued windows until [`IN_FLIGHT_WINDOWS`] are in flight and
-    /// return how many were accepted. A refused window stays at the front of
-    /// the queue and its error is returned.
-    fn pump(&mut self, submit: &mut impl FnMut(Job) -> Result<()>) -> Result<usize> {
-        let mut submitted = 0;
+    /// Submit queued windows until [`IN_FLIGHT_WINDOWS`] are in flight. A
+    /// refused window stays at the front of the queue and its error is
+    /// returned; the windows accepted before it count as in flight.
+    fn pump(&mut self, submit: &mut impl FnMut(Job) -> Result<()>) -> Option<Error> {
         while self.error.is_none() && self.in_flight < IN_FLIGHT_WINDOWS {
             let Some(job) = self.queued.front() else {
                 break;
             };
-            submit(job.clone())?;
+            if let Err(error) = submit(job.clone()) {
+                return Some(error);
+            }
             self.queued.pop_front();
             self.in_flight += 1;
-            submitted += 1;
         }
-        Ok(submitted)
+        None
     }
 
     fn absorb(&mut self, reply: Reply) {
@@ -158,8 +165,6 @@ struct Core {
     inbound: BTreeMap<JobId, Inbound>,
     /// Publications waiting for the copy-out of the named parent key.
     deferred: Vec<(PrefixKey, PublishedCheckpoint)>,
-    /// Windows accepted by the transfer threads whose replies are outstanding.
-    in_flight_jobs: usize,
     stats: StoreStats,
     outbound_rate: Rate,
     inbound_rate: Rate,
@@ -177,7 +182,6 @@ impl Core {
             outbound: BTreeMap::new(),
             inbound: BTreeMap::new(),
             deferred: Vec::new(),
-            in_flight_jobs: 0,
             stats: StoreStats::default(),
             outbound_rate: Rate(INITIAL_MEMORY_RATE),
             inbound_rate: Rate(INITIAL_MEMORY_RATE),
@@ -189,6 +193,19 @@ impl Core {
         let id = JobId(self.next_job);
         self.next_job += 1;
         id
+    }
+
+    /// Windows accepted by the transfer threads whose replies are outstanding.
+    fn in_flight_jobs(&self) -> usize {
+        self.outbound
+            .values()
+            .map(|outbound| outbound.pending.in_flight)
+            .chain(
+                self.inbound
+                    .values()
+                    .map(|inbound| inbound.pending.in_flight),
+            )
+            .sum()
     }
 
     fn deferred_key(&self, key: &PrefixKey) -> bool {
@@ -221,6 +238,7 @@ impl Core {
 
     fn store(&mut self, checkpoint: &PublishedCheckpoint) -> Result<bool> {
         if checkpoint.tail_pages > checkpoint.chain_pages.len() {
+            self.stats.store_failed += 1;
             return Err(invalid(format!(
                 "published checkpoint claims {} tail pages of a {}-page chain",
                 checkpoint.tail_pages,
@@ -242,6 +260,7 @@ impl Core {
         self.store_record(checkpoint, parent, tail, true)
     }
 
+    /// Start a copy-out, counting a skip or a failure to start.
     fn store_record(
         &mut self,
         checkpoint: &PublishedCheckpoint,
@@ -249,21 +268,46 @@ impl Core {
         tail: &[PageId],
         durable: bool,
     ) -> Result<bool> {
+        let result = self.start_record(checkpoint, parent, tail, durable);
+        match &result {
+            Ok(true) => {}
+            Ok(false) => self.stats.store_skipped += 1,
+            Err(_) => self.stats.store_failed += 1,
+        }
+        result
+    }
+
+    /// Allocate and index the record and queue its windows. `Ok(false)` when
+    /// the key is known or no slabs could be freed.
+    fn start_record(
+        &mut self,
+        checkpoint: &PublishedCheckpoint,
+        parent: Option<PrefixKey>,
+        tail: &[PageId],
+        durable: bool,
+    ) -> Result<bool> {
         if self.known(&checkpoint.key) {
-            self.stats.store_skipped += 1;
             return Ok(false);
         }
         let parent = if self.flat { None } else { parent };
-        let Some(record) = self.allocate(
+        // Eviction during allocation must not remove the record being extended.
+        if let Some(parent) = &parent
+            && self.index.pin(parent).is_err()
+        {
+            return Err(invalid("host record parent is not indexed"));
+        }
+        let allocated = self.allocate(
             checkpoint.key,
             parent,
             checkpoint.bucket,
             tail.len(),
             true,
             durable,
-        )?
-        else {
-            self.stats.store_skipped += 1;
+        );
+        if let Some(parent) = &parent {
+            let _ = self.index.unpin(parent);
+        }
+        let Some(record) = allocated? else {
             return Ok(false);
         };
         let Some(row) = record.row else {
@@ -529,41 +573,37 @@ impl Core {
         } else if let Some(inbound) = self.inbound.get_mut(&reply.id) {
             self.inbound_rate.observe(reply.bytes, reply.elapsed);
             inbound.pending.absorb(reply);
-        } else {
-            return;
         }
-        self.in_flight_jobs = self.in_flight_jobs.saturating_sub(1);
     }
 
-    /// Submit queued windows. A refused window waits for a reply to free the
-    /// queue, unless nothing is in flight to produce one: then its record fails.
+    /// Submit queued windows, restores before copy-outs. A refused window
+    /// waits for a reply to free the queue, unless nothing is in flight to
+    /// produce one: then its record fails.
     fn pump(&mut self, submit: &mut impl FnMut(Job) -> Result<()>) {
-        let ids: Vec<JobId> = self.outbound.keys().copied().collect();
-        for id in ids {
-            let Some(outbound) = self.outbound.get_mut(&id) else {
-                continue;
-            };
-            match outbound.pending.pump(submit) {
-                Ok(submitted) => self.in_flight_jobs += submitted,
-                Err(error) => {
-                    if outbound.pending.in_flight == 0 && self.in_flight_jobs == 0 {
-                        outbound.pending.fail(error);
-                    }
-                }
-            }
-        }
         let ids: Vec<JobId> = self.inbound.keys().copied().collect();
         for id in ids {
-            let Some(inbound) = self.inbound.get_mut(&id) else {
-                continue;
-            };
-            match inbound.pending.pump(submit) {
-                Ok(submitted) => self.in_flight_jobs += submitted,
-                Err(error) => {
-                    if inbound.pending.in_flight == 0 && self.in_flight_jobs == 0 {
-                        inbound.pending.fail(error);
-                    }
-                }
+            let refused = self
+                .inbound
+                .get_mut(&id)
+                .and_then(|inbound| inbound.pending.pump(submit));
+            if let Some(error) = refused
+                && self.in_flight_jobs() == 0
+                && let Some(inbound) = self.inbound.get_mut(&id)
+            {
+                inbound.pending.fail(error);
+            }
+        }
+        let ids: Vec<JobId> = self.outbound.keys().copied().collect();
+        for id in ids {
+            let refused = self
+                .outbound
+                .get_mut(&id)
+                .and_then(|outbound| outbound.pending.pump(submit));
+            if let Some(error) = refused
+                && self.in_flight_jobs() == 0
+                && let Some(outbound) = self.outbound.get_mut(&id)
+            {
+                outbound.pending.fail(error);
             }
         }
     }
@@ -627,31 +667,38 @@ impl Core {
         self.start_deferred(&key, events);
     }
 
-    fn start_deferred(&mut self, parent: &PrefixKey, events: &mut Vec<StoreEvent>) {
-        let mut waiting = Vec::new();
-        self.deferred.retain(|(waited, checkpoint)| {
-            if waited == parent {
-                waiting.push(checkpoint.clone());
-                false
-            } else {
-                true
-            }
-        });
-        for checkpoint in waiting {
-            let (parent, tail) = self.shape(&checkpoint);
-            let result = match self.store_record(&checkpoint, parent, tail, true) {
-                Ok(true) => continue,
-                Ok(false) => Err(invalid(
-                    "no host slabs could be freed for the deferred record",
-                )),
-                Err(error) => Err(error),
-            };
-            self.stats.store_failed += 1;
-            events.push(StoreEvent::Stored {
-                checkpoint: checkpoint.id,
-                key: checkpoint.key,
-                result,
+    /// Start the publications that waited for `finished`. One that cannot
+    /// start fails with an event, and the publications waiting for it follow
+    /// in turn, so nothing waits for a key whose copy-out will never finish.
+    fn start_deferred(&mut self, finished: &PrefixKey, events: &mut Vec<StoreEvent>) {
+        let mut finished = vec![*finished];
+        while let Some(parent) = finished.pop() {
+            let mut waiting = Vec::new();
+            self.deferred.retain(|(waited, checkpoint)| {
+                if *waited == parent {
+                    waiting.push(checkpoint.clone());
+                    false
+                } else {
+                    true
+                }
             });
+            for checkpoint in waiting {
+                let (parent, tail) = self.shape(&checkpoint);
+                let result = match self.start_record(&checkpoint, parent, tail, true) {
+                    Ok(true) => continue,
+                    Ok(false) => Err(invalid(
+                        "no host slabs could be freed for the deferred record",
+                    )),
+                    Err(error) => Err(error),
+                };
+                self.stats.store_failed += 1;
+                events.push(StoreEvent::Stored {
+                    checkpoint: checkpoint.id,
+                    key: checkpoint.key,
+                    result,
+                });
+                finished.push(checkpoint.key);
+            }
         }
     }
 
@@ -697,7 +744,6 @@ impl Core {
             }
         }
         self.deferred.clear();
-        self.in_flight_jobs = 0;
     }
 
     fn resident_bytes(&self) -> u64 {
@@ -951,7 +997,22 @@ impl PrefixStore for MemoryStore {
         self.core.stats()
     }
 
+    /// Wait up to [`CLOSE_TIMEOUT`] for records in transfer to finish, so
+    /// copy-outs that complete become resident, then stop the transfer
+    /// threads and abandon whatever remains. Events raised meanwhile are
+    /// dropped: nothing polls a closed store.
     fn close(&mut self) -> Result<()> {
+        let deadline = Instant::now() + CLOSE_TIMEOUT;
+        let mut events = Vec::new();
+        while !(self.core.outbound.is_empty() && self.core.inbound.is_empty())
+            && Instant::now() < deadline
+        {
+            self.poll(&mut events);
+            events.clear();
+            if !(self.core.outbound.is_empty() && self.core.inbound.is_empty()) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         let result = self
             .transfers
             .lock()
@@ -1282,7 +1343,7 @@ mod tests {
         let mut submitted = Vec::new();
         pump_into(&mut core, &mut submitted);
         assert_eq!(submitted.len(), 2);
-        assert_eq!(core.in_flight_jobs, 2);
+        assert_eq!(core.in_flight_jobs(), 2);
         {
             let pending = &core.outbound.values().next().unwrap().pending;
             assert_eq!(pending.in_flight, 2);
@@ -1312,7 +1373,7 @@ mod tests {
         core.absorb(reply(&submitted[3], Ok(())));
         core.settle(&mut events);
         assert_eq!(stored(&events), [(checkpoint.key, Some(200 * PAGE + ROW))]);
-        assert_eq!(core.in_flight_jobs, 0);
+        assert_eq!(core.in_flight_jobs(), 0);
         assert!(core.outbound.is_empty());
         assert!(core.index.node(&checkpoint.key).unwrap().ready);
     }
@@ -1662,6 +1723,204 @@ mod tests {
     }
 
     #[test]
+    fn a_deferred_publication_that_cannot_start_releases_those_waiting_for_it() {
+        // Five pages and one row: the non-durable root holds four pages and
+        // the row, so nothing can be allocated while it stays resident.
+        let mut core = store_core(5, 1, false);
+        let full = history(1200, 10);
+        let root = published(&full, 256, None, 0, 1);
+        let child = published(&full, 320, Some(256), 0, 2);
+        let grandchild = published(&full, 384, Some(320), 0, 3);
+        assert!(
+            core.store_record(&root, None, &root.chain_pages, false)
+                .unwrap()
+        );
+        assert!(core.store(&child).unwrap());
+        assert!(core.store(&grandchild).unwrap());
+        assert_eq!(core.deferred.len(), 2);
+        assert_eq!(core.stats().outbound_in_flight, 3);
+
+        // The child cannot get a row without evicting the root it extends, so
+        // it fails, and the grandchild waiting for it fails in turn: as a root
+        // its chain exceeds the pool.
+        let events = finish(&mut core);
+        assert_eq!(
+            stored(&events),
+            [
+                (root.key, Some(4 * PAGE + ROW)),
+                (child.key, None),
+                (grandchild.key, None)
+            ]
+        );
+        assert!(core.deferred.is_empty());
+        assert!(core.outbound.is_empty());
+        assert!(!core.known(&child.key));
+        assert!(!core.known(&grandchild.key));
+        let stats = core.stats();
+        assert_eq!(stats.outbound_in_flight, 0);
+        assert_eq!(stats.stored, 1);
+        assert_eq!(stats.store_failed, 2);
+        assert_eq!(stats.store_skipped, 0);
+        assert_eq!(core.pool.free_pages(), 1);
+        assert_eq!(core.pool.free_rows(), 0);
+        let node = core.index.node(&root.key).unwrap();
+        assert!(node.ready);
+        assert!(!node.pinned());
+        assert_eq!(node.children(), 0);
+
+        // Neither failed key is deduped afterwards: once the root is gone the
+        // child stores as a root holding its whole chain.
+        core.remove_record(&root.key).unwrap();
+        assert!(core.store(&child).unwrap());
+        let node = core.index.node(&child.key).unwrap();
+        assert_eq!(node.parent, None);
+        assert_eq!(node.location.pages.len(), 5);
+        assert_eq!(
+            stored(&finish(&mut core)),
+            [(child.key, Some(5 * PAGE + ROW))]
+        );
+    }
+
+    #[test]
+    fn allocating_a_child_never_evicts_the_parent_it_extends() {
+        let mut core = store_core(9, 3, false);
+        let full = history(1200, 11);
+        let other = history(300, 12);
+        let root = published(&full, 200, None, 0, 1);
+        let child = published(&full, 400, Some(200), 0, 2);
+        let stranger = published(&other, 200, None, 20, 3);
+        for checkpoint in [&root, &child, &stranger] {
+            assert!(core.store(checkpoint).unwrap());
+            finish(&mut core);
+        }
+        assert_eq!(core.pool.free_pages(), 0);
+        assert_eq!(core.pool.free_rows(), 0);
+
+        // The child is the least recently used leaf, but it is the parent the
+        // grandchild extends: the stranger is evicted instead.
+        let grandchild = published(&full, 600, Some(400), 0, 4);
+        assert!(core.store(&grandchild).unwrap());
+        assert!(core.index.contains(&root.key));
+        assert!(core.index.contains(&child.key));
+        assert!(!core.index.contains(&stranger.key));
+        assert_eq!(
+            core.index.node(&grandchild.key).unwrap().parent,
+            Some(child.key)
+        );
+        let parent = core.index.node(&child.key).unwrap();
+        assert!(!parent.pinned());
+        assert_eq!(parent.children(), 1);
+        assert_eq!(
+            stored(&finish(&mut core)),
+            [(grandchild.key, Some(3 * PAGE + ROW))]
+        );
+
+        // With nothing else evictable the publication is skipped rather than
+        // stored at its parent's expense, and the parent's pin is released.
+        let great = published(&full, 800, Some(600), 0, 5);
+        assert!(!core.store(&great).unwrap());
+        assert_eq!(core.stats().store_skipped, 1);
+        assert_eq!(core.stats().store_failed, 0);
+        assert!(!core.index.contains(&great.key));
+        assert!(core.index.contains(&grandchild.key));
+        assert!(!core.index.node(&grandchild.key).unwrap().pinned());
+        assert_eq!(core.index.len(), 3);
+        assert_eq!(core.pool.free_pages(), 0);
+    }
+
+    #[test]
+    fn a_refusal_after_accepted_windows_keeps_them_counted_in_flight() {
+        let mut core = store_core(256, 2, false);
+        let long = history(200 * PT + 1, 13);
+        let first = published(&long, 200 * PT + 1, None, 0, 1);
+        assert!(core.store(&first).unwrap());
+        let mut accepted = Vec::new();
+        core.pump(&mut |job| {
+            if accepted.is_empty() {
+                accepted.push(job);
+                Ok(())
+            } else {
+                Err(invalid("offload queue for rank 0 holds 16 jobs"))
+            }
+        });
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(core.in_flight_jobs(), 1);
+        {
+            let pending = &core.outbound.values().next().unwrap().pending;
+            assert_eq!(pending.in_flight, 1);
+            assert_eq!(pending.queued.len(), 3);
+            assert_eq!(pending.queued[0].window, 1);
+            assert!(pending.error.is_none());
+        }
+
+        // A record refused while that window is outstanding waits for its reply.
+        let short = history(200, 14);
+        let second = published(&short, 200, None, 220, 2);
+        assert!(core.store(&second).unwrap());
+        core.pump(&mut |_| Err(invalid("offload queue for rank 0 holds 16 jobs")));
+        assert!(
+            core.outbound
+                .values()
+                .all(|outbound| outbound.pending.error.is_none())
+        );
+        assert_eq!(core.stats().store_failed, 0);
+
+        let mut events = Vec::new();
+        core.absorb(reply(&accepted[0], Ok(())));
+        core.settle(&mut events);
+        assert!(events.is_empty());
+        assert_eq!(core.in_flight_jobs(), 0);
+        let mut submitted = Vec::new();
+        pump_into(&mut core, &mut submitted);
+        assert_eq!(
+            submitted
+                .iter()
+                .map(|job| (job.id, job.window))
+                .collect::<Vec<_>>(),
+            [(JobId(1), 1), (JobId(1), 2), (JobId(2), 0)]
+        );
+        assert_eq!(core.in_flight_jobs(), 3);
+        for job in &submitted {
+            core.absorb(reply(job, Ok(())));
+        }
+        core.settle(&mut events);
+        assert_eq!(stored(&events), [(second.key, Some(3 * PAGE + ROW))]);
+        assert_eq!(
+            stored(&finish(&mut core)),
+            [(first.key, Some(200 * PAGE + ROW))]
+        );
+        assert_eq!(core.stats().stored, 2);
+    }
+
+    #[test]
+    fn restores_are_submitted_before_copy_outs() {
+        let mut core = store_core(32, 4, false);
+        let full = history(1200, 15);
+        let root = published(&full, 200, None, 0, 1);
+        assert!(core.store(&root).unwrap());
+        finish(&mut core);
+        let child = published(&full, 400, Some(200), 0, 2);
+        assert!(core.store(&child).unwrap());
+        let hit = core.lookup(&full, 0).unwrap();
+        assert_eq!(hit.key, root.key);
+        let ticket = InboundTicket {
+            key: root.key,
+            pages: (100..103).map(PageId).collect(),
+            slot: StateSlotId(7),
+        };
+        core.fetch_chain(&hit.chain, ticket).unwrap();
+        let mut submitted = Vec::new();
+        pump_into(&mut core, &mut submitted);
+        assert_eq!(
+            submitted
+                .iter()
+                .map(|job| job.direction)
+                .collect::<Vec<_>>(),
+            [Direction::In, Direction::Out]
+        );
+    }
+
+    #[test]
     fn rates_weight_recent_windows_and_ignore_empty_ones() {
         let mut rate = Rate(1000.0);
         rate.observe(0, Duration::from_secs(1));
@@ -1819,29 +2078,34 @@ mod tests {
         assert_eq!(stats.memory_bytes, layout.record_bytes(3));
         assert!(stats.outbound_rate > 0.0);
 
-        let record = store.record(&checkpoint.key).unwrap().clone();
-        assert_eq!(record.pages.len(), 3);
-        let pool = store.pool();
-        for (slab, id) in record.pages.iter().zip(sources) {
-            let bytes = pool.page(*slab);
-            for (plane, geometry) in rank.planes.iter().enumerate() {
-                let start = layout.ranks[0].plane_offsets[plane] as usize;
-                let mut expected = vec![0u8; geometry.unit_bytes as usize];
-                fill(&mut expected, seed(plane, id));
-                assert!(
-                    bytes[start..start + expected.len()] == expected[..],
-                    "slab bytes of plane {} ({plane}) page {id} differ from the device",
-                    geometry.name
-                );
+        // The record's slabs hold the source pages' and row's patterns under the layout.
+        let check_record = |store: &MemoryStore, key: &PrefixKey, label: &str| {
+            let record = store.record(key).unwrap().clone();
+            assert_eq!(record.pages.len(), 3, "{label}");
+            let pool = store.pool();
+            for (slab, id) in record.pages.iter().zip(sources) {
+                let bytes = pool.page(*slab);
+                for (plane, geometry) in rank.planes.iter().enumerate() {
+                    let start = layout.ranks[0].plane_offsets[plane] as usize;
+                    let mut expected = vec![0u8; geometry.unit_bytes as usize];
+                    fill(&mut expected, seed(plane, id));
+                    assert!(
+                        bytes[start..start + expected.len()] == expected[..],
+                        "{label}: slab bytes of plane {} ({plane}) page {id} differ from the device",
+                        geometry.name
+                    );
+                }
             }
-        }
-        let row_start = layout.ranks[0].row_offset as usize;
-        let mut expected = vec![0u8; rank.row.unit_bytes as usize];
-        fill(&mut expected, seed(row_plane, source_slot));
-        assert!(
-            pool.row(record.row.unwrap())[row_start..row_start + expected.len()] == expected[..],
-            "row slab bytes differ from the device"
-        );
+            let row_start = layout.ranks[0].row_offset as usize;
+            let mut expected = vec![0u8; rank.row.unit_bytes as usize];
+            fill(&mut expected, seed(row_plane, source_slot));
+            assert!(
+                pool.row(record.row.unwrap())[row_start..row_start + expected.len()]
+                    == expected[..],
+                "{label}: row slab bytes differ from the device"
+            );
+        };
+        check_record(&store, &checkpoint.key, "first record");
 
         // Poison the device copies, then restore the chain into other ids.
         for (plane, geometry) in rank.planes.iter().enumerate() {
@@ -1971,22 +2235,33 @@ mod tests {
         assert_eq!(store.stats().memory_records, 1);
         assert!(store.lookup(&history, 0).is_none());
         assert_eq!(store.lookup(&other, 0).unwrap().key, second.key);
-        let record = store.record(&second.key).unwrap().clone();
-        let pool = store.pool();
-        for (slab, id) in record.pages.iter().zip(sources) {
-            let bytes = pool.page(*slab);
-            for (plane, geometry) in rank.planes.iter().enumerate() {
-                let start = layout.ranks[0].plane_offsets[plane] as usize;
-                let mut expected = vec![0u8; geometry.unit_bytes as usize];
-                fill(&mut expected, seed(plane, id));
-                assert!(
-                    bytes[start..start + expected.len()] == expected[..],
-                    "second record's plane {} page {id} differs from the restored device page",
-                    geometry.name
-                );
-            }
-        }
+        check_record(&store, &second.key, "second record");
+
+        // Closing waits for a copy-out in progress: the record is resident afterwards.
+        let mut another = PrefixHistory::new(IDENTITY);
+        another.append(&tokens[..consumed as usize], &[]).unwrap();
+        another.append(&[21, 22, 23], &[]).unwrap();
+        let third_consumed = consumed + 3;
+        let third = PublishedCheckpoint {
+            id: checkpoint_id(3),
+            key: another.key_at(third_consumed).unwrap(),
+            parent: None,
+            bucket: another.bucket_at(third_consumed).unwrap(),
+            chain_pages: targets.iter().map(|id| PageId(*id)).collect(),
+            tail_pages: 3,
+            slot: StateSlotId(target_slot),
+        };
+        assert!(store.store(&third).unwrap());
+        assert!(!store.index().contains(&second.key));
+        assert_eq!(store.stats().outbound_in_flight, 1);
         store.close().unwrap();
+        let stats = store.stats();
+        assert_eq!(stats.stored, 3);
+        assert_eq!(stats.store_failed, 0);
+        assert_eq!(stats.outbound_in_flight, 0);
+        assert_eq!(stats.memory_records, 1);
+        assert!(store.index().node(&third.key).unwrap().ready);
+        check_record(&store, &third.key, "record stored across close");
         drop(store);
         drop(staging);
         drop(stream);
