@@ -131,6 +131,8 @@ class PreparedGlmIndexer:
             raise ValueError("GLM index scratch and metadata capacities differ")
         self.module, self.scratch, self.state, self.metadata, self.mode = module, scratch, state, metadata, mode
         self.context = context
+        # Layers of one forward share index scratch and metadata; only the first fills the selection tables.
+        self.prepares_tables = True
         if context is not None and scratch.gathered.shape != (rows, context.shards.world * 512, 2):
             raise ValueError("GLM context-parallel selection requires candidate scratch for every row")
         # The index key and head weights arrive as columns of the layer's fused input projection.
@@ -204,12 +206,13 @@ class PreparedGlmIndexer:
         s.weights.copy_(self.weight_input)
         glm_pool.quantize_queries(*self.query_arguments, plan=self.query_plan)
         glm_pool.update_pools(*self.pool_arguments, plan=self.pool_plan)
-        pools = (m.positions + 1) // 4
-        s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
-        if self.mode == "prefill":
-            s.page_table.copy_(m.block_table)
-        else:
-            s.page_table.copy_(m.block_table[m.requests.long()])
+        if self.prepares_tables:
+            pools = (m.positions + 1) // 4
+            s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
+            if self.mode == "prefill":
+                s.page_table.copy_(m.block_table)
+            else:
+                s.page_table.copy_(m.block_table[m.requests.long()])
         for selector in self.selectors:
             selector()
         if self.context is None:

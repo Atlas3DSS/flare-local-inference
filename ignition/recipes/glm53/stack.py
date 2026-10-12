@@ -124,6 +124,11 @@ class PreparedDecoder:
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")
+        # Sparse-attention layers share index scratch, which no other layer overlays, and the same metadata,
+        # so the first layer's pool lengths and page tables serve every later one.
+        indexers = [layer.attention.indexer for layer in self.layers if hasattr(layer.attention, "indexer")]
+        for indexer in indexers[1:]:
+            indexer.prepares_tables = False
         self.lm_head = PreparedVocabularyProjection(scratch.hidden, weights.tree.lm_head.weight,
             scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator,
             session=session, name=f"{name}.lm_head")
