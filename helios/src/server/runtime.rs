@@ -1129,9 +1129,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 }
             }
         }
-        if progress {
-            self.metrics.store(store.stats());
-        }
+        // Store gauges change without events, so they are refreshed every pass.
+        self.metrics.store(store.stats());
         for handle in requeued {
             self.requeue(handle);
         }

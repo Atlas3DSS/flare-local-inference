@@ -214,7 +214,7 @@ def measure(args, label: str, extra: list[str]) -> dict:
         model_id = server.model_id()
         summary = {"decode": decode_workload(server, run, model_id, args, label),
                    "prefill": prefill_workload(server, run, model_id, args, label)}
-        if label != "baseline":
+        if not label.startswith("baseline"):
             summary["inbound"] = inbound_latency(server, run, model_id, args, label)
         return summary
     finally:

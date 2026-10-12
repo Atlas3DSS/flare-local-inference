@@ -213,33 +213,54 @@ def memory_scenario(args, flare_extra: list[str], label: str, expected: dict | N
         server.stop()
 
 
-def disk_scenario(args) -> None:
+def disk_scenario(args, memory: str, label: str) -> None:
+    """Records survive a restart: a disk-only store with `memory` zero, or a composite otherwise.
+
+    With a composite, the first server also evicts the GPU and restores from the memory tier,
+    and the restarted server restores through the disk tier into memory.
+    """
     nonce = args.nonce
-    directory = args.artifacts / "records"
+    directory = args.artifacts / f"{label}-records"
     extra = [part for option in args.flare_option for part in option.split("=", 1)]
-    extra += ["--prefix-cache-disk", str(directory), "--prefix-cache-disk-limit", args.disk_limit, "--prefix-cache-memory", "0"]
-    server = Server(args.flare, args.package, args.gpus, args.port, args.artifacts / "disk.log", extra)
+    extra += ["--prefix-cache-disk", str(directory), "--prefix-cache-disk-limit", args.disk_limit, "--prefix-cache-memory", memory]
+    server = Server(args.flare, args.package, args.gpus, args.port, args.artifacts / f"{label}.log", extra)
     try:
         server.wait_ready(args.startup_timeout)
-        run = run_for(server, args.artifacts / "disk", args.timeout)
+        run = run_for(server, args.artifacts / label, args.timeout)
         model_id = server.model_id()
-        messages, first, prompt_tokens = conversation(run, model_id, nonce, "disk", args.sentences)
-        metrics = wait_quiescent(run, "disk-written", args.timeout)
-        run.check("disk.records_written", metrics["flare_host_cache_disk_records"] >= 1
+        messages, first, prompt_tokens = conversation(run, model_id, nonce, label, args.sentences)
+        metrics = wait_quiescent(run, f"{label}-written", args.timeout)
+        run.check(f"{label}.records_written", metrics["flare_host_cache_disk_records"] >= 1
                   and metrics["flare_host_cache_stored_total"] >= 1, records=metrics["flare_host_cache_disk_records"])
+        if memory != "0":
+            evict_everything(run, model_id, nonce, f"{label}-memory", True)
+            response, choice, delta = continuation(run, model_id, messages, f"{label}-memory-continue")
+            check_host_restore(run, f"{label}-memory-continue", response, delta, prompt_tokens, args.prefill_chunk_size)
+            correct, numbers = answered(choice, retrieval(args.sentences, 3)[1])
+            run.check(f"{label}-memory-continue.recalls_facts_across_the_context", correct,
+                      expected=retrieval(args.sentences, 3)[1], observed=numbers)
+            metrics = wait_quiescent(run, f"{label}-memory-after", args.timeout)
+            run.check(f"{label}.memory_tier_served_the_restore", metrics["flare_host_cache_bytes_in_total"] > 0
+                      and metrics["flare_host_cache_disk_records"] >= metrics["flare_host_cache_memory_records"],
+                      memory_records=metrics["flare_host_cache_memory_records"], disk_records=metrics["flare_host_cache_disk_records"])
+        (args.artifacts / f"{label}.json").write_text(json.dumps(run.results, indent=1))
     finally:
         server.stop()
-    server = Server(args.flare, args.package, args.gpus, args.port, args.artifacts / "disk-restart.log", extra)
+    server = Server(args.flare, args.package, args.gpus, args.port, args.artifacts / f"{label}-restart.log", extra)
     try:
         server.wait_ready(args.startup_timeout)
-        run = run_for(server, args.artifacts / "disk-restart", args.timeout)
+        run = run_for(server, args.artifacts / f"{label}-restart", args.timeout)
         model_id = server.model_id()
-        response, choice, delta = continuation(run, model_id, messages, "disk-continue")
-        check_host_restore(run, "disk-continue", response, delta, prompt_tokens, args.prefill_chunk_size)
+        response, choice, delta = continuation(run, model_id, messages, f"{label}-continue")
+        check_host_restore(run, f"{label}-continue", response, delta, prompt_tokens, args.prefill_chunk_size)
         correct, numbers = answered(choice, retrieval(args.sentences, 3)[1])
-        run.check("disk-continue.recalls_facts_across_the_context", correct,
+        run.check(f"{label}-continue.recalls_facts_across_the_context", correct,
                   expected=retrieval(args.sentences, 3)[1], observed=numbers)
-        (args.artifacts / "disk.json").write_text(json.dumps(run.results, indent=1))
+        if memory != "0":
+            metrics = wait_quiescent(run, f"{label}-restart-after", args.timeout)
+            run.check(f"{label}-continue.read_through_made_the_record_resident",
+                      metrics["flare_host_cache_memory_records"] >= 1, memory_records=metrics["flare_host_cache_memory_records"])
+        (args.artifacts / f"{label}-restart.json").write_text(json.dumps(run.results, indent=1))
     finally:
         server.stop()
 
@@ -260,6 +281,7 @@ def main() -> int:
     parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--skip-disk", action="store_true")
     parser.add_argument("--skip-memory", action="store_true")
+    parser.add_argument("--skip-composite", action="store_true")
     parser.add_argument("--flare-option", action="append", default=[], metavar="FLAG=VALUE",
                         help="extra flare run option for every launch, such as --mtp-draft-tokens=0")
     args = parser.parse_args()
@@ -273,7 +295,9 @@ def main() -> int:
         baseline = memory_scenario(args, common + ["--prefix-cache-memory", "0"], "baseline", None)
         memory_scenario(args, common + ["--prefix-cache-memory", args.memory], "memory", baseline)
     if not args.skip_disk:
-        disk_scenario(args)
+        disk_scenario(args, "0", "disk")
+    if not args.skip_composite:
+        disk_scenario(args, args.memory, "composite")
     failed = 0
     for path in sorted(args.artifacts.glob("*.json")):
         results = json.loads(path.read_text())

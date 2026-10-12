@@ -666,7 +666,9 @@ impl CompositeStore {
                 self.stats.bytes_in += bytes;
                 self.stats.reused_tokens += inbound.tokens;
             }
-            Err(_) => self.stats.fetch_failed += 1,
+            Err(error) => {
+                self.stats.fetch_failed += 1;
+            }
         }
         events.push(StoreEvent::Fetched { key, result });
     }
@@ -1965,6 +1967,189 @@ mod tests {
     }
 
     #[cfg(feature = "runtime-package")]
+    #[test]
+    #[ignore = "requires FLARE_OFFLOAD_TEST_PACKAGE naming an exported package and a free GPU 0"]
+    fn composite_writes_a_child_published_while_its_parent_is_in_flight() {
+        use crate::{
+            cuda::Stream,
+            offload::geometry::fingerprint,
+            runtime_package::{LoadOptions, NativeModel},
+            startup::StartupProgress,
+        };
+        let Some(package) = std::env::var_os("FLARE_OFFLOAD_TEST_PACKAGE") else {
+            eprintln!("skipping: FLARE_OFFLOAD_TEST_PACKAGE is unset");
+            return;
+        };
+        let Some(directory) = test_directory("gpu-child") else {
+            return;
+        };
+        let model = unsafe {
+            NativeModel::load(
+                Path::new(&package),
+                &[0],
+                &LoadOptions::default(),
+                &StartupProgress::silent(),
+            )
+        }
+        .unwrap();
+        let manifest = model.manifests().unwrap().remove(0);
+        let geometry = vec![manifest.cache.clone().unwrap()];
+        let rank = geometry[0].clone();
+        let (context, device) = (manifest.context, manifest.device);
+        let layout = Layout::new(&geometry).unwrap();
+        let fingerprint = fingerprint(&geometry);
+        let page_tokens = rank.page_tokens;
+        let stream = Stream::open(context, device).unwrap();
+        let mut staging = stream.host_buffer(rank.row.unit_bytes as usize).unwrap();
+        let mut write_unit = |address: u64, bytes: usize, seed: u64| {
+            for (index, byte) in staging.bytes_mut()[..bytes].iter_mut().enumerate() {
+                *byte = (index as u64).wrapping_mul(31).wrapping_add(seed) as u8;
+            }
+            unsafe { stream.upload(address as usize, &staging, 0, bytes) }.unwrap();
+            stream.synchronize().unwrap();
+        };
+        for (plane, geometry) in rank.planes.iter().enumerate() {
+            for id in 1..=8u64 {
+                write_unit(
+                    geometry.unit_address(id),
+                    geometry.unit_bytes as usize,
+                    plane as u64 * 100 + id,
+                );
+            }
+        }
+        for slot in 1..=4u64 {
+            write_unit(
+                rank.row.unit_address(slot),
+                rank.row.unit_bytes as usize,
+                900 + slot,
+            );
+        }
+        let mut pool = SlabPool::new(
+            layout.page_record_bytes,
+            16,
+            layout.row_record_bytes,
+            4,
+            true,
+        )
+        .unwrap();
+        pool.register(context).unwrap();
+        let transfers = Arc::new(Mutex::new(
+            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+        ));
+        let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
+        let disk = DiskStore::new(
+            directory.clone(),
+            IDENTITY,
+            fingerprint,
+            1 << 40,
+            geometry.clone(),
+            Vec::new(),
+            Box::new(Staged::new(
+                None,
+                transfers,
+                DiskThread::start("flare-offload-disk").unwrap(),
+            )),
+        )
+        .unwrap();
+        let mut store = CompositeStore::new(memory, disk).unwrap();
+        let mut ids = Ids::new();
+        let drain = |store: &mut CompositeStore,
+                     events: &mut Vec<StoreEvent>,
+                     until: &dyn Fn(&CompositeStore) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !until(store) {
+                assert!(
+                    Instant::now() < deadline,
+                    "composite did not settle: outbound {:?} jobs {:?} stats {:?} events {events:?}",
+                    store.outbound.keys().collect::<Vec<_>>(),
+                    store.jobs.keys().collect::<Vec<_>>(),
+                    store.stats()
+                );
+                store.poll(events);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        // Two root and child pairs: the child of the first pair is published
+        // before the root's memory copy lands, the child of the second after
+        // the root's memory copy landed but while its disk write may still run.
+        for (pair, wait_for_root_copy) in [(0u32, false), (1u32, true)] {
+            let root_consumed = 3 * page_tokens;
+            let child_consumed = 4 * page_tokens + 5;
+            let mut history = PrefixHistory::new(IDENTITY);
+            let tokens: Vec<u32> = (0..child_consumed as u32 + 8)
+                .map(|t| t.wrapping_mul(2654435761).wrapping_add(pair))
+                .collect();
+            history.append(&tokens, &[]).unwrap();
+            let base = 1 + pair * 4;
+            let root_pages: Vec<PageId> = (base..base + 3).map(PageId).collect();
+            let child_page = PageId(base + 3);
+            let root = PublishedCheckpoint {
+                id: ids.next(),
+                key: history.key_at(root_consumed).unwrap(),
+                parent: None,
+                bucket: history.bucket_at(root_consumed).unwrap(),
+                chain_pages: root_pages.clone(),
+                tail_pages: 3,
+                slot: StateSlotId(1 + pair * 2),
+            };
+            let child = PublishedCheckpoint {
+                id: ids.next(),
+                key: history.key_at(child_consumed).unwrap(),
+                parent: Some(root.key),
+                bucket: history.bucket_at(child_consumed).unwrap(),
+                chain_pages: root_pages.iter().copied().chain([child_page]).collect(),
+                tail_pages: 1,
+                slot: StateSlotId(2 + pair * 2),
+            };
+            let mut events = Vec::new();
+            assert!(store.store(&root).unwrap());
+            if wait_for_root_copy {
+                drain(&mut store, &mut events, &|store| {
+                    store.stats().bytes_out > 0 && store.memory.record(&root.key).is_some()
+                });
+            }
+            assert!(store.store(&child).unwrap());
+            drain(&mut store, &mut events, &|store| store.outbound.is_empty());
+            let stored: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    StoreEvent::Stored { key, result, .. } => Some((*key, result.is_ok())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(stored.len(), 2, "pair {pair}: {events:?}");
+            assert!(stored.iter().all(|(_, ok)| *ok), "pair {pair}: {events:?}");
+            let stats = store.stats();
+            assert_eq!(
+                (stats.stored, stats.store_failed, stats.store_skipped),
+                (2 * (u64::from(pair) + 1), 0, 0),
+                "pair {pair}"
+            );
+            for key in [root.key, child.key] {
+                let node = store.disk.index().node(&key).unwrap();
+                assert!(
+                    node.ready && !node.pinned(),
+                    "pair {pair} disk node {key:?}"
+                );
+                assert_eq!(
+                    fs::metadata(&node.location.path).unwrap().len(),
+                    node.location.header.length_with_row()
+                );
+                assert!(
+                    store.memory.record(&key).unwrap().durable,
+                    "pair {pair} memory {key:?}"
+                );
+            }
+            assert!(
+                store.jobs.is_empty(),
+                "pair {pair}: {:?}",
+                store.jobs.keys().collect::<Vec<_>>()
+            );
+        }
+        store.close().unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
     #[test]
     #[ignore = "requires FLARE_OFFLOAD_TEST_PACKAGE naming an exported package and a free GPU 0"]
     fn composite_round_trips_through_memory_and_disk_on_a_loaded_package() {
