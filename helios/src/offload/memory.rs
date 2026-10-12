@@ -190,7 +190,7 @@ impl Core {
     }
 
     fn next_job(&mut self) -> JobId {
-        let id = JobId(self.next_job * 2);
+        let id = JobId(self.next_job);
         self.next_job += 1;
         id
     }
@@ -1412,7 +1412,7 @@ mod tests {
             Ok(())
         });
         assert_eq!(accepted.len(), 2);
-        assert_eq!(accepted[1].id, JobId(4));
+        assert_eq!(accepted[1].id, JobId(2));
         core.absorb(reply(&accepted[1], Ok(())));
         core.settle(&mut events);
         assert_eq!(stored(&events), [(second.key, Some(4 * PAGE + ROW))]);

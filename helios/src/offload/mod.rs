@@ -34,9 +34,9 @@ use crate::{
 
 pub use geometry::{CacheGeometry, Layout, Plane};
 
-/// Identifies one transfer or disk job issued by a store. Stores sharing
-/// transfer threads mint ids from disjoint spaces: the memory store even
-/// values, the disk store odd values.
+/// Identifies one transfer or disk job issued by a store. Within a composite
+/// only the memory store submits transfers, so the stores' counters never meet
+/// on the shared transfer threads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobId(pub u64);
 

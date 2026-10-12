@@ -213,7 +213,7 @@ def memory_scenario(args, flare_extra: list[str], label: str, expected: dict | N
         server.stop()
 
 
-def disk_scenario(args, expected: dict) -> None:
+def disk_scenario(args) -> None:
     nonce = args.nonce
     directory = args.artifacts / "records"
     extra = [part for option in args.flare_option for part in option.split("=", 1)]
@@ -259,6 +259,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--skip-disk", action="store_true")
+    parser.add_argument("--skip-memory", action="store_true")
     parser.add_argument("--flare-option", action="append", default=[], metavar="FLAG=VALUE",
                         help="extra flare run option for every launch, such as --mtp-draft-tokens=0")
     args = parser.parse_args()
@@ -268,10 +269,11 @@ def main() -> int:
     # One nonce keeps every server's prompts identical so outputs are comparable.
     args.nonce = hashlib.sha256(f"host-cache-{time.time_ns()}".encode()).hexdigest()[:10]
     common = [part for option in args.flare_option for part in option.split("=", 1)]
-    baseline = memory_scenario(args, common + ["--prefix-cache-memory", "0"], "baseline", None)
-    memory_scenario(args, common + ["--prefix-cache-memory", args.memory], "memory", baseline)
+    if not args.skip_memory:
+        baseline = memory_scenario(args, common + ["--prefix-cache-memory", "0"], "baseline", None)
+        memory_scenario(args, common + ["--prefix-cache-memory", args.memory], "memory", baseline)
     if not args.skip_disk:
-        disk_scenario(args, baseline)
+        disk_scenario(args)
     failed = 0
     for path in sorted(args.artifacts.glob("*.json")):
         results = json.loads(path.read_text())
