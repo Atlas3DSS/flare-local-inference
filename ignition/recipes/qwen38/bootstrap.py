@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from dataclasses import dataclass
@@ -198,6 +199,11 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_qwen38_checkpoint(snapshot)
+    # Loading, construction and tuning free most of what they allocate; a transient package pool returns
+    # that memory to the device once tuning completes, before graph measurement sizes the KV pages.
+    transient = contextlib.ExitStack()
+    if package_storage is not None:
+        transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, progress=progress, shard=shard)
     mtp_weights = None
     has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
@@ -349,7 +355,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
                     owners.append(maintenance)
         session.register_scratch(workspaces)
-        with phase(progress, "Prepare and tune kernels") as stage:
+        with phase(progress, "Prepare and tune kernels") as stage, transient:
             tuning = session.tune(show_progress=progress is not None, console=stage.console)
         report(f"selected prepared kernels: {tuning['selection_counts']}")
         report(f"preparation allocated bytes: before tuning={tuning['allocated_before_tuning']}, "
