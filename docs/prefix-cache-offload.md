@@ -508,12 +508,13 @@ Offload limits interference through bounded work and explicit ownership:
   the default is relied on there.
 - Disk directory: `--prefix-cache-disk DIR` names the directory under which
   the model's record directory, `<identity prefix>-<layout fingerprint>`, is
-  created; `ignition run` passes `[paths] prefix_cache`, which defaults to
-  `~/.cache/flare/prefix-cache`. An unwritable directory selects no disk
-  store and says so on the startup line. Until step 13, an unset directory
-  selects no disk store; the derived default for standalone `flare run` is a
-  directory beside the package file named after it with the `.flaretensors`
-  extension replaced by `.prefix-cache`.
+  created; `ignition run` passes `[paths] prefix_cache` when it is set. An
+  unwritable directory selects no disk store and says so on the startup line.
+  Until step 13, an unset directory selects no disk store and the built-in
+  value of `[paths] prefix_cache` is empty; the derived defaults are
+  `~/.cache/flare/prefix-cache` for `ignition run` and, for standalone
+  `flare run`, a directory beside the package file named after it with the
+  `.flaretensors` extension replaced by `.prefix-cache`.
 - Disk limit: one tenth of the free space on the directory's filesystem at
   startup. `[prefix_cache] disk_limit` and `--prefix-cache-disk-limit SIZE`
   override; zero selects no disk store.

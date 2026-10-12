@@ -187,6 +187,19 @@ def test_listener_and_authentication_are_supplied_after_export(host, tmp_path):
     assert "secret" not in host["exec"]
 
 
+def test_prefix_cache_settings_are_forwarded_only_when_set(host, tmp_path):
+    assert run("qwen3.8-flash") == 0
+    assert not any(flag.startswith("--prefix-cache") for flag in host["exec"])
+    config = tmp_path / "config.toml"
+    config.write_text('[prefix_cache]\nmemory = "8G"\ndisk_limit = "100G"\n[paths]\nprefix_cache = "~/records"\n')
+    assert main(["run", "qwen3.8-flash", "--config", str(config), "--port", str(free_port())]) == 0
+    arguments = host["exec"]
+    assert arguments[arguments.index("--prefix-cache-disk") + 1] == str(tmp_path / "records")
+    assert arguments[arguments.index("--prefix-cache-memory") + 1] == "8G"
+    assert arguments[arguments.index("--prefix-cache-disk-limit") + 1] == "100G"
+    assert "--prefix-cache-disk-transport" not in arguments
+
+
 def test_an_address_in_use_fails_before_preparation(host, capsys):
     with socket.socket() as occupied:
         occupied.bind(("127.0.0.1", 0))

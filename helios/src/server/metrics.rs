@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     execution::{CompletionRecord, GraphKind},
+    offload::StoreStats,
     scheduler::SchedulerStats,
 };
 
@@ -33,6 +34,12 @@ pub(super) struct Snapshot {
     pub reused_tokens: u64,
     pub cached_pages: u64,
     pub free_pages: u64,
+    pub host_hits: u64,
+    pub host_reused_tokens: u64,
+    pub host_memory_records: u64,
+    pub host_disk_records: u64,
+    pub host_bytes_out: u64,
+    pub host_bytes_in: u64,
 }
 
 #[derive(Default)]
@@ -67,6 +74,24 @@ pub(super) struct Metrics {
     cached_checkpoints: AtomicU64,
     cached_pages: AtomicU64,
     pub pending: AtomicU64,
+    host_lookups: AtomicU64,
+    host_hits: AtomicU64,
+    host_reused_tokens: AtomicU64,
+    host_stored: AtomicU64,
+    host_store_skipped: AtomicU64,
+    host_store_failed: AtomicU64,
+    host_fetched: AtomicU64,
+    host_fetch_failed: AtomicU64,
+    host_bytes_out: AtomicU64,
+    host_bytes_in: AtomicU64,
+    host_outbound_in_flight: AtomicU64,
+    host_inbound_in_flight: AtomicU64,
+    host_memory_records: AtomicU64,
+    host_memory_bytes: AtomicU64,
+    host_disk_records: AtomicU64,
+    host_disk_bytes: AtomicU64,
+    host_outbound_rate: AtomicU64,
+    host_inbound_rate: AtomicU64,
 }
 
 impl Metrics {
@@ -96,6 +121,12 @@ impl Metrics {
             reused_tokens: self.reused_tokens.load(Ordering::Relaxed),
             cached_pages: self.cached_pages.load(Ordering::Relaxed),
             free_pages: self.free_pages.load(Ordering::Relaxed),
+            host_hits: self.host_hits.load(Ordering::Relaxed),
+            host_reused_tokens: self.host_reused_tokens.load(Ordering::Relaxed),
+            host_memory_records: self.host_memory_records.load(Ordering::Relaxed),
+            host_disk_records: self.host_disk_records.load(Ordering::Relaxed),
+            host_bytes_out: self.host_bytes_out.load(Ordering::Relaxed),
+            host_bytes_in: self.host_bytes_in.load(Ordering::Relaxed),
             ..Snapshot::default()
         };
         for widths in &self.speculative {
@@ -192,6 +223,38 @@ impl Metrics {
             (&self.free_snapshots, stats.free_snapshots as u64),
             (&self.cached_checkpoints, stats.cached_checkpoints as u64),
             (&self.cached_pages, stats.cached_pages as u64),
+        ] {
+            target.store(value, Ordering::Relaxed);
+        }
+    }
+
+    /// Host prefix store counters and gauges, written from the model thread.
+    pub fn store(&self, stats: StoreStats) {
+        for (target, value) in [
+            (&self.host_lookups, stats.lookups),
+            (&self.host_hits, stats.hits),
+            (&self.host_reused_tokens, stats.reused_tokens),
+            (&self.host_stored, stats.stored),
+            (&self.host_store_skipped, stats.store_skipped),
+            (&self.host_store_failed, stats.store_failed),
+            (&self.host_fetched, stats.fetched),
+            (&self.host_fetch_failed, stats.fetch_failed),
+            (&self.host_bytes_out, stats.bytes_out),
+            (&self.host_bytes_in, stats.bytes_in),
+            (
+                &self.host_outbound_in_flight,
+                stats.outbound_in_flight as u64,
+            ),
+            (&self.host_inbound_in_flight, stats.inbound_in_flight as u64),
+            (&self.host_memory_records, stats.memory_records as u64),
+            (&self.host_memory_bytes, stats.memory_bytes),
+            (&self.host_disk_records, stats.disk_records as u64),
+            (&self.host_disk_bytes, stats.disk_bytes),
+            (
+                &self.host_outbound_rate,
+                stats.outbound_rate.max(0.0) as u64,
+            ),
+            (&self.host_inbound_rate, stats.inbound_rate.max(0.0) as u64),
         ] {
             target.store(value, Ordering::Relaxed);
         }
@@ -350,6 +413,56 @@ impl Metrics {
                 "Checkpoints logically evicted; GPU retirement may still be pending.",
                 &self.snapshot_evictions,
             ),
+            (
+                "host_cache_lookups_total",
+                "Host prefix store lookups above the GPU checkpoint during admission.",
+                &self.host_lookups,
+            ),
+            (
+                "host_cache_hits_total",
+                "Host prefix store lookups whose chain the admission fetched.",
+                &self.host_hits,
+            ),
+            (
+                "host_cache_reused_tokens_total",
+                "Tokens covered by host prefix store chains beyond the GPU checkpoint.",
+                &self.host_reused_tokens,
+            ),
+            (
+                "host_cache_stored_total",
+                "Published checkpoints whose copy to the host store completed.",
+                &self.host_stored,
+            ),
+            (
+                "host_cache_store_skipped_total",
+                "Published checkpoints the host store did not copy: already present, in flight, or no free slabs.",
+                &self.host_store_skipped,
+            ),
+            (
+                "host_cache_store_failed_total",
+                "Host store copy-outs that failed after draining their transfers.",
+                &self.host_store_failed,
+            ),
+            (
+                "host_cache_fetched_total",
+                "Host store chains restored into GPU pages and rows.",
+                &self.host_fetched,
+            ),
+            (
+                "host_cache_fetch_failed_total",
+                "Host store restores that failed; their requests were re-admitted without the host store.",
+                &self.host_fetch_failed,
+            ),
+            (
+                "host_cache_bytes_out_total",
+                "Bytes copied from GPU checkpoints to the host store.",
+                &self.host_bytes_out,
+            ),
+            (
+                "host_cache_bytes_in_total",
+                "Bytes copied from the host store into GPU pages and rows.",
+                &self.host_bytes_in,
+            ),
         ] {
             metric(
                 &mut text,
@@ -432,6 +545,46 @@ impl Metrics {
                 "Requests waiting inside the model scheduler, excluding its ingress channel.",
                 &self.pending,
             ),
+            (
+                "host_cache_outbound_in_flight",
+                "Host store copy-outs in progress.",
+                &self.host_outbound_in_flight,
+            ),
+            (
+                "host_cache_inbound_in_flight",
+                "Host store restores in progress.",
+                &self.host_inbound_in_flight,
+            ),
+            (
+                "host_cache_memory_records",
+                "Checkpoint records resident in the host store's registered memory.",
+                &self.host_memory_records,
+            ),
+            (
+                "host_cache_memory_bytes",
+                "Bytes of records resident in the host store's registered memory.",
+                &self.host_memory_bytes,
+            ),
+            (
+                "host_cache_disk_records",
+                "Checkpoint records in the host store's record directory.",
+                &self.host_disk_records,
+            ),
+            (
+                "host_cache_disk_bytes",
+                "Bytes of record files in the host store's record directory.",
+                &self.host_disk_bytes,
+            ),
+            (
+                "host_cache_outbound_bytes_per_second",
+                "Measured copy-out rate of the host store's most recent transfers.",
+                &self.host_outbound_rate,
+            ),
+            (
+                "host_cache_inbound_bytes_per_second",
+                "Measured restore rate of the host store's most recent transfers.",
+                &self.host_inbound_rate,
+            ),
         ] {
             metric(
                 &mut text,
@@ -506,7 +659,22 @@ mod tests {
         metrics.launched(GraphKind::Restore);
         metrics.launched(GraphKind::Decode);
         metrics.launched(GraphKind::Decode);
+        metrics.store(StoreStats {
+            lookups: 4,
+            hits: 1,
+            reused_tokens: 640,
+            bytes_out: 1 << 20,
+            memory_records: 3,
+            outbound_rate: 2.5e9,
+            ..StoreStats::default()
+        });
         let text = metrics.render();
+        assert!(text.contains("flare_host_cache_lookups_total 4\n"));
+        assert!(text.contains("flare_host_cache_hits_total 1\n"));
+        assert!(text.contains("flare_host_cache_reused_tokens_total 640\n"));
+        assert!(text.contains("flare_host_cache_bytes_out_total 1048576\n"));
+        assert!(text.contains("flare_host_cache_memory_records 3\n"));
+        assert!(text.contains("flare_host_cache_outbound_bytes_per_second 2500000000\n"));
         assert!(text.contains("flare_cache_misses_total 3\n"));
         assert!(text.contains("flare_cache_reused_tokens_total 192\n"));
         assert!(text.contains("flare_graph_launches_total{kind=\"restore\"} 1\n"));
