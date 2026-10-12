@@ -60,6 +60,7 @@ pub struct Checkpoint {
     id: CheckpointId,
     parent: Option<CheckpointId>,
     prefix: PrefixKey,
+    bucket: [u8; 16],
     tail_pages: Vec<PageId>,
     snapshot: SnapshotId,
     ready_after: Fence,
@@ -80,6 +81,11 @@ impl Checkpoint {
     }
     pub fn prefix(&self) -> PrefixKey {
         self.prefix
+    }
+    /// Digest of the aligned hash-block boundary at or below the endpoint, which
+    /// keys host-store buckets.
+    pub fn bucket(&self) -> [u8; 16] {
+        self.bucket
     }
     pub fn tail_pages(&self) -> &[PageId] {
         &self.tail_pages
@@ -239,6 +245,9 @@ impl PrefixCheckpointCache {
         let prefix = history.key_at(proposal.consumed_tokens).ok_or(
             "checkpoint endpoint must be an existing nonempty prefix in the supplied history",
         )?;
+        let bucket = history.bucket_at(proposal.consumed_tokens).ok_or(
+            "checkpoint endpoint has no aligned hash-block boundary in the supplied history",
+        )?;
         if proposal.consumed_tokens == 0
             || proposal.snapshot.consumed_tokens != proposal.consumed_tokens
         {
@@ -318,6 +327,7 @@ impl PrefixCheckpointCache {
             id,
             parent: proposal.parent,
             prefix,
+            bucket,
             tail_pages: proposal.tail_pages.clone(),
             snapshot: proposal.snapshot.id,
             ready_after: proposal.ready_after,
