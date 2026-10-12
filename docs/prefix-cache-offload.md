@@ -224,7 +224,9 @@ trait by orchestrating them:
   its slabs. With the staged transport, a node that is not resident gets slabs
   from the memory store, evicting durable unpinned residents if needed, is
   read with `read_into` into those slabs, and uploads from them; it is then a
-  durable memory resident like any other. With the direct transport, a node
+  durable memory resident like any other. An ancestor whose endpoint shares
+  its parent's last page owns no pages, so when it is not the endpoint nothing
+  of it is read and an empty resident copy stands in for it. With the direct transport, a node
   that is not resident is read into the GPU directly, and the memory store
   warms through the ordinary publication path once the restored checkpoint is
   published, because the composite skips a memory copy-out only when the
