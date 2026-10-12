@@ -416,6 +416,58 @@ impl NativeModel {
             .collect()
     }
 
+    /// Each rank's checkpoint storage: the `STATE_ROWS` allocation as the row
+    /// plane and the `KV_PAGES` allocations in package order as page planes,
+    /// with the capacities `allocate_caches` chose. Peer allocations belong to
+    /// another rank and are excluded.
+    pub(crate) fn cache_geometry(&self) -> Result<Vec<crate::offload::CacheGeometry>> {
+        use crate::offload::{CacheGeometry, Plane};
+        let number = |key: &str| {
+            self.server_config[key]
+                .as_u64()
+                .ok_or_else(|| invalid(format!("model configuration lacks {key}")))
+        };
+        let page_tokens = number("page_tokens")?;
+        let page_capacity = number("pages")?;
+        let row_capacity = number("state_rows")? + 1;
+        self.ranks
+            .iter()
+            .map(|rank| {
+                let mut row = None;
+                let mut planes = Vec::new();
+                for sized in rank
+                    .sized
+                    .iter()
+                    .filter(|sized| !matches!(sized.memory, Memory::Peer))
+                {
+                    let plane = Plane {
+                        name: sized.name.clone(),
+                        address: rank.allocation(&sized.name)?.address as u64,
+                        unit_bytes: sized.unit_bytes,
+                    };
+                    if sized.capacity == 0 {
+                        if row.replace(plane).is_some() {
+                            return Err(invalid(
+                                "rank declares more than one state-row allocation",
+                            ));
+                        }
+                    } else {
+                        planes.push(plane);
+                    }
+                }
+                let geometry = CacheGeometry {
+                    page_tokens,
+                    page_capacity,
+                    row_capacity,
+                    row: row.ok_or_else(|| invalid("rank lacks a state-row allocation"))?,
+                    planes,
+                };
+                geometry.validate()?;
+                Ok(geometry)
+            })
+            .collect()
+    }
+
     pub fn server_config(&self) -> &serde_json::Value {
         &self.server_config
     }

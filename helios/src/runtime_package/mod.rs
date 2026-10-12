@@ -40,6 +40,15 @@ struct Storage {
     fixed: bool,
 }
 
+/// A runtime-sized allocation's declaration, kept after its `Sizing` record is
+/// consumed so the cache geometry can be described from the loaded model.
+struct SizedAllocation {
+    name: String,
+    capacity: i32,
+    unit_bytes: u64,
+    memory: Memory,
+}
+
 /// Owns a CUDA context and every allocation, module, and graph loaded into it.
 /// Borrowed handles remain valid until this owner is dropped, after replay drains.
 pub struct NativeResources {
@@ -55,6 +64,8 @@ pub struct NativeResources {
     reservations: Vec<(u64, usize)>,
     execution: Option<protobuf::wire::Execution>,
     events: HashMap<String, Handle>,
+    /// Runtime-sized allocations in package order.
+    sized: Vec<SizedAllocation>,
 }
 
 // SAFETY: CUDA contexts may move between threads. Resource operations bind the
@@ -131,6 +142,7 @@ impl NativeResources {
                 reservations: vec![],
                 execution: package.execution.clone(),
                 events: HashMap::new(),
+                sized: Vec::new(),
             };
             for [limit, value] in &package.context.limits {
                 owner.driver.check(
@@ -237,7 +249,13 @@ impl NativeResources {
                 {
                     continue;
                 }
-                if allocation.sizing.is_some() {
+                if let Some(sizing) = &allocation.sizing {
+                    self.sized.push(SizedAllocation {
+                        name: allocation.name.clone(),
+                        capacity: sizing.capacity,
+                        unit_bytes: sizing.unit_bytes,
+                        memory: allocation.memory,
+                    });
                     self.allocations.insert(
                         allocation.name.clone(),
                         Storage {
