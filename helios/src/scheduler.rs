@@ -915,7 +915,12 @@ impl RequestScheduler {
             self.cache.unpin(parent)?;
         }
         if !ready {
-            return Err("restored checkpoint is not GPU-ready at the completed fence".into());
+            // The checkpoint becomes ready at a later fence; the waiters are
+            // re-admitted rather than left waiting without a ticket.
+            for handle in &ticket.waiters {
+                self.retire(*handle, false)?;
+            }
+            return Ok(ticket.waiters);
         }
         if matches!(result, PublishResult::Created { .. }) {
             self.stats.snapshot_publications += 1;
@@ -924,6 +929,7 @@ impl RequestScheduler {
         let snapshot = self.cache.checkpoint(id)?.snapshot();
         let shared_pages = self.cache.page_chain(id)?;
         for handle in ticket.waiters {
+            self.request(handle)?;
             self.cache.pin(id)?;
             let request = self.request_mut(handle)?;
             request.prefix = Some(id);
