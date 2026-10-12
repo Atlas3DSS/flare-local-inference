@@ -59,6 +59,9 @@ def _preparation_arguments(running):
                                " of the request's own history, which loads no draft model (default: mtp)")
     advanced.add_argument("--history-drafts", action="store_true",
                           help="also draft continuations copied from the request's own history")
+    advanced.add_argument("--no-context-parallel", action="store_true",
+                          help="keep each rank's attention context whole instead of sharding it across"
+                               " tensor-parallel ranks; fewer cached tokens (default: the recipe's)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
 

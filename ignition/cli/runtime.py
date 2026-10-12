@@ -27,6 +27,7 @@ def package_key(model, plan, no_compile):
     inputs = {"version": 1, "checkpoint": model.checkpoint.revision,
               "repository": model.checkpoint.repository, "compile": not no_compile,
               "concurrency": plan.concurrency, "prefill_chunk": plan.prefill_chunk,
+              "context_parallel": plan.context_parallel,
               "cache_states": plan.cache_states, "reserve_bytes": plan.reserve_bytes,
               "gpus": [(gpu.name, gpu.total_bytes) for gpu in plan.gpus],
               "speculation": None if plan.speculation is None else asdict(plan.speculation)}

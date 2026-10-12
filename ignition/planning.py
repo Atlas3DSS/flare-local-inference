@@ -117,6 +117,8 @@ class Plan:
     reserve_bytes: int
     weights_bytes: int
     graph_bytes: int
+    # Ranks shard each page's context when the recipe declares context-parallel page costs.
+    context_parallel: bool = True
 
     @property
     def world_size(self) -> int:
@@ -148,7 +150,7 @@ class Plan:
 
     @property
     def page_tokens(self) -> int:
-        return self.costs.page_tokens or self.recipe.page_tokens
+        return (self.costs.page_tokens if self.context_parallel else None) or self.recipe.page_tokens
 
     @property
     def minimum_pages(self) -> int:
@@ -196,7 +198,7 @@ class Plan:
             "gpus": [{"index": gpu.index, "name": gpu.name, "uuid": gpu.uuid, "free_bytes": gpu.free_bytes,
                       "total_bytes": gpu.total_bytes} for gpu in self.gpus],
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
-            "prefill_chunk": self.prefill_chunk,
+            "prefill_chunk": self.prefill_chunk, "context_parallel": self.context_parallel,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "proposal_source": self.speculation.proposal_source,
@@ -215,7 +217,7 @@ class Plan:
 
 
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
-        speculation: Speculation | None, prefill_chunk: int | None = None) -> Plan:
+        speculation: Speculation | None, prefill_chunk: int | None = None, context_parallel: bool = True) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
@@ -224,7 +226,8 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
     costs = recipe.costs(len(gpus), speculation)
     plan = Plan(recipe, checkpoint, gpus, concurrency, recipe.prefill_chunk if prefill_chunk is None else prefill_chunk,
                 speculation, 0, 0, 0, reserve_bytes,
-                recipe.weights_bytes(checkpoint, len(gpus), speculation), costs.graph_bytes)
+                recipe.weights_bytes(checkpoint, len(gpus), speculation), costs.graph_bytes,
+                context_parallel and costs.page_tokens is not None)
     available = plan.supply_bytes - plan.fixed_bytes
     target = min(CACHE_STATES_PER_REQUEST * concurrency,
                  max(CACHE_FLOOR, available // CACHE_SHARE // costs.state_row_bytes))
@@ -264,13 +267,14 @@ def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
 
 def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selected: tuple[int, ...] | None,
          concurrency: int, reserve_bytes: int, speculation: Speculation | None,
-         prefill_chunk: int | None = None) -> Plan:
+         prefill_chunk: int | None = None, context_parallel: bool = True) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
     for which enough GPUs fit, taking the first such GPUs in index order. Without
     `prefill_chunk`, the recipe's chunk applies. `speculation` is the drafting the
-    plan prepares, or None for none.
+    plan prepares, or None for none. `context_parallel` shards each page's context
+    across the ranks of recipes that declare context-parallel page costs.
     """
     if not 1 <= concurrency <= recipe.max_concurrency:
         raise UsageError(f"--max-concurrency for {checkpoint.alias} must be 1 through {recipe.max_concurrency}")
@@ -278,6 +282,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     if chunk % 64 or not 64 <= chunk <= recipe.context:
         raise UsageError(f"--prefill-chunk-size for {checkpoint.alias} must be a multiple of 64"
                          f" from 64 through {recipe.context:,}")
+    if not context_parallel and not any(costs.page_tokens for costs in recipe.ranks.values()):
+        raise UsageError(f"--no-context-parallel: {checkpoint.alias} does not shard attention context")
     sizes = " or ".join(map(str, recipe.tensor_parallel))
     supported = [gpu for gpu in gpus if gpu.supported]
     chosen = None
@@ -299,7 +305,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
 
     def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes, speculation=speculation):
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,
-                   speculation=speculation, prefill_chunk=chunk)
+                   speculation=speculation, prefill_chunk=chunk, context_parallel=context_parallel)
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""

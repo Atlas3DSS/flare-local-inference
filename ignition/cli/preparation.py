@@ -39,12 +39,13 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 
 
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
-           concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None) -> planning.Plan:
+           concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
+           context_parallel: bool = True) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     return planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
-        prefill_chunk=prefill_chunk)
+        prefill_chunk=prefill_chunk, context_parallel=context_parallel)
 
 
 def speculation(args, model: ResolvedModel) -> Speculation | None:

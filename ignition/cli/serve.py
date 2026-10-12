@@ -45,7 +45,7 @@ def _keep_reserve(plan, usage) -> None:
 def _server_options(configuration, model, plan, pages: int) -> dict:
     """Derive the native server's names, HTTP limits, and rejection hints from the settings and allocated pages."""
     recipe, checkpoint = plan.recipe, plan.checkpoint
-    whole = pages * recipe.page_tokens >= recipe.context
+    whole = pages * plan.page_tokens >= recipe.context
     return {
         "model_id": model.model_id, "served_names": [checkpoint.alias],
         "reserve_bytes": plan.reserve_bytes,
@@ -80,7 +80,8 @@ def run(args) -> int:
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
-                  speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size)
+                  speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                  context_parallel=not args.no_context_parallel)
     runtime = binary()
     bind = _address(configuration.get("server.host", args.host).value,
                     configuration.get("server.port", args.port).value)
@@ -132,7 +133,8 @@ def _prepare(args, *, export_path) -> int:
                                                     args.max_concurrency)
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
-                      speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size)
+                      speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                      context_parallel=not args.no_context_parallel)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
