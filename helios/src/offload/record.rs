@@ -27,7 +27,7 @@ use std::{
 
 use crate::{Result, cache::PrefixKey};
 
-use super::geometry::{BLOCK_BYTES, Layout};
+use super::geometry::{BLOCK_BYTES, CacheGeometry, Layout};
 
 pub const MAGIC: [u8; 8] = *b"FLARECKP";
 pub const VERSION: u32 = 1;
@@ -62,8 +62,7 @@ impl Header {
     /// A header for a record under `layout`, with segment offsets derived from
     /// the tail page count and checksums left zero until the writer fills them.
     pub fn new(
-        layout: &Layout,
-        geometry_planes: &[Vec<u64>],
+        geometry: &[CacheGeometry],
         identity: [u8; 32],
         fingerprint: [u8; 16],
         key: PrefixKey,
@@ -73,8 +72,7 @@ impl Header {
         created: SystemTime,
     ) -> Result<Self> {
         let _ = (
-            layout,
-            geometry_planes,
+            geometry,
             identity,
             fingerprint,
             key,
@@ -123,10 +121,15 @@ impl Header {
         file_length >= self.length_with_row()
     }
 
-    /// The header's sizes equal the live layout's.
-    pub fn matches(&self, layout: &Layout, planes: &[Vec<u64>]) -> bool {
-        let _ = (layout, planes);
+    /// The header's sizes equal the live geometry's.
+    pub fn matches(&self, geometry: &[CacheGeometry]) -> bool {
+        let _ = geometry;
         todo!("compare page tokens, rank count, plane sizes, row bytes")
+    }
+
+    /// The cross-rank layout the header describes.
+    pub fn layout(&self) -> Result<Layout> {
+        todo!("rebuild a Layout from the per-rank sizes")
     }
 }
 
@@ -171,10 +174,9 @@ pub fn scan(
     directory: &Path,
     identity: &[u8; 32],
     fingerprint: &[u8; 16],
-    layout: &Layout,
-    planes: &[Vec<u64>],
+    geometry: &[CacheGeometry],
 ) -> Result<Vec<Scanned>> {
-    let _ = (directory, identity, fingerprint, layout, planes);
+    let _ = (directory, identity, fingerprint, geometry);
     todo!()
 }
 

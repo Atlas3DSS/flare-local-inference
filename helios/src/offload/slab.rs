@@ -101,9 +101,10 @@ impl SlabPool {
     }
 
     /// Register the mapping with the driver as portable so every rank's context
-    /// can address it; requires a current CUDA context on the calling thread.
-    pub fn register(&mut self) -> Result<()> {
-        todo!("cuMemHostRegister_v2 with the portable flag")
+    /// can address it, with `context` made current on the calling thread.
+    pub fn register(&mut self, context: usize) -> Result<()> {
+        let _ = context;
+        todo!("crate::cuda::register_host with the portable flag")
     }
 
     pub fn unregister(&mut self) -> Result<()> {
