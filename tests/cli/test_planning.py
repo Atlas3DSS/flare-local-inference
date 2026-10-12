@@ -1,6 +1,7 @@
 """Plan sizing, GPU selection, and capacity errors from declared costs and injected free memory."""
 
 import json
+from dataclasses import replace
 import re
 from types import MappingProxyType
 
@@ -149,6 +150,23 @@ def test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override():
     # Twenty GiB of reserve leaves pages for 104,576 tokens, the longest sequence this plan allows.
     with pytest.raises(UsageError, match="131,072 exceeds the 104,576-token context"):
         derive(reserve=20, prefill_chunk=131072)
+
+
+def test_context_parallel_pages_hold_every_rank_share_unless_disabled():
+    sharded = replace(PAIR, ranks=MappingProxyType({size: replace(costs, page_tokens=64 * size)
+                                                    for size, costs in PAIR.ranks.items()}))
+    pair = (gpu(0, 95), gpu(1, 95))
+    shared = planning.plan(sharded, sharded.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                           speculation=None)
+    whole = planning.plan(sharded, sharded.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                          speculation=None, context_parallel=False)
+    assert (shared.context_parallel, shared.page_tokens) == (True, 128)
+    assert (whole.context_parallel, whole.page_tokens) == (False, 64)
+    assert shared.pages == whole.pages and shared.tokens == 2 * whole.tokens
+    assert derive().context_parallel is False
+    with pytest.raises(UsageError, match="does not shard attention context"):
+        planning.plan(PAIR, PAIR.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                      speculation=None, context_parallel=False)
 
 
 def test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size():

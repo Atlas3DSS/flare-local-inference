@@ -38,7 +38,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width}
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
-        max_active=plan.concurrency, context_parallel=True,
+        max_active=plan.concurrency, context_parallel=plan.context_parallel,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
