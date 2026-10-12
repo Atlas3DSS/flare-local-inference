@@ -2,8 +2,11 @@
 checkpoints, evict them from the GPU, and observe restores from host memory,
 from disk across a restart, and shared by concurrent continuations.
 
-Each scenario also runs against a server without a host store, and the
-continuation outputs at temperature zero must agree.
+Each scenario also runs against a server without a host store whose
+continuations hit the GPU cache. Continuations ask for facts spread across the
+whole restored context and must answer every one correctly; generated tokens
+are not compared verbatim because two GPU-cache restores of one checkpoint
+already diverge after a few tokens at temperature zero.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import signal
 import subprocess
 import time
@@ -70,10 +74,27 @@ def run_for(server: Server, artifacts: Path, timeout: float) -> Run:
                                max_response_bytes=64 << 20, require_metrics=True, cases=None))
 
 
+def fact_value(index: int) -> int:
+    return index * 7919 % 1009
+
+
 def long_prompt(nonce: str, sentences: int) -> str:
     return (f"Reference {nonce}. " + " ".join(
-        f"Fact {index}: the {nonce[index % len(nonce)]} series records value {index * 7919 % 1009}." for index in range(sentences))
+        f"Fact {index}: the {nonce[index % len(nonce)]} series records value {fact_value(index)}." for index in range(sentences))
         + "\nSummarize the facts above in one sentence.")
+
+
+def retrieval(sentences: int, offset: int) -> tuple[str, list[int]]:
+    """A question whose answer needs facts from every part of the context, and its answer."""
+    facts = [(offset + step * sentences // 9) % sentences for step in range(9)]
+    question = ("List the values recorded by facts " + ", ".join(str(fact) for fact in facts[:-1])
+                + f" and {facts[-1]}, in that order, as comma-separated numbers only.")
+    return question, [fact_value(fact) for fact in facts]
+
+
+def answered(choice: dict, expected: list[int]) -> tuple[bool, list[int]]:
+    numbers = [int(number) for number in re.findall(r"\d+", choice["message"].get("content") or "")][:len(expected)]
+    return numbers == expected, numbers
 
 
 def body(model_id: str, messages: list[dict], max_tokens: int = 48) -> dict:
@@ -93,8 +114,12 @@ def wait_quiescent(run: Run, name: str, timeout: float) -> dict:
         time.sleep(0.05)
 
 
-def evict_everything(run: Run, model_id: str, nonce: str, label: str) -> None:
-    """Publish more distinct prefixes than the GPU keeps, so every earlier checkpoint is evicted."""
+def evict_everything(run: Run, model_id: str, nonce: str, label: str, host: bool) -> None:
+    """Publish more distinct prefixes than the GPU keeps, so every earlier checkpoint is evicted.
+
+    Each filler publishes one terminal checkpoint, which the host store must retain alongside the
+    conversation's records; the host store therefore needs more row slabs than the GPU has rows.
+    """
     before = wait_quiescent(run, f"{label}-evict-before", run.args.timeout)
     capacity = resource_totals(before)["snapshots"]
     for index in range(capacity + 1):
@@ -103,6 +128,11 @@ def evict_everything(run: Run, model_id: str, nonce: str, label: str) -> None:
     after = wait_quiescent(run, f"{label}-evict-after", run.args.timeout)
     delta = metric_delta(before, after)
     run.check(f"{label}.gpu_checkpoints_evicted", delta["flare_snapshot_evictions_total"] >= 1, delta=delta)
+    if host:
+        run.check(f"{label}.host_store_retains_every_record",
+                  delta["flare_host_cache_stored_total"] == capacity + 1
+                  and after["flare_host_cache_memory_records"] >= before["flare_host_cache_memory_records"] + capacity + 1,
+                  before=before["flare_host_cache_memory_records"], after=after["flare_host_cache_memory_records"], delta=delta)
 
 
 def conversation(run: Run, model_id: str, nonce: str, label: str, sentences: int) -> tuple[list[dict], dict, int]:
@@ -110,8 +140,9 @@ def conversation(run: Run, model_id: str, nonce: str, label: str, sentences: int
     response = run.request(f"{label}-turn-1", body(model_id, messages))
     choice = run.complete(response)
     prompt_tokens = response["body"]["usage"]["prompt_tokens"]
+    question, _ = retrieval(sentences, 3)
     messages = messages + [{"role": "assistant", "content": choice["message"].get("content") or ""},
-                           {"role": "user", "content": "Continue with one more sentence about the series."}]
+                           {"role": "user", "content": question}]
     return messages, choice, prompt_tokens
 
 
@@ -137,7 +168,7 @@ def check_host_restore(run: Run, label: str, response: dict, delta: dict, prompt
 
 
 def memory_scenario(args, flare_extra: list[str], label: str, expected: dict | None) -> dict:
-    nonce = hashlib.sha256(f"{label}-{time.time_ns()}".encode()).hexdigest()[:10]
+    nonce = args.nonce
     server = Server(args.flare, args.package, args.gpus, args.port, args.artifacts / f"{label}.log", flare_extra)
     outputs = {}
     try:
@@ -146,27 +177,35 @@ def memory_scenario(args, flare_extra: list[str], label: str, expected: dict | N
         model_id = server.model_id()
         messages, first, prompt_tokens = conversation(run, model_id, nonce, "memory", args.sentences)
         outputs["first"] = comparable_message(first["message"])
-        evict_everything(run, model_id, nonce, "memory")
+        if expected is not None:
+            evict_everything(run, model_id, nonce, "memory", True)
         response, choice, delta = continuation(run, model_id, messages, "memory-continue")
         outputs["continue"] = comparable_message(choice["message"])
-        if expected is not None:
+        correct, numbers = answered(choice, retrieval(args.sentences, 3)[1])
+        run.check("memory-continue.recalls_facts_across_the_context", correct,
+                  expected=retrieval(args.sentences, 3)[1], observed=numbers)
+        if expected is None:
+            run.check("memory-continue.gpu_hit", delta["flare_cache_hits_total"] == 1
+                      and delta['flare_graph_launches_total{kind="restore"}'] == 1, delta=delta)
+        else:
             check_host_restore(run, "memory-continue", response, delta, prompt_tokens, args.prefill_chunk_size)
-            run.check("memory-continue.agrees_with_the_server_without_a_host_store",
-                      outputs["continue"] == expected["continue"], expected=expected["continue"], observed=outputs["continue"])
         # Two continuations of one evicted prefix admitted together share one restore.
-        evict_everything(run, model_id, nonce, "branch")
-        branches = [messages[:-1] + [{"role": "user", "content": f"Branch {index}: name one fact from the series."}] for index in range(2)]
+        if expected is not None:
+            evict_everything(run, model_id, nonce, "branch", False)
+        questions = [retrieval(args.sentences, 11 + index) for index in range(2)]
+        branches = [messages[:-1] + [{"role": "user", "content": question}] for question, _ in questions]
         before = wait_quiescent(run, "branch-before", args.timeout)
         results = run.concurrent("branch", [body(model_id, branch) for branch in branches])
         after = wait_quiescent(run, "branch-after", args.timeout)
         delta = metric_delta(before, after)
         outputs["branches"] = [comparable_message(run.complete(result)["message"]) for result in results]
+        for index, (result, (_, values)) in enumerate(zip(results, questions)):
+            correct, numbers = answered(result["body"]["choices"][0], values)
+            run.check(f"branch-{index}.recalls_facts_across_the_context", correct, expected=values, observed=numbers)
         if expected is not None:
             run.check("branch.one_restore_serves_both", delta["flare_host_cache_hits_total"] + delta["flare_cache_hits_total"] == 2
                       and delta["flare_host_cache_fetched_total"] >= 1 and delta["flare_host_cache_fetch_failed_total"] == 0
                       and delta['flare_graph_launches_total{kind="init"}'] == 0, delta=delta)
-            run.check("branch.agrees_with_the_server_without_a_host_store", outputs["branches"] == expected["branches"],
-                      expected=expected["branches"], observed=outputs["branches"])
         run.results["outputs"] = outputs
         (args.artifacts / f"{label}.json").write_text(json.dumps(run.results, indent=1))
         return outputs
@@ -175,9 +214,10 @@ def memory_scenario(args, flare_extra: list[str], label: str, expected: dict | N
 
 
 def disk_scenario(args, expected: dict) -> None:
-    nonce = hashlib.sha256(f"disk-{time.time_ns()}".encode()).hexdigest()[:10]
+    nonce = args.nonce
     directory = args.artifacts / "records"
-    extra = ["--prefix-cache-disk", str(directory), "--prefix-cache-disk-limit", args.disk_limit, "--prefix-cache-memory", "0"]
+    extra = [part for option in args.flare_option for part in option.split("=", 1)]
+    extra += ["--prefix-cache-disk", str(directory), "--prefix-cache-disk-limit", args.disk_limit, "--prefix-cache-memory", "0"]
     server = Server(args.flare, args.package, args.gpus, args.port, args.artifacts / "disk.log", extra)
     try:
         server.wait_ready(args.startup_timeout)
@@ -196,9 +236,9 @@ def disk_scenario(args, expected: dict) -> None:
         model_id = server.model_id()
         response, choice, delta = continuation(run, model_id, messages, "disk-continue")
         check_host_restore(run, "disk-continue", response, delta, prompt_tokens, args.prefill_chunk_size)
-        run.check("disk-continue.agrees_with_the_server_without_a_host_store",
-                  comparable_message(choice["message"]) == expected["continue"],
-                  expected=expected["continue"], observed=comparable_message(choice["message"]))
+        correct, numbers = answered(choice, retrieval(args.sentences, 3)[1])
+        run.check("disk-continue.recalls_facts_across_the_context", correct,
+                  expected=retrieval(args.sentences, 3)[1], observed=numbers)
         (args.artifacts / "disk.json").write_text(json.dumps(run.results, indent=1))
     finally:
         server.stop()
@@ -211,19 +251,25 @@ def main() -> int:
     parser.add_argument("--gpus", default="0")
     parser.add_argument("--port", type=int, default=8031)
     parser.add_argument("--artifacts", type=Path, required=True)
-    parser.add_argument("--memory", default="8G", help="--prefix-cache-memory for the memory scenario")
+    parser.add_argument("--memory", default="24G",
+                        help="--prefix-cache-memory for the memory scenario; its row slabs must outnumber the GPU's cached rows")
     parser.add_argument("--disk-limit", default="50G")
     parser.add_argument("--sentences", type=int, default=400, help="facts in the first prompt; about 16 tokens each")
     parser.add_argument("--prefill-chunk-size", type=int, default=4096)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--skip-disk", action="store_true")
+    parser.add_argument("--flare-option", action="append", default=[], metavar="FLAG=VALUE",
+                        help="extra flare run option for every launch, such as --mtp-draft-tokens=0")
     args = parser.parse_args()
     if args.artifacts.exists() and any(args.artifacts.iterdir()):
         parser.error("the artifact directory must not contain a previous run")
     args.artifacts.mkdir(parents=True, exist_ok=True)
-    baseline = memory_scenario(args, ["--prefix-cache-memory", "0"], "baseline", None)
-    memory_scenario(args, ["--prefix-cache-memory", args.memory], "memory", baseline)
+    # One nonce keeps every server's prompts identical so outputs are comparable.
+    args.nonce = hashlib.sha256(f"host-cache-{time.time_ns()}".encode()).hexdigest()[:10]
+    common = [part for option in args.flare_option for part in option.split("=", 1)]
+    baseline = memory_scenario(args, common + ["--prefix-cache-memory", "0"], "baseline", None)
+    memory_scenario(args, common + ["--prefix-cache-memory", args.memory], "memory", baseline)
     if not args.skip_disk:
         disk_scenario(args, baseline)
     failed = 0
