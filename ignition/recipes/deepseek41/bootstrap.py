@@ -60,9 +60,8 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         request_capacity(self.max_active)
         self.speculative_shapes
-        if (any(w > 6 for w in self.speculative_widths)
-                or self.speculative_fixed_width is not None and self.speculative_fixed_width not in self.speculative_widths):
-            raise ValueError("DSpark verification widths must be within the five-token draft block")
+        if self.speculative_fixed_width is not None and self.speculative_fixed_width not in self.speculative_widths:
+            raise ValueError("fixed verification width must belong to the prepared widths")
         if self.minimum_pages <= 0 or self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
             raise ValueError("page and snapshot budgets must be positive and headroom nonnegative")
 
@@ -87,6 +86,10 @@ class PreparationConfig:
     @property
     def decode_tokens(self):
         return max((b * w for b, w in self.speculative_shapes), default=self.request_capacity)
+
+    @property
+    def draft_tokens(self):
+        return max(self.speculative_widths) - 1 if self.dspark else 0
 
 
 @torch.no_grad()
@@ -127,12 +130,12 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         records = torch.zeros((2, slots, 24 if config.dspark else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
         ipc = package_storage.peer_storage
-        tokens = max(config.prefill_chunk_size, config.decode_tokens, slots * 5 if config.dspark else 0)
+        tokens = max(config.prefill_chunk_size, config.decode_tokens)
         collective = create_all_reduce_runtime(group, device, max_tokens=tokens, hidden_size=5120, ipc=ipc)
         prefill_collective = create_dma_all_reduce_runtime(group, device,
             max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=max(config.decode_tokens, slots * 5 if config.dspark else 0), columns=129280, ipc=ipc)
+            max_rows=config.decode_tokens, columns=129280, ipc=ipc)
         markov_collective = (create_all_gather_runtime(group, device,
             max_rows=slots, columns=2 * 129280, ipc=ipc) if config.dspark else None)
         identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
@@ -157,7 +160,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             from .speculative import SpeculativePreparation
 
             speculation = SpeculativePreparation(weights, tables, pool, requests, inputs, decoder_storage,
-                records=records, frame=frame, sequence=sequence, session=session, workspace=arena,
+                draft_tokens=config.draft_tokens, records=records, frame=frame, sequence=sequence,
+                session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
                 markov_runtime=markov_collective, coordinator=coordinator)
 

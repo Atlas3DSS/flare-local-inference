@@ -1,10 +1,10 @@
 # Ignition preparation and Flare serving commands
 
 Flare serves the model architectures its recipes support on NVIDIA SM120 and
-SM121 GPUs; each recipe pins qualified default checkpoints. Its command line accepts only what the engine cannot determine by itself,
-expressed in the user's terms. A setting the engine can read from the
-checkpoint, measure on the host, or derive from another setting is not a
-parameter anywhere: not a flag, not a configuration key, not a debug override.
+SM121 GPUs. Recipes declare default checkpoints and supported preparation
+capacities. The command line selects models, GPUs, concurrency, storage, and
+listeners. The engine derives memory and execution geometry from those choices;
+advanced preparation flags expose the explicit overrides listed below.
 
 ## 1. Principles
 
@@ -14,17 +14,16 @@ parameter anywhere: not a flag, not a configuration key, not a debug override.
   as qualified code. A recipe declares its checkpoints, their pinned revisions,
   supported tensor-parallel sizes, concurrency range, memory cost model, and
   template defaults. The command line never needs to know which model it runs.
-- **Derived means derived.** Context length, page count, prefix-cache size,
-  snapshot slots, graph capacities, worker counts, and body limits are computed
-  from the recipe, the host, and the user's intent. They are printed, never
-  typed. The recipe sets the prefill chunk and the speculation settings;
-  advanced flags override them.
+- **Derive execution geometry.** Context length, page count, GPU prefix-cache
+  size, snapshot slots, graph capacities, worker counts, and body limits follow
+  the recipe, host, and selected capacities. Advanced flags override the recipe's
+  prefill chunk and speculation settings.
 - **Memory follows the model and the host.** Weights, graphs and
   scratch, live state, and a prefix cache sized from `--max-concurrency` come
   first. KV pages take everything else: the GPU's free memory at startup minus
   engine headroom. The page pool holds active requests and every cached prefix,
   so memory beyond what active requests need keeps more history resident.
-  Nothing asks for a fraction or a size.
+  The configuration's GPU reserve leaves memory for processes started later.
 - **Estimate roughly, allocate from the device.** Before weights load, Flare
   estimates memory from the recipe's declared sizes, only to choose GPUs and to
   refuse a model that cannot fit. Allocation follows the memory the device has
@@ -65,7 +64,7 @@ allocation contents, graph descriptions, and frontend assets to one `.flaretenso
 that must not exist, then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
-preparation source contents. Qwen and GLM provide native package storage support.
+preparation source contents. Qwen, GLM, and DeepSeek provide native package storage support.
 Tensor-parallel packages contain one resource bundle per selected GPU and load
 in one process with one execution thread per rank. API keys are excluded from
 the package.
@@ -91,10 +90,7 @@ storage according to those selections and available GPU memory.
 
 ## 3. Parameters
 
-This is the complete inventory. Everything a user can set is listed here with
-its home: the command line, the configuration file, or both.
-
-### 3.1 Command-line flags
+### 3.1 Ignition command-line flags
 
 `run` accepts the following flags. `export` accepts the same preparation flags,
 requires `--output FILE`, and excludes `--host` and `--port`.
@@ -109,14 +105,13 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--verbose` | Per-phase detail on stderr | off |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
 
-Advanced flags appear in their own section of `--help`. The recipe sets each
-value; the flag overrides it.
+Advanced flags appear in their own section of `--help`. Recipe values apply when flags are omitted; explicit flags take precedence.
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to the recipe's limit (7 for Qwen and GLM; 5 for DeepSeek). Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
@@ -129,13 +124,30 @@ fixed.
 
 Both Ignition commands accept `--config`.
 
-Names follow one rule: the flag says what the user is deciding, in the word a
-user would use. `--gpus` rather than `--device` and `--tp`, because the user
-picks GPUs and tensor parallelism follows. `--max-concurrency` rather than
-`--max-active` or `--max-num-seqs`, and with the `max` because it is a cap,
-not a target. `--host` and `--port` because they are the names every HTTP server uses.
+### 3.2 Native serving flags
 
-### 3.2 Configuration file
+`flare run PACKAGE` loads an exported file without the Ignition configuration
+reader. Its options are:
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
+| `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
+| `--api-key-file PATH` | File containing the serving API key | No authentication |
+| `--max-concurrency N` | Reduce concurrency within captured batch capacities | Package default |
+| `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
+| `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
+| `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
+| `--weight-loading auto\|direct\|gds` | Automatic cuFile selection, staged direct I/O, or required cuFile weight loading | `auto` |
+
+Selected concurrency and draft depth cannot exceed prepared capacity.
+Concurrency three requires the batch-four bucket. Fixed verification loads
+width `N+1` for each required batch; adaptive verification loads the permitted
+widths. Missing variants fail before GPU allocation. Continuation rows and
+KV pages receive physical backing after graph upload, within fixed virtual
+extents. Reducing execution state can leave more memory for KV pages.
+
+### 3.3 Configuration file
 
 `~/.config/flare/config.toml`. All keys optional. Written on first `run` with
 the resolved values present as comments.
@@ -144,23 +156,23 @@ the resolved values present as comments.
 [server]
 host = "127.0.0.1"
 port = 8000
-api_key = ""                      # empty: no authentication
+api_key = ""                      # Empty: no authentication.
 
 [defaults]
 model = "qwen3.8-flash"
 max_concurrency = 4
 
 [memory]
-reserve = "0"                     # GPU memory left untouched for processes that start later
+reserve = "0"                     # GPU memory left for processes started later.
 
-[models."qwen3.8-flash"]          # per-model overrides of [defaults]
+[models."qwen3.8-flash"]          # Per-model overrides of [defaults].
 max_concurrency = 2
 
 [paths]
 hub_cache = "~/.cache/huggingface/hub"
 kernel_cache = "~/.cache/flare/kernels"
 package_cache = "~/.cache/flare/packages"
-cuda = "/opt/cuda"                # used only when the toolkit is not found in installed packages
+cuda = "/opt/cuda"                # Used when installed packages provide no toolkit.
 ```
 
 `[models.<alias>]` overrides `[defaults]`; flags override both.
@@ -173,11 +185,10 @@ Until it exists, requests receive the checkpoint's template and
 
 `memory.reserve` exists for one case: a process that starts after Flare and
 needs GPU memory. Processes already running when Flare starts need no
-setting, because supply is free memory rather than card size. It is the one
-memory number a user may ever type, it is the number they actually know, and
-it lives only in the configuration file.
+setting, because supply is free memory rather than card size. It lives in the configuration file and is exported as the package's serving
+reserve.
 
-The prefix cache is not a setting. It holds model states at instruction,
+The GPU prefix cache is derived. It holds model states at instruction,
 prompt, and answer boundaries so that later requests repeating a prefix skip
 recomputing it. A finished exchange keeps its prompt and answer states, so the
 engine sizes the cache at eight states per concurrent request, about four
@@ -187,35 +198,39 @@ recipe. Each active request additionally holds three states while it runs,
 counted as live state. Under memory pressure, KV pages shrink first and the prefix cache has a
 floor of 8 states.
 
-### 3.3 Parameters that do not exist
+### 3.4 Configuration boundaries
 
-Each of these was a flag on the previous entrypoint, is a flag on vLLM, or is
-a field in a lil manifest. None is a parameter in Flare.
+Configuration assigns each decision to one owner:
 
-| Candidate | Verdict | Reason |
-|---|---|---|
-| `--context`, `max_model_len` | Not a parameter | Context is the checkpoint's maximum. KV pages are one shared pool and admission reserves each request's prompt plus output limit against it, so four 128K requests and one 262K request both fit without a setting. A recipe that preallocates per request derives its capacity from `--max-concurrency`. |
-| `--memory`, `--gpu-memory-utilization`, `kv_cache_memory_bytes`, `--pages` | Not a parameter | A fraction is relative to the card and blind to other processes; a size asks the user to subtract their other workload in their head. Weights come from the index, graphs and scratch from capture, and pages from the free memory that remains. The only memory number is `memory.reserve`, in the configuration file, for processes that start later. |
-| `--snapshot`, `--model-path` | Not a parameter | A directory is a valid `MODEL`. The old name also collided with state snapshots. |
-| `--device`, `--tp` | Not a parameter | `--gpus` lists GPUs; tensor parallelism is their count. |
-| `max_num_batched_tokens` | Not a parameter | The recipe's prefill chunk; `--prefill-chunk-size` is the advanced override. |
-| `--headroom`, `--snapshot-budget`, `conversation_cache` | Not a parameter | Ignition keeps 1 GiB for compiled warm-up and graph capture. Helios sizes its caches after graph upload and keeps 64 MiB for driver bookkeeping, streams, and events. Both leave the configured `memory.reserve` untouched. The prefix cache is sized from `--max-concurrency`. |
-| `--mtp`, width lists, fixed width, proposal source, copy | Advanced flags | Speculation is distribution-preserving and faster when the recipe prepares it, so every recipe with an MTP module enables it and adapts the draft count from measured rounds. `--no-mtp` and the `--mtp-*` flags override the recipe: to measure a setting, to pin one, or to free the draft model's memory on a host where it does not fit. One draft-token count sets the depth and `--no-mtp-adaptive-verification` pins it; there is no list of counts, no separate fixed count, and no flag that turns speculation on. |
-| `--max-active` | Renamed | `--max-concurrency`. |
-| `--bind`, `--listen` | Renamed | `--host` and `--port`. |
-| `--thinking`, `--template-defaults FILE`, reasoning effort, sampling defaults, `--max-tokens` | Not command-line parameters | These are default request parameters, a separate mechanism not yet specified. Launch flags do not set per-request behavior. |
-| `--memory-report FILE` | Removed | `run` prints the allocated capacities; the server exposes metrics over HTTP. |
-| `--prepare-only`, `prepare`, `plan` | Removed | `run` prepares and caches a runtime package; `export` writes one to an explicit destination. |
-| `--revision` | Part of `MODEL` | `org/name@revision`. An alias uses the revision its recipe pins. |
-| `--dtype`, `--quantization`, `--kv-cache-dtype`, `--block-size`, kernel backends, `cudagraph_mode`, `--enable-prefix-caching`, `--enable-chunked-prefill` | Not a parameter | Recipe decisions, qualified. |
-| `--served-model-name` | Not a parameter | Requests may name the alias or the repository id; `/v1/models` lists both. |
-| `--max-num-seqs`, `--max-num-batched-tokens` | Not a parameter | `--max-concurrency` and the derived chunk. |
-| `queue_capacity`, `event_capacity`, `frontend_workers`, `max_body_bytes` | Not a parameter | Derived: queue is four times concurrency, frontend workers equal concurrency, event capacity is fixed, body limit is the recipe's image count times its per-image limit plus 1 MiB. |
-| `compile_workers` | Not a parameter | Derived from CPU count. |
-| `CUDA_HOME` | Not a parameter | Located from installed packages, then `[paths].cuda`. |
-| `CUDA_VISIBLE_DEVICES` | Read only to interpret `--gpus` | `--gpus` selects. If the caller set it, integer entries are NVML indices, other entries are GPU UUID prefixes, `--gpus` indices are relative to that enumeration, and the `Select GPUs.` startup line says so. Flare then exports the selected GPUs' UUIDs to its own processes. |
-| `--api-key` | Configuration only | Secrets do not go on command lines. |
-| `--seed`, `--temperature`, stop sequences | Request fields | Per request. |
+| Decision | Owner or interface |
+|---|---|
+| Checkpoint and revision | `MODEL`, including a local directory or `org/name@revision` |
+| GPUs and TP size | `--gpus`; rank count follows the selected list |
+| Concurrent requests | `--max-concurrency` |
+| Listener | Ignition `--host` and `--port`; native Flare `--bind` |
+| Context limit | Checkpoint maximum; admission still requires sufficient shared cache capacity |
+| KV pages and GPU prefix-cache rows | Derived from available memory, graph cost, and concurrency |
+| GPU memory for later processes | `[memory] reserve` |
+| Preparation headroom | 1 GiB for compiled warmup and capture |
+| Serving driver margin | 64 MiB after graph upload |
+| Prefill chunk | Recipe default, overridden by `--prefill-chunk-size` |
+| Speculation | Recipe default, overridden by `--no-mtp` and the advanced speculation flags |
+| Weight format, KV precision, page geometry, kernel plans | Checkpoint metadata and recipe preparation |
+| Queue, frontend workers, event capacity, body limit | Concurrency and recipe image limits |
+| Compiler workers | Host CPU capacity |
+| CUDA toolkit | Installed packages, then `[paths] cuda` |
+| Served names | Recipe alias and repository ID, exposed through `/v1/models` |
+| API key | Ignition configuration or native `--api-key-file`; excluded from packages |
+| Seed, sampling controls, output limit, and stops | Request fields, with declared defaults for missing values |
+
+Explicit request values take precedence over defaults. Speculation's benefit
+depends on measured acceptance and round cost. Reducing the draft limit at
+load time retains draft weights; freeing those weights requires preparation
+with `--no-mtp`.
+
+Host prefix retention is specified separately in the proposed
+[prefix-cache offload design](prefix-cache-offload.md). Its host-memory and
+disk settings require the implementation and measurements defined there.
 
 ## 4. Derived settings
 
@@ -227,7 +242,7 @@ a field in a lil manifest. None is a parameter in Flare.
 | Prefix cache | Eight states per `--max-concurrency` request, at most a quarter of the memory left after weights, graphs, and live state; floor 8 states under pressure |
 | Live state | The recipe's state rows for `--max-concurrency` requests: one row per request slot, the recipe's speculative rows per slot while speculating, and three checkpoint rows per active request |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |
-| Prefill chunk | The recipe's chunk, 4,096 tokens for both recipes; `--prefill-chunk-size` overrides |
+| Prefill chunk | The recipe's chunk, 4,096 tokens for Qwen, GLM, and DeepSeek; `--prefill-chunk-size` overrides |
 | Speculative catalog and draft counts | Recipe, overridden by `--no-mtp` and the `--mtp-*` flags; the draft count adapts from measured rounds unless fixed |
 | Kernel selections | Autotuned during preparation; cached by checkpoint revision, recipe version, GPU, and settings |
 | HTTP queue, workers, event capacity, body limit | `--max-concurrency` and the recipe's image limits |
@@ -254,9 +269,10 @@ a field in a lil manifest. None is a parameter in Flare.
 5. Flare loads the model through Helios and starts HTTP. The completed
    `Start server.` row reports the listening URL.
 
-The Qwen recipe sizes its KV pages from free memory after graph capture.
-The package retains that capacity on subsequent loads. Insufficient device
-memory or a recorded-address collision fails native startup.
+Preparation records cache layouts and maximum virtual extents. Helios sizes
+physical row and page counts from selected execution capacities and free
+memory after graph upload. Insufficient memory or a recorded-address collision
+fails native startup.
 
 Serving prints no per-request output. SIGINT and SIGTERM stop admission,
 give active responses five seconds to finish, drain GPU work, and exit 0.
@@ -274,10 +290,10 @@ closes the prepared model and exits without starting a listener.
 
 ### 5.3 `flare run`
 
-Animate the Flare banner during loading on a terminal. Prepare the model,
-initialize GPUs, allocate model memory, load weights, prepare kernels and
-execution, allocate cache, load model configuration and frontend assets, and
-start the HTTP server. Helios reports each stage with a ten-column bracketed
+Animate the Flare banner during loading on a terminal. Validate the package,
+initialize GPUs, allocate model memory, load weights and compiled kernels,
+instantiate graphs, allocate caches, load frontend assets, and start HTTP.
+Loading performs no kernel compilation or graph capture. Helios reports each stage with a ten-column bracketed
 progress bar, a result, and elapsed time.
 Memory loading advances by bytes; kernel and execution preparation
 advance by resource counts. Stages with no known total show a cycling bar.
@@ -323,29 +339,13 @@ keyed by checkpoint revision, recipe version, GPU, and settings. A second
 `--max-concurrency`, `--gpus`, or the speculation flags can add graph shapes
 and incur partial tuning.
 
-`run` prints the resolution, the selected GPUs with the settings in effect,
-and each preparation phase with its counts and elapsed time. For example:
+`run` prints checkpoint resolution, selected GPUs, preparation settings, and
+each phase's counts and elapsed time. The phases include weight loading,
+`Prepare embedding tables`, kernel tuning, forward compilation, KV allocation,
+graph capture, and package export. A package cache hit skips preparation.
 
-```
-[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.3s
-[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · up to 5 draft tokens  0.2s
-[    OK    ] Inspect checkpoint.  3.6s
-[    OK    ] Load weights.  15.8s
-[    OK    ] Load MTP weights.  1.8s
-[    OK    ] Load PLE table.  128/128  5.0s
-[    OK    ] Allocate model state.  0.0s
-[    OK    ] Construct graph catalog.  30/30  1.4s
-[    OK    ] Prepare and tune kernels.  6.4s
-[    OK    ] Measure graph memory.  30/30  5.9s
-[    OK    ] Compile model forwards.  17/17  117.3s
-[    OK    ] Allocate KV cache.  6.90 GiB per GPU · 270,016 tokens  0.3s
-[    OK    ] Warm compiled forwards.  17/17  53.5s
-[    OK    ] Prepare serving graphs.  30/30  4.2s
-[    OK    ] Export native package.  /path/to/runtime-package  35.0s
-```
-
-After export, `run` replaces Ignition with Flare, which displays its banner and
-model-loading stages. A package cache hit skips the preparation stages.
+After export, `run` replaces Ignition with Flare, which displays its banner
+and native loading stages.
 
 Preparation phases come from `ignition.progress.phase`; on a terminal each shows an activity
 bar while it runs. `Select GPUs.` names the GPUs by index, followed by
@@ -383,8 +383,8 @@ The hub cache follows the Hugging Face hub library's convention unless
 For the command line to stay this small, every recipe declares:
 
 - aliases, repository ids, revisions, architectures;
-- each revision's stored tensor bytes by placement, device or mapped host
-  memory, so the estimate needs no cached snapshot; another checkpoint's placement
+- each revision's stored tensor bytes by placement, device or auxiliary table
+  storage, so the estimate needs no cached snapshot; another checkpoint's placement
   scales from these by its index's total size;
 - supported tensor-parallel sizes and the concurrency range;
 - a memory cost model: bytes per cached token, bytes per snapshot, bytes of
@@ -406,20 +406,3 @@ maps, container and multi-node discovery, multiple models in one process,
 and serving an architecture no recipe supports.
 Multi-node tensor parallelism across DGX Spark hosts, if it arrives, is a
 separate command with its own discovery, not a layer inside `run`.
-
-## Runtime capacity selection
-
-`flare run PACKAGE --max-concurrency N --mtp-draft-tokens K` loads only the
-captured graph variants needed for N concurrent requests and at most K drafts
-per round. `--mtp-adaptive-verification` enables width selection;
-`--no-mtp-adaptive-verification` loads only width K+1. With omitted flags, the
-package supplies defaults. K=0 selects ordinary prefill, decode, resume, and
-prefix-cache graphs without draft generation or draft-state maintenance. Adaptive
-width-one rounds retain draft state for later wider rounds. MTP weights remain
-loaded. Capacity increases and missing variants are rejected before GPU
-allocation. Fixed storage retains its prepared layout. Continuation rows and KV
-pages are sized after graph upload within their reserved virtual ranges; reducing
-concurrency or verification width leaves more physical memory for KV pages.
-
-`--embedding-table-storage disk|ram` selects storage for PLE and Engram tables.
-Both modes deliver compact GPU rows to the same prepared graphs; disk is the default.

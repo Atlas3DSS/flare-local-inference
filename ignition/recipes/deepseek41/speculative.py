@@ -16,7 +16,7 @@ from .dspark import PreparedContext, PreparedDraft, PreparedMarkov
 
 
 class SpeculativePreparation:
-    def __init__(self, weights, tables, pool, requests, inputs, scratch, *, records, frame, sequence,
+    def __init__(self, weights, tables, pool, requests, inputs, scratch, *, draft_tokens, records, frame, sequence,
                  session, workspace, runtime, vocabulary_runtime, markov_runtime, coordinator):
         self.weights, self.tables, self.pool = weights, tables, pool
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
@@ -28,7 +28,8 @@ class SpeculativePreparation:
         self.generation = torch.zeros_like(requests.generation)
         self.offset = torch.zeros_like(requests.generation)
         draft = weights.config.draft
-        tokens = requests.capacity * draft.block_size
+        self.block_size = max(1, draft_tokens)
+        tokens = requests.capacity * self.block_size
         self.draft_scratch = Scratch.allocate(tokens, tokens, weights.shard.world_size, pool.backing.device,
                                              experts=draft.experts, top_k=draft.top_k)
 
@@ -51,7 +52,7 @@ class PreparedRound:
             name=name + ".target", workspace=o.workspace, **o.collectives)
         self.context = PreparedContext(o.weights, self.decoder.auxiliary, self.metadata, o.pool,
             session=o.session, name=name + ".context", workspace=o.workspace)
-        block = o.weights.config.draft.block_size
+        block = o.block_size
         self.draft_metadata = Metadata.allocate(b * block, b, 1, device, samples=b * block)
         self.draft = None if w == 1 else PreparedDraft(o.weights, o.draft_scratch.rows(b * block, b * block),
             self.draft_metadata, o.pool, session=o.session, name=name + ".draft", workspace=o.workspace, **o.collectives)

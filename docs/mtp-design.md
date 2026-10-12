@@ -40,8 +40,8 @@ The MTP decoder has no GDN or PLE layer. Target verification still executes all
 MTP expert preparation must preserve W4A16 arithmetic. The target expert loader
 uses activation-quantized NVFP4 with CSF scales and cannot be applied unchanged.
 The [checkpoint manifest](../ignition/preparation/qwen38.py) validates MTP
-headers; the [weight loader](../ignition/recipes/qwen38/weights.py) excludes them.
-Header validation does not verify tensor payload hashes or model execution.
+tensor geometry. Target loading excludes those tensors; the separate
+[MTP loader](../ignition/recipes/qwen38/mtp_weights.py) prepares their weights.
 
 Transformers `4cc2aa84301c9aa210b5513dab9fefae03981f6e` ignores `mtp.*`
 and has no MTP module. The [MTP recipe](../ignition/recipes/qwen38/mtp.py) composes
@@ -115,7 +115,13 @@ sampling, and commit execute inside prepared CUDA graphs.
 ## DeepSeek DSpark proposals and continuation state
 
 The [DSpark preparation code](../ignition/recipes/deepseek41/dspark.py) composes
-three draft layers with a five-position noncausal block. Their context comes
+three draft layers with a noncausal block sized to the preparation's draft-token
+maximum, five by default. This matches the five draft positions described in
+the [DeepSeek-V4.1 report](https://arxiv.org/html/2609.19969v1#S2.SS4.SSS3)
+and the checkpoint's `dspark_block_size`. Preparation accepts explicit draft
+limits through seven; block length controls prepared query and scratch shapes,
+not learned weight dimensions. Every graph offering drafts evaluates the complete block before
+sampling and verifying its selected prefix. Their context comes
 from target inputs to layers 37, 38, and 39: collapsed mHC states are concatenated,
 projected, normalized, and written into each draft layer's 128-token window.
 The block begins with the pending target token and fills the remaining positions
@@ -136,9 +142,12 @@ target execution; Helios delivers the requested rows through the shared embeddin
 table interface.
 
 DSpark uses the shared token-vector completion and adaptive verification contracts.
-Ignition captures verification widths one through six for every batch capacity;
+Ignition captures verification widths one through six by default for every batch capacity;
 Flare can reduce draft count and concurrency when loading. Helios schedules and
 replays the selected graphs without interpreting DSpark layers or proposals.
+Adaptive selection uses observed acceptance and measured GPU round cost. The
+DSpark confidence head is computed inside the graph but does not drive the
+native controller.
 
 ## A speculative round is a state transaction
 
@@ -210,7 +219,7 @@ The target's FP32 recurrent matrices occupy **108 MiB per saved verification
 position**. Four requests with seven additional positions require 2.953 GiB;
 fifteen require 6.328 GiB, excluding histories, logits and weights. Recurrent
 writes also cost 108 MiB per verified row: batch one at width eight writes
-864 MiB, approximately 0.5 ms at 1.79 TB/s before other traffic. The excluded
+864 MiB, approximately 0.5 ms at 1.79 TB/s before other traffic. A
 batch-four width-eight shape would write 3.375 GiB, approximately 2 ms.
 Measured round timings must include these writes. Existing GDN
 supports a maximum of seven drafts plus the guaranteed input per request.
@@ -223,19 +232,12 @@ by the draft model. Preparation reports exact persistent, graph-pool and scratch
 costs before allocating KV pages, preserving configured headroom and snapshot
 budgets.
 
-TensorFold's optional Flash Next Metal kernel demonstrates another representation:
-one committed recurrent matrix plus compact per-row K/V, normalization and gate
-records. The following round replays accepted updates before evaluating its
-speculative rows. Two sixteen-row record banks across 36 layers occupy about
-27.8 MiB, versus 1.688 GiB for sixteen full recurrent positions. These are
-layout sizes, not measured Flare savings.
-
-A Qwen-compatible b12x operation could implement this explicit deferred commit.
-It must reproduce b12x's recurrence arithmetic and materialize all accepted
-updates before snapshot publication or resumable terminal-state export. Full
-checkpoint columns remain its correctness oracle. This is an extension of the
-state representation, not permission to reconstruct an arbitrary checkpoint by
-rerunning the model.
+Compact recurrence would retain one committed matrix plus per-row K/V,
+normalization, and gate records, then apply accepted updates before the following
+round. A Qwen-compatible b12x contract must reproduce the recurrence arithmetic
+and materialize accepted updates before checkpoint publication. Full checkpoint
+columns provide the component reference. Capacity and write-traffic savings
+must be measured in complete rounds before replacing the representation.
 
 ## Graph catalog, control and scheduling
 
@@ -255,6 +257,13 @@ inside an enabled speculative catalog maintains draft state, allowing the next
 round to use a wider verification graph. Graphs declare their serving mode through
 `speculation_enabled`; shared operations leave the field absent.
 
+Per-width cost measurements must include the total target rows `B × W`.
+The small-row MoE band through eight rows covers widths through eight at
+batch one, four at batch two, and two at batch four. Larger shapes can select
+grouped expert kernels with different costs. The Cartesian catalog includes
+those shapes; preparation does not enforce an eight-row cap. Measure each
+captured shape and locate the kernel-band transition before choosing serving
+defaults. Odd widths require the same validation as even widths.
 Adaptive width-one rounds continue absorbing target feedback into the MTP cache so
 requests can resume drafting when concurrency falls. The native adaptive
 controller chooses only among that batch's captured counts.
@@ -338,12 +347,23 @@ tokens. One grammar mask reused across draft positions is invalid. Such rounds
 remain single in-flight until the native grammar state and uploaded masks are ready.
 Multi-token custom stops similarly require ordered matching across token and
 round boundaries, retaining candidate checkpoints until the selected stopping
-prefix is known. Tentative device progress beyond a host-selected stop remains
+prefix is known.
+The tool/schema union grammar described in the
+[core design](core-design.md#integration-and-remaining-work) must use the same
+candidate-mask mechanism. Grammar acceptance tests require at least one accepted
+draft, valid output, and exact committed state. Token-for-token comparison with
+one-token execution requires deterministic arithmetic and compatible sampling
+semantics. Tentative device progress beyond a host-selected stop remains
 private, cannot publish snapshots, and retires only after all referencing work
 drains. Host output truncation alone does not commit the corresponding model
 state.
 
 ## Sampling correctness
+
+Stochastic verification is the primary serving path. Qwen's checkpoint defaults
+are temperature 1.0, top-k 20, and top-p 0.95; explicit request values win.
+Acceptance and round-cost measurements use those defaults. Temperature-zero
+results are reported separately.
 
 All chains use FlashInfer's rejection sampler: accept
 with `min(1, p(token)/q(token))`; on rejection, sample the normalized positive
@@ -385,13 +405,10 @@ nonoverlapping ranges by converting that bound to the RNG API's offset units,
 and qualify the compiled kernel's progression. Merely adding emitted count
 to the ordinary single-token counter would reuse random draws.
 
-Distribution-preserving verification does **not** imply the same tokens for one
-fixed seed as ordinary sampling. TensorFold uses seed/absolute-position/token-ID
-keyed draws and target-match verification to obtain a stronger coupling under
-row-invariant arithmetic. Adopting that sampler would change Flare's random
-contract; it is not required here. Numerical differences between verification
-widths also remain subject to the measured reference floor, including changes
-in the maximum-logit token near ties.
+Distribution-preserving verification does not guarantee the same token sequence
+as ordinary sampling for a fixed seed. Acceptance and correction consume a
+different random stream. Verification widths can also change arithmetic near
+logit ties; comparisons use measured operator bounds and repeatability.
 
 ## Adaptive policy and operator extensions
 
@@ -399,9 +416,7 @@ The controller selects bounded captured widths from completed-round token counts
 and measured round cost. Copied request continuations use the same verification
 budget as MTP proposals. Compact recurrence is a separate state-representation
 extension; token trees additionally require parent-indexed GDN, convolution,
-PLE and QSA histories. The [research comparison](/data/sparkgap-artifacts/mtp-research/competitive-mechanisms.md)
-records the external mechanisms, source revisions and their applicability to
-this checkpoint.
+PLE and QSA histories.
 
 ## Implementation dependencies and acceptance
 
@@ -443,10 +458,11 @@ cancellation and the single-round submission barrier; grammar barriers; and snap
 pressure. Prompt counts are initialized once, generated counts advance once,
 and rejected proposals never enter committed state or public output.
 
-Compare Python and Rust replay of the same graphs bitwise, including same-shape
-restore and every persistent state region. Cross-capacity and ordinary-versus-
-verification arithmetic use tolerances established from measured same-input
-variation. Teacher-forced diagnostics retain full-vocabulary logits,
+Compare Python and Rust replay of the same graphs and same-shape restores.
+Metadata and state transfers require exact equality. Deterministic plans require
+identical outputs; plans with variable reduction order use measured component
+repeatability bounds. Cross-capacity and ordinary-versus-verification arithmetic
+use tolerances established from measured same-input variation. Teacher-forced diagnostics retain full-vocabulary logits,
 relative L2 with the reference norm as denominator, top-10 overlap and FP32
 `KL(reference || actual)`. Numerical acceptance requires component comparisons
 on identical operands, tolerances derived from measured arithmetic differences,
@@ -501,5 +517,5 @@ The native overhead target remains within 5% of that **measured replay floor**, 
 from frontend delivery. The approximate 3.9 ms single-token weight-traffic bound
 is a non-speculative batch-one reference: amortized verification can reduce bytes
 per emitted token, while extra expert routes and MTP work can increase round
-cost. No fixed MTP speedup is assumed. Raw observations and large tensor/trace
-data stays outside the repository.
+cost. No fixed MTP speedup is assumed. Keep raw measurements and the configuration needed to interpret them; large
+tensor and trace files remain outside the repository.

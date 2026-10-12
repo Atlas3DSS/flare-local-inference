@@ -46,12 +46,8 @@ impl ModelContract for DeepSeek41 {
         }
         if config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
             || config.history_drafts
-            || config.speculative_widths.iter().any(|w| *w > 6)
         {
-            return Err(
-                "DeepSeek V4.1 speculation requires DSpark proposals with at most five drafts"
-                    .into(),
-            );
+            return Err("DeepSeek V4.1 speculation requires DSpark proposals".into());
         }
         if config.limits.max_sequence_tokens > 1048576 {
             return Err("DeepSeek V4.1 context exceeds 1048576 tokens".into());
@@ -244,7 +240,7 @@ mod contract_tests {
             eos_token_ids: vec![1],
             sampling_defaults: SamplingParameters::default(),
             max_new_tokens: 128,
-            speculative_widths: vec![1, 2, 3, 4, 5, 6],
+            speculative_widths: vec![1, 2, 3, 4, 5, 6, 7, 8],
             speculative_fixed_width: None,
             history_drafts: false,
             speculative_proposal_source: crate::scheduler::speculation::ProposalSource::Mtp,

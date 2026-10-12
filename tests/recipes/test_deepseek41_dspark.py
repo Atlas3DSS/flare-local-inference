@@ -9,14 +9,24 @@ from ignition.recipes.deepseek41.config import DSparkConfig
 from ignition.recipes.deepseek41.recipe import RECIPE
 
 
-def test_dspark_is_the_only_learned_draft_and_has_five_positions():
+def test_dspark_defaults_to_five_drafts_with_adaptive_verification():
     config = PreparationConfig(max_active=4)
     assert config.speculative_widths == (1, 2, 3, 4, 5, 6)
-    assert config.decode_tokens == 24
-    assert RECIPE.speculation.draft_tokens == 5 and not RECIPE.history_copy
+    assert config.draft_tokens == 5 and config.decode_tokens == 24
+    assert RECIPE.speculation.draft_tokens == 5 and RECIPE.max_draft_tokens == 7
+    assert RECIPE.speculation.adaptive and not RECIPE.history_copy
     assert PreparationConfig(dspark=False).speculative_shapes == ()
+    assert PreparationConfig(dspark=False).draft_tokens == 0
     with pytest.raises(ValueError):
-        PreparationConfig(speculative_widths=(1, 7))
+        PreparationConfig(speculative_widths=(1, 9))
+
+
+@pytest.mark.parametrize("width", range(1, 9))
+def test_explicit_draft_limit_sizes_the_parallel_block(width):
+    config = PreparationConfig(speculative_widths=tuple(range(1, width + 1)),
+                               speculative_fixed_width=width)
+    assert config.draft_tokens == width - 1
+    assert config.decode_tokens == 4 * width
 
 
 def test_native_dspark_geometry():
@@ -24,6 +34,7 @@ def test_native_dspark_geometry():
         dspark_target_layer_ids=[37, 38, 39], dspark_markov_rank=256, dspark_n_routed_experts=128,
         dspark_num_experts_per_tok=3, num_hidden_layers=40, vocab_size=129280, compress_ratios=[0] * 43)
     assert DSparkConfig.from_text(text).target_layers == (37, 38, 39)
+    assert DSparkConfig.from_text({**text, "dspark_block_size": 7}).block_size == 7
     with pytest.raises(ValueError):
         DSparkConfig.from_text({**text, "dspark_target_layer_ids": [39, 37, 38]})
 

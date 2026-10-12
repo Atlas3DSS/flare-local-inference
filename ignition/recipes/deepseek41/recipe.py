@@ -33,7 +33,7 @@ RECIPE = Recipe(
         revision="fb2764a5cf321eaa5070ca8f9e892818f477c16d", architecture="DeepseekV41ForCausalLM",
         stored_bytes=510_286_023_000, device_bytes=306_557_453_640, draft_bytes=7_932_874_632),),
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    speculation=Speculation(draft_tokens=5), max_draft_tokens=5,
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7,
     ranks=MappingProxyType({4: RankCosts(3_043_840, 113_920, 8 << 30)}),
     plain_ranks=MappingProxyType({4: RankCosts(2_841_088, 113_920, 8 << 30)}),
 )

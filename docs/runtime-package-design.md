@@ -46,8 +46,9 @@ demand with `cuMemCreate` and `cuMemMap` at allocation granularity. PyTorch
 allocates through a `MemPool` whose pluggable allocator is the Rust arena in
 `heliopause/src/allocator.rs`, so weights, state, pages, and the
 graph pool all live inside the range. Ordinary preparation and capture use
-separate PyTorch pools backed by that arena. Mapped host memory, including the PLE
-table, is placed by `mmap` at fixed addresses from `0x1000_0000_0000` and
+separate PyTorch pools backed by that arena. Mapped host buffers, including
+n-gram request mailboxes, are placed by `mmap` at fixed addresses from
+`0x1000_0000_0000` and
 registered with the driver; under unified addressing the device pointer
 equals the host pointer, which the exporter checks. A CUPTI subscriber logs
 driver allocations and removes records when their context is destroyed.
@@ -195,10 +196,12 @@ retained for lookup, so packages do not conceal the compiler that emitted them.
 each template node by node: kernel nodes with grid, block, shared memory,
 every nonzero launch attribute, and the parameter bytes copied verbatim;
 memset and contiguous device-to-device copy nodes with their driver
-parameters; empty nodes; and every edge with its edge data. Nodes are ordered
-by the driver's local id. Host nodes, child graphs, event nodes, conditional
+parameters; empty nodes; named external event-wait nodes; and every edge
+with its edge data. Nodes are ordered by the driver's local id. External
+waits refer to declared readiness events that the loader recreates. Host
+nodes, child graphs, undeclared event waits, event-record nodes, conditional
 nodes, kernels launched through the `extra` parameter path, and
-device-updatable nodes fail the export.
+device-updatable nodes fail export.
 
 **Contract.** The package carries the Helios execution manifest with buffer
 addresses rewritten as allocation references, the server configuration, the
@@ -248,7 +251,7 @@ package; set function attributes; add nodes, attributes, and edges; and
 instantiate each graph with its recorded flags. The execution manifest is
 then rebased onto the live addresses and validated, and the server starts
 from this reconstructed contract. `flare run PACKAGE` in
-`flare/src/main.rs` supports the Qwen and GLM contracts.
+`flare/src/main.rs` selects the Qwen, GLM, or DeepSeek contract.
 
 Before any CUDA initialization or worker threads, Flare restricts
 `CUDA_VISIBLE_DEVICES` to `--gpus`, resolving indices within an inherited mask.
@@ -355,14 +358,14 @@ completion events guarding buffer reuse. Host-resident payloads are copied
 from staging into their final mapped allocations. Readers join and uploads
 drain before relocations, module loading, or graph execution.
 
-A rebuilt process holds no Python mapping, which its tests assert by reading
-`/proc/self/maps`. On a 16 MiB working set the rebuild costs 0.5 s, of which
-0.45 s is context creation and reservation; at model scale the cost is the
-contents transfer, bounded by storage read and PCIe upload.
+The serving process contains no Python interpreter. Loader tests inspect
+`/proc/self/maps` after reconstruction. Startup measurements separate context
+creation, address reservation, payload transfer, module loading, graph upload,
+and cache allocation.
 
-## 5. The flare command
+## 5. The Flare command
 
-flare resolves its argument to a package, calls the linked Helios library,
+Flare resolves its argument to a package, calls the linked Helios library,
 supplies the bind address and API key, handles signals, and reports readiness.
 Flare owns the terminal banner. Helios supplies loading stages with measured
 progress, cycling bars for indeterminate work, results, and elapsed time.
@@ -374,12 +377,13 @@ understands. It does not pin a driver version or a Helios build, because sm_120
 SASS loads on any driver that supports the architecture and a package stays
 valid across Helios builds that keep the contract.
 
-flare has no recipe catalog, no planner, no hub access, and no kernel cache.
+Flare has no recipe catalog, no planner, no hub access, and no kernel cache.
 Those belong to ignition.
 
 ## 6. Tensor-parallel ranks as threads
 
-Qwen TP2 uses one Rust process with one CUDA execution thread per rank. Rank
+Tensor-parallel serving uses one Rust process with one CUDA execution thread
+per rank. Rank
 zero's thread also runs the scheduler. In-process channels carry prepared
 steps to peer threads; every rank validates the same fence and uploads before
 commit. Completion records must agree on request epochs, token consumption,
@@ -403,8 +407,10 @@ loading, kernel loading, and execution preparation each run concurrently across
 ranks, joining all rank threads between stages. Loading retains a process-wide
 16 MiB pinned staging bound and displays aggregate progress for each stage.
 Serving uses ordinary shared pointers; no IPC import,
-Python process, or socket protocol is involved. TP4 follows the same resource
-layout but requires separate model validation.
+Python process, or socket protocol is involved. Each model and TP size requires
+independent numerical and serving validation. The
+[rank-thread design](same-process-tp.md) specifies coordination and failure
+handling.
 
 ## 7. Process images
 
@@ -432,8 +438,6 @@ restored image. The probes, orchestration, and measurements live under
 - Full-model relocation requires complete pointer and tensor-map bindings in
   parameters, persistent storage, and module globals. The loader accepts typed
   relocations, but the model exporter preserves addresses for opaque resources.
-- GPUDirect Storage is not integrated; device payloads pass through the bounded
-  pinned staging buffers.
 - The sm_120 TMA tile path links against driver-provided code and reserves
   about 3.6 GiB of device memory per context when loaded; the memory plan
   should account for it once b12x kernels that use the path are identified.

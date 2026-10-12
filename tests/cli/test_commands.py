@@ -111,6 +111,19 @@ def test_speculation_flags_override_the_recipe():
     assert speculation("--no-mtp", model="glm-5.3-flash") is None
 
 
+def test_deepseek_defaults_to_five_adaptive_drafts_and_accepts_explicit_overrides():
+    default = speculation(model="deepseek-v4.1-flash")
+    assert (default.draft_tokens, default.adaptive, default.fixed_width) == (5, True, None)
+    assert default.widths == tuple(range(1, 7))
+    reduced = speculation("--mtp-draft-tokens", "3", "--no-mtp-adaptive-verification",
+                          model="deepseek-v4.1-flash")
+    assert (reduced.draft_tokens, reduced.adaptive, reduced.fixed_width) == (3, False, 4)
+    extended = speculation("--mtp-draft-tokens", "7", model="deepseek-v4.1-flash")
+    assert extended.draft_tokens == 7 and extended.widths == tuple(range(1, 9))
+    assert speculation("--mtp-draft-tokens", "0", model="deepseek-v4.1-flash").widths == (1,)
+    assert speculation("--no-mtp", model="deepseek-v4.1-flash") is None
+
+
 @pytest.mark.parametrize("arguments, message", [
     (["--no-mtp", "--mtp-draft-tokens", "2"], "--no-mtp disables speculation; --mtp-draft-tokens cannot"),
     (["--no-mtp", "--no-mtp-adaptive-verification"],

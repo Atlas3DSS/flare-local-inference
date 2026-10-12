@@ -14,6 +14,10 @@ import torch.multiprocessing as mp
 from ignition.progress import phase
 
 
+# Peers wait here while rank zero compiles the complete serving catalog.
+_PREPARATION_TIMEOUT = timedelta(hours=2)
+
+
 def minimum_across_ranks(value, group):
     """The smallest integer any rank reports, for sizing storage every rank must allocate."""
     if group is None:
@@ -33,7 +37,7 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=len(config.devices),
-                                timeout=timedelta(minutes=15))
+                                timeout=_PREPARATION_TIMEOUT)
         recorder = storage = None
         if packaged:
             from .module_images import ModuleImages
@@ -176,7 +180,7 @@ def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=N
     try:
         with phase(progress, "Connect tensor-parallel ranks"):
             dist.init_process_group("gloo", init_method=address, rank=0, world_size=len(config.devices),
-                                    timeout=timedelta(minutes=15))
+                                    timeout=_PREPARATION_TIMEOUT)
         model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress,
                         **({} if package_storage is None else {"package_storage": package_storage}))
         model.manifest()

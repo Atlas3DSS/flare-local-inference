@@ -61,7 +61,7 @@ def test_graph_produced_hashes_publish_after_all_rows_are_visible():
         mailbox.close()
 
 
-@pytest.mark.parametrize("width", [6, 256])
+@pytest.mark.parametrize("width", [6, 8, 256])
 @torch.no_grad()
 def test_window_commit_keeps_only_accepted_prefix_and_preserves_other_rows(width):
     device = torch.device("cuda:0")
@@ -121,13 +121,14 @@ def test_ratio_two_pending_state_selects_the_last_accepted_target_token(compiled
     assert pool.region("layer2.pending_values")[2:].eq(42).all()
 
 
+@pytest.mark.parametrize("block", [5, 7])
 @torch.no_grad()
-def test_noncausal_draft_block_attends_to_future_positions_without_crossing_requests():
+def test_noncausal_draft_block_attends_to_future_positions_without_crossing_requests(block):
     from b12x.attention._shared.mla.compressed_reference import compressed_sparse_mla_reference
 
     device = torch.device("cuda:0")
     torch.manual_seed(4151)
-    span, block, rows = 133, 5, 2
+    span, rows = 128 + block, 2
     values = torch.randn((rows * span, 512), dtype=torch.bfloat16, device=device) * .2
     cache = torch.zeros((rows, span * 528), dtype=torch.uint8, device=device)
     slots = torch.arange(rows * span, device=device)

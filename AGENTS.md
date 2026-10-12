@@ -69,7 +69,8 @@ resident host memory. The graph publishes GPU-produced lookup IDs before layer
 use the same prepared model graphs; the flag selects table storage only.
 
 DeepSeek V4.1 Flash supports TP4 text generation, reasoning, and DSML tool calls.
-DSpark is its learned draft method, with up to five draft tokens per round;
+DSpark is its learned draft method, defaulting to five draft tokens per round
+with adaptive verification based on observed acceptance and GPU round cost;
 vision graphs are not prepared. Its 188.8 GiB of Engram tables are
 stored once in the package and read on demand through bounded direct-I/O
 staging. `flare run --embedding-table-storage ram` loads those tables into ordinary RAM;

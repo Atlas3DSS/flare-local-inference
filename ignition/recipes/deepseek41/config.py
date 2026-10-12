@@ -32,7 +32,7 @@ class DSparkConfig:
             text["dspark_noise_token_id"], tuple(text["dspark_target_layer_ids"]),
             text["dspark_markov_rank"], text["dspark_n_routed_experts"],
             text["dspark_num_experts_per_tok"])
-        if (result.layers != 3 or result.block_size != 5 or result.markov_rank != 256
+        if (result.layers != 3 or result.block_size < 1 or result.markov_rank != 256
                 or result.experts != 128 or result.top_k != 3
                 or not 0 <= result.noise_token < text["vocab_size"]
                 or not result.target_layers or tuple(sorted(set(result.target_layers))) != result.target_layers
