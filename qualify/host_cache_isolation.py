@@ -120,7 +120,7 @@ def decode_workload(server: Server, run, model_id: str, args, label: str) -> dic
     def worker(index: int):
         turn = 0
         while time.monotonic() < deadline:
-            nonce = f"{args.nonce}-{label}-{index}-{turn}"
+            nonce = f"{args.nonce}-{index}-{turn}"
             messages = [{"role": "user", "content": long_prompt(nonce, args.prompt_sentences)}]
             first = stream(server.url, body(model_id, messages, args.answer_tokens), args.timeout)
             messages += [{"role": "assistant", "content": first["content"]},
@@ -144,7 +144,7 @@ def decode_workload(server: Server, run, model_id: str, args, label: str) -> dic
                    host_stored=delta.get("flare_host_cache_stored_total", 0),
                    host_store_skipped=delta.get("flare_host_cache_store_skipped_total", 0),
                    host_bytes_out=delta.get("flare_host_cache_bytes_out_total", 0),
-                   speculative_gpu_ns=delta.get("flare_speculative_gpu_nanoseconds_total", 0),
+                   speculative_gpu_ns=sum(v for k, v in delta.items() if k.startswith("flare_speculative_gpu_nanoseconds_total")),
                    speculative_rounds=sum(v for k, v in delta.items() if k.startswith("flare_speculative_rounds_total")))
     (args.artifacts / f"{label}-decode.json").write_text(json.dumps({"summary": summary, "observations": observations}, indent=1))
     return summary
@@ -155,7 +155,7 @@ def prefill_workload(server: Server, run, model_id: str, args, label: str) -> di
     before = wait_quiescent(run, f"{label}-prefill-before", args.timeout)
     rates, observations = [], []
     for index in range(args.prefill_count):
-        nonce = f"{args.nonce}-{label}-prefill-{index}"
+        nonce = f"{args.nonce}-prefill-{index}"
         observation = stream(server.url, body(model_id, [{"role": "user", "content": long_prompt(nonce, args.prefill_sentences)}], 1), args.timeout)
         observations.append(observation)
         prompt = observation["usage"].get("prompt_tokens", 0)
@@ -177,7 +177,7 @@ def prefill_workload(server: Server, run, model_id: str, args, label: str) -> di
 def inbound_latency(server: Server, run, model_id: str, args, label: str) -> dict:
     """First-token time of a long prefix computed cold, hit on the GPU, and restored from the host store."""
     results = {}
-    nonce = f"{args.nonce}-{label}-inbound"
+    nonce = f"{args.nonce}-inbound"
     messages = [{"role": "user", "content": long_prompt(nonce, args.prefill_sentences)}]
     cold = stream(server.url, body(model_id, messages, 1), args.timeout)
     results["cold"] = cold
@@ -257,6 +257,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--flare-option", action="append", default=[], metavar="FLAG=VALUE")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="alternate baseline and offload servers this many times; drift between repeats bounds the noise")
     args = parser.parse_args()
     if args.artifacts.exists() and any(args.artifacts.iterdir()):
         parser.error("the artifact directory must not contain a previous run")
@@ -266,18 +268,28 @@ def main() -> int:
     offload = common + ["--prefix-cache-memory", args.memory]
     if args.disk is not None:
         offload += ["--prefix-cache-disk", str(args.disk), "--prefix-cache-disk-limit", args.disk_limit]
-    baseline = measure(args, "baseline", common + ["--prefix-cache-memory", "0"])
-    measured = measure(args, "offload", offload)
-    rows = compare(baseline, measured)
+    runs = []
+    for repeat in range(args.repeat):
+        suffix = "" if args.repeat == 1 else f"-{repeat}"
+        baseline = measure(args, f"baseline{suffix}", common + ["--prefix-cache-memory", "0"])
+        measured = measure(args, f"offload{suffix}", offload)
+        runs.append({"baseline": baseline, "offload": measured, "comparison": [
+            {"metric": n, "baseline": b, "offload": v, "change": c, "within_2_percent": w} for n, b, v, c, w in compare(baseline, measured)]})
     report = {"configuration": {"package": str(args.package), "gpus": args.gpus, "memory": args.memory,
                                 "disk": str(args.disk) if args.disk else None, "disk_limit": args.disk_limit,
                                 "seconds": args.seconds, "concurrency": args.concurrency, "flare_options": common},
-              "baseline": baseline, "offload": measured,
-              "comparison": [{"metric": n, "baseline": b, "offload": v, "change": c, "within_2_percent": w} for n, b, v, c, w in rows]}
+              "runs": runs}
     (args.artifacts / "report.json").write_text(json.dumps(report, indent=1))
-    print(f"{'metric':30} {'baseline':>14} {'offload':>14} {'change':>8}")
-    for name, base, value, change, within in rows:
-        print(f"{name:30} {base:14.1f} {value:14.1f} {change:+8.2%} {'ok' if within else 'OVER'}")
+    print(f"{'metric':30} " + " ".join(f"{'base':>10} {'offload':>10} {'change':>8}" for _ in runs))
+    names = [row["metric"] for row in runs[0]["comparison"]]
+    for name in names:
+        cells = []
+        for run in runs:
+            row = next(r for r in run["comparison"] if r["metric"] == name)
+            cells.append(f"{row['baseline']:10.1f} {row['offload']:10.1f} {row['change']:+8.2%}")
+        print(f"{name:30} " + " ".join(cells))
+    rows = [(r["metric"], r["baseline"], r["offload"], r["change"], r["within_2_percent"]) for r in runs[-1]["comparison"]]
+    measured = runs[-1]["offload"]
     inbound = measured.get("inbound", {})
     print(f"inbound: prompt {inbound.get('prompt_tokens')} tokens, cold TTFT {inbound.get('cold_ttft_ms')} ms, "
           f"GPU hit TTFT {inbound.get('gpu_hit_ttft_ms')} ms, host restore TTFT {inbound.get('host_restore_ttft_ms')} ms, "
