@@ -856,3 +856,28 @@ fn exact_pending_and_duplicate_checkpoints_keep_external_tail_ownership() {
         vec![SnapshotId(0)]
     );
 }
+
+#[test]
+fn bucket_digest_names_the_aligned_boundary_at_or_below_the_endpoint() {
+    let mut cache = cache();
+    let history = history(3, 0);
+    let short = created(&mut cache, &history, &proposal(None, 3, &[], 0, 0));
+    let aligned = created(
+        &mut cache,
+        &history,
+        &proposal(Some(short), 128, &[0, 1], 1, 0),
+    );
+    let unaligned = created(
+        &mut cache,
+        &history,
+        &proposal(Some(aligned), 150, &[], 2, 0),
+    );
+    let root = history.key_at(0).unwrap().digest;
+    let block = history.key_at(128).unwrap().digest;
+    assert_eq!(cache.checkpoint(short).unwrap().bucket(), root);
+    assert_eq!(cache.checkpoint(aligned).unwrap().bucket(), block);
+    assert_eq!(cache.checkpoint(unaligned).unwrap().bucket(), block);
+    assert_eq!(history.bucket_at(150), Some(block));
+    assert_ne!(root, block);
+    assert_ne!(cache.checkpoint(unaligned).unwrap().prefix().digest, block);
+}
