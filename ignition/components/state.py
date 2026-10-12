@@ -4,6 +4,8 @@ import math
 from dataclasses import dataclass
 
 import torch
+import triton
+import triton.language as tl
 
 
 @dataclass(frozen=True)
@@ -59,12 +61,16 @@ class StateLayout:
 class StateStorage:
     backing: torch.Tensor
     layout: StateLayout
+    memory_capacity: torch.Tensor
 
     @classmethod
-    def allocate(cls, layout, slots, device):
+    def allocate(cls, layout, slots, device, *, storage=None):
         if type(slots) is not int or slots < 2:
             raise ValueError("state storage requires null and live slots")
-        return cls(torch.zeros((slots, layout.row_bytes), dtype=torch.uint8, device=device), layout)
+        backing = (torch.zeros((slots, layout.row_bytes), dtype=torch.uint8, device=device) if storage is None else
+            storage.device_allocate("continuations", (slots, layout.row_bytes), torch.uint8, group="STATE_ROWS",
+                                    maximum=torch.cuda.mem_get_info(device)[1] // layout.row_bytes))
+        return cls(backing, layout, torch.tensor([slots, 0], dtype=torch.int64, device=device))
 
     def region(self, name):
         region = self.layout.region(name)
@@ -72,14 +78,94 @@ class StateStorage:
             region.dtype).view(self.backing.shape[0], *region.shape)
 
 
-def save_hidden(source, destination, slots, active):
-    """Save packed final hidden rows to validated physical request slots.
+def gather_rows(source, rows, destination):
+    """Read selected rows without materializing the full strided state view."""
+    source = source.view(source.shape[0], -1)
+    output = destination.view(destination.shape[0], -1)
+    if source.is_cuda:
+        torch.library.wrap_triton(_gather_rows)[(output.shape[0], triton.cdiv(output.shape[1], 1024))](
+            source, rows, output, source.stride(0), output.stride(0), rows.stride(0), output.shape[1], 1024)
+    else:
+        output.copy_(source[rows])
+    return destination
 
-    Destination contains only live slots. Admission must reject duplicate active
-    slots before forward execution. Inactive destinations retain their bytes.
+
+@triton.jit
+def _gather_rows(Source, Rows, Output, SS: tl.constexpr, OS: tl.constexpr,
+                 RS: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    selected = tl.load(Rows + row * RS)
+    value = tl.load(Source + selected * SS + columns, columns < WIDTH, other=0)
+    tl.store(Output + row * OS + columns, value, columns < WIDTH)
+
+
+def save_hidden(source, destination, slots, active):
+    """Save packed final hidden outputs to the requests' continuation rows.
+
+    Admission must reject duplicate active rows before forward execution.
+    Inactive destinations retain their bytes.
     """
-    physical = torch.arange(destination.shape[0], device=destination.device)
-    packed = torch.arange(source.shape[0], device=source.device)
-    matches = (physical[:, None] == slots[None, :]) & active[None, :].bool()
-    indices = torch.where(matches, packed[None, :], 0).amax(1)
-    destination.copy_(torch.where(matches.any(1)[:, None], source[indices], destination))
+    if destination.is_cuda:
+        torch.library.wrap_triton(_save_hidden)[(source.shape[0],)](source, destination, slots, active, source.stride(0),
+            destination.stride(0), source.shape[1], triton.next_power_of_2(source.shape[1]))
+    else:
+        selected = active.bool()
+        destination[slots[selected]] = source[selected]
+
+
+@triton.jit
+def _save_hidden(Source, Destination, Slots, Active, SS: tl.constexpr, DS: tl.constexpr,
+                 WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    slot = tl.load(Slots + row)
+    active = (tl.load(Active + row) != 0) & (slot > 0)
+    columns = tl.arange(0, BLOCK)
+    value = tl.load(Source + row * SS + columns, active & (columns < WIDTH), other=0)
+    tl.store(Destination + slot * DS + columns, value, active & (columns < WIDTH))
+
+
+class PreparedRequestHistory:
+    """Transfer request-local counters and token history at continuation boundaries."""
+
+    def __init__(self, pool, requests, commands, *, snapshot):
+        from .sampling import _compile
+
+        history = getattr(requests, "ple_history", None)
+        saved_history = pool.region("ple_history") if history is not None else None
+        self.args = (requests.consumed_tokens, history, pool.region("consumed_tokens"), saved_history,
+            commands.request_slots, commands.source_slots, commands.destination_slots,
+            commands.num_ops, commands.errors, pool.memory_capacity, requests.capacity,
+            requests.consumed_tokens.stride(0), pool.region("consumed_tokens").stride(0),
+            0 if history is None else history.stride(0),
+            0 if saved_history is None else saved_history.stride(0), history is not None, snapshot)
+        self.run = _compile(_request_history, self.args, (requests.capacity, 1, 1))
+
+    def __call__(self):
+        self.run()
+
+
+@triton.jit
+def _request_history(Counts, History, SavedCounts, SavedHistory, Requests, Sources, Destinations,
+                     Count, Errors, MemoryCapacity, REQUESTS: tl.constexpr,
+                     CS: tl.constexpr, SS: tl.constexpr, HS: tl.constexpr, SHS: tl.constexpr,
+                     HAS_HISTORY: tl.constexpr, SNAPSHOT: tl.constexpr):
+    command = tl.program_id(0)
+    slot = tl.load(Requests + command)
+    row = tl.load(Sources + command) if SNAPSHOT else tl.load(Destinations + command)
+    valid = (command < tl.load(Count)) & (tl.load(Errors + command) == 0)
+    valid &= (slot >= 0) & (slot < REQUESTS) & (row > 0) & (row < tl.load(MemoryCapacity))
+    if SNAPSHOT:
+        value = tl.load(Counts + slot * CS, valid, other=0)
+        tl.store(SavedCounts + row * SS, value, valid)
+    else:
+        value = tl.load(SavedCounts + row * SS, valid, other=0)
+        tl.store(Counts + slot * CS, value, valid)
+    if HAS_HISTORY:
+        columns = tl.arange(0, 2)
+        if SNAPSHOT:
+            value = tl.load(History + slot * HS + columns, valid, other=0)
+            tl.store(SavedHistory + row * SHS + columns, value, valid)
+        else:
+            value = tl.load(SavedHistory + row * SHS + columns, valid, other=0)
+            tl.store(History + slot * HS + columns, value, valid)

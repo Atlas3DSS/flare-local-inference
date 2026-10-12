@@ -1,57 +1,138 @@
 //! A model package owns a disjoint resource bundle for every tensor-parallel rank.
 
 use super::{
-    NativeResources,
+    LoadOptions, NativeResources,
+    archive::Archive,
     driver::{Access, Location},
     format::{Memory, Package, Reservation, invalid},
     protobuf,
 };
 use crate::{Result, execution::ExecutionManifest, startup::StartupProgress};
-use prost::Message;
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
-    thread,
-};
+use std::{collections::HashSet, path::Path, thread};
 
 pub struct NativeModel {
-    ranks: Vec<NativeResources>,
-    frontend_root: PathBuf,
+    pub(super) ranks: Vec<NativeResources>,
+    pub(super) server_config: serde_json::Value,
 }
 
 impl NativeModel {
     /// # Safety
     /// All rank bundles must be trusted and obey the CUDA execution contract.
-    pub unsafe fn load(root: &Path, devices: &[i32], progress: &StartupProgress) -> Result<Self> {
+    pub unsafe fn load(
+        root: &Path,
+        devices: &[i32],
+        options: &LoadOptions,
+        progress: &StartupProgress,
+    ) -> Result<Self> {
+        let device_labels = options.device_labels.as_deref().unwrap_or(devices);
+        if device_labels.len() != devices.len() {
+            return Err(invalid("GPU label count must match selected devices"));
+        }
         let phase = progress.phase("Prepare model", None);
-        let descriptor = protobuf::wire::ModelPackage::decode(
-            fs::read(root.join("model.pb"))
-                .map_err(|e| e.to_string())?
-                .as_slice(),
-        )
-        .map_err(|e| invalid(format!("invalid model package: {e}")))?;
-        if descriptor.version != 1
-            || ![1, 2, 4].contains(&descriptor.ranks.len())
-            || devices.len() != descriptor.ranks.len()
+        let (archive, mut descriptor) = Archive::open(root)?;
+        if devices.len() != descriptor.ranks.len()
             || devices.iter().collect::<HashSet<_>>().len() != devices.len()
         {
             return Err(invalid(
                 "model rank count must match distinct selected devices",
             ));
         }
-        let mut paths = Vec::new();
-        let mut packages: Vec<Package> = Vec::new();
-        for (rank, path) in descriptor.ranks.iter().enumerate() {
-            if path != &format!("rank-{rank}") {
-                return Err(invalid("rank bundle paths must be rank-N in rank order"));
-            }
-            let path = root.join(path);
-            let package =
-                protobuf::decode(&fs::read(path.join("package.pb")).map_err(|e| e.to_string())?)?;
+        let mut packages = descriptor
+            .ranks
+            .drain(..)
+            .map(protobuf::decode)
+            .collect::<Result<Vec<_>>>()?;
+        for package in &packages {
             package.validate()?;
-            paths.push(path);
-            packages.push(package);
+            archive.validate(package)?;
+        }
+        let mut server_config = protobuf::json(prost_types::Value {
+            kind: Some(prost_types::value::Kind::StructValue(
+                descriptor
+                    .server
+                    .take()
+                    .ok_or_else(|| invalid("model package lacks serving configuration"))?,
+            )),
+        })?;
+        let mut assets = serde_json::Map::new();
+        for asset in descriptor.assets {
+            let span = asset
+                .payload
+                .ok_or_else(|| invalid("frontend asset lacks a payload"))?;
+            let value = serde_json::json!({ "path": root, "offset": archive.start + span.offset,
+                "nbytes": span.nbytes, "sha256": asset.sha256 });
+            if assets.insert(asset.name, value).is_some() {
+                return Err(invalid("duplicate frontend asset"));
+            }
+        }
+        server_config["assets"] = assets.into();
+        let active = options.select(&mut packages, &mut server_config)?;
+        let state_rows = server_config["state_rows"]
+            .as_u64()
+            .filter(|rows| *rows > 0 && *rows < i32::MAX as u64)
+            .ok_or_else(|| invalid("model configuration requires a shared state-row pool"))?;
+        for package in &packages {
+            package.validate()?;
+            let pool = package
+                .execution
+                .as_ref()
+                .unwrap()
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "state_pool")
+                .ok_or_else(|| invalid("rank lacks continuation pool geometry"))?;
+            if pool.dtype != "uint8"
+                || pool.shape.len() != 2
+                || pool.shape[0] != state_rows + 1
+                || pool.shape[1] == 0
+                || pool.strides != [pool.shape[1], 1]
+                || pool.nbytes != pool.shape[0].checked_mul(pool.shape[1]).unwrap_or(0)
+            {
+                return Err(invalid(
+                    "rank continuation pool differs from its serving capacity",
+                ));
+            }
+            let reference = pool
+                .reference
+                .as_ref()
+                .filter(|r| r.offset == 0)
+                .ok_or_else(|| invalid("continuation storage must start at its allocation base"))?;
+            if !package.allocations.iter().any(|a| {
+                a.name == reference.allocation
+                    && a.sizing.as_ref().is_some_and(|s| {
+                        s.capacity == 0
+                            && s.unit_bytes == pool.shape[1]
+                            && s.maximum >= pool.shape[0]
+                    })
+            }) {
+                return Err(invalid(
+                    "continuation storage requires a matching runtime-sized allocation",
+                ));
+            }
+            let capacity = package
+                .execution
+                .as_ref()
+                .unwrap()
+                .buffers
+                .iter()
+                .find(|b| b.name == "memory_capacity")
+                .filter(|b| {
+                    b.dtype == "int64" && b.shape == [2] && b.strides == [1] && b.nbytes == 16
+                })
+                .and_then(|b| b.reference.as_ref())
+                .ok_or_else(|| invalid("model requires a runtime memory capacity binding"))?;
+            if !package.allocations.iter().any(|a| {
+                a.name == capacity.allocation
+                    && a.sizing.is_none()
+                    && capacity
+                        .offset
+                        .checked_add(16)
+                        .is_some_and(|n| n <= a.nbytes as u64)
+            }) {
+                return Err(invalid(
+                    "runtime memory capacity must fit a fixed allocation",
+                ));
+            }
         }
         let mut allocations = Vec::new();
         let mut ranges = Vec::new();
@@ -61,7 +142,7 @@ impl NativeModel {
                     .address
                     .ok_or_else(|| invalid("model allocations require recorded addresses"))?;
                 let end = address
-                    .checked_add(allocation.nbytes as u64)
+                    .checked_add(allocation.extent() as u64)
                     .ok_or_else(|| invalid("allocation range overflow"))?;
                 allocations.push((address, end));
             }
@@ -121,7 +202,7 @@ impl NativeModel {
         ));
         let mut model = Self {
             ranks: Vec::new(),
-            frontend_root: paths[0].clone(),
+            server_config,
         };
         unsafe {
             let phase = progress.phase(
@@ -140,7 +221,7 @@ impl NativeModel {
             phase.finish(
                 packages
                     .iter()
-                    .zip(devices)
+                    .zip(device_labels)
                     .map(|(package, device)| {
                         format!(
                             "GPU {device} · SM{}{}",
@@ -161,7 +242,7 @@ impl NativeModel {
             let phase = progress.phase("Allocate model memory", Some(gpu_bytes + host_bytes));
             // Reservations cover all ranks and must exist before parallel mapping.
             model.ranks[0].reserve(&packages[0])?;
-            model.parallel(&packages, &paths, |rank, package, _| {
+            model.parallel(&packages, &archive, |rank, package, _| {
                 rank.allocate(package, &phase)
             })?;
             phase.finish(format!(
@@ -171,7 +252,7 @@ impl NativeModel {
             ));
             let phase = progress.phase("Load weights", Some(payload_bytes));
             phase.advance_bytes(0);
-            model.parallel(&packages, &paths, |rank, package, path| {
+            model.parallel(&packages, &archive, |rank, package, path| {
                 rank.load_payload(path, package, &phase, devices.len())
             })?;
             phase.finish(format!(
@@ -209,26 +290,21 @@ impl NativeModel {
                 .sum::<u64>();
             let modules = packages.iter().map(|p| p.modules.len() as u64).sum::<u64>();
             let phase = progress.phase("Prepare kernels", Some(kernels + modules));
-            model.parallel(&packages, &paths, |rank, package, path| {
+            model.parallel(&packages, &archive, |rank, package, path| {
                 rank.prepare_kernels(path, package, &phase)
             })?;
             phase.finish(format!("{kernels} kernels"));
             let nodes = packages
                 .iter()
                 .flat_map(|p| &p.graphs)
-                .map(|graph| graph.nodes.len() as u64 + 1)
+                .map(|graph| graph.node_count as u64 + 1)
                 .sum();
             let phase = progress.phase("Prepare execution", Some(nodes));
-            model.parallel(&packages, &paths, |rank, package, _| {
-                rank.prepare_graphs(package, &phase)
+            model.parallel(&packages, &archive, |rank, package, archive| {
+                rank.prepare_graphs(archive, package, &phase)
             })?;
-            phase.finish(
-                packages[0]
-                    .execution
-                    .as_ref()
-                    .map(|execution| format!("concurrency {}", execution.max_active))
-                    .unwrap_or_default(),
-            );
+            phase.finish(format!("concurrency {active}"));
+            model.allocate_caches(&mut packages, progress, active)?;
         }
         Ok(model)
     }
@@ -236,20 +312,18 @@ impl NativeModel {
     fn parallel(
         &mut self,
         packages: &[Package],
-        paths: &[PathBuf],
-        operation: impl Fn(&mut NativeResources, &Package, &Path) -> Result<()> + Sync,
+        archive: &Archive,
+        operation: impl Fn(&mut NativeResources, &Package, &Archive) -> Result<()> + Sync,
     ) -> Result<()> {
         thread::scope(|scope| {
             let mut workers = Vec::new();
-            for (index, ((rank, package), path)) in
-                self.ranks.iter_mut().zip(packages).zip(paths).enumerate()
-            {
+            for (index, (rank, package)) in self.ranks.iter_mut().zip(packages).enumerate() {
                 let operation = &operation;
                 workers.push(
                     thread::Builder::new()
                         .name(format!("helios-load-{index}"))
                         .spawn_scoped(scope, move || {
-                            operation(rank, package, path)
+                            operation(rank, package, archive)
                                 .map_err(|error| invalid(format!("rank {index}: {error}")))
                         })
                         .map_err(|error| error.to_string())?,
@@ -275,8 +349,8 @@ impl NativeModel {
             .collect()
     }
 
-    pub fn frontend_root(&self) -> &Path {
-        &self.frontend_root
+    pub fn server_config(&self) -> &serde_json::Value {
+        &self.server_config
     }
 }
 

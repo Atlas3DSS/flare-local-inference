@@ -23,15 +23,18 @@ pub struct StateSlotId(pub u32);
 #[derive(Clone, Copy, Debug)]
 pub struct SchedulerLimits {
     pub max_active: usize,
+    /// Physical request slots and buffer strides fixed by graph capture.
+    pub request_slots: usize,
     pub max_sequence_tokens: usize,
     pub prefill_chunk_size: usize,
     pub pages: u32,
+    /// Prefix-cache rows, separate from the fixed execution partition.
     pub snapshots: u32,
 }
 
 impl SchedulerLimits {
     pub fn request_capacity(&self) -> usize {
-        self.max_active.next_power_of_two()
+        self.request_slots
     }
 
     pub(crate) fn validate_prefill(&self) -> Result<()> {
@@ -60,7 +63,6 @@ pub struct SchedulerCapabilities {
     pub vocabulary: usize,
     pub page_tokens: usize,
     pub vision: crate::model::VisionCapabilities,
-    pub live_state_base: u32,
     pub draft_pages_per_request: usize,
 }
 
@@ -242,7 +244,6 @@ pub struct RequestScheduler {
     stats: SchedulerStats,
     speculative_widths: Vec<usize>,
     speculative_fixed_width: Option<usize>,
-    speculative_graph_budget: usize,
     speculative_catalog: [Vec<usize>; 7],
     proposal_source: speculation::ProposalSource,
     controller: speculation::WidthController,
@@ -259,15 +260,13 @@ impl RequestScheduler {
         if capabilities.draft_pages_per_request > limits.pages as usize
             || capabilities.vocabulary == 0
             || capabilities.vocabulary > i32::MAX as usize
-            || capabilities
-                .live_state_base
-                .checked_add(limits.request_capacity() as u32)
-                .is_none()
         {
             return Err("invalid model scheduling capabilities".into());
         }
 
-        if !(1..=REQUEST_LANES).contains(&limits.max_active)
+        if !crate::execution::BATCH_CAPACITIES.contains(&limits.request_slots)
+            || limits.max_active > limits.request_slots
+            || !(1..=REQUEST_LANES).contains(&limits.max_active)
             || limits.max_sequence_tokens == 0
             || limits.pages == 0
             || limits.snapshots == 0
@@ -303,11 +302,23 @@ impl RequestScheduler {
             stats: SchedulerStats::default(),
             speculative_widths: Vec::new(),
             speculative_fixed_width: None,
-            speculative_graph_budget: 56,
             speculative_catalog: Default::default(),
             proposal_source: speculation::ProposalSource::Mtp,
             controller: speculation::WidthController::default(),
         })
+    }
+
+    pub fn execution_width(&self) -> usize {
+        self.speculative_catalog
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(1)
+    }
+
+    pub fn snapshot_slot(&self, snapshot: SnapshotId) -> StateSlotId {
+        StateSlotId((1 + self.limits.max_active * self.execution_width()) as u32 + snapshot.0)
     }
 
     pub fn enable_speculation(&mut self, widths: &[usize]) -> Result<()> {
@@ -321,10 +332,11 @@ impl RequestScheduler {
     }
     pub fn fixed_speculative_width(&mut self, width: Option<usize>) -> Result<()> {
         if self.submitted != Fence(0)
+            || self.slots.iter().any(|s| s.request.is_some())
             || width.is_some_and(|w| !self.speculative_widths.contains(&w))
         {
             return Err(
-                "fixed speculative width must be prepared and configured before submissions".into(),
+                "fixed speculative width must be prepared and configured before admission".into(),
             );
         }
         self.speculative_fixed_width = width;
@@ -335,21 +347,40 @@ impl RequestScheduler {
         self.speculative_catalog = speculation::graph_catalog(
             &self.speculative_widths,
             self.speculative_fixed_width,
-            self.speculative_graph_budget,
-            self.limits.request_capacity(),
+            self.limits.max_active.next_power_of_two(),
         );
     }
-    pub fn speculative_graph_budget(&mut self, budget: usize) -> Result<()> {
-        if !(self.limits.request_capacity().ilog2() as usize + 1..=56).contains(&budget)
-            || self.submitted != Fence(0)
-            || self.slots.iter().any(|s| s.request.is_some())
-        {
-            return Err(
-                "speculative graph budget must cover every batch capacity and be at most 56 and set before admission".into(),
-            );
+    /// Restricts scheduling to graph shapes present in the loaded execution manifest.
+    pub fn speculative_graphs(&mut self, shapes: &[(usize, usize)]) -> Result<()> {
+        if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
+            return Err("speculative graphs must be selected before admission".into());
         }
-        self.speculative_graph_budget = budget;
-        self.refresh_speculative_catalog();
+        let mut catalog: [Vec<usize>; 7] = Default::default();
+        for &(batch, width) in shapes {
+            if !crate::execution::BATCH_CAPACITIES.contains(&batch)
+                || batch > self.limits.max_active.next_power_of_two()
+                || !self.speculative_widths.contains(&width)
+                || self
+                    .speculative_fixed_width
+                    .is_some_and(|fixed| fixed != width)
+            {
+                return Err("loaded speculative shape is outside runtime limits".into());
+            }
+            let widths = &mut catalog[batch.trailing_zeros() as usize];
+            if widths.contains(&width) {
+                return Err("duplicate speculative graph shape".into());
+            }
+            widths.push(width);
+        }
+        for widths in
+            &mut catalog[..self.limits.max_active.next_power_of_two().ilog2() as usize + 1]
+        {
+            widths.sort_unstable();
+            if !self.speculative_widths.is_empty() && widths.is_empty() {
+                return Err("missing speculative graph for a runtime batch capacity".into());
+            }
+        }
+        self.speculative_catalog = catalog;
         Ok(())
     }
     pub fn proposal_source(&mut self, source: speculation::ProposalSource) -> Result<()> {
@@ -582,6 +613,13 @@ impl RequestScheduler {
         let need_prompt = spec.prompt.len() as u64 > prefix.consumed_tokens
             && spec.system_boundary != Some(spec.prompt.len())
             && spec.max_new_tokens > 1;
+        let execution_rows = self
+            .speculative_catalog
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(1);
         if let Err(error) = self.ensure_resources(
             reserved_count,
             1 + usize::from(need_system) + usize::from(need_prompt),
@@ -606,7 +644,7 @@ impl RequestScheduler {
         self.slots[slot].generation = generation;
         self.slots[slot].request = Some(LiveRequest {
             handle,
-            state_slot: StateSlotId(slot as u32 + self.capabilities.live_state_base),
+            state_slot: StateSlotId((1 + slot * execution_rows) as u32),
             terminal_snapshot,
             phase: if prefix.checkpoint.is_some() {
                 RequestPhase::Restore

@@ -25,7 +25,7 @@ class DraftMetadata:
         self.output_indices = torch.zeros(rows, dtype=torch.int64, device=device)
         self.num_tokens = torch.zeros(1, dtype=torch.int32, device=device)
 
-    def set(self, slots, lengths, starts, tokens, hidden, tables, *, capacity):
+    def set(self, slots, lengths, starts, tokens, hidden, tables, *, capacity, state_rows):
         m = self.indexed
         ends = lengths.cumsum(0)
         begins = ends - lengths
@@ -40,7 +40,7 @@ class DraftMetadata:
         self.num_tokens.copy_(ends[-1:])
         m.query_start_loc[0].zero_()
         m.query_start_loc[1:].copy_(ends)
-        m.state_slots.copy_(torch.where(lengths > 0, slots.long() + 1, -1))
+        m.state_slots.copy_(torch.where(lengths > 0, state_rows[slots.long().clamp(0, tables.shape[0] - 1), 0], -1))
         m.requests.copy_(torch.where(active, row, 0))
         position = starts[row] + local
         m.positions.copy_(torch.where(active, position, -1))

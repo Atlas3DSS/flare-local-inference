@@ -12,7 +12,7 @@ crate-type = ["rlib"]
 [features]
 default = []
 test-tools = []
-runtime-package = ["dep:serde", "dep:serde_json", "dep:prost", "dep:prost-build"]
+runtime-package = ["dep:serde", "dep:serde_json", "dep:prost", "dep:prost-types", "dep:prost-build"]
 frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
@@ -22,6 +22,7 @@ server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
 prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
 blake2 = "0.10"
 libloading = "0.8.9"
 libc = "0.2.189"

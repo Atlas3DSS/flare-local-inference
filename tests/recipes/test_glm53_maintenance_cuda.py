@@ -38,8 +38,9 @@ def _run(rank, world, rendezvous=None):
         runtime = create_all_reduce_runtime(dist.group.WORLD, device, max_tokens=1, hidden_size=8)
     try:
         pool = ContinuationPool.allocate(("linear_attention", "indexed_attention"), max(world, 2), 8, 5, device)
-        requests = DeviceRequestState.allocate(device, vocab_size=154880, consumed_tokens=pool.consumed_tokens[1:5, 0])
+        requests = DeviceRequestState.allocate(device, vocab_size=154880)
         inputs, commands = BatchInputs.allocate(1, 3, device), StateCommands.allocate(device)
+        inputs.request_state_rows[:, 0] = torch.tensor([6, 3, 1, 4], device=device)
         admission = AdmissionBuffers.allocate(device, vocab_size=154880)
         records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
@@ -54,7 +55,7 @@ def _run(rank, world, rendezvous=None):
                         runtime=runtime, coordinator=coordinator, session=session, name=mode, admission_buffers=admission)
                 else:
                     transfer = PreparedStateTransfer(pool, commands, inputs.page_tables,
-                        pages=pool.partial_pages(), page_tokens=256)
+                        pages=pool.partial_pages(), page_tokens=256, state_rows=inputs.request_state_rows, requests=requests)
                     slots, epochs, count = (inputs.row_slot_ids, inputs.row_generations, inputs.live_rows) if mode == "snapshot" else (
                         admission.admission_slots, admission.admission_generations, admission.admission_count)
                     local = LocalMaintenance(mode, requests, transfer, slots, epochs, count, records, frame, sequence,
@@ -92,7 +93,8 @@ def _run(rank, world, rendezvous=None):
                 for key in ("allocation.all.allocated", "allocation.all.freed", "segment.all.allocated", "segment.all.freed"):
                     assert before[key] == after[key], key
 
-            def command(source, destination, endpoint, operation=0):
+            def command(slot, source, destination, endpoint, operation=0):
+                commands.request_slots[0] = slot
                 commands.num_ops.fill_(1)
                 commands.source_slots[0], commands.destination_slots[0] = source, destination
                 commands.expected_consumed[0], commands.operation[0] = endpoint, operation
@@ -100,43 +102,43 @@ def _run(rank, world, rendezvous=None):
             inputs.page_tables.copy_(torch.tensor([[0, 1, 2], [0, 3, 2], [0, 4, 2], [0, 2, 1]], dtype=torch.int32))
             admission.admission_count.fill_(1)
             admission.stage(0, 0, RequestAdmission(1, 13, max_new_tokens=8), [5, 7])
-            command(-1, 1, 0, 1)
+            command(0, -1, 6, 0, 1)
             replay("init")
             assert not commands.errors.count_nonzero()
             assert requests.generation.tolist() == [1, 0, 0, 0]
             assert requests.histogram[0].sum() == 2 and not pool.backing.count_nonzero()
 
-            pool.backing[1].fill_(0x30 + rank)
-            pool.consumed_tokens[1] = 257
+            pool.backing[6].fill_(0x30 + rank)
+            requests.consumed_tokens[0] = 257
             for _, cache in pool.partial_pages():
                 cache.fill_(0x70 + rank)
             inputs.row_slot_ids[0], inputs.row_generations[0] = 0, 1
             inputs.live_rows.fill_(1)
-            command(1, 5, 257)
+            command(0, 6, 2, 257)
             replay("snapshot")
             assert not commands.errors.count_nonzero()
-            immutable = pool.backing[5].clone()
+            immutable = pool.backing[2].clone()
             assert records[0, 0, 2] == 257 and records[0, 0, 5] == 1
             admission.stage(0, 1, RequestAdmission(1, 99, max_new_tokens=8), [5] * 257)
-            command(5, 2, 257)
+            command(1, 2, 3, 257)
             replay("restore")
             assert not commands.errors.count_nonzero()
-            assert torch.equal(pool.backing[2], immutable)
+            assert torch.equal(pool.backing[3], immutable)
             assert requests.consumed_tokens[1] == 257 and requests.seed[1] == 99
             assert requests.histogram[1, 5] == 257 and requests.rng_counter[1] == 0
             for name, cache in pool.partial_pages():
-                assert torch.equal(cache[3], pool.region(name)[5].reshape(-1))
+                assert torch.equal(cache[3], pool.region(name)[2].reshape(-1))
 
             for fault in ("epoch", "endpoint", "page", "admission", "count"):
                 admission.stage(0, 2, RequestAdmission(1, 37, max_new_tokens=8), [5] * 257)
                 inputs.row_slot_ids[0], inputs.row_generations[0] = 0, 1
                 mode = "snapshot" if fault in ("epoch", "count") else "restore"
-                command(1, 6, 257) if mode == "snapshot" else command(5, 3, 257)
+                command(0, 6, 7, 257) if mode == "snapshot" else command(2, 2, 1, 257)
                 if rank == world - 1:
                     if fault == "epoch":
                         requests.generation[0] = 2
                     elif fault == "endpoint":
-                        pool.consumed_tokens[5] = 258
+                        pool.consumed_tokens[2] = 258
                     elif fault == "page":
                         inputs.page_tables[2, 1] = -1
                     elif fault == "admission":
@@ -156,9 +158,9 @@ def _run(rank, world, rendezvous=None):
                 for name, cache in pool.partial_pages():
                     assert torch.equal(cache, caches[name]), name
                 requests.generation[0] = 1
-                pool.consumed_tokens[5] = 257
+                pool.consumed_tokens[2] = 257
                 inputs.page_tables[2, 1] = 4
-            assert torch.equal(pool.backing[5], immutable)
+            assert torch.equal(pool.backing[2], immutable)
             worker.close()
             worker = None
     finally:

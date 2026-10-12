@@ -31,6 +31,9 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
     use Dtype::{Float32 as F32, Int32 as I32, Int64 as I64};
     let vocabulary = config.contract.vocabulary;
     let mut buffers = vec![
+        ("request_state_rows", I64, vec![slots, 8]),
+        ("memory_capacity", I64, vec![2]),
+        ("state_request_slots", I64, vec![slots]),
         ("row_slot_ids", I32, vec![slots]),
         ("row_generations", I64, vec![slots]),
         ("live_rows", I32, vec![1]),
@@ -82,6 +85,7 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
 pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
     match kind {
         GraphKind::Init | GraphKind::Restore => &[
+            "request_state_rows",
             "admission_count",
             "admission_slots",
             "admission_generations",
@@ -95,6 +99,7 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "admission_grammar_mask",
             "admission_grammar_enabled",
             "page_tables",
+            "state_request_slots",
             "state_expected_consumed",
             "state_source_slots",
             "state_destination_slots",
@@ -102,10 +107,12 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "state_num_ops",
         ],
         GraphKind::Snapshot => &[
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",
             "page_tables",
+            "state_request_slots",
             "state_expected_consumed",
             "state_source_slots",
             "state_destination_slots",
@@ -113,6 +120,7 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "state_num_ops",
         ],
         GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative => &[
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",
@@ -123,6 +131,7 @@ pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "sampling_grammar_mask",
         ],
         GraphKind::Resume => &[
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",

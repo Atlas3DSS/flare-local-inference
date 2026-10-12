@@ -1,5 +1,7 @@
 //! Serve a prepared model package without a Python interpreter.
 
+mod environment;
+
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -7,8 +9,8 @@ use std::{
 };
 
 use flare_helios::{
-    model::qwen4exp::Qwen4Exp,
-    runtime_package::NativeModel,
+    model::{ModelContract, glm5next::Glm5Next, qwen4exp::Qwen4Exp},
+    runtime_package::{LoadOptions, NativeModel},
     server::{Bootstrap, Server},
     startup::StartupProgress,
 };
@@ -22,21 +24,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
         return Err(
-            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH]"
+            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification]"
                 .into(),
         );
     };
     if command != "run" {
         return Err("expected flare run PACKAGE".into());
     }
-    let root =
-        PathBuf::from(arguments.next().ok_or("package directory is required")?).canonicalize()?;
+    let root = PathBuf::from(arguments.next().ok_or("package file is required")?).canonicalize()?;
     let (mut bind, mut key, mut devices) = ("127.0.0.1:8000".to_owned(), None, vec![0]);
+    let mut options = LoadOptions::default();
     while let Some(flag) = arguments.next() {
+        match flag.as_str() {
+            "--mtp-adaptive-verification" => {
+                options.adaptive_verification = Some(true);
+                continue;
+            }
+            "--no-mtp-adaptive-verification" => {
+                options.adaptive_verification = Some(false);
+                continue;
+            }
+            _ => {}
+        }
         let value = arguments
             .next()
             .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
+            "--max-concurrency" => options.max_concurrency = Some(value.parse()?),
+            "--mtp-draft-tokens" => options.mtp_draft_tokens = Some(value.parse()?),
             "--bind" => bind = value,
             "--gpus" => {
                 devices = value
@@ -48,36 +63,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(format!("unknown option {flag}").into()),
         }
     }
-    let mut progress = StartupProgress::stderr();
-    // SAFETY: The trusted package owners remain live until every rank drains.
-    let owner = unsafe { NativeModel::load(&root, &devices, &progress)? };
-    let root = owner.frontend_root();
-    let phase = progress.phase("Read model configuration", None);
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("server.json"))?)?;
-    if config["model_contract"]["schema"] != flare_helios::model::qwen4exp::INPUT_SCHEMA {
-        return Err("native package serving supports the Qwen contract".into());
+    let inherited =
+        std::env::var("CUDA_VISIBLE_DEVICES")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                error => Err(error),
+            })?;
+    let visibility = environment::visibility(&devices, inherited.as_deref())?;
+    let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
+    options.device_labels = Some(devices);
+    // SAFETY: Startup is single-threaded here, before Helios starts workers or
+    // loads CUDA. Packages contain compiled cubins and require no driver JIT.
+    unsafe {
+        std::env::set_var("CUDA_VISIBLE_DEVICES", visibility);
+        std::env::set_var("CUDA_FORCE_PRELOAD_LIBRARIES", "0");
+        std::env::set_var("CUDA_DISABLE_JIT", "1");
     }
+    let progress = StartupProgress::stderr();
+    // SAFETY: The trusted package owners remain live until every rank drains.
+    let owner = unsafe { NativeModel::load(&root, &local_devices, &options, &progress)? };
+    let phase = progress.phase("Read model configuration", None);
+    let mut config = owner.server_config().clone();
     config["bind"] = bind.into();
     config["api_key"] = key.unwrap_or_default().into();
-    for asset in config["assets"]
-        .as_object_mut()
-        .ok_or("missing frontend assets")?
-        .values_mut()
-    {
-        let file = asset["path"]
-            .as_str()
-            .ok_or("invalid frontend asset path")?;
-        if std::path::Path::new(file).components().count() != 1 {
-            return Err("frontend assets must be package-local files".into());
-        }
-        asset["path"] = root
-            .join(file)
-            .to_str()
-            .ok_or("non-UTF8 package path")?
-            .into();
-    }
     phase.finish(config["model_id"].as_str().unwrap_or_default());
+    match config["model_contract"]["schema"].as_str() {
+        Some(flare_helios::model::qwen4exp::INPUT_SCHEMA) => {
+            serve::<Qwen4Exp>(owner, config, progress)
+        }
+        Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
+            serve::<Glm5Next>(owner, config, progress)
+        }
+        _ => Err("unsupported model contract".into()),
+    }
+}
+
+fn serve<M: ModelContract>(
+    owner: NativeModel,
+    config: serde_json::Value,
+    mut progress: StartupProgress,
+) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
     let phase = progress.phase("Load tokenizer", None);
@@ -85,14 +111,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = manifests.remove(0);
     let peers =
         (!manifests.is_empty()).then_some(flare_helios::execution::RankPeers::Threads(manifests));
-    let bootstrap = Bootstrap::load::<Qwen4Exp>(&config.to_string(), &manifest)?;
+    let bootstrap = Bootstrap::load::<M>(&config.to_string(), &manifest)?;
     phase.finish(format!(
         "{} token vocabulary",
         bootstrap.model.contract.vocabulary
     ));
     let phase = progress.phase("Start server", None);
     let server = match unsafe {
-        Server::<Qwen4Exp>::start(
+        Server::<M>::start(
             manifest,
             bootstrap.model,
             bootstrap.frontend,

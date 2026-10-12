@@ -37,6 +37,11 @@ class PackageStorage:
         from flare_heliopause import flare_heliopause as native
 
         self.host_regions = []
+        self.dynamic_regions = []
+        from .tensor_metadata import NumericStorage
+
+        self.numeric_storage = NumericStorage()
+        self._device_cursor = self.DEVICE_BASE + self.RESERVATION_BYTES // 2
         self._host_cursor = self.HOST_BASE
         self.library = C.CDLL(native.__file__)
         self.library.flare_package_error.restype = C.c_char_p
@@ -84,12 +89,47 @@ class PackageStorage:
         self.host_regions.append(region)
         return region
 
+    def device_allocate(self, name, shape, dtype, *, group, maximum, units=None):
+        """Map a prefix of a stable virtual range for runtime-sized storage."""
+        import torch
+        from b12x.sequence._shared.disk_table import _tensor_from_pointer
+
+        units = shape[0] if units is None else units
+        unit_bytes = math.prod(shape[1:]) * dtype.itemsize
+        if not 0 < units <= maximum or shape[0] > maximum:
+            raise ValueError("dynamic storage exceeds its virtual extent")
+        extent = (maximum * unit_bytes + self.granularity - 1) // self.granularity * self.granularity
+        nbytes = (units * unit_bytes + self.granularity - 1) // self.granularity * self.granularity
+        address = self._device_cursor
+        if address + extent > self.DEVICE_BASE + self.RESERVATION_BYTES:
+            raise MemoryError("dynamic storage address range exhausted")
+        region = DeviceRegion(self.cuda, address, nbytes, self.device)
+        region.name, region.group = name, group
+        region.unit_bytes, region.maximum, region.extent = unit_bytes, maximum, extent
+        self.dynamic_regions.append(region)
+        self._device_cursor += extent
+        return _tensor_from_pointer(address, shape=shape, dtype=dtype,
+                                    device=torch.device("cuda", self.device), nbytes=math.prod(shape) * dtype.itemsize)
+
+    def grow(self, group, units):
+        """Back additional units after compiler contexts have exited."""
+        for region in self.dynamic_regions:
+            if region.group == group:
+                if not 0 < units <= region.maximum:
+                    raise ValueError("dynamic storage exceeds its virtual extent")
+                size = (units * region.unit_bytes + self.granularity - 1) // self.granularity * self.granularity
+                region.grow(size)
+
     def __enter__(self):
         self._scope.__enter__()
+        self.numeric_storage.__enter__()
         return self
 
     def __exit__(self, kind, value, traceback):
-        self._scope.__exit__(kind, value, traceback)
+        try:
+            self._scope.__exit__(kind, value, traceback)
+        finally:
+            self.numeric_storage.__exit__(kind, value, traceback)
         if kind is None and self.error is not None:
             raise RuntimeError("native package allocator failed") from self.error
 
@@ -132,3 +172,45 @@ class HostRegion:
             if self.libc.munmap(C.c_void_p(self.address), C.c_size_t(self.extent)):
                 raise OSError(C.get_errno(), "cannot unmap native package host storage")
             self.closed = True
+
+
+class _Location(C.Structure):
+    _fields_ = [("kind", C.c_int), ("device", C.c_int)]
+
+
+class _Properties(C.Structure):
+    _fields_ = [("kind", C.c_int), ("handles", C.c_int), ("location", _Location),
+                ("windows", C.c_void_p), ("flags", C.c_ubyte * 8)]
+
+
+class _Access(C.Structure):
+    _fields_ = [("location", _Location), ("flags", C.c_uint64)]
+
+
+class DeviceRegion:
+    def __init__(self, cuda, address, nbytes, device):
+        self.cuda, self.device, self.address, self.nbytes = cuda, device, address, 0
+        self.grow(nbytes)
+
+    def grow(self, nbytes):
+        if nbytes < self.nbytes:
+            raise ValueError("preparation storage cannot shrink")
+        if nbytes == self.nbytes:
+            return
+        cuda, device = self.cuda, self.device
+        address, size = self.address + self.nbytes, nbytes - self.nbytes
+        handle = C.c_uint64()
+        properties = _Properties(1, 0, _Location(1, device), None, (C.c_ubyte * 8)())
+        cuda.call("cuMemCreate", C.byref(handle), C.c_size_t(size), C.byref(properties), C.c_uint64(0))
+        try:
+            cuda.call("cuMemMap", C.c_uint64(address), C.c_size_t(size), C.c_size_t(0), handle, C.c_uint64(0))
+        finally:
+            cuda.call("cuMemRelease", handle)
+        access = _Access(_Location(1, device), 3)
+        try:
+            cuda.call("cuMemSetAccess", C.c_uint64(address), C.c_size_t(size), C.byref(access), C.c_size_t(1))
+            cuda.call("cuMemsetD8_v2", C.c_uint64(address), C.c_ubyte(0), C.c_size_t(size))
+        except BaseException:
+            cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
+            raise
+        self.nbytes = nbytes

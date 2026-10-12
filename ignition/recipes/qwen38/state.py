@@ -17,8 +17,6 @@ from .gdn import GDNState
 
 GDN_LAYERS = tuple(layer for layer in range(48) if layer % 4 != 3)
 QSA_LAYERS = tuple(range(3, 48, 4))
-LIVE_BASE = 1
-SNAPSHOT_BASE = 5
 EOS_TOKEN_ID = 248044
 COPY = 0
 RESET = 1
@@ -86,8 +84,8 @@ class HybridStateLayout(StateLayout):
 class HybridStatePool(StateStorage):
     """Typed disjoint views into one persistent byte row per state slot.
 
-    Slot zero is permanently zero. Native request slots map to model slots
-    starting at one. Immutable snapshots follow the live request capacity.
+    Slot zero is permanently zero. Helios partitions the backed rows between
+    request execution state and immutable prefix snapshots at load time.
     Snapshots carry the exact consumed endpoint, normalized recurrent/history
     state, target raw selector state and partial pages. Speculative snapshots
     also carry independently aligned draft state for one fewer consumed token.
@@ -96,6 +94,7 @@ class HybridStatePool(StateStorage):
 
     backing: torch.Tensor
     layout: HybridStateLayout
+    memory_capacity: torch.Tensor
     gdn: Mapping[int, GDNState]
     ple_convolution: torch.Tensor
     last_hidden: torch.Tensor
@@ -104,13 +103,13 @@ class HybridStatePool(StateStorage):
     rope_delta: torch.Tensor
 
     @classmethod
-    def allocate(cls, slots: int, device, *, speculative_tokens: int = 0, world_size: int = 1) -> HybridStatePool:
+    def allocate(cls, slots: int, device, *, speculative_tokens: int = 0, world_size: int = 1, storage=None) -> HybridStatePool:
         if type(slots) is not int or slots < 2:
             raise ValueError("hybrid state requires null and live slots")
         layout = HybridStateLayout.build(speculative_tokens=speculative_tokens, world_size=world_size)
-        backing = torch.zeros(
-            (slots, layout.row_bytes), dtype=torch.uint8, device=device
-        )
+        backing = (torch.zeros((slots, layout.row_bytes), dtype=torch.uint8, device=device) if storage is None else
+            storage.device_allocate("continuations", (slots, layout.row_bytes), torch.uint8, group="STATE_ROWS",
+                                    maximum=torch.cuda.mem_get_info(device)[1] // layout.row_bytes))
 
         def view(name):
             region = layout.region(name)
@@ -133,6 +132,7 @@ class HybridStatePool(StateStorage):
         return cls(
             backing,
             layout,
+            torch.tensor([slots, 0], dtype=torch.int64, device=device),
             gdn,
             view("ple_convolution"),
             view("last_hidden"),
@@ -158,6 +158,7 @@ class StateTransferMetadata:
     be unique and cannot alias another operation's source.
     """
 
+    request_slots: torch.Tensor
     source_slots: torch.Tensor
     destination_slots: torch.Tensor
     operation: torch.Tensor
@@ -172,6 +173,7 @@ class StateTransferMetadata:
         if type(capacity) is not int or capacity <= 0:
             raise ValueError("state-transfer capacity must be positive")
         return cls(
+            torch.full((capacity,), -1, dtype=torch.int64, device=device),
             torch.full((capacity,), -1, dtype=torch.int64, device=device),
             torch.full((capacity,), -1, dtype=torch.int64, device=device),
             torch.zeros(capacity, dtype=torch.int32, device=device),
@@ -199,14 +201,14 @@ def _transfer(
     CopyLayout,
     Tables,
     DraftTables,
+    Requests,
+    StateRows,
     EXACT: tl.constexpr,
     SPECULATIVE: tl.constexpr,
     HAS_DRAFT: tl.constexpr,
-    EXTRA_BASE: tl.constexpr,
-    PAGE_COUNT: tl.constexpr,
+    MemoryCapacity,
     TABLE_WIDTH: tl.constexpr,
     ROW_BYTES: tl.constexpr,
-    SLOTS: tl.constexpr,
     CAPACITY: tl.constexpr,
     RAW_SLOTS: tl.constexpr,
     HISTORY_OFFSET: tl.constexpr,
@@ -217,6 +219,8 @@ def _transfer(
 ):
     command, tile = tl.program_id(0), tl.program_id(1)
     count = tl.load(Count)
+    SLOTS = tl.load(MemoryCapacity)
+    PAGE_COUNT = tl.load(MemoryCapacity + 1)
     source = tl.load(Sources + command)
     destination = tl.load(Destinations + command)
     operation = tl.load(Operations + command)
@@ -241,7 +245,7 @@ def _transfer(
         expected = tl.load(Expected + command)
         error = tl.where(live & ((expected < 0) | ((operation == 1) & (expected != 0))
                          | ((operation == 0) & ((expected <= 0) | (consumed != expected)))), 4, error)
-        physical_slot = tl.where(source < LIVE + 1, source - 1, destination - 1)
+        physical_slot = tl.load(Requests + command)
         endpoint = expected // 64
         physical_valid = (physical_slot >= 0) & (physical_slot < LIVE)
         tail = live & (operation == 0) & (expected > 0) & (expected % 64 != 0)
@@ -261,7 +265,7 @@ def _transfer(
         selected = tl.full((), 1, tl.int32)
         if SPECULATIVE:
             selected = tl.load(PreviousAccepted + physical_slot,
-                               live & physical_valid & (source > 0) & (source < LIVE + 1) & (operation == 0), other=1)
+                               live & physical_valid & (raw_slot < 0) & (operation == 0), other=1)
             error = tl.where(live & ((selected < 1) | (selected > 8)), 5, error)
     else:
         error = tl.where(restoring & ((consumed < 0) | (consumed % 64 != 0)), 4, error)
@@ -303,13 +307,13 @@ def _transfer(
         read_offsets = offsets
         keep = tl.full((BLOCK,), True, tl.int1)
         if EXACT and SPECULATIVE:
-            snapshot = (source >= 1) & (source < LIVE + 1) & (destination >= LIVE + 1)
+            snapshot = raw_slot < 0
             kind = tl.load(CopyLayout + tile * 4)
             region_start = tl.load(CopyLayout + tile * 4 + 1)
             history = tl.load(CopyLayout + tile * 4 + 2)
             state_history = tl.load(CopyLayout + tile * 4 + 3)
             if snapshot & (kind == 1):
-                read_slot = tl.where(selected == 1, source, EXTRA_BASE + (source - 1) * 7 + selected - 2)
+                read_slot = tl.load(StateRows + physical_slot * 8 + selected - 1)
             if snapshot & (kind == 2):
                 relative = offsets - region_start
                 column = (relative // 2) % state_history
@@ -331,13 +335,14 @@ def _invalidate_qsa(
     Count,
     Errors,
     CONSUMED_STRIDE: tl.constexpr,
-    SLOTS: tl.constexpr,
+    MemoryCapacity,
     RAW_SLOTS: tl.constexpr,
     RING: tl.constexpr,
     AXES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     command, layer = tl.program_id(0), tl.program_id(1)
+    SLOTS = tl.load(MemoryCapacity)
     destination = tl.load(Destinations + command)
     source = tl.load(Sources + command)
     operation = tl.load(Operations + command)
@@ -377,6 +382,7 @@ class PreparedStateTransfers:
             raise ValueError("prepared state transfers require CUDA")
         capacity = metadata.source_slots.numel()
         for name, dtype in (
+            ("request_slots", torch.int64),
             ("source_slots", torch.int64),
             ("destination_slots", torch.int64),
             ("operation", torch.int32),
@@ -454,14 +460,14 @@ class PreparedStateTransfers:
             exact.copy_layout if exact is not None else None,
             exact.tables if exact is not None else None,
             exact.draft_tables if exact is not None else None,
+            metadata.request_slots,
+            exact.state_rows if exact is not None else None,
             exact is not None,
             bool(pool.layout.speculative_tokens),
             exact is not None and exact.draft is not None,
-            exact.extra_base if exact is not None else 0,
-            exact.page_count if exact is not None else 0,
+            pool.memory_capacity,
             exact.tables.shape[1] if exact is not None else 0,
             pool.layout.row_bytes,
-            pool.backing.shape[0],
             capacity,
             raw_slots,
             pool.layout.region("ple_history").offset,
@@ -482,7 +488,7 @@ class PreparedStateTransfers:
             metadata.num_ops,
             metadata.errors,
             pool.consumed_tokens.stride(0),
-            pool.backing.shape[0],
+            pool.memory_capacity,
             raw_slots,
             ring,
             axes,
@@ -514,17 +520,17 @@ class PreparedStateTransfers:
             self._qsa()
 
 @triton.jit
-def _checkpoint_raw(Pointers, Backing, Sources, Destinations, Operations, Expected, Count, Errors,
+def _checkpoint_raw(Pointers, Backing, Sources, Destinations, Operations, Expected, Count, Errors, Requests, RawSlots,
                     ROW_BYTES: tl.constexpr, ELEMENTS: tl.constexpr, RING: tl.constexpr,
                     FIELD: tl.constexpr, DRAFT: tl.constexpr, BLOCK: tl.constexpr, LIVE: tl.constexpr = 4):
     command, layer = tl.program_id(0), tl.program_id(1)
     source, destination = tl.load(Sources + command), tl.load(Destinations + command)
     operation = tl.load(Operations + command)
     active = (command < tl.load(Count)) & (destination > 0) & (tl.load(Errors + command) == 0)
-    snapshot = (operation == 0) & (source > 0) & (source < 1 + LIVE) & (destination >= LIVE + 1)
-    restore = (operation == 0) & (source >= LIVE + 1) & (destination >= 1) & (destination < 1 + LIVE)
+    snapshot = (operation == 0) & (tl.load(RawSlots + command) < 0)
+    restore = (operation == 0) & (tl.load(RawSlots + command) >= 0)
     reset = operation == 1
-    slot = tl.where(snapshot, source, destination)
+    slot = tl.load(Requests + command) + 1
     active &= snapshot | restore | reset
     dtype = tl.bfloat16 if FIELD == 0 else tl.int64
     pointer = tl.load(Pointers + layer * 3).to(tl.pointer_type(dtype))
@@ -553,14 +559,14 @@ def _checkpoint_raw(Pointers, Backing, Sources, Destinations, Operations, Expect
 
 
 @triton.jit
-def _checkpoint_pages(Pointers, Backing, Tables, Sources, Destinations, Operations, Expected, Count, Errors,
+def _checkpoint_pages(Pointers, Backing, Tables, Sources, Destinations, Operations, Expected, Count, Errors, Requests, RawSlots,
                       ROW_BYTES: tl.constexpr, ELEMENTS: tl.constexpr, TABLE_WIDTH: tl.constexpr,
                       DRAFT_PART: tl.constexpr, BLOCK: tl.constexpr, LIVE: tl.constexpr = 4):
     command, layer, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     source, destination = tl.load(Sources + command), tl.load(Destinations + command)
     endpoint = tl.load(Expected + command)
-    snapshot = (source >= 1) & (source < 1 + LIVE) & (destination >= LIVE + 1)
-    restore = (source >= LIVE + 1) & (destination >= 1) & (destination < 1 + LIVE)
+    snapshot = tl.load(RawSlots + command) < 0
+    restore = tl.load(RawSlots + command) >= 0
     active = (command < tl.load(Count)) & (tl.load(Errors + command) == 0)
     active &= (tl.load(Operations + command) == 0) & (snapshot | restore) & (endpoint > 0)
     logical = endpoint // 64
@@ -571,7 +577,7 @@ def _checkpoint_pages(Pointers, Backing, Tables, Sources, Destinations, Operatio
         active &= (endpoint > 1) & (logical >= 0)
         if DRAFT_PART == 1:
             active &= endpoint % 64 >= 2
-    slot = tl.where(snapshot, source, destination) - 1
+    slot = tl.load(Requests + command)
     page = tl.load(Tables + slot * TABLE_WIDTH + logical, active, other=-1)
     active &= page >= 0
     pointer = tl.load(Pointers + layer * 2).to(tl.pointer_type(tl.bfloat16))
@@ -608,7 +614,7 @@ def checkpoint_copy_layout(layout, block=4096):
 class PreparedCheckpointCaches:
     """Exact target/draft cache tails plus normalized recurrent snapshot storage."""
 
-    def __init__(self, pool, metadata, qsa_states, tables, *, speculation=None):
+    def __init__(self, pool, metadata, qsa_states, tables, *, state_rows, speculation=None):
         from .decoder_state import compile_kernel
 
         slots = tables.shape[0]
@@ -617,7 +623,7 @@ class PreparedCheckpointCaches:
         self.draft = speculation.cache[48] if speculation is not None and speculation.draft_tables is not None else None
         self.draft_tables = speculation.draft_tables if self.draft is not None else None
         self.previous_accepted = speculation.previous_accepted if speculation is not None else None
-        self.extra_base = speculation.extra_base if speculation is not None else 0
+        self.state_rows = state_rows
         from math import gcd
 
         self.copy_block = 4096
@@ -634,6 +640,7 @@ class PreparedCheckpointCaches:
         if tables.device != pool.backing.device:
             raise ValueError("checkpoint page tables must share the state device")
         self.page_count = self.states[0].main_k_cache.shape[0]
+        pool.memory_capacity[1] = self.page_count
         if self.draft_tables is not None and (self.draft_tables.shape != tables.shape
                 or self.draft_tables.dtype != torch.int32 or not self.draft_tables.is_contiguous()
                 or self.draft_tables.device != tables.device):
@@ -641,8 +648,7 @@ class PreparedCheckpointCaches:
         if pool.layout.speculative_tokens:
             previous = self.previous_accepted
             if (previous.shape != (slots,) or previous.dtype != torch.int32
-                    or previous.device != pool.backing.device or not previous.is_contiguous()
-                    or self.extra_base < slots + 2 or self.extra_base + slots * 7 > pool.backing.shape[0]):
+                    or previous.device != pool.backing.device or not previous.is_contiguous()):
                 raise ValueError("speculative checkpoints require eight accepted columns per live slot")
         self.operations, self.pointers = [], []
         groups = [(self.states, tuple(f"qsa.{layer}." for layer in QSA_LAYERS), False)]
@@ -673,7 +679,7 @@ class PreparedCheckpointCaches:
                 size = pool.layout.region(prefixes[0] + suffix).nbytes // value.element_size()
                 self.operations.append(compile_kernel(_checkpoint_raw,
                     (pointer, pool.backing, metadata.source_slots, metadata.destination_slots, metadata.operation,
-                     metadata.expected_consumed, metadata.num_ops, metadata.errors, pool.layout.row_bytes,
+                     metadata.expected_consumed, metadata.num_ops, metadata.errors, metadata.request_slots, metadata.qsa_slots, pool.layout.row_bytes,
                      size, ring, field, draft, triton.next_power_of_2(size), slots), (metadata.source_slots.numel(), len(states), 1)))
             for part in ((0, 1) if draft else (-1,)):
                 for name, suffix in (("main_k_cache", "boundary_key"), ("main_v_cache", "boundary_value"),
@@ -691,7 +697,7 @@ class PreparedCheckpointCaches:
                     self.operations.append(compile_kernel(_checkpoint_pages,
                         (pointer, pool.backing, self.draft_tables if draft else tables, metadata.source_slots,
                          metadata.destination_slots, metadata.operation, metadata.expected_consumed,
-                         metadata.num_ops, metadata.errors, pool.layout.row_bytes, size, tables.shape[1], part, 1024, slots),
+                         metadata.num_ops, metadata.errors, metadata.request_slots, metadata.qsa_slots, pool.layout.row_bytes, size, tables.shape[1], part, 1024, slots),
                         (metadata.source_slots.numel(), len(states), triton.cdiv(size, 1024))))
 
     def __call__(self):
@@ -703,10 +709,8 @@ __all__ = [
     "COPY",
     "EOS_TOKEN_ID",
     "GDN_LAYERS",
-    "LIVE_BASE",
     "QSA_LAYERS",
     "RESET",
-    "SNAPSHOT_BASE",
     "HybridStateLayout",
     "HybridStatePool",
     "PreparedCheckpointCaches",

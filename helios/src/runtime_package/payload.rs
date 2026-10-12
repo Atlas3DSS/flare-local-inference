@@ -2,9 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    fs::File,
     os::unix::fs::FileExt,
-    path::Path,
     ptr::null_mut,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -80,7 +78,6 @@ impl Drop for Staging<'_> {
 }
 
 struct Chunk {
-    file: usize,
     file_offset: u64,
     destination: u64,
     nbytes: usize,
@@ -90,33 +87,22 @@ struct Chunk {
 /// The owner's mapped allocations must be live and unused by graph execution.
 pub(super) unsafe fn load(
     owner: &NativeResources,
-    root: &Path,
+    archive: &super::archive::Archive,
     package: &Package,
     phase: &Phase,
     ranks: usize,
 ) -> Result<()> {
     let chunk_bytes = CHUNK / ranks;
-    let mut files = Vec::new();
     let mut chunks = Vec::new();
     for allocation in &package.allocations {
         let Some(file) = &allocation.file else {
             continue;
         };
-        let file = root.join(file);
-        if file.metadata().map_err(|e| e.to_string())?.len() != allocation.stored_bytes() as u64 {
-            return Err(invalid(format!(
-                "storage size mismatch for {}",
-                allocation.name
-            )));
-        }
-        let index = files.len();
-        files.push(file);
-        let mut file_offset = 0;
+        let mut file_offset = archive.start + archive.span(package, file)?.offset;
         for [offset, nbytes] in allocation.spans() {
             for start in (0..nbytes).step_by(chunk_bytes) {
                 let nbytes = chunk_bytes.min(nbytes - start);
                 chunks.push(Chunk {
-                    file: index,
                     file_offset,
                     destination: owner.allocations[&allocation.name].address
                         + (offset + start) as u64,
@@ -144,24 +130,18 @@ pub(super) unsafe fn load(
         let available = Arc::new(Mutex::new(available));
         let (ready, finished) = mpsc::sync_channel(count);
         for index in 0..READERS.min(count) {
-            let (available, chunks, files, buffers, ready) =
-                (available.clone(), &chunks, &files, &buffers, ready.clone());
+            let (available, chunks, buffers, ready) =
+                (available.clone(), &chunks, &buffers, ready.clone());
             thread::Builder::new()
                 .name(format!("helios-reader-{index}"))
                 .spawn_scoped(scope, move || {
-                    let mut file: Option<(usize, File)> = None;
+                    let file = &archive.file;
                     loop {
                         let Ok((slot, index)) = available.lock().unwrap().recv() else {
                             break;
                         };
                         let chunk = &chunks[index];
                         let result = (|| -> Result<()> {
-                            if file.as_ref().is_none_or(|(index, _)| *index != chunk.file) {
-                                file = Some((
-                                    chunk.file,
-                                    File::open(&files[chunk.file]).map_err(|e| e.to_string())?,
-                                ));
-                            }
                             let address = match chunk.memory {
                                 Memory::Device => buffers[slot],
                                 Memory::MappedHost => chunk.destination as usize,
@@ -172,14 +152,11 @@ pub(super) unsafe fn load(
                             let destination = unsafe {
                                 std::slice::from_raw_parts_mut(address as *mut u8, chunk.nbytes)
                             };
-                            file.as_ref()
-                                .unwrap()
-                                .1
-                                .read_exact_at(destination, chunk.file_offset)
+                            file.read_exact_at(destination, chunk.file_offset)
                                 .map_err(|e| {
                                     invalid(format!(
                                         "read {} at {}: {e}",
-                                        files[chunk.file].display(),
+                                        archive.path.display(),
                                         chunk.file_offset
                                     ))
                                 })

@@ -5,7 +5,7 @@ import shutil
 import tempfile
 
 from .runtime_package import export_model
-from .runtime_package_pb2 import ModelPackage
+from .package_file import combine
 
 
 def export_package(prepared, images, storage, path, *, options, progress=None):
@@ -16,7 +16,7 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=path.parent))
     try:
-        roots = [f'rank-{rank}' for rank in range(storage.world)]
+        roots = [f'rank-{rank}.flaretensors' for rank in range(storage.world)]
         if storage.world > 1:
             for rank, control in enumerate(prepared.controls, 1):
                 control.send(('export', stage / roots[rank], options))
@@ -29,14 +29,11 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
         memory = [[]] if storage.world == 1 else [list(storage.peer_storage.owned.items())]
         if storage.world > 1:
             memory.extend(control.recv()['peer_memory'] for control in prepared.controls)
-        descriptor = ModelPackage(version=1, ranks=roots)
+        peers = []
         for rank, allocations in enumerate(memory):
             for address, size in allocations:
-                descriptor.peer_memory.add(owner=rank, address=address, nbytes=size, readers=range(storage.world))
-        (stage / 'model.pb').write_bytes(descriptor.SerializeToString())
-        if path.exists():
-            raise FileExistsError(path)
-        stage.rename(path)
+                peers.append(dict(owner=rank, address=address, nbytes=size, readers=list(range(storage.world))))
+        combine(path, [stage / root for root in roots], peers)
     finally:
         if stage.exists():
             shutil.rmtree(stage)

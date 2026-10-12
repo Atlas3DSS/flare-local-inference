@@ -5,38 +5,34 @@ core owns graph-catalog validation and selection, request admission, scheduling,
 cache ownership, and completion retirement. The contract supplies buffer and
 capability declarations, prompt interpretation, input encoding, model-specific
 completion checks, and the associated `ModelOutput` implementation. For the
-Qwen4Exp schema, the Python entrypoint selects `Qwen4Exp`.
+Qwen4Exp schema, the Flare executable selects `Qwen4Exp`.
 Transport owns graph handles, four physical completion lanes, bounded output
 vectors, host spans, fences, and confirmed resource drain.
 
 The server consumes the transport manifest in [manifest.md](manifest.md)
-and the Qwen4Exp semantics below. Python prepares graphs and persistent storage,
-synchronizes preparation, then transfers exclusive mutation access to Rust.
+and the Qwen4Exp semantics below. Ignition prepares graphs and persistent storage
+and exports a `.flaretensors` package. Helios loads that package into native
+resource owners before serving starts.
 Every tensor listed here is contiguous and remains allocated through confirmed
 drain of the model and completion-copy streams.
 
 ## Bootstrap
 
-Build with `server,extension-module` and construct:
+Build Helios with `server,runtime-package`. `NativeModel::load` selects variants,
+loads each rank's resources, and chooses physical cache capacities.
+`NativeModel::manifests` supplies the live execution contracts.
+`Bootstrap::load::<Qwen4Exp>` validates serving configuration and loads frontend
+assets. `Server::<Qwen4Exp>::start` starts the listener and execution workers;
+tensor-parallel peers use `RankPeers::Threads`.
 
-```python
-server = flare_heliopause.Server(owner, manifest, config_json)
-print(server.address)
-# The interpreter may wait for process signals. Requests execute entirely in Rust.
-server.close()
-assert server.drained
-```
+The native owner retains graphs, CUDA contexts, mapped allocations, weights,
+KV pages, recurrent state, the feature arena, and workspaces. The executable
+retains it through `Server::close` and releases it only after confirmed CUDA
+drain. Failed drain retains resources until process termination.
 
-`owner` retains the complete model, graphs, CUDA context, mapped allocations,
-weights, KV pages, recurrent state, feature arena and workspaces. The object
-exposes `address`, `healthy`, `drained`, `wait(timeout_ms=1000)` and idempotent
-`close()`. Construction,
-asset loading and shutdown release the GIL. Failed CUDA drain retains the owner.
-A failed startup releases it only if its drain confirmation permits release. Its
-Python exception carries `resources_retained=true` when drain failed; bootstrap
-must prohibit explicit graph, session and mapped-allocation teardown in that case.
-
-`config_json` is an object with these fields:
+The package contains serving configuration as a Protobuf structure. The loader
+supplies resolved asset ranges and runtime capacities to `Bootstrap::load` as
+a JSON object with these fields:
 
 | Field | Meaning |
 |---|---|
@@ -44,11 +40,12 @@ must prohibit explicit graph, session and mapped-allocation teardown in that cas
 | `identity` | 64 hexadecimal characters identifying model weights and recipe |
 | `max_sequence_tokens` | Positive context capacity divisible by 64 |
 | `prefill_chunk_size` | Maximum prompt tokens per prefill graph; 4096 if omitted; divisible by 64, at least 64, and no greater than context or 262144 |
-| `pages` | Prepared KV page capacity |
-| `snapshots` | Prepared immutable state-snapshot capacity |
+| `max_active` | Selected admission limit, no greater than captured concurrency |
+| `pages` | Physically backed KV page capacity |
+| `snapshots` | Immutable continuation rows in the prefix-cache partition |
 | `eos_token_ids` | Up to eight vocabulary token IDs |
 | `model_contract` | Required closed model input-schema metadata shown below |
-| `assets` | Verified asset descriptors, each `{path, sha256}` |
+| `assets` | Verified asset descriptors, each `{path, offset, nbytes, sha256}` for a range in the package |
 | `template_defaults` | Optional Jinja defaults |
 | `generation_defaults` | Optional overrides of checkpoint sampling defaults |
 | `max_new_tokens` | Default output limit, 256 if omitted |
@@ -65,7 +62,7 @@ must prohibit explicit graph, session and mapped-allocation teardown in that cas
 The preparation recipe declares this metadata alongside its graph catalog:
 
 ```json
-{"schema":"qwen4exp.graph-inputs.v2","vocabulary":248320,"vision":{"features_per_request":16384,"max_images":4,"patches_per_feature":4,"patch_capacities":[256,1024,4096,16384]}}
+{"schema":"qwen4exp.graph-inputs.v3","vocabulary":248320,"vision":{"features_per_request":16384,"max_images":4,"patches_per_feature":4,"patch_capacities":[256,1024,4096,16384]}}
 ```
 
 Missing or unknown fields, unsupported schema versions, different model
@@ -78,7 +75,8 @@ speculative draft-cache interpretation live under `model/qwen4exp`.
 
 Asset keys are `tokenizer`, `tokenizer_config`, `chat_template`,
 `preprocessor_config`, `model_config` and `generation_config`. Paths must be
-absolute. Each asset is hashed and parsed from the same bytes. Generation
+absolute. Package offsets are absolute file byte offsets. Each asset is hashed
+and parsed from the same bounded byte range. Generation
 defaults come from the checkpoint; configured defaults override them; explicit
 request sampling values override configured defaults. The HTTP default sets
 `add_generation_prompt=true` unless configured otherwise. Explicit continuation
@@ -392,8 +390,14 @@ State staging names are `state_expected_consumed` int64[4],
 `state_operation` int32[4], `state_qsa_slots` int64[4],
 `state_accepted_tokens` int32[4], and `state_num_ops` int32[1]. These arrays
 are packed by transfer row; the page tables are indexed by physical request slot.
-COPY is 0 and RESET is 1. Null state row 0 is padding, live rows are
-`1 + physical_slot`, and immutable rows are `5 + SnapshotId`.
+COPY is 0 and RESET is 1. `state_request_slots` int64[slots] identifies the
+request associated with each transfer. `request_state_rows` int64[slots,8]
+maps request slots and speculative columns to continuation rows. With runtime
+concurrency `C` and maximum loaded verification width `W`, request `s` owns
+rows `1 + s * W` through `1 + (s + 1) * W - 1`; snapshot `i` occupies row
+`1 + C * W + i`. Row zero is padding. `memory_capacity` int64[2] holds the
+backed continuation-row count, including row zero, and physical KV-page count.
+The loader writes these bounds once; maintenance kernels read them during replay.
 
 Initialization supplies expected consumed count 0. Snapshot and restore supply
 the exact positive endpoint; an active operation cannot use a negative sentinel.

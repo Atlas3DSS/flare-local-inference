@@ -59,10 +59,12 @@ def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
     requests = DeviceRequestState.allocate(device, consumed_tokens=pool.consumed_tokens[1:5, 0],
         ple_history=pool.ple_history[1:5])
     inputs = DecoderInputs.allocate(device, context=256, tokens=64)
+    inputs.request_state_rows[:, 0] = torch.arange(1, 5, device=inputs.token_ids.device)
+    inputs.request_state_rows[:, 1:] = torch.arange(6, 34, device=inputs.token_ids.device).view(4, 7)
     candidates = torch.arange(32, device=device, dtype=torch.int64).reshape(4, 8) + 901
     accepted = torch.ones(4, dtype=torch.int32, device=device)
     states = {width: PreparedVerificationState(inputs, requests, pool, candidates, accepted,
-        width=width, rows=1, extra_base=6) for width in range(1, 9)}
+        width=width, rows=1) for width in range(1, 9)}
     counts = torch.tensor([5], dtype=torch.int32, device=device)
     before = torch.tensor([61], dtype=torch.int64, device=device)
     residual = torch.arange(8, device=device, dtype=torch.bfloat16)[:, None].expand(8, 10240).contiguous()
@@ -127,7 +129,7 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     pool = SimpleNamespace(region=lambda name: regions[name], rope_delta=torch.zeros((5, 1), dtype=torch.int64))
     owner = SimpleNamespace(requests=requests, pool=pool,
         copy_generation=torch.tensor([0, 0, 0, copy_epoch]),
-        inputs=SimpleNamespace(row_slot_ids=slots, row_generations=epochs, live_rows=torch.tensor([2], dtype=torch.int32)),
+        inputs=SimpleNamespace(request_state_rows=torch.arange(1, 5)[:, None].expand(4, 8), row_slot_ids=slots, row_generations=epochs, live_rows=torch.tensor([2], dtype=torch.int32)),
         cache={48: SimpleNamespace()},
         draft_rng_generation=torch.zeros(4, dtype=torch.int64), draft_rng_offset=torch.zeros(4, dtype=torch.int64),
         copy_expected=torch.tensor([-1, -1, -1, 64]), copy_count=torch.tensor([0, 0, 0, 1]),
@@ -208,6 +210,8 @@ def test_fixed_verification_masks_context_tail_without_changing_shape():
     requests = DeviceRequestState.allocate("cuda", consumed_tokens=pool.consumed_tokens[1:5, 0],
         ple_history=pool.ple_history[1:5])
     inputs = DecoderInputs.allocate("cuda", context=64, tokens=64)
+    inputs.request_state_rows[:, 0] = torch.arange(1, 5, device=inputs.token_ids.device)
+    inputs.request_state_rows[:, 1:] = torch.arange(6, 34, device=inputs.token_ids.device).view(4, 7)
     candidates = torch.zeros((4, 8), dtype=torch.int64, device="cuda")
     accepted = torch.ones(4, dtype=torch.int32, device="cuda")
     inputs.query_lengths.copy_(torch.tensor([2, 4, 1, 3], dtype=torch.int32, device="cuda"))
@@ -219,7 +223,7 @@ def test_fixed_verification_masks_context_tail_without_changing_shape():
     inputs.live_rows.fill_(4)
     inputs.page_tables.fill_(0)
     state = PreparedVerificationState(inputs, requests, pool, candidates, accepted,
-        width=4, rows=4, extra_base=6, token_limits=inputs.query_lengths)
+        width=4, rows=4, token_limits=inputs.query_lengths)
     state.begin()
     assert requests.status.tolist() == [1] * 4
     assert state.qsa.query_positions.reshape(4, 4).tolist() == [

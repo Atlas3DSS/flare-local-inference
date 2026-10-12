@@ -19,6 +19,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     let asset = |name: &str| {
         let path = snapshot.join(name);
         Asset {
+            range: None,
             sha256: format!("{:x}", Sha256::digest(fs::read(&path).unwrap())),
             path,
         }
@@ -40,6 +41,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         identity: [9; 32],
         model_id: "glm53".into(),
         limits: SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 1048576,
             prefill_chunk_size: 4096,
@@ -51,7 +53,6 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         max_new_tokens: 128,
         speculative_widths: vec![],
         speculative_fixed_width: None,
-        speculative_graph_budget: 24,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };

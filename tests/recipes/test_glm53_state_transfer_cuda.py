@@ -5,6 +5,7 @@ import os
 import pytest
 import torch
 
+from ignition.components.sampling import DeviceRequestState
 from ignition.components.state_transfer import PreparedStateTransfer, StateCommands
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.recipes.glm53.pool import ContinuationPool
@@ -18,7 +19,9 @@ def transfers():
     pool = ContinuationPool.allocate(("linear_attention", "indexed_attention"), 2, 8, 5, "cuda:0")
     commands = StateCommands.allocate("cuda:0")
     tables = torch.full((4, 3), -1, dtype=torch.int32, device="cuda:0")
-    operation = PreparedStateTransfer(pool, commands, tables, pages=pool.partial_pages(), page_tokens=256)
+    requests = DeviceRequestState.allocate("cuda:0", vocab_size=128, consumed_tokens=pool.consumed_tokens[1:5, 0])
+    state_rows = torch.arange(1, 5, device="cuda:0")[:, None].expand(4, 8).contiguous()
+    operation = PreparedStateTransfer(pool, commands, tables, pages=pool.partial_pages(), page_tokens=256, state_rows=state_rows, requests=requests)
     operation.prepare()
     peer_errors = torch.zeros(4, dtype=torch.int32, device="cuda:0")
     graph = torch.cuda.CUDAGraph()
@@ -45,6 +48,7 @@ def _commands(commands, rows):
     commands.expected_consumed.fill_(-1)
     commands.operation.zero_()
     for index, (source, destination, operation, endpoint) in enumerate(rows):
+        commands.request_slots[index] = (source if 0 < source < 5 else destination) - 1
         commands.source_slots[index] = source
         commands.destination_slots[index] = destination
         commands.operation[index] = operation
@@ -147,7 +151,9 @@ def test_mtp_trailing_partial_page_restores_at_target_page_boundaries(endpoint):
     commands = StateCommands.allocate("cuda:0")
     tables = torch.tensor([[0, 1, 2], [3, 4, 5], [-1, -1, -1], [-1, -1, -1]], device="cuda:0", dtype=torch.int32)
     draft_tables = tables.clone()
-    operation = PreparedStateTransfer(pool, commands, tables, pages=pool.partial_pages(), page_tokens=256,
+    requests = DeviceRequestState.allocate("cuda:0", vocab_size=128, consumed_tokens=pool.consumed_tokens[1:5, 0])
+    state_rows = torch.arange(1, 5, device="cuda:0")[:, None].expand(4, 8).contiguous()
+    operation = PreparedStateTransfer(pool, commands, tables, pages=pool.partial_pages(), page_tokens=256, state_rows=state_rows, requests=requests,
         trailing_pages=pool.draft_pages(), trailing_tables=draft_tables)
     operation.prepare()
     pool.backing[1].random_(0, 256)

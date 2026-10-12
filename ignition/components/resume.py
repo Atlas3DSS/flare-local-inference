@@ -3,6 +3,7 @@
 import torch
 
 from .sampling import ERROR, RUNNING, _check_tensor
+from .state import gather_rows
 
 
 class PreparedResumeState:
@@ -14,12 +15,13 @@ class PreparedResumeState:
     flags across ranks before gather(), using the same world size as preparation.
     """
 
-    def __init__(self, requests, saved_hidden, slots, epochs, count, *, world_size):
+    def __init__(self, requests, saved_hidden, slots, epochs, count, *, world_size, state_rows):
+        self.state_rows = state_rows
         self.capacity = requests.capacity
         rows, device = slots.numel(), requests.generation.device
         if device.type != "cuda" or world_size not in (1, 2, 4) or not 1 <= rows <= self.capacity:
             raise ValueError("resume requires CUDA request state, TP1/2/4, and rows within request capacity")
-        if saved_hidden.ndim != 2 or saved_hidden.shape[0] != self.capacity or saved_hidden.shape[1] <= 0:
+        if saved_hidden.ndim != 2 or saved_hidden.shape[0] < 2 or saved_hidden.shape[1] <= 0:
             raise ValueError("resume requires saved hidden outputs for all physical request slots")
         _check_tensor(saved_hidden, saved_hidden.shape, torch.bfloat16, device, "saved_hidden", contiguous=False)
         if saved_hidden.stride(1) != 1 or saved_hidden.stride(0) < saved_hidden.shape[1]:
@@ -59,5 +61,6 @@ class PreparedResumeState:
         safe = self.slots.long().clamp(0, self.capacity - 1)
         active = (self.row_ids < self.count) & (self.slots >= 0) & (self.slots < self.capacity)
         active &= (self.epochs == r.generation[safe]) & (r.status[safe] == RUNNING)
-        self.hidden.copy_(torch.where(active[:, None], self.saved_hidden[safe], 0))
+        gather_rows(self.saved_hidden, self.state_rows[safe, 0], self.hidden)
+        self.hidden.masked_fill_(~active[:, None], 0)
         return self.hidden

@@ -31,6 +31,7 @@ def test_native_metadata_exact_endpoints_and_terminal_guards(compile_forward):
     requests = DeviceRequestState.allocate(device,
         consumed_tokens=pool.consumed_tokens[1:5, 0], ple_history=pool.ple_history[1:5])
     inputs = DecoderInputs.allocate(device, context=256)
+    inputs.request_state_rows[:, 0] = torch.arange(1, 5, device=device)
     metadata = PreparedDecoderState(inputs, requests, pool, tokens=128, rows=1, mode="prefill")
     decode = PreparedDecoderState(inputs, requests, pool, tokens=4, rows=4, mode="decode")
     source = torch.arange(128, device=device, dtype=torch.float32).bfloat16()[:, None].expand(128, 10240).contiguous()

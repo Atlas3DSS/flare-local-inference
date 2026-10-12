@@ -87,7 +87,12 @@ impl Bootstrap {
             model_id: text("model_id")?.into(),
             identity: digest,
             limits: SchedulerLimits {
-                max_active: manifest.max_active,
+                request_slots: manifest.max_active.next_power_of_two(),
+                max_active: usize::try_from(integer(
+                    "max_active",
+                    Some(manifest.max_active as u64),
+                )?)
+                .map_err(|_| "runtime concurrency exceeds usize")?,
                 max_sequence_tokens: usize::try_from(integer("max_sequence_tokens", None)?)
                     .map_err(|error| {
                         crate::ExecutionError::Manifest(crate::Failure::caused_by(
@@ -110,7 +115,7 @@ impl Bootstrap {
                 })?,
                 snapshots: u32::try_from(integer("snapshots", None)?).map_err(|error| {
                     crate::ExecutionError::Manifest(crate::Failure::caused_by(
-                        "snapshot capacity overflow",
+                        "state row capacity overflow",
                         error,
                     ))
                 })?,
@@ -141,11 +146,6 @@ impl Bootstrap {
                         .ok_or("speculative_fixed_width must be an integer or null")
                 })
                 .transpose()?,
-            speculative_graph_budget: usize::try_from(integer(
-                "speculative_graph_budget",
-                Some(8),
-            )?)
-            .map_err(|_| "speculative graph budget exceeds usize")?,
             history_drafts: match object.get("history_drafts") {
                 None => false,
                 Some(Value::Bool(value)) => *value,
@@ -194,6 +194,15 @@ impl Bootstrap {
                 .get(name)
                 .ok_or_else(|| format!("missing asset {name}"))?;
             Ok(Asset {
+                range: match (descriptor.get("offset"), descriptor.get("nbytes")) {
+                    (None, None) => None,
+                    (Some(offset), Some(size)) => Some((
+                        offset.as_u64().ok_or("invalid asset offset")?,
+                        usize::try_from(size.as_u64().ok_or("invalid asset size")?)
+                            .map_err(|_| "asset size exceeds usize")?,
+                    )),
+                    _ => return Err("asset range requires offset and nbytes".into()),
+                },
                 path: descriptor
                     .get("path")
                     .and_then(Value::as_str)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes as C
 from dataclasses import asdict, dataclass, replace
-import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -29,6 +28,7 @@ class Argument:
 
     size: int
     relocations: tuple[Relocation, ...] = ()
+    numeric: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,7 @@ class Allocation:
     preserve_address: bool = False
     memory: str = "device"
     snapshot_spans: tuple[tuple[int, int], ...] | None = None
+    sizing: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ def _without_zero_ranges(allocation, zero_ranges):
                    snapshot_spans=tuple(kept) if kept else None)
 
 
-def _write_allocation(cuda, allocation, path):
+def _write_allocation(cuda, allocation, path, *, visit=None):
     """Pack nonzero ranges into a file; the loader zeroes omitted bytes."""
     import numpy as np
 
@@ -143,6 +144,8 @@ def _write_allocation(cuda, allocation, path):
                 size = min(8 << 20, start + nbytes - offset)
                 data = (C.string_at(allocation.address + offset, size) if allocation.memory == "mapped_host"
                         else cuda.download(allocation.address + offset, size))
+                if visit is not None:
+                    visit(allocation, offset, data)
                 full = size // block * block
                 occupied = np.frombuffer(data, dtype=np.uint8, count=full).reshape(-1, block).any(axis=1)
                 indices = np.flatnonzero(occupied).tolist()
@@ -170,7 +173,7 @@ class RuntimePackage:
     completes; graph templates must have been captured with keep_graph=True.
     """
 
-    def __init__(self, *, allocations, modules, kernels, owners=(), reservations=()):
+    def __init__(self, *, allocations, modules, kernels, owners=(), reservations=(), reachability=None):
         self.allocations = tuple(allocations)
         self.modules = dict(modules)
         kernels = tuple(kernels)
@@ -180,6 +183,7 @@ class RuntimePackage:
         self._function_indices = {function: index for index, function in enumerate(self.kernels)}
         self.owners = tuple(owners)
         self.reservations = tuple(reservations)
+        self.reachability = reachability
         self._by_name = {allocation.name: allocation for allocation in self.allocations}
         if len(self._by_name) != len(self.allocations):
             raise ValueError("allocation names must be unique")
@@ -214,6 +218,14 @@ class RuntimePackage:
                 if argument.size <= 0:
                     raise ValueError("kernel arguments must have positive sizes")
                 self._validate_relocations(argument.size, argument.relocations)
+                end = 0
+                for start, stop in argument.numeric:
+                    if start < end or stop <= start or stop > argument.size:
+                        raise ValueError("numeric argument fields must be ordered, disjoint, and within the parameter")
+                    if any(start < relocation.offset + (8 if relocation.kind == "pointer" else 128)
+                           and relocation.offset < stop for relocation in argument.relocations):
+                        raise ValueError("numeric argument fields overlap a pointer binding")
+                    end = stop
         if not self.allocations or not self.kernels:
             raise ValueError("runtime package requires allocations and kernels")
         if any(not isinstance(image, bytes) or not image.startswith(b"\x7fELF")
@@ -259,7 +271,7 @@ class RuntimePackage:
                     raise ValueError(f"tensor-map binding does not match {relocation.target}")
 
     def write(self, path, graphs, *, execution=None, server=None, progress=None):
-        """Synchronize and publish a package into a directory that does not exist."""
+        """Synchronize and publish an indexed model file without overwriting."""
         path = Path(path)
         if path.exists():
             raise FileExistsError(path)
@@ -286,13 +298,6 @@ class RuntimePackage:
             if status:
                 raise RuntimeError(f"cuCtxGetLimit({limit}) failed with CUDA status {status}")
             limits.append([limit, value.value])
-        serialized_graphs = []
-        for name, graph in graphs.items():
-            description = self._graph(cuda, name, int(graph.raw_cuda_graph()))
-            graph_flags = C.c_uint64()
-            cuda.call("cuGraphExecGetFlags", C.c_void_p(graph.raw_cuda_graph_exec()), C.byref(graph_flags))
-            description["flags"] = graph_flags.value
-            serialized_graphs.append(description)
         functions = []
         for kernel in self.kernels.values():
             name = C.c_char_p()
@@ -308,24 +313,23 @@ class RuntimePackage:
         path.parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f".{path.name}-", dir=path.parent))
         try:
-            allocations = []
-            for index, allocation in enumerate(self.allocations):
-                if progress is not None and allocation.snapshot_spans is not None:
-                    progress(f"Copy {allocation.name}: {allocation.address:#x}+{allocation.nbytes}; "
-                             f"live spans {allocation.snapshot_spans}")
-                file, data_spans = _write_allocation(cuda, allocation, stage / f"storage-{index}.bin")
-                for relocation in allocation.relocations:
-                    width = 8 if relocation.kind == "pointer" else 128
-                    data = cuda.download(allocation.address + relocation.offset, width)
-                    self._check_bindings(cuda, data, [Relocation(0, relocation.target, relocation.kind)])
-                if file is None and any(r.kind == "tensor_map" for r in allocation.relocations):
-                    raise ValueError("tensor-map storage requires a snapshot initializer")
-                allocations.append({"name": allocation.name, "nbytes": allocation.nbytes,
-                    "alignment": allocation.alignment, "file": file,
-                    "data_spans": data_spans,
-                    "address": allocation.address if allocation.preserve_address else None,
-                    "memory": allocation.memory,
-                    "relocations": [asdict(r) for r in allocation.relocations]})
+            from .package_proto import bundle, write_graph
+            from .package_file import align, publish
+            from .runtime_package_pb2 import ModelIndex
+
+            serialized_graphs = []
+            if self.reachability is not None and execution is not None:
+                for buffer in execution["buffers"]:
+                    self.reachability.reference(buffer["reference"])
+            for index, (name, graph) in enumerate(graphs.items()):
+                description = self._graph(cuda, name, int(graph.raw_cuda_graph()))
+                if self.reachability is not None:
+                    self.reachability.graph(description, tuple(self.kernels.values()))
+                graph_flags = C.c_uint64()
+                cuda.call("cuGraphExecGetFlags", C.c_void_p(graph.raw_cuda_graph_exec()), C.byref(graph_flags))
+                description["flags"] = graph_flags.value
+                serialized_graphs.append(write_graph(description, stage / f"graph-{index}.bin"))
+                del description
             modules = []
             for index, (name, image) in enumerate(self.modules.items()):
                 from .module_images import global_symbols, strip_debug, strip_global_source
@@ -340,27 +344,69 @@ class RuntimePackage:
                     address, size = C.c_uint64(), C.c_size_t()
                     cuda.call("cuModuleGetGlobal_v2", C.byref(address), C.byref(size), module, C.c_char_p(symbol.encode()))
                     data_file = f"module-{index}-global-{len(globals)}.bin"
-                    (stage / data_file).write_bytes(strip_global_source(symbol, cuda.download(address.value, size.value)))
+                    data = strip_global_source(symbol, cuda.download(address.value, size.value))
+                    if self.reachability is not None:
+                        self.reachability.blob(data)
+                    (stage / data_file).write_bytes(data)
                     globals.append({"symbol": symbol, "file": data_file, "nbytes": size.value, "relocations": []})
                 modules.append({"name": name, "file": file, "globals": globals})
-            document = {"version": 3, "architecture": architecture, "allocations": allocations,
+            allocations = []
+            selected = (self.allocations if self.reachability is None
+                        else iter(self.reachability.take, None))
+            for allocation in selected:
+                index = len(allocations)
+                if progress is not None and allocation.snapshot_spans is not None:
+                    progress(f"Copy {allocation.name}: {allocation.address:#x}+{allocation.nbytes}; "
+                             f"live spans {allocation.snapshot_spans}")
+                file, data_spans = _write_allocation(cuda, allocation, stage / f"storage-{index}.bin",
+                    visit=None if self.reachability is None else self.reachability.contents)
+                for relocation in allocation.relocations:
+                    width = 8 if relocation.kind == "pointer" else 128
+                    data = cuda.download(allocation.address + relocation.offset, width)
+                    self._check_bindings(cuda, data, [Relocation(0, relocation.target, relocation.kind)])
+                if file is None and any(r.kind == "tensor_map" for r in allocation.relocations):
+                    raise ValueError("tensor-map storage requires a snapshot initializer")
+                allocations.append({"name": allocation.name, "nbytes": 0 if allocation.sizing else allocation.nbytes,
+                    "alignment": allocation.alignment, "file": file,
+                    "data_spans": data_spans,
+                    "address": allocation.address if allocation.preserve_address else None,
+                    "memory": allocation.memory,
+                    "relocations": [asdict(r) for r in allocation.relocations], "sizing": allocation.sizing})
+            if self.reachability is not None:
+                omitted = [a for a in self.allocations if a.name not in self.reachability.reached]
+                if progress is not None:
+                    progress(f"Omitted {len(omitted)} unreachable allocations "
+                             f"({sum(a.nbytes for a in omitted) / (1 << 20):.1f} MiB)")
+                self.allocations = tuple(a for a in self.allocations if a.name in self.reachability.reached)
+                self._by_name = {a.name: a for a in self.allocations}
+            document = {"architecture": architecture, "allocations": allocations,
                         "modules": modules, "functions": functions, "graphs": serialized_graphs,
                         "reservations": self.reservations, "execution": execution,
                         "context": {"flags": flags.value, "cache": cache.value, "limits": limits}}
+            index = ModelIndex(version=1, ranks=[bundle(document)])
+            asset_files = {}
             if server is not None:
-                server = {**server, "assets": {name: dict(asset) for name, asset in server["assets"].items()}}
+                from google.protobuf.json_format import ParseDict
+
+                ParseDict({k: v for k, v in server.items() if k != "assets"}, index.server)
                 for name, asset in server["assets"].items():
                     source = Path(asset["path"])
                     destination = f"asset-{name}{source.suffix}"
                     shutil.copyfile(source, stage / destination)
-                    asset["path"] = destination
-                (stage / "server.json").write_text(json.dumps(server) + "\n")
-            from .package_proto import encode
-
-            (stage / "package.pb").write_bytes(encode(document))
-            if path.exists():
-                raise FileExistsError(path)
-            stage.rename(path)
+                    asset_files[destination] = (name, asset["sha256"])
+            payload, cursor = [], 0
+            for source in sorted(stage.iterdir()):
+                cursor = align(cursor)
+                size = source.stat().st_size
+                if source.name in asset_files:
+                    name, digest = asset_files[source.name]
+                    index.assets.add(name=name, sha256=digest, payload={"offset": cursor, "nbytes": size})
+                else:
+                    span = index.ranks[0].resources[source.name]
+                    span.offset, span.nbytes = cursor, size
+                payload.append((cursor, source, 0, size))
+                cursor += size
+            publish(path, index, payload)
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
@@ -484,12 +530,15 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         raise RuntimeError("native package allocator failed") from storage.error
     if prepared._consumed:
         raise RuntimeError("runtime package export requires an unused prepared model")
-    zero_ranges = list(prepared.export_zero_ranges)
+    inactive = [(block["address"], block["address"] + block["size"])
+                for segment in storage.pool.snapshot(include_traces=False)
+                for block in segment["blocks"] if block["state"] == "inactive"]
+    dynamic = {region.address: region for region in storage.dynamic_regions}
+    zero_ranges = [(address, size) for address, size in prepared.export_zero_ranges
+                   if not any(region.address <= address < region.address + region.extent for region in dynamic.values())]
     zero_ranges.extend((segment["address"], segment["total_size"])
                        for segment in storage.graph_pool.snapshot(include_traces=False))
-    zero_ranges.extend((block["address"], block["size"])
-                       for segment in storage.pool.snapshot(include_traces=False)
-                       for block in segment["blocks"] if block["state"] == "inactive")
+    zero_ranges.extend((start, end - start) for start, end in inactive)
     zero_ranges = _merge_ranges(zero_ranges)
     for address, nbytes in zero_ranges:
         cuda.call("cuMemsetD8_v2", C.c_uint64(address), C.c_ubyte(0), C.c_size_t(nbytes))
@@ -502,7 +551,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         if images.allocations.get(address) != (size, "device"):
             raise ValueError(f"peer mapping {address:#x}+{size} differs from the recorded allocation")
     outside = [(address, size) for address, (size, kind) in images.allocations.items()
-               if kind == "device" and address not in mappings and address not in imports]
+               if kind == "device" and address not in mappings and address not in imports
+               and not any(region.address <= address < region.address + region.extent for region in dynamic.values())]
     current = C.c_void_p()
     cuda.call("cuCtxGetCurrent", C.byref(current))
     for address, nbytes in outside:
@@ -523,6 +573,16 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
                                   preserve_address=True, memory="mapped_host")
                        for index, region in enumerate(storage.host_regions) if not region.closed)
     allocations = [_without_zero_ranges(allocation, zero_ranges) for allocation in allocations]
+    allocations.extend(Allocation(region.name, region.address, region.extent, alignment=storage.granularity,
+        initialize="zero", preserve_address=True, sizing={"capacity": region.group, "unit_bytes": region.unit_bytes,
+        "maximum": region.maximum}) for region in dynamic.values())
+    from .tensor_metadata import live_metadata
+    from .reachability import Reachability
+
+    numeric, parameter_layouts = live_metadata(allocations, storage.numeric_storage, prepared.buffers)
+    if progress is not None:
+        progress(f"Classified {len(numeric)} numeric tensor spans and "
+                 f"{len(parameter_layouts)} typed kernel signatures")
     modules, module_names, kernels = {}, {}, {}
     for graph in prepared.graphs.values():
         count = C.c_size_t()
@@ -558,6 +618,12 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
                 arguments.append(Argument(size.value))
             else:
                 raise ValueError("kernel exceeds supported parameter count")
+            layout = parameter_layouts.get(function.value)
+            if layout is not None:
+                if tuple(size for size, _ in layout) != tuple(argument.size for argument in arguments):
+                    raise ValueError("compiler parameter metadata differs from the CUDA function layout")
+                arguments = [replace(argument, numeric=((0, argument.size),) if numeric else ())
+                             for argument, (_, numeric) in zip(arguments, layout, strict=True)]
             kernels[function.value] = Kernel(function.value, name, tuple(arguments))
     ranges = [(storage.DEVICE_BASE, storage.DEVICE_BASE + storage.RESERVATION_BYTES)]
     granule = 1 << 30
@@ -569,8 +635,11 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
             merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
         else:
             merged.append((start, end))
+    peer_addresses = set() if storage.peer_storage is None else storage.peer_storage.owned.keys()
+    reachability = Reachability(allocations, numeric=numeric, inactive=inactive,
+                               roots=[a.name for a in allocations if a.address in peer_addresses])
     package = RuntimePackage(allocations=allocations, modules=modules, kernels=kernels.values(), owners=(prepared, storage),
-                             reservations=[{"address": start, "nbytes": end - start} for start, end in merged])
+        reservations=[{"address": start, "nbytes": end - start} for start, end in merged], reachability=reachability)
     execution = prepared.manifest()
     execution.pop("context")
     execution.pop("device")
@@ -578,5 +647,9 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         buffer["reference"] = package._reference(buffer.pop("address"), buffer["nbytes"])
     for graph in execution["graphs"]:
         graph.pop("handle")
+        if graph["kind"] == "speculative":
+            graph["draft_tokens"] = graph["token_capacity"] - 1
+            graph["verify_tokens"] = graph["token_capacity"]
+            graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"
     package.write(path, prepared.graphs, execution=execution, server={**prepared.server_config, **options}, progress=progress)
     return package

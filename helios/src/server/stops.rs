@@ -276,6 +276,7 @@ pub(super) mod string_tests {
             let path = root.join(name);
             std::fs::write(&path, bytes).unwrap();
             Asset {
+                range: None,
                 path,
                 sha256: format!("{:x}", Sha256::digest(bytes)),
             }

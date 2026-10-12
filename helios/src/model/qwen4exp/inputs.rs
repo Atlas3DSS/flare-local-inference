@@ -50,6 +50,20 @@ impl Inputs {
         } = *frame;
         let capacity = config.limits.request_capacity();
         self.staging.clear();
+        for lane in &step.lanes {
+            let request = scheduler.request(lane.request)?;
+            self.staging.i64(
+                "request_state_rows",
+                lane.request.slot as usize * 8 * 8,
+                (0..8).map(|column| {
+                    if column < scheduler.execution_width() {
+                        request.state_slot.0 as i64 + column as i64
+                    } else {
+                        0
+                    }
+                }),
+            );
+        }
         if !matches!(step.kind, GraphKind::Init | GraphKind::Restore) {
             self.staging
                 .i32("row_slot_ids", 0, slots.into_iter().take(capacity));
@@ -220,6 +234,15 @@ impl Inputs {
             step.kind,
             GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot
         ) {
+            self.staging.i64(
+                "state_request_slots",
+                0,
+                step.lanes
+                    .iter()
+                    .map(|lane| lane.request.slot as i64)
+                    .chain(std::iter::repeat(-1))
+                    .take(capacity),
+            );
             let mut source = [0; REQUEST_LANES];
             let mut destination = [0; REQUEST_LANES];
             let mut operation = [0; REQUEST_LANES];
@@ -230,17 +253,17 @@ impl Inputs {
                 if step.kind == GraphKind::Snapshot {
                     source[row] = request.state_slot.0 as i64;
                     destination[row] =
-                        (capacity + 1) as i64 + request.snapshot_destination().0 as i64;
+                        scheduler.snapshot_slot(request.snapshot_destination()).0 as i64;
                     expected[row] = request.snapshot_consumed() as i64;
                 } else {
                     source[row] = if let Some(snapshot) = request.prefix_snapshot() {
-                        (capacity + 1) as i64 + snapshot.0 as i64
+                        scheduler.snapshot_slot(snapshot).0 as i64
                     } else {
                         request.state_slot.0 as i64
                     };
                     destination[row] = request.state_slot.0 as i64;
                     operation[row] = i32::from(step.kind == GraphKind::Init);
-                    qsa[row] = request.state_slot.0 as i64;
+                    qsa[row] = lane.request.slot as i64 + 1;
                     expected[row] = request.consumed_tokens as i64;
                 }
             }

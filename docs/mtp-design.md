@@ -7,8 +7,8 @@ weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
 Each recipe's `PreparationConfig(mtp=True)` prepares it, and `ignition run`
 prepares it for both recipes unless `--no-mtp` is given. The advanced flags
-select the draft-token count, fixed in place of adaptive verification, the
-graph budget, and the proposal source. Draft continuations from request history are
+select the draft-token maximum, the default verification policy, and the
+proposal source. Draft continuations from request history are
 disabled by default and enabled on the Qwen recipe with `--history-drafts`,
 which sets `PreparationConfig(history_drafts=True)`.
 
@@ -96,8 +96,8 @@ with E4M3 block scales and BF16 activations; target experts use CSF storage.
 The draft decoder has no mHC streams, KDA recurrence, or rotary positions.
 
 GLM prepares TP2 or TP4 graphs and defaults to a maximum of five draft tokens.
-With concurrency four and the eight-graph budget, batch one captures draft
-counts `{5,4,3,2,1,0}`, batch two captures `{5}`, and batch four captures `{0}`.
+With concurrency four, batches one, two, and four each capture draft
+counts `{5,4,3,2,1,0}`.
 The shared native controller selects among the available counts. All ranks
 sample identical gathered distributions with identical device RNG state.
 History-copy proposals are not part of the GLM recipe.
@@ -214,21 +214,19 @@ rerunning the model.
 The chain catalog has request capacities `B ∈ {1,2,4}` and integer verification
 widths `1 <= W <= K_max + 1`, where `K=W-1`.
 `PreparationConfig.speculative_widths` lists the prepared widths; its largest entry is
-`K_max + 1`, and its default gives three drafts for Qwen or five for GLM.
-`PreparationConfig.speculative_graph_budget` limits the total number of speculative captures, including
-zero-draft fallbacks, and defaults to eight. Preparation visits batch capacities
-one, two, and four in order. It reserves one fallback capture for each remaining
-batch, then selects the largest requested draft counts first. If a batch gets
-only part of its requested width catalog, subsequent batches use zero drafts.
-The default three-draft maximum and eight-graph budget capture draft counts
-`{3,2,1,0}` at batch one, `{3,2,1}` at batch two, and `{0}` at batch four.
+`K_max + 1`, and its default gives five drafts for Qwen and GLM.
+Capture includes the Cartesian product of prepared batch capacities and widths.
+With concurrency four and five drafts, this is eighteen speculative graphs.
+Flare reduces concurrency and draft depth by selecting the required subset
+before loading GPU resources; adaptive or fixed verification is a serving policy.
 The zero-draft path continues absorbing target feedback into the MTP cache so
 requests can resume drafting when concurrency falls. The native adaptive
 controller chooses only among that batch's captured counts.
 `speculative_widths` may be any increasing set of widths that includes one, so
 the prepared draft counts need not be contiguous.
-`speculative_fixed_width=4` captures exactly three speculative graphs: one for
-each batch capacity, each evaluating three drafts plus the pending input. A
+`speculative_fixed_width=4` selects three speculative graphs at runtime: one for
+each batch capacity, each evaluating three drafts plus the pending input. Capture
+retains every configured width regardless of the default verification policy. A
 fixed width must belong to `speculative_widths`. Fixed drafting has no aggregate row cap;
 batch four with three drafts evaluates sixteen target rows. Context tails,
 host stop boundaries, and grammar constraints limit each request's valid prefix

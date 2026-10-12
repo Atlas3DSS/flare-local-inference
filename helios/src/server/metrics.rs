@@ -399,7 +399,7 @@ impl Metrics {
             ),
             (
                 "free_request_slots",
-                "Physical slots available for admission.",
+                "Request slots available for admission.",
                 &self.free_slots,
             ),
             (
@@ -414,7 +414,7 @@ impl Metrics {
             ),
             (
                 "free_snapshots",
-                "Immutable state slots reusable after completed GPU fences.",
+                "Prefix-cache rows reusable after completed GPU fences.",
                 &self.free_snapshots,
             ),
             (

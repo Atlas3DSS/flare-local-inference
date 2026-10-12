@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from ignition.components.draft_sampling import PreparedDraftDistribution
+from ignition.components.state import gather_rows
 
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
@@ -21,7 +22,7 @@ class SpeculativePreparation:
 
     def __init__(self, *, weights, mtp_weights, pool, requests, inputs, scratch,
                  workspaces, rotary, cache, table, session, completion, frame, sequence,
-                 extra_base, context, prefill_capacity, max_cache_pages, proposal_source="mtp",
+                 context, prefill_capacity, max_cache_pages, proposal_source="mtp",
                  runtime=None, vocabulary_runtime=None, coordinator=None):
         if proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
@@ -31,7 +32,7 @@ class SpeculativePreparation:
         self.inputs, self.scratch, self.workspaces, self.rotary = inputs, scratch, workspaces, rotary
         self.cache, self.table, self.session = cache, table, session
         self.completion, self.frame, self.sequence = completion, frame, sequence
-        self.extra_base, self.context, self.max_cache_pages = extra_base, context, max_cache_pages
+        self.context, self.max_cache_pages = context, max_cache_pages
         device = pool.backing.device
         self.previous_accepted = torch.ones(requests.capacity, dtype=torch.int32, device=device)
         self.candidates = torch.zeros((requests.capacity, 8), dtype=torch.int64, device=device)
@@ -110,8 +111,8 @@ class PreparedPrefillAbsorption:
         slots = o.inputs.row_slot_ids[:1]
         safe = slots.long().clamp(0, o.requests.capacity - 1)
         self.before.copy_(o.requests.consumed_tokens[safe])
-        self.previous.copy_(o.pool.region("target_residual")[safe + 1])
-        self.previous_rope.copy_(o.pool.region("target_residual_position")[safe + 1])
+        gather_rows(o.pool.region("target_residual"), o.inputs.request_state_rows[safe, 0], self.previous)
+        gather_rows(o.pool.region("target_residual_position"), o.inputs.request_state_rows[safe, 0], self.previous_rope)
         self.decoder()
         active = state.token_state.active.bool()
         length = (state.gdn.query_start_loc[1:] - state.gdn.query_start_loc[:-1]).long()
@@ -137,7 +138,7 @@ class PreparedSpeculativeRound:
         device = owner.pool.backing.device
         self.token_limits = owner.inputs.query_lengths[:batch]
         self.state = PreparedVerificationState(owner.inputs, owner.requests, owner.pool,
-            owner.candidates, owner.previous_accepted, width=width, rows=batch, extra_base=owner.extra_base, token_limits=self.token_limits)
+            owner.candidates, owner.previous_accepted, width=width, rows=batch, token_limits=self.token_limits)
         scratch = owner.scratch.rows(batch * width, batch * width)
         self.target_residual = torch.zeros((batch * width, 10240), dtype=torch.bfloat16, device=device)
         self.decoder = PreparedDecoder(owner.weights, scratch, self.state, owner.cache, owner.rotary,
@@ -156,6 +157,7 @@ class PreparedSpeculativeRound:
         self.pending = torch.zeros(batch, dtype=torch.int64, device=device)
         self.previous = torch.zeros((batch, 10240), dtype=torch.bfloat16, device=device)
         self.previous_rope = torch.zeros((batch, 3), dtype=torch.int64, device=device)
+        self.rope_delta = torch.zeros(batch, dtype=torch.int64, device=device)
         self.active = torch.zeros(batch, dtype=torch.bool, device=device)
         self.drafts = torch.zeros((batch, width - 1), dtype=torch.int64, device=device)
         self.draft_probabilities = torch.zeros((batch, width - 1, owner.requests.vocab_size), dtype=torch.float32, device=device)
@@ -222,8 +224,8 @@ class PreparedSpeculativeRound:
             & (o.requests.generation[safe] == o.inputs.row_generations[:b]) & (o.requests.status[safe] == 1))
         self.before.copy_(o.requests.consumed_tokens[safe])
         self.pending.copy_(o.requests.pending_token[safe])
-        self.previous.copy_(o.pool.region("target_residual")[safe + 1])
-        self.previous_rope.copy_(o.pool.region("target_residual_position")[safe + 1])
+        gather_rows(o.pool.region("target_residual"), o.inputs.request_state_rows[safe, 0], self.previous)
+        gather_rows(o.pool.region("target_residual_position"), o.inputs.request_state_rows[safe, 0], self.previous_rope)
         for name, backup in self.raw_backup.items():
             backup.copy_(getattr(o.cache[48], name))
         if not self.copy_only:
@@ -233,7 +235,7 @@ class PreparedSpeculativeRound:
         self.base_offset.copy_(torch.where(o.draft_rng_generation[safe] == o.requests.generation[safe],
                                           o.draft_rng_offset[safe], 0))
         self.seed.copy_(o.requests.seed.view(torch.int64)[safe] ^ DRAFT_RNG_DOMAIN)
-        delta = o.pool.rope_delta[safe + 1, 0]
+        delta = gather_rows(o.pool.rope_delta, o.inputs.request_state_rows[safe, 0], self.rope_delta)
         for index, proposal in enumerate(proposals):
             hidden = self.previous if index == 0 else self.draft.scratch.residual[self.draft_metadata.output_indices]
             tokens = self.pending if index == 0 else self.drafts[:, index - 1]

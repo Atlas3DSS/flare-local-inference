@@ -129,7 +129,8 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     pool = SimpleNamespace(backing=torch.zeros(1, dtype=torch.uint8), region=regions.__getitem__,
                            rope_delta=torch.zeros((5, 1), dtype=torch.int64))
     inputs = SimpleNamespace(row_slot_ids=slots, row_generations=epochs, live_rows=live,
-        query_lengths=torch.full((batch,), width, dtype=torch.int32))
+        query_lengths=torch.full((batch,), width, dtype=torch.int32),
+        request_state_rows=torch.arange(1, 5)[:, None].expand(4, 8).clone())
     scratch = SimpleNamespace(logits=torch.zeros((batch * width, vocab)),
                               sample_hidden=torch.zeros((batch * width, 2560), dtype=torch.bfloat16))
     observed = []
@@ -186,7 +187,7 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     owner = module.SpeculativePreparation(weights=None, mtp_weights=None, pool=pool, requests=state,
         inputs=inputs, scratch=SimpleNamespace(rows=lambda *_: scratch), workspaces=None,
         rotary=None, cache={}, table=None, session=None, completion=records,
-        frame=torch.tensor([0], dtype=torch.int32), sequence=torch.tensor([19]), extra_base=9,
+        frame=torch.tensor([0], dtype=torch.int32), sequence=torch.tensor([19]),
         context=64, prefill_capacity=64, max_cache_pages=1, proposal_source="copy")
     assert owner.prefill(scratch, "test") is scratch and owner.resume(scratch) is scratch
     owner.rebind_pages_for_preparation({})

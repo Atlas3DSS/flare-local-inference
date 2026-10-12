@@ -2,7 +2,6 @@
 
 use super::format::*;
 use crate::Result;
-use prost::Message;
 
 pub(super) mod wire {
     include!(concat!(env!("OUT_DIR"), "/flare.runtime.rs"));
@@ -45,7 +44,7 @@ fn blob(value: wire::Blob) -> Result<Blob> {
         relocations: convert(value.relocations, relocation)?,
     })
 }
-fn node(value: wire::Node) -> Result<Node> {
+pub(super) fn node(value: wire::Node) -> Result<Node> {
     use wire::node::Operation;
     Ok(match required(value.operation, "node operation")? {
         Operation::Kernel(value) => Node::Kernel {
@@ -78,15 +77,10 @@ fn node(value: wire::Node) -> Result<Node> {
     })
 }
 
-pub(super) fn decode(bytes: &[u8]) -> Result<Package> {
-    let value = wire::Package::decode(bytes)
-        .map_err(|e| invalid(format!("invalid protobuf runtime package: {e}")))?;
-    if value.version != 3 {
-        return Err(invalid("unsupported protobuf runtime package version"));
-    }
+pub(super) fn decode(value: wire::BundleIndex) -> Result<Package> {
     let context = required(value.context, "CUDA context")?;
     let package = Package {
-        version: value.version,
+        resources: value.resources,
         architecture: array(value.architecture, "architecture")?,
         context: Context {
             flags: context.flags,
@@ -102,6 +96,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Package> {
         allocations: convert(value.allocations, |v| {
             Ok(Allocation {
                 name: v.name,
+                sizing: v.sizing,
                 nbytes: size(v.nbytes)?,
                 alignment: size(v.alignment)?,
                 file: v.file,
@@ -129,26 +124,26 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Package> {
                 })?,
             })
         })?,
-        functions: convert(value.functions, |v| {
-            Ok(Function {
-                module: v.module,
-                symbol: v.symbol,
-                parameter_sizes: convert(v.parameter_sizes, size)?,
-                attributes: v.attributes.into_iter().map(|v| [v.id, v.value]).collect(),
-            })
-        })?,
+        functions: convert(
+            value.functions.into_iter().enumerate().collect(),
+            |(id, v)| {
+                Ok(Function {
+                    id,
+                    module: v.module,
+                    symbol: v.symbol,
+                    parameter_sizes: convert(v.parameter_sizes, size)?,
+                    attributes: v.attributes.into_iter().map(|v| [v.id, v.value]).collect(),
+                })
+            },
+        )?,
         graphs: convert(value.graphs, |v| {
             Ok(Graph {
                 name: v.name,
                 flags: v.flags,
-                nodes: convert(v.nodes, node)?,
-                edges: convert(v.edges, |v| {
-                    Ok(Edge {
-                        source: size(v.source)?,
-                        destination: size(v.destination)?,
-                        data: array(v.data, "edge data")?,
-                    })
-                })?,
+                resource: v.resource,
+                node_count: size(v.node_count)?,
+                edge_count: size(v.edge_count)?,
+                functions: convert(v.functions, size)?,
             })
         })?,
         execution: value.execution,
@@ -156,48 +151,40 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Package> {
     Ok(package)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(super) fn edge(value: wire::Edge) -> Result<Edge> {
+    Ok(Edge {
+        source: size(value.source)?,
+        destination: size(value.destination)?,
+        data: array(value.data, "edge data")?,
+    })
+}
 
-    fn message() -> wire::Package {
-        wire::Package {
-            version: 3,
-            architecture: vec![12, 0],
-            context: Some(wire::Context::default()),
-            allocations: vec![wire::Allocation {
-                name: "scratch".into(),
-                nbytes: 256,
-                alignment: 256,
-                ..Default::default()
-            }],
-            graphs: vec![wire::Graph {
-                name: "empty".into(),
-                nodes: vec![wire::Node {
-                    operation: Some(wire::node::Operation::Empty(wire::Empty {})),
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
+pub(super) fn json(value: prost_types::Value) -> Result<serde_json::Value> {
+    use prost_types::value::Kind;
+    Ok(match required(value.kind, "configuration value")? {
+        Kind::NullValue(_) => serde_json::Value::Null,
+        Kind::BoolValue(v) => v.into(),
+        Kind::StringValue(v) => v.into(),
+        Kind::NumberValue(v) => {
+            if !v.is_finite() {
+                return Err(invalid("nonfinite configuration number"));
+            }
+            if v >= 0.0 && v.fract() == 0.0 && v < u64::MAX as f64 {
+                (v as u64).into()
+            } else if v.fract() == 0.0 && v >= i64::MIN as f64 && v < 0.0 {
+                (v as i64).into()
+            } else {
+                v.into()
+            }
         }
-    }
-
-    #[test]
-    fn protobuf_decodes_zero_storage_and_validates_required_fields() {
-        let value = message();
-        decode(&value.encode_to_vec()).unwrap().validate().unwrap();
-        let mut invalid_message = value.clone();
-        invalid_message.version = 4;
-        assert!(decode(&invalid_message.encode_to_vec()).is_err());
-        invalid_message = value.clone();
-        invalid_message.allocations[0].memory = 5;
-        assert!(decode(&invalid_message.encode_to_vec()).is_err());
-        invalid_message = value.clone();
-        invalid_message.graphs[0].nodes[0].operation = None;
-        assert!(decode(&invalid_message.encode_to_vec()).is_err());
-        invalid_message = value;
-        invalid_message.context = None;
-        assert!(decode(&invalid_message.encode_to_vec()).is_err());
-        assert!(decode(&[0xff]).is_err());
-    }
+        Kind::ListValue(v) => {
+            serde_json::Value::Array(v.values.into_iter().map(json).collect::<Result<_>>()?)
+        }
+        Kind::StructValue(v) => serde_json::Value::Object(
+            v.fields
+                .into_iter()
+                .map(|(k, v)| Ok((k, json(v)?)))
+                .collect::<Result<_>>()?,
+        ),
+    })
 }

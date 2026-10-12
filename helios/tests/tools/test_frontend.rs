@@ -19,6 +19,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| error.to_string())?;
     let asset = |name: &str| -> Result<Asset, String> {
         Ok(Asset {
+            range: None,
             path: snapshot.join(name),
             sha256: fixture["assets"][name]
                 .as_str()

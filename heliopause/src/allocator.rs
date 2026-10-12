@@ -79,7 +79,7 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
             driver,
             device,
             granularity,
-            free: vec![(BASE + u64::from(rank) * EXTENT as u64, EXTENT)],
+            free: vec![(BASE + u64::from(rank) * EXTENT as u64, EXTENT / 2)],
             mappings: BTreeMap::new(),
         });
         Ok(())

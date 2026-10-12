@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path};
 
 use crate::{Error, ExecutionError, Result};
 
@@ -9,7 +8,7 @@ pub(super) fn invalid(message: impl Into<String>) -> Error {
 
 #[derive(Debug)]
 pub(super) struct Package {
-    pub version: u32,
+    pub resources: HashMap<String, super::protobuf::wire::Span>,
     pub architecture: [i32; 2],
     pub allocations: Vec<Allocation>,
     pub modules: Vec<Module>,
@@ -50,9 +49,16 @@ pub(super) struct Allocation {
     pub relocations: Vec<Relocation>,
     pub address: Option<u64>,
     pub memory: Memory,
+    pub sizing: Option<super::protobuf::wire::Sizing>,
 }
 
 impl Allocation {
+    pub fn extent(&self) -> usize {
+        self.sizing.as_ref().map_or(self.nbytes, |s| {
+            (s.unit_bytes as usize * s.maximum as usize).div_ceil(self.alignment) * self.alignment
+        })
+    }
+
     pub fn spans(&self) -> impl Iterator<Item = [usize; 2]> + '_ {
         self.data_spans.iter().copied()
     }
@@ -79,6 +85,7 @@ pub(super) struct Global {
 
 #[derive(Debug)]
 pub(super) struct Function {
+    pub id: usize,
     pub module: String,
     pub symbol: String,
     pub parameter_sizes: Vec<usize>,
@@ -162,23 +169,67 @@ pub(super) struct Edge {
 pub(super) struct Graph {
     pub name: String,
     pub flags: u64,
-    pub nodes: Vec<Node>,
-    pub edges: Vec<Edge>,
+    pub resource: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub functions: Vec<usize>,
 }
 
-fn filename(value: &str) -> Result<()> {
-    let mut components = Path::new(value).components();
-    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
-        return Err(invalid(
-            "package data files must be direct children of the package directory",
-        ));
+pub(super) struct Dependencies {
+    seen: HashSet<(usize, usize)>,
+    indegree: Vec<usize>,
+    successors: Vec<Vec<usize>>,
+}
+impl Dependencies {
+    pub fn new(nodes: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            indegree: vec![0; nodes],
+            successors: vec![vec![]; nodes],
+        }
     }
-    Ok(())
+    pub fn add(&mut self, edge: &Edge) -> Result<()> {
+        if edge.source >= self.indegree.len()
+            || edge.destination >= self.indegree.len()
+            || edge.data[0] > 2
+            || edge.data[1] != 0
+            || edge.data[2] > 1
+            || edge.data[3..].iter().any(|v| *v != 0)
+            || !self.seen.insert((edge.source, edge.destination))
+        {
+            return Err(invalid("invalid graph dependency"));
+        }
+        self.indegree[edge.destination] += 1;
+        self.successors[edge.source].push(edge.destination);
+        Ok(())
+    }
+    pub fn finish(mut self) -> Result<()> {
+        let mut ready: Vec<_> = self
+            .indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| (*n == 0).then_some(i))
+            .collect();
+        let mut visited = 0;
+        while let Some(node) = ready.pop() {
+            visited += 1;
+            for &next in &self.successors[node] {
+                self.indegree[next] -= 1;
+                if self.indegree[next] == 0 {
+                    ready.push(next);
+                }
+            }
+        }
+        if visited != self.indegree.len() {
+            return Err(invalid("graph dependency cycle"));
+        }
+        Ok(())
+    }
 }
 
 impl Package {
     pub fn validate(&self) -> Result<()> {
-        if self.version != 3 || self.allocations.is_empty() || self.graphs.is_empty() {
+        if self.allocations.is_empty() || self.graphs.is_empty() {
             return Err(invalid("unsupported or empty runtime package"));
         }
         if self
@@ -207,6 +258,27 @@ impl Package {
             return Err(invalid("device address reservations overlap"));
         }
         for a in &self.allocations {
+            if let Some(s) = &a.sizing {
+                if a.nbytes != 0
+                    || a.address.is_none()
+                    || !matches!(a.memory, Memory::Device)
+                    || a.file.is_some()
+                    || !a.data_spans.is_empty()
+                    || !a.relocations.is_empty()
+                    || ![0, 1].contains(&s.capacity)
+                    || s.unit_bytes == 0
+                    || s.maximum == 0
+                    || s.maximum > i32::MAX as u64
+                    || !a.alignment.is_power_of_two()
+                    || s.unit_bytes
+                        .checked_mul(s.maximum)
+                        .and_then(|n| n.checked_add(a.alignment as u64 - 1))
+                        .is_none_or(|n| n > usize::MAX as u64)
+                {
+                    return Err(invalid("invalid runtime-sized allocation"));
+                }
+            }
+            let extent = a.extent();
             let mut end = 0;
             for [offset, size] in a.spans() {
                 if size == 0
@@ -230,16 +302,16 @@ impl Package {
                 ));
             }
             if a.name.is_empty()
-                || a.nbytes == 0
+                || extent == 0
                 || !a.alignment.is_power_of_two()
                 || a.nbytes.checked_add(a.alignment - 1).is_none()
-                || allocations.insert(a.name.as_str(), a.nbytes).is_some()
+                || allocations.insert(a.name.as_str(), extent).is_some()
             {
                 return Err(invalid("invalid or duplicate runtime allocation"));
             }
             if let Some(address) = a.address {
                 let end = address
-                    .checked_add(a.nbytes as u64)
+                    .checked_add(extent as u64)
                     .ok_or_else(|| invalid("allocation address overflow"))?;
                 if address == 0 || address % a.alignment as u64 != 0 {
                     return Err(invalid("invalid recorded allocation address"));
@@ -260,12 +332,10 @@ impl Package {
                     "mapped host allocation requires a recorded address",
                 ));
             }
-            if let Some(file) = &a.file {
-                filename(file)?;
-            } else if a
-                .relocations
-                .iter()
-                .any(|r| matches!(r.kind, RelocationKind::TensorMap))
+            if a.file.is_none()
+                && a.relocations
+                    .iter()
+                    .any(|r| matches!(r.kind, RelocationKind::TensorMap))
             {
                 return Err(invalid(
                     "tensor-map storage requires an initialized descriptor",
@@ -276,43 +346,16 @@ impl Package {
         if addresses.windows(2).any(|a| a[0].1 > a[1].0) {
             return Err(invalid("recorded allocation addresses overlap"));
         }
-        let reference = |r: &Reference, size: usize| -> Result<()> {
-            if !allocations
-                .get(r.allocation.as_str())
-                .is_some_and(|n| r.offset.checked_add(size).is_some_and(|end| end <= *n))
-            {
-                return Err(invalid(format!(
-                    "reference exceeds allocation {:?}",
-                    r.allocation
-                )));
-            }
-            Ok(())
-        };
-        let relocations = |size: usize, values: &[Relocation]| -> Result<()> {
-            let mut fields: Vec<_> = values.iter().collect();
-            fields.sort_by_key(|r| r.offset);
-            let mut end = 0;
-            for r in fields {
-                if r.offset < end || r.offset.checked_add(r.width()).is_none_or(|v| v > size) {
-                    return Err(invalid("invalid or overlapping relocation fields"));
-                }
-                reference(&r.target, 1)?;
-                end = r.offset + r.width();
-            }
-            Ok(())
-        };
         for a in &self.allocations {
-            relocations(a.nbytes, &a.relocations)?;
+            self.validate_relocations(a.nbytes, &a.relocations)?;
         }
         let mut modules = HashSet::new();
         for module in &self.modules {
-            filename(&module.file)?;
             if module.name.is_empty() || !modules.insert(&module.name) {
                 return Err(invalid("invalid or duplicate module name"));
             }
             let mut globals = HashSet::new();
             for global in &module.globals {
-                filename(&global.file)?;
                 if global.symbol.is_empty()
                     || global.symbol.contains('\0')
                     || global.nbytes == 0
@@ -320,7 +363,7 @@ impl Package {
                 {
                     return Err(invalid("invalid or duplicate module global"));
                 }
-                relocations(global.nbytes, &global.relocations)?;
+                self.validate_relocations(global.nbytes, &global.relocations)?;
             }
         }
         for function in &self.functions {
@@ -340,125 +383,129 @@ impl Package {
         for graph in &self.graphs {
             if graph.name.is_empty()
                 || !names.insert(&graph.name)
-                || graph.nodes.is_empty()
+                || graph.node_count == 0
                 || graph.flags & !9 != 0
             {
                 return Err(invalid("invalid or duplicate graph name"));
             }
-            for node in &graph.nodes {
-                match node {
-                    Node::Kernel {
-                        function,
-                        grid,
-                        block,
-                        arguments,
-                        attributes,
-                        ..
-                    } => {
-                        let f = self
-                            .functions
-                            .get(*function)
-                            .ok_or_else(|| invalid("unknown kernel"))?;
-                        if grid.contains(&0)
-                            || block.contains(&0)
-                            || arguments
-                                .iter()
-                                .map(|a| a.data.len())
-                                .ne(f.parameter_sizes.iter().copied())
-                        {
-                            return Err(invalid(
-                                "kernel argument layout or launch dimensions are invalid",
-                            ));
-                        }
-                        for a in arguments {
-                            relocations(a.data.len(), &a.relocations)?;
-                        }
-                        let mut ids = HashSet::new();
-                        for a in attributes {
-                            if ![1, 2, 4, 5, 8, 9, 10, 11, 14].contains(&a.id)
-                                || a.value.data.len() != 64
-                                || !ids.insert(a.id)
-                            {
-                                return Err(invalid(
-                                    "unsupported or duplicate kernel-node attribute",
-                                ));
-                            }
-                            relocations(64, &a.value.relocations)?;
-                        }
-                    }
-                    Node::Memset {
-                        destination,
-                        pitch,
-                        element_size,
-                        width,
-                        height,
-                        ..
-                    } => {
-                        let row = width
-                            .checked_mul(*element_size as usize)
-                            .ok_or_else(|| invalid("memset extent overflow"))?;
-                        if ![1, 2, 4].contains(element_size)
-                            || row == 0
-                            || *height == 0
-                            || (*height > 1 && *pitch < row)
-                        {
-                            return Err(invalid("invalid memset dimensions"));
-                        }
-                        let extent = (height - 1)
-                            .checked_mul(*pitch)
-                            .and_then(|v| v.checked_add(row))
-                            .ok_or_else(|| invalid("memset extent overflow"))?;
-                        reference(destination, extent)?;
-                    }
-                    Node::Copy {
-                        source,
-                        destination,
-                        nbytes,
-                    } => {
-                        if *nbytes == 0 {
-                            return Err(invalid("empty graph copy"));
-                        }
-                        reference(source, *nbytes)?;
-                        reference(destination, *nbytes)?;
-                    }
-                    Node::Empty => {}
-                }
+            if graph.resource.is_empty()
+                || graph
+                    .functions
+                    .iter()
+                    .any(|id| !self.functions.iter().any(|f| f.id == *id))
+            {
+                return Err(invalid("invalid graph resource or function dependency"));
             }
-            let mut seen = HashSet::new();
-            let mut indegree = vec![0usize; graph.nodes.len()];
-            let mut successors = vec![vec![]; graph.nodes.len()];
-            for edge in &graph.edges {
-                if edge.source >= graph.nodes.len()
-                    || edge.destination >= graph.nodes.len()
-                    || edge.data[0] > 2
-                    || edge.data[1] != 0
-                    || edge.data[2] > 1
-                    || edge.data[3..].iter().any(|v| *v != 0)
-                    || !seen.insert((edge.source, edge.destination))
+        }
+        Ok(())
+    }
+    pub fn validate_reference(&self, r: &Reference, size: usize) -> Result<()> {
+        if !self
+            .allocations
+            .iter()
+            .find(|a| a.name == r.allocation)
+            .is_some_and(|a| {
+                r.offset
+                    .checked_add(size)
+                    .is_some_and(|end| end <= a.extent())
+            })
+        {
+            return Err(invalid(format!(
+                "reference exceeds allocation {:?}",
+                r.allocation
+            )));
+        }
+        Ok(())
+    }
+    pub fn validate_relocations(&self, size: usize, values: &[Relocation]) -> Result<()> {
+        let mut fields: Vec<_> = values.iter().collect();
+        fields.sort_by_key(|r| r.offset);
+        let mut end = 0;
+        for r in fields {
+            if r.offset < end || r.offset.checked_add(r.width()).is_none_or(|v| v > size) {
+                return Err(invalid("invalid or overlapping relocation fields"));
+            }
+            self.validate_reference(&r.target, 1)?;
+            end = r.offset + r.width();
+        }
+        Ok(())
+    }
+    pub fn validate_node(&self, node: &Node) -> Result<()> {
+        match node {
+            Node::Kernel {
+                function,
+                grid,
+                block,
+                arguments,
+                attributes,
+                ..
+            } => {
+                let f = self
+                    .functions
+                    .iter()
+                    .find(|f| f.id == *function)
+                    .ok_or_else(|| invalid("unknown kernel"))?;
+                if grid.contains(&0)
+                    || block.contains(&0)
+                    || arguments
+                        .iter()
+                        .map(|a| a.data.len())
+                        .ne(f.parameter_sizes.iter().copied())
                 {
-                    return Err(invalid("invalid graph dependency"));
+                    return Err(invalid(
+                        "kernel argument layout or launch dimensions are invalid",
+                    ));
                 }
-                indegree[edge.destination] += 1;
-                successors[edge.source].push(edge.destination);
-            }
-            let mut ready: Vec<_> = indegree
-                .iter()
-                .enumerate()
-                .filter_map(|(i, n)| (*n == 0).then_some(i))
-                .collect();
-            let mut visited = 0;
-            while let Some(node) = ready.pop() {
-                visited += 1;
-                for &next in &successors[node] {
-                    indegree[next] -= 1;
-                    if indegree[next] == 0 {
-                        ready.push(next);
+                for a in arguments {
+                    self.validate_relocations(a.data.len(), &a.relocations)?;
+                }
+                let mut ids = HashSet::new();
+                for a in attributes {
+                    if ![1, 2, 4, 5, 8, 9, 10, 11, 14].contains(&a.id)
+                        || a.value.data.len() != 64
+                        || !ids.insert(a.id)
+                    {
+                        return Err(invalid("unsupported or duplicate kernel-node attribute"));
                     }
+                    self.validate_relocations(64, &a.value.relocations)?;
                 }
             }
-            if visited != graph.nodes.len() {
-                return Err(invalid("graph dependency cycle"));
+            Node::Memset {
+                destination,
+                pitch,
+                element_size,
+                width,
+                height,
+                ..
+            } => {
+                let row = width
+                    .checked_mul(*element_size as usize)
+                    .ok_or_else(|| invalid("memset extent overflow"))?;
+                if ![1, 2, 4].contains(element_size)
+                    || row == 0
+                    || *height == 0
+                    || (*height > 1 && *pitch < row)
+                {
+                    return Err(invalid("invalid memset dimensions"));
+                }
+                let extent = (height - 1)
+                    .checked_mul(*pitch)
+                    .and_then(|v| v.checked_add(row))
+                    .ok_or_else(|| invalid("memset extent overflow"))?;
+                self.validate_reference(destination, extent)?;
             }
+            Node::Copy {
+                source,
+                destination,
+                nbytes,
+            } => {
+                if *nbytes == 0 {
+                    return Err(invalid("empty graph copy"));
+                }
+                self.validate_reference(source, *nbytes)?;
+                self.validate_reference(destination, *nbytes)?;
+            }
+            Node::Empty => {}
         }
         Ok(())
     }
@@ -470,7 +517,7 @@ mod tests {
 
     fn package() -> Package {
         Package {
-            version: 3,
+            resources: HashMap::new(),
             architecture: [12, 0],
             allocations: vec![Allocation {
                 name: "state".into(),
@@ -481,6 +528,7 @@ mod tests {
                 relocations: vec![],
                 address: None,
                 memory: Memory::Device,
+                sizing: None,
             }],
             modules: vec![],
             functions: vec![],
@@ -490,10 +538,43 @@ mod tests {
             graphs: vec![Graph {
                 name: "copy".into(),
                 flags: 0,
-                nodes: vec![Node::Empty, Node::Empty],
-                edges: vec![],
+                resource: "copy".into(),
+                node_count: 2,
+                edge_count: 0,
+                functions: vec![],
             }],
         }
+    }
+
+    #[test]
+    fn streamed_dependencies_reject_cycles_duplicates_and_invalid_nodes() {
+        let edge = |source, destination| Edge {
+            source,
+            destination,
+            data: [0; 8],
+        };
+        let mut dependencies = Dependencies::new(4);
+        for (source, destination) in [(0, 1), (0, 2), (1, 3), (2, 3)] {
+            dependencies.add(&edge(source, destination)).unwrap();
+        }
+        dependencies.finish().unwrap();
+
+        let mut dependencies = Dependencies::new(4);
+        for (source, destination) in [(0, 1), (1, 2), (2, 1)] {
+            dependencies.add(&edge(source, destination)).unwrap();
+        }
+        assert!(
+            dependencies
+                .finish()
+                .unwrap_err()
+                .to_string()
+                .contains("cycle")
+        );
+
+        let mut dependencies = Dependencies::new(2);
+        dependencies.add(&edge(0, 1)).unwrap();
+        assert!(dependencies.add(&edge(0, 1)).is_err());
+        assert!(dependencies.add(&edge(0, 2)).is_err());
     }
 
     #[test]
@@ -507,6 +588,37 @@ mod tests {
         });
         assert!(value.validate().is_ok());
         value.allocations[0].nbytes = 8193;
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_sizing_reserves_its_maximum_without_a_payload() {
+        use super::super::protobuf::wire::Sizing;
+
+        let mut value = package();
+        let a = &mut value.allocations[0];
+        a.address = Some(0x200000000000);
+        a.nbytes = 0;
+        a.file = None;
+        a.data_spans.clear();
+        a.sizing = Some(Sizing {
+            capacity: 0,
+            unit_bytes: 300,
+            maximum: 100,
+        });
+        assert_eq!(a.extent(), 30208);
+        value.reservations.push(Reservation {
+            address: 0x200000000000,
+            nbytes: 30208,
+        });
+        value.validate().unwrap();
+        value.reservations[0].nbytes -= 1;
+        assert!(value.validate().is_err());
+        value.reservations[0].nbytes += 1;
+        value.allocations[0].nbytes = 256;
+        assert!(value.validate().is_err());
+        value.allocations[0].nbytes = 0;
+        value.allocations[0].sizing.as_mut().unwrap().unit_bytes = u64::MAX;
         assert!(value.validate().is_err());
     }
 
@@ -547,31 +659,6 @@ mod tests {
         value.allocations[0].relocations[0].target.offset = 4096;
         assert!(value.validate().is_err());
         value.allocations[0].relocations = vec![relocation(), relocation()];
-        assert!(value.validate().is_err());
-    }
-
-    #[test]
-    fn graph_cycles_are_rejected() {
-        let mut value = package();
-        value.graphs[0].edges = vec![
-            Edge {
-                source: 0,
-                destination: 1,
-                data: [0; 8],
-            },
-            Edge {
-                source: 1,
-                destination: 0,
-                data: [0; 8],
-            },
-        ];
-        assert!(value.validate().is_err());
-    }
-
-    #[test]
-    fn data_paths_cannot_escape_the_package() {
-        let mut value = package();
-        value.allocations[0].file = Some("../weights.bin".into());
         assert!(value.validate().is_err());
     }
 

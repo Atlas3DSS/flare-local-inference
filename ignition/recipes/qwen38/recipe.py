@@ -30,7 +30,6 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     speculation = plan.speculation
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width,
-        "speculative_graph_budget": speculation.graph_budget,
         "speculative_proposal_source": speculation.proposal_source, "history_drafts": speculation.history_drafts}
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
@@ -66,7 +65,7 @@ RECIPE = Recipe(
     context=262144, page_tokens=64, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     # Rounds adapt among zero through five drafts. Verification retains recurrent
     # state for seven draft positions per request whatever the captured counts.
-    speculation=Speculation(draft_tokens=5), speculative_rows=7, history_copy=True,
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, history_copy=True,
     ranks=MappingProxyType({
         1: _costs(122_932_224, 135_168, _GRAPH_BYTES[1], speculating=True),
         2: _costs(61_705_216, 69_632, _GRAPH_BYTES[2], speculating=True),

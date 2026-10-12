@@ -75,7 +75,7 @@ class QSAState:
                    invalid((slots, *geometry.raw_logical_positions_shape)),
                    invalid((slots, *geometry.raw_rope_positions_shape)), invalid((slots,)))
 
-    def resize_pages_for_preparation(self, pages: int, *, metadata_mode=None) -> QSAState:
+    def resize_pages_for_preparation(self, pages: int, *, metadata_mode=None, storage=None, prefix="", backed_pages=None) -> QSAState:
         """Allocate final page pools while retaining fixed raw selector slots.
 
         No graph referencing the returned page pools may have been handed to
@@ -84,15 +84,18 @@ class QSAState:
         """
         if type(pages) is not int or pages <= 0:
             raise ValueError("QSA page capacity must be positive")
-        def pages_like(value):
+        def pages_like(value, name):
             if metadata_mode is not None:
                 from ignition.preparation.deferred import deferred_tensor
 
                 return deferred_tensor((pages, *value.shape[1:]), dtype=value.dtype,
                                        device=value.device, mode=metadata_mode)
+            if storage is not None:
+                return storage.device_allocate(prefix + name, (pages, *value.shape[1:]), value.dtype,
+                    group="KV_PAGES", maximum=pages, units=backed_pages)
             return torch.zeros((pages, *value.shape[1:]), dtype=value.dtype, device=value.device)
-        return type(self)(pages_like(self.main_k_cache), pages_like(self.main_v_cache),
-            pages_like(self.compressed_k_cache), self.raw_k_ring, self.raw_logical_positions,
+        return type(self)(pages_like(self.main_k_cache, "key"), pages_like(self.main_v_cache, "value"),
+            pages_like(self.compressed_k_cache, "selector"), self.raw_k_ring, self.raw_logical_positions,
             self.raw_rope_positions, self.raw_interval_start_positions)
 
 

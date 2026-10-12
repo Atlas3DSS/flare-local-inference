@@ -44,16 +44,18 @@ def test_speculative_policy_requires_a_prepared_width_catalog(widths, fixed):
         PreparationConfig(mtp=True, speculative_widths=widths, speculative_fixed_width=fixed)
 
 
-@pytest.mark.parametrize("widths,budget,expected", [
-    ((1, 2, 3, 4), 4, ((1, 4), (1, 3), (2, 1), (4, 1))),
-    ((1, 2, 3, 4), 8, ((1, 4), (1, 3), (1, 2), (1, 1), (2, 4), (2, 3), (2, 2), (4, 1))),
-    ((1, 2, 3, 4), 12, tuple((b, w) for b in (1, 2, 4) for w in (4, 3, 2, 1))),
-    (tuple(range(1, 9)), 24, tuple((b, w) for b in (1, 2, 4) for w in range(8, 0, -1))),
-])
-def test_speculative_graph_budget_prioritizes_small_batches_and_largest_widths(widths, budget, expected):
-    config = PreparationConfig(mtp=True, speculative_widths=widths, speculative_graph_budget=budget)
-    assert config.speculative_shapes == expected
-    assert len(config.speculative_shapes) <= budget
+@pytest.mark.parametrize("concurrency", [1, 2, 3, 4, 64])
+@pytest.mark.parametrize("maximum", range(1, 9))
+def test_capture_covers_every_runtime_reduction(concurrency, maximum):
+    from ignition.components.capacity import batch_capacities
+
+    widths = tuple(range(1, maximum + 1))
+    config = PreparationConfig(max_active=concurrency, mtp=True, speculative_widths=widths)
+    assert set(config.speculative_shapes) == {
+        (batch, width) for batch in batch_capacities(concurrency) for width in widths}
+    for active in range(1, concurrency + 1):
+        for width in widths:
+            assert all((batch, width) in config.speculative_shapes for batch in batch_capacities(active))
 
 
 def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
@@ -64,23 +66,11 @@ def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
 
 
 @pytest.mark.parametrize("drafts", range(8))
-def test_fixed_drafting_captures_exactly_one_graph_per_batch(drafts):
+def test_fixed_serving_default_does_not_remove_capture_variants(drafts):
     from ignition.preparation.execution import GraphSignature
 
     config = PreparationConfig(mtp=True, speculative_widths=tuple(range(1, 9)),
                                speculative_fixed_width=drafts + 1)
-    assert config.speculative_shapes == ((1, drafts + 1), (2, drafts + 1), (4, drafts + 1))
+    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in range(8, 0, -1))
     for batch, width in config.speculative_shapes:
         GraphSignature("speculative", batch, width)
-
-
-@pytest.mark.parametrize("budget", [0, 2, 57, True, 4.0])
-def test_speculative_graph_budget_requires_a_capture_for_each_batch(budget):
-    with pytest.raises(ValueError, match="graph budget"):
-        PreparationConfig(mtp=True, speculative_graph_budget=budget)
-
-
-def test_fixed_three_with_four_graph_budget_keeps_three_drafts_at_every_batch():
-    config = PreparationConfig(mtp=True, speculative_widths=(1, 2, 3, 4, 5),
-        speculative_fixed_width=4, speculative_graph_budget=4)
-    assert config.speculative_shapes == ((1, 4), (2, 4), (4, 4))

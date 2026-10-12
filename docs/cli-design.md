@@ -47,7 +47,7 @@ then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
 
 ```
 ignition run     [MODEL] [flags]     cache a runtime package and launch Flare
-ignition export  [MODEL] --output DIR [flags]  prepare per-rank native resource bundles
+ignition export  [MODEL] --output FILE [flags]  prepare a native model package
 ```
 
 Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
@@ -61,13 +61,14 @@ Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to a directory
+allocation contents, graph descriptions, and frontend assets to one `.flaretensors` file
 that must not exist, then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
-preparation source contents. Export requires
-one GPU and a recipe with native package storage support; Qwen provides that
-support. API keys are excluded from the package.
+preparation source contents. Qwen and GLM provide native package storage support.
+Tensor-parallel packages contain one resource bundle per selected GPU and load
+in one process with one execution thread per rank. API keys are excluded from
+the package.
 
 Build the public serving executable, which links the Helios library:
 
@@ -77,12 +78,16 @@ flare/target/release/flare run PACKAGE --gpus 0 --bind 127.0.0.1:8000
 ```
 
 The native device ordinal follows CUDA's visible device enumeration. Optional
-`--api-key-file PATH` supplies authentication at launch. Native restore requires
+`--api-key-file PATH` supplies authentication at launch. Loading requires
 the package's GPU architecture and sufficient GPU and mapped host memory.
 Recorded addresses must be available; an address collision fails startup.
-The package records prepared concurrency, cache capacities, and the available
-prefill and speculation graphs. Flare uses the packaged settings; runtime
-reductions of concurrency and execution widths are not exposed yet.
+The package records prepared concurrency, the available prefill and speculation
+graphs, and maximum virtual extents for cache storage. `--max-concurrency N`
+and `--mtp-draft-tokens N` select supported reductions at load time;
+`--mtp-adaptive-verification` and `--no-mtp-adaptive-verification` select the
+verification policy. Omitted flags use package defaults. Only selected graphs
+and required kernels load. Continuation rows and KV pages receive physical
+storage according to those selections and available GPU memory.
 
 ## 3. Parameters
 
@@ -92,7 +97,7 @@ its home: the command line, the configuration file, or both.
 ### 3.1 Command-line flags
 
 `run` accepts the following flags. `export` accepts the same preparation flags,
-requires `--output DIR`, and excludes `--host` and `--port`.
+requires `--output FILE`, and excludes `--host` and `--port`.
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -112,8 +117,7 @@ value; the flag overrides it.
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round, 0 through 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 for Qwen and GLM |
-| `--no-mtp-adaptive-verification` | Verify exactly the draft-token count every round. Only that count's graphs are captured. | Adaptive |
-| `--mtp-graph-budget N` | Most speculative graphs captured across batch sizes, at least one per batch size and at most 56. Small batches and deep drafts are captured first. | 8 |
+| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
@@ -195,7 +199,7 @@ a field in a lil manifest. None is a parameter in Flare.
 | `--snapshot`, `--model-path` | Not a parameter | A directory is a valid `MODEL`. The old name also collided with state snapshots. |
 | `--device`, `--tp` | Not a parameter | `--gpus` lists GPUs; tensor parallelism is their count. |
 | `max_num_batched_tokens` | Not a parameter | The recipe's prefill chunk; `--prefill-chunk-size` is the advanced override. |
-| `--headroom`, `--snapshot-budget`, `conversation_cache` | Not a parameter | Headroom is an engine constant, 1 GiB: the free memory kept after the final KV allocation for the transient working memory of compiled warm-up and graph capture, measured at 0.83 GiB for one Qwen rank. Serving allocates nothing, and the CUDA context is counted in graphs and scratch. The prefix cache is sized from `--max-concurrency`. |
+| `--headroom`, `--snapshot-budget`, `conversation_cache` | Not a parameter | Ignition keeps 1 GiB for compiled warm-up and graph capture. Helios sizes its caches after graph upload and keeps 64 MiB for driver bookkeeping, streams, and events. Both leave the configured `memory.reserve` untouched. The prefix cache is sized from `--max-concurrency`. |
 | `--mtp`, width lists, fixed width, proposal source, copy | Advanced flags | Speculation is distribution-preserving and faster when the recipe prepares it, so every recipe with an MTP module enables it and adapts the draft count from measured rounds. `--no-mtp` and the `--mtp-*` flags override the recipe: to measure a setting, to pin one, or to free the draft model's memory on a host where it does not fit. One draft-token count sets the depth and `--no-mtp-adaptive-verification` pins it; there is no list of counts, no separate fixed count, and no flag that turns speculation on. |
 | `--max-active` | Renamed | `--max-concurrency`. |
 | `--bind`, `--listen` | Renamed | `--host` and `--port`. |
@@ -264,14 +268,15 @@ Native startup and runtime failures exit 1.
 ### 5.2 `ignition export`
 
 Resolve the model and preparation settings as for `run`, then prepare and write
-a runtime package to `--output DIR`. The destination must not exist. Export
+a runtime package to `--output FILE`, appending `.flaretensors` if needed.
+The destination must not exist. Export
 closes the prepared model and exits without starting a listener.
 
 ### 5.3 `flare run`
 
-Display the Flare banner on a terminal, then read the model configuration,
-prepare the model, initialize the GPU, allocate model memory, load weights,
-prepare kernels and execution, load the tokenizer and frontend assets, and
+Animate the Flare banner during loading on a terminal. Prepare the model,
+initialize GPUs, allocate model memory, load weights, prepare kernels and
+execution, allocate cache, load model configuration and frontend assets, and
 start the HTTP server. Helios reports each stage with a ten-column bracketed
 progress bar, a result, and elapsed time.
 Memory loading advances by bytes; kernel and execution preparation
@@ -401,3 +406,15 @@ maps, container and multi-node discovery, multiple models in one process,
 and serving an architecture no recipe supports.
 Multi-node tensor parallelism across DGX Spark hosts, if it arrives, is a
 separate command with its own discovery, not a layer inside `run`.
+
+## Runtime capacity selection
+
+`flare run PACKAGE --max-concurrency N --mtp-draft-tokens K` loads only the
+captured graph variants needed for N concurrent requests and at most K drafts
+per round. `--mtp-adaptive-verification` enables width selection;
+`--no-mtp-adaptive-verification` loads only width K+1. With omitted flags, the
+package supplies defaults. K=0 selects target-only verification without removing
+MTP weights. Capacity increases and missing variants are rejected before GPU
+allocation. Fixed storage retains its prepared layout. Continuation rows and KV
+pages are sized after graph upload within their reserved virtual ranges; reducing
+concurrency or verification width leaves more physical memory for KV pages.

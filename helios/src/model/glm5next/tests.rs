@@ -17,18 +17,18 @@ pub(super) fn config() -> ModelConfig {
         identity: [9; 32],
         model_id: "glm53".into(),
         limits: SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 16384,
             prefill_chunk_size: 4096,
             pages: 64,
-            snapshots: 16,
+            snapshots: 48,
         },
         eos_token_ids: vec![154820, 154827, 154829],
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 128,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_graph_budget: 24,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     }
@@ -113,7 +113,6 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
             let masks = crate::scheduler::speculation::graph_width_masks(
                 &config.speculative_widths,
                 config.speculative_fixed_width,
-                config.speculative_graph_budget,
                 config.limits.max_active.next_power_of_two(),
             );
             [1usize, 2, 4]
@@ -409,7 +408,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
     );
     let live = scheduler.request(branch).unwrap();
     assert_eq!(live.reused_prompt_tokens(), 267);
-    let source = 5 + live.prefix_snapshot().unwrap().0 as i64;
+    let source = scheduler.snapshot_slot(live.prefix_snapshot().unwrap()).0 as i64;
     let exact = add(&mut scheduler, &mut admissions, vec![7; 535]);
     let step = scheduler.next_step().unwrap();
     assert_eq!(step.kind, GraphKind::Restore);
@@ -420,7 +419,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
     assert_eq!(values(&inputs, "state_source_slots")[0], source);
     assert_eq!(
         values(&inputs, "state_destination_slots")[0],
-        branch.slot as i64 + 1
+        scheduler.request(branch).unwrap().state_slot.0 as i64
     );
     assert_eq!(values(&inputs, "state_expected_consumed")[0], 267);
     let pages = inputs
@@ -458,6 +457,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         .unwrap();
     assert!(inputs.uploads().iter().all(|u| {
         [
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",
@@ -472,10 +472,9 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
 }
 
 #[test]
-fn mtp_catalog_requires_shifted_draft_pages_and_budgeted_widths() {
+fn mtp_catalog_requires_shifted_draft_pages_and_verification_widths() {
     let mut config = config();
     config.speculative_widths = (1..=6).collect();
-    config.speculative_graph_budget = 8;
     let catalog = manifest(&config);
     validate::<Glm5Next>(&config, &catalog).unwrap();
     assert_eq!(
@@ -490,16 +489,10 @@ fn mtp_catalog_requires_shifted_draft_pages_and_budgeted_widths() {
         .collect();
     assert_eq!(
         shapes,
-        vec![
-            (1, 1),
-            (1, 2),
-            (1, 3),
-            (1, 4),
-            (1, 5),
-            (1, 6),
-            (2, 6),
-            (4, 1)
-        ]
+        [1, 2, 4]
+            .into_iter()
+            .flat_map(|batch| (1..=6).map(move |width| (batch, width)))
+            .collect::<Vec<_>>()
     );
     for index in 0..catalog.graphs.len() {
         if catalog.graphs[index].kind == GraphKind::Resume {
@@ -512,7 +505,6 @@ fn mtp_catalog_requires_shifted_draft_pages_and_budgeted_widths() {
         assert!(validate::<Glm5Next>(&config, &invalid).is_err());
     }
     config.speculative_fixed_width = Some(6);
-    config.speculative_graph_budget = 3;
     validate::<Glm5Next>(&config, &manifest(&config)).unwrap();
     config.history_drafts = true;
     assert!(validate::<Glm5Next>(&config, &manifest(&config)).is_err());

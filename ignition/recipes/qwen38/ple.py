@@ -86,6 +86,8 @@ def table_layout(manifest: CheckpointManifest, device, *, rank=0, world_size=1):
 def _copy_plane(
     manifest: CheckpointManifest, name: str, destination: torch.Tensor, *, rows=None
 ) -> None:
+    from ignition.preparation.tensor_metadata import record_numeric_tensor
+
     metadata = manifest.tensors[name]
     first, last = (0, metadata.shape[0]) if rows is None else rows
     expected = (last - first, *metadata.shape[1:])
@@ -107,6 +109,7 @@ def _copy_plane(
             if not count:
                 raise OSError(f"{name}: truncated checkpoint payload")
             offset += count
+    record_numeric_tensor(destination)
 
 
 def _available_host_bytes() -> int:

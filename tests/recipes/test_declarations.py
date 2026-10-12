@@ -23,7 +23,7 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
     from ignition.recipes.qwen38.state import HybridStateLayout
 
     recipe = QWEN.recipe
-    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.speculative_rows == 7
+    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.max_draft_tokens == 7
     assert recipe.speculation.adaptive and recipe.history_copy
 
     def layer(speculative_tokens):
@@ -47,7 +47,7 @@ def test_glm_state_rows_and_pages_match_the_continuation_pool(world_size):
     from ignition.recipes.glm53.pool import continuation_layout
 
     recipe = GLM.recipe
-    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.speculative_rows == 7
+    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.max_draft_tokens == 7
     assert not recipe.history_copy and recipe.page_tokens == 256
     layer_types = tuple("indexed_attention" if index % 4 == 3 else "linear_attention" for index in range(45))
     target = layer_types.count("indexed_attention")
@@ -68,7 +68,7 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     for speculation in (None, COPY):
         assert recipe.weights_bytes(checkpoint, world, speculation) == -(
             -(checkpoint.device_bytes - checkpoint.draft_bytes) // world)
-    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * 8 + 12 and recipe.live_rows(4, None) == 1 + 4 + 12
+    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * 6 + 12 and recipe.live_rows(4, None) == 1 + 4 + 12
 
 
 def test_qwen_stored_bytes_match_the_cached_checkpoint():
@@ -127,8 +127,8 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     assert seen["compile_decoder"] is compile_forwards and config.compile_decoder is compile_forwards
     assert config.devices == (0,) and config.max_active == concurrency and config.mtp
     assert (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
-    assert (config.speculative_graph_budget, config.speculative_proposal_source, config.history_drafts) == (
-        8, "mtp", False)
+    assert (config.speculative_proposal_source, config.history_drafts) == (
+        "mtp", False)
     # Pages fill the free memory measured after capture, at least the plan's minimum.
     assert (config.pages, config.minimum_pages, config.context) == (None, plan.minimum_pages, plan.context)
     assert config.prefill_chunk_size == plan.prefill_chunk == 4096 and config.kernel_cache == tmp_path / "kernels"
@@ -136,7 +136,7 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     layout = HybridStateLayout.build(speculative_tokens=7, world_size=1)
     assert layout.snapshot_capacity(config.snapshot_budget_bytes) == plan.snapshots
     # The pool holds a null row, live and speculative rows per slot, and the snapshot rows.
-    assert 1 + config.request_capacity * 8 + plan.snapshots == plan.live_rows + plan.cache_states
+    assert 1 + config.request_capacity * max(config.speculative_widths) + plan.snapshots == plan.live_rows + plan.cache_states
 
 
 def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
@@ -151,12 +151,12 @@ def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
         QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
         return plan, seen.pop()
 
-    plan, config = configured(Speculation(2, adaptive=False, graph_budget=12, proposal_source="copy",
+    plan, config = configured(Speculation(2, adaptive=False, proposal_source="copy",
                                           history_drafts=True))
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
-    assert (config.speculative_graph_budget, config.speculative_proposal_source, config.history_drafts) == (
-        12, "copy", True)
-    assert config.speculative_shapes == ((1, 3), (2, 3), (4, 3))
+    assert (config.speculative_proposal_source, config.history_drafts) == (
+        "copy", True)
+    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in (3, 2, 1))
 
     plan, config = configured(None)
     assert not config.mtp
@@ -187,13 +187,11 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     assert config.compile_decoder is False and config.kernel_cache == tmp_path
     assert config.context % 256 == 0 and config.page_capacity == plan.pages and config.prefill_chunk_size == 2048
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
-    assert config.speculative_graph_budget == 8
 
-    plan = fitted(GLM, 4, speculation=Speculation(2, adaptive=False, graph_budget=5))
+    plan = fitted(GLM, 4, speculation=Speculation(2, adaptive=False, ))
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     config, _ = seen.pop()
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
-    assert config.speculative_graph_budget == 5
 
     plan = fitted(GLM, 4, speculation=None)
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)

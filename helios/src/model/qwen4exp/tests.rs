@@ -22,18 +22,18 @@ fn config() -> ModelConfig {
         identity: [1; 32],
         model_id: "qwen38".into(),
         limits: SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 2048,
             prefill_chunk_size: 512,
             pages: 64,
-            snapshots: 8,
+            snapshots: 40,
         },
         eos_token_ids: vec![248046, 248044],
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_graph_budget: 24,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     }
@@ -112,7 +112,6 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                             crate::scheduler::speculation::graph_width_masks(
                                 &config.speculative_widths,
                                 config.speculative_fixed_width,
-                                config.speculative_graph_budget,
                                 config.limits.request_capacity(),
                             )[batch.trailing_zeros() as usize]
                                 & (1 << (width - 1))
@@ -259,7 +258,7 @@ fn optional_decode_graphs_in_speculative_catalogs_obey_the_shared_contract() {
 }
 
 #[test]
-fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
+fn speculative_catalog_requires_each_batch_and_shifted_page_binding() {
     let mut config = config();
     config.speculative_widths = (1..=8).collect();
     let original = manifest(&config);
@@ -273,19 +272,32 @@ fn speculative_catalog_requires_every_width_mode_and_shifted_page_binding() {
             .all(|g| g.token_capacity <= 8)
     );
     assert!(!original.graphs.iter().any(|g| g.kind == GraphKind::Decode));
-    for index in original
-        .graphs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, g)| (g.kind == GraphKind::Speculative).then_some(i))
-    {
+    for batch in [1, 2, 4] {
         let mut missing = original.clone();
-        missing.graphs.remove(index);
+        missing
+            .graphs
+            .retain(|g| g.kind != GraphKind::Speculative || g.batch_capacity != batch);
         assert!(matches!(
             validate::<Qwen4Exp>(&config, &missing).unwrap_err(),
             crate::Error::Execution(crate::ExecutionError::Manifest(_))
         ));
     }
+    let mut subset = original.clone();
+    subset
+        .graphs
+        .retain(|g| g.kind != GraphKind::Speculative || g.token_capacity <= 3);
+    validate::<Qwen4Exp>(&config, &subset).unwrap();
+    assert!(
+        select::<Qwen4Exp>(
+            &config,
+            &subset,
+            GraphKind::Speculative,
+            1,
+            4,
+            SamplingMode::General
+        )
+        .is_err()
+    );
     for kind in [
         GraphKind::Prefill,
         GraphKind::Resume,
@@ -348,7 +360,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     let adaptive = manifest(&config);
     let body = json!({"model_contract":metadata_json(),"model_id":"qwen38","identity":"01".repeat(32),
         "max_sequence_tokens":2048,"prefill_chunk_size":512,"pages":64,"snapshots":8,
-        "eos_token_ids":[],"speculative_widths":[1,2,4,8],"speculative_graph_budget":24});
+        "eos_token_ids":[],"speculative_widths":[1,2,4,8]});
     for width in [json!(null), json!(1), json!(2), json!(4), json!(8)] {
         for copy in [true, false] {
             config.speculative_fixed_width = width.as_u64().map(|w| w as usize);
@@ -687,9 +699,6 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
 
 #[test]
 fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics() {
-    let mut wire_fixture = WireFixture::new(
-        "admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics",
-    );
     let config = config();
     let mut scheduler = RequestScheduler::new(
         config.identity,
@@ -730,7 +739,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     scheduler.record_submission(&step, Fence(1)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
-    wire_fixture.observe(&inputs.uploads());
+    assert_state_bindings(&inputs, &scheduler, &step);
     let uploads = inputs.uploads();
     let seed = uploads
         .iter()
@@ -749,7 +758,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         admissions[0].as_mut().unwrap().ignore_eos = ignore_eos;
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
-        wire_fixture.observe(&inputs.uploads());
+        assert_state_bindings(&inputs, &scheduler, &step);
         let uploads = inputs.uploads();
         let count = uploads
             .iter()
@@ -782,7 +791,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     scheduler.record_submission(&step, Fence(2)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
-    wire_fixture.observe(&inputs.uploads());
+    assert_state_bindings(&inputs, &scheduler, &step);
     assert_eq!(
         inputs
             .uploads()
@@ -809,7 +818,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     scheduler.record_submission(&step, Fence(4)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
-    wire_fixture.observe(&inputs.uploads());
+    assert_state_bindings(&inputs, &scheduler, &step);
     assert!(!inputs.uploads().iter().any(|u| u.buffer == "page_tables"));
     assert!(
         !inputs
@@ -821,9 +830,6 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
 
 #[test]
 fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_padding() {
-    let mut wire_fixture = WireFixture::new(
-        "large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_padding",
-    );
     let mut config = config();
     config.limits.max_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
@@ -882,7 +888,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         scheduler.record_submission(&step, Fence(sequence)).unwrap();
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
-        wire_fixture.observe(&inputs.uploads());
+        assert_state_bindings(&inputs, &scheduler, &step);
         let uploads = inputs.uploads();
         let bytes = |name| {
             uploads
@@ -1212,7 +1218,7 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
     let mut value = body.clone();
     value.as_object_mut().unwrap().remove("model_contract");
     cases.push(value);
-    for invalid in [json!(null), json!({}), json!("qwen4exp.graph-inputs.v2")] {
+    for invalid in [json!(null), json!({}), json!("qwen4exp.graph-inputs.v3")] {
         let mut value = body.clone();
         value["model_contract"] = invalid;
         cases.push(value);
@@ -1314,7 +1320,6 @@ fn model_validates_draft_cache_and_completion_vocabulary() {
 
 #[test]
 fn state_transfer_and_resume_upload_fixture() {
-    let mut wire_fixture = WireFixture::new("state_transfer_and_resume_upload_fixture");
     let config = config();
     let mut scheduler = RequestScheduler::new(
         config.identity,
@@ -1376,7 +1381,7 @@ fn state_transfer_and_resume_upload_fixture() {
                 &admissions,
             )
             .unwrap();
-            wire_fixture.observe(&inputs.uploads());
+            assert_state_bindings(&inputs, &scheduler, &step);
             assert!(!inputs.uploads().is_empty());
             if matches!(
                 kind,
@@ -1398,7 +1403,11 @@ fn state_transfer_and_resume_upload_fixture() {
                     assert_eq!(values("state_source_slots"), [1, 0, 0, 0]);
                     assert_eq!(
                         values("state_destination_slots")[0],
-                        5 + scheduler.request(handle).unwrap().snapshot_destination().0 as i64
+                        scheduler
+                            .snapshot_slot(
+                                scheduler.request(handle).unwrap().snapshot_destination()
+                            )
+                            .0 as i64
                     );
                 }
             }
@@ -1421,8 +1430,6 @@ fn state_transfer_and_resume_upload_fixture() {
 #[test]
 #[cfg(feature = "images")]
 fn vision_upload_fixture_retains_second_image_feature_offset() {
-    let mut wire_fixture =
-        WireFixture::new("vision_upload_fixture_retains_second_image_feature_offset");
     use crate::frontend::images::{ImageGeometry, ProcessedImages};
     let config = config();
     let images = ProcessedImages {
@@ -1454,7 +1461,6 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
                 image,
             )
             .unwrap();
-        wire_fixture.observe(&inputs.uploads());
         let uploads = inputs.uploads();
         assert_eq!(
             uploads
@@ -1467,56 +1473,36 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
     }
 }
 
-struct WireFixture {
-    name: &'static str,
-    index: usize,
-}
-impl WireFixture {
-    fn new(name: &'static str) -> Self {
-        Self { name, index: 0 }
-    }
-    fn observe(&mut self, uploads: &[crate::execution::Upload<'_>]) {
-        use blake2::{Blake2b512, Digest};
-        let mut hash = Blake2b512::new();
-        for upload in uploads.iter().filter(|u| {
-            self.name == "state_transfer_and_resume_upload_fixture"
-                || u.buffer != "state_expected_consumed"
-        }) {
-            hash.update((upload.buffer.len() as u64).to_le_bytes());
-            hash.update(upload.buffer.as_bytes());
-            hash.update((upload.offset as u64).to_le_bytes());
-            hash.update((upload.bytes.len() as u64).to_le_bytes());
-            hash.update(upload.bytes);
-        }
-        let digest = format!("{:x}", hash.finalize());
-        let line = include_str!("wire-fixtures.txt")
-            .lines()
-            .find(|line| {
-                let mut columns = line.split_whitespace();
-                columns.next() == Some(self.name)
-                    && columns.next().and_then(|n| n.parse::<usize>().ok()) == Some(self.index)
+fn assert_state_bindings(
+    inputs: &Inputs,
+    scheduler: &RequestScheduler,
+    step: &crate::scheduler::ScheduledStep,
+) {
+    let uploads = inputs.uploads();
+    for lane in &step.lanes {
+        let request = scheduler.request(lane.request).unwrap();
+        let binding = uploads
+            .iter()
+            .find(|upload| {
+                upload.buffer == "request_state_rows"
+                    && upload.offset == lane.request.slot as usize * 64
             })
-            .expect("upload fixture covers every packing call");
-        assert_eq!(
-            digest,
-            line.split_whitespace().nth(2).unwrap(),
-            "{} packing call {}",
-            self.name,
-            self.index
-        );
-        self.index += 1;
-    }
-}
-
-impl Drop for WireFixture {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            let count = include_str!("wire-fixtures.txt")
-                .lines()
-                .filter(|line| line.split_whitespace().next() == Some(self.name))
-                .count();
-            assert_eq!(self.index, count, "{} packing fixture coverage", self.name);
+            .unwrap();
+        let rows: Vec<_> = binding
+            .bytes
+            .chunks_exact(8)
+            .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0], request.state_slot.0 as i64);
+        for column in 0..scheduler.execution_width() {
+            assert_eq!(rows[column], request.state_slot.0 as i64 + column as i64);
         }
+        assert!(
+            rows[scheduler.execution_width()..]
+                .iter()
+                .all(|row| *row == 0)
+        );
     }
 }
 
@@ -1649,18 +1635,23 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
             assert_eq!(
                 i64s("state_source_slots"),
                 [
-                    5 + scheduler
-                        .cache()
-                        .checkpoint(checkpoint)
-                        .unwrap()
-                        .snapshot()
+                    scheduler
+                        .snapshot_slot(scheduler.cache().checkpoint(checkpoint).unwrap().snapshot())
                         .0 as i64,
                     0,
                     0,
                     0
                 ]
             );
-            assert_eq!(i64s("state_destination_slots"), [2, 0, 0, 0]);
+            assert_eq!(
+                i64s("state_destination_slots"),
+                [
+                    scheduler.request(restored).unwrap().state_slot.0 as i64,
+                    0,
+                    0,
+                    0
+                ]
+            );
             let pages = scheduler
                 .request(restored)
                 .unwrap()
@@ -1739,4 +1730,18 @@ fn maintenance_contract_requires_exact_endpoint_and_private_page_bindings() {
             .shape = vec![2, 2];
         assert!(validate::<Qwen4Exp>(&config, &broken).is_err());
     }
+}
+
+#[test]
+fn reduced_concurrency_preserves_captured_buffer_strides() {
+    let mut config = config();
+    let mut captured = manifest(&config);
+    config.limits.max_active = 1;
+    captured.graphs.retain(|graph| graph.batch_capacity == 1);
+    validate::<Qwen4Exp>(&config, &captured).unwrap();
+    assert_eq!(config.limits.request_capacity(), 4);
+    assert_eq!(captured.request_capacity(), 4);
+    assert_eq!(captured.buffer("page_tables").unwrap().shape[0], 4);
+    config.limits.request_slots = 1;
+    assert!(validate::<Qwen4Exp>(&config, &captured).is_err());
 }

@@ -46,7 +46,7 @@ def continuation_layout(layer_types, world_size, *, mtp=False):
 class ContinuationPool(StateStorage):
     """One byte row per null/live/snapshot slot; complete KV pages remain separate.
 
-    Live request rows precede immutable snapshot rows.
+    Native configuration assigns execution and prefix-cache rows at load time.
     KDA and C4 kernels bind directly to strided views into these rows. Every MLA
     snapshot has space for the complete 256-token partial page and its index page.
     """
@@ -57,34 +57,46 @@ class ContinuationPool(StateStorage):
     draft: MLAState | None = None
 
     @classmethod
-    def allocate(cls, layer_types, world_size, slots, pages, device, *, mtp=False):
+    def allocate(cls, layer_types, world_size, slots, pages, device, *, mtp=False, storage=None, maximum_pages=None):
         layer_types = tuple(layer_types)
         if type(pages) is not int or pages <= 0:
             raise ValueError("GLM continuation storage requires positive page capacity")
-        storage = StateStorage.allocate(continuation_layout(layer_types, world_size, mtp=mtp), slots, device)
+        package_storage = storage
+        storage = StateStorage.allocate(continuation_layout(layer_types, world_size, mtp=mtp), slots, device, storage=storage)
+        count = layer_types.count("indexed_attention") + int(mtp)
+        maximum = pages if package_storage is None else maximum_pages
+        if maximum is None or maximum < pages:
+            raise ValueError("GLM virtual page capacity must cover prepared pages on every rank")
+        def page_tensor(name, shape):
+            if package_storage is None:
+                return torch.zeros((pages, *shape), dtype=torch.uint8, device=device)
+            return package_storage.device_allocate(name, (maximum, *shape), torch.uint8,
+                group="KV_PAGES", maximum=maximum, units=pages)
         layers = []
         for index, kind in enumerate(layer_types):
             if kind == "linear_attention":
                 layers.append(DeltaState(storage.region(f"layer{index}.convolution"),
                                          storage.region(f"layer{index}.recurrent")))
             else:
-                cache = torch.zeros((pages * 4, 64, 528), dtype=torch.uint8, device=device)
-                index_cache = torch.zeros((pages, 64, 132), dtype=torch.uint8, device=device)
+                cache = page_tensor(f"kv-{index}-latent", (4, 64, 528)).view(-1, 64, 528)
+                index_cache = page_tensor(f"kv-{index}-index", (64, 132))
                 layers.append(MLAState(cache, IndexState(index_cache, storage.region(f"layer{index}.index_tail"))))
         draft = None
         if mtp:
-            draft = MLAState(torch.zeros((pages * 4, 64, 528), dtype=torch.uint8, device=device),
-                IndexState(torch.zeros((pages, 64, 132), dtype=torch.uint8, device=device),
+            draft = MLAState(page_tensor("kv-draft-latent", (4, 64, 528)).view(-1, 64, 528),
+                IndexState(page_tensor("kv-draft-index", (64, 132)),
                            storage.region("draft.index_tail")))
-        return cls(storage.backing, storage.layout, DecoderState(tuple(layers)),
+        storage.memory_capacity[1] = pages
+        return cls(storage.backing, storage.layout, storage.memory_capacity, DecoderState(tuple(layers)),
                    storage.region("consumed_tokens"), storage.region("last_hidden"), draft)
 
     def clear_for_preparation(self):
         self.backing.zero_()
+        pages = int(self.memory_capacity[1].item())
         for layer in (*self.decoder.layers, *((self.draft,) if self.draft is not None else ())):
             if isinstance(layer, MLAState):
-                layer.cache.zero_()
-                layer.index.cache.zero_()
+                layer.cache[:pages * 4].zero_()
+                layer.index.cache[:pages].zero_()
 
     def partial_pages(self):
         """Pair each immutable page field with its live physical-page records."""

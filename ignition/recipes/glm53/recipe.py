@@ -22,7 +22,7 @@ def _costs(state_row_bytes, graph_bytes, *, speculating):
                      draft_page_bytes=_PAGE_LAYER_BYTES if speculating else 0)
 
 
-def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
+def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False, package_storage=None):
     """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1."""
     from ignition.preparation.rank_group import prepare_group
 
@@ -30,15 +30,15 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress):
 
     speculation = plan.speculation
     drafting = {} if speculation is None else {
-        "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width,
-        "speculative_graph_budget": speculation.graph_budget}
+        "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width}
     config = PreparationConfig(
-        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, max_active=plan.concurrency,
+        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
+        max_active=plan.concurrency,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, pages=plan.pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
         mtp=speculation is not None, **drafting)
-    return prepare_group(snapshot, config, prepare_rank, progress=progress)
+    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 
 
 def usage(prepared):
@@ -56,9 +56,7 @@ RECIPE = Recipe(
         # Decoder layer 45, the MTP module.
         draft_bytes=4_301_658_112),),
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    # Rounds adapt among zero through five drafts. Verification retains recurrent
-    # state for seven draft positions per request whatever the captured counts.
-    speculation=Speculation(draft_tokens=5), speculative_rows=7,
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7,
     ranks=MappingProxyType({
         2: _costs(81_464_576, _GRAPH_BYTES, speculating=True),
         4: _costs(41_635_072, _GRAPH_BYTES, speculating=True),

@@ -11,14 +11,12 @@ make it fit.
 
 from dataclasses import dataclass, replace
 
-from ignition.components.capacity import batch_capacities
 from ignition.errors import CapacityError, UsageError
 from ignition.recipes.declaration import Checkpoint, Recipe, Speculation
 
-# Free memory kept after the final KV allocation. Serving allocates nothing, so
-# headroom covers the transient working memory of compiled warm-up and graph
-# capture, measured at 0.83 GiB for one Qwen rank. Graphs and scratch, including
-# the CUDA context, are planned separately.
+# Preparation headroom covers compiled warm-up and graph capture, measured at
+# 0.83 GiB for one Qwen rank. Helios sizes its caches after graph upload with a
+# separate driver margin. Graphs, scratch, and the CUDA context are planned separately.
 HEADROOM_BYTES = 1 << 30
 MINIMUM_REQUEST_TOKENS = 8192
 # The prefix cache keeps about four recent exchanges per concurrent request
@@ -29,7 +27,6 @@ CACHE_STATES_PER_REQUEST = 8
 CACHE_SHARE = 4
 CACHE_FLOOR = 8
 SUPPORTED_CAPABILITIES = ((12, 0), (12, 1))
-MAX_SPECULATIVE_GRAPHS = 56
 _GIB = 1 << 30
 
 
@@ -198,7 +195,6 @@ class Plan:
             "prefill_chunk": self.prefill_chunk,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
-                "graph_budget": self.speculation.graph_budget,
                 "proposal_source": self.speculation.proposal_source,
                 "history_drafts": self.speculation.history_drafts},
             "context": self.context, "checkpoint_context": self.recipe.context,
@@ -274,11 +270,6 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     """
     if not 1 <= concurrency <= recipe.max_concurrency:
         raise UsageError(f"--max-concurrency for {checkpoint.alias} must be 1 through {recipe.max_concurrency}")
-    if speculation is not None:
-        batches = len(batch_capacities(concurrency))
-        if not batches <= speculation.graph_budget <= MAX_SPECULATIVE_GRAPHS:
-            raise UsageError(f"--mtp-graph-budget must be {batches} through {MAX_SPECULATIVE_GRAPHS} at"
-                             f" --max-concurrency {concurrency}: every batch capacity captures at least one graph")
     chunk = recipe.prefill_chunk if prefill_chunk is None else prefill_chunk
     if chunk % 64 or not 64 <= chunk <= recipe.context:
         raise UsageError(f"--prefill-chunk-size for {checkpoint.alias} must be a multiple of 64"

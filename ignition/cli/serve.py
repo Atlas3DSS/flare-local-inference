@@ -44,6 +44,7 @@ def _server_options(configuration, model, plan, pages: int) -> dict:
     whole = pages * recipe.page_tokens >= recipe.context
     return {
         "model_id": model.model_id, "served_names": [checkpoint.alias],
+        "reserve_bytes": plan.reserve_bytes,
         "api_key": configuration.get("server.api_key").value,
         "queue_capacity": 4 * plan.concurrency, "frontend_workers": plan.concurrency,
         "max_body_bytes": recipe.max_images * recipe.image_bytes + (1 << 20),
@@ -99,6 +100,8 @@ def run(args) -> int:
 
 
 def export(args) -> int:
+    if args.output.suffix != ".flaretensors":
+        args.output = args.output.with_name(args.output.name + ".flaretensors")
     if args.output.exists():
         raise UsageError(f"export destination already exists: {args.output}")
     return _prepare(args, export_path=args.output)

@@ -29,6 +29,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let image: Value = serde_json::from_slice(&fs::read(&image_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let asset = |name: &str| Asset {
+        range: None,
         path: snapshot.join(name),
         sha256: image["assets"][name].as_str().unwrap().into(),
     };
@@ -50,6 +51,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         model_id: text["model_id"].as_str().unwrap().into(),
         identity: [0; 32],
         limits: SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 262144,
             prefill_chunk_size: 512,
@@ -65,7 +67,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_new_tokens: 17,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_graph_budget: 24,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     };

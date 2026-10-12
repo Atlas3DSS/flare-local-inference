@@ -41,7 +41,8 @@ def test_verification_packs_unequal_lengths_and_retains_request_output_rows():
     inputs = BatchInputs.allocate(128, 2, "cpu", capacity=2)
     inputs.page_tables.copy_(torch.tensor([[10, 11], [20, 21]]))
     inputs.live_rows.fill_(2)
-    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2), extra_base=8)
+    inputs.request_state_rows.copy_(torch.tensor([[1, 8, 9, 10, 11, 12, 13, 14], [2, 15, 16, 17, 18, 19, 20, 21]]))
+    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2))
     m = DecoderMetadata.allocate(12, 2, 2, "cpu")
     op.metadata = DecoderMetadata(m.token_ids, torch.zeros(12, dtype=torch.int64),
         DeltaMetadata.allocate(2, "cpu", verification_columns=8), m.indexed)
@@ -60,17 +61,18 @@ def test_verification_packs_unequal_lengths_and_retains_request_output_rows():
 def test_draft_rows_exclude_exhausted_requests_and_restore_output_order():
     metadata = DraftMetadata(3, 3, 2, "cpu")
     slots = torch.tensor([2, 0, 1])
+    state_rows = torch.arange(1, 4)[:, None].expand(3, 8)
     tables = torch.tensor([[10, 11], [20, 21], [30, 31]])
     hidden = torch.arange(3, dtype=torch.bfloat16)[:, None].expand(3, 4096)
     metadata.set(slots, torch.tensor([0, 1, 1]), torch.tensor([512, 255, 510]),
-                 torch.tensor([7, 8, 9]), hidden, tables, capacity=1)
+                 torch.tensor([7, 8, 9]), hidden, tables, capacity=1, state_rows=state_rows)
     assert metadata.indexed.query_start_loc.tolist() == [0, 0, 1, 2]
     assert metadata.indexed.positions.tolist() == [255, 510, -1]
     assert metadata.indexed.token_slots.tolist() == [10 * 256 + 255, 21 * 256 + 254, -1]
     assert metadata.token_ids[:2].tolist() == [8, 9]
     assert metadata.hidden[metadata.output_indices][1:, 0].tolist() == [1, 2]
     metadata.set(slots, torch.zeros(3, dtype=torch.int64), torch.full((3,), 512),
-                 torch.tensor([7, 8, 9]), hidden, tables, capacity=1)
+                 torch.tensor([7, 8, 9]), hidden, tables, capacity=1, state_rows=state_rows)
     assert metadata.num_tokens.item() == 0
     assert metadata.indexed.positions.tolist() == [-1, -1, -1]
     assert metadata.indexed.token_slots.tolist() == [-1, -1, -1]

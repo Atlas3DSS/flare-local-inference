@@ -14,6 +14,7 @@ from safetensors.torch import save_file
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.checkpoint import TensorMetadata
 from ignition.preparation.qwen38 import PLE_PREFIX
+from ignition.preparation.tensor_metadata import NumericStorage
 from ignition.recipes.qwen38.ple import (
     PLE_LAYER_PREFIX,
     TABLE_BYTES,
@@ -122,7 +123,9 @@ def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
     )
     manifest = SimpleNamespace(snapshot=tmp_path, tensors={"plane": entry})
     destination = torch.empty_like(source)
-    _copy_plane(manifest, "plane", destination)
+    with NumericStorage() as numeric:
+        _copy_plane(manifest, "plane", destination)
+    assert numeric.ranges() == [(destination.data_ptr(), destination.data_ptr() + destination.nbytes)]
     assert torch.equal(source.view(torch.uint8), destination.view(torch.uint8))
     part = torch.empty((193, shape[1]), dtype=dtype)
     _copy_plane(manifest, "plane", part, rows=(129, 322))

@@ -44,6 +44,20 @@ impl Inputs {
         } = *frame;
         let capacity = config.limits.request_capacity();
         self.staging.clear();
+        for lane in &step.lanes {
+            let request = scheduler.request(lane.request)?;
+            self.staging.i64(
+                "request_state_rows",
+                lane.request.slot as usize * 8 * 8,
+                (0..8).map(|column| {
+                    if column < scheduler.execution_width() {
+                        request.state_slot.0 as i64 + column as i64
+                    } else {
+                        0
+                    }
+                }),
+            );
+        }
         if step.kind == GraphKind::Vision {
             return Err("unsupported GLM graph kind".into());
         }
@@ -143,6 +157,15 @@ impl Inputs {
                 .i64("token_ids", 0, tokens.into_iter().take(step.batch_capacity));
         }
         if admit || step.kind == GraphKind::Snapshot {
+            self.staging.i64(
+                "state_request_slots",
+                0,
+                step.lanes
+                    .iter()
+                    .map(|lane| lane.request.slot as i64)
+                    .chain(std::iter::repeat(-1))
+                    .take(capacity),
+            );
             let mut source = [-1; REQUEST_LANES];
             let mut destination = [-1; REQUEST_LANES];
             let mut operation = [0; REQUEST_LANES];
@@ -156,18 +179,19 @@ impl Inputs {
                         expected[row] = 0;
                     }
                     GraphKind::Restore => {
-                        source[row] = (capacity + 1) as i64
-                            + live
-                                .prefix_snapshot()
-                                .ok_or("restore requires a GLM checkpoint")?
-                                .0 as i64;
+                        source[row] = scheduler
+                            .snapshot_slot(
+                                live.prefix_snapshot()
+                                    .ok_or("restore lacks a prefix snapshot")?,
+                            )
+                            .0 as i64;
                         destination[row] = live.state_slot.0 as i64;
                         expected[row] = live.consumed_tokens as i64;
                     }
                     GraphKind::Snapshot => {
                         source[row] = live.state_slot.0 as i64;
                         destination[row] =
-                            (capacity + 1) as i64 + live.snapshot_destination().0 as i64;
+                            scheduler.snapshot_slot(live.snapshot_destination()).0 as i64;
                         expected[row] = live.snapshot_consumed() as i64;
                     }
                     _ => unreachable!(),

@@ -111,8 +111,8 @@ def host(monkeypatch, tmp_path):
         assert "api_key" not in options
         calls["options"] = options
         calls["exports"] += 1
-        path.mkdir()
-        (path / "package.pb").write_bytes(b"")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime package")
     monkeypatch.setattr(model_package, "export_package", export_model)
 
     def execute(path, arguments):
@@ -159,14 +159,20 @@ def test_preparation_flags_select_distinct_packages(host):
     assert host["exports"] == 2 and host["plan"].speculation is None
 
 
-def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tmp_path):
+@pytest.mark.parametrize("reserve", [0, 2 * GIB])
+def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tmp_path, reserve):
     output = tmp_path / "package"
-    assert main(["export", "qwen3.8-flash", "--output", str(output)]) == 0
+    config = tmp_path / "config.toml"
+    config.write_text(f'[memory]\nreserve = "{reserve}"\n')
+    assert main(["export", "qwen3.8-flash", "--output", str(output), "--config", str(config)]) == 0
     assert host["exports"] == 1 and "exec" not in host
     assert host["plan"].prefill_chunk == 4096 and host["compile_forwards"]
     assert host["options"]["queue_capacity"] == 16
     assert host["options"]["served_names"] == ["qwen3.8-flash"]
+    assert host["options"]["reserve_bytes"] == reserve
+    assert "headroom_bytes" not in host["options"]
     assert host["prepared"].closed
+    assert output.with_suffix(".flaretensors").is_file()
     assert main(["export", "qwen3.8-flash", "--output", str(output)]) == 2
     assert host["exports"] == 1
 

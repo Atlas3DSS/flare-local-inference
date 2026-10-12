@@ -43,7 +43,9 @@ class LayerScratch:
 
 def _install_mhc(module, norm, weights, prefix, norm_name):
     for attribute in ("fn", "scale", "base"):
-        setattr(module, attribute, torch.nn.Parameter(weights[f"{prefix}_{attribute}"].float(), requires_grad=False))
+        key = f"{prefix}_{attribute}"
+        weights[key] = weights[key].float()
+        setattr(module, attribute, torch.nn.Parameter(weights[key], requires_grad=False))
     norm.weight = torch.nn.Parameter(weights[f"{norm_name}.weight"], requires_grad=False)
     return MHCWeights(module.fn, module.scale, module.base, norm.weight)
 

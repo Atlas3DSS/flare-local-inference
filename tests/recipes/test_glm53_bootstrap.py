@@ -29,10 +29,10 @@ def test_invalid_prepared_geometry_rejects_before_gpu_use(values):
 def test_mtp_catalog_defaults_to_five_drafts_and_reserves_draft_pages():
     config = PreparationConfig(mtp=True)
     assert config.speculative_widths == (1, 2, 3, 4, 5, 6)
-    assert config.speculative_shapes == tuple((1, w) for w in range(6, 0, -1)) + ((2, 6), (4, 1))
+    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in range(6, 0, -1))
     assert config.page_capacity == PreparationConfig().page_capacity + 4
-    fixed = PreparationConfig(mtp=True, speculative_fixed_width=6, speculative_graph_budget=3)
-    assert fixed.speculative_shapes == ((1, 6), (2, 6), (4, 6))
+    fixed = PreparationConfig(mtp=True, speculative_fixed_width=6)
+    assert fixed.speculative_shapes == config.speculative_shapes
     large = PreparationConfig(mtp=True, max_active=64)
-    assert len(large.speculative_shapes) == 8
+    assert len(large.speculative_shapes) == 42
     assert large.speculative_shapes[-1] == (64, 1)

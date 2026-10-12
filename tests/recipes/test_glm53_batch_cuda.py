@@ -22,9 +22,10 @@ def test_small_request_capacities_pad_rank_agreement(slots):
     from ignition.components.resume import PreparedResumeState
 
     inputs = BatchInputs.allocate(128, 1, "cuda", capacity=slots)
+    inputs.request_state_rows[:, 0] = torch.arange(1, inputs.row_slot_ids.numel() + 1, device="cuda")
     requests = DeviceRequestState.allocate("cuda", vocab_size=154880, capacity=slots)
     metadata = DecoderMetadata.allocate(1, 1, 1, "cuda")
-    batch = PreparedBatch(inputs, requests, metadata, mode="decode", shard=TensorParallelShard(0, 2), pages=1)
+    batch = PreparedBatch(inputs, requests, metadata, mode="decode", shard=TensorParallelShard(0, 2), pages=torch.tensor([1], device="cuda:0"))
     requests.admit(0, RequestAdmission(7, 13), [3], consumed_tokens=1)
     requests.pending_token[0] = 5
     inputs.row_slot_ids[0], inputs.row_generations[0], inputs.live_rows[0] = 0, 7, 1
@@ -36,12 +37,12 @@ def test_small_request_capacities_pad_rank_agreement(slots):
     assert requests.error_code[0] == 0
 
     requests.pending_token[0] = -1
-    hidden = torch.randn((slots, 16), dtype=torch.bfloat16, device="cuda")
+    hidden = torch.randn((slots + 1, 16), dtype=torch.bfloat16, device="cuda")
     resume = PreparedResumeState(requests, hidden, inputs.row_slot_ids[:1],
-                                 inputs.row_generations[:1], inputs.live_rows, world_size=2)
+                                 inputs.row_generations[:1], inputs.live_rows, world_size=2, state_rows=inputs.request_state_rows)
     resume.validation_sum.copy_(resume.validate() * 2)
     assert resume.validation_input.nbytes == 16
-    torch.testing.assert_close(resume.gather(), hidden[:1], rtol=0, atol=0)
+    torch.testing.assert_close(resume.gather(), hidden[1:2], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("rank,world", [(0, 2), (3, 4)])
@@ -51,10 +52,11 @@ def test_native_glm_metadata_and_consumption(rank, world, mode, capacity):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     rows = 1 if mode == "prefill" else capacity
     inputs = BatchInputs.allocate(capacity, 32, "cuda")
+    inputs.request_state_rows[:, 0] = torch.arange(1, inputs.row_slot_ids.numel() + 1, device="cuda")
     requests = DeviceRequestState.allocate("cuda", vocab_size=154880)
     metadata = DecoderMetadata.allocate(capacity, rows, 32, "cuda")
     batch = PreparedBatch(inputs, requests, metadata, mode=mode,
-        shard=TensorParallelShard(rank, world), pages=64)
+        shard=TensorParallelShard(rank, world), pages=torch.tensor([64], device="cuda"))
 
     def forward():
         batch.begin(batch.validate() * world)

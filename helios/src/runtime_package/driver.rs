@@ -143,6 +143,8 @@ driver! {
     function: "cuModuleGetFunction"(*mut Handle, Handle, *const c_char);
     parameter_info: "cuFuncGetParamInfo"(Handle, usize, *mut usize, *mut usize);
     function_attribute: "cuFuncSetAttribute"(Handle, c_int, c_int);
+    function_load: "cuFuncLoad"(Handle);
+    graph_upload: "cuGraphUpload"(Handle, Handle);
     graph_create: "cuGraphCreate"(*mut Handle, c_uint);
     graph_destroy: "cuGraphDestroy"(Handle);
     graph_kernel: "cuGraphAddKernelNode_v2"(*mut Handle, Handle, *const Handle, usize, *const KernelParams);

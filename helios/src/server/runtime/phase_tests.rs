@@ -45,6 +45,7 @@ impl Fixture {
             let path = directory.join(name);
             std::fs::write(&path, bytes).unwrap();
             Asset {
+                range: None,
                 path,
                 sha256: format!("{:x}", Sha256::digest(bytes)),
             }
@@ -68,6 +69,7 @@ impl Fixture {
                 identity: [23; 32],
                 model_id: "qwen-worker-phases".into(),
                 limits: SchedulerLimits {
+                    request_slots: 4,
                     max_active: 4,
                     max_sequence_tokens: 128,
                     prefill_chunk_size: 64,
@@ -79,7 +81,6 @@ impl Fixture {
                 max_new_tokens: 16,
                 speculative_widths: vec![],
                 speculative_fixed_width: None,
-                speculative_graph_budget: 24,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
             },

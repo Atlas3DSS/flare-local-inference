@@ -30,49 +30,20 @@ pub struct CopyProposal {
     pub grammar_masks: Vec<i32>,
 }
 
-pub fn graph_width_masks(
-    widths: &[usize],
-    fixed: Option<usize>,
-    budget: usize,
-    capacity: usize,
-) -> [u8; 7] {
-    let batches = capacity.ilog2() as usize + 1;
-    let count = if fixed.is_some() { 1 } else { widths.len() };
-    let mut remaining = budget;
-    let mut exhausted = false;
-    std::array::from_fn(|index| {
-        if count == 0 || index >= batches {
-            return 0;
-        }
-        let take = if exhausted {
-            1
-        } else {
-            count.min(remaining.saturating_sub(batches - 1 - index))
-        };
-        let mask = if exhausted {
-            1
-        } else if let Some(width) = fixed {
-            1 << (width - 1)
-        } else {
+pub fn graph_width_masks(widths: &[usize], fixed: Option<usize>, capacity: usize) -> [u8; 7] {
+    let mask = fixed.map_or_else(
+        || {
             widths
                 .iter()
-                .rev()
-                .take(take)
                 .fold(0, |mask, width| mask | (1 << (width - 1)))
-        };
-        exhausted |= take < count;
-        remaining = remaining.saturating_sub(take);
-        mask
-    })
+        },
+        |width| 1 << (width - 1),
+    );
+    BATCH_CAPACITIES.map(|batch| if batch <= capacity { mask } else { 0 })
 }
 
-pub fn graph_catalog(
-    widths: &[usize],
-    fixed: Option<usize>,
-    budget: usize,
-    capacity: usize,
-) -> [Vec<usize>; 7] {
-    graph_width_masks(widths, fixed, budget, capacity)
+pub fn graph_catalog(widths: &[usize], fixed: Option<usize>, capacity: usize) -> [Vec<usize>; 7] {
+    graph_width_masks(widths, fixed, capacity)
         .map(|mask| (1..=8).filter(|w| mask & (1 << (w - 1)) != 0).collect())
 }
 
@@ -164,9 +135,8 @@ impl WidthController {
                 return legal().max();
             }
             return legal().max_by(|left, right| {
-                let score = |width: usize| {
-                    self.expected_tokens(width) / self.costs[b][c][width - 1].nanos
-                };
+                let score =
+                    |width: usize| self.expected_tokens(width) / self.costs[b][c][width - 1].nanos;
                 score(*left)
                     .total_cmp(&score(*right))
                     .then_with(|| right.cmp(left))

@@ -1,11 +1,36 @@
 syntax = "proto3";
 package flare.runtime;
+import "google/protobuf/struct.proto";
 
-message ModelPackage {
+message ModelIndex {
   uint32 version = 1;
-  repeated string ranks = 2;
+  repeated BundleIndex ranks = 2;
   repeated PeerMemory peer_memory = 3;
+  google.protobuf.Struct server = 4;
+  repeated Asset assets = 5;
 }
+message Asset { string name = 1; Span payload = 2; string sha256 = 3; }
+message BundleIndex {
+  repeated int32 architecture = 1;
+  repeated Allocation allocations = 2;
+  repeated Module modules = 3;
+  repeated Function functions = 4;
+  repeated GraphIndex graphs = 5;
+  repeated Reservation reservations = 6;
+  Execution execution = 7;
+  Context context = 8;
+  map<string, Span> resources = 9;
+}
+message GraphIndex {
+  string name = 1;
+  uint64 flags = 2;
+  string resource = 3;
+  uint64 node_count = 4;
+  uint64 edge_count = 5;
+  repeated uint64 functions = 6;
+}
+
+
 message PeerMemory {
   uint32 owner = 1;
   uint64 address = 2;
@@ -13,17 +38,7 @@ message PeerMemory {
   repeated uint32 readers = 4;
 }
 
-message Package {
-  uint32 version = 1;
-  repeated int32 architecture = 2;
-  repeated Allocation allocations = 3;
-  repeated Module modules = 4;
-  repeated Function functions = 5;
-  repeated Graph graphs = 6;
-  repeated Reservation reservations = 7;
-  Execution execution = 8;
-  Context context = 9;
-}
+
 message Context { uint32 flags = 1; int32 cache = 2; repeated Limit limits = 3; }
 message Limit { uint64 id = 1; uint64 value = 2; }
 message Reservation { uint64 address = 1; uint64 nbytes = 2; }
@@ -38,7 +53,10 @@ message Allocation {
   repeated Relocation relocations = 6;
   optional uint64 address = 7;
   Memory memory = 8;
+  Sizing sizing = 9;
 }
+enum Capacity { STATE_ROWS = 0; KV_PAGES = 1; }
+message Sizing { Capacity capacity = 1; uint64 unit_bytes = 2; uint64 maximum = 3; }
 message Module { string name = 1; string file = 2; repeated Global globals = 3; }
 message Global { string symbol = 1; string file = 2; uint64 nbytes = 3; repeated Relocation relocations = 4; }
 message Function {
@@ -75,7 +93,7 @@ message Node {
   oneof operation { Kernel kernel = 1; Memset memset = 2; Copy copy = 3; Empty empty = 4; }
 }
 message Edge { uint64 source = 1; uint64 destination = 2; bytes data = 3; }
-message Graph { string name = 1; uint64 flags = 2; repeated Node nodes = 3; repeated Edge edges = 4; }
+
 message Execution {
   uint32 abi_version = 1;
   uint64 max_active = 2;
@@ -98,5 +116,10 @@ message ExecutionGraph {
   uint64 batch_capacity = 4;
   uint64 token_capacity = 5;
   repeated InputBinding input_bindings = 6;
+  optional uint32 draft_tokens = 7;
+  // Target positions evaluated, including the pending input token.
+  optional uint32 verify_tokens = 8;
+  DraftSource draft_source = 9;
 }
+enum DraftSource { NO_DRAFT = 0; MTP = 1; COPY_DRAFT = 2; }
 message InputBinding { string buffer_name = 1; uint64 host_offset = 2; uint64 nbytes = 3; }

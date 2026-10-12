@@ -17,6 +17,7 @@ use crate::{Error, Failure, FrontendError, Result};
 pub struct Asset {
     pub path: PathBuf,
     pub sha256: String,
+    pub range: Option<(u64, usize)>,
 }
 
 impl Asset {
@@ -34,7 +35,27 @@ impl Asset {
                 format!("invalid expected SHA256 for {}", self.path.display()),
             ))));
         }
-        let bytes = fs::read(&self.path).map_err(|error| {
+        let bytes = (|| -> std::io::Result<Vec<u8>> {
+            if let Some((offset, size)) = self.range {
+                use std::os::unix::fs::FileExt;
+                let file = fs::File::open(&self.path)?;
+                if offset
+                    .checked_add(size as u64)
+                    .is_none_or(|end| end > file.metadata().map_or(0, |m| m.len()))
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "frontend asset exceeds package",
+                    ));
+                }
+                let mut bytes = vec![0; size];
+                file.read_exact_at(&mut bytes, offset)?;
+                Ok(bytes)
+            } else {
+                fs::read(&self.path)
+            }
+        })()
+        .map_err(|error| {
             Error::frontend(FrontendError::Asset(Failure::caused_by(
                 format!("cannot read {}: {error}", self.path.display()),
                 error,
@@ -414,6 +435,7 @@ mod tests {
         use std::error::Error as _;
 
         let asset = Asset {
+            range: None,
             path: std::env::temp_dir()
                 .join(format!("flare-missing-asset-{}", std::process::id()))
                 .join("tokenizer.json"),
@@ -486,6 +508,7 @@ mod tests {
         let original = b"{\"eos_token\":\"<eos>\"}";
         fs::write(&path, original).unwrap();
         let asset = Asset {
+            range: None,
             path: path.clone(),
             sha256: format!("{:x}", Sha256::digest(original)),
         };

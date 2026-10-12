@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub struct Glm5Next;
-pub const INPUT_SCHEMA: &str = "glm5next.graph-inputs.v1";
+pub const INPUT_SCHEMA: &str = "glm5next.graph-inputs.v2";
 pub const VOCABULARY: usize = 154880;
 pub const PAGE_TOKENS: usize = 256;
 
@@ -56,7 +56,7 @@ impl ModelContract for Glm5Next {
             vocabulary: config.contract.vocabulary,
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
-            live_state_base: 1,
+
             draft_pages_per_request: usize::from(config.has_draft_cache()),
         }
     }

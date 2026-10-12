@@ -16,7 +16,7 @@ from .sampling import (
 
 @triton.jit
 def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, StateCount, TransferErrors,
-           AdmissionErrors, Generation, Status, Validation, MODE: tl.constexpr, CAPACITY: tl.constexpr, SLOTS: tl.constexpr = 4):
+           AdmissionErrors, Generation, Status, Validation, StateRows, RequestSlots, MODE: tl.constexpr, CAPACITY: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     count, state_count = tl.load(Count), tl.load(StateCount)
     source, destination, operation = tl.load(Sources + row), tl.load(Destinations + row), tl.load(Operations + row)
@@ -24,8 +24,10 @@ def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, StateCount, 
     present = (row < count) | (row < state_count)
     valid_slot = (slot >= 0) & (slot < SLOTS)
     valid = (count >= 0) & (count <= CAPACITY) & (count == state_count) & valid_slot & (epoch > 0)
+    state = tl.load(StateRows + slot * 8, valid_slot, other=0)
+    valid &= (state > 0) & (tl.load(RequestSlots + row) == slot)
     if MODE == 2:
-        valid &= (operation == 0) & (source == slot + 1) & (destination >= SLOTS + 1)
+        valid &= (operation == 0) & (source == state) & ((destination > 0) & (destination != source))
         valid &= epoch == tl.load(Generation + slot, valid_slot, other=0)
         status = tl.load(Status + slot, valid_slot, other=0)
         valid &= (status == 1) | (status == 2)
@@ -33,8 +35,8 @@ def _stage(Slots, Epochs, Count, Sources, Destinations, Operations, StateCount, 
         duplicates = (others < count) & (tl.load(Slots + others) == slot)
         valid &= tl.sum(duplicates.to(tl.int32), 0) == 1
     else:
-        valid &= (destination == slot + 1) & (operation == (1 if MODE == 0 else 0))
-        valid &= (source == -1) if MODE == 0 else (source >= SLOTS + 1)
+        valid &= (destination == state) & (operation == (1 if MODE == 0 else 0))
+        valid &= (source == -1) if MODE == 0 else ((source > 0) & (source != destination))
         valid &= tl.load(AdmissionErrors + row) == 0
     bad = (tl.load(TransferErrors + row) != 0) | (present & ~valid)
     tl.store(Validation + row, bad.to(tl.bfloat16))
@@ -93,9 +95,6 @@ class PreparedMaintenance:
             raise ValueError("maintenance requires a supported transition, rank count, and row capacity")
         self.slots = requests.capacity
         device = transfer.pool.backing.device
-        consumed = transfer.pool.region("consumed_tokens")[1:1 + self.slots, 0]
-        if requests.consumed_tokens.data_ptr() != consumed.data_ptr() or requests.consumed_tokens.stride() != consumed.stride():
-            raise ValueError("request counts must alias continuation storage live rows")
         for value, shape, dtype, name in ((slots, (self.slots,), torch.int32, "slots"),
                 (epochs, (self.slots,), torch.int64, "epochs"), (count, (1,), torch.int32, "count"),
                 (frame, (1,), torch.int32, "frame"), (sequence, (1,), torch.int64, "sequence")):
@@ -115,10 +114,14 @@ class PreparedMaintenance:
         self.admission_errors = self.admission.errors if self.admission is not None else torch.zeros(self.slots, dtype=torch.int32, device=device)
         c, r = transfer.commands, requests
         self.stage_args = (slots, epochs, count, c.source_slots, c.destination_slots, c.operation, c.num_ops, c.errors,
-            self.admission_errors, r.generation, r.status, self.validation_input, ("init", "restore", "snapshot").index(mode), capacity, self.slots)
+            self.admission_errors, r.generation, r.status, self.validation_input, transfer.state_rows, c.request_slots, ("init", "restore", "snapshot").index(mode), capacity, self.slots)
         self.agree_args = (self.validation_sum, c.errors, self.admission_errors, world_size, self.admission is not None, self.slots)
         self.complete_args = (slots, epochs, count, c.errors, r.generation, r.consumed_tokens, r.generated_tokens,
             r.status, r.error_code, records, frame, sequence, capacity, r.consumed_tokens.stride(0), fields, self.slots)
+        from .state import PreparedRequestHistory
+
+        self.history = PreparedRequestHistory(transfer.pool, requests, c, snapshot=mode == "snapshot")
+        self.snapshot = mode == "snapshot"
         self._stage = None
 
     def prepare(self):
@@ -142,7 +145,11 @@ class PreparedMaintenance:
         if self._stage is None:
             raise RuntimeError("maintenance prepare() must complete before capture")
         self._agree()
+        if self.snapshot:
+            self.history()
         self.transfer.apply()
+        if not self.snapshot:
+            self.history()
         if self.admission is not None:
             self.admission.apply()
         self._complete()

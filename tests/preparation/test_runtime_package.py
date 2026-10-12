@@ -128,14 +128,20 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         arguments.append(executable)
     result = subprocess.run(arguments, check=True, cwd=root, text=True, capture_output=True, timeout=180)
     package_path = tmp_path / "package"
-    from ignition.preparation.runtime_package_pb2 import Package
+    from ignition.preparation.package_file import read_index
 
-    document = Package.FromString((package_path / "package.pb").read_bytes())
+    index, start = read_index(package_path)
+    document = index.ranks[0]
+    def contents(key):
+        span = document.resources[key]
+        with package_path.open("rb") as source:
+            source.seek(start + span.offset)
+            return source.read(span.nbytes)
     for module in document.modules:
-        assert b".py\0" not in (package_path / module.file).read_bytes()
+        assert b".py\0" not in contents(module.file)
         for symbol in module.globals:
             if symbol.symbol.startswith("assertFile_"):
-                assert (package_path / symbol.file).read_bytes().rstrip(b"\0") == b"kernel"
+                assert contents(symbol.file).rstrip(b"\0") == b"kernel"
     if not exec_handover:
         result = subprocess.run([executable, str(tmp_path)],
                                 check=True, cwd=root, text=True, capture_output=True, timeout=60)

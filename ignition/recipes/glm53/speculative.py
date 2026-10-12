@@ -9,7 +9,7 @@ from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
     PreparedStochasticVerification, SpeculativeRngState,
 )
-from ignition.components.state import save_hidden
+from ignition.components.state import gather_rows, save_hidden
 
 from .batch import PreparedBatch
 from .mtp import DraftMetadata, PreparedMTP
@@ -18,10 +18,10 @@ from .state import DecoderMetadata
 
 
 class SpeculativePreparation:
-    def __init__(self, weights, pool, requests, inputs, scratch, *, extra_base, session,
+    def __init__(self, weights, pool, requests, inputs, scratch, *, session,
                  workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
-        self.scratch, self.extra_base, self.session, self.workspace = scratch, extra_base, session, workspace
+        self.scratch, self.session, self.workspace = scratch, session, workspace
         self.records, self.frame, self.sequence = records, frame, sequence
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
         self.rng = SpeculativeRngState.allocate(pool.backing.device, capacity=requests.capacity)
@@ -51,7 +51,7 @@ class PreparedPrefill:
         o, g = self.owner, self.generation
         slot = o.inputs.row_slot_ids[:1].long().clamp(0, o.requests.capacity - 1)
         self.before.copy_(o.requests.consumed_tokens[slot])
-        self.previous.copy_(o.pool.last_hidden[slot + 1])
+        gather_rows(o.pool.last_hidden, o.inputs.request_state_rows[slot, 0], self.previous)
         g()
         length = g.batch.metadata.recurrent.num_tokens.long()
         skip = (self.before == 0).long()
@@ -60,7 +60,7 @@ class PreparedPrefill:
         hidden = torch.where(((self.indices == 0) & (self.before[0] > 0))[:, None], self.previous, hidden)
         self.metadata.set(o.inputs.row_slot_ids[:1], (length - skip).clamp_min(0),
             (self.before - 1).clamp_min(0), g.batch.metadata.token_ids[indices], hidden,
-            o.draft_tables, capacity=self.indices.numel())
+            o.draft_tables, state_rows=o.inputs.request_state_rows, capacity=self.indices.numel())
         self.absorb()
 
 
@@ -78,7 +78,7 @@ class PreparedRound:
         self.metadata = DecoderMetadata(self.metadata.token_ids, torch.arange(b * w, device=device),
             DeltaMetadata.allocate(b, device, verification_columns=8), self.metadata.indexed)
         self.validator = PreparedBatch(o.inputs, o.requests, DecoderMetadata.allocate(b, b, blocks, device),
-            mode="decode", shard=o.weights.shard, pages=o.pool.draft.index.cache.shape[0])
+            mode="decode", shard=o.weights.shard, pages=o.pool.memory_capacity[1:])
         self.validator.accept_unsampled = False
         self.validation = PreparedAllReduce(self.validator.validation_input, self.validator.validation_sum,
             runtime=o.collectives['runtime'], coordinator=o.collectives['coordinator'],
@@ -100,7 +100,7 @@ class PreparedRound:
         self.probabilities = torch.zeros((b, w - 1, o.requests.vocab_size), dtype=torch.float32, device=device)
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
         self.seed, self.offset, self.base_offset, self.sampled = (torch.zeros_like(self.before) for _ in range(4))
-        self.tail_backup = torch.empty_like(o.pool.draft.index.tail[:o.requests.capacity + 1])
+        self.tail_backup = torch.empty_like(o.pool.draft.index.tail[:b])
         self.operations = None
 
     def prepare(self):
@@ -140,11 +140,10 @@ class PreparedRound:
         starts = ends - lengths
         g.query_start_loc[0].zero_()
         g.query_start_loc[1:].copy_(ends)
-        g.convolution_slots.copy_(torch.where(self.active, slots + 1, -1))
+        states = o.inputs.request_state_rows[slots.clamp(0, o.requests.capacity - 1)]
+        g.convolution_slots.copy_(torch.where(self.active, states[:, 0], -1))
         g.fresh.zero_()
         g.accepted_tokens.fill_(1)
-        states = torch.where(self.state_columns == 0, slots[:, None] + 1,
-            o.extra_base + slots[:, None] * 7 + self.state_columns - 1)
         g.state_indices.copy_(torch.where(self.active[:, None], states, 0))
         g.num_seqs.copy_(o.inputs.live_rows.clamp(0, b))
         g.num_tokens.copy_(ends[-1:])
@@ -165,11 +164,12 @@ class PreparedRound:
 
     def commit_state(self, slots, counts):
         o, w = self.owner, self.width
-        selected = torch.where(counts > 1, o.extra_base + slots * 7 + counts - 2, slots + 1)
-        live = torch.where(counts > 0, slots + 1, 0).long()
+        states = o.inputs.request_state_rows[slots.clamp(0, o.requests.capacity - 1)]
+        selected = states[self.rows, (counts - 1).clamp_min(0).long()]
+        live = torch.where(counts > 0, states[:, 0], 0).long()
         for layer in o.pool.decoder.layers:
             if isinstance(layer, DeltaState):
-                values = layer.recurrent[selected.clamp(0, layer.recurrent.shape[0] - 1)]
+                values = layer.recurrent[selected]
                 values = torch.where((counts > 0)[:, None, None, None], values, layer.recurrent[live])
                 layer.recurrent.index_copy_(0, live, values)
                 conv = layer.convolution[live]
@@ -180,8 +180,8 @@ class PreparedRound:
                 layer.convolution.index_copy_(0, live, conv)
         hidden = self.decoder.scratch.hidden.view(self.batch, w, 4096)
         selected_hidden = hidden[self.rows, (counts - 1).clamp_min(0).long()]
-        save_hidden(selected_hidden, o.pool.last_hidden[1:1 + o.requests.capacity],
-                    o.inputs.row_slot_ids[:self.batch], (counts > 0).int())
+        save_hidden(selected_hidden, o.pool.last_hidden,
+                    live, (counts > 0).int())
 
     def __call__(self):
         o, b, w = self.owner, self.batch, self.width
@@ -201,8 +201,8 @@ class PreparedRound:
         self.active.copy_(self.validator.token_state.active.bool())
         self.before.copy_(o.requests.consumed_tokens[safe])
         self.pending.copy_(o.requests.pending_token[safe])
-        self.previous.copy_(o.pool.last_hidden[safe + 1])
-        self.tail_backup.copy_(o.pool.draft.index.tail[:o.requests.capacity + 1])
+        gather_rows(o.pool.last_hidden, o.inputs.request_state_rows[safe, 0], self.previous)
+        gather_rows(o.pool.draft.index.tail, o.inputs.request_state_rows[safe, 0], self.tail_backup)
         self.base_offset.copy_(torch.where(o.draft_generation[safe] == o.requests.generation[safe], o.draft_offset[safe], 0))
         self.seed.copy_(o.requests.seed.view(torch.int64)[safe] ^ DRAFT_RNG_DOMAIN)
         for i, proposal in enumerate(proposals):
@@ -210,7 +210,7 @@ class PreparedRound:
             token = self.pending if i == 0 else self.drafts[:, i - 1]
             proposing = self.active & (i < limits - 1)
             self.draft_metadata.set(slots, proposing.long(), self.before - 1 + i,
-                token, hidden, o.draft_tables, capacity=1)
+                token, hidden, o.draft_tables, state_rows=o.inputs.request_state_rows, capacity=1)
             self.draft()
             torch.index_select(self.draft.logits, 0, self.draft_metadata.output_indices, out=self.draft_logits)
             proposal()
@@ -232,8 +232,10 @@ class PreparedRound:
         verify()
         commit()
         self.commit_state(slots, commit.emitted_count)
-        o.pool.draft.index.tail[:o.requests.capacity + 1].copy_(self.tail_backup)
+        tail = o.pool.draft.index.tail
+        save_hidden(self.tail_backup.view(b, -1), tail.view(tail.shape[0], -1),
+                    o.inputs.request_state_rows[safe, 0], self.active)
         hidden = torch.cat((self.previous[:, None], self.decoder.scratch.hidden.view(b, w, 4096)[:, :-1]), dim=1)
         self.absorb_metadata.set(slots, commit.emitted_count.long(), self.before - 1,
-            self.candidates, hidden, o.draft_tables, capacity=w)
+            self.candidates, hidden, o.draft_tables, state_rows=o.inputs.request_state_rows, capacity=w)
         self.absorb()

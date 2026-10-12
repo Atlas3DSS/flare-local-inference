@@ -36,7 +36,7 @@ def backing():
 def _staging():
     metadata = StateTransferMetadata.allocate(4, "cuda")
     admissions = AdmissionBuffers.allocate("cuda", vocab_size=128)
-    inputs = SimpleNamespace(row_slot_ids=torch.full((4,), -1, dtype=torch.int32, device="cuda"),
+    inputs = SimpleNamespace(request_state_rows=torch.arange(1, 5, device="cuda")[:, None].expand(4, 8).contiguous(), row_slot_ids=torch.full((4,), -1, dtype=torch.int32, device="cuda"),
         row_generations=torch.zeros(4, dtype=torch.int64, device="cuda"),
         live_rows=torch.zeros(1, dtype=torch.int32, device="cuda"),
         page_tables=torch.tensor([[0, 1, 2, 3]] * 4, dtype=torch.int32, device="cuda"))
@@ -47,6 +47,7 @@ def _staging():
 
 
 def _command(metadata, *, source, destination, operation, expected, qsa_slot=-1, row=0):
+    metadata.request_slots[row] = (qsa_slot if qsa_slot >= 0 else source) - 1
     metadata.source_slots[row] = source
     metadata.destination_slots[row] = destination
     metadata.operation[row] = operation

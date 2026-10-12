@@ -50,11 +50,11 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
 def speculation(args, model: ResolvedModel) -> Speculation | None:
     """Apply the command line's speculation overrides to the recipe's settings; None disables speculation."""
     recipe, alias = model.recipe, model.checkpoint.alias
-    default, limit = recipe.speculation, recipe.speculative_rows
+    default, limit = recipe.speculation, recipe.max_draft_tokens
     given = [flag for flag, value in (
         ("--mtp-draft-tokens", args.mtp_draft_tokens),
         ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None),
-        ("--mtp-graph-budget", args.mtp_graph_budget), ("--mtp-proposal-source", args.mtp_proposal_source),
+        ("--mtp-proposal-source", args.mtp_proposal_source),
         ("--history-drafts", args.history_drafts or None)) if value is not None]
     if default is None:
         if args.no_mtp or given:
@@ -74,8 +74,7 @@ def speculation(args, model: ResolvedModel) -> Speculation | None:
     if (source == "copy" or history) and not recipe.history_copy:
         flag = "--history-drafts" if args.history_drafts else "--mtp-proposal-source copy"
         raise UsageError(f"{alias} drafts only with its MTP module; {flag} does not apply")
-    budget = default.graph_budget if args.mtp_graph_budget is None else args.mtp_graph_budget
-    return Speculation(drafts, adaptive, budget, source, history)
+    return Speculation(drafts, adaptive, source, history)
 
 
 def fetch(model: ResolvedModel, hub_cache, *, progress_bars: bool = True) -> str:

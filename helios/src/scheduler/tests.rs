@@ -39,11 +39,10 @@ fn admission_and_completion_cover_configured_concurrency() {
 }
 
 #[test]
-fn graph_budget_reserves_all_prepared_concurrencies_through_64() {
-    let catalog = speculation::graph_catalog(&[1, 2, 3, 4], None, 8, 64);
-    assert_eq!(catalog[0], [3, 4]);
-    assert!(catalog[1..].iter().all(|widths| widths == &[1]));
-    let fixed = speculation::graph_catalog(&[1, 2, 3, 4], Some(4), 8, 64);
+fn verification_catalog_covers_all_prepared_concurrencies_through_64() {
+    let catalog = speculation::graph_catalog(&[1, 2, 3, 4], None, 64);
+    assert!(catalog.iter().all(|widths| widths == &[1, 2, 3, 4]));
+    let fixed = speculation::graph_catalog(&[1, 2, 3, 4], Some(4), 64);
     assert!(fixed.iter().all(|widths| widths == &[4]));
 }
 
@@ -51,6 +50,7 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
     RequestScheduler::new(
         [9; 32],
         SchedulerLimits {
+            request_slots: active.next_power_of_two(),
             max_active: active,
             max_sequence_tokens: 2048,
             prefill_chunk_size: 512,
@@ -66,7 +66,6 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
                 patches_per_feature: 4,
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
-            live_state_base: 1,
             draft_pages_per_request: 1,
         },
     )
@@ -258,6 +257,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
         let mut scheduler = RequestScheduler::new(
             [9; 32],
             SchedulerLimits {
+                request_slots: 1,
                 max_active: 1,
                 max_sequence_tokens: 32768,
                 prefill_chunk_size: chunk_size,
@@ -273,7 +273,6 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                     patches_per_feature: 4,
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
-                live_state_base: 1,
                 draft_pages_per_request: 1,
             },
         )
@@ -325,6 +324,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
         let result = RequestScheduler::new(
             [9; 32],
             SchedulerLimits {
+                request_slots: 1,
                 max_active: 1,
                 max_sequence_tokens: 4096,
                 prefill_chunk_size: chunk_size,
@@ -340,7 +340,6 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                     patches_per_feature: 4,
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
-                live_state_base: 1,
                 draft_pages_per_request: 1,
             },
         );
@@ -1057,7 +1056,8 @@ fn measured_acceptance_selects_the_width_with_most_tokens_per_round_time() {
         let mut c = WidthController::default();
         for w in widths {
             // Round time grows 1.2 ms per draft from 8.8 ms at width one.
-            c.observe(1, 100, w, 8_800_000 + 1_200_000 * (w as u64 - 1), 1).unwrap();
+            c.observe(1, 100, w, 8_800_000 + 1_200_000 * (w as u64 - 1), 1)
+                .unwrap();
         }
         c
     };
@@ -1318,10 +1318,10 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             patches_per_feature: 2,
             patch_capacities: vec![8, 32],
         },
-        live_state_base: 11,
         draft_pages_per_request: 1,
     };
     let limits = SchedulerLimits {
+        request_slots: 1,
         max_active: 1,
         max_sequence_tokens: 2048,
         prefill_chunk_size: 512,
@@ -1340,7 +1340,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             host_stops: false,
         })
         .unwrap();
-    assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(11));
+    assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(1));
     assert!(s.set_vision_images(handle, &[4, 4, 4]).is_err());
     assert!(s.set_vision_images(handle, &[3]).is_err());
     s.set_vision_images(handle, &[4]).unwrap();
@@ -1370,7 +1370,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             ..capabilities.clone()
         },
         SchedulerCapabilities {
-            live_state_base: u32::MAX,
+            draft_pages_per_request: 9,
             ..capabilities
         },
     ] {
@@ -1379,24 +1379,15 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
 }
 
 #[test]
-fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
-    use speculation::graph_catalog;
-    assert_eq!(
-        graph_catalog(&[1, 2, 3, 4], None, 4, 4)[..3],
-        [vec![3, 4], vec![1], vec![1]]
-    );
-    assert_eq!(
-        graph_catalog(&[1, 2, 3, 4], None, 8, 4)[..3],
-        [vec![1, 2, 3, 4], vec![2, 3, 4], vec![1]]
-    );
-    assert_eq!(
-        graph_catalog(&[1, 2, 3, 4], Some(4), 4, 4)[..3],
-        [vec![4], vec![4], vec![4]]
-    );
+fn scheduler_uses_only_loaded_verification_shapes() {
     for active in [1, 2, 3, 4] {
         let mut s = scheduler(active, 64, 8);
         s.enable_speculation(&[1, 2, 3, 4]).unwrap();
-        s.speculative_graph_budget(4).unwrap();
+        let shapes: Vec<_> = [(1, 1), (1, 2), (1, 3), (1, 4), (2, 1), (4, 1)]
+            .into_iter()
+            .filter(|(batch, _)| *batch <= active.next_power_of_two())
+            .collect();
+        s.speculative_graphs(&shapes).unwrap();
         let handles = (0..active)
             .map(|_| s.admit(spec(65, 32)).unwrap())
             .collect::<Vec<_>>();
@@ -1424,16 +1415,7 @@ fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
         for h in handles.iter().skip(1) {
             s.cancel(*h).unwrap();
         }
-        assert_eq!(
-            s.next_step().unwrap().token_capacity,
-            if active == 1 {
-                1
-            } else if active == 2 {
-                2
-            } else {
-                3
-            }
-        );
+        assert_eq!(s.next_step().unwrap().token_capacity, 1);
         assert_eq!(s.request(handles[0]).unwrap().consumed_tokens, 66);
     }
 }

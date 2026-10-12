@@ -17,6 +17,50 @@ ForwardOutput = namedtuple("ForwardOutput", ("hidden", "auxiliary"))
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
+def test_compiled_gather_reads_only_backed_state_rows():
+    import ctypes as C
+    from b12x.sequence._shared.disk_table import _tensor_from_pointer
+    from ignition.components.state import gather_rows
+    from ignition.preparation.package_storage import DeviceRegion
+    from ignition.preparation.runtime_package import _Cuda
+
+    torch.cuda.init()
+    torch.empty(0, device="cuda")
+    cuda = _Cuda()
+    address = C.c_uint64()
+    row_bytes, rows, backed = 2 << 20, 8, 2
+    cuda.call("cuMemAddressReserve", C.byref(address), C.c_size_t(rows * row_bytes),
+              C.c_size_t(row_bytes), C.c_uint64(0), C.c_uint64(0))
+    region = DeviceRegion(cuda, address.value, backed * row_bytes, torch.cuda.current_device())
+    try:
+        storage = _tensor_from_pointer(address.value, shape=(rows, row_bytes), dtype=torch.uint8,
+            device=torch.device("cuda", torch.cuda.current_device()), nbytes=rows * row_bytes)
+        selection = torch.tensor([1, 0], dtype=torch.int64, device="cuda")
+        result = torch.empty((2, 64), dtype=torch.float32, device="cuda")
+
+        def forward():
+            source = storage[:, 256:512].view(torch.float32)
+            gather_rows(source, selection, result)
+
+        storage[:backed, 256:512].view(torch.float32).copy_(torch.arange(128, device="cuda").view(2, 64))
+        compiled = compile_forward(forward)
+        compiled()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            compiled()
+        for indices in ([1, 0], [0, 1]):
+            selection.copy_(torch.tensor(indices, device="cuda"))
+            graph.replay()
+            torch.testing.assert_close(result, torch.arange(128, device="cuda", dtype=torch.float32).view(2, 64)[indices])
+        del graph, compiled, storage
+    finally:
+        torch.cuda.synchronize()
+        cuda.call("cuMemUnmap", address, C.c_size_t(region.nbytes))
+        cuda.call("cuMemAddressFree", address, C.c_size_t(rows * row_bytes))
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
 def test_shared_tracer_preserves_shape_specific_aliases_and_replay():
     source = torch.randn(8, 64, device="cuda")
     weight = torch.randn(64, device="cuda")

@@ -13,6 +13,7 @@ from .state import DecoderMetadata
 
 @dataclass(frozen=True)
 class BatchInputs:
+    request_state_rows: torch.Tensor
     row_slot_ids: torch.Tensor
     row_generations: torch.Tensor
     live_rows: torch.Tensor
@@ -25,7 +26,7 @@ class BatchInputs:
     def allocate(cls, tokens, blocks, device, *, capacity=4):
         if any(type(value) is not int or value <= 0 for value in (tokens, blocks)):
             raise ValueError("GLM upload capacities require positive token and page counts")
-        return cls(torch.full((capacity,), -1, dtype=torch.int32, device=device),
+        return cls(torch.zeros((capacity, 8), dtype=torch.int64, device=device),torch.full((capacity,), -1, dtype=torch.int32, device=device),
             torch.zeros(capacity, dtype=torch.int64, device=device), torch.zeros(1, dtype=torch.int32, device=device),
             torch.zeros(capacity, dtype=torch.int32, device=device), torch.zeros(tokens, dtype=torch.int64, device=device),
             torch.full((capacity, blocks), -1, dtype=torch.int32, device=device),
@@ -55,7 +56,7 @@ class PreparedBatch:
             raise ValueError("GLM prefill has one sequence; decode has one token per row")
         if tokens > inputs.token_ids.numel() or inputs.page_tables.shape[1] != metadata.indexed.block_table.shape[1]:
             raise ValueError("GLM upload and metadata capacities differ")
-        if type(pages) is not int or pages <= 0 or requests.vocab_size != 154880:
+        if not isinstance(pages, torch.Tensor) or pages.shape != (1,) or pages.dtype != torch.int64 or requests.vocab_size != 154880:
             raise ValueError("GLM batches require positive cache capacity and a 154880-token vocabulary")
         self.inputs, self.requests, self.metadata = inputs, requests, metadata
         self.rows, self.tokens, self.pages, self.mode, self.shard = rows, tokens, pages, mode, shard
@@ -119,12 +120,13 @@ class PreparedBatch:
         starts = ends - lengths
         g.query_start_loc[0].zero_()
         g.query_start_loc[1:].copy_(ends)
-        g.convolution_slots.copy_(torch.where(active, slots + 1, -1))
+        state = b.request_state_rows[slots.clamp(0, self.capacity - 1), 0]
+        g.convolution_slots.copy_(torch.where(active, state, -1))
         g.fresh.copy_(active & (t.positions == 0))
         g.accepted_tokens.fill_(1)
-        g.state_indices[:, 0].copy_(torch.where(active, slots + 1, 0))
-        g.initial_state_indices.copy_(torch.where(active & (t.positions > 0), slots + 1, 0))
-        g.final_state_indices.copy_(torch.where(active, slots + 1, 0))
+        g.state_indices[:, 0].copy_(torch.where(active, state, 0))
+        g.initial_state_indices.copy_(torch.where(active & (t.positions > 0), state, 0))
+        g.final_state_indices.copy_(torch.where(active, state, 0))
         g.checkpoint_state_indices.zero_()
         g.checkpoint_offsets.zero_()
         g.num_seqs.copy_(b.live_rows.clamp(0, self.rows))

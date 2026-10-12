@@ -20,6 +20,9 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
     let prefill_chunk_size = config.limits.prefill_chunk_size;
     let patch_capacity = *config.contract.vision.patch_capacities.last().unwrap();
     let mut buffers = vec![
+        ("request_state_rows", I64, vec![slots, 8]),
+        ("memory_capacity", I64, vec![2]),
+        ("state_request_slots", I64, vec![slots]),
         ("row_slot_ids", I32, vec![slots]),
         ("row_generations", I64, vec![slots]),
         ("live_rows", I32, vec![1]),
@@ -116,6 +119,7 @@ pub(super) fn required_inputs(
 fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
     match kind {
         GraphKind::Init | GraphKind::Restore => &[
+            "request_state_rows",
             "admission_count",
             "admission_slots",
             "admission_generations",
@@ -128,6 +132,7 @@ fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
             "admission_histogram",
             "admission_grammar_mask",
             "admission_grammar_enabled",
+            "state_request_slots",
             "state_expected_consumed",
             "state_source_slots",
             "state_destination_slots",
@@ -137,6 +142,8 @@ fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
             "state_num_ops",
         ],
         GraphKind::Snapshot => &[
+            "request_state_rows",
+            "state_request_slots",
             "state_expected_consumed",
             "state_source_slots",
             "state_destination_slots",
@@ -149,6 +156,7 @@ fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
             "live_rows",
         ],
         GraphKind::Prefill => &[
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",
@@ -161,6 +169,7 @@ fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
             "sampling_grammar_mask",
         ],
         GraphKind::Speculative => &[
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",
@@ -173,6 +182,7 @@ fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
             "copy_generation",
         ],
         GraphKind::Decode | GraphKind::Resume => &[
+            "request_state_rows",
             "row_slot_ids",
             "row_generations",
             "live_rows",

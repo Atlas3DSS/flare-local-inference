@@ -241,7 +241,17 @@ impl<M: ModelContract> ModelRuntime<M> {
                         scheduler.fixed_speculative_width(worker_config.speculative_fixed_width)
                     })
                     .and_then(|()| {
-                        scheduler.speculative_graph_budget(worker_config.speculative_graph_budget)
+                        scheduler.speculative_graphs(
+                            &executor
+                                .manifest()
+                                .graphs
+                                .iter()
+                                .filter(|graph| {
+                                    graph.kind == crate::execution::GraphKind::Speculative
+                                })
+                                .map(|graph| (graph.batch_capacity, graph.token_capacity))
+                                .collect::<Vec<_>>(),
+                        )
                     })
                 {
                     let _ = ready_tx.send(Err(error.clone()));
@@ -1262,11 +1272,12 @@ mod tests {
         let mut scheduler = RequestScheduler::new(
             [5; 32],
             SchedulerLimits {
+                request_slots: 4,
                 max_active: 4,
                 max_sequence_tokens: 64,
                 prefill_chunk_size: 64,
                 pages: 4,
-                snapshots: 8,
+                snapshots: 40,
             },
             SchedulerCapabilities {
                 vocabulary: 248320,
@@ -1277,7 +1288,7 @@ mod tests {
                     patches_per_feature: 4,
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
-                live_state_base: 1,
+
                 draft_pages_per_request: 1,
             },
         )
@@ -1382,17 +1393,18 @@ mod tests {
         RequestScheduler::new(
             [3; 32],
             crate::scheduler::SchedulerLimits {
+                request_slots: 2,
                 max_active: 2,
                 max_sequence_tokens: 64,
                 prefill_chunk_size: 64,
                 pages: 4,
-                snapshots: 8,
+                snapshots: 40,
             },
             SchedulerCapabilities {
                 vocabulary: 6,
                 page_tokens: 64,
                 vision: Qwen4Exp::metadata().vision,
-                live_state_base: 1,
+
                 draft_pages_per_request: 0,
             },
         )
@@ -1653,7 +1665,7 @@ mod tests {
         assert!(scheduler.complete(Fence(1), &records).unwrap().is_empty());
         assert_eq!(scheduler.stats().retiring_slots, 0);
         assert_eq!(scheduler.free_page_count(), 4);
-        assert_eq!(scheduler.free_snapshot_count(), 8);
+        assert_eq!(scheduler.free_snapshot_count(), 40);
         let reused = scheduler.admit(retirement_spec(false)).unwrap();
         assert_eq!(reused.slot, handle.slot);
         assert!(reused.generation > handle.generation);
@@ -1866,6 +1878,7 @@ mod tests {
         let mut scheduler = RequestScheduler::new(
             [7; 32],
             crate::scheduler::SchedulerLimits {
+                request_slots: 2,
                 max_active: 2,
                 max_sequence_tokens: 64,
                 prefill_chunk_size: 64,
@@ -1881,7 +1894,7 @@ mod tests {
                     patches_per_feature: 4,
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
-                live_state_base: 1,
+
                 draft_pages_per_request: 1,
             },
         )

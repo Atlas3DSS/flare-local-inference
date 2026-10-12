@@ -33,7 +33,9 @@ fn validate_inner<M: ModelContract>(
     config.limits.validate_prefill()?;
     let page_tokens = M::scheduler_capabilities(config).page_tokens;
     if config.model_id.is_empty()
-        || config.limits.max_active != manifest.max_active
+        || config.limits.max_active == 0
+        || config.limits.max_active > manifest.max_active
+        || config.limits.request_slots != manifest.request_capacity()
         || config.limits.max_sequence_tokens == 0
         || page_tokens == 0
         || !config
@@ -56,13 +58,6 @@ fn validate_inner<M: ModelContract>(
         return Err("invalid prepared model configuration".into());
     }
     speculation::validate_widths(&config.speculative_widths)?;
-    if !(config.limits.request_capacity().ilog2() as usize + 1..=56)
-        .contains(&config.speculative_graph_budget)
-    {
-        return Err(
-            "speculative graph budget must cover every batch capacity and be at most 56".into(),
-        );
-    }
     if config
         .speculative_fixed_width
         .is_some_and(|w| !config.speculative_widths.contains(&w))
@@ -130,32 +125,28 @@ fn validate_inner<M: ModelContract>(
             SamplingMode::General,
         )?;
     }
-    for &tokens in &config.speculative_widths {
-        for batch in batches(config).filter(|batch| speculative_shape(config, *batch, tokens)) {
-            select::<M>(
-                config,
-                manifest,
-                GraphKind::Speculative,
-                batch,
-                tokens,
-                SamplingMode::General,
-            )?;
+    if !config.speculative_widths.is_empty() {
+        for batch in batches(config) {
+            if !manifest
+                .graphs
+                .iter()
+                .any(|graph| graph.kind == GraphKind::Speculative && graph.batch_capacity == batch)
+            {
+                return Err(
+                    format!("prepared model lacks speculative graphs for batch {batch}").into(),
+                );
+            }
         }
     }
     Ok(())
 }
 
 fn speculative_shape(config: &ModelConfig, batch: usize, tokens: usize) -> bool {
-    let index = batch.trailing_zeros() as usize;
-    (1..=8).contains(&tokens)
-        && speculation::graph_width_masks(
-            &config.speculative_widths,
-            config.speculative_fixed_width,
-            config.speculative_graph_budget,
-            config.limits.request_capacity(),
-        )[index]
-            & (1 << (tokens - 1))
-            != 0
+    batches(config).any(|capacity| capacity == batch)
+        && config.speculative_widths.contains(&tokens)
+        && config
+            .speculative_fixed_width
+            .is_none_or(|width| width == tokens)
 }
 
 fn batches(config: &ModelConfig) -> impl Iterator<Item = usize> {

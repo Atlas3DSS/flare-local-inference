@@ -26,7 +26,7 @@ def test_resume_gathers_exact_hidden_without_consumption(rows):
     slots = torch.tensor([2, 0, 3, 1][:rows], dtype=torch.int32, device="cuda:0")
     epochs = torch.full((rows,), 7, dtype=torch.int64, device="cuda:0")
     count = torch.full((1,), rows, dtype=torch.int32, device="cuda:0")
-    operation = PreparedResumeState(state, saved, slots, epochs, count, world_size=1)
+    operation = PreparedResumeState(state, saved, slots, epochs, count, world_size=1, state_rows=torch.arange(state.capacity, device="cuda")[:, None].expand(-1, 8).contiguous())
 
     def forward():
         operation.validation_sum.copy_(operation.validate())

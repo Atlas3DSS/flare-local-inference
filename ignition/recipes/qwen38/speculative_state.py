@@ -43,9 +43,9 @@ def _validate_round(Slots, Epochs, Live, Generation, Status, Error, Pending, Con
 def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, PreviousAccepted,
                            Delta, Tokens, Cu, ConvSlots, Fresh, StateIndices, Accepted,
                            NumSeqs, NumTokens, RequestIds, QueryPositions, Rope, SequenceLengths,
-                           SlotMapping, PhysicalPages, PackedPages, Limits, LIMITED: tl.constexpr,
+                           SlotMapping, PhysicalPages, PackedPages, Limits, StateRows, RawSlots, LIMITED: tl.constexpr,
                            ROWS: tl.constexpr, WIDTH: tl.constexpr, CANDIDATE_STRIDE: tl.constexpr,
-                           PAGES: tl.constexpr, DELTA_STRIDE: tl.constexpr, EXTRA_BASE: tl.constexpr,
+                           PAGES: tl.constexpr, DELTA_STRIDE: tl.constexpr,
                            BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row = tl.program_id(0)
     slot = tl.load(Slots + row)
@@ -53,18 +53,19 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
     active = (row < live) & (tl.load(Active + row) != 0) & (slot >= 0) & (slot < SLOTS)
     start = row * WIDTH
     position = tl.load(Positions + row)
-    model_slot = tl.where(active, slot + 1, -1)
+    model_slot = tl.load(StateRows + slot * 8, active, other=-1)
     tl.store(Cu + row, tl.minimum(row, live) * WIDTH)
     if row == 0:
         tl.store(Cu + ROWS, live * WIDTH)
         tl.store(NumSeqs, live)
         tl.store(NumTokens, live * WIDTH)
     tl.store(ConvSlots + row, model_slot)
+    tl.store(RawSlots + row, tl.where(active, slot + 1, -1))
     tl.store(Fresh + row, False)
     previous = tl.load(PreviousAccepted + slot, active, other=1)
     tl.store(Accepted + row, previous)
     columns = tl.arange(0, 8)
-    indices = tl.where(columns == 0, slot + 1, EXTRA_BASE + slot * 7 + columns - 1)
+    indices = tl.load(StateRows + slot * 8 + columns, active, other=0)
     tl.store(StateIndices + row * 8 + columns, tl.where(active, indices, 0))
     length = WIDTH
     if LIMITED:
@@ -81,7 +82,7 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
     tl.store(RequestIds + start + offsets, tl.where(in_context, row, -1), valid)
     tl.store(QueryPositions + start + offsets, tl.where(in_context, logical, -1), valid)
     tl.store(SlotMapping + start + offsets, tl.where(in_context, page * 64 + logical % 64, -1), valid)
-    delta = tl.load(Delta + (slot + 1) * DELTA_STRIDE, active, other=0)
+    delta = tl.load(Delta + model_slot * DELTA_STRIDE, active, other=0)
     for axis in tl.static_range(3):
         tl.store(Rope + (start + offsets) * 3 + axis, tl.where(in_context, logical + delta, -1), valid)
     for block in range(tl.cdiv(PAGES, BLOCK)):
@@ -92,22 +93,23 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
 
 @triton.jit
 def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope, Slots, Count,
-                   PreviousAccepted, WIDTH: tl.constexpr, HS: tl.constexpr, RS: tl.constexpr,
+                   PreviousAccepted, StateRows, WIDTH: tl.constexpr, HS: tl.constexpr, RS: tl.constexpr,
                    RPS: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
     row, tile = tl.program_id(0), tl.program_id(1)
     slot, count = tl.load(Slots + row), tl.load(Count + row)
+    state_row = tl.load(StateRows + slot * 8, (slot >= 0) & (slot < SLOTS), other=0)
     active = (count > 0) & (slot >= 0) & (slot < SLOTS)
     channel = tile * BLOCK + tl.arange(0, BLOCK)
     offset = row * WIDTH + count - 1
     residual = tl.load(Residual + offset * 10240 + channel, active & (channel < 10240), other=0)
-    tl.store(SavedResidual + (slot + 1) * RS + channel, residual, active & (channel < 10240))
+    tl.store(SavedResidual + state_row * RS + channel, residual, active & (channel < 10240))
     hidden = tl.load(Hidden + offset * 2560 + channel, active & (channel < 2560), other=0)
-    tl.store(SavedHidden + (slot + 1) * HS + channel, hidden, active & (channel < 2560))
+    tl.store(SavedHidden + state_row * HS + channel, hidden, active & (channel < 2560))
     if tile == 0:
         tl.store(PreviousAccepted + slot, count, active)
         axes = tl.arange(0, 4)
         rope = tl.load(Rope + (row * WIDTH + count - 1) * 3 + axes, active & (axes < 3), other=-1)
-        tl.store(SavedRope + (slot + 1) * RPS + axes, rope, active & (axes < 3))
+        tl.store(SavedRope + state_row * RPS + axes, rope, active & (axes < 3))
 
 
 
@@ -119,11 +121,9 @@ class PreparedVerificationState:
     """
 
     def __init__(self, inputs, requests, pool, candidates, previous_accepted,
-                 *, width: int, rows: int, extra_base: int, token_limits=None):
+                 *, width: int, rows: int, token_limits=None):
         if type(width) is not int or not 1 <= width <= 8 or (rows not in BATCH_CAPACITIES or rows > requests.capacity):
             raise ValueError("verification requires width 1 through 8 and a power-of-two batch within request capacity")
-        if pool.layout.speculative_tokens != 7 or extra_base < requests.capacity + 2 or extra_base + requests.capacity * 7 > pool.backing.shape[0]:
-            raise ValueError("verification requires a seven-draft pool and seven private state rows per request")
         if candidates.dtype != torch.int64 or candidates.shape != (requests.capacity, 8):
             raise ValueError("verification candidates require int64 [capacity,8]")
         self.inputs, self.requests, self.pool = inputs, requests, pool
@@ -135,7 +135,7 @@ class PreparedVerificationState:
         self.qsa = QSAMetadata.allocate(tokens=self.tokens, batch=rows,
             context=inputs.page_tables.shape[1] * 64, device=device)
         self.qsa = QSAMetadata(self.qsa.main_block_table, self.qsa.main_block_table,
-            self.gdn.convolution_slots, self.qsa.request_ids, self.qsa.query_positions,
+            self.qsa.raw_state_slot_ids, self.qsa.request_ids, self.qsa.query_positions,
             self.qsa.rope_positions, self.qsa.sequence_lengths, self.gdn.query_start_loc,
             self.gdn.accepted_tokens, self.qsa.is_prefilling, self.qsa.slot_mapping)
         self.token_state = PreparedTokenState(requests, self.token_ids, self.gdn.query_start_loc,
@@ -156,9 +156,9 @@ class PreparedVerificationState:
              g.convolution_slots, g.fresh, g.state_indices, g.accepted_tokens, g.num_seqs, g.num_tokens,
              q.request_ids, q.query_positions, q.rope_positions, q.sequence_lengths, q.slot_mapping,
              inputs.page_tables, q.main_block_table,
-             inputs.query_lengths if token_limits is None else token_limits, token_limits is not None,
+             inputs.query_lengths if token_limits is None else token_limits, inputs.request_state_rows, q.raw_state_slot_ids, token_limits is not None,
              rows, width, candidates.stride(0),
-             inputs.page_tables.shape[1], pool.rope_delta.stride(0), extra_base, 128, requests.capacity), (rows, 1, 1))
+             inputs.page_tables.shape[1], pool.rope_delta.stride(0), 128, requests.capacity), (rows, 1, 1))
 
     def prepare_hidden(self, hidden, sample):
         if hidden.shape != sample.shape:
@@ -183,7 +183,7 @@ class PreparedVerificationState:
         saved_rope = pool.region("target_residual_position")
         self._commit.append(compile_kernel(_commit_hidden,
             (hidden, residual, pool.last_hidden, saved_residual, self.qsa.rope_positions, saved_rope, slots,
-             emitted_count, self.previous_accepted, self.width,
+             emitted_count, self.previous_accepted, self.inputs.request_state_rows, self.width,
              pool.last_hidden.stride(0), saved_residual.stride(0), saved_rope.stride(0), 1024, self.requests.capacity),
             (self.rows, 10, 1)))
 

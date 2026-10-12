@@ -1109,7 +1109,7 @@ Prepare these operations:
   storage.
 - **State maintenance:** initialize or restore a live slot, or freeze its exact
   consumed state into an immutable snapshot. The model input schema
-  `qwen4exp.graph-inputs.v2` carries the expected consumed count and physical-slot
+  `qwen4exp.graph-inputs.v3` carries the expected consumed count and physical-slot
   target/draft page tables for snapshot and restore.
 
 Padding changes capacity, never logical sequence length. Every padded row must
@@ -1175,10 +1175,10 @@ Execution ABIs 2 and 3 retain `sampling_mode="general"` as their sole supported
 manifest value. With batch capacities 1, 2 and 4, the ordinary serving catalog
 contains `19 + len(prefill_capacities)` graphs: 25 with the 4,096-token default,
 or 22 with a 512-token limit. The speculative catalog replaces three ordinary
-decode graphs with eight verification shapes under the default three-draft
-limit and eight-graph budget, for 30 graphs at the default prefill capacity.
-Fixed drafting captures one verification shape per batch capacity, for 25 graphs
-at the default prefill capacity. Bounded top-k optimization is deferred.
+decode graphs with eighteen verification shapes under the default five-draft
+limit, for 40 graphs at the default prefill capacity. Runtime fixed verification
+loads one verification shape per required batch capacity, for 25 graphs at
+concurrency four and the default prefill capacity. Bounded top-k optimization is deferred.
 Historical component measurements of the general path were 120–170 microseconds per step; each
 prepared implementation requires its own measurement. Threshold ties must never
 be truncated to a fixed number of candidates.
@@ -1340,9 +1340,11 @@ allocation; at an aligned endpoint, maintenance never writes a shared full page.
 The copied unused KV rows and incomplete selector-group values do not define
 committed state. Valid token ranges, completed selector groups, and raw tags do.
 
-The model state pool uses row zero for the null state, rows1–4 for live requests,
-and row `5 + snapshot_id` for immutable snapshots. Speculative recurrent columns
-follow the immutable range. Metadata validation checks the exact source count,
+The model state pool uses row zero for the null state. For runtime concurrency
+`C` and maximum loaded verification width `W`, request slot `s` owns rows
+`1 + s * W` through `1 + (s + 1) * W - 1`. Immutable snapshot `i` occupies
+row `1 + C * W + i`. These partitions remain fixed while the model is loaded.
+Metadata validation checks the exact source count,
 epoch, transfer direction, needed page mappings, and cross-row aliases before
 any state mutation.
 

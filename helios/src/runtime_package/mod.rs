@@ -1,16 +1,19 @@
 //! Native ownership and reconstruction of prepared CUDA graph packages.
 
+mod archive;
 pub mod driver;
 mod format;
+mod memory;
 mod model;
 mod payload;
 mod protobuf;
+mod selection;
 mod serving;
 pub use model::NativeModel;
+pub use selection::LoadOptions;
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fs;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
@@ -19,6 +22,7 @@ use crate::{
     BufferSpan, GraphBundle, Result,
     startup::{Phase, StartupProgress},
 };
+use archive::Archive;
 use driver::{
     Access, AllocationProperties, CopyEndpoint, CopyParams, Driver, Handle, KernelParams, Location,
     MemsetParams, TensorMap,
@@ -41,7 +45,7 @@ pub struct NativeResources {
     device: i32,
     allocations: HashMap<String, Storage>,
     modules: Vec<Handle>,
-    functions: Vec<Handle>,
+    functions: HashMap<usize, Handle>,
     templates: Vec<Handle>,
     executables: Vec<Handle>,
     names: Vec<String>,
@@ -62,17 +66,26 @@ impl NativeResources {
     /// This method makes the owner's context current on the calling thread.
     pub unsafe fn load(path: impl AsRef<Path>, ordinal: i32) -> Result<Self> {
         let path = path.as_ref();
-        let bytes = fs::read(path.join("package.pb")).map_err(|e| e.to_string())?;
-        let package = protobuf::decode(&bytes)?;
+        let (archive, mut index) = Archive::open(path)?;
+        if index.ranks.len() != 1 || !index.peer_memory.is_empty() {
+            return Err(invalid("resource loader requires one independent rank"));
+        }
+        let package = protobuf::decode(index.ranks.remove(0))?;
+        archive.validate(&package)?;
         package.validate()?;
+        if package.allocations.iter().any(|a| a.sizing.is_some()) {
+            return Err(invalid(
+                "runtime-sized storage requires a model memory plan",
+            ));
+        }
         let phase = StartupProgress::silent().phase("Load model", None);
         let mut owner = unsafe { Self::initialize(&package, ordinal)? };
         unsafe {
             owner.reserve(&package)?;
             owner.allocate(&package, &phase)?;
-            owner.load_payload(path, &package, &phase, 1)?;
-            owner.prepare_kernels(path, &package, &phase)?;
-            owner.prepare_graphs(&package, &phase)?;
+            owner.load_payload(&archive, &package, &phase, 1)?;
+            owner.prepare_kernels(&archive, &package, &phase)?;
+            owner.prepare_graphs(&archive, &package, &phase)?;
         }
         phase.finish("");
         Ok(owner)
@@ -107,13 +120,23 @@ impl NativeResources {
                 device,
                 allocations: HashMap::new(),
                 modules: vec![],
-                functions: vec![],
+                functions: HashMap::new(),
                 templates: vec![],
                 executables: vec![],
                 names: vec![],
                 reservations: vec![],
                 execution: package.execution.clone(),
             };
+            for [limit, value] in &package.context.limits {
+                owner.driver.check(
+                    "cuCtxSetLimit",
+                    (owner.driver.context_limit)(*limit as i32, *value),
+                )?;
+            }
+            owner.driver.check(
+                "cuCtxSetCacheConfig",
+                (owner.driver.context_cache)(package.context.cache),
+            )?;
             Ok(owner)
         }
     }
@@ -180,7 +203,13 @@ impl NativeResources {
             let footprint = package
                 .allocations
                 .iter()
-                .filter(|allocation| matches!(allocation.memory, Memory::Device))
+                .filter(|allocation| {
+                    matches!(allocation.memory, Memory::Device)
+                        && !self
+                            .allocations
+                            .get(&allocation.name)
+                            .is_some_and(|a| a.nbytes > 0)
+                })
                 .try_fold(0usize, |total, allocation| {
                     total.checked_add(allocation.nbytes)
                 })
@@ -195,17 +224,27 @@ impl NativeResources {
                     "package needs {footprint} device bytes; only {free} are free"
                 )));
             }
-            for [limit, value] in &package.context.limits {
-                driver.check(
-                    "cuCtxSetLimit",
-                    (driver.context_limit)(*limit as i32, *value),
-                )?;
-            }
-            driver.check(
-                "cuCtxSetCacheConfig",
-                (driver.context_cache)(package.context.cache),
-            )?;
             for allocation in &package.allocations {
+                if self
+                    .allocations
+                    .get(&allocation.name)
+                    .is_some_and(|a| a.nbytes > 0)
+                {
+                    continue;
+                }
+                if allocation.sizing.is_some() {
+                    self.allocations.insert(
+                        allocation.name.clone(),
+                        Storage {
+                            base: 0,
+                            address: allocation.address.unwrap(),
+                            nbytes: 0,
+                            memory: allocation.memory,
+                            fixed: true,
+                        },
+                    );
+                    continue;
+                }
                 let mut base = 0;
                 let size = allocation.nbytes + allocation.alignment - 1;
                 let address = if let Some(address) = allocation.address {
@@ -321,7 +360,7 @@ impl NativeResources {
 
     unsafe fn load_payload(
         &mut self,
-        root: &Path,
+        archive: &Archive,
         package: &Package,
         phase: &Phase,
         ranks: usize,
@@ -329,7 +368,7 @@ impl NativeResources {
         let driver = self.driver.clone();
         unsafe {
             driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
-            payload::load(self, root, package, phase, ranks)?;
+            payload::load(self, archive, package, phase, ranks)?;
             for allocation in &package.allocations {
                 for relocation in &allocation.relocations {
                     let address =
@@ -352,7 +391,7 @@ impl NativeResources {
 
     unsafe fn prepare_kernels(
         &mut self,
-        root: &Path,
+        archive: &Archive,
         package: &Package,
         phase: &Phase,
     ) -> Result<()> {
@@ -361,7 +400,8 @@ impl NativeResources {
             driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
             let mut modules = HashMap::new();
             for module in &package.modules {
-                let image = fs::read(root.join(&module.file)).map_err(|e| e.to_string())?;
+                let mapping = archive.map(package, &module.file)?;
+                let image = mapping.bytes();
                 if !image.starts_with(b"\x7fELF") {
                     return Err(invalid("module image is not a compiled cubin"));
                 }
@@ -379,8 +419,7 @@ impl NativeResources {
                         "cuModuleGetGlobal_v2",
                         (driver.module_global)(&mut address, &mut size, handle, symbol.as_ptr()),
                     )?;
-                    let mut contents =
-                        fs::read(root.join(&global.file)).map_err(|e| e.to_string())?;
+                    let mut contents = archive.read(package, &global.file)?;
                     if size != global.nbytes || contents.len() != size {
                         return Err(invalid(format!(
                             "module global size mismatch for {}",
@@ -404,6 +443,7 @@ impl NativeResources {
                     "cuModuleGetFunction",
                     (driver.function)(&mut handle, modules[&function.module], symbol.as_ptr()),
                 )?;
+                driver.check("cuFuncLoad", (driver.function_load)(handle))?;
                 for (index, expected) in function.parameter_sizes.iter().enumerate() {
                     let (mut offset, mut size) = (0, 0);
                     driver.check(
@@ -434,14 +474,19 @@ impl NativeResources {
                         (driver.function_attribute)(handle, *attribute, *value),
                     )?;
                 }
-                self.functions.push(handle);
+                self.functions.insert(function.id, handle);
                 phase.advance(1);
             }
         }
         Ok(())
     }
 
-    unsafe fn prepare_graphs(&mut self, package: &Package, phase: &Phase) -> Result<()> {
+    unsafe fn prepare_graphs(
+        &mut self,
+        archive: &Archive,
+        package: &Package,
+        phase: &Phase,
+    ) -> Result<()> {
         let driver = self.driver.clone();
         unsafe {
             driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
@@ -449,8 +494,19 @@ impl NativeResources {
                 let mut handle = null_mut();
                 driver.check("cuGraphCreate", (driver.graph_create)(&mut handle, 0))?;
                 self.templates.push(handle);
-                let mut nodes = Vec::new();
-                for node in &graph.nodes {
+                let mut nodes = Vec::with_capacity(graph.node_count);
+                let mut records = archive.records(package, &graph.resource)?;
+                for _ in 0..graph.node_count {
+                    let node = protobuf::node(records.read()?)?;
+                    package.validate_node(&node)?;
+                    if let Node::Kernel { function, .. } = &node {
+                        if !graph.functions.contains(function) {
+                            return Err(invalid(
+                                "graph kernel is absent from its dependency index",
+                            ));
+                        }
+                    }
+                    let node = &node;
                     let mut result = null_mut();
                     match node {
                         Node::Kernel {
@@ -468,7 +524,7 @@ impl NativeResources {
                             let mut pointers: Vec<_> =
                                 storage.iter_mut().map(|a| a.as_mut_ptr().cast()).collect();
                             let params = KernelParams {
-                                function: self.functions[*function],
+                                function: self.functions[function],
                                 grid: *grid,
                                 block: *block,
                                 shared: *shared,
@@ -568,11 +624,18 @@ impl NativeResources {
                     nodes.push(result);
                     phase.advance(1);
                 }
-                if !graph.edges.is_empty() {
-                    let sources: Vec<_> = graph.edges.iter().map(|e| nodes[e.source]).collect();
-                    let destinations: Vec<_> =
-                        graph.edges.iter().map(|e| nodes[e.destination]).collect();
-                    let data: Vec<_> = graph.edges.iter().map(|e| e.data).collect();
+                let mut dependencies = format::Dependencies::new(graph.node_count);
+                for begin in (0..graph.edge_count).step_by(4096) {
+                    let mut sources = Vec::new();
+                    let mut destinations = Vec::new();
+                    let mut data = Vec::new();
+                    for _ in begin..(begin + 4096).min(graph.edge_count) {
+                        let edge = protobuf::edge(records.read()?)?;
+                        dependencies.add(&edge)?;
+                        sources.push(nodes[edge.source]);
+                        destinations.push(nodes[edge.destination]);
+                        data.push(edge.data);
+                    }
                     driver.check(
                         "cuGraphAddDependencies_v2",
                         (driver.graph_edges)(
@@ -584,6 +647,8 @@ impl NativeResources {
                         ),
                     )?;
                 }
+                dependencies.finish()?;
+                records.finish()?;
                 let mut executable = null_mut();
                 driver.check(
                     "cuGraphInstantiateWithFlags",
@@ -591,8 +656,16 @@ impl NativeResources {
                 )?;
                 self.executables.push(executable);
                 self.names.push(graph.name.clone());
+                driver.check(
+                    "cuGraphUpload",
+                    (driver.graph_upload)(executable, null_mut()),
+                )?;
+                driver.check("cuCtxSynchronize", (driver.context_sync)())?;
+                driver.check("cuGraphDestroy", (driver.graph_destroy)(handle))?;
+                self.templates.pop();
                 phase.advance(1);
             }
+            self.functions.clear();
             driver.check("cuCtxSynchronize", (driver.context_sync)())?;
         }
         Ok(())
@@ -689,6 +762,9 @@ impl Drop for NativeResources {
                 (self.driver.module_unload)(*module);
             }
             for allocation in self.allocations.values() {
+                if allocation.nbytes == 0 {
+                    continue;
+                }
                 match (allocation.memory, allocation.fixed) {
                     (Memory::Device, false) => {
                         (self.driver.free)(allocation.base);

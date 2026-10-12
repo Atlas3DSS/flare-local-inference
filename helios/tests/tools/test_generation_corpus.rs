@@ -35,6 +35,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let asset = |name: &str| -> Result<Asset, String> {
         Ok(Asset {
+            range: None,
             path: snapshot.join(name),
             sha256: corpus["tokenizer_assets"][name]["sha256"]
                 .as_str()
@@ -65,6 +66,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .into(),
         identity: [0; 32],
         limits: SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 262144,
             prefill_chunk_size: 4096,
@@ -76,7 +78,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        speculative_graph_budget: 24,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     };

@@ -93,7 +93,7 @@ def test_speculation_flags_override_the_recipe():
     assert default == resolve("qwen3.8-flash").recipe.speculation
     assert (default.draft_tokens, default.adaptive, default.widths, default.fixed_width) == (
         5, True, (1, 2, 3, 4, 5, 6), None)
-    assert (default.graph_budget, default.proposal_source, default.history_drafts) == (8, "mtp", False)
+    assert (default.proposal_source, default.history_drafts) == ("mtp", False)
     assert speculation("--no-mtp") is None
     # Verification adapts among every count up to the draft-token setting unless it is fixed.
     reduced = speculation("--mtp-draft-tokens", "3")
@@ -104,7 +104,6 @@ def test_speculation_flags_override_the_recipe():
     assert speculation("--no-mtp-adaptive-verification").fixed_width == 6
     assert speculation("--mtp-draft-tokens", "0").widths == (1,)
     assert speculation("--mtp-draft-tokens", "7").draft_tokens == 7
-    assert speculation("--mtp-graph-budget", "12").graph_budget == 12
     copied = speculation("--mtp-proposal-source", "copy")
     assert copied.proposal_source == "copy" and not copied.learned and not copied.history_drafts
     assert speculation("--history-drafts").history_drafts
@@ -119,8 +118,6 @@ def test_speculation_flags_override_the_recipe():
     (["--no-mtp", "--history-drafts"], "--no-mtp disables speculation; --history-drafts cannot accompany it"),
     (["--mtp-draft-tokens", "8"], "--mtp-draft-tokens must be 0 through 7; --no-mtp disables speculation"),
     (["--mtp-draft-tokens", "-1"], "--mtp-draft-tokens must be 0 through 7"),
-    (["--mtp-graph-budget", "2"], "--mtp-graph-budget must be 3 through 56 at --max-concurrency 4"),
-    (["--max-concurrency", "64", "--mtp-graph-budget", "6"], "--mtp-graph-budget must be 7 through 56"),
 ])
 def test_invalid_speculation_flags_are_usage_errors(host, capsys, arguments, message):
     assert run("qwen3.8-flash", *arguments) == 2

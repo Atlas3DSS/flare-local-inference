@@ -197,8 +197,11 @@ class DirectWeightLoader:
             raise RuntimeError(f"weight loading requires an open {type(self).__name__} context")
 
     def _copy(self, destination, source):
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
+
         if not self._session(destination, source):
             raise RuntimeError("b12x rejected the direct weight transfer")
+        record_numeric_tensor(destination)
         if self._display is not None:
             self._display.update(self._session.payload_bytes)
 
@@ -443,15 +446,19 @@ class DirectWeightLoader:
 
     def _queue_csf_sources(self, prefixes, *, rows, columns, **selection):
         from b12x.loader._csf_source import stage_csf_sources
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
 
         encoding = "csf_32x2_v1" if f"{prefixes[0]}.csf32_bases" in self._sources else "csf"
         suffixes = (tuple(f"csf32_{field}" for field in
                     ("bases", "codes", "page_bases", "offsets", "exceptions"))
                     if encoding == "csf_32x2_v1" else ("nvfp4_csf_fixed", "nvfp4_csf_exceptions"))
-        return stage_csf_sources(
+        result = stage_csf_sources(
             [tuple(self._sources[f"{prefix}.{suffix}"] for suffix in suffixes) for prefix in prefixes],
             rows=rows, columns=columns, quantization="nvfp4", device=self.device,
             encoding=encoding, copy=self._session, **selection)
+        for tensor in (*result.components, result.starts):
+            record_numeric_tensor(tensor)
+        return result
 
 
 def _aligned_range(selected, extent, alignment):

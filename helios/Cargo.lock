@@ -565,6 +565,7 @@ dependencies = [
  "png",
  "prost",
  "prost-build",
+ "prost-types",
  "ratatui",
  "ryu",
  "serde",

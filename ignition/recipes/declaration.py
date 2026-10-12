@@ -34,19 +34,18 @@ class Checkpoint:
 class Speculation:
     """Multi-token speculation: how many draft tokens a round verifies and where drafts come from.
 
-    A round verifies the pending input and up to `draft_tokens` drafts. With
-    `adaptive` verification, graphs are captured for every count from zero
-    through `draft_tokens` and rounds adapt among them from measured acceptance;
-    without it every round verifies exactly `draft_tokens`. Preparation captures
-    at most `graph_budget` speculative graphs across batch capacities, small
-    batches and deep drafts first. Drafts come from the checkpoint's MTP module
-    or, with the `copy` source, from continuations of the request's own history;
-    `history_drafts` adds those continuations to MTP drafts.
+    A round verifies the pending input and up to `draft_tokens` drafts.
+    Preparation captures every width from one through `draft_tokens + 1` at
+    every prepared batch capacity. `adaptive` sets the serving default: choose
+    widths from measured acceptance when true, or use the fixed maximum when
+    false. Flare can reduce both capacities when loading the package. Drafts
+    come from the checkpoint's MTP module or, with the `copy` source, from
+    continuations of the request's own history; `history_drafts` adds those
+    continuations to MTP drafts.
     """
 
     draft_tokens: int
     adaptive: bool = True
-    graph_budget: int = 8
     proposal_source: str = "mtp"
     history_drafts: bool = False
 
@@ -94,9 +93,9 @@ class Recipe:
     `ranks` holds each tensor-parallel size's costs as the recipe serves by
     default. A recipe that declares `speculation` drafts with those settings
     unless a plan overrides them, and `plain_ranks` holds its costs with
-    speculation disabled. `speculative_rows` is the state rows each request slot
-    keeps for verification while speculating. `history_copy` states that drafts
-    can be copied from request history.
+    speculation disabled. Each active request has one execution state row per
+    selected verification position. `history_copy` states that drafts can be
+    copied from request history.
     """
 
     name: str
@@ -105,7 +104,7 @@ class Recipe:
     page_tokens: int
     concurrency: int
     max_concurrency: int
-    speculative_rows: int
+    max_draft_tokens: int
     prefill_chunk: int
     ranks: Mapping[int, RankCosts]
     prepare: Callable
@@ -141,7 +140,7 @@ class Recipe:
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:
         """State rows held for running requests: null, live, speculative, and admission rows."""
         slots = request_capacity(concurrency)
-        speculative = self.speculative_rows if speculation is not None else 0
+        speculative = speculation.draft_tokens if speculation is not None else 0
         return 1 + slots * (1 + speculative) + ADMISSION_SNAPSHOTS * concurrency
 
     def snapshot_rows(self, cache_states: int, concurrency: int) -> int:

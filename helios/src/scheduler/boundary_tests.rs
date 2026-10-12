@@ -8,6 +8,7 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
     let mut s = RequestScheduler::new(
         [9; 32],
         SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 8192,
             prefill_chunk_size: 512,
@@ -23,7 +24,6 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
                 patches_per_feature: 4,
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
-            live_state_base: 1,
             draft_pages_per_request: 1,
         },
     )
@@ -306,4 +306,50 @@ fn history(n: usize) -> PrefixHistory {
     let mut h = PrefixHistory::new([9; 32]);
     h.append(&(0..n as u32).collect::<Vec<_>>(), &[]).unwrap();
     h
+}
+
+#[test]
+fn runtime_concurrency_and_loaded_width_assign_fixed_execution_rows() {
+    let template = scheduler(256, false);
+    for active in [1usize, 4, 32] {
+        for width in [1usize, 3, 6] {
+            let mut s = RequestScheduler::new(
+                [9; 32],
+                SchedulerLimits {
+                    max_active: active,
+                    request_slots: 32,
+                    ..template.limits
+                },
+                template.capabilities.clone(),
+            )
+            .unwrap();
+            s.enable_speculation(&[1, 2, 3, 4, 5, 6]).unwrap();
+            let shapes: Vec<_> = crate::execution::BATCH_CAPACITIES
+                .into_iter()
+                .filter(|batch| *batch <= active.next_power_of_two())
+                .flat_map(|batch| (1..=width).map(move |width| (batch, width)))
+                .collect();
+            s.speculative_graphs(&shapes).unwrap();
+            let mut handles = Vec::new();
+            let mut owned = BTreeSet::new();
+            for _ in 0..active {
+                let handle = s.admit(spec(None, 64, 1)).unwrap();
+                let request = s.request(handle).unwrap();
+                assert_eq!(
+                    request.state_slot.0 as usize,
+                    1 + handle.slot as usize * width
+                );
+                for column in 0..width {
+                    assert!(owned.insert(request.state_slot.0 + column as u32));
+                }
+                assert!(owned.insert(s.snapshot_slot(request.terminal_snapshot).0));
+                handles.push(handle);
+            }
+            assert_eq!(s.free_snapshot_count(), 256 - active);
+            for handle in handles {
+                s.cancel(handle).unwrap();
+            }
+            assert_eq!(s.free_snapshot_count(), 256);
+        }
+    }
 }

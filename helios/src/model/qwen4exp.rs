@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub struct Qwen4Exp;
-pub const INPUT_SCHEMA: &str = "qwen4exp.graph-inputs.v2";
+pub const INPUT_SCHEMA: &str = "qwen4exp.graph-inputs.v3";
 pub const VOCABULARY: usize = 248320;
 
 #[derive(Clone)]
@@ -71,7 +71,7 @@ impl ModelContract for Qwen4Exp {
             vocabulary: config.contract.vocabulary,
             page_tokens: 64,
             vision: config.contract.vision.clone(),
-            live_state_base: 1,
+
             draft_pages_per_request: 1,
         }
     }

@@ -9,7 +9,7 @@ class PreparedMaintenance:
     def __init__(self, mode, requests, pool, commands, inputs, records, frame, sequence, *,
                  runtime, coordinator, session, name, capacity=4, admission_buffers=None, draft_tables=None):
         transfer = PreparedStateTransfer(pool, commands, inputs.page_tables, pages=pool.partial_pages(), page_tokens=256,
-            trailing_pages=pool.draft_pages(), trailing_tables=draft_tables)
+            state_rows=inputs.request_state_rows, requests=requests, trailing_pages=pool.draft_pages(), trailing_tables=draft_tables)
         if mode == "snapshot":
             slots, epochs, count = inputs.row_slot_ids, inputs.row_generations, inputs.live_rows
         elif admission_buffers is not None:

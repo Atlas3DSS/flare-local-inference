@@ -59,6 +59,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::from_slice(&fs::read(&fixture_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     let asset = |name: &str| Asset {
+        range: None,
         path: snapshot.join(name),
         sha256: fixture["assets"][name].as_str().unwrap().into(),
     };

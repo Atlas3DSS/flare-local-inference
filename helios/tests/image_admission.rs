@@ -22,6 +22,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     let fixture: Value =
         serde_json::from_slice(&fs::read(root.join("qwen38_jpeg_exif.json")).unwrap()).unwrap();
     let asset = |name: &str| Asset {
+        range: None,
         path: snapshot.join(name),
         sha256: fixture["assets"][name].as_str().unwrap().into(),
     };
@@ -45,6 +46,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         model_id: "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD".into(),
         identity: [0; 32],
         limits: SchedulerLimits {
+            request_slots: 4,
             max_active: 4,
             max_sequence_tokens: 262144,
             prefill_chunk_size: 4096,
@@ -56,7 +58,6 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         max_new_tokens: 64,
         speculative_widths: vec![],
         speculative_fixed_width: None,
-        speculative_graph_budget: 24,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };

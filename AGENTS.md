@@ -10,10 +10,10 @@ Heliopause depend on Helios; Helios has no Python or preparation-tool dependency
 ## Build and run model checkpoints
 
 Run commands from the repository root. Ignition prepares a source checkpoint
-into a **runtime package**: a directory containing `model.pb` and one
-`rank-N/` resource bundle per TP rank. Each bundle contains `package.pb`,
-compiled CUDA modules, persistent tensor payloads, and frontend assets.
-Flare loads this directory without Python. Helios is a Rust library;
+into a **runtime package**: a single `.flaretensors` file with a bounded
+Protobuf index and independently addressed graph, kernel, tensor, and frontend
+payloads. Tensor-parallel packages contain one resource bundle per rank.
+Flare loads the file without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
 Set up the preparation environment and build the native CLI:
@@ -36,22 +36,23 @@ Inspect GPU occupancy with `nvidia-smi` before preparation or loading. Select
 available GPUs explicitly on shared hosts. `--gpus 2` means one rank on GPU 2;
 `--gpus 0,1` means two ranks on GPUs 0 and 1. With `CUDA_VISIBLE_DEVICES` set,
 indices refer to the exposed device list. TP1, TP2, and TP4 require separately
-prepared packages; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 have
-been exercised end to end; TP4 still requires model validation.
+prepared packages; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 and
+GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation.
 
 Export Qwen with up to five MTP draft tokens per round:
 
 ```sh
 .venv/bin/ignition export qwen3.8-flash --gpus 2 \
   --mtp-draft-tokens 5 --max-concurrency 4 \
-  --output /data/flare-runtime/qwen38-tp1-mtp5 --verbose
+  --output /data/flare-runtime/qwen38-tp1-mtp5.flaretensors --verbose
 
 .venv/bin/ignition export qwen3.8-flash --gpus 0,1 \
   --mtp-draft-tokens 5 --max-concurrency 4 \
-  --output /data/flare-runtime/qwen38-tp2-mtp5 --verbose
+  --output /data/flare-runtime/qwen38-tp2-mtp5.flaretensors --verbose
 ```
 
-Choose an unused output directory; export refuses to overwrite one. Do not
+Choose an unused output filename; export appends `.flaretensors` if needed and
+refuses to overwrite one. Do not
 delete an existing package merely to reuse its name. `MODEL` can also be a
 supported repository ID or a local source-checkpoint directory. Ignition
 downloads missing source weights, loads and tunes kernels, compiles forwards,
@@ -63,16 +64,42 @@ Changing this default does not change an already exported package.
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
 `[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`
-controls the GPU headroom left by preparation. Concurrency, prefill capacity,
-and MTP variants are prepared capacities, not Flare load-time flags.
+leaves GPU memory available for other processes during preparation and serving.
+Ignition additionally keeps 1 GiB for warm-up and capture. Helios sizes its caches
+after uploading the selected graphs, keeping a separate 64 MiB driver margin.
+Ignition captures power-of-two
+batch capacities through the concurrency limit
+and every verification width through the draft-token maximum. Flare can reduce
+concurrency and draft tokens at load time; prefill capacity stays prepared.
 
-Load an exported package directly with the native CLI:
+Load an exported `.flaretensors` package directly with the native CLI:
 
 ```sh
-./flare/target/release/flare run /data/flare-runtime/qwen38-tp2-mtp5 \
+./flare/target/release/flare run /data/flare-runtime/qwen38-tp2-mtp5.flaretensors \
   --gpus 0,1 --bind 127.0.0.1:8001
 curl --fail http://127.0.0.1:8001/health
 ```
+
+Select a subset of a package's captured execution capacities:
+
+```sh
+./flare/target/release/flare run /data/flare-runtime/qwen38-tp1-c4-mtp5.flaretensors \
+  --gpus 2 --max-concurrency 2 --mtp-draft-tokens 3 \
+  --no-mtp-adaptive-verification --bind 127.0.0.1:8001
+```
+
+`--mtp-draft-tokens N` limits each round to N drafts plus its pending input.
+`--mtp-draft-tokens 0` selects target-only verification while retaining the MTP
+weights and cache layout. `--mtp-adaptive-verification` selects among the loaded
+widths; `--no-mtp-adaptive-verification` selects the fixed width. Omitted flags
+use the package's serving defaults. Limits cannot exceed captured capacity;
+missing required batch/width combinations fail before GPU initialization.
+Concurrency three requires the batch-four bucket. Only selected graphs and
+required kernel functions are loaded. Weights, MTP weights, and transport buffers
+retain their prepared layouts. Continuation rows and KV pages occupy separate
+fixed virtual ranges with declared maximum extents. Helios backs those ranges
+according to selected concurrency, verification width, and available GPU memory;
+reducing execution state leaves more physical memory for KV pages.
 
 The selected GPU count must match the package, and each GPU must match its
 rank's architecture and memory requirements. Flare serves all ranks in one
@@ -166,7 +193,11 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   through the plan into the recipe's `PreparationConfig`, so the plan, its
   printed report, and its recorded measurements describe what was prepared.
 - `CUDA_VISIBLE_DEVICES` is the only variable Flare interprets: it renumbers the
-  GPUs that `--gpus` indexes. `ignition.cli.environment` sets the variables that
+  GPUs that `--gpus` indexes. Before starting Helios, Flare narrows that mask to
+  the selected GPUs and passes contiguous local ordinals to the runtime. It
+  sets `CUDA_FORCE_PRELOAD_LIBRARIES=0` and `CUDA_DISABLE_JIT=1` as fixed driver
+  policy: serving loads compiled cubins without driver compilation.
+  `ignition.cli.environment` sets the variables that
   PyTorch, b12x, Triton, and the Hugging Face hub read, from Flare's
   configuration, before importing them. Detecting a terminal's capabilities is
   not configuration.
