@@ -253,7 +253,7 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
 #[test]
 fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents() {
     for (chunk_size, tail, tail_capacity) in
-        [(4096, 17, 128), (3072, 2050, 3072), (8192, 513, 1024)]
+        [(4096, 17, 128), (3072, 2050, 2560), (8192, 513, 1024)]
     {
         let mut scheduler = RequestScheduler::new(
             [9; 32],
@@ -1436,4 +1436,21 @@ fn graph_budget_keeps_largest_widths_and_reserves_target_only_concurrencies() {
         );
         assert_eq!(s.request(handles[0]).unwrap().consumed_tokens, 66);
     }
+}
+
+#[test]
+fn prefill_capacities_step_after_doubling_and_end_at_the_chunk() {
+    let capacities = |chunk| super::prefill_capacities(chunk).collect::<Vec<_>>();
+    assert_eq!(capacities(64), [64]);
+    assert_eq!(capacities(1000), [128, 256, 512, 1000]);
+    assert_eq!(
+        capacities(4096),
+        [128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
+    );
+    assert_eq!(
+        capacities(8192),
+        [
+            128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192
+        ]
+    );
 }

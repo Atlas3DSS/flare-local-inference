@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from ignition.components.capacity import batch_capacities, request_capacity
+from ignition.components.capacity import batch_capacities, prefill_capacities, request_capacity
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
@@ -108,11 +108,7 @@ class PreparationConfig:
 
     @property
     def prefill_capacities(self):
-        sizes, capacity = [], 128
-        while capacity < self.prefill_chunk_size:
-            sizes.append(capacity)
-            capacity *= 2
-        return (*sizes, self.prefill_chunk_size)
+        return prefill_capacities(self.prefill_chunk_size)
 
     @property
     def batch_capacities(self):

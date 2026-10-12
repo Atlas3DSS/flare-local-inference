@@ -49,9 +49,17 @@ impl SchedulerLimits {
 }
 
 /// Required token capacities for a validated, 64-aligned prefill chunk limit.
+/// Prepared prefill token capacities: doubling from 128 to a step of at least 512 tokens and about an
+/// eighth of the chunk, then growing by that step, then the chunk size itself. A partial chunk pads
+/// by less than one step. Matches `ignition.components.capacity.prefill_capacities`.
 pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
+    let step = 512.max(chunk_size / 8 / 512 * 512);
     std::iter::successors(Some(128usize), |capacity| capacity.checked_mul(2))
-        .take_while(move |capacity| *capacity < chunk_size)
+        .take_while(move |capacity| *capacity < chunk_size.min(step))
+        .chain(
+            std::iter::successors(Some(step), move |capacity| capacity.checked_add(step))
+                .take_while(move |capacity| *capacity < chunk_size),
+        )
         .chain(std::iter::once(chunk_size))
 }
 

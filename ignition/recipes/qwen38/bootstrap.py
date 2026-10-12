@@ -150,12 +150,9 @@ class PreparationConfig:
 
     @property
     def prefill_capacities(self) -> tuple[int, ...]:
-        capacities = []
-        capacity = 128
-        while capacity < self.prefill_chunk_size:
-            capacities.append(capacity)
-            capacity *= 2
-        return (*capacities, self.prefill_chunk_size)
+        from ignition.components.capacity import prefill_capacities
+
+        return prefill_capacities(self.prefill_chunk_size)
 
 
 
