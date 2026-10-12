@@ -111,7 +111,7 @@ The worker depends on one trait:
 ```rust
 pub trait PrefixStore {
     fn lookup(&mut self, history: &PrefixHistory, resident: u64) -> Option<HostHit>;
-    fn store(&mut self, checkpoint: &PublishedCheckpoint) -> Result<()>;
+    fn store(&mut self, checkpoint: &PublishedCheckpoint) -> Result<bool>;
     fn fetch(&mut self, hit: HostHit, ticket: InboundTicket) -> Result<()>;
     fn poll(&mut self, events: &mut Vec<StoreEvent>);
     fn stats(&self) -> StoreStats;
@@ -119,10 +119,15 @@ pub trait PrefixStore {
 }
 ```
 
-`store` copies a published GPU checkpoint out; `fetch` copies a looked-up
-chain into the ticket's page ids and state slot. Both enqueue work and return;
+`store` copies a published GPU checkpoint out and returns whether it queued
+the copy; `Ok(false)` means the key is already present or in flight or no
+slabs could be freed, and no event follows. `fetch` copies a looked-up chain
+into the ticket's page ids and state slot. Both enqueue work and return;
 `poll` drains completions as `StoreEvent::Stored`, `StoreEvent::Fetched`, and
-their failures. `MemoryStore`, `DiskStore`, and `CompositeStore` implement the
+their failures. A `PublishedCheckpoint` names the GPU checkpoint, its key,
+its parent's key, its bucket digest, every page of its chain from the root
+with the count that belongs to the checkpoint itself, and the state slot of
+its row. `MemoryStore`, `DiskStore`, and `CompositeStore` implement the
 trait for serving, and a test double implements it for worker tests. The
 worker holds `Option<Box<dyn PrefixStore>>`.
 
@@ -146,22 +151,27 @@ below each endpoint to the node keys ending in that block supports lookup.
 
 Lookup takes the request's `PrefixHistory` and the consumed count `a` of the
 deepest ready GPU checkpoint. It walks the history's aligned boundaries from
-the longest down to the first boundary above `a`, probing the bucket at each
-one. A candidate node qualifies when its row exists, its consumed count `c`
-exceeds `a`, and `history.key_at(c)` equals the node's key, which costs one
-hash of at most 64 tokens. The candidate is feasible when walking its parent
-links collects nodes with consumed counts above `a` and reaches a node whose
-consumed count equals `a`, or reaches the root when `a` is zero. The result is
-that chain in ascending order; its tail page counts sum to `c / page_tokens -
-a / page_tokens`, which is what `publish` requires. The first feasible
-candidate wins. The deepest hit is usually within the last few blocks because
-a new user message is short relative to the history, so the probe count is
-about the new tokens divided by 64.
+the longest down to the block containing `a`, including the root bucket for
+endpoints inside the first block, probing the bucket at each one. A candidate
+node qualifies when its row exists, its consumed count `c` exceeds `a`, and
+`history.key_at(c)` equals the node's key, which costs one hash of at most 64
+tokens. The candidate is feasible when walking its parent links collects
+every node whose consumed count exceeds `a` and stops at a parent at or below
+`a`, or at the root. The result is that chain in ascending order; its tail
+page counts sum to `c / page_tokens - p / page_tokens` for the stopping
+parent's count `p`, and the restore skips the first `a / page_tokens - p /
+page_tokens` of them, leaving exactly the pages `publish` requires. The first
+feasible candidate wins. The deepest hit is usually within the last few
+blocks because a new user message is short relative to the history, so the
+probe count is about the new tokens divided by 64.
 
-Page content is determined by the token prefix ending at the page, so pages
-from the host chain combine correctly with the GPU ancestor's pages. Requiring
-the chain to pass through the ancestor's exact endpoint keeps a restored
-checkpoint's row and pages from one lineage.
+Page content is determined by the token prefix ending at the page, so a
+suffix of a host chain's pages combines correctly with the GPU ancestor's
+pages, in the same way a GPU checkpoint's pages combine with a child computed
+later from a different request. A checkpoint published while its parent key
+is absent from the host index is stored as a root record holding its complete
+page chain, so a skipped or evicted ancestor never makes its descendants
+unrestorable.
 
 Eviction follows `PrefixCheckpointCache::evict`: remove the least recently
 used unpinned leaf; when every leaf is pinned, compact the least recently used
@@ -266,25 +276,28 @@ A record file lives at
 `<directory>/<identity prefix>-<layout fingerprint>/<consumed>-<digest>.ckpt`,
 with the consumed count as 16 hexadecimal digits and the digest as 32. The
 first 4 KiB is a little-endian header: magic `FLARECKP`, format version, flags,
-the key (consumed count and digest), the parent key, the bucket digest, the
-rank count, the page token count, the tail page count, the per-rank plane
-sizes, per-rank row bytes, the page segment offset, the row segment offset, a
-page segment checksum, a row segment checksum, and the creation time. The page
-segment follows, page-major: page `i`, then rank `r`, then planes in geometry
-order, with every plane padded to 4 KiB. The row segment follows, rank-major,
-with every row padded to 4 KiB. Per-plane padding is what lets the direct
-transport address each plane at an aligned file offset, so one file format
-serves both transports; the cost is small because the large planes are
-already multiples of 4 KiB and only small index planes pad. The row exists
-when the file length covers the row segment; compaction truncates the file at
-the row segment offset and changes nothing else. Writes go to a temporary
-name in the same directory, use direct I/O, optionally `fdatasync`, and rename
-into place. Deletion is `unlink`. Checksums are 64-bit xxh3 over each segment
-to detect torn or corrupted files; the staged transport computes and verifies
-them on the disk thread, and the direct transport computes and verifies them
-on the GPU with a prepared reduction over the planes, deferred until that
-kernel exists, so the direct transport initially records and verifies a
-header-only checksum and relies on the rename for atomicity.
+the model identity, the layout fingerprint, the key (consumed count and
+digest), the parent key, the bucket digest, the page token count, the tail
+page count, the rank count, the per-rank plane sizes and row bytes, the page
+segment offset, the row segment offset, the row checksum, and the creation
+time. A checksum segment follows, one 64-bit xxh3 per tail page, padded to
+4 KiB, so a restore that reads only a suffix of the pages verifies each page
+it read. The page segment follows, page-major: page `i`, then rank `r`, then
+planes in geometry order, with every plane padded to 4 KiB. The row segment
+follows, rank-major, with every row padded to 4 KiB. Per-plane padding is
+what lets the direct transport address each plane at an aligned file offset,
+so one file format serves both transports; the cost is small because the
+large planes are already multiples of 4 KiB and only small index planes pad.
+The row exists when the file length covers the row segment; compaction
+truncates the file at the row segment offset and changes nothing else. Writes
+go to a temporary name in the same directory, use direct I/O, optionally
+`fdatasync`, and rename into place. Deletion is `unlink`. Checksums are
+64-bit xxh3 over each page record and over the row record to detect torn or
+corrupted files; the staged transport computes and verifies them on the disk
+thread, and the direct transport computes and verifies them on the GPU with a
+prepared reduction over the planes, deferred until that kernel exists, so the
+direct transport initially records and verifies a header-only checksum and
+relies on the rename for atomicity.
 
 The disk store's startup scan reads each file's header, validates the magic,
 version, identity, fingerprint, and name, derives row presence from the size,
@@ -385,10 +398,12 @@ API on this class of host and is the reference for call patterns.
   caller for cancellation and re-admission.
 - Cancelling a waiter removes it from the ticket. The ticket completes
   regardless, because the restored checkpoint is useful on its own.
-- `take_publications()` returns every checkpoint published since the previous
-  call, created or existing, with its id, key, parent key, consumed count,
-  bucket digest, tail page ids, and the row's state slot from `snapshot_slot`.
-  `publish_boundary` and `retire` append to this list.
+- `take_publications()` returns every checkpoint that became GPU-ready since
+  the previous call, each once, with its id, key, parent key, bucket digest,
+  the page ids of its whole chain with the count belonging to the checkpoint,
+  and the row's state slot from `snapshot_slot`. Checkpoints created by
+  `publish_boundary`, `retire`, and `finish_inbound` enter the list when the
+  completed fence makes them ready.
 - `SchedulerStats` gains `host_lookups`, `host_hits`, `host_reused_tokens`,
   and `inbound_waiting`.
 - `release_after_shutdown` drops tickets.
@@ -427,11 +442,14 @@ its threads, and finishes pending disk writes within a bound, before
 
 `NativeModel::load` in `helios/src/runtime_package/model.rs` constructs the
 shared pieces after `allocate_caches`, under a progress phase named `Prepare
-host prefix cache`: the slab pools, registered with rank zero's context
-current; the cuFile driver, buffer registrations, and transport probe when the
-direct transport is selected; and the disk index scan. `manifests` attaches a
-`Binding` to each rank's `ExecutionManifest`, using per-rank resources and shared host ownership,
-so the server can construct the store and its transfer threads.
+host prefix cache`: it parses the model identity from the package's serving
+configuration, resolves the settings, maps and registers the slab pools with
+rank zero's context current, opens the cuFile driver, registers buffers, and
+probes the transport when the direct transport is selected, and scans the
+record directory. `manifests` attaches a `Binding` to each rank's
+`ExecutionManifest`; the binding shares one prepared bundle, holding every
+rank's geometry and context, which the model worker takes once to construct
+the store and its transfer threads.
 
 ### 2.10 Policy and isolation
 
@@ -478,26 +496,32 @@ Offload limits interference through bounded work and explicit ownership:
 
 ### 2.11 Configuration and defaults
 
-- Memory size default: zero on an integrated-memory device, detected through
-  `CU_DEVICE_ATTRIBUTE_INTEGRATED` on the selected devices; otherwise one
-  eighth of the host's available memory at startup, as `/proc/meminfo` reports
-  it, clamped to the memory store's minimum and 32 GiB. `[prefix_cache]
-  memory` in `config.toml` and `--prefix-cache-memory SIZE` on `flare run`
-  override it; zero selects no memory store. The attribute's value on DGX
-  Spark hardware must be verified before the default is relied on there.
-- Disk directory default: `ignition run` passes `[paths] prefix_cache`, which
-  defaults to `~/.cache/flare/prefix-cache`. Standalone `flare run` defaults
-  to a directory beside the package file named after it with a
-  `.prefix-cache` suffix. An unwritable directory selects no disk store and
-  says so on the startup line. `--prefix-cache-disk DIR` overrides.
-- Disk limit default: one tenth of the free space on the directory's
-  filesystem at startup. `[prefix_cache] disk_limit` and
-  `--prefix-cache-disk-limit SIZE` override; zero selects no disk store.
-- Disk transport default: direct when the cuFile probe confirms the direct
-  path, otherwise staged. `[prefix_cache] disk_transport` and
-  `--prefix-cache-disk-transport` accept `direct`, which fails startup when
-  the direct path is unavailable, and `staged`, which forces the host path
-  for measurement.
+- Memory size: `[prefix_cache] memory` in `config.toml` and
+  `--prefix-cache-memory SIZE` on `flare run` set it; zero selects no memory
+  store, and a nonzero size below the package's minimum fails startup. Until
+  step 13 enables derived defaults, an unset size selects no memory store.
+  The derived default is zero on an integrated-memory device, detected
+  through `CU_DEVICE_ATTRIBUTE_INTEGRATED` on the selected devices, and
+  otherwise one eighth of the host's available memory at startup, as
+  `/proc/meminfo` reports it, clamped to the memory store's minimum and
+  32 GiB. The attribute's value on DGX Spark hardware must be verified before
+  the default is relied on there.
+- Disk directory: `--prefix-cache-disk DIR` names the directory under which
+  the model's record directory, `<identity prefix>-<layout fingerprint>`, is
+  created; `ignition run` passes `[paths] prefix_cache`, which defaults to
+  `~/.cache/flare/prefix-cache`. An unwritable directory selects no disk
+  store and says so on the startup line. Until step 13, an unset directory
+  selects no disk store; the derived default for standalone `flare run` is a
+  directory beside the package file named after it with the `.flaretensors`
+  extension replaced by `.prefix-cache`.
+- Disk limit: one tenth of the free space on the directory's filesystem at
+  startup. `[prefix_cache] disk_limit` and `--prefix-cache-disk-limit SIZE`
+  override; zero selects no disk store.
+- Disk transport: staged. `[prefix_cache] disk_transport` and
+  `--prefix-cache-disk-transport` accept `staged` and `direct`; `direct` fails
+  startup until the direct transport exists, and afterwards when the cuFile
+  probe rejects the direct path. Once the probe exists, the default becomes
+  direct where the probe accepts it.
 - The staged transport's staging pool size is derived; it is not a setting.
 - `LoadOptions` gains `prefix_cache: PrefixCacheOffload` with the resolved
   memory size, directory, limit, and transport.
