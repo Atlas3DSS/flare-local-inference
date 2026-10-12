@@ -1,26 +1,32 @@
 """Prepare a GLM tensor-parallel rank before native serving takes ownership."""
 
+import contextlib
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 
-from ignition.components.capacity import batch_capacities, request_capacity
+from ignition.components.capacity import batch_capacities, prefill_capacities, request_capacity
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
     CollectivePreparation,
     create_all_gather_runtime,
     create_all_reduce_runtime,
+    create_dma_all_reduce_runtime,
+    create_head_exchange,
 )
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
 from ignition.preparation.model import PreparedModel
+from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.progress import phase
 from ignition.preparation.tuning import RecordedPreparationSession
@@ -35,6 +41,13 @@ from .state import DecoderMetadata
 from .weights import ModelWeights
 
 
+_COMPILED_KINDS = ("prefill", "decode", "resume", "speculative")
+# Prefill chunks of at least this many tokens all-reduce through the copy-engine ring.
+_DMA_PREFILL_TOKENS = 1024
+# Allocator granularity and fragmentation slack beyond the headroom kept after the final KV allocation.
+_KV_ALLOCATION_MARGIN = 64 << 20
+
+
 @dataclass(frozen=True)
 class PreparationConfig:
     devices: tuple[int, ...] = (0, 1)
@@ -42,12 +55,18 @@ class PreparationConfig:
     prefill_chunk_size: int = 4096
     max_active: int = 4
     pages: int | None = None
+    # Without fixed pages, KV pages fill the memory measured free after graph capture, at least this many.
+    minimum_pages: int | None = None
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
     mtp: bool = False
+    # Routed NVFP4-CSF experts: A16 activations with A4 prefill launches, or A4 throughout.
+    expert_activation: str = "a16"
+    # Shard latent records and C4 pools across the tensor-parallel ranks (decode context parallelism).
+    context_parallel: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
 
@@ -68,13 +87,16 @@ class PreparationConfig:
         for name in ("context", "prefill_chunk_size", "max_active", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an integer")
-        if not 256 <= self.context <= 1048576 or self.context % 256:
-            raise ValueError("GLM context must be 256-aligned in [256,1048576]")
+        if not self.page_tokens <= self.context <= 1048576 or self.context % self.page_tokens:
+            raise ValueError(f"GLM context must be {self.page_tokens}-aligned in [{self.page_tokens},1048576]")
         if not 64 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         request_capacity(self.max_active)
         if self.pages is not None and (type(self.pages) is not int or not 0 < self.pages <= 2147483647):
             raise ValueError("page capacity must be a positive signed 32-bit integer")
+        if self.minimum_pages is not None and (type(self.minimum_pages) is not int or self.minimum_pages <= 0
+                                               or self.pages is not None and self.minimum_pages > self.pages):
+            raise ValueError("minimum page capacity must be positive and at most the fixed page capacity")
         if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
             raise ValueError("snapshot budget must be positive and headroom nonnegative")
 
@@ -91,11 +113,7 @@ class PreparationConfig:
 
     @property
     def prefill_capacities(self):
-        sizes, capacity = [], 128
-        while capacity < self.prefill_chunk_size:
-            sizes.append(capacity)
-            capacity *= 2
-        return (*sizes, self.prefill_chunk_size)
+        return prefill_capacities(self.prefill_chunk_size)
 
     @property
     def batch_capacities(self):
@@ -107,7 +125,25 @@ class PreparationConfig:
 
     @property
     def page_capacity(self):
-        return (self.context // 256 + int(self.mtp)) * self.max_active if self.pages is None else self.pages
+        """Fixed KV pages, or the context of every active request when memory does not size them."""
+        if self.pages is not None:
+            return self.pages
+        return self.minimum_pages or (self.context // self.page_tokens + int(self.mtp)) * self.max_active
+
+    @property
+    def speculative_state_rows(self):
+        """Recurrent states kept per request for every verified position after the first."""
+        return max(self.speculative_widths) - 1
+
+    @property
+    def page_tokens(self):
+        """Global positions per KV page: 256 local records on each rank that shares the context."""
+        return 256 * (len(self.devices) if self.context_parallel else 1)
+
+    @property
+    def preparation_pages(self):
+        """Pages held while tuning and measuring graphs; the final pools replace them before capture."""
+        return min(self.page_capacity, 2 * self.request_capacity)
 
 
 @torch.no_grad()
@@ -116,7 +152,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     The caller must terminate the complete rank group if any preparation fails.
     Successful cleanup requires every rank to close its IPC runtime together,
-    after native replay drains. No eager execution path is exported.
+    after native replay drains. No eager execution path is exported. Package
+    storage backs device memory, collective mappings and graphs with addresses
+    that native restore reproduces.
     """
     def report(message):
         if progress is not None:
@@ -128,30 +166,31 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
-    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp)
+    if config.expert_activation == "a16":
+        # b12x retains activation scales for A4 prefill launches only while preparing with this switch.
+        os.environ["B12X_W4A16_A4_PREFILL"] = "1"
+    # Loading, construction and tuning free most of what they allocate; a transient package pool returns
+    # that memory to the device once tuning completes, before graph measurement sizes the KV pages.
+    transient = contextlib.ExitStack()
+    if package_storage is not None:
+        transient.enter_context(package_storage.transient())
+    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp,
+                                expert_activation=config.expert_activation)
     with phase(progress, "Allocate model state and collectives") as stage:
         layer_types = weights.tree.config.text_config.layer_types
         layout = continuation_layout(layer_types, shard.world_size, mtp=config.mtp)
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
         if snapshots < 1:
             raise ValueError("GLM snapshot budget must hold at least one continuation row")
-        pages, blocks = config.page_capacity, config.context // 256
+        pages, blocks = config.preparation_pages, config.context // config.page_tokens
         slots = config.request_capacity
         state_rows = snapshots + slots * (max(config.speculative_widths) if config.mtp else 1)
-        preparation_pages = pages if package_storage is None else min(pages, slots * (8192 // 256))
-        maximum_pages = None
-        if package_storage is not None:
-            import torch.distributed as dist
-
-            page_bytes = (layer_types.count("indexed_attention") + int(config.mtp)) * (4 * 64 * 528 + 64 * 132)
-            maximum = torch.tensor(torch.cuda.mem_get_info(device)[1] // page_bytes, dtype=torch.int64)
-            dist.all_reduce(maximum, op=dist.ReduceOp.MIN, group=group)
-            maximum_pages = int(maximum.item())
+        page_bytes = (layer_types.count("indexed_attention") + int(config.mtp)) * (4 * 64 * 528 + 64 * 132)
+        max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
+        context_ranks = shard.world_size if config.context_parallel else 1
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
-            state_rows + 1, preparation_pages, device, mtp=config.mtp, storage=package_storage,
-            maximum_pages=maximum_pages)
-        kv_bytes = pages * sum(cache.shape[1] for _, cache in (*pool.partial_pages(), *pool.draft_pages()))
-        stage.update(f"KV cache: {kv_bytes / (1 << 30):.2f} GiB per GPU · {pages * 256:,} tokens")
+            state_rows + 1, pages, device, mtp=config.mtp, storage=package_storage,
+            maximum_pages=max_cache_pages, context_ranks=context_ranks)
         requests = DeviceRequestState.allocate(device, vocab_size=154880, capacity=slots)
         inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=154880, capacity=slots)
@@ -162,6 +201,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         coordinator = CollectivePreparation(group)
         ipc = None if package_storage is None else package_storage.peer_storage
         collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=4096, ipc=ipc)
+        prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
+                                                           hidden_size=4096, ipc=ipc)
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=sample_rows, columns=154880, ipc=ipc)
@@ -181,16 +222,36 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             state_pool=pool.backing, memory_capacity=pool.memory_capacity, sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
             submission_sequence=sequence, completion_records=records)
         forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
-        decoder_storage = DecoderScratch.allocate(config.token_capacity, blocks, "decode", device,
-            shard=shard, sample_rows=sample_rows)
+        context = None
+        if config.context_parallel:
+            from .dcp import SLICE_ROWS, ContextParallel, ContextShards
+
+            # Only decode exchanges heads; prefill gathers context blocks instead.
+            exchange_rows = min(SLICE_ROWS, max(config.request_capacity,
+                max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1))
+            context = ContextParallel(ContextShards.on(rank, shard.world_size, device),
+                heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512, ipc=ipc),
+                candidates=create_all_gather_runtime(group, device, max_rows=min(config.token_capacity, SLICE_ROWS),
+                                                     columns=2048 * shard.world_size, ipc=ipc),
+                coordinator=coordinator)
+        shards = None if context is None else context.shards
+        # Prefill chunks overlay their layer intermediates; decode rows keep small separate scratch.
+        prefill_storage = DecoderScratch.allocate(config.prefill_chunk_size, blocks, "prefill", device,
+            shard=shard, sample_rows=1, context_ranks=context_ranks, overlay_layers=True)
+        decode_rows = max(config.request_capacity,
+                          max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1)
+        decoder_storage = DecoderScratch.allocate(decode_rows, blocks, "decode", device,
+            shard=shard, sample_rows=sample_rows, context_ranks=context_ranks)
 
         speculation = None
         if config.mtp:
             from .speculative import SpeculativePreparation
 
-            speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage,
+            speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage, prefill_storage,
                 session=session, workspace=arena, records=records, frame=frame,
-                sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
+                sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                max_cache_pages=max_cache_pages, prefill_tokens=config.prefill_chunk_size,
+                decode_tokens=decode_rows, context=context)
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 
@@ -207,12 +268,16 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 rows = 1 if mode == "prefill" else capacity
                 name = f"{mode}{capacity}"
                 metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
-                scratch[name] = decoder_storage.rows(capacity, mode, sample_rows=rows)
+                storage = prefill_storage if mode == "prefill" else decoder_storage
+                scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
                 feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
                 decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                    runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-                    session=session, name=name, workspace=arena, feedback=feedback)
-                batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pages=pool.memory_capacity[1:])
+                    runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective,
+                    vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                    session=session, name=name, workspace=arena, feedback=feedback,
+                    max_cache_pages=max_cache_pages, context=context)
+                batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard,
+                                      pages=pool.memory_capacity[1:], shards=shards)
                 forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
                     pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation", replicated_sampling=config.mtp)
                 if speculation is not None:
@@ -241,37 +306,57 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
                     runtime=collective, coordinator=coordinator, session=session, name=name,
                     capacity=capacity, admission_buffers=admission,
-                    draft_tables=None if speculation is None else speculation.draft_tables)
+                    draft_tables=None if speculation is None else speculation.draft_tables,
+                    page_tokens=config.page_tokens)
                 fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
                 add(name, operation, mode, capacity, 1, (*fields, "page_tables", *(("draft_page_tables",) if config.mtp else ()), *commands.buffers()))
-    with phase(progress, "Prepare and tune kernels") as stage:
+    with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")
+    report(f"after tuning: free={torch.cuda.mem_get_info(device)[0] >> 20} MiB, "
+           f"allocated={torch.cuda.memory_allocated(device) >> 20} MiB, reserved={torch.cuda.memory_reserved(device) >> 20} MiB, "
+           f"weights={weights.allocated_bytes >> 20} MiB, continuation={pool.backing.nbytes >> 20} MiB, "
+           f"operator scratch={arena.nbytes >> 20} MiB")
     stream = torch.cuda.Stream(device=device)
     graph_pool = torch.cuda.graph_pool_handle() if package_storage is None else package_storage.graph_pool.id
-    trials = {}
-    if package_storage is not None:
-        trials, _ = capture_forwards(forwards, signatures, session=session, device=device,
-            stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
-            compile_decoder=False, progress=progress, label="Measure graph memory")
+    trials, _ = capture_forwards(forwards, signatures, session=session, device=device,
+        stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
+        compile_decoder=False, progress=progress, label="Measure graph memory")
+    free = torch.cuda.mem_get_info(device)[0]
+    available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
+    pages = available // page_bytes if config.pages is None else config.pages
+    if pages < (config.minimum_pages or config.preparation_pages) or pages * page_bytes > available:
+        raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
+
+    def rebind_pages():
+        for forward in forwards.values():
+            if hasattr(forward, "rebind_pages"):
+                forward.rebind_pages(pages)
+
+    if config.compile_decoder and package_storage is None:
+        from b12x._lib.compile_plan import compile_only_launches
+
+        with compile_only_launches():
+            pool.replace_pages(pages, metadata_mode=deferred_mode(), ranks=context_ranks)
+            for name, forward in forwards.items():
+                if signatures[name].kind in _COMPILED_KINDS and hasattr(forward, "rebind_pages"):
+                    forward.rebind_pages(pages)
+    shared_pages = []
 
     def materialize_cache():
-        nonlocal pages, kv_bytes
-        import torch.distributed as dist
-
         with phase(progress, "Allocate KV cache") as stage:
-            torch.cuda.synchronize(device)
-            free, _ = torch.cuda.mem_get_info(device)
-            available = torch.tensor(free - config.headroom_bytes - (512 << 20), dtype=torch.int64)
-            dist.all_reduce(available, op=dist.ReduceOp.MIN, group=group)
-            page_bytes = kv_bytes // pages
-            pages = min(pages, int(available.item()) // page_bytes)
-            if pages < preparation_pages:
-                raise MemoryError("prepared graph catalog leaves insufficient memory for minimum KV capacity")
-            package_storage.grow("KV_PAGES", pages)
+            if package_storage is not None:
+                package_storage.grow("KV_PAGES", pages)
+                if config.context_parallel:
+                    pool.share_pages(package_storage, group)
+            else:
+                from ignition.components.shared_pages import SharedPages
+
+                shared_pages.extend(pool.replace_pages(pages, ranks=context_ranks,
+                    share=lambda nbytes: SharedPages(group, device, nbytes)))
+                rebind_pages()
             pool.memory_capacity[1] = pages
-            kv_bytes = pages * page_bytes
-            stage.update(f"{kv_bytes / (1 << 30):.2f} GiB per GPU · {pages * 256:,} tokens")
+            stage.update(f"{pages * page_bytes / (1 << 30):.2f} GiB per GPU · {pages * config.page_tokens:,} tokens")
             for graph in trials.values():
                 graph.reset()
             trials.clear()
@@ -279,7 +364,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
         compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
-        retain_graphs=config.retain_graphs, materialize=None if package_storage is None else materialize_cache)
+        retain_graphs=config.retain_graphs, materialize=materialize_cache)
+    kv_bytes = pages * page_bytes
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
@@ -289,7 +375,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "weights_bytes": weights.allocated_bytes, "continuation_bytes": pool.backing.nbytes,
         "state_rows": state_rows, "pages": pages, "page_bytes": kv_bytes // pages, "kv_bytes": kv_bytes,
         "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
-        "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes, "page_tokens": 256,
+        "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes, "page_tokens": config.page_tokens,
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
         "tuning": tuning, "compiled_decoder": config.compile_decoder}
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
@@ -297,21 +383,23 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                                ("chat_template", "chat_template.jinja"), ("generation_config", "generation_config.json"))}
     generation = json.loads((snapshot / "generation_config.json").read_text())
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,
-        "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 256,
+        "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": config.page_tokens,
         "eos_token_ids": generation["eos_token_id"], "assets": assets,
         "model_contract": {"schema": "glm5next.graph-inputs.v2", "vocabulary": 154880,
-            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []}}}
+            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
+            "page_tokens": config.page_tokens}}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
             speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
-        decoder_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
-        vocabulary_collective, coordinator, speculation)
+        decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
+        prefill_collective, vocabulary_collective, coordinator, speculation, context)
     from .export import disposable_ranges
 
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
-        export_zero_ranges=disposable_ranges(decoder_storage, arena, forwards),
-        close_resources=(vocabulary_collective, collective),
+        export_zero_ranges=disposable_ranges((decoder_storage, prefill_storage), arena, forwards),
+        close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
+                         prefill_collective, vocabulary_collective, collective),
         server_config=server_config, memory_report=memory)

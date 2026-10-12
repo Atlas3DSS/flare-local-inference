@@ -34,19 +34,33 @@ class PreparedAllReduce:
 
     def __init__(self, source, output, *, runtime, session, coordinator, name):
         import torch.distributed as dist
+        from b12x.comm import pcie
 
-        if (runtime.world_size not in (2, 4) or runtime.algorithm != "oneshot"
-                or not runtime.single_channel):
-            raise ValueError("prepared PCIe reductions require single-channel b12x TP2 or TP4 all-reduce")
         self.runtime, self.output = runtime, output
-        self.plan = runtime.plan(source, out=output)
+        if isinstance(runtime, pcie.DmaAllReduce):
+            # Copy-engine ring for prefill-sized activations.
+            from b12x.comm.pcie._dma_preparation import query_from_metadata
 
-        def prepare(state):
-            state.bind_input(source)
-            return PreparedCall(run=lambda: state.run_plain(source, output),
-                                output=output, owners=(runtime, source, output))
+            self.plan = pcie.plan(query_from_metadata(runtime, shape=tuple(source.shape), dtype=source.dtype),
+                                  runtime=runtime)
+            group = runtime.group
 
-        ranks = tuple(dist.get_process_group_ranks(runtime.exchange_group))
+            def prepare(state):
+                return PreparedCall(run=lambda: state.run(source, out=output), output=output,
+                                    owners=(runtime, source, output))
+        else:
+            if (runtime.world_size not in (2, 4) or runtime.algorithm != "oneshot"
+                    or not runtime.single_channel):
+                raise ValueError("prepared PCIe reductions require single-channel b12x TP2 or TP4 all-reduce")
+            self.plan = runtime.plan(source, out=output)
+            group = runtime.exchange_group
+
+            def prepare(state):
+                state.bind_input(source)
+                return PreparedCall(run=lambda: state.run_plain(source, output),
+                                    output=output, owners=(runtime, source, output))
+
+        ranks = tuple(dist.get_process_group_ranks(group))
         request = self.plan.request(name=name, prepare_call=prepare,
             collective=CollectiveRequirement(key=name, ranks=ranks))
         declare(session, (request,), coordinator=coordinator)
@@ -107,4 +121,50 @@ class PreparedAllGather:
 
     def __call__(self, source):
         _all_gather(source, self.output, self.handle)
+        return self.output
+
+
+@torch.library.custom_op("flare::pcie_lse_reduce_scatter", mutates_args=("output",))
+def _lse_reduce_scatter(partial: torch.Tensor, lse: torch.Tensor, output: torch.Tensor, handle: int) -> None:
+    owner = _OWNERS[handle]
+    owner.runtime.lse_reduce_scatter(partial, lse, out=output, plan=owner.plan, is_lse_base_on_e=True)
+
+
+@_lse_reduce_scatter.register_fake
+def _fake_lse_reduce_scatter(partial, lse, output, handle):
+    pass
+
+
+class PreparedLseReduceScatter:
+    """Combine every rank's partial attention by natural-log LSE and keep this rank's heads.
+
+    Partial outputs are [rows, heads, dim] over all heads with FP32 [rows, heads] LSE;
+    the output holds this rank's contiguous head shard. Operations sharing the
+    channel must execute serially on every rank.
+    """
+
+    def __init__(self, partial, lse, output, *, runtime, session, coordinator, name):
+        import torch.distributed as dist
+        from b12x.comm import pcie
+
+        rows = partial.shape[0]
+        if (partial.shape != (rows, runtime.total_heads, runtime.query_head_dim) or partial.dtype != torch.bfloat16
+                or lse.shape != (rows, runtime.total_heads) or lse.dtype != torch.float32
+                or output.shape != (rows, runtime.heads_per_rank, runtime.query_head_dim)
+                or output.dtype != torch.bfloat16 or not 0 < rows <= runtime.max_batch_size):
+            raise ValueError("LSE reduce-scatter requires BF16 partials, FP32 LSE and a head shard of its channel")
+        self.runtime, self.output = runtime, output
+        call = {"partial_output": partial, "partial_lse": lse, "out": output, "is_lse_base_on_e": True}
+        query = pcie.query_from_runtime(runtime, surface="DcpAllToAll.lse_reduce_scatter", call=call)
+        self.plan = pcie.plan(query, runtime=runtime)
+        ranks = tuple(dist.get_process_group_ranks(runtime.exchange_group))
+        declare(session, (self.plan.request(name=name,
+            prepare_call=lambda state: PreparedCall(run=lambda: state.run(**call), output=output,
+                                                    owners=(runtime, partial, lse, output)),
+            collective=CollectiveRequirement(key=name, ranks=ranks)),), coordinator=coordinator)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
+
+    def __call__(self, partial, lse):
+        _lse_reduce_scatter(partial, lse, self.output, self.handle)
         return self.output

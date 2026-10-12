@@ -68,8 +68,11 @@ numeric by their execution contract. These spans are leaves in the traversal:
 their storage is retained when referenced, but their values are not interpreted
 as addresses.
 
-Address candidates must also fall outside blocks that PyTorch marks inactive
-in the preparation allocator. Those blocks have no live allocation, so stale
+Preparation uses temporary PyTorch pools backed by the package allocator during
+loading and tuning. Retiring a pool releases whole free segments before KV sizing;
+live tensors retain their storage and addresses. Address candidates must fall
+outside blocks that PyTorch marks inactive in any preparation pool, including
+retired pools with surviving tensors. Those blocks have no live allocation, so stale
 values in opaque arguments cannot keep their backing segments resident. This
 filter excludes the private graph pool: its intermediates remain live through
 captured replay even when their Python tensors have been released. Explicit
@@ -210,6 +213,9 @@ identifies graph kind, sampling mode, batch capacity, token capacity, draft
 source, draft count, and verification count; the
 loader uses these fields rather than graph names to select variants. It checks
 required batch coverage and identical selected catalogs across TP ranks.
+The scheduler chooses the smallest declared prefill capacity that covers the
+live token count. A package must include its configured maximum prefill chunk;
+intermediate capacities are optional and need not follow a generated sequence.
 Draft count and verification count are independent declaration fields.
 Verification count includes the pending input token. For a given selected
 batch and verification width, the loader chooses one permitted draft count;
@@ -240,6 +246,11 @@ tensor payload or prescribed physical size for these records. Per-rank 1 TiB
 reservations place fixed resources in the lower half and runtime-sized regions
 in the upper half. Maximum extents are chosen during preparation and validated
 for overflow and overlap before loading.
+
+Shared cache records identify the owning rank, reader ranks, and full virtual
+extent. Preparation exports a shareable handle for each physical chunk added
+while growing the cache. Helios maps the owning rank's selected physical prefix
+and grants every reader access to that prefix; peer records allocate no storage.
 
 Helios maps physical prefixes after loading fixed storage, kernels, and graph
 executables and uploading every selected graph. It leaves 64 MiB for driver

@@ -7,6 +7,7 @@ import torch
 from ignition.components.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import PreparedSpeculativeCommit, SpeculativeAcceptance
 from ignition.recipes.glm53.batch import BatchInputs
+from ignition.recipes.glm53.dcp import ContextShards
 from ignition.recipes.glm53.speculative import PreparedRound
 from ignition.recipes.glm53.mtp import DraftMetadata
 from ignition.recipes.glm53.state import DecoderMetadata
@@ -42,7 +43,7 @@ def test_verification_packs_unequal_lengths_and_retains_request_output_rows():
     inputs.page_tables.copy_(torch.tensor([[10, 11], [20, 21]]))
     inputs.live_rows.fill_(2)
     inputs.request_state_rows.copy_(torch.tensor([[1, 8, 9, 10, 11, 12, 13, 14], [2, 15, 16, 17, 18, 19, 20, 21]]))
-    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2))
+    op.owner = SimpleNamespace(inputs=inputs, requests=SimpleNamespace(capacity=2), shards=ContextShards())
     m = DecoderMetadata.allocate(12, 2, 2, "cpu")
     op.metadata = DecoderMetadata(m.token_ids, torch.zeros(12, dtype=torch.int64),
         DeltaMetadata.allocate(2, "cpu", verification_columns=8), m.indexed)
@@ -55,7 +56,8 @@ def test_verification_packs_unequal_lengths_and_retains_request_output_rows():
     assert op.metadata.recurrent.num_tokens.item() == 8
     assert op.metadata.indexed.positions.tolist() == [255, 256, 257, 258, 259, 260, 510, 511, -1, -1, -1, -1]
     assert op.metadata.indexed.token_slots.tolist()[:8] == [10 * 256 + 255, *range(11 * 256, 11 * 256 + 5), 21 * 256 + 254, 21 * 256 + 255]
-    assert op.metadata.recurrent.state_indices.tolist() == [[1, 8, 9, 10, 11, 12, 13, 14], [2, 15, 16, 17, 18, 19, 20, 21]]
+    # Columns past the round's width stay on the null row instead of reaching the next slot's rows.
+    assert op.metadata.recurrent.state_indices.tolist() == [[1, 8, 9, 10, 11, 12, 0, 0], [2, 15, 16, 17, 18, 19, 0, 0]]
 
 
 def test_draft_rows_exclude_exhausted_requests_and_restore_output_order():

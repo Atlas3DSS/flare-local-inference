@@ -38,7 +38,7 @@ class MoeScratch:
 class PreparedGlmMoe:
     """One rank's intermediate-sharded expert contribution before all-reduce."""
 
-    def __init__(self, module, source, weights, scratch: MoeScratch, *, session, name, workspace):
+    def __init__(self, module, source, weights, scratch: MoeScratch, *, session, name, workspace, prefill=False):
         gate = module.gate
         if (gate.num_group != 1 or gate.topk_group != 1 or gate.top_k != 8 or gate.num_experts != 288
                 or not gate.norm_topk_prob or gate.routed_scaling_factor != 2.5):
@@ -61,7 +61,8 @@ class PreparedGlmMoe:
             swiglu_limit=module.config.swiglu_limit)
         self.experts = PreparedRoutedExperts(source, weights.experts, scratch.router.ids,
             scratch.router.weights, scratch.routed, session=session, name=f"{name}.experts", workspace=workspace,
-            router_weight=weights.router, router_plan=self.routing.plan, correction_bias=weights.correction)
+            router_weight=weights.router, router_plan=self.routing.plan, correction_bias=weights.correction,
+            a4_prefill=prefill and weights.experts_a4_prefill)
         self.concurrent_shared = None
         if source.shape[0] <= 256:
             self.concurrent_shared = ConcurrentSharedExpert(self.shared,

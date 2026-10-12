@@ -37,6 +37,8 @@ pub(super) enum Memory {
     #[default]
     Device,
     MappedHost,
+    /// Another rank's device allocation, referenced at its recorded address.
+    Peer,
 }
 
 #[derive(Debug)]
@@ -293,6 +295,13 @@ impl Package {
             }
             if a.file.is_some() != (a.stored_bytes() > 0) {
                 return Err(invalid("allocation payload file must match its data spans"));
+            }
+            if matches!(a.memory, Memory::Peer)
+                && (a.address.is_none() || a.file.is_some() || !a.relocations.is_empty())
+            {
+                return Err(invalid(
+                    "peer allocations require a recorded address and carry no payload",
+                ));
             }
             if matches!(a.memory, Memory::MappedHost)
                 && (a.nbytes % 4096 != 0 || a.address.is_none_or(|v| v % 4096 != 0))

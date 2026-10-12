@@ -16,6 +16,8 @@ from .indexer import IndexMetadata, IndexScratch, IndexState, PreparedGlmIndexer
 class MLAState:
     cache: torch.Tensor
     index: IndexState
+    # Every rank's latent cache address when ranks share the context; prefill reads peer records through it.
+    peers: torch.Tensor | None = None
 
     @classmethod
     def allocate(cls, pages, slots, device, *, ring=4):
@@ -37,18 +39,36 @@ class MLAScratch:
     output: torch.Tensor
     visible: torch.Tensor
     index: IndexScratch
+    # Context-parallel decode exchanges every rank's heads for one slice of rows; context-parallel
+    # prefill gathers every rank's records of the whole prepared context into the slab.
+    gathered: torch.Tensor
+    partial: torch.Tensor
+    lse: torch.Tensor
+    slab: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, heads, blocks, mode, device):
+    def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1):
         if heads not in (16, 32):
             raise ValueError("GLM MLA scratch requires TP2 or TP4 head partitions")
-        index = IndexScratch.allocate(tokens, blocks, mode, device)
+        from .dcp import PREFILL_SLICE_ROWS, SLICE_ROWS
+
+        index = IndexScratch.allocate(tokens, blocks, mode, device, context_ranks=context_ranks)
+        def zeros(*shape, dtype=torch.bfloat16):
+            return torch.zeros(shape, dtype=dtype, device=device)
         def buffer(*shape):
-            return torch.zeros((tokens, *shape), dtype=torch.bfloat16, device=device)
+            return zeros(tokens, *shape)
         projected = buffer(2048)
+        prefill = context_ranks > 1 and mode == "prefill"
+        exchange = min(tokens, SLICE_ROWS) if context_ranks > 1 and not prefill else 0
+        # Context-parallel rows absorb, attend and expand one slice at a time; otherwise every row at once.
+        absorbed = exchange or (min(tokens, PREFILL_SLICE_ROWS) if prefill else tokens)
+        # One 528-byte record per global position: `blocks` pages of 256 records on every rank.
+        positions = blocks * 256 * context_ranks if prefill else 0
         return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:], buffer(512),
-            buffer(heads, 256), buffer(heads, 512), buffer(heads, 512), buffer(heads, 256),
-            buffer(4096), torch.zeros(tokens, dtype=torch.int32, device=device), index)
+            buffer(heads, 256), zeros(absorbed, heads, 512), zeros(absorbed, heads, 512), buffer(heads, 256),
+            buffer(4096), zeros(tokens, dtype=torch.int32), index,
+            zeros(exchange, heads * context_ranks, 512), zeros(exchange, heads * context_ranks, 512),
+            zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8))
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
@@ -56,7 +76,8 @@ class MLAScratch:
         return MLAScratch(self.projected_input[:tokens], self.query_input[:tokens],
             self.query_residual[:tokens], self.latent_input[:tokens],
             self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
-            self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode))
+            self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode),
+            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab)
 
 
 class PreparedGlmMLA:
@@ -69,7 +90,7 @@ class PreparedGlmMLA:
     """
 
     def __init__(self, module, weights, source, scratch: MLAScratch, state: MLAState,
-                 metadata: IndexMetadata, *, mode, session, name, workspace):
+                 metadata: IndexMetadata, *, mode, session, name, workspace, max_cache_pages=None, context=None):
         rows, heads = scratch.query.shape[:2]
         if (source.shape != (rows, 4096) or source.dtype != torch.bfloat16
                 or source.device != scratch.query.device):
@@ -96,24 +117,110 @@ class PreparedGlmMLA:
                 session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
         packed = weights["kv_b_proj"].weight
         values, scales = packed.values.view(heads, 512, 512), packed.scale_rows.view(heads, 512, 16)
-        self.query_absorption = BatchedQuantizedProjection(scratch.query.transpose(0, 1),
-            (values[:, :256], scales[:, :256]), scratch.absorbed_query.transpose(0, 1), major="n",
-            session=session, name=f"{name}.absorb_query")
-        self.value_expansion = BatchedQuantizedProjection(scratch.attended.transpose(0, 1),
-            (values[:, 256:], scales[:, 256:]), scratch.expanded.transpose(0, 1), major="k",
-            session=session, name=f"{name}.expand_value")
+        self.absorb_weights, self.expand_weights = (values[:, :256], scales[:, :256]), (values[:, 256:], scales[:, 256:])
+        self.mode = mode
+        if context is None:
+            self.query_absorption = BatchedQuantizedProjection(scratch.query.transpose(0, 1),
+                self.absorb_weights, scratch.absorbed_query.transpose(0, 1), major="n",
+                session=session, name=f"{name}.absorb_query")
+            self.value_expansion = BatchedQuantizedProjection(scratch.attended.transpose(0, 1),
+                self.expand_weights, scratch.expanded.transpose(0, 1), major="k",
+                session=session, name=f"{name}.expand_value")
         self.indexer = PreparedGlmIndexer(module.indexer, weights, source, scratch.query_residual,
-            scratch.index, state.index, metadata, mode=mode, session=session, name=f"{name}.indexer", workspace=workspace)
+            scratch.index, state.index, metadata, mode=mode, session=session, name=f"{name}.indexer",
+            workspace=workspace, max_cache_pages=max_cache_pages, context=context)
         self.writer = PreparedLatentCacheWriter(scratch.latent, state.cache, metadata.token_slots,
             session=session, name=f"{name}.cache_write")
-        caps = sparse_mla.Caps(device=source.device, num_q_heads=heads, max_q_rows=rows, max_width=2051,
-            softmax_scale=module.scaling, max_batch=rows, max_kv_rows=state.cache.shape[0] * 64,
+        self.context = context
+        ranks = 1 if context is None else context.shards.world
+        slices = [(0, rows)] if context is None else context.slices(rows)
+        caps = sparse_mla.Caps(device=source.device, num_q_heads=heads * ranks, max_q_rows=slices[0][1],
+            max_width=2051, softmax_scale=module.scaling, max_batch=slices[0][1],
+            max_kv_rows=max(state.cache.shape[0], 4 * (max_cache_pages or 0)) * 64,
             kv_dtype=torch.uint8, head_dim=512, v_head_dim=512, page_size=64,
             model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528,
-            mode="decode" if mode == "decode" else "extend")
-        self.attention = PreparedSparseMLA(scratch.absorbed_query, state.cache, scratch.index.physical,
-            scratch.visible, scratch.index.selected_lengths, scratch.attended, caps=caps,
-            session=session, name=f"{name}.attention", workspace=workspace)
+            mode="decode" if mode == "decode" else "extend",
+            **({} if context is None else {"return_lse": True, "lse_scale": "natural"}))
+        if context is None:
+            self.attention = PreparedSparseMLA(scratch.absorbed_query, state.cache, scratch.index.physical,
+                scratch.visible, scratch.index.selected_lengths, scratch.attended, caps=caps,
+                session=session, name=f"{name}.attention", workspace=workspace)
+            return
+        if mode == "prefill":
+            # Prefill gathers every rank's records of the context into the slab, where a record's index is its
+            # global position, and attends with this rank's heads, so neither queries nor outputs cross ranks.
+            from .dcp import PREFILL_SLICE_ROWS
+
+            step = min(rows, PREFILL_SLICE_ROWS)
+            slab_caps = sparse_mla.Caps(device=source.device, num_q_heads=heads, max_q_rows=step, max_width=2051,
+                softmax_scale=module.scaling, max_batch=step, max_kv_rows=scratch.slab.shape[0],
+                kv_dtype=torch.uint8, head_dim=512, v_head_dim=512, page_size=64,
+                model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528, mode="extend")
+            if scratch.slab.shape[0] != metadata.block_table.shape[1] * context.shards.page_tokens:
+                raise ValueError("GLM prefill slab must hold every position of the prepared context")
+            self.slices = []
+            for start in range(0, rows, step):
+                end = min(start + step, rows)
+                count = end - start
+                absorbed, attended = scratch.absorbed_query[:count], scratch.attended[:count]
+                absorb = BatchedQuantizedProjection(scratch.query[start:end].transpose(0, 1), self.absorb_weights,
+                    absorbed.transpose(0, 1), major="n", session=session, name=f"{name}.absorb_query{start}")
+                attention = PreparedSparseMLA(absorbed, scratch.slab.view(-1, 64, 528),
+                    scratch.index.physical[start:end], scratch.visible[start:end],
+                    scratch.index.selected_lengths[start:end], attended, caps=slab_caps, session=session,
+                    name=f"{name}.attention{start}", workspace=workspace)
+                expand = BatchedQuantizedProjection(attended.transpose(0, 1), self.expand_weights,
+                    scratch.expanded[start:end].transpose(0, 1), major="k", session=session,
+                    name=f"{name}.expand_value{start}")
+                self.slices.append((start, end, absorb, attention, expand))
+            return
+        # Each slice gathers every rank's query heads, attends to local records, and keeps this rank's heads.
+        from ignition.components.collectives import PreparedAllGather, PreparedLseReduceScatter
+
+        self.slices = []
+        for start, end in slices:
+            count = end - start
+            gathered, partial, lse = scratch.gathered[:count], scratch.partial[:count], scratch.lse[:count]
+            absorbed, attended = scratch.absorbed_query[:count], scratch.attended[:count]
+            absorb = BatchedQuantizedProjection(scratch.query[start:end].transpose(0, 1), self.absorb_weights,
+                absorbed.transpose(0, 1), major="n", session=session, name=f"{name}.absorb_query{start}")
+            expand = BatchedQuantizedProjection(attended.transpose(0, 1), self.expand_weights,
+                scratch.expanded[start:end].transpose(0, 1), major="k", session=session,
+                name=f"{name}.expand_value{start}")
+            gather = PreparedAllGather(absorbed.view(count, -1), gathered.view(count, -1),
+                runtime=context.heads, session=session, coordinator=context.coordinator,
+                name=f"{name}.gather_heads{start}")
+            attention = PreparedSparseMLA(gathered, state.cache, scratch.index.physical[start:end],
+                scratch.visible[start:end], scratch.index.selected_lengths[start:end], partial, caps=caps,
+                session=session, name=f"{name}.attention{start}", workspace=workspace, lse=lse)
+            combine = PreparedLseReduceScatter(partial, lse, attended, runtime=context.heads,
+                session=session, coordinator=context.coordinator, name=f"{name}.combine{start}")
+            self.slices.append((start, end, absorb, gather, attention, combine, expand))
+
+    def attend_gathered_context(self):
+        """Attend one prefill request over its context gathered from every rank, one query slice at a time."""
+        from .dcp import pull_context
+
+        s, m = self.scratch, self.metadata
+        # The indexer's candidate gather orders this layer's peer cache writes before these reads.
+        pull_context(self.state.peers, m.block_table[0], (m.positions.max() + 1).reshape(1),
+                     s.slab.view(torch.int32), self.context.shards)
+        # Selected indices are global positions, which index the slab directly.
+        s.visible.copy_(m.positions + 1)
+        for start, end, absorb, attention, expand in self.slices:
+            absorb(s.query[start:end].transpose(0, 1))
+            attention()
+            expand(s.attended[:end - start].transpose(0, 1))
+
+    def rebind_pages(self):
+        """Write and attend through the state's current page pools after they were replaced."""
+        self.writer.cache = self.state.cache
+        self.indexer.rebind_pages()
+        if self.context is None:
+            self.attention.rebind_cache(self.state.cache)
+        elif self.mode != "prefill":
+            for slice in self.slices:
+                slice[4].rebind_cache(self.state.cache)
 
     def __call__(self, source):
         s, p = self.scratch, self.projections
@@ -121,12 +228,24 @@ class PreparedGlmMLA:
         rms_norm(s.query_input, self.module.q_a_layernorm.weight, s.query_residual,
             self.module.q_a_layernorm.variance_epsilon, round_before_weight=True)
         p["q_b_proj"](s.query_residual)
-        self.query_absorption(s.query.transpose(0, 1))
+        if self.context is None:
+            self.query_absorption(s.query.transpose(0, 1))
         rms_norm(s.latent_input, self.module.kv_a_layernorm.weight, s.latent,
             self.module.kv_a_layernorm.variance_epsilon, round_before_weight=True)
         self.writer()
         self.indexer()
-        s.visible.copy_(self.metadata.positions + 1)
-        self.attention()
-        self.value_expansion(s.attended.transpose(0, 1))
+        if self.context is None:
+            s.visible.copy_(self.metadata.positions + 1)
+            self.attention()
+            self.value_expansion(s.attended.transpose(0, 1))
+        elif self.mode == "prefill":
+            self.attend_gathered_context()
+        else:
+            s.visible.copy_(self.context.shards.local_tokens(self.metadata.positions + 1))
+            for start, end, absorb, gather, attention, combine, expand in self.slices:
+                count = end - start
+                absorb(s.query[start:end].transpose(0, 1))
+                gather(s.absorbed_query[:count].view(count, -1))
+                attention()
+                expand(combine(attention.output, attention.lse).transpose(0, 1))
         return p["o_proj"](s.expanded.view(s.output.shape[0], -1))

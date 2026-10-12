@@ -42,7 +42,13 @@ class PreparedSparseIndexer:
             self.binding = dsa_indexer.bind(self.plan,
                 scratch=planned_scratch(self.plan.scratch_specs(), workspace), **self.inputs)
 
+        self._finalize = finalize
         register_finalizer(session, finalize, workspace=workspace)
+
+    def rebind_cache(self, cache):
+        """Bind a replacement index cache before capture; its page count is a runtime bound."""
+        self.inputs["index_k_cache"] = cache
+        self._finalize()
 
     def __call__(self):
         return dsa_indexer.run(self.binding)

@@ -47,7 +47,7 @@ class PreparedBatch:
     """
 
     def __init__(self, inputs: BatchInputs, requests: DeviceRequestState, metadata: DecoderMetadata,
-                 *, mode, shard: TensorParallelShard, pages):
+                 *, mode, shard: TensorParallelShard, pages, shards=None):
         rows, tokens = metadata.sample_indices.numel(), metadata.token_ids.numel()
         self.capacity = requests.capacity
         if mode not in ("prefill", "decode") or not 1 <= rows <= self.capacity:
@@ -60,6 +60,9 @@ class PreparedBatch:
             raise ValueError("GLM batches require positive cache capacity and a 154880-token vocabulary")
         self.inputs, self.requests, self.metadata = inputs, requests, metadata
         self.rows, self.tokens, self.pages, self.mode, self.shard = rows, tokens, pages, mode, shard
+        from .dcp import ContextShards
+
+        self.shards = ContextShards() if shards is None else shards
         self.accept_unsampled = shard.rank != 0
         device = metadata.token_ids.device
         self.row_ids = torch.arange(rows, device=device)
@@ -84,9 +87,11 @@ class PreparedBatch:
         positions = r.consumed_tokens[safe_slots]
         ends = positions + lengths
         valid = ~duplicate & (b.live_rows <= self.rows) & (lengths > 0) & (lengths <= self.tokens)
-        valid &= (positions >= 0) & (ends <= b.page_tables.shape[1] * 256)
+        page_tokens = self.shards.page_tokens
+        valid &= (positions >= 0) & (ends <= b.page_tables.shape[1] * page_tokens)
         pages = b.page_tables[safe_slots]
-        valid &= (((pages >= 0) & (pages < self.pages)) | (self.block_ids >= (ends[:, None] + 255) // 256)).all(1)
+        valid &= (((pages >= 0) & (pages < self.pages))
+                  | (self.block_ids >= (ends[:, None] + page_tokens - 1) // page_tokens)).all(1)
         pending = r.pending_token[safe_slots]
         uploaded = b.token_ids[:self.tokens]
         if self.mode == "prefill":
@@ -140,8 +145,8 @@ class PreparedBatch:
         position = t.positions[request] + self.token_offsets - starts[request]
         index.requests.copy_(torch.where(live_token, request, 0))
         index.positions.copy_(torch.where(live_token, position, -1))
-        physical = index.block_table[request, (position // 256).clamp(0, index.block_table.shape[1] - 1)]
-        index.token_slots.copy_(torch.where(live_token, physical.long() * 256 + position % 256, -1))
+        index.token_slots.copy_(torch.where(live_token,
+            self.shards.token_slots(position, index.block_table[request]), -1))
         tokens = b.token_ids[:self.tokens] if self.mode == "prefill" else b.token_ids[request]
         m.token_ids.copy_(torch.where(live_token, tokens, 0))
 

@@ -90,7 +90,9 @@ class PreparedRoutedExperts:
 
     def __init__(self, source, experts, ids, weights, output, *, session: PreparationSession, name: str,
                  workspace: ScratchArena | torch.Tensor | None = None, router_weight=None, router_plan=None,
-                 correction_bias=None):
+                 correction_bias=None, a4_prefill=False):
+        # A16 experts prepared with A4 capability run large prefill calls with quantized activations.
+        precision = {"a4_prefill": True} if a4_prefill else {}
         self.source = source
         self.output = output
         self.scratch = None
@@ -109,7 +111,7 @@ class PreparedRoutedExperts:
             scratch = planned_scratch(state.scratch.scratch_specs(), workspace)
             self.scratch = scratch
             binding = state.bind(a=source, topk_ids=ids, topk_weights=weights,
-                output=output, scratch=scratch, input_scales_static=True)
+                output=output, scratch=scratch, input_scales_static=True, **precision)
             return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(workspace, scratch, binding))
 
         scale_requests = () if self.scale_plan is None else (self.scale_plan.request(
@@ -124,12 +126,12 @@ class PreparedRoutedExperts:
             benchmark_call=partial(moe_fixtures.benchmark_call, source=source, experts=experts,
                 top_k=ids.shape[1], session=session, name=name, workspace=workspace,
                 allocate_router=RouterScratch.allocate, router_weight=router_weight,
-                router_plan=router_plan, correction_bias=correction_bias)),))
+                router_plan=router_plan, correction_bias=correction_bias, precision=precision)),))
 
         def finalize():
             self.scratch = planned_scratch(self.plan.scratch_specs(), workspace)
             self.binding = fused_moe.bind(self.plan, a=source, topk_ids=ids, topk_weights=weights,
-                output=output, scratch=self.scratch, input_scales_static=True)
+                output=output, scratch=self.scratch, input_scales_static=True, **precision)
 
         register_finalizer(session, finalize, workspace=workspace)
 

@@ -7,9 +7,12 @@ from ignition.components.state_transfer import PreparedStateTransfer
 
 class PreparedMaintenance:
     def __init__(self, mode, requests, pool, commands, inputs, records, frame, sequence, *,
-                 runtime, coordinator, session, name, capacity=4, admission_buffers=None, draft_tables=None):
-        transfer = PreparedStateTransfer(pool, commands, inputs.page_tables, pages=pool.partial_pages(), page_tokens=256,
-            state_rows=inputs.request_state_rows, requests=requests, trailing_pages=pool.draft_pages(), trailing_tables=draft_tables)
+                 runtime, coordinator, session, name, capacity=4, admission_buffers=None, draft_tables=None,
+                 page_tokens=256):
+        self.pool, self.commands, self.tables, self.draft_tables = pool, commands, inputs.page_tables, draft_tables
+        self.requests, self.state_rows = requests, inputs.request_state_rows
+        self.page_tokens = page_tokens
+        transfer = self._transfer()
         if mode == "snapshot":
             slots, epochs, count = inputs.row_slot_ids, inputs.row_generations, inputs.live_rows
         elif admission_buffers is not None:
@@ -22,6 +25,16 @@ class PreparedMaintenance:
         self.state.prepare()
         self.validation = PreparedAllReduce(self.state.validation_input, self.state.validation_sum,
             runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.validation")
+
+    def _transfer(self):
+        return PreparedStateTransfer(self.pool, self.commands, self.tables, pages=self.pool.partial_pages(),
+            page_tokens=self.page_tokens, state_rows=self.state_rows, requests=self.requests,
+            trailing_pages=self.pool.draft_pages(), trailing_tables=self.draft_tables)
+
+    def rebind_pages(self, pages):
+        """Copy partial pages of the continuation pool's current page pools."""
+        self.state.transfer = self._transfer()
+        self.state.transfer.prepare()
 
     def __call__(self):
         self.validation(self.state.validate())

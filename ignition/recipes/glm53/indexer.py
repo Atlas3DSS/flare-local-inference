@@ -12,6 +12,9 @@ from ignition.components.linear import QuantizedProjection, UnquantizedProjectio
 from ignition.preparation.tuning import declare
 
 
+_SELECT_ROWS = 512
+
+
 @dataclass(frozen=True)
 class IndexState:
     cache: torch.Tensor
@@ -62,9 +65,14 @@ class IndexScratch:
     physical: torch.Tensor
     selected_lengths: torch.Tensor
     page_table: torch.Tensor
+    # Decode context parallel selection: local scores, packed and gathered candidates, global pools.
+    scores: torch.Tensor
+    candidates: torch.Tensor
+    gathered: torch.Tensor
+    global_pools: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, blocks, mode, device):
+    def allocate(cls, tokens, blocks, mode, device, *, context_ranks=1):
         if tokens <= 0 or blocks <= 0 or mode not in ("decode", "prefill"):
             raise ValueError("GLM index scratch requires positive capacities and decode/prefill mode")
         def tensor(width, dtype=torch.bfloat16):
@@ -74,7 +82,15 @@ class IndexScratch:
             torch.zeros(tokens, dtype=torch.int32, device=device),
             torch.tensor([blocks * 64], dtype=torch.int32, device=device), tensor(512, torch.int32),
             tensor(2051, torch.int32), torch.zeros(tokens, dtype=torch.int32, device=device),
-            torch.zeros((tokens if mode == "decode" else 1, blocks), dtype=torch.int32, device=device))
+            torch.zeros((tokens if mode == "decode" else 1, blocks), dtype=torch.int32, device=device),
+            *cls._context_selection(tokens if context_ranks > 1 else 0, context_ranks, device))
+
+    @staticmethod
+    def _context_selection(tokens, ranks, device):
+        return (torch.zeros((tokens, 512), dtype=torch.float32, device=device),
+                torch.zeros((tokens, 512, 2), dtype=torch.float32, device=device),
+                torch.zeros((tokens, ranks * 512, 2), dtype=torch.float32, device=device),
+                torch.full((tokens, 512), -1, dtype=torch.int32, device=device))
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.query.shape[0] or mode not in ("decode", "prefill"):
@@ -86,7 +102,8 @@ class IndexScratch:
             self.key[:tokens], self.normalized_key[:tokens], self.gate[:tokens],
             self.projected_weights[:tokens], self.weights[:tokens], self.pool_lengths[:tokens],
             self.active_width, self.pools[:tokens], self.physical[:tokens], self.selected_lengths[:tokens],
-            self.page_table[:sequences])
+            self.page_table[:sequences], self.scores[:tokens], self.candidates[:tokens], self.gathered[:tokens],
+            self.global_pools[:tokens])
 
 
 class PreparedGlmIndexer:
@@ -100,7 +117,8 @@ class PreparedGlmIndexer:
     """
 
     def __init__(self, module, weights, source, query_residual, scratch: IndexScratch,
-                 state: IndexState, metadata: IndexMetadata, *, mode, session, name, workspace):
+                 state: IndexState, metadata: IndexMetadata, *, mode, session, name, workspace,
+                 max_cache_pages=None, context=None):
         rows = source.shape[0]
         if (source.shape != (rows, 4096) or query_residual.shape != (rows, 1536)
                 or source.dtype != torch.bfloat16 or query_residual.dtype != source.dtype
@@ -115,6 +133,9 @@ class PreparedGlmIndexer:
                 or scratch.page_table.shape[0] != (1 if mode == "prefill" else rows)):
             raise ValueError("GLM index scratch and metadata capacities differ")
         self.module, self.scratch, self.state, self.metadata, self.mode = module, scratch, state, metadata, mode
+        self.context = context
+        if context is not None and scratch.gathered.shape != (rows, context.shards.world * 512, 2):
+            raise ValueError("GLM context-parallel selection requires candidate scratch for every row")
         self.source, self.query_residual = source, query_residual
         module.k_norm.weight = torch.nn.Parameter(weights["indexer.k_norm.weight"], requires_grad=False)
         module.k_norm.bias = torch.nn.Parameter(weights["indexer.k_norm.bias"], requires_grad=False)
@@ -140,19 +161,43 @@ class PreparedGlmIndexer:
                 PreparedCall(run=lambda: state.update(*self.pool_arguments))),
         ))
         page_table = scratch.page_table.expand(rows, -1) if mode == "prefill" else scratch.page_table
-        caps = dsa_indexer.Caps(device=source.device, num_q_heads=32, max_q_rows=rows,
+        # Prefill selection scratch grows with query rows (about 140 KB each), so long chunks select in slices.
+        step = _SELECT_ROWS if mode == "prefill" else rows
+        caps = dsa_indexer.Caps(device=source.device, num_q_heads=32, max_q_rows=min(rows, step),
             max_page_table_width=page_table.shape[1], topk=512, mode=mode)
-        self.selector = PreparedSparseIndexer(scratch.query_fp8.view(rows, 32, 128), scratch.weights,
-            state.cache.view(state.cache.shape[0], -1), page_table, scratch.pool_lengths,
-            scratch.active_width, scratch.pools, caps=caps, session=session, name=f"{name}.select", workspace=workspace)
+        cache = state.cache.view(state.cache.shape[0], -1)
+        self.selectors = tuple(PreparedSparseIndexer(scratch.query_fp8[start:end].view(end - start, 32, 128),
+            scratch.weights[start:end], cache, page_table[start:end], scratch.pool_lengths[start:end],
+            scratch.active_width, scratch.pools[start:end], caps=caps, session=session,
+            name=f"{name}.select" if end - start == rows else f"{name}.select{start}", workspace=workspace,
+            scores=None if context is None else scratch.scores[start:end])
+            for start in range(0, rows, step) for end in (min(start + step, rows),))
+        self.gathers = ()
+        if context is not None:
+            from ignition.components.collectives import PreparedAllGather
+
+            columns, world = 1024, context.shards.world
+            self.gathers = tuple(PreparedAllGather(scratch.candidates[start:end].view(torch.bfloat16).view(-1, 2 * columns),
+                scratch.gathered[start:end].view(torch.bfloat16).view(-1, 2 * columns * world),
+                runtime=context.candidates, session=session, coordinator=context.coordinator,
+                name=f"{name}.candidates{start}") for start, end in context.slices(rows))
         self.expand_arguments = (scratch.pools, metadata.positions, metadata.requests,
                                  metadata.block_table, scratch.physical, scratch.selected_lengths)
         self.expand_options = {"pool_size": 4, "block_size": 256, "block_stride_rows": 256,
                                "num_cache_blocks": state.cache.shape[0]}
         self.expand_plan = sparse_mla.plan_pooled_selection(device=source.device, max_rows=rows,
-            page_size=256, max_page_table_width=metadata.block_table.shape[1], num_cache_blocks=state.cache.shape[0])
+            page_size=256, max_page_table_width=metadata.block_table.shape[1],
+            num_cache_blocks=max(state.cache.shape[0], max_cache_pages or 0))
         declare(session, (self.expand_plan.request(name=f"{name}.expand", prepare_call=lambda state:
             PreparedCall(run=lambda: state.run(*self.expand_arguments, **self.expand_options))),))
+
+    def rebind_pages(self):
+        """Address the state's current index cache; plans bound its page count from above."""
+        cache = self.state.cache
+        self.pool_arguments = (cache, *self.pool_arguments[1:])
+        for selector in self.selectors:
+            selector.rebind_cache(cache.view(cache.shape[0], -1))
+        self.expand_options["num_cache_blocks"] = cache.shape[0]
 
     def __call__(self):
         s, m = self.scratch, self.metadata
@@ -162,12 +207,29 @@ class PreparedGlmIndexer:
         s.weights.copy_(self.weight_projection(self.source))
         glm_pool.quantize_queries(*self.query_arguments, plan=self.query_plan)
         glm_pool.update_pools(*self.pool_arguments, plan=self.pool_plan)
-        s.pool_lengths.copy_((m.positions + 1) // 4)
+        pools = (m.positions + 1) // 4
+        s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
         if self.mode == "prefill":
             s.page_table.copy_(m.block_table)
         else:
             s.page_table.copy_(m.block_table[m.requests.long()])
-        self.selector()
-        sparse_mla.expand_pooled_topk_to_physical_slots(*self.expand_arguments,
-            **self.expand_options, plan=self.expand_plan)
+        for selector in self.selectors:
+            selector()
+        if self.context is None:
+            sparse_mla.expand_pooled_topk_to_physical_slots(*self.expand_arguments,
+                **self.expand_options, plan=self.expand_plan)
+            return s.physical
+        from .dcp import expand_local, expand_tokens, merge_candidates, pack_candidates
+
+        # Every rank merges identical global candidates, then keeps the records it owns.
+        pack_candidates(s.pools, s.scores, s.candidates, self.context.shards)
+        for gather, (start, end) in zip(self.gathers, self.context.slices(s.pools.shape[0]), strict=True):
+            gather(s.candidates[start:end].view(torch.bfloat16).view(end - start, -1))
+        merge_candidates(s.gathered, s.global_pools)
+        if self.mode == "prefill":
+            # Prefill attends over gathered context blocks addressed by global position.
+            expand_tokens(s.global_pools, m.positions, s.physical, s.selected_lengths)
+        else:
+            expand_local(s.global_pools, m.positions, m.requests, m.block_table, s.physical, s.selected_lengths,
+                         self.context.shards)
         return s.physical

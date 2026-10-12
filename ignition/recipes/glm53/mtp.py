@@ -1,6 +1,7 @@
 """Learned GLM draft layer and target-feedback cache absorption."""
 
 from copy import deepcopy
+from dataclasses import dataclass
 
 import torch
 from b12x.attention.dsa_indexer import glm_pool
@@ -16,8 +17,54 @@ from .mla import MLAScratch, PreparedGlmMLA
 from .moe import MoeScratch, PreparedGlmMoe
 
 
+@dataclass(frozen=True)
+class MTPScratch:
+    """Draft-layer intermediates that serial draft and absorption passes can share."""
+
+    embedded: torch.Tensor
+    joined: torch.Tensor
+    residual: torch.Tensor
+    normalized: torch.Tensor
+    attention_output: torch.Tensor
+    mlp_output: torch.Tensor
+    hidden: torch.Tensor
+    attention: MLAScratch
+    moe: MoeScratch | None
+
+    @classmethod
+    def allocate(cls, tokens, world_size, blocks, mode, device, *, moe=True, context_ranks=1):
+        def buffer(width):
+            return torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+        return cls(buffer(4096), buffer(8192), buffer(4096), buffer(4096), buffer(4096), buffer(4096), buffer(4096),
+                   MLAScratch.allocate(tokens, 64 // world_size, blocks, mode, device, context_ranks=context_ranks),
+                   MoeScratch.allocate(tokens, world_size, device) if moe else None)
+
+    @classmethod
+    def absorbing(cls, decoder):
+        """Views of decoder prefill scratch for cache absorption, which runs after the target prefill.
+
+        Absorption reads only its own metadata and the separately owned target feedback, so the
+        decoder's intermediates are dead by then. It writes no attention, MLP or hidden outputs.
+        """
+        tokens = decoder.embedding.shape[0]
+        joined = decoder.residual.view(-1)[:tokens * 8192].view(tokens, 8192)
+        return cls(decoder.embedding, joined, decoder.attention_output, decoder.mlp_output,
+                   decoder.attention_output, decoder.mlp_output, decoder.embedding, decoder.mla, None)
+
+    def rows(self, tokens, mode):
+        if type(tokens) is not int or not 0 < tokens <= self.hidden.shape[0]:
+            raise ValueError("GLM draft rows exceed scratch capacity")
+        views = {name: getattr(self, name)[:tokens] for name in (
+            "embedded", "joined", "residual", "normalized", "attention_output", "mlp_output", "hidden")}
+        return MTPScratch(**views, attention=self.attention.rows(tokens, mode),
+                          moe=None if self.moe is None else self.moe.rows(tokens))
+
+
 class DraftMetadata:
-    def __init__(self, tokens, rows, blocks, device):
+    def __init__(self, tokens, rows, blocks, device, *, shards=None):
+        from .dcp import ContextShards
+
+        self.shards = ContextShards() if shards is None else shards
         self.indexed = IndexMetadata.allocate(tokens, rows, blocks, device)
         self.token_ids = torch.zeros(tokens, dtype=torch.int64, device=device)
         self.hidden = torch.zeros((tokens, 4096), dtype=torch.bfloat16, device=device)
@@ -45,8 +92,7 @@ class DraftMetadata:
         position = starts[row] + local
         m.positions.copy_(torch.where(active, position, -1))
         m.block_table.copy_(tables[slots.long().clamp(0, tables.shape[0] - 1)])
-        page = m.block_table[row, (position // 256).clamp(0, tables.shape[1] - 1)]
-        m.token_slots.copy_(torch.where(active, page.long() * 256 + position % 256, -1))
+        m.token_slots.copy_(torch.where(active, self.shards.token_slots(position, m.block_table[row]), -1))
 
 
 class PreparedMTP:
@@ -58,7 +104,8 @@ class PreparedMTP:
     """
 
     def __init__(self, weights, state, metadata, *, mode, session, name, workspace,
-                 runtime, vocabulary_runtime, coordinator, cache_only=False):
+                 runtime, vocabulary_runtime, coordinator, cache_only=False, max_cache_pages=None, scratch=None,
+                 context=None):
         from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextAttention, Glm5NextTextMoE
 
         config = deepcopy(weights.tree.config.text_config)
@@ -71,31 +118,37 @@ class PreparedMTP:
         rows, device = metadata.token_ids.numel(), metadata.hidden.device
         def buffer(*shape):
             return torch.zeros(shape, dtype=torch.bfloat16, device=device)
-        self.embedded, self.joined = buffer(rows, 4096), buffer(rows, 8192)
-        self.residual, self.normalized = buffer(rows, 4096), buffer(rows, 4096)
-        self.attention_output, self.mlp_output = buffer(rows, 4096), buffer(rows, 4096)
-        self.hidden = buffer(rows, 4096)
+        if scratch is None:
+            scratch = MTPScratch.allocate(rows, weights.shard.world_size, metadata.indexed.block_table.shape[1],
+                                          mode, device, moe=not cache_only,
+                                          context_ranks=1 if context is None else context.shards.world)
+        self.embedded, self.joined = scratch.embedded, scratch.joined
+        self.residual, self.normalized = scratch.residual, scratch.normalized
+        self.attention_output, self.mlp_output = scratch.attention_output, scratch.mlp_output
+        self.hidden = scratch.hidden
         self.embedding = PreparedEmbedding(weights.tree.model.language_model.embed_tokens.weight,
             metadata.token_ids, self.embedded, num_rows=metadata.num_tokens, session=session, name=f"{name}.embedding")
         self.projection = UnquantizedProjection(self.joined, weights.mtp.tensors["eh_proj"], self.residual,
             session=session, name=f"{name}.eh_proj")
-        scratch = MLAScratch.allocate(rows, 64 // weights.shard.world_size,
-            metadata.indexed.block_table.shape[1], mode, device)
-        self.attention = PreparedGlmMLA(attention, weights.mtp.attention, self.normalized, scratch,
-            state, metadata.indexed, mode=mode, session=session, name=f"{name}.mla", workspace=workspace)
+        self.attention = PreparedGlmMLA(attention, weights.mtp.attention, self.normalized, scratch.attention,
+            state, metadata.indexed, mode=mode, session=session, name=f"{name}.mla", workspace=workspace,
+            max_cache_pages=max_cache_pages, context=context)
         if not cache_only:
-            self.attention_reduce = PreparedAllReduce(scratch.output, self.attention_output,
+            self.attention_reduce = PreparedAllReduce(scratch.attention.output, self.attention_output,
                 runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.attention_reduce")
             self.moe = PreparedGlmMoe(moe, self.normalized, weights.mtp.mlp,
-                MoeScratch.allocate(rows, weights.shard.world_size, device),
-                session=session, name=f"{name}.moe", workspace=workspace)
+                scratch.moe, session=session, name=f"{name}.moe", workspace=workspace)
             self.mlp_reduce = PreparedAllReduce(self.moe.output, self.mlp_output,
                 runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.mlp_reduce")
             self.local_logits = buffer(rows, 154880 // weights.shard.world_size)
             self.logits = buffer(rows, 154880)
-            self.head = PreparedVocabularyProjection(self.hidden, weights.tree.lm_head.weight,
+            head = weights.mtp.draft_head if weights.mtp.draft_head is not None else weights.tree.lm_head.weight
+            self.head = PreparedVocabularyProjection(self.hidden, head,
                 self.local_logits, self.logits, runtime=vocabulary_runtime, coordinator=coordinator,
                 session=session, name=f"{name}.lm_head")
+
+    def rebind_pages(self):
+        self.attention.rebind_pages()
 
     def __call__(self):
         w, m = self.weights.tensors, self.metadata

@@ -64,7 +64,13 @@ class PreparedSparseMLA:
             self.binding = sparse_mla.bind(self.plan,
                 scratch=planned_scratch(self.plan.scratch_specs(), workspace), **self.inputs)
 
+        self._finalize = finalize
         register_finalizer(session, finalize, workspace=workspace)
+
+    def rebind_cache(self, cache):
+        """Bind replacement paged storage before capture; the plan's max_kv_rows bounds its size."""
+        self.inputs["kv_cache"] = cache
+        self._finalize()
 
     def __call__(self):
         result = sparse_mla.run(self.binding)

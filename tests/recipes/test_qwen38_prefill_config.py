@@ -8,9 +8,9 @@ from ignition.recipes.qwen38.bootstrap import PreparationConfig
 @pytest.mark.parametrize("size, expected", [
     (64, (64,)),
     (512, (128, 256, 512)),
-    (3072, (128, 256, 512, 1024, 2048, 3072)),
-    (4096, (128, 256, 512, 1024, 2048, 4096)),
-    (8192, (128, 256, 512, 1024, 2048, 4096, 8192)),
+    (3072, (128, 256, 512, 1024, 1536, 2048, 2560, 3072)),
+    (4096, (128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096)),
+    (8192, (128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192)),
 ])
 def test_prefill_catalog_covers_aligned_limit_and_partial_tails(size, expected):
     config = PreparationConfig(prefill_chunk_size=size)

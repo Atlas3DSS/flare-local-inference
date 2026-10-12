@@ -52,9 +52,17 @@ impl SchedulerLimits {
 }
 
 /// Required token capacities for a validated, 64-aligned prefill chunk limit.
+/// Prepared prefill token capacities: doubling from 128 to a step of at least 512 tokens and about an
+/// eighth of the chunk, then growing by that step, then the chunk size itself. A partial chunk pads
+/// by less than one step. Matches `ignition.components.capacity.prefill_capacities`.
 pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
+    let step = 512.max(chunk_size / 8 / 512 * 512);
     std::iter::successors(Some(128usize), |capacity| capacity.checked_mul(2))
-        .take_while(move |capacity| *capacity < chunk_size)
+        .take_while(move |capacity| *capacity < chunk_size.min(step))
+        .chain(
+            std::iter::successors(Some(step), move |capacity| capacity.checked_add(step))
+                .take_while(move |capacity| *capacity < chunk_size),
+        )
         .chain(std::iter::once(chunk_size))
 }
 
@@ -245,6 +253,7 @@ pub struct RequestScheduler {
     speculative_widths: Vec<usize>,
     speculative_fixed_width: Option<usize>,
     speculative_catalog: [Vec<usize>; 7],
+    prefill_catalog: Vec<usize>,
     proposal_source: speculation::ProposalSource,
     controller: speculation::WidthController,
 }
@@ -303,6 +312,7 @@ impl RequestScheduler {
             speculative_widths: Vec::new(),
             speculative_fixed_width: None,
             speculative_catalog: Default::default(),
+            prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
             proposal_source: speculation::ProposalSource::Mtp,
             controller: speculation::WidthController::default(),
         })
@@ -315,6 +325,21 @@ impl RequestScheduler {
             .copied()
             .max()
             .unwrap_or(1)
+    }
+
+    pub fn prefill_graphs(&mut self, capacities: &[usize]) -> Result<()> {
+        let mut catalog = capacities.to_vec();
+        catalog.sort_unstable();
+        if catalog.last() != Some(&self.limits.prefill_chunk_size)
+            || catalog.iter().any(|n| *n == 0 || !n.is_multiple_of(64))
+            || catalog.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(
+                "prefill graphs must be distinct aligned capacities covering the chunk size".into(),
+            );
+        }
+        self.prefill_catalog = catalog;
+        Ok(())
     }
 
     pub fn snapshot_slot(&self, snapshot: SnapshotId) -> StateSlotId {
@@ -823,7 +848,9 @@ impl RequestScheduler {
             })
             .collect();
         let token_capacity = if kind == GraphKind::Prefill {
-            prefill_capacities(self.limits.prefill_chunk_size)
+            self.prefill_catalog
+                .iter()
+                .copied()
                 .find(|capacity| *capacity >= lanes[0].tokens)
                 .unwrap()
         } else if kind == GraphKind::Vision {

@@ -66,6 +66,9 @@ pub struct ContractMetadata {
     pub schema: String,
     pub vocabulary: usize,
     pub vision: VisionCapabilities,
+    /// Global tokens per KV page when the model shards pages across ranks; absent for its default.
+    #[cfg_attr(feature = "server", serde(default))]
+    pub page_tokens: Option<usize>,
 }
 
 #[derive(Clone, Debug)]

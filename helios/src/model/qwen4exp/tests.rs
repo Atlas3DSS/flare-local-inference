@@ -168,7 +168,12 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
             let index = missing
                 .graphs
                 .iter()
-                .position(|graph| graph.kind == kind && graph.sampling_mode == mode)
+                .position(|graph| {
+                    graph.kind == kind
+                        && graph.sampling_mode == mode
+                        && (kind != GraphKind::Prefill
+                            || graph.token_capacity == config.limits.prefill_chunk_size)
+                })
                 .unwrap();
             let removed = missing.graphs.remove(index);
             assert!(matches!(
@@ -606,6 +611,11 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
         config.limits.prefill_chunk_size = chunk_size;
         let original = manifest(&config);
         validate::<Qwen4Exp>(&config, &original).unwrap();
+        let mut maximum_only = original.clone();
+        maximum_only
+            .graphs
+            .retain(|graph| graph.kind != GraphKind::Prefill || graph.token_capacity == chunk_size);
+        validate::<Qwen4Exp>(&config, &maximum_only).unwrap();
         {
             let mode = SamplingMode::General;
             let mut missing = original.clone();

@@ -137,7 +137,12 @@ impl NativeModel {
         let mut allocations = Vec::new();
         let mut ranges = Vec::new();
         for package in &mut packages {
-            for allocation in &package.allocations {
+            // Peer allocations name storage another rank owns and are checked against the model index below.
+            for allocation in package
+                .allocations
+                .iter()
+                .filter(|a| !matches!(a.memory, Memory::Peer))
+            {
                 let address = allocation
                     .address
                     .ok_or_else(|| invalid("model allocations require recorded addresses"))?;
@@ -174,27 +179,7 @@ impl NativeModel {
             }
         }
         packages[0].reservations = merged;
-        let mut shared = HashSet::new();
-        for peer in &descriptor.peer_memory {
-            let owner = packages
-                .get(peer.owner as usize)
-                .ok_or_else(|| invalid("invalid peer-memory owner"))?;
-            if !shared.insert(peer.address)
-                || !peer.readers.contains(&peer.owner)
-                || peer.readers.iter().collect::<HashSet<_>>().len() != peer.readers.len()
-                || peer.readers.is_empty()
-                || peer.readers.iter().any(|r| *r as usize >= devices.len())
-                || !owner.allocations.iter().any(|a| {
-                    a.address == Some(peer.address)
-                        && a.nbytes as u64 == peer.nbytes
-                        && matches!(a.memory, Memory::Device)
-                })
-            {
-                return Err(invalid(
-                    "peer memory must name one owned device allocation and valid readers",
-                ));
-            }
-        }
+        validate_peer_memory(&packages, &descriptor.peer_memory)?;
         phase.finish(format!(
             "{} rank{}",
             devices.len(),
@@ -236,6 +221,7 @@ impl NativeModel {
                 match allocation.memory {
                     Memory::Device => gpu_bytes += allocation.nbytes as u64,
                     Memory::MappedHost => host_bytes += allocation.nbytes as u64,
+                    Memory::Peer => {}
                 }
                 payload_bytes += allocation.stored_bytes() as u64;
             }
@@ -259,31 +245,7 @@ impl NativeModel {
                 "{:.1} GiB",
                 payload_bytes as f64 / (1u64 << 30) as f64
             ));
-            for peer in &descriptor.peer_memory {
-                let rank = &model.ranks[peer.owner as usize];
-                let access: Vec<_> = peer
-                    .readers
-                    .iter()
-                    .map(|reader| Access {
-                        location: Location {
-                            kind: 1,
-                            device: model.ranks[*reader as usize].device,
-                        },
-                        flags: 3,
-                    })
-                    .collect();
-                rank.driver
-                    .check("cuCtxSetCurrent", (rank.driver.context_set)(rank.context))?;
-                rank.driver.check(
-                    "cuMemSetAccess",
-                    (rank.driver.access)(
-                        peer.address,
-                        peer.nbytes as usize,
-                        access.as_ptr(),
-                        access.len(),
-                    ),
-                )?;
-            }
+            model.grant_peer_access(&descriptor.peer_memory)?;
             let kernels = packages
                 .iter()
                 .map(|p| p.functions.len() as u64)
@@ -305,8 +267,48 @@ impl NativeModel {
             })?;
             phase.finish(format!("concurrency {active}"));
             model.allocate_caches(&mut packages, progress, active)?;
+            model.grant_peer_access(&descriptor.peer_memory)?;
         }
         Ok(model)
+    }
+
+    unsafe fn grant_peer_access(&self, peers: &[protobuf::wire::PeerMemory]) -> Result<()> {
+        for peer in peers {
+            let rank = &self.ranks[peer.owner as usize];
+            let allocation = rank
+                .allocations
+                .values()
+                .find(|a| a.address == peer.address && matches!(a.memory, Memory::Device))
+                .ok_or_else(|| invalid("shared allocation is missing from its owner"))?;
+            if allocation.nbytes == 0 {
+                continue;
+            }
+            let access: Vec<_> = peer
+                .readers
+                .iter()
+                .map(|reader| Access {
+                    location: Location {
+                        kind: 1,
+                        device: self.ranks[*reader as usize].device,
+                    },
+                    flags: 3,
+                })
+                .collect();
+            unsafe {
+                rank.driver
+                    .check("cuCtxSetCurrent", (rank.driver.context_set)(rank.context))?;
+                rank.driver.check(
+                    "cuMemSetAccess",
+                    (rank.driver.access)(
+                        peer.address,
+                        allocation.nbytes,
+                        access.as_ptr(),
+                        access.len(),
+                    ),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn parallel(
@@ -358,5 +360,106 @@ impl Drop for NativeModel {
     fn drop(&mut self) {
         // Rank zero owns the shared reservations and releases them after every peer.
         while self.ranks.pop().is_some() {}
+    }
+}
+
+fn validate_peer_memory(packages: &[Package], peers: &[protobuf::wire::PeerMemory]) -> Result<()> {
+    let mut shared = HashSet::new();
+    for peer in peers {
+        let owner = packages
+            .get(peer.owner as usize)
+            .ok_or_else(|| invalid("invalid peer-memory owner"))?;
+        if !shared.insert(peer.address)
+            || !peer.readers.contains(&peer.owner)
+            || peer.readers.iter().collect::<HashSet<_>>().len() != peer.readers.len()
+            || peer.readers.is_empty()
+            || peer.readers.iter().any(|r| *r as usize >= packages.len())
+            || !owner.allocations.iter().any(|a| {
+                a.address == Some(peer.address)
+                    && a.extent() as u64 == peer.nbytes
+                    && matches!(a.memory, Memory::Device)
+            })
+        {
+            return Err(invalid(
+                "peer memory must name one owned device allocation and valid readers",
+            ));
+        }
+    }
+    for (rank, package) in packages.iter().enumerate() {
+        for allocation in package
+            .allocations
+            .iter()
+            .filter(|a| matches!(a.memory, Memory::Peer))
+        {
+            if !peers.iter().any(|peer| {
+                peer.owner as usize != rank
+                    && Some(peer.address) == allocation.address
+                    && peer.nbytes == allocation.nbytes as u64
+                    && peer.readers.contains(&(rank as u32))
+            }) {
+                return Err(invalid(
+                    "peer allocation must name another rank's shared memory this rank reads",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protobuf::wire;
+
+    #[test]
+    fn peer_ownership_covers_virtual_extents_before_cache_backing() {
+        let address = 0x200000000000;
+        for dynamic in [false, true] {
+            let extent = if dynamic { 8 << 20 } else { 2 << 20 };
+            let allocation = wire::Allocation {
+                name: "cache".into(),
+                address: Some(address),
+                alignment: 65536,
+                nbytes: if dynamic { 0 } else { extent },
+                sizing: dynamic.then_some(wire::Sizing {
+                    capacity: 1,
+                    unit_bytes: 2 << 20,
+                    maximum: 4,
+                }),
+                ..Default::default()
+            };
+            let import = wire::Allocation {
+                name: "peer-cache".into(),
+                address: Some(address),
+                alignment: 65536,
+                nbytes: extent,
+                memory: wire::Memory::Peer as i32,
+                ..Default::default()
+            };
+            let packages: Vec<_> = [allocation, import]
+                .into_iter()
+                .map(|allocation| {
+                    protobuf::decode(wire::BundleIndex {
+                        architecture: vec![12, 0],
+                        context: Some(Default::default()),
+                        allocations: vec![allocation],
+                        ..Default::default()
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let mut peers = vec![wire::PeerMemory {
+                owner: 0,
+                address,
+                nbytes: extent,
+                readers: vec![0, 1],
+            }];
+            validate_peer_memory(&packages, &peers).unwrap();
+            peers[0].nbytes /= 2;
+            assert!(validate_peer_memory(&packages, &peers).is_err());
+            peers[0].nbytes = extent;
+            peers[0].readers.pop();
+            assert!(validate_peer_memory(&packages, &peers).is_err());
+        }
     }
 }

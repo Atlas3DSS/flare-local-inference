@@ -5,6 +5,7 @@ from dataclasses import dataclass, fields
 import torch
 from b12x.sequence import gdn_decode, kda_prefill, short_conv
 
+from ignition.components.gated_norm import PreparedGatedRMSNorm
 from ignition.components.linear import QuantizedProjection
 from ignition.components.projection_overlap import ConcurrentProjectionChain
 from ignition.components.recurrent import (
@@ -55,7 +56,7 @@ class PreparedGlmKDA:
     """One rank's KDA branch before the row-parallel output reduction.
 
     Decode and prefill use b12x recurrence kernels. Prefill output normalization
-    uses the canonical Transformers module inside the compiled forward. Device
+    fuses the canonical sigmoid-gated FP32 RMSNorm and zeroes inactive rows. Device
     metadata selects live rows and persistent state slots; zero live counts are
     required while preparing and tuning kernels.
     """
@@ -119,7 +120,8 @@ class PreparedGlmKDA:
             "raw_g": scratch.raw_g.view(self.tokens, self.heads, 128), "raw_beta": scratch.raw_beta,
             "A_log": weights["A_log"], "dt_bias": weights["dt_bias"].view(self.heads, 128),
             "recurrent_state": state.recurrent, "num_seqs": metadata.num_seqs, "num_tokens": metadata.num_tokens,
-            "output": scratch.recurrence.view(self.tokens, self.heads, 128),
+            # Decode writes normalized output straight into the output projection's input.
+            "output": (scratch.gated if mode == "decode" else scratch.recurrence).view(self.tokens, self.heads, 128),
         }
         self.run_options = {"lower_bound": -5.0}
         if mode == "decode":
@@ -146,8 +148,12 @@ class PreparedGlmKDA:
             session=session, name=f"{name}.{mode}", public_bind=public_bind, bind_method=bind_method,
             mode=mode, workspace=workspace, run_options=self.run_options,
             set_binding=lambda binding: setattr(self, "recurrent_binding", binding))
-        self.row_ids = torch.arange(self.tokens, dtype=torch.int32, device=self.device).view(-1, 1)
-        self.inactive_rows = torch.empty((self.tokens, 1), dtype=torch.bool, device=self.device)
+        if mode == "prefill":
+            # The canonical sigmoid-gated FP32 RMSNorm, fused, writing the output projection's input.
+            self.output_norm = PreparedGatedRMSNorm(scratch.recurrence.view(self.tokens, self.heads, 128),
+                scratch.z.view(self.tokens, self.heads, 128), module.o_norm.weight,
+                scratch.gated.view(self.tokens, self.heads, 128), metadata.num_tokens,
+                eps=module.o_norm.variance_epsilon)
 
     def __call__(self, source):
         s, p = self.scratch, self.projections
@@ -160,13 +166,7 @@ class PreparedGlmKDA:
         short_conv.run(self.conv_binding)
         if self.mode == "decode":
             gdn_decode.run_kda(self.recurrent_binding, **self.run_options)
-            s.gated.copy_(s.recurrence)
         else:
-            s.recurrence.zero_()
             kda_prefill.run(self.recurrent_binding, **self.run_options)
-            normalized = self.module.o_norm(s.recurrence.view(self.tokens, self.heads, 128),
-                                           s.z.view(self.tokens, self.heads, 128))
-            s.gated.copy_(normalized.view(self.tokens, self.width))
-            torch.ge(self.row_ids, self.metadata.num_tokens, out=self.inactive_rows)
-            s.gated.masked_fill_(self.inactive_rows, 0)
+            self.output_norm()
         return p["o_proj"](s.gated)

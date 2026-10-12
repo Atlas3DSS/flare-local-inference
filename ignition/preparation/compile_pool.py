@@ -8,6 +8,9 @@ import torch
 
 from .compilation import _OPTIONS, _defer_full_collection
 
+# Device memory one compiler worker can hold: its CUDA context plus Inductor's constant folding.
+_WORKER_DEVICE_BYTES = 2 << 30
+
 
 @_defer_full_collection()
 def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
@@ -35,7 +38,9 @@ class CompilePool:
     def __init__(self, device):
         self.device = torch.device(device)
         budget = max(1, _OPTIONS['compile_threads'])
-        self.workers = min(8, budget)
+        # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
+        free = torch.cuda.mem_get_info(self.device)[0]
+        self.workers = max(1, min(8, budget, free // _WORKER_DEVICE_BYTES))
         self.options = dict(_OPTIONS, compile_threads=max(1, budget // self.workers))
         self.pool = None
 

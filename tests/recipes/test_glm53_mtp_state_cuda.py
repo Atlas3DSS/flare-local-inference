@@ -15,7 +15,7 @@ from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
 from ignition.recipes.glm53.model import create_model_tree
 from ignition.recipes.glm53.pool import ContinuationPool
-from ignition.recipes.glm53.speculative import PreparedRound
+from ignition.recipes.glm53.speculative import PreparedRound, delta_regions
 from ignition.recipes.glm53.weights import GlmWeightLoader, TEXT_PREFIX
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
@@ -43,6 +43,7 @@ def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
                               inputs=SimpleNamespace(row_slot_ids=slots,
                                   request_state_rows=torch.tensor([[1, 3, 4, 5, 6, 7, 8, 9]], device="cuda:0")))
     op.width, op.batch, op.rows = 6, 1, torch.arange(1, device="cuda:0")
+    op.delta_regions = delta_regions(pool)
     op.decoder = SimpleNamespace(scratch=SimpleNamespace(hidden=torch.zeros((6, 4096), dtype=torch.bfloat16, device="cuda:0")))
     operators = {}
     with RecordedPreparationSession(device=torch.device("cuda:0"), checkpoint="glm53-mtp-state",

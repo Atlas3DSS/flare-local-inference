@@ -24,6 +24,8 @@ class PeerStorage(CudaRTLibrary):
         self.storage = storage
         self.owned = {}
         self.imported = {}
+        self.imported_mappings = {}
+        self.dynamic = {}
         storage.library.flare_package_allocate.restype = C.c_void_p
 
     def cudaMalloc(self, size):
@@ -43,49 +45,81 @@ class PeerStorage(CudaRTLibrary):
 
     def cudaIpcGetMemHandleBytes(self, pointer):
         cuda = self.storage.cuda
-        physical, descriptor = C.c_uint64(), C.c_int()
-        cuda.call("cuMemRetainAllocationHandle", C.byref(physical), C.c_void_p(pointer))
-        try:
-            cuda.call("cuMemExportToShareableHandle", C.byref(descriptor), physical,
-                      C.c_int(1), C.c_uint64(0))
-        finally:
-            cuda.call("cuMemRelease", physical)
-        try:
-            descriptors = [None if rank == self.storage.rank else DupFd(descriptor.value)
-                           for rank in range(self.storage.world)]
-            return pickle.dumps((pointer, self.owned[pointer], descriptors))
-        finally:
-            os.close(descriptor.value)
+        region = self.dynamic.get(pointer)
+        mappings = [(pointer, self.owned[pointer])] if region is None else region.mappings
+        parts = []
+        for address, size in mappings:
+            physical, descriptor = C.c_uint64(), C.c_int()
+            cuda.call("cuMemRetainAllocationHandle", C.byref(physical), C.c_void_p(address))
+            try:
+                cuda.call("cuMemExportToShareableHandle", C.byref(descriptor), physical,
+                          C.c_int(1), C.c_uint64(0))
+            finally:
+                cuda.call("cuMemRelease", physical)
+            try:
+                descriptors = [None if rank == self.storage.rank else DupFd(descriptor.value)
+                               for rank in range(self.storage.world)]
+                parts.append((address, size, descriptors))
+            finally:
+                os.close(descriptor.value)
+        return pickle.dumps((pointer, self.owned[pointer], parts))
 
     def cudaIpcOpenMemHandleBytes(self, data):
-        address, size, descriptors = pickle.loads(data)
-        descriptor = descriptors[self.storage.rank].detach()
-        physical = C.c_uint64()
+        base, extent, parts = pickle.loads(data)
         cuda = self.storage.cuda
+        mapped = []
         try:
-            cuda.call("cuMemImportFromShareableHandle", C.byref(physical),
-                      C.c_void_p(descriptor), C.c_int(1))
-        finally:
-            os.close(descriptor)
-        try:
-            cuda.call("cuMemMap", C.c_uint64(address), C.c_size_t(size), C.c_size_t(0),
-                      physical, C.c_uint64(0))
-        finally:
-            cuda.call("cuMemRelease", physical)
-        try:
-            access = _Access(_Location(1, self.storage.device), 3)
-            cuda.call("cuMemSetAccess", C.c_uint64(address), C.c_size_t(size), C.byref(access), C.c_size_t(1))
+            for address, size, descriptors in parts:
+                descriptor = descriptors[self.storage.rank].detach()
+                physical = C.c_uint64()
+                try:
+                    cuda.call("cuMemImportFromShareableHandle", C.byref(physical),
+                              C.c_void_p(descriptor), C.c_int(1))
+                finally:
+                    os.close(descriptor)
+                try:
+                    cuda.call("cuMemMap", C.c_uint64(address), C.c_size_t(size), C.c_size_t(0),
+                              physical, C.c_uint64(0))
+                finally:
+                    cuda.call("cuMemRelease", physical)
+                mapped.append((address, size))
+                access = _Access(_Location(1, self.storage.device), 3)
+                cuda.call("cuMemSetAccess", C.c_uint64(address), C.c_size_t(size), C.byref(access), C.c_size_t(1))
         except BaseException:
-            cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
+            for address, size in reversed(mapped):
+                cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
             raise
-        self.imported[address] = size
-        return address
+        self.imported[base] = extent
+        self.imported_mappings[base] = mapped
+        return base
 
     def cudaIpcCloseMemHandle(self, pointer):
-        self.storage.cuda.call("cuMemUnmap", C.c_uint64(pointer), C.c_size_t(self.imported[pointer]))
+        for address, size in self.imported_mappings.pop(pointer):
+            self.storage.cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
         del self.imported[pointer]
+
+    def share_regions(self, group, regions):
+        """Map every rank's backed cache prefixes, retaining their full virtual extents for export."""
+        import torch.distributed as dist
+
+        payloads = []
+        for region in regions:
+            self.dynamic[region.address] = region
+            self.owned[region.address] = region.extent
+            payloads.append(self.cudaIpcGetMemHandleBytes(region.address))
+        ranks = [None] * self.storage.world
+        dist.all_gather_object(ranks, payloads, group=group)
+        addresses = [[region.address] * self.storage.world for region in regions]
+        for rank, payloads in enumerate(ranks):
+            if len(payloads) != len(regions):
+                raise ValueError("ranks must share the same cache regions")
+            if rank != self.storage.rank:
+                for index, payload in enumerate(payloads):
+                    addresses[index][rank] = self.cudaIpcOpenMemHandleBytes(payload)
+        return addresses
 
     def reset(self):
         """Reset all local signals and generation-tagged payloads after group drain."""
         for address, size in self.owned.items():
-            self.cudaMemset(address, 0, size)
+            if address not in self.dynamic:
+                self.cudaMemset(address, 0, size)

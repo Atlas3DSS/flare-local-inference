@@ -1,4 +1,4 @@
-use super::PAGE_TOKENS;
+use super::Glm5Next;
 use crate::{
     Result,
     execution::{GraphKind, REQUEST_LANES, Upload},
@@ -70,7 +70,7 @@ impl Inputs {
             self.staging.i32("live_rows", 0, [step.lanes.len() as i32]);
         }
         if step.kind != GraphKind::Resume {
-            let capacity = config.limits.max_sequence_tokens / PAGE_TOKENS;
+            let capacity = config.limits.max_sequence_tokens / Glm5Next::page_tokens(config);
             for lane in &step.lanes {
                 let live = scheduler.request(lane.request)?;
                 append_pages(

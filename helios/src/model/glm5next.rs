@@ -29,7 +29,13 @@ impl Glm5Next {
             schema: INPUT_SCHEMA.into(),
             vocabulary: VOCABULARY,
             vision: VisionCapabilities::disabled(),
+            page_tokens: None,
         }
+    }
+
+    /// Global tokens per page: 256 local records on every rank, times the decode context parallel size.
+    pub fn page_tokens(config: &ModelConfig) -> usize {
+        config.contract.page_tokens.unwrap_or(PAGE_TOKENS)
     }
 }
 
@@ -54,7 +60,7 @@ impl ModelContract for Glm5Next {
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
         SchedulerCapabilities {
             vocabulary: config.contract.vocabulary,
-            page_tokens: PAGE_TOKENS,
+            page_tokens: Self::page_tokens(config),
             vision: config.contract.vision.clone(),
 
             draft_pages_per_request: usize::from(config.has_draft_cache()),

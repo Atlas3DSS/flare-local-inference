@@ -85,8 +85,10 @@ def prepare(root):
             table_source = torch.full((7 << 20,), 3, dtype=torch.float32, device="cuda")
             pointer_table = torch.tensor([table_source.data_ptr()], dtype=torch.int64, device="cuda")
             floating_alias = pointer_table.view(torch.float64)
-            freed = torch.empty(32 << 20, dtype=torch.uint8, device="cuda")
-            freed_address = freed.data_ptr()
+            with storage.transient():
+                retained = torch.ones(1024, dtype=torch.float32, device="cuda")
+                freed = torch.empty(256 << 10, dtype=torch.uint8, device="cuda")
+                freed_address = freed.data_ptr()
             region = storage.host_allocate("table", (128,), torch.float32)
             region.host_view.fill_(3)
             module, function = global_kernel(root, storage, source)
@@ -124,10 +126,8 @@ def prepare(root):
                 export_zero_ranges=((transient.data_ptr(), transient.nbytes),))
             prepared.server_config = {"assets": {}}
             del freed
-            assert any(block["address"] <= freed_address < block["address"] + block["size"]
-                       and block["state"] == "inactive"
-                       for segment in storage.pool.snapshot(include_traces=False)
-                       for block in segment["blocks"])
+            assert retained.sum().item() == 1024
+            assert any(start <= freed_address < end for start, end in storage.inactive_ranges())
             graph_segments = storage.graph_pool.snapshot(include_traces=False)
             assert graph_segments
     package = export_model(prepared, images, storage, root / "package", options={})

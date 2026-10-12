@@ -37,18 +37,32 @@ class DecoderScratch:
     mlp_output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows):
+    def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows, context_ranks=1,
+                 overlay_layers=False):
+        """Allocate layer scratch; with overlay_layers, KDA, MLA and MLP intermediates share storage.
+
+        A layer runs attention then its MLP, and layers run serially, so their intermediates are
+        never live together. Index scratch and router weights keep their own prepared constants.
+        """
         if type(sample_rows) is not int or not 0 < sample_rows <= tokens:
             raise ValueError("GLM sampling capacity must be positive and fit the token capacity")
         def buffer(*shape):
             return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+        layers = (KDAScratch.allocate(tokens, 64 // shard.world_size, device),
+            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device, context_ranks=context_ranks),
+            MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
+            MoeScratch.allocate(tokens, shard.world_size, device))
+        if overlay_layers:
+            from ignition.components.moe import RouterScratch
+            from ignition.preparation.scratch import overlay
+
+            from .indexer import IndexScratch
+
+            layers = overlay(layers, keep=(IndexScratch, RouterScratch))
         return cls(buffer(tokens, 4096), buffer(tokens, 4, 4096), buffer(sample_rows, 4, 4096),
             buffer(sample_rows, 4096), buffer(sample_rows, 154880 // shard.world_size), buffer(sample_rows, 154880),
             MHCScratch.allocate(tokens, 4096, device), MHCScratch.allocate(tokens, 4096, device),
-            KDAScratch.allocate(tokens, 64 // shard.world_size, device),
-            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device),
-            MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
-            MoeScratch.allocate(tokens, shard.world_size, device), buffer(tokens, 4096), buffer(tokens, 4096))
+            *layers, buffer(tokens, 4096), buffer(tokens, 4096))
 
     def rows(self, tokens, mode, *, sample_rows):
         """Bind a graph variant to storage shared by serial decoder replays."""
@@ -84,7 +98,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
                  metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
-                 workspace, progress=None, feedback=None):
+                 workspace, progress=None, feedback=None, max_cache_pages=None, context=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
             raise ValueError("GLM text execution requires all 45 decoder layers")
@@ -105,13 +119,20 @@ class PreparedDecoder:
                 scratch.layer(module.block_type, sparse=isinstance(layer_weights.mlp, MoEWeights)), layer_state,
                 metadata.indexed if indexed else metadata.recurrent, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
-                carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1)
+                carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1,
+                max_cache_pages=max_cache_pages, context=context)
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")
         self.lm_head = PreparedVocabularyProjection(scratch.hidden, weights.tree.lm_head.weight,
             scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator,
             session=session, name=f"{name}.lm_head")
+
+    def rebind_pages(self):
+        """Rebind every sparse-attention layer to the continuation pool's current page pools."""
+        for layer in self.layers:
+            if hasattr(layer.attention, "rebind_pages"):
+                layer.attention.rebind_pages()
 
     def __call__(self):
         s, language = self.scratch, self.weights.tree.model.language_model

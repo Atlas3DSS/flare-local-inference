@@ -198,8 +198,11 @@ class RuntimePackage:
                 raise ValueError("allocation alignment must be a satisfied power of two")
             if allocation.initialize not in ("snapshot", "zero"):
                 raise ValueError("allocation initializer must be snapshot or zero")
-            if allocation.memory not in ("device", "mapped_host"):
+            if allocation.memory not in ("device", "mapped_host", "peer"):
                 raise ValueError("unsupported allocation memory type")
+            if allocation.memory == "peer" and (not allocation.preserve_address or allocation.initialize != "zero"
+                                                or allocation.relocations):
+                raise ValueError("peer allocations name another rank's storage at its recorded address")
             if allocation.memory == "mapped_host" and not allocation.preserve_address:
                 raise ValueError("mapped host allocations require a recorded address")
             if allocation.snapshot_spans is not None:
@@ -433,9 +436,12 @@ class RuntimePackage:
                 params = _CopyParams()
                 cuda.call("cuGraphMemcpyNodeGetParams", C.c_void_p(handle), C.byref(params))
                 endpoints = (params.source, params.destination)
+                # Unified endpoints (cudaMemcpyDefault) carry their address in the device field.
                 if params.height != 1 or params.depth != 1 or any(
-                        p.memory_type != 2 or p.y or p.z or p.lod for p in endpoints):
-                    raise ValueError("only contiguous device-to-device graph copies are supported")
+                        p.memory_type not in (2, 4) or p.y or p.z or p.lod
+                        or p.memory_type == 4 and not self._is_device(cuda, p.device) for p in endpoints):
+                    raise ValueError("only contiguous device-to-device graph copies are supported; got memory types "
+                                     f"{[p.memory_type for p in endpoints]}")
                 node = {"kind": "copy", "nbytes": params.width,
                         "source": self._reference(params.source.device + params.source.x, params.width),
                         "destination": self._reference(params.destination.device + params.destination.x, params.width)}
@@ -461,6 +467,12 @@ class RuntimePackage:
         edges = [{"source": indices[a], "destination": indices[b], "data": list(d)}
                  for a, b, d in zip(sources, destinations, data, strict=True)]
         return {"name": name, "nodes": nodes, "edges": edges}
+
+    @staticmethod
+    def _is_device(cuda, address):
+        memory = C.c_int()
+        cuda.call("cuPointerGetAttribute", C.byref(memory), C.c_int(2), C.c_uint64(address))
+        return memory.value == 2
 
     def _kernel(self, cuda, handle):
         params = _KernelParams()
@@ -497,6 +509,10 @@ class RuntimePackage:
                 if any(data):
                     raise ValueError("device-updatable kernel nodes require explicit export support")
                 continue
+            # An unset preferred shared-memory carveout reads as zero; restoring it explicitly would
+            # request the minimum shared memory and cut occupancy of every kernel using shared memory.
+            if attribute == 14 and not any(data):
+                continue
             relocations = []
             if attribute == 1 and value[1]:
                 relocations = [{"offset": 0, "kind": "pointer", "target": self._reference(value[0], value[1])}]
@@ -530,9 +546,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         raise RuntimeError("native package allocator failed") from storage.error
     if prepared._consumed:
         raise RuntimeError("runtime package export requires an unused prepared model")
-    inactive = [(block["address"], block["address"] + block["size"])
-                for segment in storage.pool.snapshot(include_traces=False)
-                for block in segment["blocks"] if block["state"] == "inactive"]
+    inactive = storage.inactive_ranges()
     dynamic = {region.address: region for region in storage.dynamic_regions}
     zero_ranges = [(address, size) for address, size in prepared.export_zero_ranges
                    if not any(region.address <= address < region.address + region.extent for region in dynamic.values())]
@@ -547,11 +561,14 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         progress(f"Cleared {sum(size for _, size in zero_ranges) / (1 << 30):.2f} GiB of disposable storage")
     mappings = storage.mappings
     imports = {} if storage.peer_storage is None else storage.peer_storage.imported
-    for address, size in imports.items():
+    imported_mappings = (() if storage.peer_storage is None else
+                         (part for parts in storage.peer_storage.imported_mappings.values() for part in parts))
+    for address, size in imported_mappings:
         if images.allocations.get(address) != (size, "device"):
             raise ValueError(f"peer mapping {address:#x}+{size} differs from the recorded allocation")
     outside = [(address, size) for address, (size, kind) in images.allocations.items()
-               if kind == "device" and address not in mappings and address not in imports
+               if kind == "device" and address not in mappings
+               and not any(base <= address < base + size for base, size in imports.items())
                and not any(region.address <= address < region.address + region.extent for region in dynamic.values())]
     current = C.c_void_p()
     cuda.call("cuCtxGetCurrent", C.byref(current))
@@ -569,6 +586,10 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
                              alignment=storage.granularity, preserve_address=True)
                    for index, mapping in enumerate(sorted(mappings.values(), key=lambda m: m.address))]
     allocations.extend(_external_allocations(outside, storage.granularity))
+    # Graph copies may address peer mappings; the model index declares their owners and access.
+    allocations.extend(Allocation(f"peer-{index}", address, size, alignment=storage.granularity,
+                                  initialize="zero", preserve_address=True, memory="peer")
+                       for index, (address, size) in enumerate(sorted(imports.items())))
     allocations.extend(Allocation(f"host-{index}", region.address, region.extent, alignment=4096,
                                   preserve_address=True, memory="mapped_host")
                        for index, region in enumerate(storage.host_regions) if not region.closed)

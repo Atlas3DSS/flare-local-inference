@@ -7,7 +7,7 @@ use crate::{
         SamplingMode,
     },
     model::{ModelConfig, ModelContract},
-    scheduler::{prefill_capacities, speculation},
+    scheduler::speculation,
 };
 
 pub type BufferSpec = (&'static str, Dtype, Vec<usize>);
@@ -105,16 +105,14 @@ fn validate_inner<M: ModelContract>(
             select::<M>(config, manifest, kind, batch, 1, SamplingMode::General)?;
         }
     }
-    for tokens in prefill_capacities(config.limits.prefill_chunk_size) {
-        select::<M>(
-            config,
-            manifest,
-            GraphKind::Prefill,
-            1,
-            tokens,
-            SamplingMode::General,
-        )?;
-    }
+    select::<M>(
+        config,
+        manifest,
+        GraphKind::Prefill,
+        1,
+        config.limits.prefill_chunk_size,
+        SamplingMode::General,
+    )?;
     for &tokens in &config.contract.vision.patch_capacities {
         select::<M>(
             config,
@@ -167,7 +165,9 @@ pub fn select<M: ModelContract>(
         && match kind {
             GraphKind::Prefill => {
                 batch == 1
-                    && prefill_capacities(config.limits.prefill_chunk_size).any(|n| n == tokens)
+                    && tokens > 0
+                    && tokens <= config.limits.prefill_chunk_size
+                    && tokens.is_multiple_of(64)
             }
             GraphKind::Vision => {
                 batch == 1 && config.contract.vision.patch_capacities.contains(&tokens)

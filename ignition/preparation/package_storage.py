@@ -1,6 +1,7 @@
 """Preparation storage whose virtual addresses can be reserved by native restore."""
 
 import ctypes as C
+from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 import json
@@ -51,8 +52,10 @@ class PackageStorage:
         self.granularity = self._snapshot()["granularity"]
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
+        self._allocator = allocator
         self.pool = torch.cuda.MemPool(allocator.allocator())
         self.graph_pool = torch.cuda.MemPool(allocator.allocator())
+        self._preparation_pools = {self.pool.id}
         self._scope = torch.cuda.use_mem_pool(self.pool, device=device)
         self.peer_storage = None
         if world > 1:
@@ -78,6 +81,37 @@ class PackageStorage:
     def error(self):
         message = self.library.flare_package_error()
         return None if message is None else RuntimeError(message.decode())
+
+    @contextmanager
+    def transient(self):
+        """Route allocations to a package-backed pool whose free segments return to the device on exit.
+
+        A live pool never releases cached segments, so work that frees most of
+        what it allocates, such as kernel tuning, would otherwise strand that
+        memory for the rest of preparation. Allocations still live on exit
+        stay valid, package-backed, and exported.
+        """
+        import torch
+
+        pool = torch.cuda.MemPool(self._allocator.allocator())
+        self._preparation_pools.add(pool.id)
+        try:
+            with torch.cuda.use_mem_pool(pool, device=self.device):
+                yield
+        finally:
+            torch.cuda.synchronize(self.device)
+            del pool
+            torch.cuda.empty_cache()
+
+    def inactive_ranges(self):
+        """Free blocks in preparation pools, including pools retired while tensors remain live."""
+        import torch
+
+        return [(block["address"], block["address"] + block["size"])
+                for segment in torch.cuda.memory_snapshot()
+                if segment["device"] == self.device
+                and tuple(segment["segment_pool_id"]) in self._preparation_pools
+                for block in segment["blocks"] if block["state"] == "inactive"]
 
     def host_allocate(self, name, shape, dtype):
         size = math.prod(shape) * dtype.itemsize
@@ -190,6 +224,7 @@ class _Access(C.Structure):
 class DeviceRegion:
     def __init__(self, cuda, address, nbytes, device):
         self.cuda, self.device, self.address, self.nbytes = cuda, device, address, 0
+        self.mappings = []
         self.grow(nbytes)
 
     def grow(self, nbytes):
@@ -200,7 +235,7 @@ class DeviceRegion:
         cuda, device = self.cuda, self.device
         address, size = self.address + self.nbytes, nbytes - self.nbytes
         handle = C.c_uint64()
-        properties = _Properties(1, 0, _Location(1, device), None, (C.c_ubyte * 8)())
+        properties = _Properties(1, 1, _Location(1, device), None, (C.c_ubyte * 8)())
         cuda.call("cuMemCreate", C.byref(handle), C.c_size_t(size), C.byref(properties), C.c_uint64(0))
         try:
             cuda.call("cuMemMap", C.c_uint64(address), C.c_size_t(size), C.c_size_t(0), handle, C.c_uint64(0))
@@ -214,3 +249,4 @@ class DeviceRegion:
             cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
             raise
         self.nbytes = nbytes
+        self.mappings.append((address, size))

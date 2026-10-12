@@ -28,13 +28,17 @@ def assert_selection(actual, expected, indexer):
     if not differing.any():
         return
     assert indexer.mode == "prefill"
-    indexer.selector()
-    runtime = indexer.selector.binding.runtime
-    block_k = runtime.prefill_block_k
-    tiles = runtime.supertile_k // block_k
-    logits = (runtime.scratch.get_indexer_contiguous_tile_logits()
-              .reshape(-1, tiles, 32, block_k).permute(0, 2, 1, 3)
-              .reshape(-1, tiles * block_k)[:actual.shape[0]])
+    # Prefill selects in row slices; recompute each slice's tile logits for its differing rows.
+    logits = []
+    for selector in indexer.selectors:
+        selector()
+        runtime = selector.binding.runtime
+        block_k = runtime.prefill_block_k
+        tiles = runtime.supertile_k // block_k
+        logits.extend((runtime.scratch.get_indexer_contiguous_tile_logits()
+                       .reshape(-1, tiles, 32, block_k).permute(0, 2, 1, 3)
+                       .reshape(-1, tiles * block_k)[:selector.output.shape[0]]).clone())
+    assert len(logits) == actual.shape[0]
     for row in differing.nonzero().flatten().tolist():
         observed, reference = actual[row].tolist(), expected[row].tolist()
         live = [index for index in observed if index >= 0]
@@ -44,9 +48,9 @@ def assert_selection(actual, expected, indexer):
         length = int(indexer.scratch.pool_lengths[row])
         assert all(0 <= index < length for index in live)
         changed = sorted(set(live) ^ set(expected_live))
-        cutoff = logits[row, expected_live].min()
+        cutoff = logits[row][expected_live].min()
         # CTA arrival order can choose different candidates tied at the cutoff.
-        assert torch.all(logits[row, changed] == cutoff)
+        assert torch.all(logits[row][changed] == cutoff)
 
 
 @pytest.fixture(scope="module", params=[2, 4])

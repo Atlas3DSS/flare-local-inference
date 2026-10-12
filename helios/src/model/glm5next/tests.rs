@@ -171,7 +171,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
 }
 
 #[test]
-fn catalog_requires_each_capacity_and_semantic_binding() {
+fn catalog_requires_execution_capacities_and_semantic_bindings() {
     for chunk in [64, 3072, 4096, 8192] {
         let mut config = config();
         config.limits.prefill_chunk_size = chunk;
@@ -180,8 +180,9 @@ fn catalog_requires_each_capacity_and_semantic_binding() {
         for index in 0..original.graphs.len() {
             let mut missing = original.clone();
             let graph = missing.graphs.remove(index);
-            assert!(
+            assert_eq!(
                 validate::<Glm5Next>(&config, &missing).is_err(),
+                graph.kind != GraphKind::Prefill || graph.token_capacity == chunk,
                 "{}",
                 graph.name
             );

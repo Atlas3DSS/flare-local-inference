@@ -295,6 +295,8 @@ impl NativeResources {
                             }
                             driver.check("cuMemHostRegister_v2", status)?;
                         }
+                        // The owning rank maps peer storage and grants this rank access.
+                        Memory::Peer => {}
                     }
                     address
                 } else {
@@ -338,6 +340,7 @@ impl NativeResources {
                                 ));
                             }
                         }
+                        Memory::Peer => {}
                     }
                 }
                 if allocation.stored_bytes() < allocation.nbytes {
@@ -349,6 +352,7 @@ impl NativeResources {
                             "cuMemsetD8_v2",
                             (driver.zero)(address, 0, allocation.nbytes),
                         )?,
+                        Memory::Peer => {}
                     }
                 }
                 phase.advance(allocation.nbytes as u64);
@@ -683,6 +687,7 @@ impl NativeResources {
             buffers: self
                 .allocations
                 .values()
+                .filter(|a| !matches!(a.memory, Memory::Peer))
                 .map(|a| BufferSpan {
                     address: a.address as usize,
                     nbytes: a.nbytes,
@@ -776,6 +781,7 @@ impl Drop for NativeResources {
                         (self.driver.host_unregister)(allocation.address as Handle);
                         libc::munmap(allocation.address as Handle, allocation.nbytes);
                     }
+                    (Memory::Peer, _) => {}
                 }
             }
             for (address, size) in self.reservations.iter().rev() {

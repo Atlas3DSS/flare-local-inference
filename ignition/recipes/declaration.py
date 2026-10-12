@@ -72,6 +72,8 @@ class RankCosts:
     graph_bytes: int
     # The share of `page_bytes` that stores the draft model's pages, present only with learned drafts.
     draft_page_bytes: int = 0
+    # Global positions per page when ranks share each page's context; the recipe's page size otherwise.
+    page_tokens: int | None = None
 
 
 @dataclass(frozen=True)

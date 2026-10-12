@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ignition.components.parallel import TensorParallelShard
@@ -23,6 +23,8 @@ class MoEWeights:
     correction: torch.Tensor
     experts: PreparedExperts
     shared: MLPWeights
+    # A16 experts prepared with A4 capability: prefill may bind quantized activations.
+    experts_a4_prefill: bool = False
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,8 @@ class MTPWeights:
     attention: dict[str, object]
     mlp: MoEWeights
     tensors: dict[str, torch.Tensor]
+    # NVFP4 copy of this rank's vocabulary shard for draft proposals; None keeps the BF16 head.
+    draft_head: object | None = None
 
 
 @dataclass(frozen=True)
@@ -56,7 +60,7 @@ class ModelWeights:
     mtp: MTPWeights | None = None
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None, mtp=False):
+    def load(cls, manifest, device, *, shard, progress=None, mtp=False, expert_activation="a4"):
         import torch
 
         from .model import create_model_tree
@@ -71,7 +75,8 @@ class ModelWeights:
         before = torch.cuda.memory_allocated(device)
         layers = []
         with GlmWeightLoader(manifest, device, shard=shard,
-                             progress=progress if shard.rank == 0 else None) as loader:
+                             progress=progress if shard.rank == 0 else None,
+                             expert_activation=expert_activation) as loader:
             names = [f"{TEXT_PREFIX}.embed_tokens.weight", f"{TEXT_PREFIX}.norm.weight"]
             for name in names:
                 path, attribute = name.rsplit(".", 1)
@@ -85,6 +90,10 @@ class ModelWeights:
                 layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),
                                            loader.load_residual(index)))
             draft = loader.load_mtp(scales) if mtp else None
+            if draft is not None:
+                from ignition.components.vocabulary import nvfp4_draft_head
+
+                draft = replace(draft, draft_head=nvfp4_draft_head(tree.lm_head.weight))
         torch.cuda.synchronize(device)
         return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before, draft)
 
@@ -99,10 +108,14 @@ class GlmWeightLoader(DirectWeightLoader):
     """
 
     def __init__(self, manifest: IndexedCheckpoint, device, *, shard: TensorParallelShard,
-                 prefixes=None, progress=None):
+                 prefixes=None, progress=None, expert_activation="a4"):
         super().__init__(manifest, device, prefixes=prefixes,
                          progress=progress)
         self.shard = shard
+        if expert_activation not in ("a4", "a16"):
+            raise ValueError("GLM NVFP4-CSF experts execute with A4 or A16 activations")
+        # A16 keeps calibrated activation scales so prefill can still bind A4 launches.
+        self.expert_activation = expert_activation
         config = json.loads((manifest.snapshot / "config.json").read_text())
         if (config.get("model_type") != "glm5_next"
                 or config.get("architectures") != ["Glm5NextForConditionalGeneration"]):
@@ -196,10 +209,14 @@ class GlmWeightLoader(DirectWeightLoader):
                                  row_ranges=(extent, extent)),
             self._projection(f"{shared_prefix}.down_proj", columns=extent),
         )
+        from ignition.preparation.quantization import expert_format
+
+        csf = expert_format(self.quantization, prefix + ".experts")[0] == "nvfp4_csf"
         return MoEWeights(
             self.load_tensor(f"{prefix}.gate.weight"),
             self.load_tensor(f"{prefix}.gate.e_score_correction_bias"),
             self.load_experts(layer, scale_scratch=scale_scratch), shared,
+            experts_a4_prefill=csf and self.expert_activation == "a16",
         )
 
     def load_experts(self, layer, *, expert_ids=None, scale_scratch=None):
@@ -223,7 +240,7 @@ class GlmWeightLoader(DirectWeightLoader):
             prefixes, hidden_size=4096, intermediate_size=2048,
             intermediate_range=self.shard.partition(2048, alignment=128),
             scale_vectors=_expert_scales(self._sources, prefixes), scale_scratch=scale_scratch,
-            swiglu_limit=10.0,
+            swiglu_limit=10.0, activation_mode=self.expert_activation,
         )
 
     def allocate_expert_scale_scratch(self, expert_count=288):
@@ -243,7 +260,9 @@ class GlmWeightLoader(DirectWeightLoader):
 
     def load_residual(self, layer):
         prefix = self._layer(layer)
-        return {name: self.load_tensor(f"{prefix}.{name}") for name in (
+        # mHC parameters execute in FP32; converting once lets every prepared graph variant share them.
+        return {name: self.load_tensor(f"{prefix}.{name}").float() if name.startswith("hc_")
+                else self.load_tensor(f"{prefix}.{name}") for name in (
             "input_layernorm.weight", "post_attention_layernorm.weight",
             "hc_attn_base", "hc_attn_fn", "hc_attn_scale", "hc_ffn_base", "hc_ffn_fn", "hc_ffn_scale")}
 

@@ -250,9 +250,33 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
 }
 
 #[test]
+fn prefill_uses_only_declared_capacities() {
+    for (capacities, expected) in [(vec![128, 512], 512), (vec![128, 384, 512], 384)] {
+        let mut scheduler = scheduler(1, 32, 2);
+        scheduler.prefill_graphs(&capacities).unwrap();
+        scheduler.admit(spec(300, 3)).unwrap();
+        init(&mut scheduler, 1);
+        let step = scheduler.next_step().unwrap();
+        assert_eq!(
+            (step.kind, step.token_capacity, step.lanes[0].tokens),
+            (GraphKind::Prefill, expected, 300)
+        );
+    }
+    for capacities in [
+        vec![],
+        vec![128],
+        vec![128, 513],
+        vec![128, 128, 512],
+        vec![0, 512],
+    ] {
+        assert!(scheduler(1, 32, 2).prefill_graphs(&capacities).is_err());
+    }
+}
+
+#[test]
 fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents() {
     for (chunk_size, tail, tail_capacity) in
-        [(4096, 17, 128), (3072, 2050, 3072), (8192, 513, 1024)]
+        [(4096, 17, 128), (3072, 2050, 2560), (8192, 513, 1024)]
     {
         let mut scheduler = RequestScheduler::new(
             [9; 32],
@@ -1418,4 +1442,21 @@ fn scheduler_uses_only_loaded_verification_shapes() {
         assert_eq!(s.next_step().unwrap().token_capacity, 1);
         assert_eq!(s.request(handles[0]).unwrap().consumed_tokens, 66);
     }
+}
+
+#[test]
+fn prefill_capacities_step_after_doubling_and_end_at_the_chunk() {
+    let capacities = |chunk| super::prefill_capacities(chunk).collect::<Vec<_>>();
+    assert_eq!(capacities(64), [64]);
+    assert_eq!(capacities(1000), [128, 256, 512, 1000]);
+    assert_eq!(
+        capacities(4096),
+        [128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
+    );
+    assert_eq!(
+        capacities(8192),
+        [
+            128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192
+        ]
+    );
 }

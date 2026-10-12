@@ -31,6 +31,17 @@ def test_views_must_share_one_registered_backing_storage():
         owner._reference(0x1080, 129)
 
 
+def test_peer_allocations_name_recorded_storage_without_payload():
+    peer = Allocation("peer-0", 0x10000, 4096, alignment=4096, initialize="zero", preserve_address=True, memory="peer")
+    owner = package(allocations=[Allocation("weight", 0x1000, 256), peer])
+    assert owner._reference(0x10800, 64) == {"allocation": "peer-0", "offset": 0x800}
+    for invalid in ({"initialize": "snapshot"}, {"preserve_address": False}):
+        with pytest.raises(ValueError, match="another rank's storage"):
+            package(allocations=[Allocation("weight", 0x1000, 256), Allocation(
+                "peer-0", 0x10000, 4096, alignment=4096, memory="peer",
+                **{"initialize": "zero", "preserve_address": True, **invalid})])
+
+
 @pytest.mark.parametrize("relocations", [
     (Relocation(0, Reference("absent")),),
     (Relocation(0, Reference("weight", 256)),),

@@ -241,6 +241,17 @@ impl<M: ModelContract> ModelRuntime<M> {
                         scheduler.fixed_speculative_width(worker_config.speculative_fixed_width)
                     })
                     .and_then(|()| {
+                        scheduler.prefill_graphs(
+                            &executor
+                                .manifest()
+                                .graphs
+                                .iter()
+                                .filter(|graph| graph.kind == crate::execution::GraphKind::Prefill)
+                                .map(|graph| graph.token_capacity)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .and_then(|()| {
                         scheduler.speculative_graphs(
                             &executor
                                 .manifest()

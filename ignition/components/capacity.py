@@ -11,6 +11,25 @@ def request_capacity(concurrency: int) -> int:
     return 1 << (concurrency - 1).bit_length()
 
 
+def prefill_capacities(chunk_size: int) -> tuple[int, ...]:
+    """Token capacities of prepared prefill graphs; Helios pads a chunk to the smallest that holds it.
+
+    Capacities double from 128 tokens to a step of at least 512 tokens and about an eighth of the
+    chunk, then grow by that step, so a partial chunk pads by less than one step; the chunk size
+    itself is last. Helios's `prefill_capacities` must agree.
+    """
+    step = max(512, chunk_size // 8 // 512 * 512)
+    capacities, capacity = [], 128
+    while capacity < min(chunk_size, step):
+        capacities.append(capacity)
+        capacity *= 2
+    capacity = step
+    while capacity < chunk_size:
+        capacities.append(capacity)
+        capacity += step
+    return (*capacities, chunk_size)
+
+
 def batch_capacities(concurrency: int) -> tuple[int, ...]:
     capacity = request_capacity(concurrency)
     return tuple(batch for batch in BATCH_CAPACITIES if batch <= capacity)

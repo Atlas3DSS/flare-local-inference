@@ -144,11 +144,15 @@ class Plan:
 
     @property
     def demand_pages(self) -> int:
-        return self.concurrency * (self.recipe.context // self.recipe.page_tokens)
+        return self.concurrency * (self.recipe.context // self.page_tokens)
+
+    @property
+    def page_tokens(self) -> int:
+        return self.costs.page_tokens or self.recipe.page_tokens
 
     @property
     def minimum_pages(self) -> int:
-        return self.concurrency * (MINIMUM_REQUEST_TOKENS // self.recipe.page_tokens)
+        return self.concurrency * (MINIMUM_REQUEST_TOKENS // self.page_tokens)
 
     @property
     def free_bytes(self) -> int:
@@ -164,7 +168,7 @@ class Plan:
 
     @property
     def tokens(self) -> int:
-        return self.pages * self.recipe.page_tokens
+        return self.pages * self.page_tokens
 
     @property
     def context(self) -> int:
@@ -174,7 +178,7 @@ class Plan:
     @property
     def guaranteed_tokens(self) -> int:
         """Tokens every request can hold while all admitted requests are active."""
-        return min(self.recipe.context, self.pages // self.concurrency * self.recipe.page_tokens)
+        return min(self.recipe.context, self.pages // self.concurrency * self.page_tokens)
 
     @property
     def snapshots(self) -> int:
@@ -203,7 +207,7 @@ class Plan:
             "live_bytes": self.live_bytes, "prefix_cache_states": self.cache_states,
             "prefix_cache_target": self.cache_target, "prefix_cache_bytes": self.cache_bytes,
             "snapshots": self.snapshots,
-            "pages": self.pages, "demand_pages": self.demand_pages, "page_tokens": self.recipe.page_tokens,
+            "pages": self.pages, "demand_pages": self.demand_pages, "page_tokens": self.page_tokens,
             "page_bytes": self.page_bytes, "tokens": self.tokens, "guaranteed_tokens": self.guaranteed_tokens,
             "free_bytes": self.free_bytes, "headroom_bytes": HEADROOM_BYTES, "reserve_bytes": self.reserve_bytes,
             "supply_bytes": self.supply_bytes,

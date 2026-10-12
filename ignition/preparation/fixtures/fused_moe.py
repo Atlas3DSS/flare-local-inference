@@ -74,7 +74,7 @@ class ExpertBenchmarkInputs:
 
 
 def benchmark_call(state, *, source, experts, top_k, session, name, workspace,
-                   allocate_router, router_weight, router_plan, correction_bias=None):
+                   allocate_router, router_weight, router_plan, correction_bias=None, precision=None):
     operands = benchmark_resource(session, ("moe_inputs", name),
         lambda: ExpertBenchmarkInputs(source, experts=experts.num_experts,
             top_k=top_k, allocate_router=allocate_router, router_weight=router_weight, router_plan=router_plan,
@@ -82,7 +82,7 @@ def benchmark_call(state, *, source, experts, top_k, session, name, workspace,
     scratch = planned_scratch(state.scratch.scratch_specs(), workspace)
     binding = state.bind(a=operands.source, topk_ids=operands.router.ids,
         topk_weights=operands.router.weights, output=operands.output,
-        scratch=scratch, input_scales_static=True)
+        scratch=scratch, input_scales_static=True, **(precision or {}))
     call = PreparedCall(run=lambda: state.run(binding), output=operands.output,
         produce=operands.producers[0], benchmark_producers=operands.producers,
         owners=(operands, scratch, binding, experts))
