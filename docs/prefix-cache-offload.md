@@ -723,8 +723,8 @@ the worker's use of the trait without a GPU. GPU tests are ignored by default
 and keyed by environment variables that locate a package, following
 `helios/src/runtime_package/event_tests.rs`.
 
-Qualification extends `qualify/checkpoint_http.py` with these scenarios, each
-run with every store and transport that supports it:
+`qualify/host_cache.py` launches Flare with and without a host store and runs
+these scenarios, each with every store and transport that supports it:
 
 - Memory hit after GPU eviction, with the host hit counter, reused tokens, and
   token agreement checked.
