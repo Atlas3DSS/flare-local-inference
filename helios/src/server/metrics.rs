@@ -208,11 +208,17 @@ impl Metrics {
     }
 
     pub fn scheduler(&self, stats: SchedulerStats) {
+        if stats.host_lookups != 0 || stats.host_hits != 0 {
+            for (target, value) in [
+                (&self.host_lookups, stats.host_lookups),
+                (&self.host_hits, stats.host_hits),
+                (&self.host_reused_tokens, stats.host_reused_tokens),
+                (&self.host_inbound_waiting, stats.inbound_waiting as u64),
+            ] {
+                target.store(value, Ordering::Relaxed);
+            }
+        }
         for (target, value) in [
-            (&self.host_lookups, stats.host_lookups),
-            (&self.host_hits, stats.host_hits),
-            (&self.host_reused_tokens, stats.host_reused_tokens),
-            (&self.host_inbound_waiting, stats.inbound_waiting as u64),
             (&self.cache_lookups, stats.cache_lookups),
             (&self.cache_hits, stats.cache_hits),
             (&self.cache_misses, stats.cache_lookups - stats.cache_hits),
@@ -617,6 +623,26 @@ pub(super) fn metric(text: &mut String, name: &str, kind: &str, help: &str, valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_host_gauges_reset_after_inbound_requests_finish() {
+        let metrics = Metrics::default();
+        let mut stats = SchedulerStats::default();
+        metrics.scheduler(stats);
+        assert_eq!(metrics.host_inbound_waiting.load(Ordering::Relaxed), 0);
+        stats.host_lookups = 1;
+        stats.host_hits = 1;
+        stats.host_reused_tokens = 64;
+        stats.inbound_waiting = 1;
+        metrics.scheduler(stats);
+        assert_eq!(metrics.host_inbound_waiting.load(Ordering::Relaxed), 1);
+        stats.inbound_waiting = 0;
+        metrics.scheduler(stats);
+        assert_eq!(metrics.host_inbound_waiting.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.host_lookups.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.host_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.host_reused_tokens.load(Ordering::Relaxed), 64);
+    }
 
     #[test]
     fn speculative_metrics_preserve_depth_source_and_clipped_progress() {

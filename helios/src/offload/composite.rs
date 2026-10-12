@@ -1,7 +1,7 @@
 //! Memory and disk stores composed with write-through and read-through.
 //!
-//! Every stored checkpoint is copied out of the GPU into the memory store
-//! first. When that copy lands, the composite reserves a disk record and
+//! Checkpoints that fit available retention capacity are copied out of the GPU
+//! into the memory store first. The composite then reserves a disk record and
 //! writes the memory slabs through to its file; when the write completes, the
 //! memory record becomes durable. Lookups run on the disk index, a superset of
 //! the memory index that includes records whose writes are in flight: a disk
@@ -13,9 +13,10 @@
 //! loses its memory copy, so memory contents remain a subset of disk contents.
 //!
 //! The memory store is flat: its index holds no parent links, and the disk
-//! index owns the tree. The staged transport owns no staging pool here; the
-//! memory store's slabs are the buffers it reads and writes, and only the
-//! memory store submits jobs to the shared transfer threads.
+//! index owns the tree. Records and restore chains that cannot fit available
+//! memory stream through the disk transport's bounded staging pool without
+//! evicting retained copies. Each tier owns independent transfer queues on the
+//! existing rank contexts, so completions remain associated with their owning tier.
 //!
 //! Pins follow the bytes a job references. A fetch pins the memory copies it
 //! uploads from in the memory index and the files it reads in the disk index,
@@ -149,8 +150,8 @@ fn resident_copy(
 }
 
 impl CompositeStore {
-    /// Compose a flat memory store with a disk store whose staged transport
-    /// owns no staging pool; the memory store's slabs are its buffers.
+    /// Compose a flat memory store with a staged disk store. Each tier owns
+    /// its transfer queues; disk staging serves records that cannot stay in RAM.
     pub fn new(memory: MemoryStore, mut disk: DiskStore) -> Result<Self> {
         if memory.identity() != disk.identity() {
             return Err(invalid("composite store tiers belong to different models"));
@@ -171,17 +172,25 @@ impl CompositeStore {
                     "the composite store requires the staged disk transport",
                 ));
             }
-            Some(staged) if staged.pool().is_some() => {
+            Some(staged) if staged.pool().is_none() => {
                 return Err(invalid(
-                    "the staged transport inside a composite must not own a staging pool; the memory store's slabs are its buffers",
+                    "the composite disk transport requires a bounded staging pool",
                 ));
+            }
+            Some(staged) if staged.shares_transfers(memory.transfers()) => {
+                return Err(invalid("composite tiers require separate transfer queues"));
             }
             Some(_) => {}
         }
+        let memory_stats = memory.stats();
         Ok(Self {
             memory,
             disk,
-            stats: StoreStats::default(),
+            stats: StoreStats {
+                outbound_rate: memory_stats.outbound_rate,
+                inbound_rate: memory_stats.inbound_rate,
+                ..StoreStats::default()
+            },
             outbound: HashMap::new(),
             inbound: HashMap::new(),
             jobs: HashMap::new(),
@@ -227,6 +236,76 @@ impl CompositeStore {
                 .collect(),
             record.row.map(|slab| pool.row_address(slab)),
         ))
+    }
+
+    fn retains_chain(&self, chain: &Match) -> bool {
+        let mut pages = 0;
+        let mut rows = 1;
+        for (position, key) in chain.nodes.iter().enumerate() {
+            let Some(node) = self.disk.index().node(key) else {
+                return false;
+            };
+            pages += node.tail_pages;
+            let row = position + 1 == chain.nodes.len();
+            if let Some(memory) = self.memory.index().node(key) {
+                if memory.pinned()
+                    && (memory.location.pages.len() != node.tail_pages
+                        || (row && memory.location.row.is_none())
+                        || self.stale.contains(key))
+                {
+                    return false;
+                }
+                if !row && memory.location.row.is_some() {
+                    rows += 1;
+                }
+            }
+        }
+        for node in self.memory.index().nodes() {
+            if !chain.nodes.contains(&node.key)
+                && (node.pinned() || !node.ready || !node.location.durable)
+            {
+                pages += node.location.pages.len();
+                rows += usize::from(node.location.row.is_some());
+            }
+        }
+        pages <= self.memory.pool().page_count() && rows <= self.memory.pool().row_count()
+    }
+
+    fn fail_children(&mut self, key: PrefixKey) {
+        for waiting in self.outbound.values_mut() {
+            if waiting.parent == Some(key) {
+                waiting.parent = None;
+                waiting.parent_failed = true;
+                let _ = self.disk.index_mut().unpin(&key);
+            }
+        }
+    }
+
+    fn streamed_event(&mut self, event: TransportEvent, events: &mut Vec<StoreEvent>) {
+        if let TransportEvent::Stored {
+            id, result: Err(_), ..
+        } = &event
+        {
+            if let Some(key) = self.disk.pending_store_key(*id) {
+                self.fail_children(key);
+            }
+        }
+        let before = self.disk.stats();
+        self.disk.apply(event, events);
+        let after = self.disk.stats();
+        self.stats.stored += after.stored - before.stored;
+        self.stats.store_failed += after.store_failed - before.store_failed;
+        self.stats.fetched += after.fetched - before.fetched;
+        self.stats.fetch_failed += after.fetch_failed - before.fetch_failed;
+        self.stats.reused_tokens += after.reused_tokens - before.reused_tokens;
+        self.stats.bytes_out += after.bytes_out - before.bytes_out;
+        self.stats.bytes_in += after.bytes_in - before.bytes_in;
+        if after.stored > before.stored {
+            self.stats.outbound_rate = after.outbound_rate;
+        }
+        if after.fetched > before.fetched {
+            self.stats.inbound_rate = after.inbound_rate;
+        }
     }
 
     /// A hit for `chain` priced at the disk rate for the records read from
@@ -316,6 +395,7 @@ impl CompositeStore {
             }
         };
         self.stats.bytes_out += bytes;
+        self.stats.outbound_rate = self.memory.stats().outbound_rate;
         if outbound.parent_failed {
             self.remove_copy(key);
             self.stats.store_failed += 1;
@@ -427,13 +507,7 @@ impl CompositeStore {
                 // Children whose memory copies are still in flight hold only
                 // their tail pages, so they cannot be written without this
                 // record; their pins are released so it can leave the index.
-                for waiting in self.outbound.values_mut() {
-                    if waiting.parent == Some(key) {
-                        waiting.parent = None;
-                        waiting.parent_failed = true;
-                        let _ = self.disk.index_mut().unpin(&key);
-                    }
-                }
+                self.fail_children(key);
                 let _ = self.disk.commit_record(key, Err(error));
                 self.remove_copy(key);
                 self.stats.store_failed += 1;
@@ -450,12 +524,12 @@ impl CompositeStore {
         bucket: [u8; 16],
         row: bool,
     ) -> Result<()> {
-        let path = self
+        let source = self
             .disk
             .record(&key)
-            .ok_or_else(|| invalid("host chain names a record that is not indexed on disk"))?
-            .path
-            .clone();
+            .ok_or_else(|| invalid("host chain names a record that is not indexed on disk"))?;
+        let path = source.path.clone();
+        let header = source.header.clone();
         let record = self
             .memory
             .allocate_record(key, bucket, tail_pages, row)?
@@ -470,7 +544,7 @@ impl CompositeStore {
         let id = self.disk.next_job();
         let submitted = self
             .staged()
-            .and_then(|staged| staged.read_into(id, path, 0, pages, row));
+            .and_then(|staged| staged.read_into(id, path, header, 0, pages, row));
         if let Err(error) = submitted {
             let _ = self.memory.complete_record(&key, false);
             return Err(error);
@@ -684,8 +758,9 @@ impl CompositeStore {
                 self.stats.fetched += 1;
                 self.stats.bytes_in += bytes;
                 self.stats.reused_tokens += inbound.tokens;
+                self.stats.inbound_rate = self.memory.stats().inbound_rate;
             }
-            Err(error) => {
+            Err(_) => {
                 self.stats.fetch_failed += 1;
             }
         }
@@ -703,8 +778,14 @@ impl PrefixStore for CompositeStore {
             .lookup_where(history, resident, |node| {
                 node.ready || resident_copy(memory, stale, &node.key, node.tail_pages, true)
             })?;
+        let hit = if self.retains_chain(&chain) {
+            self.hit(chain)
+        } else {
+            let chain = self.disk.index_mut().lookup(history, resident, |_| true)?;
+            self.disk.hit(chain)
+        };
         self.stats.hits += 1;
-        Some(self.hit(chain))
+        Some(hit)
     }
 
     fn store(&mut self, checkpoint: &PublishedCheckpoint) -> Result<bool> {
@@ -725,6 +806,17 @@ impl PrefixStore for CompositeStore {
             return Ok(false);
         }
         let (parent, tail) = self.disk.plan_record(checkpoint);
+        let (pages, rows) = self.memory.reclaimable_slabs();
+        if tail.len() > pages || rows == 0 {
+            let result = self.disk.store(checkpoint);
+            match &result {
+                Ok(false) => self.stats.store_skipped += 1,
+                Err(_) => self.stats.store_failed += 1,
+                _ => {}
+            }
+            self.drop_evicted_copies();
+            return result;
+        }
         // The parent stays in the disk index while the memory copy is in
         // flight, so the record can be reserved under it once its tail lands.
         if let Some(parent) = &parent
@@ -764,6 +856,9 @@ impl PrefixStore for CompositeStore {
     }
 
     fn fetch(&mut self, hit: HostHit, ticket: InboundTicket) -> Result<()> {
+        if !self.retains_chain(&hit.chain) {
+            return self.disk.fetch(hit, ticket);
+        }
         let chain = hit.chain;
         if ticket.key != chain.key {
             return Err(invalid(
@@ -888,9 +983,13 @@ impl PrefixStore for CompositeStore {
         self.disk.poll_transport(&mut transport_events);
         for event in transport_events.drain(..) {
             match event {
-                TransportEvent::Stored { id, result } => self.disk_stored(id, result),
-                TransportEvent::Fetched { id, result } => self.disk_read(id, result, events),
-                maintenance => self.disk.apply(maintenance, events),
+                TransportEvent::Stored { id, result } if self.jobs.contains_key(&id) => {
+                    self.disk_stored(id, result)
+                }
+                TransportEvent::Fetched { id, result } if self.jobs.contains_key(&id) => {
+                    self.disk_read(id, result, events)
+                }
+                other => self.streamed_event(other, events),
             }
         }
         self.transport_events = transport_events;
@@ -919,39 +1018,38 @@ impl PrefixStore for CompositeStore {
         let memory = self.memory.stats();
         let disk = self.disk.stats();
         StoreStats {
-            outbound_in_flight: self.outbound.len(),
-            inbound_in_flight: self.inbound.len(),
+            outbound_in_flight: self.outbound.len() + disk.outbound_in_flight,
+            inbound_in_flight: self.inbound.len() + disk.inbound_in_flight,
             memory_records: memory.memory_records,
             memory_bytes: memory.memory_bytes,
             disk_records: disk.disk_records,
             disk_bytes: disk.disk_bytes,
-            outbound_rate: memory.outbound_rate,
-            inbound_rate: memory.inbound_rate,
             ..self.stats
         }
     }
 
     /// Finish the copy-outs, disk writes, and restores in flight within
-    /// [`CLOSE_TIMEOUT`], then close the memory store, which stops the shared
-    /// transfer threads, and the disk store, which stops the disk thread.
+    /// [`CLOSE_TIMEOUT`], then drain the disk and memory tiers. An error leaves
+    /// ownership intact until their transfers can be drained.
     fn close(&mut self) -> Result<()> {
         let deadline = Instant::now() + CLOSE_TIMEOUT;
         let mut events = Vec::new();
-        while !(self.outbound.is_empty() && self.inbound.is_empty()) && Instant::now() < deadline {
+        while Instant::now() < deadline {
+            let stats = self.stats();
+            if stats.outbound_in_flight == 0 && stats.inbound_in_flight == 0 {
+                break;
+            }
             self.poll(&mut events);
             events.clear();
-            if !(self.outbound.is_empty() && self.inbound.is_empty()) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            std::thread::sleep(Duration::from_millis(1));
         }
-        let memory = self.memory.close();
-        let disk = self.disk.close();
+        self.disk.close()?;
+        self.memory.close()?;
         self.outbound.clear();
         self.inbound.clear();
         self.jobs.clear();
         self.stale.clear();
-        memory?;
-        disk
+        Ok(())
     }
 }
 
@@ -1103,6 +1201,20 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "runtime-package")]
+    fn gpu_transport(context: usize, device: i32, geometry: &[CacheGeometry]) -> Staged {
+        let mut pool = SlabPool::staging(&Layout::new(geometry).unwrap()).unwrap();
+        pool.register(context).unwrap();
+        let transfers = Arc::new(Mutex::new(
+            Transfers::start(&[(context, device)], geometry.to_vec()).unwrap(),
+        ));
+        Staged::new(
+            Some(pool),
+            transfers,
+            DiskThread::start("flare-offload-disk").unwrap(),
+        )
+    }
+
     fn pattern(bytes: &mut [u8], seed: u64) {
         for (index, byte) in bytes.iter_mut().enumerate() {
             let index = index as u64;
@@ -1118,17 +1230,20 @@ mod tests {
         let transfers = Arc::new(Mutex::new(Transfers::stopped(&geometry).unwrap()));
         let pool = SlabPool::new(PAGE_RECORD, pages, ROW_RECORD, rows, true).unwrap();
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
-        let scanned = record::scan(directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let directory_lock = record::DirectoryLock::acquire(directory).unwrap();
+        let scanned = record::scan(&directory_lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let layout = Layout::new(&geometry).unwrap();
+        let disk_transfers = Arc::new(Mutex::new(Transfers::stopped(&geometry).unwrap()));
         let disk = DiskStore::new(
-            directory.to_path_buf(),
+            directory_lock,
             IDENTITY,
             FINGERPRINT,
             limit,
             geometry,
             scanned,
             Box::new(Staged::new(
-                None,
-                transfers,
+                Some(SlabPool::staging(&layout).unwrap()),
+                disk_transfers,
                 DiskThread::start("flare-offload-disk").unwrap(),
             )),
         )
@@ -1275,7 +1390,171 @@ mod tests {
     }
 
     #[test]
-    fn new_requires_matching_flat_tiers_over_a_poolless_staged_transport() {
+    fn oversized_chains_stream_without_evicting_retained_records() {
+        let Some(directory) = test_directory("oversized-chain") else {
+            return;
+        };
+        let full = history(2000);
+        let mut ids = Ids::new();
+        let root = checkpoint(&mut ids, &full, 700, None, pages(0..10), 10, StateSlotId(1));
+        let child = checkpoint(
+            &mut ids,
+            &full,
+            1300,
+            Some(700),
+            pages(0..20),
+            10,
+            StateSlotId(2),
+        );
+        let mut store = composite(&directory, 32, 4, 1 << 30);
+        written(&mut store, &root, None, 1);
+        written(&mut store, &child, Some(root.key), 2);
+        store.close().unwrap();
+        drop(store);
+
+        // Both an oversized record and individually fitting records whose
+        // combined chain exceeds retention must use the streaming path.
+        for capacity in [4, 15] {
+            let mut store = composite(&directory, capacity, 2, 1 << 30);
+            let useful_record =
+                checkpoint(&mut ids, &full, 100, None, pages(0..1), 1, StateSlotId(1));
+            let useful = useful_record.key;
+            // Replace the retained copy after reopening the directory.
+            let retained = landed(&mut store, useful, useful_record.bucket, 1, 3);
+            let bytes = record_bytes(&store, &retained);
+            let hit = store.lookup(&full, 0).unwrap();
+            assert_eq!((hit.key, hit.tier, hit.pages), (child.key, Tier::Disk, 20));
+            assert!(!store.retains_chain(&hit.chain));
+            store
+                .fetch(
+                    hit,
+                    InboundTicket {
+                        key: child.key,
+                        pages: pages(30..50),
+                        slot: StateSlotId(3),
+                    },
+                )
+                .unwrap();
+            assert!(store.inbound.is_empty());
+            assert_eq!(store.disk.stats().inbound_in_flight, 1);
+            assert_eq!(
+                record_bytes(&store, store.memory.record(&useful).unwrap()),
+                bytes
+            );
+            let mut events = Vec::new();
+            poll_until(&mut store, &mut events, |store| {
+                store.stats().inbound_in_flight == 0
+            });
+            // Stopped CUDA workers fail the upload after disk I/O; the record
+            // remains retriable and no retained slab was borrowed or evicted.
+            assert_eq!(fetched(&events), [(child.key, false)]);
+            assert_eq!(store.stats().fetch_failed, 1);
+            assert_eq!(
+                record_bytes(&store, store.memory.record(&useful).unwrap()),
+                bytes
+            );
+            assert!(store.disk.index().nodes().all(|node| !node.pinned()));
+            assert!(store.lookup(&full, 0).is_some());
+            store.close().unwrap();
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn streamed_store_failure_preserves_ram_and_releases_parent_pins() {
+        let Some(directory) = test_directory("streamed-failure") else {
+            return;
+        };
+        let mut store = composite(&directory, 4, 2, 1 << 30);
+        let full = history(2000);
+        let mut ids = Ids::new();
+        let root = checkpoint(&mut ids, &full, 700, None, pages(0..10), 10, StateSlotId(1));
+        let child = checkpoint(
+            &mut ids,
+            &full,
+            800,
+            Some(700),
+            pages(0..12),
+            2,
+            StateSlotId(2),
+        );
+        assert!(store.store(&root).unwrap());
+        assert_eq!(store.disk.stats().outbound_in_flight, 1);
+        assert!(store.outbound.is_empty());
+        assert_eq!(store.memory.pool().free_pages(), 4);
+        assert!(store.store(&child).unwrap());
+        assert_eq!(store.outbound[&child.key].parent, Some(root.key));
+        let parent_pins = store.disk.index().node(&root.key).unwrap().pins();
+        assert!(parent_pins > 0);
+        // Deliver the parent's failure first, while the child's copy is still
+        // pending, and verify that its dependency cannot retain a dead parent.
+        let mut events = Vec::new();
+        let mut transport = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while transport.is_empty() {
+            assert!(Instant::now() < deadline);
+            store.disk.poll_transport(&mut transport);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for event in transport {
+            store.streamed_event(event, &mut events);
+        }
+        assert_eq!(stored(&events), [(root.key, false)]);
+        assert!(store.outbound[&child.key].parent_failed);
+        assert_eq!(store.outbound[&child.key].parent, None);
+        assert!(!store.disk.index().contains(&root.key));
+        poll_until(&mut store, &mut events, |store| {
+            store.stats().outbound_in_flight == 0
+        });
+        assert_eq!(stored(&events), [(root.key, false), (child.key, false)]);
+        assert_eq!(store.stats().store_failed, 2);
+        assert!(store.memory.index().is_empty());
+        assert!(store.disk.index().is_empty());
+        assert_eq!(
+            (
+                store.memory.pool().free_pages(),
+                store.memory.pool().free_rows()
+            ),
+            (4, 2)
+        );
+        store.close().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retention_planning_accounts_for_pinned_and_incomplete_copies() {
+        let Some(directory) = test_directory("retention-pressure") else {
+            return;
+        };
+        let mut store = composite(&directory, 20, 3, 1 << 30);
+        let full = history(2000);
+        let mut ids = Ids::new();
+        let root = checkpoint(&mut ids, &full, 700, None, pages(0..10), 10, StateSlotId(1));
+        written(&mut store, &root, None, 1);
+        store.memory.remove_record(&root.key).unwrap();
+        let other = full.key_at(1000).unwrap();
+        landed(&mut store, other, full.bucket_at(1000).unwrap(), 15, 2);
+        let chain = store.disk.index_mut().lookup(&full, 0, |_| true).unwrap();
+        assert!(store.retains_chain(&chain));
+        store.memory.pin_record(&other).unwrap();
+        assert!(!store.retains_chain(&chain));
+        store.memory.unpin_record(&other).unwrap();
+        assert!(store.retains_chain(&chain));
+        store.memory.remove_record(&other).unwrap();
+        store
+            .memory
+            .allocate_record(other, full.bucket_at(1000).unwrap(), 15, true)
+            .unwrap()
+            .unwrap();
+        assert!(!store.retains_chain(&chain));
+        store.memory.complete_record(&other, true).unwrap();
+        assert!(store.retains_chain(&chain));
+        store.close().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn new_requires_matching_flat_tiers_and_independent_staged_transfers() {
         let Some(directory) = test_directory("new") else {
             return;
         };
@@ -1283,9 +1562,15 @@ mod tests {
         let layout = Layout::new(&geometry).unwrap();
         let transfers = Arc::new(Mutex::new(Transfers::stopped(&geometry).unwrap()));
         let pool = || SlabPool::new(PAGE_RECORD, 4, ROW_RECORD, 2, true).unwrap();
-        let disk = |identity: [u8; 32], staging: Option<SlabPool>| {
+        let staging = || Some(SlabPool::staging(&layout).unwrap());
+        let disk = |identity: [u8; 32], staging: Option<SlabPool>, shared: bool| {
+            let disk_transfers = if shared {
+                transfers.clone()
+            } else {
+                Arc::new(Mutex::new(Transfers::stopped(&geometry).unwrap()))
+            };
             DiskStore::new(
-                directory.clone(),
+                record::DirectoryLock::acquire(&directory).unwrap(),
                 identity,
                 FINGERPRINT,
                 1 << 30,
@@ -1293,26 +1578,19 @@ mod tests {
                 Vec::new(),
                 Box::new(Staged::new(
                     staging,
-                    transfers.clone(),
+                    disk_transfers,
                     DiskThread::start("flare-offload-disk").unwrap(),
                 )),
             )
             .unwrap()
         };
+        let flat = || MemoryStore::new_flat(IDENTITY, pool(), transfers.clone()).unwrap();
         let tree = MemoryStore::new(IDENTITY, pool(), transfers.clone()).unwrap();
-        assert!(CompositeStore::new(tree, disk(IDENTITY, None)).is_err());
-        let flat = MemoryStore::new_flat(IDENTITY, pool(), transfers.clone()).unwrap();
-        assert!(CompositeStore::new(flat, disk([1; 32], None)).is_err());
-        let flat = MemoryStore::new_flat(IDENTITY, pool(), transfers.clone()).unwrap();
-        assert!(
-            CompositeStore::new(
-                flat,
-                disk(IDENTITY, Some(SlabPool::staging(&layout).unwrap()))
-            )
-            .is_err()
-        );
-        let flat = MemoryStore::new_flat(IDENTITY, pool(), transfers.clone()).unwrap();
-        let mut store = CompositeStore::new(flat, disk(IDENTITY, None)).unwrap();
+        assert!(CompositeStore::new(tree, disk(IDENTITY, staging(), false)).is_err());
+        assert!(CompositeStore::new(flat(), disk([1; 32], staging(), false)).is_err());
+        assert!(CompositeStore::new(flat(), disk(IDENTITY, None, false)).is_err());
+        assert!(CompositeStore::new(flat(), disk(IDENTITY, staging(), true)).is_err());
+        let mut store = CompositeStore::new(flat(), disk(IDENTITY, staging(), false)).unwrap();
         assert_eq!(
             store.stats(),
             StoreStats {
@@ -2057,17 +2335,13 @@ mod tests {
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
-            directory.clone(),
+            record::DirectoryLock::acquire(&directory).unwrap(),
             IDENTITY,
             fingerprint,
             1 << 40,
             geometry.clone(),
             Vec::new(),
-            Box::new(Staged::new(
-                None,
-                transfers,
-                DiskThread::start("flare-offload-disk").unwrap(),
-            )),
+            Box::new(gpu_transport(context, device, &geometry)),
         )
         .unwrap();
         let mut store = CompositeStore::new(memory, disk).unwrap();
@@ -2236,8 +2510,10 @@ mod tests {
         drop(store);
 
         // Restart: a fresh composite over the scanned directory and an empty memory pool.
+        let directory_lock = record::DirectoryLock::acquire(&directory).unwrap();
         let scanned =
-            crate::offload::record::scan(&directory, &IDENTITY, &fingerprint, &geometry).unwrap();
+            crate::offload::record::scan(&directory_lock, &IDENTITY, &fingerprint, &geometry)
+                .unwrap();
         assert_eq!(scanned.len(), 7);
         let mut pool = SlabPool::new(
             layout.page_record_bytes,
@@ -2253,17 +2529,13 @@ mod tests {
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
-            directory.clone(),
+            directory_lock,
             IDENTITY,
             fingerprint,
             1 << 40,
             geometry.clone(),
             scanned,
-            Box::new(Staged::new(
-                None,
-                transfers,
-                DiskThread::start("flare-offload-disk").unwrap(),
-            )),
+            Box::new(gpu_transport(context, device, &geometry)),
         )
         .unwrap();
         let mut store = CompositeStore::new(memory, disk).unwrap();
@@ -2423,17 +2695,13 @@ mod tests {
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
-            directory.clone(),
+            record::DirectoryLock::acquire(&directory).unwrap(),
             IDENTITY,
             fingerprint,
             1 << 40,
             geometry.clone(),
             Vec::new(),
-            Box::new(Staged::new(
-                None,
-                transfers,
-                DiskThread::start("flare-offload-disk").unwrap(),
-            )),
+            Box::new(gpu_transport(context, device, &geometry)),
         )
         .unwrap();
         let mut store = CompositeStore::new(memory, disk).unwrap();
@@ -2669,11 +2937,170 @@ mod tests {
         );
         assert_eq!((stats.memory_records, stats.disk_records), (1, 3));
         assert_eq!(
-            record::scan(&directory, &IDENTITY, &fingerprint, &geometry)
-                .unwrap()
-                .len(),
+            record::scan(
+                &store.disk.directory_lock,
+                &IDENTITY,
+                &fingerprint,
+                &geometry
+            )
+            .unwrap()
+            .len(),
             3
         );
+        store.close().unwrap();
+        drop(store);
+        // Retention is smaller than a record and staging holds one record's
+        // pages. Exercise simultaneous memory copy-out, streamed copy-out,
+        // and streamed restore, then reopen the files with an empty RAM tier.
+        let open_small = || {
+            let mut pool = SlabPool::new(
+                layout.page_record_bytes,
+                1,
+                layout.row_record_bytes,
+                1,
+                true,
+            )
+            .unwrap();
+            pool.register(context).unwrap();
+            let memory = MemoryStore::new_flat(
+                IDENTITY,
+                pool,
+                Arc::new(Mutex::new(
+                    Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+                )),
+            )
+            .unwrap();
+            let mut staging_pool = SlabPool::new(
+                layout.page_record_bytes,
+                3,
+                layout.row_record_bytes,
+                2,
+                true,
+            )
+            .unwrap();
+            staging_pool.register(context).unwrap();
+            let lock = record::DirectoryLock::acquire(&directory).unwrap();
+            let scanned = record::scan(&lock, &IDENTITY, &fingerprint, &geometry).unwrap();
+            let disk = DiskStore::new(
+                lock,
+                IDENTITY,
+                fingerprint,
+                1 << 40,
+                geometry.clone(),
+                scanned,
+                Box::new(Staged::new(
+                    Some(staging_pool),
+                    Arc::new(Mutex::new(
+                        Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+                    )),
+                    DiskThread::start("flare-offload-disk").unwrap(),
+                )),
+            )
+            .unwrap();
+            CompositeStore::new(memory, disk).unwrap()
+        };
+        let mut store = open_small();
+        write_pages(&mut write_unit, &sources, &seed);
+        write_row(&mut write_unit, source_slot, seed(row_plane, source_slot.0));
+        let mut fresh = PrefixHistory::new(IDENTITY);
+        fresh
+            .append(
+                &base
+                    .iter()
+                    .map(|token| token.wrapping_add(77))
+                    .collect::<Vec<_>>(),
+                &[],
+            )
+            .unwrap();
+        let short = checkpoint(
+            &mut ids,
+            &fresh,
+            page_tokens + 5,
+            None,
+            sources[..1].to_vec(),
+            1,
+            source_slot,
+        );
+        let large = checkpoint(
+            &mut ids,
+            &fresh,
+            consumed,
+            None,
+            sources.clone(),
+            3,
+            source_slot,
+        );
+        assert!(store.store(&short).unwrap());
+        assert!(store.store(&large).unwrap());
+        assert_eq!(store.outbound.len(), 1);
+        assert_eq!(store.disk.stats().outbound_in_flight, 1);
+        assert_eq!(store.memory.pool().free_pages(), 0);
+        let hit = store.lookup(&histories[0], 0).unwrap();
+        assert!(!store.retains_chain(&hit.chain));
+        store.fetch(hit, ticket()).unwrap();
+        let mut events = Vec::new();
+        poll_until(&mut store, &mut events, |store| {
+            let stats = store.stats();
+            stats.outbound_in_flight == 0 && stats.inbound_in_flight == 0
+        });
+        assert_eq!(events.len(), 3, "{events:?}");
+        let mut stored_keys = Vec::new();
+        for event in events {
+            match event {
+                StoreEvent::Stored { key, result, .. } => {
+                    result.unwrap();
+                    stored_keys.push(key);
+                }
+                StoreEvent::Fetched { key, result } => {
+                    assert_eq!(key, first.key);
+                    assert_eq!(result.unwrap(), record_bytes);
+                }
+            }
+        }
+        assert!(stored_keys.contains(&short.key) && stored_keys.contains(&large.key));
+        check(&read_unit);
+        assert!(store.memory.record(&short.key).unwrap().durable);
+        assert!(store.memory.record(&large.key).is_none());
+        assert!(store.memory.index().nodes().all(|node| !node.pinned()));
+        assert!(store.disk.index().nodes().all(|node| !node.pinned()));
+        assert_eq!(
+            (
+                store.stats().stored,
+                store.stats().fetched,
+                store.stats().store_failed,
+                store.stats().fetch_failed
+            ),
+            (2, 1, 0, 0)
+        );
+        assert_eq!(store.stats().inbound_rate, store.disk.stats().inbound_rate);
+        store.close().unwrap();
+        drop(store);
+
+        let mut store = open_small();
+        write_pages(&mut write_unit, &targets, &|_, _| 0xA5);
+        write_row(&mut write_unit, target_slot, 0xA5);
+        let hit = store.lookup(&fresh, 0).unwrap();
+        assert_eq!((hit.key, hit.pages, hit.tier), (large.key, 3, Tier::Disk));
+        store
+            .fetch(
+                hit,
+                InboundTicket {
+                    key: large.key,
+                    pages: targets.clone(),
+                    slot: target_slot,
+                },
+            )
+            .unwrap();
+        match wait_event(&mut store) {
+            StoreEvent::Fetched { key, result } => {
+                assert_eq!(key, large.key);
+                assert_eq!(result.unwrap(), record_bytes);
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        check(&read_unit);
+        assert_eq!(store.stats().memory_records, 0);
+        assert!(store.disk.index().nodes().all(|node| !node.pinned()));
         store.close().unwrap();
         drop(store);
         drop(readback);

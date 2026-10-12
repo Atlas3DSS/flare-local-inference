@@ -34,9 +34,8 @@ use crate::{
 
 pub use geometry::{CacheGeometry, Layout, Plane};
 
-/// Identifies one transfer or disk job issued by a store. Within a composite
-/// only the memory store submits transfers, so the stores' counters never meet
-/// on the shared transfer threads.
+/// Identifies one transfer or disk job issued by a store. Memory and disk
+/// stores own separate transfer queues, so their counters do not intersect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobId(pub u64);
 
@@ -70,6 +69,12 @@ pub struct PrefixCacheOffload {
     /// Bytes of record files kept on disk; zero selects no disk store.
     pub disk_limit: Option<u64>,
     pub transport: Option<Transport>,
+}
+
+impl PrefixCacheOffload {
+    pub fn enabled(&self) -> bool {
+        self.memory_bytes.unwrap_or(0) != 0 || (self.disk.is_some() && self.disk_limit != Some(0))
+    }
 }
 
 /// Parse a byte count with an optional binary K, M, G, or T suffix, with or
@@ -128,6 +133,7 @@ pub struct Prepared {
     pub memory_pool: Option<slab::SlabPool>,
     pub staging_pool: Option<slab::SlabPool>,
     pub scanned: Vec<record::Scanned>,
+    pub directory_lock: Option<record::DirectoryLock>,
 }
 
 /// The loader's result: either prepared resources or the reason no store exists.
@@ -165,6 +171,9 @@ impl Prepared {
                 pool.page_count(),
                 pool.row_count()
             ));
+        }
+        if let Some(pool) = &self.staging_pool {
+            parts.push(format!("staging {}", gibibytes(pool.bytes())));
         }
         if let Some(directory) = &self.resolved.directory {
             parts.push(format!(
@@ -249,6 +258,9 @@ pub fn prepare(
     geometry: Vec<CacheGeometry>,
     contexts: Vec<(usize, i32)>,
 ) -> Result<Preparation> {
+    if !options.enabled() {
+        return Ok(Preparation::None("disabled".to_owned()));
+    }
     let _ = package;
     let layout = Layout::new(&geometry)?;
     let fingerprint = geometry::fingerprint(&geometry);
@@ -265,7 +277,11 @@ pub fn prepare(
         return Err("the direct prefix cache transport is not available".into());
     }
     let mut notes = Vec::new();
-    let directory = match &options.disk {
+    let directory = match options
+        .disk
+        .as_ref()
+        .filter(|_| options.disk_limit != Some(0))
+    {
         None => None,
         Some(base) => {
             let directory = base.join(record::directory_name(&identity, &fingerprint));
@@ -293,6 +309,10 @@ pub fn prepare(
         notes.insert(0, "disabled".to_owned());
         return Ok(Preparation::None(notes.join("; ")));
     }
+    let directory_lock = directory
+        .as_deref()
+        .map(record::DirectoryLock::acquire)
+        .transpose()?;
     let context = contexts
         .first()
         .ok_or("the host prefix store requires at least one rank")?
@@ -304,14 +324,15 @@ pub fn prepare(
             Ok::<_, crate::Error>(pool)
         })
         .transpose()?;
-    let staging_pool = (memory_bytes == 0 && directory.is_some())
+    let staging_pool = directory
+        .is_some()
         .then(|| {
             let mut pool = slab::SlabPool::staging(&layout)?;
             pool.register(context)?;
             Ok::<_, crate::Error>(pool)
         })
         .transpose()?;
-    let scanned = match &directory {
+    let scanned = match &directory_lock {
         Some(directory) => record::scan(directory, &identity, &fingerprint, &geometry)?,
         None => Vec::new(),
     };
@@ -330,6 +351,7 @@ pub fn prepare(
         memory_pool,
         staging_pool,
         scanned,
+        directory_lock,
     })))
 }
 
@@ -363,18 +385,26 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
         memory_pool,
         staging_pool,
         scanned,
+        directory_lock,
     } = prepared;
     let transfers = std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
         &contexts,
         geometry.clone(),
     )?));
-    let disk = resolved
-        .directory
+    let disk = directory_lock
         .map(|directory| {
+            let disk_transfers = if memory_pool.is_some() {
+                std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
+                    &contexts,
+                    geometry.clone(),
+                )?))
+            } else {
+                transfers.clone()
+            };
             let transport = match resolved.transport {
                 Transport::Staged => disk_store::Staged::new(
                     staging_pool,
-                    transfers.clone(),
+                    disk_transfers,
                     disk::DiskThread::start("flare-offload-disk")?,
                 ),
                 Transport::Direct => {
@@ -510,6 +540,8 @@ pub trait PrefixStore {
     fn poll(&mut self, events: &mut Vec<StoreEvent>);
     fn stats(&self) -> StoreStats;
     /// Drain transfers, join threads, and finish pending disk writes.
+    /// On failure the caller must retain the store: transfer jobs may still
+    /// reference its registered host buffers and GPU destinations.
     fn close(&mut self) -> Result<()>;
 }
 
@@ -529,6 +561,135 @@ pub fn worth_fetching(hit: &HostHit, prefill_tokens_per_second: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_directory() -> PathBuf {
+        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "flare-offload-disabled-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn disabled_preparation_requires_no_geometry_context_or_worker_binding() {
+        for options in [
+            PrefixCacheOffload::default(),
+            PrefixCacheOffload {
+                memory_bytes: Some(0),
+                disk_limit: Some(0),
+                ..Default::default()
+            },
+            PrefixCacheOffload {
+                memory_bytes: Some(0),
+                transport: Some(Transport::Direct),
+                ..Default::default()
+            },
+        ] {
+            let prepared = prepare(
+                &options,
+                std::path::Path::new("/missing/model.flaretensors"),
+                [0; 32],
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            assert!(matches!(&prepared, Preparation::None(reason) if reason == "disabled"));
+            assert!(prepared.into_shared().is_none());
+        }
+    }
+
+    #[test]
+    fn zero_disk_limit_does_not_create_a_record_directory() {
+        let directory = test_directory();
+        let prepared = prepare(
+            &PrefixCacheOffload {
+                disk: Some(directory.clone()),
+                disk_limit: Some(0),
+                ..Default::default()
+            },
+            std::path::Path::new("/missing/model.flaretensors"),
+            [0; 32],
+            vec![geometry::tests::geometry(64, &[("kv", 4096)], 4096)],
+            Vec::new(),
+        )
+        .unwrap();
+        let created = directory.exists();
+        if created {
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+        assert!(
+            !created,
+            "disabled disk store created {}",
+            directory.display()
+        );
+        assert!(prepared.into_shared().is_none());
+    }
+
+    #[test]
+    fn zero_disk_limit_avoids_disk_setup_when_memory_is_enabled() {
+        let directory = test_directory();
+        let geometry = vec![geometry::tests::geometry(64, &[("kv", 4096)], 4096)];
+        let memory_bytes = slab::SlabPool::minimum_bytes(&Layout::new(&geometry).unwrap());
+        let error = prepare(
+            &PrefixCacheOffload {
+                memory_bytes: Some(memory_bytes),
+                disk: Some(directory.clone()),
+                disk_limit: Some(0),
+                ..Default::default()
+            },
+            std::path::Path::new("/missing/model.flaretensors"),
+            [0; 32],
+            geometry,
+            Vec::new(),
+        )
+        .err()
+        .expect("a memory store requires a CUDA context");
+        let created = directory.exists();
+        if created {
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+        assert_eq!(
+            error.to_string(),
+            "the host prefix store requires at least one rank"
+        );
+        assert!(
+            !created,
+            "disabled disk store created {}",
+            directory.display()
+        );
+    }
+
+    #[test]
+    fn zero_disk_limit_does_not_lock_or_scan_existing_records() {
+        let base = test_directory();
+        let geometry = vec![geometry::tests::geometry(64, &[("kv", 4096)], 4096)];
+        let fingerprint = geometry::fingerprint(&geometry);
+        let directory = base.join(record::directory_name(&[0; 32], &fingerprint));
+        std::fs::create_dir_all(&directory).unwrap();
+        let lock = record::DirectoryLock::acquire(&directory).unwrap();
+        let active_write = directory.join("active-record.tmp");
+        std::fs::write(&active_write, b"active writer payload").unwrap();
+        let prepared = prepare(
+            &PrefixCacheOffload {
+                disk: Some(base.clone()),
+                disk_limit: Some(0),
+                ..Default::default()
+            },
+            std::path::Path::new("/missing/model.flaretensors"),
+            [0; 32],
+            geometry,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(prepared.into_shared().is_none());
+        assert_eq!(
+            std::fs::read(active_write).unwrap(),
+            b"active writer payload"
+        );
+        drop(lock);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn sizes_parse_binary_suffixes_like_the_ignition_configuration() {

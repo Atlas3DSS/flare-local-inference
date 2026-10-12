@@ -1,9 +1,9 @@
 # Tiered prefix cache offload
 
 Helios keeps immutable prefix checkpoints in GPU memory and evicts them under
-pressure. The proposed host prefix store adds memory retention, disk retention,
-and a composite of both. Disk records support staged transfers through
-registered host memory and direct transfers through GPUDirect Storage.
+pressure. The host prefix store adds memory retention, disk retention,
+and a composite of both. Disk records move through bounded registered host
+staging. GPUDirect Storage support is deferred.
 
 Every tier stores the same checkpoint: immutable page chains and a complete
 endpoint row across all ranks. Recipes define the bytes needed to resume;
@@ -12,9 +12,9 @@ publishes an ordinary GPU checkpoint, so branching, continuation, and retirement
 use the existing cache semantics. Scheduler-owned transfer tickets retain
 buffers independently of the requests waiting for them.
 
-Host offload requires the implementation sequence in section 3. Derived
-defaults become enabled only after correctness and the inference-latency
-thresholds in section 4 pass. Preparation, captured graphs, and the runtime
+Host offload requires explicit configuration. Derived defaults remain disabled
+until correctness and the inference-latency thresholds in section 4 pass.
+Preparation, captured graphs, and the runtime
 package format retain their contracts. The
 [core design](core-design.md#4-prefix-checkpoints-and-complete-model-state)
 defines checkpoint contents and ownership; the [CLI design](cli-design.md)
@@ -38,20 +38,19 @@ selects one of them or none:
 
 | Memory size | Disk limit | Store | Behavior |
 |---|---|---|---|
-| nonzero | nonzero | `CompositeStore` | Records are retained in registered memory and written through to disk; disk reads warm the memory store. The default on discrete GPUs with ample host memory. |
+| nonzero | nonzero | `CompositeStore` | Records are retained in registered memory and written through to disk; disk reads warm the memory store when capacity permits. |
 | nonzero | zero | `MemoryStore` | Records are retained in registered memory only. |
-| zero | nonzero | `DiskStore` | Records live on disk. The staged transport owns a small registered staging pool; the direct transport needs no host payload staging. The default on integrated-memory devices. |
+| zero | nonzero | `DiskStore` | Records live on disk and stream through a bounded registered staging pool. |
 | zero | zero | none | The worker holds no store. |
 
 On an integrated-memory device, such as a DGX Spark, GPU memory and host
 memory are one physical pool, and the GPU prefix cache already takes the
 memory that `capacities` leaves after weights and live state. A retained
-memory store there would duplicate bytes within the same pool, so the memory
-size defaults to zero and the disk store is the only second tier. Under the
-staged transport its staging pool exists because direct I/O needs a
+memory store there would duplicate bytes within the same pool, so disk-only
+retention avoids that duplication. Its staging pool exists because direct I/O needs a
 CPU-mapped destination and the page planes are mapped only on the GPU side.
-The direct transport removes payload staging; its indexes and I/O control
-structures still occupy host memory.
+A GPUDirect Storage transport could remove payload staging; its indexes and
+I/O control structures would still occupy host memory.
 
 ## 2. Design
 
@@ -95,9 +94,20 @@ before consuming the sizing records, and `execution_manifest` in
 
 A layout fingerprint is the 16-byte BLAKE2b digest of the rank count, the page
 token count, and for each rank the ordered page plane names and unit sizes and
-the row plane name and unit size. Together with the 32-byte model identity from
-the server configuration it names the disk directory. The fingerprint is
-required because model identity does not encode every row-layout parameter.
+the row plane name and unit size. The disk namespace combines this fingerprint
+with a 32-byte identity derived from the package's model identity and the
+selected continuation-state mode: ordinary execution, learned speculation,
+or copy speculation. `offload_identity` in
+`helios/src/runtime_package/model.rs` computes that identity with BLAKE2b and
+the domain `flare-prefix-state-v1`. Ordinary execution omits draft-state
+updates, so its records cannot be loaded into speculative execution even when
+the physical layouts match. Changes to positive draft limits, concurrency,
+and verification policy that retain speculation do not change the state mode.
+Permanently fixed width one selects ordinary execution. Token-prefix
+keys retain the package's model identity within this storage namespace.
+
+The fingerprint is required because model identity does not encode every
+row-layout parameter.
 Preparing draft history can add row regions and page planes. Packages that
 share a model identity can therefore have incompatible checkpoint bytes.
 Unit sizes do not depend on the concurrency or verification width selected
@@ -137,8 +147,8 @@ Three components are shared by the implementations:
 - `SlabPool`, a registered pool of fixed-size page and row slabs, section 2.5.
   The memory store uses it with retention; the staged disk transport uses a
   small one as staging without retention.
-- `Transfers`, the per-rank copy threads of section 2.5, constructed once and
-  shared by handle.
+- `Transfers`, the per-rank copy threads of section 2.5. Each tier owns its
+  transfer queues; a composite has independent memory and disk transfer sets.
 
 ### 2.3 Index and lookup
 
@@ -194,7 +204,7 @@ evicted. `fetch` copies resident slabs in. Lookup hits are always resident.
 
 `DiskStore` owns an index rebuilt from its directory at startup, a file
 backend, and a transport. The transport is a crate-private trait,
-`DiskTransport`, with two implementations:
+`DiskTransport`, implemented by `Staged`:
 
 - `Staged` owns a staging slab pool without retention, a transfer handle, and
   the disk thread. `store` streams the checkpoint out through staging windows
@@ -205,19 +215,17 @@ backend, and a transport. The transport is a crate-private trait,
   it is not a setting. It also exposes `write_from(key, metadata, buffers)`
   and `read_into(key, buffers)`, which move a record between its file and
   caller-owned registered buffers, for the composite.
-- `Direct` moves bytes between device memory and record files with the
-  GPUDirect Storage API, section 2.6. It needs no host payload staging.
+The deferred direct transport requirements are in section 2.6.
 
 `CompositeStore` owns a `MemoryStore` and a `DiskStore` and implements the
 trait by orchestrating them:
 
 - `store` with the staged transport runs `memory.store`; when the copy-out
   lands, it runs `write_from` with the memory store's slabs for that record;
-  when the write completes, it marks the memory record durable. With the
-  direct transport it runs `memory.store` and `disk.store` concurrently, both
-  reading the GPU, and marks the record durable when the disk write
-  completes. The disk store indexes the record when the write starts, in a
-  writing state, so lookups see it.
+  when the write completes, it marks the memory record durable. If available
+  and evictable memory slabs cannot hold the record, `disk.store` streams it
+  through bounded staging without retention. The disk store indexes the
+  record when the write starts, in a writing state, so lookups see it.
 - `lookup` runs on the disk index, which is a superset of the memory index
   under write-through, including records whose writes are in flight.
 - `fetch` walks the chain. A node resident in the memory store uploads from
@@ -226,17 +234,20 @@ trait by orchestrating them:
   read with `read_into` into those slabs, and uploads from them; it is then a
   durable memory resident like any other. An ancestor whose endpoint shares
   its parent's last page owns no pages, so when it is not the endpoint nothing
-  of it is read and an empty resident copy stands in for it. With the direct transport, a node
-  that is not resident is read into the GPU directly, and the memory store
-  warms through the ordinary publication path once the restored checkpoint is
-  published, because the composite skips a memory copy-out only when the
-  record is memory-resident, not when it is merely on disk.
+  of it is read and an empty resident copy stands in for it. When the chain
+  exceeds available and evictable retention slabs, lookup selects a complete
+  disk chain and `disk.fetch` streams it through bounded staging directly to
+  the GPU destinations. Such a restore neither requires the chain to fit in
+  RAM nor evicts memory residents merely to attempt an impossible admission.
 - The memory store's eviction is restricted to durable records. Disk
   eviction removes the memory copy as well, so the memory contents remain a
   subset of the disk contents. A failed disk write removes the memory record
   and is counted.
-- The staged transport's own staging pool is not constructed inside the
-  composite; the memory store's slabs are its buffers.
+- The staged transport retains its bounded staging pool inside the composite.
+  Memory slabs supply write-through and read-through buffers when retention
+  fits; disk staging handles records and chains that cannot be retained.
+  The staging pool is additional to the configured retention-memory budget
+  and appears separately in the startup summary.
 
 ### 2.5 Transfers, slabs, and record files
 
@@ -280,7 +291,7 @@ A record file lives at
 `<directory>/<identity prefix>-<layout fingerprint>/<consumed>-<digest>.ckpt`,
 with the consumed count as 16 hexadecimal digits and the digest as 32. The
 first 4 KiB is a little-endian header: magic `FLARECKP`, format version, flags,
-the model identity, the layout fingerprint, the key (consumed count and
+the storage namespace identity, the layout fingerprint, the key (consumed count and
 digest), the parent key, the bucket digest, the page token count, the tail
 page count, the rank count, the per-rank plane sizes and row bytes, the page
 segment offset, the row segment offset, the row checksum, and the creation
@@ -298,19 +309,26 @@ go to a temporary name in the same directory, use direct I/O, optionally
 `fdatasync`, and rename into place. Deletion is `unlink`. Checksums are
 64-bit xxh3 over each page record and over the row record to detect torn or
 corrupted files; the staged transport computes and verifies them on the disk
-thread, and the direct transport computes and verifies them on the GPU with a
-prepared reduction over the planes, deferred until that kernel exists, so the
-direct transport initially records and verifies a header-only checksum and
-relies on the rename for atomicity.
+thread. A direct transport requires a prepared GPU reduction over record
+planes to preserve the same payload verification.
 
-The disk store's startup scan reads each file's header, validates the magic,
+The loader acquires an exclusive nonblocking lock on the record directory
+before scanning it. The store retains that directory descriptor through all
+I/O and shutdown. Another process using the same namespace fails startup
+before scanning or deleting files; independent namespaces can share a base
+directory. The disk store's startup scan reads each file's header, validates the magic,
 version, identity, fingerprint, and name, derives row presence from the size,
 seeds the access order from the modification time, deletes temporary files,
 and deletes any node whose parent is missing together with its descendants.
 Leaf-first eviction never unlinks a parent before its children, so orphans
 arise only from interrupted operations or external changes. The disk thread
 owns an `io_uring` ring over files opened with `O_DIRECT`, chunks transfers at
-8 MiB, and computes and verifies checksums.
+8 MiB, and computes and verifies checksums. Before accepting payload reads,
+it checks the opened file's header against the indexed record, including all
+layout and size fields. Changed headers cannot enlarge reads into registered
+slabs. A failed ring submission drains every kernel-owned buffer reference
+before reporting completion; shutdown retains the worker and its buffers if
+that drain cannot finish before the deadline.
 
 Bindings added to `helios/src/cuda.rs`: `cuMemcpyBatchAsync` with the CUDA 13
 signature (destinations, sources, sizes, count, attributes, attribute indices,
@@ -321,9 +339,10 @@ and `cuDeviceGetAttribute` for the integrated-memory check, which the loader's
 driver binding already has. The installed driver 610.57.04 exports the
 batched copy, and `/opt/cuda/include/cuda.h` declares it.
 
-### 2.6 GPUDirect Storage transport
+### 2.6 Deferred GPUDirect Storage transport
 
-The direct transport binds `libcufile.so` through `libloading`, the way
+Direct transport is not implemented. Its integration requires bindings for
+`libcufile.so` through `libloading`, the way
 `helios/src/cuda.rs` binds the driver, in `helios/src/offload/cufile.rs`.
 The b12x weight loader in the sibling FlashInfer checkout
 (`flashinfer/experimental/b12x/loader/_gds_reader.c`) already uses the same
@@ -440,17 +459,19 @@ lookup disabled for that attempt.
 
 Shutdown closes the executor, then the store, which drains its streams, joins
 its threads, and finishes pending disk writes within a bound, before
-`release_after_shutdown`.
+`release_after_shutdown`. If either drain fails, the store and its resource
+owners remain alive together with the model resources; host registrations
+and device allocations are never released beneath outstanding transfers.
 
 ### 2.9 Loader integration
 
-`NativeModel::load` in `helios/src/runtime_package/model.rs` constructs the
-shared pieces after `allocate_caches`, under a progress phase named `Prepare
-host prefix cache`: it parses the model identity from the package's serving
-configuration, resolves the settings, maps and registers the slab pools with
-rank zero's context current, opens the cuFile driver, registers buffers, and
-probes the transport when the direct transport is selected, and scans the
-record directory. `manifests` attaches a `Binding` to each rank's
+`NativeModel::load` in `helios/src/runtime_package/model.rs` skips host-store
+preparation entirely when memory and disk retention are disabled. Otherwise,
+after `allocate_caches`, the `Prepare host prefix cache` phase derives the
+storage namespace from the selected serving configuration, resolves settings,
+locks the record directory, maps and registers slab pools with rank zero's
+context current, and scans the directory. Direct transport selection fails
+explicitly. `manifests` attaches a `Binding` to each rank's
 `ExecutionManifest`; the binding shares one prepared bundle, holding every
 rank's geometry and context, which the model worker takes once to construct
 the store and its transfer threads.
@@ -525,7 +546,7 @@ Offload limits interference through bounded work and explicit ownership:
   `.flaretensors` extension replaced by `.prefix-cache`.
 - Disk limit: one tenth of the free space on the directory's filesystem at
   startup. `[prefix_cache] disk_limit` and `--prefix-cache-disk-limit SIZE`
-  override; zero selects no disk store.
+  override; zero selects no disk store and does not create its directory.
 - Disk transport: staged. `[prefix_cache] disk_transport` and
   `--prefix-cache-disk-transport` accept `staged` and `direct`; `direct` fails
   startup until the direct transport exists, and afterwards when the cuFile
@@ -543,10 +564,9 @@ Offload limits interference through bounded work and explicit ownership:
   memory size, directory, limit, and transport.
 - The startup phase reports the selected store, transport, pool sizes, the
   directory, the limit, and the scanned record count.
-- The GPU prefix cache remains derived, as the CLI design specifies. The host
-  stores are derived capacities with overrides, for the reason
-  `memory.reserve` exists: host memory and disk are shared with other
-  software.
+- The GPU prefix cache remains derived, as the CLI design specifies. Host
+  retention is explicit until the default-enablement criteria pass; host
+  memory and disk are shared with other software.
 
 ### 2.12 Invariants
 
@@ -561,11 +581,12 @@ Offload limits interference through bounded work and explicit ownership:
 - A transfer failure is reported only after the thread's stream or batch is
   drained.
 - Ticket resources belong to the scheduler until `finish_inbound`.
-- A record's row and pages are restored from one lineage: the host chain
-  passes through the GPU ancestor's exact endpoint.
+- A restored endpoint's row and pages describe the same token prefix. GPU
+  ancestor pages are retained, and only the missing page suffix is uploaded.
 - Rows and pages are stored byte-exact; no compression or requantization.
-- Record files are keyed by identity and layout fingerprint; a mismatched
-  directory is never read. One file format serves both transports.
+- Record files are keyed by model and execution-state identity plus layout
+  fingerprint; incompatible state is never restored. Each record directory
+  has one process owner through its complete I/O lifetime.
 - In the composite, memory contents are a subset of disk contents, counting
   writes in flight, and memory evicts only durable records.
 - Slab allocation never blocks; an unsatisfiable request fails its job.
@@ -687,8 +708,9 @@ on the file format fixed in step 5.
     package and directory, replay the conversation, and observe a disk hit,
     prefill launches limited to the new tokens through `prefill_launches` in
     `qualify/server.py`, and the retrieval check, with the composite and with the
-    disk store alone. A package exported with a different draft-token count
-    must miss.
+    disk store alone. Ordinary and speculative execution must use separate
+    namespaces. Compatible positive draft limits, concurrency, and verification
+    policies must retain reuse; incompatible row or page layouts must miss.
 
 13. **Isolation measurement and default-on.** Run the measurements in
     section 4 with explicit sizes, baseline first. When every threshold holds,
@@ -732,6 +754,35 @@ on the file format fixed in step 5.
     an IOMMU that is off or in passthrough, in `docs/cli-design.md`.
 
 ## 4. Validation
+
+Run CPU ownership, corruption, eviction, namespace, scheduler, and shutdown
+regressions with `cargo test --manifest-path helios/Cargo.toml --all-features --lib`.
+Package-backed GPU tests verify exact page and continuation-row bytes, including
+multi-window transfers, RAM eviction, bounded disk streaming, and restarts:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 \
+FLARE_OFFLOAD_TEST_PACKAGE=/data/flare-runtime/qwen38-tp1-c4-mtp5-ordinary.flaretensors \
+FLARE_OFFLOAD_TEST_DIR=/data/flare-offload-tests \
+cargo test --manifest-path helios/Cargo.toml --all-features offload:: -- --ignored --test-threads=1
+```
+
+Choose an idle GPU and create the test directory on a filesystem supporting
+direct I/O. Build the native CLI and run the HTTP regressions against a Qwen TP1
+package containing ordinary and MTP5 graphs:
+
+```sh
+cargo build --release --manifest-path flare/Cargo.toml
+CUDA_VISIBLE_DEVICES=0 FLARE_RUN_CUDA_TESTS=1 \
+FLARE_OFFLOAD_TEST_PACKAGE=/data/flare-runtime/qwen38-tp1-c4-mtp5-ordinary.flaretensors \
+.venv/bin/python -m pytest tests/server/test_prefix_cache_offload.py -q \
+  --basetemp /data/flare-offload-tests/http
+```
+
+The HTTP tests launch and stop their own servers, isolate ordinary and
+speculative records, restore prefixes exceeding RAM retention, reject corrupted
+payloads, and check GPU prefix reuse with offload disabled. Pytest owns and clears
+its `--basetemp` directory; use a dedicated test path.
 
 CPU tests cover steps 3 through 6, 8 through 10, 15's decision table, and
 the worker's use of the trait without a GPU. GPU tests are ignored by default
@@ -781,17 +832,12 @@ A correctness failure in any scenario blocks performance claims.
 
 ## 5. Known limitations
 
-- A record larger than the memory pool is never copied out through a
-  composite, because the disk write reads the memory slabs, and a chain whose
-  non-resident pages exceed the pool cannot be restored through it; the
-  composite's lookup does not yet exclude such chains, so an unfetchable hit
-  fails its restore and evicts durable residents while trying.
 - Disk compaction of a record is not propagated to its memory copy, whose row
   slab stays allocated until the whole copy is evicted.
 - A publication whose key still names a stale memory copy pinned by an upload
   in flight is skipped rather than written again.
-- Closing a composite bounds each tier's drain separately, so a stuck job can
-  take three times the single bound.
+- Shutdown deadlines apply separately to pipelines, disk workers, and CUDA
+  transfers, so total shutdown time can exceed one drain deadline.
 - `bytes_out` counts every memory copy that landed, including copies the disk
   limit then refused; `stored` counts only records that reached disk.
 

@@ -312,6 +312,7 @@ pub struct RequestScheduler {
     proposal_source: speculation::ProposalSource,
     controller: speculation::WidthController,
     tickets: HashMap<PrefixKey, Ticket>,
+    track_publications: bool,
     publications: Vec<CheckpointId>,
 }
 
@@ -373,6 +374,7 @@ impl RequestScheduler {
             proposal_source: speculation::ProposalSource::Mtp,
             controller: speculation::WidthController::default(),
             tickets: HashMap::new(),
+            track_publications: false,
             publications: Vec::new(),
         })
     }
@@ -560,15 +562,18 @@ impl RequestScheduler {
             free_snapshots: self.free_snapshots.len(),
             cached_checkpoints: cache.published_checkpoints,
             cached_pages: cache.cached_pages,
-            inbound_waiting: self
-                .slots
-                .iter()
-                .filter(|slot| {
-                    slot.request
-                        .as_ref()
-                        .is_some_and(|request| request.phase == RequestPhase::Inbound)
-                })
-                .count(),
+            inbound_waiting: if self.tickets.is_empty() {
+                0
+            } else {
+                self.slots
+                    .iter()
+                    .filter(|slot| {
+                        slot.request
+                            .as_ref()
+                            .is_some_and(|request| request.phase == RequestPhase::Inbound)
+                    })
+                    .count()
+            },
             ..self.stats
         }
     }
@@ -953,8 +958,13 @@ impl RequestScheduler {
         Ok(ticket.waiters)
     }
 
-    /// Checkpoints that became GPU-ready since the previous call, in that order
-    /// and each once, omitting any the cache has retired since.
+    /// Queue GPU-ready checkpoint notifications for an attached host store.
+    pub fn enable_publications(&mut self) {
+        self.track_publications = true;
+    }
+
+    /// Checkpoints that became GPU-ready since tracking was enabled or the
+    /// previous call, in that order and each once, omitting retired checkpoints.
     pub fn take_publications(&mut self) -> Vec<PublishedCheckpoint> {
         std::mem::take(&mut self.publications)
             .into_iter()
@@ -980,8 +990,10 @@ impl RequestScheduler {
     }
 
     fn record_publication(&mut self, id: CheckpointId) {
-        // Without a host store nothing drains the list; live checkpoints number at
-        // most the snapshot capacity, so pruning retired ids bounds it.
+        if !self.track_publications {
+            return;
+        }
+        // Bound queued notifications when the store delays draining them.
         if self.publications.len() >= 2 * self.limits.snapshots as usize {
             self.publications
                 .retain(|id| self.cache.checkpoint(*id).is_ok());

@@ -53,6 +53,7 @@ use std::{
     fmt::Write as _,
     fs,
     io::{self, Read as _},
+    os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -611,14 +612,63 @@ pub struct Scanned {
     pub modified: SystemTime,
 }
 
+/// Exclusive ownership of a disk prefix cache, held through pending I/O.
+#[derive(Debug)]
+pub struct DirectoryLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl DirectoryLock {
+    pub fn acquire(path: &Path) -> Result<Self> {
+        fs::create_dir_all(path).map_err(|error| {
+            io_failure(format!("create record directory {}", path.display()), error)
+        })?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|error| {
+                io_failure(format!("open record directory {}", path.display()), error)
+            })?;
+        loop {
+            // SAFETY: The directory descriptor remains open for the guard's lifetime.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            let message = if error.kind() == io::ErrorKind::WouldBlock {
+                format!(
+                    "host prefix cache directory {} is already in use; stop its Flare process or choose a different --prefix-cache-disk directory",
+                    path.display()
+                )
+            } else {
+                format!("lock record directory {}", path.display())
+            };
+            return Err(io_failure(message, error));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            _file: file,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// Read every record header in `directory`, delete temporary files, files
 /// whose header or name is invalid or belongs to another identity, fingerprint,
 /// or layout, and records whose parent is missing together with their
 /// descendants. Returns the survivors ordered by consumed count ascending, so
 /// parents precede children.
 ///
-/// The directory is created when missing. Entries are inspected without
-/// following symbolic links; symbolic links, subdirectories, and files whose
+/// The caller retains exclusive ownership through all subsequent I/O. Entries
+/// are inspected without following symbolic links; symbolic links, subdirectories, and files whose
 /// names are neither `.*.tmp` nor `*.ckpt` are left alone. A `.ckpt` file
 /// shorter than its page segment cannot supply its pages and is deleted; a
 /// file covering the page segment but not the row segment is a page-only
@@ -627,29 +677,12 @@ pub struct Scanned {
 /// scan cannot open or read for another reason, such as a permission or
 /// device error, fails the scan with an error naming it and stays in place.
 pub fn scan(
-    directory: &Path,
+    directory: &DirectoryLock,
     identity: &[u8; 32],
     fingerprint: &[u8; 16],
     geometry: &[CacheGeometry],
 ) -> Result<Vec<Scanned>> {
-    fs::create_dir_all(directory).map_err(|error| {
-        io_failure(
-            format!("create record directory {}", directory.display()),
-            error,
-        )
-    })?;
-    let metadata = fs::metadata(directory).map_err(|error| {
-        io_failure(
-            format!("inspect record directory {}", directory.display()),
-            error,
-        )
-    })?;
-    if !metadata.is_dir() {
-        return Err(invalid(format!(
-            "record directory {} is not a directory",
-            directory.display()
-        )));
-    }
+    let directory = directory.path();
     let entries = fs::read_dir(directory).map_err(|error| {
         io_failure(
             format!("list record directory {}", directory.display()),
@@ -1157,9 +1190,9 @@ mod tests {
         )
         .unwrap();
 
-        // The directory does not exist yet; the scan creates it.
+        let lock = DirectoryLock::acquire(&directory).unwrap();
         assert!(
-            scan(&directory, &IDENTITY, &FINGERPRINT, &geometry)
+            scan(&lock, &IDENTITY, &FINGERPRINT, &geometry)
                 .unwrap()
                 .is_empty()
         );
@@ -1213,7 +1246,7 @@ mod tests {
         let link = directory.join(file_name(&key(999, 9)));
         symlink("/nonexistent/target.ckpt", &link).unwrap();
 
-        let records = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let records = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
         assert_eq!(
             names(&records),
             [&root, &sibling, &child, &grandchild]
@@ -1234,7 +1267,7 @@ mod tests {
         assert!(subdirectory.is_dir());
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
 
-        let again = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let again = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
         assert_eq!(again, records);
 
         let mut index = Index::new(64);
@@ -1276,7 +1309,7 @@ mod tests {
 
         // Deleting the child orphans the grandchild on the next scan.
         fs::remove_file(directory.join(file_name(&child.key))).unwrap();
-        let pruned = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let pruned = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
         assert_eq!(
             names(&pruned),
             [file_name(&root.key), file_name(&sibling.key)]
@@ -1285,7 +1318,8 @@ mod tests {
 
         let file = directory.join("file");
         fs::write(&file, b"").unwrap();
-        assert!(scan(&file, &IDENTITY, &FINGERPRINT, &geometry).is_err());
+        assert!(DirectoryLock::acquire(&file).is_err());
+        drop(lock);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1303,6 +1337,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
+        let lock = DirectoryLock::acquire(&directory).unwrap();
         let geometry = geometries().remove(0);
         let root = header(&geometry, 200, None);
         let path = write_record(
@@ -1312,14 +1347,52 @@ mod tests {
             root.length_with_row(),
         );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-        let error = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry)
+        let error = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry)
             .unwrap_err()
             .to_string();
         assert!(error.contains(&file_name(&root.key)), "{error}");
         assert!(path.exists());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        let records = scan(&directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let records = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
         assert_eq!(names(&records), [file_name(&root.key)]);
+        drop(lock);
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn directory_lock_prevents_another_scan_from_deleting_an_active_write() {
+        let directory = std::env::temp_dir().join(format!(
+            "flare-record-lock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let geometry = geometries().remove(0);
+        let owner = DirectoryLock::acquire(&directory).unwrap();
+        assert!(
+            scan(&owner, &IDENTITY, &FINGERPRINT, &geometry)
+                .unwrap()
+                .is_empty()
+        );
+        let temporary = directory.join(temporary_name(&key(200, 17)));
+        fs::write(&temporary, b"pending record").unwrap();
+
+        let error = DirectoryLock::acquire(&directory).unwrap_err().to_string();
+        assert!(error.contains("already in use"), "{error}");
+        assert!(error.contains(directory.to_str().unwrap()), "{error}");
+        assert_eq!(fs::read(&temporary).unwrap(), b"pending record");
+        let alias = directory.join(".");
+        assert!(DirectoryLock::acquire(&alias).is_err());
+
+        drop(owner);
+        let next = DirectoryLock::acquire(&directory).unwrap();
+        assert!(
+            scan(&next, &IDENTITY, &FINGERPRINT, &geometry)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!temporary.exists());
+        drop(next);
         fs::remove_dir_all(&directory).unwrap();
     }
 }

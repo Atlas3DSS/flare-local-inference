@@ -314,7 +314,7 @@ impl<M: ModelContract> ModelRuntime<M> {
                     receiver,
                     queue_capacity,
                 );
-                worker.store = store;
+                worker.attach_store(store);
                 worker_metrics.scheduler(worker.scheduler.stats());
                 worker_health.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
@@ -335,18 +335,7 @@ impl<M: ModelContract> ModelRuntime<M> {
                 });
                 worker.fail_all(&final_error);
                 let mut shutdown = executor.close();
-                // The store's streams and registrations are released only after a
-                // confirmed drain; otherwise they are retained like the executor's.
-                if let Some(mut store) = worker.store.take() {
-                    if shutdown.drained {
-                        if let Err(error) = store.close() {
-                            shutdown.drained = false;
-                            shutdown.error.get_or_insert(error);
-                        }
-                    } else {
-                        std::mem::forget(store);
-                    }
-                }
+                worker.close_store(&mut shutdown);
                 if shutdown.drained {
                     let _ = worker.scheduler.release_after_shutdown(&shutdown);
                     worker_metrics.scheduler(worker.scheduler.stats());
@@ -625,6 +614,35 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         Ok(())
     }
 
+    fn attach_store(&mut self, store: Option<Box<dyn crate::offload::PrefixStore>>) {
+        if store.is_some() {
+            self.scheduler.enable_publications();
+        }
+        self.store = store;
+    }
+
+    fn close_store(&mut self, shutdown: &mut Shutdown) {
+        let Some(store) = self.store.take() else {
+            return;
+        };
+        // Retain registered slabs if either drain fails, including an unwind
+        // inside the store's close operation.
+        let mut store = std::mem::ManuallyDrop::new(store);
+        if !shutdown.drained {
+            return;
+        }
+        shutdown.drained = false;
+        match store.close() {
+            Ok(()) => {
+                shutdown.drained = true;
+                drop(std::mem::ManuallyDrop::into_inner(store));
+            }
+            Err(error) => {
+                shutdown.error.get_or_insert(error);
+            }
+        }
+    }
+
     fn admit(&mut self) -> Result<std::ops::ControlFlow<(), bool>> {
         let mut progress = false;
         self.pending.retain(|request| {
@@ -785,7 +803,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             .complete(completion.fence, &completion.records)?;
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
-        if kind == GraphKind::Prefill {
+        if kind == GraphKind::Prefill && self.store.is_some() {
             self.observe_prefill_rate(completion.fence, prefill);
         }
         if !acceptance_rows.is_empty() {

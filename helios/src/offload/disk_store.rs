@@ -9,14 +9,14 @@
 //! staging pool, the shared transfer threads, and the disk thread, in windows of
 //! at most [`WINDOW_PAGES`] pages with at most [`WINDOWS_IN_FLIGHT`] windows of
 //! one record staged at a time. It also moves records between files and
-//! caller-owned registered buffers for the composite store, which owns no
-//! staging pool. Nothing here waits: `store`, `fetch`, `truncate`, and `unlink`
+//! caller-owned registered buffers retained by the composite's memory tier.
+//! Nothing here waits: `store`, `fetch`, `truncate`, and `unlink`
 //! enqueue, and `poll` advances every pipeline as far as free slabs and queue
 //! space allow before reporting completions.
 
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime},
 };
@@ -136,7 +136,7 @@ struct Buffers {
 /// The threads and pool every pipeline draws on, with the counters that keep
 /// submissions within the queues' depths so a refusal is a failure, not backpressure.
 struct Resources {
-    /// Absent inside a composite store, whose memory slabs are the buffers.
+    /// Non-retaining buffers for device transfers; host-buffer-only users may omit them.
     pool: Option<SlabPool>,
     transfers: Arc<Mutex<Transfers>>,
     disk: DiskThread,
@@ -599,9 +599,8 @@ enum FileState {
 struct Segment {
     disk: JobId,
     path: PathBuf,
-    /// The indexed header the opened file must agree with; `None` for a
-    /// caller-named file.
-    expected: Option<Header>,
+    /// The indexed header the disk thread validates before reading payloads.
+    expected: Header,
     state: FileState,
     /// Windows of this segment whose reads have not completed.
     reads_left: usize,
@@ -705,22 +704,7 @@ impl InboundRecord {
         };
         match reply.operation {
             Operation::Open => match reply.result {
-                Ok(()) => {
-                    let agrees = match (&file.expected, &reply.header) {
-                        (Some(expected), Some(header)) => {
-                            header.key == expected.key && header.tail_pages == expected.tail_pages
-                        }
-                        (None, _) => true,
-                        (Some(_), None) => false,
-                    };
-                    if !agrees {
-                        let path = file.path.clone();
-                        self.fail(invalid(format!(
-                            "record file {} holds a different record than the index expects",
-                            path.display()
-                        )));
-                    }
-                }
+                Ok(()) => {}
                 Err(error) => {
                     file.state = FileState::Closed;
                     self.fail(error);
@@ -849,6 +833,7 @@ impl InboundRecord {
             resources.submit_disk(disk::Job::Open {
                 id: segment.disk,
                 path: segment.path.clone(),
+                expected: segment.expected.clone(),
             })?;
             segment.state = FileState::Opened;
             self.outstanding += 1;
@@ -1009,6 +994,10 @@ impl Staged {
         }
     }
 
+    pub(crate) fn shares_transfers(&self, transfers: &Arc<Mutex<Transfers>>) -> bool {
+        Arc::ptr_eq(&self.resources.transfers, transfers)
+    }
+
     pub fn pool(&self) -> Option<&SlabPool> {
         self.resources.pool.as_ref()
     }
@@ -1051,6 +1040,7 @@ impl Staged {
         &mut self,
         id: super::JobId,
         path: PathBuf,
+        expected: Header,
         first_page: u32,
         pages: Vec<usize>,
         row: Option<usize>,
@@ -1067,7 +1057,7 @@ impl Staged {
         let segment = Segment {
             disk,
             path,
-            expected: None,
+            expected,
             state: FileState::Unopened,
             reads_left: plans.len(),
         };
@@ -1283,7 +1273,7 @@ impl DiskTransport for Staged {
             segments.push(Segment {
                 disk,
                 path: segment.path,
-                expected: Some(segment.header),
+                expected: segment.header,
                 state: FileState::Unopened,
                 reads_left: plans.iter().filter(|plan| plan.segment == index).count(),
             });
@@ -1407,7 +1397,6 @@ struct Reclaim {
 
 pub struct DiskStore {
     index: Index<DiskRecord>,
-    directory: PathBuf,
     identity: [u8; 32],
     fingerprint: [u8; 16],
     limit: u64,
@@ -1425,14 +1414,15 @@ pub struct DiskStore {
     evicted: Vec<PrefixKey>,
     outbound_rate: Rate,
     inbound_rate: Rate,
+    pub(crate) directory_lock: record::DirectoryLock,
 }
 
 impl DiskStore {
-    /// Open a store over `directory`, already scanned by
+    /// Open a store over the locked directory, already scanned by
     /// [`super::record::scan`], whose records are inserted parents first and
     /// take their access order from file age, oldest first.
     pub fn new(
-        directory: PathBuf,
+        directory_lock: record::DirectoryLock,
         identity: [u8; 32],
         fingerprint: [u8; 16],
         limit: u64,
@@ -1470,7 +1460,6 @@ impl DiskStore {
         };
         Ok(Self {
             index,
-            directory,
             identity,
             fingerprint,
             limit,
@@ -1486,6 +1475,7 @@ impl DiskStore {
             evicted: Vec::new(),
             outbound_rate: Rate(rate),
             inbound_rate: Rate(rate),
+            directory_lock,
         })
     }
 
@@ -1497,8 +1487,8 @@ impl DiskStore {
         &mut self.index
     }
 
-    pub fn directory(&self) -> &PathBuf {
-        &self.directory
+    pub fn directory(&self) -> &Path {
+        self.directory_lock.path()
     }
 
     pub fn identity(&self) -> [u8; 32] {
@@ -1531,6 +1521,10 @@ impl DiskStore {
 
     pub(crate) fn transport_mut(&mut self) -> &mut dyn DiskTransport {
         self.transport.as_mut()
+    }
+
+    pub(crate) fn pending_store_key(&self, id: JobId) -> Option<PrefixKey> {
+        self.outbound.get(&id).map(|job| job.key)
     }
 
     pub(crate) fn next_job(&mut self) -> super::JobId {
@@ -1624,8 +1618,8 @@ impl DiskStore {
         if !room? {
             return Ok(None);
         }
-        let path = self.directory.join(record::file_name(&key));
-        let temporary = self.directory.join(record::temporary_name(&key));
+        let path = self.directory().join(record::file_name(&key));
+        let temporary = self.directory().join(record::temporary_name(&key));
         self.index.insert(
             key,
             parent,
@@ -2186,6 +2180,12 @@ mod tests {
     /// whatever events the test queues.
     struct Recorder(Rc<RefCell<Log>>);
 
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir(directory());
+        }
+    }
+
     impl DiskTransport for Recorder {
         fn kind(&self) -> Transport {
             Transport::Staged
@@ -2250,13 +2250,17 @@ mod tests {
     }
 
     fn directory() -> PathBuf {
-        PathBuf::from("/nonexistent/flare-disk-store")
+        std::env::temp_dir().join(format!(
+            "flare-disk-store-mock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
     }
 
     fn store_with(scanned: Vec<Scanned>, limit: u64) -> (DiskStore, Rc<RefCell<Log>>) {
         let log = Rc::new(RefCell::new(Log::default()));
         let store = DiskStore::new(
-            directory(),
+            record::DirectoryLock::acquire(&directory()).unwrap(),
             IDENTITY,
             FINGERPRINT,
             limit,
@@ -2266,6 +2270,19 @@ mod tests {
         )
         .unwrap();
         (store, log)
+    }
+
+    #[test]
+    fn disk_store_keeps_exclusive_directory_ownership_until_drop() {
+        let (mut store, _) = store_with(Vec::new(), 1 << 30);
+        assert!(record::DirectoryLock::acquire(store.directory()).is_err());
+        store.close().unwrap();
+        assert!(record::DirectoryLock::acquire(store.directory()).is_err());
+        let path = store.directory().to_owned();
+        drop(store);
+        let reopened = record::DirectoryLock::acquire(&path).unwrap();
+        drop(reopened);
+        fs::remove_dir(path).unwrap();
     }
 
     fn complete(
@@ -3393,6 +3410,113 @@ mod tests {
     }
 
     #[test]
+    fn staged_reads_reject_changed_headers_before_writing_host_or_staging_slabs() {
+        let Some(directory) = test_directory("changed-header") else {
+            return;
+        };
+        let geometry = geometry();
+        let expected = header(&geometry, &history(200), 200, None);
+        let mut variants = Vec::new();
+        let mut changed = expected.clone();
+        changed.key.digest[0] ^= 1;
+        variants.push(("key", changed));
+        let mut changed = expected.clone();
+        changed.ranks[0].planes[0] -= 1;
+        variants.push(("geometry", changed));
+        let mut changed = expected.clone();
+        changed.ranks[0].planes[0] += 4096;
+        changed.row_segment += u64::from(changed.tail_pages) * 4096;
+        variants.push(("page-size", changed));
+        let mut changed = expected.clone();
+        changed.ranks[0].row_bytes += 4096;
+        variants.push(("row-size", changed));
+        for (name, changed) in variants {
+            let path = directory.join(format!("{name}.ckpt"));
+            let mut bytes = vec![0x5a; changed.length_with_row() as usize];
+            bytes[..record::HEADER_BYTES].copy_from_slice(&changed.encode().unwrap());
+            fs::write(&path, bytes).unwrap();
+            for device in [false, true] {
+                let mut pool = SlabPool::new(PAGE_RECORD, 4, ROW_RECORD, 2, true).unwrap();
+                for index in 0..4 {
+                    pool.page_mut(PageSlab(index)).fill(0xee);
+                }
+                for index in 0..2 {
+                    pool.row_mut(RowSlab(index)).fill(0xee);
+                }
+                let page = pool.page_address(PageSlab(0));
+                let row = pool.row_address(RowSlab(0));
+                let (host, staging) = if device {
+                    (None, Some(pool))
+                } else {
+                    (Some(pool), None)
+                };
+                let mut staged = Staged::new(
+                    staging,
+                    stopped_transfers(),
+                    DiskThread::start("flare-offload-disk").unwrap(),
+                );
+                if device {
+                    staged
+                        .fetch(
+                            JobId(1),
+                            vec![FetchSegment {
+                                path: path.clone(),
+                                header: expected.clone(),
+                                first_page: 0,
+                                pages: 1,
+                                row: true,
+                            }],
+                            &InboundTicket {
+                                key: expected.key,
+                                pages: pages(0..1),
+                                slot: StateSlotId(0),
+                            },
+                        )
+                        .unwrap();
+                } else {
+                    staged
+                        .read_into(
+                            JobId(1),
+                            path.clone(),
+                            expected.clone(),
+                            0,
+                            vec![page],
+                            Some(row),
+                        )
+                        .unwrap();
+                }
+                match &transport_events(&mut staged, 1)[..] {
+                    [
+                        TransportEvent::Fetched {
+                            result: Err(error), ..
+                        },
+                    ] => assert!(
+                        error.to_string().contains("different header"),
+                        "{name}, device={device}: {error}"
+                    ),
+                    other => panic!("{name}, device={device}: {other:?}"),
+                }
+                assert!(settled(&staged));
+                let pool = host.as_ref().or_else(|| staged.pool()).unwrap();
+                for index in 0..4 {
+                    assert!(
+                        pool.page(PageSlab(index)).iter().all(|byte| *byte == 0xee),
+                        "{name} changed page {index}, device={device}"
+                    );
+                }
+                for index in 0..2 {
+                    assert!(
+                        pool.row(RowSlab(index)).iter().all(|byte| *byte == 0xee),
+                        "{name} changed row {index}, device={device}"
+                    );
+                }
+                staged.close().unwrap();
+            }
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn staged_moves_records_between_files_and_caller_buffers_without_a_pool() {
         let Some(directory) = test_directory("host-buffers") else {
             return;
@@ -3478,7 +3602,7 @@ mod tests {
         );
         assert!(
             staged
-                .read_into(JobId(1), path.clone(), 0, Vec::new(), None)
+                .read_into(JobId(1), path.clone(), header.clone(), 0, Vec::new(), None)
                 .is_err()
         );
         assert!(settled(&staged));
@@ -3517,7 +3641,13 @@ mod tests {
         }
         assert_eq!(fs::metadata(&path).unwrap().len(), header.length_with_row());
         assert!(!temporary.exists());
-        let scanned = record::scan(&directory, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
+        let scanned = record::scan(
+            &record::DirectoryLock::acquire(&directory).unwrap(),
+            &IDENTITY,
+            &FINGERPRINT,
+            &geometry,
+        )
+        .unwrap();
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].header.key, header.key);
         assert!(scanned[0].row);
@@ -3532,6 +3662,7 @@ mod tests {
             .read_into(
                 JobId(2),
                 path.clone(),
+                header.clone(),
                 SKIP as u32,
                 addresses(&pool, &targets[..PAGES - SKIP]),
                 Some(pool.row_address(target_row)),
@@ -3555,6 +3686,7 @@ mod tests {
             .read_into(
                 JobId(3),
                 path.clone(),
+                header.clone(),
                 PAGES as u32 - 2,
                 addresses(&pool, &targets[PAGES - 2..]),
                 None,
@@ -3577,6 +3709,7 @@ mod tests {
             .read_into(
                 JobId(4),
                 directory.join("missing.ckpt"),
+                header.clone(),
                 0,
                 addresses(&pool, &targets[..1]),
                 None,
@@ -3598,6 +3731,7 @@ mod tests {
             .read_into(
                 JobId(5),
                 path.clone(),
+                header.clone(),
                 0,
                 addresses(&pool, &targets),
                 Some(pool.row_address(target_row)),
@@ -3635,6 +3769,7 @@ mod tests {
             .read_into(
                 JobId(7),
                 path.clone(),
+                header.clone(),
                 WINDOW_PAGES as u32,
                 addresses(&pool, &targets[..PAGES - WINDOW_PAGES]),
                 Some(pool.row_address(target_row)),
@@ -3827,7 +3962,7 @@ mod tests {
                         .as_ref()
                         .unwrap_err()
                         .to_string()
-                        .contains("different record")
+                        .contains("different header")
                 );
             }
             other => panic!("unexpected events {other:?}"),
@@ -3894,9 +4029,14 @@ mod tests {
         assert!(settled(&staged));
         assert_eq!(free(&staged), all);
         assert_eq!(
-            record::scan(&directory, &IDENTITY, &FINGERPRINT, &geometry)
-                .unwrap()
-                .len(),
+            record::scan(
+                &record::DirectoryLock::acquire(&directory).unwrap(),
+                &IDENTITY,
+                &FINGERPRINT,
+                &geometry
+            )
+            .unwrap()
+            .len(),
             1
         );
         staged.close().unwrap();
@@ -3992,9 +4132,14 @@ mod tests {
         }
         assert!(settled(&staged));
         assert_eq!(
-            record::scan(&directory, &IDENTITY, &FINGERPRINT, &geometry)
-                .unwrap()
-                .len(),
+            record::scan(
+                &record::DirectoryLock::acquire(&directory).unwrap(),
+                &IDENTITY,
+                &FINGERPRINT,
+                &geometry
+            )
+            .unwrap()
+            .len(),
             RECORDS as usize
         );
         staged.close().unwrap();
@@ -4130,7 +4275,7 @@ mod tests {
             ));
             let disk = DiskThread::start("flare-offload-disk").unwrap();
             DiskStore::new(
-                directory.clone(),
+                record::DirectoryLock::acquire(&directory).unwrap(),
                 IDENTITY,
                 fingerprint,
                 limit,
@@ -4155,9 +4300,11 @@ mod tests {
             let pool = store.transport_mut().staged_mut().unwrap().pool().unwrap();
             (pool.free_pages(), pool.free_rows())
         }
-        let scan = || record::scan(&directory, &IDENTITY, &fingerprint, &geometry).unwrap();
+        let scan = |lock: &record::DirectoryLock| {
+            record::scan(lock, &IDENTITY, &fingerprint, &geometry).unwrap()
+        };
 
-        assert!(scan().is_empty());
+        assert!(scan(&record::DirectoryLock::acquire(&directory).unwrap()).is_empty());
         let mut store = open(Vec::new(), 1 << 40);
         assert!(store.store(&root).unwrap());
         assert_eq!(store.stats().outbound_in_flight, 1);
@@ -4177,7 +4324,7 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().len(), header.length_with_row());
         assert!(!directory.join(record::temporary_name(&root.key)).exists());
         assert_eq!(header.tail_pages, PAGES);
-        let scanned = scan();
+        let scanned = scan(&store.directory_lock);
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].header.key, root.key);
         assert!(scanned[0].row);
@@ -4274,7 +4421,7 @@ mod tests {
         drop(store);
 
         // A store opened over a fresh scan serves the same record.
-        let scanned = scan();
+        let scanned = scan(&record::DirectoryLock::acquire(&directory).unwrap());
         assert_eq!(scanned.len(), 1);
         let mut store = open(scanned, 1 << 40);
         assert_eq!(store.used(), header.length_with_row());
@@ -4327,7 +4474,7 @@ mod tests {
             (Some(root.key), EXTRA)
         );
         assert_eq!(child_bytes, child_header.length_with_row());
-        assert_eq!(scan().len(), 2);
+        assert_eq!(scan(&store.directory_lock).len(), 2);
         assert_eq!(staging_free(&mut store), (STAGING_PAGE_SLABS, 4));
 
         // Above a resident checkpoint five pages into the root, the chain
@@ -4387,7 +4534,7 @@ mod tests {
         // Under a limit the two records fill, with the child pinned, a third
         // record of only a row cannot be placed, and making room compacts the
         // root: its file is truncated at the row segment.
-        let scanned = scan();
+        let scanned = scan(&record::DirectoryLock::acquire(&directory).unwrap());
         assert_eq!(scanned.len(), 2);
         let mut store = open(scanned, bytes + child_bytes);
         assert_eq!(store.used(), store.limit());
@@ -4425,7 +4572,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(!header.row_present(fs::metadata(&path).unwrap().len()));
-        let scanned = scan();
+        let scanned = scan(&store.directory_lock);
         assert_eq!(scanned.len(), 2);
         assert!(!scanned[0].row && scanned[0].header.key == root.key);
         assert_eq!(scanned[0].bytes, header.row_segment);

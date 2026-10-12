@@ -1471,6 +1471,11 @@ fn history(tokens: usize) -> PrefixHistory {
 fn free(scheduler: &RequestScheduler) -> (usize, usize) {
     (scheduler.free_page_count(), scheduler.free_snapshot_count())
 }
+fn host_scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
+    let mut scheduler = scheduler(active, pages, snapshots);
+    scheduler.enable_publications();
+    scheduler
+}
 fn inbound(scheduler: &mut RequestScheduler, spec: RequestSpec, consumed: u64) -> Admitted {
     let plan = scheduler.plan_admission(&spec).unwrap();
     let key = plan.history().key_at(consumed).unwrap();
@@ -1503,8 +1508,40 @@ fn seed_checkpoint(scheduler: &mut RequestScheduler, fence: u64) -> CheckpointId
 }
 
 #[test]
+fn disabled_publication_tracking_keeps_gpu_reuse_without_allocating_a_notification_queue() {
+    let mut scheduler = scheduler(1, 4, 2);
+    for round in 0..32 {
+        let checkpoint = seed_checkpoint(&mut scheduler, round * 3 + 1);
+        assert_eq!(scheduler.stats().snapshot_publications, round + 1);
+        assert_eq!(scheduler.publications.capacity(), 0);
+        assert!(scheduler.take_publications().is_empty());
+        let hit = scheduler.admit(spec(64, 2)).unwrap();
+        let request = scheduler.request(hit).unwrap();
+        assert_eq!(request.phase, RequestPhase::Restore);
+        assert_eq!(request.prefix(), Some(checkpoint));
+        assert_eq!(request.reused_prompt_tokens(), 64);
+        scheduler.cancel(hit).unwrap();
+        scheduler.ensure_resources(4, 2).unwrap();
+        assert_eq!(free(&scheduler), (4, 2));
+        assert_eq!(scheduler.stats().snapshot_evictions, round + 1);
+    }
+    let stats = scheduler.stats();
+    assert_eq!((stats.cache_hits, stats.reused_tokens), (32, 32 * 64));
+    assert_eq!(
+        (
+            stats.host_lookups,
+            stats.host_hits,
+            stats.host_reused_tokens
+        ),
+        (0, 0, 0)
+    );
+    assert!(scheduler.tickets.is_empty());
+    assert_eq!(scheduler.tickets.capacity(), 0);
+}
+
+#[test]
 fn inbound_request_waits_unscheduled_then_restores_like_a_gpu_prefix_hit() {
-    let mut scheduler = scheduler(2, 8, 4);
+    let mut scheduler = host_scheduler(2, 8, 4);
     let admitted = inbound(&mut scheduler, spec(65, 2), 64);
     let handle = admitted.handle;
     let ticket = admitted.ticket.unwrap();
@@ -1638,7 +1675,7 @@ fn inbound_request_waits_unscheduled_then_restores_like_a_gpu_prefix_hit() {
 
 #[test]
 fn inbound_full_prompt_hit_resumes_without_prefill() {
-    let mut scheduler = scheduler(1, 4, 2);
+    let mut scheduler = host_scheduler(1, 4, 2);
     let admitted = inbound(&mut scheduler, spec(64, 2), 64);
     let handle = admitted.handle;
     let ticket = admitted.ticket.unwrap();
@@ -1686,7 +1723,7 @@ fn inbound_full_prompt_hit_resumes_without_prefill() {
 
 #[test]
 fn inbound_restore_above_a_resident_checkpoint_pins_the_ancestor_until_completion() {
-    let mut scheduler = scheduler(2, 8, 4);
+    let mut scheduler = host_scheduler(2, 8, 4);
     let ancestor = seed_checkpoint(&mut scheduler, 1);
     let ancestor_key = history(64).key_at(64).unwrap();
     let ancestor_pages = scheduler.cache().page_chain(ancestor).unwrap();
@@ -1809,7 +1846,7 @@ fn inbound_restore_above_a_resident_checkpoint_pins_the_ancestor_until_completio
 
 #[test]
 fn finish_inbound_attaches_to_an_existing_checkpoint_and_frees_the_ticket() {
-    let mut scheduler = scheduler(2, 8, 4);
+    let mut scheduler = host_scheduler(2, 8, 4);
     let cold = scheduler.admit(spec(64, 1)).unwrap();
     let admitted = inbound(&mut scheduler, spec(64, 2), 64);
     let ticket = admitted.ticket.unwrap();
@@ -1872,7 +1909,7 @@ fn finish_inbound_attaches_to_an_existing_checkpoint_and_frees_the_ticket() {
 
 #[test]
 fn failed_inbound_frees_the_ticket_and_returns_waiters_for_readmission() {
-    let mut scheduler = scheduler(2, 8, 6);
+    let mut scheduler = host_scheduler(2, 8, 6);
     let first = inbound(&mut scheduler, spec(65, 2), 64);
     let ticket = first.ticket.unwrap();
     let second = inbound(&mut scheduler, spec(66, 2), 64);
@@ -1908,7 +1945,7 @@ fn failed_inbound_frees_the_ticket_and_returns_waiters_for_readmission() {
 
 #[test]
 fn waiters_sharing_one_ticket_restore_together_and_both_complete() {
-    let mut scheduler = scheduler(2, 8, 4);
+    let mut scheduler = host_scheduler(2, 8, 4);
     let first = inbound(&mut scheduler, spec(65, 1), 64);
     let ticket = first.ticket.unwrap();
     let second = inbound(&mut scheduler, spec(66, 1), 64);
@@ -1992,7 +2029,7 @@ fn waiters_sharing_one_ticket_restore_together_and_both_complete() {
 
 #[test]
 fn cancelled_inbound_waiter_leaves_ticket_resources_until_finish_inbound() {
-    let mut scheduler = scheduler(2, 8, 4);
+    let mut scheduler = host_scheduler(2, 8, 4);
     let admitted = inbound(&mut scheduler, spec(65, 2), 64);
     let ticket = admitted.ticket.unwrap();
     scheduler.cancel(admitted.handle).unwrap();
@@ -2048,7 +2085,7 @@ fn cancelled_inbound_waiter_leaves_ticket_resources_until_finish_inbound() {
 
 #[test]
 fn invalid_inbound_requests_reserve_nothing_and_planned_admission_matches_admit() {
-    let mut scheduler = scheduler(1, 8, 4);
+    let mut scheduler = host_scheduler(1, 8, 4);
     let request = spec(65, 2);
     let key = history(65).key_at(64).unwrap();
     let root = history(65).key_at(0).unwrap();
@@ -2105,7 +2142,7 @@ fn invalid_inbound_requests_reserve_nothing_and_planned_admission_matches_admit(
 
 #[test]
 fn pinned_checkpoints_survive_eviction_pressure_until_unpinned() {
-    let mut scheduler = scheduler(1, 4, 2);
+    let mut scheduler = host_scheduler(1, 4, 2);
     let checkpoint = seed_checkpoint(&mut scheduler, 1);
     assert_eq!(free(&scheduler), (3, 1));
     assert!(scheduler.unpin_checkpoint(checkpoint).is_err());
@@ -2135,7 +2172,7 @@ fn pinned_checkpoints_survive_eviction_pressure_until_unpinned() {
 
 #[test]
 fn take_publications_reports_boundary_and_terminal_checkpoints_once() {
-    let mut scheduler = scheduler(1, 8, 4);
+    let mut scheduler = host_scheduler(1, 8, 4);
     let handle = scheduler
         .admit(RequestSpec {
             system_boundary: Some(64),
@@ -2243,7 +2280,7 @@ fn take_publications_reports_boundary_and_terminal_checkpoints_once() {
 
 #[test]
 fn shutdown_release_drops_inbound_tickets_and_their_ancestor_pins() {
-    let mut scheduler = scheduler(2, 8, 4);
+    let mut scheduler = host_scheduler(2, 8, 4);
     let ancestor = seed_checkpoint(&mut scheduler, 1);
     let admitted = inbound(&mut scheduler, spec(130, 2), 128);
     let ticket = admitted.ticket.unwrap();

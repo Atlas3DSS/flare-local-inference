@@ -100,10 +100,11 @@ pub enum Job {
     Abort {
         id: JobId,
     },
-    /// Open a record file for reading under `id` and load its header and checksums.
+    /// Validate the file's header before loading checksums or accepting payload reads.
     Open {
         id: JobId,
         path: PathBuf,
+        expected: Header,
     },
     /// Read page records `first..first + buffers.len()` into `buffers`, verifying checksums.
     ReadPages {
@@ -200,9 +201,27 @@ impl DiskThread {
     /// queued job before it exits, and those replies remain available through
     /// `poll` after this returns. Records still being written when the thread
     /// exits are closed and their temporary files unlinked; records open for
-    /// reading are closed.
+    /// reading are closed. A timeout retains the worker and its resources;
+    /// callers must retain their buffers until a later successful drain.
     pub fn close(&mut self) -> Result<()> {
+        self.close_until(std::time::Instant::now() + super::transfer::CLOSE_TIMEOUT)
+    }
+
+    fn close_until(&mut self, deadline: std::time::Instant) -> Result<()> {
         self.sender.take();
+        while self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(invalid(format!(
+                    "disk thread did not drain before shutdown deadline; {} jobs await replies",
+                    self.outstanding.get()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let Some(thread) = self.thread.take() else {
             return Ok(());
         };
@@ -321,7 +340,7 @@ impl Worker {
                 reply(id, Operation::Commit, 0, self.commit(id, &path, sync))
             }
             Job::Abort { id } => reply(id, Operation::Abort, 0, self.abort(id)),
-            Job::Open { id, path } => match self.open(id, path) {
+            Job::Open { id, path, expected } => match self.open(id, path, expected) {
                 Ok((bytes, header)) => Reply {
                     id,
                     operation: Operation::Open,
@@ -525,7 +544,7 @@ impl Worker {
         }
     }
 
-    fn open(&mut self, id: JobId, path: PathBuf) -> Result<(u64, Header)> {
+    fn open(&mut self, id: JobId, path: PathBuf, mut expected: Header) -> Result<(u64, Header)> {
         if self.records.contains_key(&id) {
             return Err(invalid(format!("disk job {} is already open", id.0)));
         }
@@ -543,6 +562,14 @@ impl Worker {
         let header = Header::decode(&self.scratch.as_slice()[..HEADER_BYTES])
             .map_err(|error| invalid(format!("record file {}: {error}", path.display())))?;
         check_tail_pages(&header)?;
+        // The writer fills this checksum after reserving the indexed header.
+        expected.row_checksum = header.row_checksum;
+        if header != expected {
+            return Err(invalid(format!(
+                "record file {} has a different header than the indexed record",
+                path.display()
+            )));
+        }
         let checksum_bytes = header.checksum_bytes() as usize;
         if checksum_bytes > 0 {
             let span = Span {
@@ -787,8 +814,8 @@ impl Ring {
 
     /// Move every span, keeping up to [`RING_DEPTH`] chunks in flight, and
     /// return the bytes moved. Returns after every chunk the kernel holds has
-    /// completed, so the caller's buffers are quiescent whatever the outcome;
-    /// see `abandon` for the one case that cannot establish this.
+    /// completed, so the caller's buffers are quiescent whatever the outcome.
+    /// An undrainable ring retains the call and its buffers through shutdown.
     fn transfer(&mut self, file: &File, spans: &[Span], write: bool) -> Result<u64> {
         if let Some(reason) = &self.broken {
             return Err(invalid(format!(
@@ -892,36 +919,46 @@ impl Ring {
 
     /// `io_uring_enter` failed outright, so it consumed no entries: the ones
     /// still in the submission queue were never seen by the kernel, while the
-    /// others may still be in flight. Wait for those to complete so the
-    /// caller's buffers are quiescent, then leave the ring unusable. If
-    /// waiting fails as well, the kernel may still write into a buffer of this
-    /// transfer after the reply; the store must then stop using the thread.
+    /// others may still be in flight. Wait for every consumed entry even if
+    /// waiting fails, so a reply always means the caller's buffers are quiescent.
+    /// Shutdown retains this worker and its buffers when completion cannot be confirmed.
     fn abandon(&mut self, verb: &str, error: io::Error) -> Error {
         let reason = format!("submit direct {verb}: {error}");
         self.broken = Some(reason.clone());
         let unconsumed = self.ring.submission().len();
-        let mut held = (RING_DEPTH - self.free.len()).saturating_sub(unconsumed);
-        while held > 0 {
-            held = held.saturating_sub(self.ring.completion().count());
-            if held == 0 {
-                break;
+        let held = (RING_DEPTH - self.free.len()).saturating_sub(unconsumed);
+        drain_completions(held, |pending| {
+            let completed = self.ring.completion().count();
+            if completed >= pending {
+                return (completed, Ok(()));
             }
             // SAFETY: Nothing is submitted and no argument is passed; the call
             // only waits for one completion.
-            match unsafe {
+            let waited = unsafe {
                 self.ring.submitter().enter::<libc::sigset_t>(
                     0,
                     1,
                     EnterFlags::GETEVENTS.bits(),
                     None,
                 )
-            } {
-                Ok(_) => {}
-                Err(error) if retryable(&error) => std::thread::yield_now(),
-                Err(_) => break,
+            };
+            (completed, waited.map(|_| ()))
+        });
+        invalid(reason)
+    }
+}
+
+fn drain_completions(mut pending: usize, mut wait: impl FnMut(usize) -> (usize, io::Result<()>)) {
+    while pending > 0 {
+        let (completed, waited) = wait(pending);
+        pending = pending.saturating_sub(completed);
+        if let Err(error) = waited {
+            if retryable(&error) {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        invalid(reason)
     }
 }
 
@@ -1223,6 +1260,7 @@ mod tests {
             .submit(Job::Open {
                 id: reader,
                 path: path.clone(),
+                expected: header.clone(),
             })
             .unwrap();
         thread
@@ -1316,6 +1354,7 @@ mod tests {
             .submit(Job::Open {
                 id: reopened,
                 path: path.clone(),
+                expected: header.clone(),
             })
             .unwrap();
         thread
@@ -1604,6 +1643,7 @@ mod tests {
             .submit(Job::Open {
                 id: reader,
                 path: path.clone(),
+                expected: header.clone(),
             })
             .unwrap();
         thread
@@ -1644,6 +1684,94 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_headers_reject_queued_reads_without_touching_destinations() {
+        let Some(directory) = test_directory("header-contract") else {
+            return;
+        };
+        let expected = header(
+            PrefixKey {
+                consumed_tokens: 200,
+                digest: [7; 16],
+            },
+            3,
+        );
+        let mut variants = Vec::new();
+        let mut changed = expected.clone();
+        changed.key.digest[0] ^= 1;
+        variants.push(("key", changed));
+        let mut changed = expected.clone();
+        changed.identity[0] ^= 1;
+        variants.push(("identity", changed));
+        let mut changed = expected.clone();
+        changed.fingerprint[0] ^= 1;
+        variants.push(("fingerprint", changed));
+        let mut changed = expected.clone();
+        changed.bucket[0] ^= 1;
+        variants.push(("bucket", changed));
+        let mut changed = expected.clone();
+        changed.created += 1;
+        variants.push(("created", changed));
+        let mut changed = expected.clone();
+        changed.ranks[0].planes[2] -= 1;
+        variants.push(("geometry-with-the-same-padded-size", changed));
+        let mut changed = expected.clone();
+        changed.ranks[0].planes[0] += BLOCK_BYTES;
+        changed.row_segment += u64::from(changed.tail_pages) * BLOCK_BYTES;
+        variants.push(("larger-page", changed));
+        let mut changed = expected.clone();
+        changed.ranks[0].row_bytes += BLOCK_BYTES;
+        variants.push(("larger-row", changed));
+
+        let mut thread = DiskThread::start("flare-offload-disk").unwrap();
+        for (index, (name, changed)) in variants.into_iter().enumerate() {
+            let path = directory.join(format!("{name}.ckpt"));
+            let mut contents = vec![0x5a; changed.length_with_row() as usize];
+            contents[..HEADER_BYTES].copy_from_slice(&changed.encode().unwrap());
+            fs::write(&path, contents).unwrap();
+            // Extra mapped bytes make an oversized read observable without crossing the allocation.
+            let page = buffer(changed.page_record_bytes() as usize + HEADER_BYTES, 0xee);
+            let row = buffer(changed.row_record_bytes() as usize + HEADER_BYTES, 0xee);
+            let page_before = page.as_slice().to_vec();
+            let row_before = row.as_slice().to_vec();
+            let id = JobId(index as u64);
+            thread
+                .submit(Job::Open {
+                    id,
+                    path,
+                    expected: expected.clone(),
+                })
+                .unwrap();
+            thread
+                .submit(Job::ReadPages {
+                    id,
+                    window: 0,
+                    first: 0,
+                    buffers: vec![page.address()],
+                })
+                .unwrap();
+            thread
+                .submit(Job::ReadRow {
+                    id,
+                    buffer: row.address(),
+                })
+                .unwrap();
+            let replies = wait(&thread, 3);
+            assert!(failed(&replies[0]).contains("different header"), "{name}");
+            for reply in &replies[1..] {
+                assert!(failed(reply).contains("names no open record"), "{name}");
+            }
+            assert_eq!(
+                page.as_slice(),
+                page_before,
+                "{name} changed page destination"
+            );
+            assert_eq!(row.as_slice(), row_before, "{name} changed row destination");
+        }
+        thread.close().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn open_and_create_reject_files_and_headers_outside_the_contract() {
         let Some(directory) = test_directory("reject") else {
             return;
@@ -1667,24 +1795,28 @@ mod tests {
             .submit(Job::Open {
                 id: JobId(1),
                 path: short,
+                expected: wide.clone(),
             })
             .unwrap();
         thread
             .submit(Job::Open {
                 id: JobId(2),
                 path: zeroed,
+                expected: wide.clone(),
             })
             .unwrap();
         thread
             .submit(Job::Open {
                 id: JobId(3),
                 path: wide_path,
+                expected: wide.clone(),
             })
             .unwrap();
         thread
             .submit(Job::Open {
                 id: JobId(4),
                 path: directory.join("missing.ckpt"),
+                expected: wide.clone(),
             })
             .unwrap();
         thread
@@ -1730,6 +1862,76 @@ mod tests {
         }
         thread.close().unwrap();
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn close_timeout_keeps_the_worker_until_its_buffer_references_are_released() {
+        let (release, resume) = mpsc::channel();
+        let (sender, jobs) = mpsc::sync_channel(1);
+        let (reply, receiver) = mpsc::channel();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_released = released.clone();
+        let thread = std::thread::spawn(move || {
+            assert!(jobs.recv().is_err());
+            resume.recv().unwrap();
+            worker_released.store(true, std::sync::atomic::Ordering::Release);
+            drop(reply);
+        });
+        let mut disk = DiskThread {
+            sender: Some(sender),
+            receiver,
+            thread: Some(thread),
+            outstanding: Cell::new(1),
+        };
+        let error = disk.close_until(Instant::now()).unwrap_err();
+        assert!(error.to_string().contains("did not drain"));
+        assert!(disk.thread.is_some());
+        assert!(!released.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(disk.outstanding.get(), 1);
+        release.send(()).unwrap();
+        disk.close_until(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(disk.thread.is_none());
+        assert!(released.load(std::sync::atomic::Ordering::Acquire));
+        disk.close_until(Instant::now()).unwrap();
+    }
+
+    #[test]
+    fn draining_keeps_ownership_across_wait_errors_until_every_completion_arrives() {
+        let (waiting, entered) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut calls = 0;
+            drain_completions(3, |pending| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(pending, 3);
+                        waiting.send(()).unwrap();
+                        (1, Err(io::Error::from_raw_os_error(libc::EIO)))
+                    }
+                    2 => {
+                        assert_eq!(pending, 2);
+                        resume.recv().unwrap();
+                        (0, Err(io::Error::from_raw_os_error(libc::EBADF)))
+                    }
+                    3 => {
+                        assert_eq!(pending, 2);
+                        (2, Ok(()))
+                    }
+                    _ => panic!("draining continued after all completions arrived"),
+                }
+            });
+            assert_eq!(calls, 3);
+            finished.send(()).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(done.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        drain_completions(0, |_| panic!("an empty drain must not wait"));
     }
 
     #[test]

@@ -877,6 +877,26 @@ impl MemoryStore {
         &self.core.index
     }
 
+    pub(crate) fn transfers(&self) -> &Arc<Mutex<Transfers>> {
+        &self.transfers
+    }
+
+    pub(crate) fn reclaimable_slabs(&self) -> (usize, usize) {
+        self.core
+            .index
+            .nodes()
+            .filter(|node| node.ready && !node.pinned() && node.location.durable)
+            .fold(
+                (self.core.pool.free_pages(), self.core.pool.free_rows()),
+                |(pages, rows), node| {
+                    (
+                        pages + node.location.pages.len(),
+                        rows + usize::from(node.location.row.is_some()),
+                    )
+                },
+            )
+    }
+
     pub fn pool(&self) -> &SlabPool {
         &self.core.pool
     }
@@ -887,10 +907,6 @@ impl MemoryStore {
 
     pub fn layout(&self) -> &Layout {
         &self.core.layout
-    }
-
-    pub(crate) fn next_job(&mut self) -> JobId {
-        self.core.next_job()
     }
 
     /// Store the checkpoint's `tail` pages and row as a record with the given
@@ -1009,8 +1025,8 @@ impl PrefixStore for MemoryStore {
 
     /// Wait up to [`CLOSE_TIMEOUT`] for records in transfer to finish, so
     /// copy-outs that complete become resident, then stop the transfer
-    /// threads and abandon whatever remains. Events raised meanwhile are
-    /// dropped: nothing polls a closed store.
+    /// threads and abandon whatever remains after a confirmed drain. Events
+    /// raised meanwhile are dropped: nothing polls a closed store.
     fn close(&mut self) -> Result<()> {
         let deadline = Instant::now() + CLOSE_TIMEOUT;
         let mut events = Vec::new();
@@ -1023,14 +1039,13 @@ impl PrefixStore for MemoryStore {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
-        let result = self
-            .transfers
+        self.transfers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .close();
+            .close()?;
         self.core.abandon();
         self.events.clear();
-        result
+        Ok(())
     }
 }
 
