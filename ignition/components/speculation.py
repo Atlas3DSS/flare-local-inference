@@ -217,7 +217,7 @@ class PreparedSpeculativeDistributions:
         self.counts.copy_(state.histogram[safe, None, :].expand_as(self.counts))
         prefix = columns + self.prefix_offset
         prefix_valid = torch.ones_like(self.valid)
-        for index in range(self.candidates.shape[1]):
+        for index in range(columns.numel() - 1 + self.prefix_offset):
             ids = self.candidates[:, index]
             used = index < prefix
             valid = (ids >= 0) & (ids < state.vocab_size)

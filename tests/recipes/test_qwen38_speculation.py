@@ -180,3 +180,26 @@ def test_invalid_conditional_id_does_not_index_histogram_out_of_bounds():
     op.prepare_scores()
     assert op.valid.tolist() == [[True, True, False, False]]
     assert torch.cuda.is_initialized() == initialized
+
+
+@pytest.mark.parametrize("prefix_offset", [0, 1, 2, 3])
+def test_draft_penalties_ignore_unoffered_candidates(prefix_offset):
+    state, _, commit, _ = example()
+    state.parameters[2] = torch.tensor([1., 1., 0., 2., 3., .5])
+    candidates = torch.tensor([[4, 4, 5, -1, -1, -1, -1]])
+    op = PreparedSpeculativeDistributions(torch.full((1, 1, 16), 8.), state,
+        commit.slots, commit.generations, commit.live, candidates, prefix_offset=prefix_offset)
+    op.prepare_scores()
+    assert op.valid.item()
+    assert op.counts[0, 0, 4].item() == (0, 1, 2, 2)[prefix_offset]
+    assert op.counts[0, 0, 5].item() == int(prefix_offset == 3)
+    assert op.scores[0, 0, 4].item() == (8., .5, 0., 0.)[prefix_offset]
+    counts, scores = op.counts.clone(), op.scores.clone()
+    candidates[:, prefix_offset:] = 99
+    op.prepare_scores()
+    assert op.valid.item()
+    assert torch.equal(op.counts, counts) and torch.equal(op.scores, scores)
+    if prefix_offset:
+        candidates[:, prefix_offset - 1] = 99
+        op.prepare_scores()
+        assert not op.valid.item()

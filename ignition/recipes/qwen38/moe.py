@@ -143,13 +143,18 @@ class PreparedSharedExpert(PreparedMLP):
             session=session, name=f"{name}.shared_gate")
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
-        super().__call__(source)
-        self.gate_projection(source)
+        self.project(source)
         return self.finish()
 
-    def finish(self) -> torch.Tensor:
-        self.output.copy_(self.projected * torch.sigmoid(self.gate_logits))
-        return self.output
+    def project(self, source: torch.Tensor) -> None:
+        super().__call__(source)
+        self.gate_projection(source)
+
+    def finish(self, routed: torch.Tensor | None = None, *, out: torch.Tensor | None = None) -> torch.Tensor:
+        output = self.output if out is None else out
+        shared = self.projected * torch.sigmoid(self.gate_logits)
+        output.copy_(shared if routed is None else routed + shared)
+        return output
 
 
 class PreparedQwenMoe:
@@ -202,7 +207,7 @@ class PreparedQwenMoe:
                 source.data_ptr() != self.source.data_ptr() or source.shape != self.source.shape):
             raise ValueError("prepared Qwen MoE requires its fixed source storage")
         if self.concurrent_shared is None:
-            shared = self.shared(source)
+            self.shared.project(source)
         else:
             self.concurrent_shared.start(source)
         self.router_projection(source)
@@ -210,6 +215,4 @@ class PreparedQwenMoe:
         routed = self.experts()
         if self.concurrent_shared is not None:
             self.concurrent_shared.finish(source, routed)
-            shared = self.shared.finish()
-        torch.add(routed, shared, out=self.output)
-        return self.output
+        return self.shared.finish(routed, out=self.output)

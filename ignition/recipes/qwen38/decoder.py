@@ -334,7 +334,7 @@ class PreparedDecoder:
                 self.stage_outputs["moe_router_logits"].copy_(moe.router_logits)
                 self.stage_outputs["moe_ids"].copy_(moe.router.ids)
                 self.stage_outputs["moe_weights"].copy_(moe.router.weights)
-                self.stage_outputs["moe_shared"].copy_(moe.shared.output)
+                self.stage_outputs["moe_shared"].copy_(moe.shared.finish())
                 self.stage_outputs["moe_routed"].copy_(moe.routed_output)
             if index == 0:
                 s.residual.copy_(mlp_hc.combine(s.residual, block))

@@ -77,7 +77,8 @@ def _quant_scale_math(experts):
 
 
 @torch.no_grad()
-def test_compiled_shared_gate_preserves_bf16_rounding():
+@pytest.mark.parametrize("combine_routed", [False, True])
+def test_compiled_shared_gate_preserves_bf16_rounding(combine_routed):
     from ignition.preparation.compilation import compile_forward
 
     gates = torch.arange(65536, device="cuda", dtype=torch.int32).to(torch.int16).view(torch.bfloat16)
@@ -86,13 +87,17 @@ def test_compiled_shared_gate_preserves_bf16_rounding():
                             generator=torch.Generator(device="cuda").manual_seed(581))
     output = torch.empty_like(projected)
     shared = SimpleNamespace(gate_logits=gates, projected=projected, output=output)
+    routed = torch.randn_like(projected) if combine_routed else None
+    combined = torch.empty_like(projected)
 
     def finish():
-        return PreparedSharedExpert.finish(shared)
+        return PreparedSharedExpert.finish(shared, routed, out=combined)
 
     expected = projected * torch.sigmoid(gates)
+    if routed is not None:
+        expected = routed + expected
     compile_forward(finish)()
-    torch.testing.assert_close(output.view(torch.int16), expected.view(torch.int16), rtol=0, atol=0)
+    torch.testing.assert_close(combined.view(torch.int16), expected.view(torch.int16), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 16])
@@ -274,9 +279,10 @@ def test_actual_complete_layer_512_experts_graph(manifest, complete_layer, token
             workspace.tensor.fill_(0xA5)
             prepared(source)
             first_output.copy_(prepared.output)
-            first_shared.copy_(prepared.shared.output)
+            first_shared.copy_(prepared.shared.finish())
             workspace.tensor.fill_(0x5A)
             repeated(source)
+            repeated.shared.finish()
         bundle = PreparedGraphBundle(device=0, graphs={"qwen_moe": graph},
             buffers={"source": source, "output": prepared.output},
             resources=(weights, prepared, repeated, session, scale_scratch, moe_scratch, workspace, first_output))

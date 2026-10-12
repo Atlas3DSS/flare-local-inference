@@ -253,17 +253,19 @@ def test_native_flashinfer_one_hot_all_prefix_lengths_and_clipping(width):
         assert torch.equal(state.histogram.cpu(), before)
 
 
-@pytest.mark.parametrize("batch,width", [(1, 1), (1, 4), (2, 4)])
+@pytest.mark.parametrize("batch,width,prefix_offset", [(1, 1, 0), (1, 1, 1), (2, 1, 5), (1, 4, 0), (2, 4, 0)])
 @torch.no_grad()
-def test_compiled_distributions_match_eager_with_changed_parameters(batch, width):
+def test_compiled_distributions_match_eager_with_changed_parameters(batch, width, prefix_offset):
     from ignition.preparation.compilation import compile_forward
 
     args = tensors(batch, width)
     state, slots, epochs, live, inputs, *_ = args
     generator = torch.Generator(device="cuda").manual_seed(1803)
     logits = torch.randn((batch, width, VOCAB), generator=generator, device="cuda") * 3
+    candidates = torch.arange(4, 11, device="cuda").expand(batch, -1).clone()
+    candidates[:, width - 1 + prefix_offset:] = -1
     op = PreparedSpeculativeDistributions(logits, state, slots, epochs, live,
-        inputs[:, 1:].contiguous())
+        candidates, prefix_offset=prefix_offset)
     op.prepare()
     run = compile_forward(op)
     with captured(run, (*args, op, run), {"probabilities": op.probabilities}) as replay:
@@ -275,10 +277,13 @@ def test_compiled_distributions_match_eager_with_changed_parameters(batch, width
             state.parameters[:, 4] = .15
             expected = op().clone()
             expected_valid = op.valid.clone()
+            expected_counts = op.counts.clone()
             op.probabilities.fill_(float("nan"))
+            op.counts.fill_(-99)
             replay()
             torch.testing.assert_close(op.probabilities, expected, rtol=2e-5, atol=1e-7)
             assert torch.equal(op.valid, expected_valid)
+            assert torch.equal(op.counts, expected_counts)
         state.grammar_enabled.fill_(1)
         state.grammar_mask.zero_()
         replay()

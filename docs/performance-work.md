@@ -35,6 +35,9 @@ caller-owned scratch, and allocation-stable replay are required.
    FlashInfer chain verification exposes token and acceptance-counter mutations
    to compilation. Native replay tests cover compiled verification and request
    commit at widths 1–8, invalid distributions, and per-request RNG lane invariance.
+   Conditional penalty counts include only preceding candidate IDs. The
+   verification width and conditional-prefix offset bound the histogram updates;
+   future draft positions require no updates.
    With `--check-compiled`, the replay qualification compares all 256 steps'
    logits and completion records, plus final request, hybrid, and KV state,
    against uncompiled graphs using the same prepared model and buffers. This
@@ -56,11 +59,13 @@ caller-owned scratch, and allocation-stable replay are required.
    serial layers and graph variants reuse the same storage. Shared-expert
    projections run alongside routing and routed experts at capacities up to 256
    rows, using a disjoint arena suffix. A captured join precedes shared-expert
-   gating and the final sum, which remain visible to Inductor. MXFP8 QSA input
-   projections overlap at capacities up to 16 rows. Index projection and b12x
-   selection use the auxiliary stream while QKV projection, normalization,
-   rotary embedding, and KV writes use the main stream. Separate workspace
-   views isolate both projections and QSA. The b12x selection-stream join
+   gating and the final sum. Inductor combines the sigmoid, multiplication, and
+   routed addition into one pointwise kernel while preserving BF16 intermediate
+   rounding. Diagnostics explicitly materialize the shared-only result.
+   MXFP8 QSA input projections overlap at capacities up to 16 rows. Index
+   projection and b12x selection use the auxiliary stream while QKV projection,
+   normalization, rotary embedding, and KV writes use the main stream. Separate
+   workspace views isolate both projections and QSA. The b12x selection-stream join
    precedes attention, and explicit tensor operands preserve cache mutations
    and final KV-pool rebinding through compilation. Fork and rejoin auxiliary
    streams within Python's capture of a single CUDA graph;

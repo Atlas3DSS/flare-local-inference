@@ -34,10 +34,10 @@ def weights(request):
         return QwenMoeWeights.load(loader, 0, scale_scratch=scales), scales
 
 
-@pytest.mark.parametrize("rows", [1, 2, 4, 8])
+@pytest.mark.parametrize("rows", [1, 2, 4, 6, 8, 24, 256, 512, 4096])
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
-def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
+def test_shared_routed_composition_and_arena_reuse(weights, rows, compiled):
     weights, _scale_owners = weights
     arena = ScratchArena("cuda:0")
     source = torch.randn(rows, 2560, dtype=torch.bfloat16, device="cuda") * .1
@@ -51,15 +51,16 @@ def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
                               workspace=arena, projection_workspace=arena)
         session.tune()
         session.freeze()
-        assert moe.concurrent_shared is not None
-        routed_bytes = moe.experts.plan.memory_requirements().scratch_nbytes
-        assert moe.experts.scratch.data_ptr() + routed_bytes <= moe.concurrent_shared.workspace.data_ptr()
+        assert (moe.concurrent_shared is not None) == (rows <= 256)
+        if moe.concurrent_shared is not None:
+            routed_bytes = moe.experts.plan.memory_requirements().scratch_nbytes
+            assert moe.experts.scratch.data_ptr() + routed_bytes <= moe.concurrent_shared.workspace.data_ptr()
 
         def forward():
             input_copy.copy_(source)
             moe(input_copy)
             output_copy.copy_(moe.output)
-            shared_copy.copy_(moe.shared.output)
+            shared_copy.copy_(moe.shared.finish())
             arena.tensor.fill_(255)
             input_copy.zero_()
 
@@ -76,8 +77,9 @@ def test_shared_routed_fork_join_and_arena_reuse(weights, rows, compiled):
         status, sources, destinations, _, _ = cuda.cuGraphGetEdges(raw, count)
         assert status == cuda.CUresult.CUDA_SUCCESS
         edges = [(int(a), int(b)) for a, b in zip(sources, destinations, strict=True)]
-        assert any(sum(parent == node for parent, _ in edges) >= 2 for node, _ in edges)
-        assert any(sum(child == node for _, child in edges) >= 2 for _, node in edges)
+        if moe.concurrent_shared is not None:
+            assert any(sum(parent == node for parent, _ in edges) >= 2 for node, _ in edges)
+            assert any(sum(child == node for _, child in edges) >= 2 for _, node in edges)
         for _ in range(3):
             source.normal_(std=.1)
             input_copy.copy_(source)
@@ -135,10 +137,10 @@ module.compile_forward = compile_forward
 with torch.no_grad():
     weights = module.weights.__wrapped__(SimpleNamespace(param=2))
     if mode == "load":
-        module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, False)
-    module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, True)
+        module.test_shared_routed_composition_and_arena_reuse(weights, 1, False)
+    module.test_shared_routed_composition_and_arena_reuse(weights, 1, True)
     if mode == "load":
-        module.test_shared_routed_fork_join_and_arena_reuse(weights, 1, True)
+        module.test_shared_routed_composition_and_arena_reuse(weights, 1, True)
 '''
     for mode in ("save", "load"):
         subprocess.run([sys.executable, "-c", script, mode, str(Path(__file__).resolve()),
