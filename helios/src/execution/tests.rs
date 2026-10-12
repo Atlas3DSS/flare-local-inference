@@ -95,6 +95,8 @@ pub(super) fn manifest() -> ExecutionManifest {
     };
     ExecutionManifest {
         engram: None,
+        cache: None,
+        offload: None,
         abi_version: ABI_VERSION,
         context: 1,
         device: 0,

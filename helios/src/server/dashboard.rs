@@ -218,6 +218,10 @@ fn rate(value: f64) -> String {
     }
 }
 
+fn gibibytes(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
+}
+
 fn render(frame: &mut Frame, title: &str, history: &History) {
     let area = frame.area();
     frame.render_widget(
@@ -254,7 +258,7 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
         Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Min(8),
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Length(1),
     ])
     .split(area);
@@ -331,6 +335,16 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
             Line::from(format!(
                 " PREFILL {}   GENERATED {}   REUSED {}   KV PAGES {} cached / {} free",
                 s.prefill_tokens, s.generated_tokens, s.reused_tokens, s.cached_pages, s.free_pages
+            ))
+            .style(Style::default().fg(MUTED)),
+            Line::from(format!(
+                " HOST CACHE {} hits   {} reused   {} in memory / {} on disk   {} out / {} in",
+                s.host_hits,
+                s.host_reused_tokens,
+                s.host_memory_records,
+                s.host_disk_records,
+                gibibytes(s.host_bytes_out),
+                gibibytes(s.host_bytes_in),
             ))
             .style(Style::default().fg(MUTED)),
         ]),

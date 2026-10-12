@@ -55,6 +55,7 @@ pub struct NativeResources {
     reservations: Vec<(u64, usize)>,
     execution: Option<protobuf::wire::Execution>,
     events: HashMap<String, Handle>,
+    cache: Option<crate::offload::CacheGeometry>,
 }
 
 // SAFETY: CUDA contexts may move between threads. Resource operations bind the
@@ -131,6 +132,7 @@ impl NativeResources {
                 reservations: vec![],
                 execution: package.execution.clone(),
                 events: HashMap::new(),
+                cache: None,
             };
             for [limit, value] in &package.context.limits {
                 owner.driver.check(
@@ -699,6 +701,15 @@ impl NativeResources {
 
     pub fn graph_names(&self) -> &[String] {
         &self.names
+    }
+
+    /// The rank's prefix checkpoint storage, present after cache allocation.
+    pub fn cache_geometry(&self) -> Option<&crate::offload::CacheGeometry> {
+        self.cache.as_ref()
+    }
+
+    pub(super) fn context_handle(&self) -> (usize, i32) {
+        (self.context as usize, self.device)
     }
 
     pub fn graph_bundle(&self) -> GraphBundle {

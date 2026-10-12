@@ -92,6 +92,7 @@ def run(args) -> int:
             print(f"Load cached runtime package. {package}", flush=True)
     environment.apply(configuration, plan.gpus)
     command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)), "--bind", bind]
+    command += configuration.prefix_cache_flags()
     key = configuration.get("server.api_key").value
     if key:
         key_file = tempfile.TemporaryFile()

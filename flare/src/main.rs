@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
         return Err(
-            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification] [--embedding-table-storage disk|ram]\n\n--embedding-table-storage  Storage for auxiliary embedding tables (PLE/Engram); default: disk."
+            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification] [--embedding-table-storage disk|ram] [--prefix-cache-memory SIZE] [--prefix-cache-disk DIR] [--prefix-cache-disk-limit SIZE] [--prefix-cache-disk-transport staged|direct]\n\n--embedding-table-storage  Storage for auxiliary embedding tables (PLE/Engram); default: disk.\n--prefix-cache-memory      Host memory retaining prefix checkpoints; 0 disables the memory tier.\n--prefix-cache-disk        Directory retaining prefix checkpoint records on disk.\n--prefix-cache-disk-limit  Bytes of records kept on disk; default: one tenth of the free space; 0 disables the disk tier.\n--prefix-cache-disk-transport  How records move between disk and the GPU; default: staged."
                 .into(),
         );
     };
@@ -56,6 +56,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "ram" => flare_helios::engram::Storage::Ram,
                     _ => return Err("--embedding-table-storage must be disk or ram".into()),
                 }
+            }
+            "--prefix-cache-memory" => {
+                options.prefix_cache.memory_bytes = Some(
+                    flare_helios::offload::parse_size(&value)
+                        .map_err(|error| format!("--prefix-cache-memory: {error}"))?,
+                )
+            }
+            "--prefix-cache-disk" => options.prefix_cache.disk = Some(PathBuf::from(value)),
+            "--prefix-cache-disk-limit" => {
+                options.prefix_cache.disk_limit = Some(
+                    flare_helios::offload::parse_size(&value)
+                        .map_err(|error| format!("--prefix-cache-disk-limit: {error}"))?,
+                )
+            }
+            "--prefix-cache-disk-transport" => {
+                options.prefix_cache.transport = Some(match value.as_str() {
+                    "staged" => flare_helios::offload::Transport::Staged,
+                    "direct" => flare_helios::offload::Transport::Direct,
+                    _ => {
+                        return Err("--prefix-cache-disk-transport must be staged or direct".into());
+                    }
+                })
             }
             "--max-concurrency" => options.max_concurrency = Some(value.parse()?),
             "--mtp-draft-tokens" => options.mtp_draft_tokens = Some(value.parse()?),

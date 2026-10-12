@@ -8,12 +8,14 @@ use super::{
     protobuf,
 };
 use crate::{Result, execution::ExecutionManifest, startup::StartupProgress};
+use blake2::{Blake2b, Digest, digest::consts::U32};
 use std::{collections::HashSet, path::Path, thread};
 
 pub struct NativeModel {
     pub(super) ranks: Vec<NativeResources>,
     pub(super) server_config: serde_json::Value,
     engram: Option<std::sync::Arc<crate::engram::Shared>>,
+    offload: Option<std::sync::Arc<crate::offload::Shared>>,
 }
 
 impl NativeModel {
@@ -205,6 +207,7 @@ impl NativeModel {
             ranks: Vec::new(),
             server_config,
             engram: None,
+            offload: None,
         };
         unsafe {
             let phase = progress.phase(
@@ -311,8 +314,44 @@ impl NativeModel {
             }
             model.allocate_caches(&mut packages, progress, active)?;
             model.grant_peer_access(&descriptor.peer_memory)?;
+            model.prepare_offload(root, options, progress)?;
         }
         Ok(model)
+    }
+
+    /// Resolve the host prefix store configuration, map and register its
+    /// pools, and scan its record directory.
+    unsafe fn prepare_offload(
+        &mut self,
+        root: &Path,
+        options: &LoadOptions,
+        progress: &StartupProgress,
+    ) -> Result<()> {
+        if !options.prefix_cache.enabled() {
+            return Ok(());
+        }
+        let phase = progress.phase("Prepare host prefix cache", None);
+        let identity = offload_identity(&self.server_config)?;
+        let geometry = self
+            .ranks
+            .iter()
+            .map(|rank| {
+                rank.cache_geometry()
+                    .cloned()
+                    .ok_or_else(|| invalid("rank lacks cache geometry"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let contexts: Vec<_> = self
+            .ranks
+            .iter()
+            .map(|rank| rank.context_handle())
+            .collect();
+        let prepared =
+            crate::offload::prepare(&options.prefix_cache, root, identity, geometry, contexts)?;
+        let summary = prepared.summary();
+        self.offload = prepared.into_shared();
+        phase.finish(summary);
+        Ok(())
     }
 
     unsafe fn grant_peer_access(&self, peers: &[protobuf::wire::PeerMemory]) -> Result<()> {
@@ -393,6 +432,9 @@ impl NativeModel {
             .enumerate()
             .map(|(index, rank)| {
                 let mut manifest = rank.execution_manifest()?;
+                if let Some(shared) = &self.offload {
+                    manifest.offload = Some(crate::offload::Binding::new(shared.clone(), index));
+                }
                 if let Some(shared) = &self.engram {
                     let events = shared
                         .index
@@ -423,10 +465,46 @@ impl NativeModel {
 
 impl Drop for NativeModel {
     fn drop(&mut self) {
+        self.offload.take();
         self.engram.take();
         // Rank zero owns the shared reservations and releases them after every peer.
         while self.ranks.pop().is_some() {}
     }
+}
+
+/// Namespace host records by model and the continuation state maintained by selected graphs.
+pub(super) fn offload_identity(config: &serde_json::Value) -> Result<[u8; 32]> {
+    let text = config["identity"]
+        .as_str()
+        .ok_or_else(|| invalid("model package lacks an identity"))?;
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid("model identity must be 64 hexadecimal characters"));
+    }
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .map_err(|_| invalid("model identity must be hexadecimal"))?;
+    }
+    let widths = config["speculative_widths"]
+        .as_array()
+        .ok_or_else(|| invalid("selected speculative_widths must be an array"))?;
+    let state = if widths.is_empty() {
+        0u8
+    } else {
+        match config["speculative_proposal_source"]
+            .as_str()
+            .unwrap_or("mtp")
+        {
+            "mtp" => 1,
+            "copy" => 2,
+            _ => return Err(invalid("unknown speculative proposal source")),
+        }
+    };
+    let mut hash = Blake2b::<U32>::new();
+    hash.update(b"flare-prefix-state-v1\0");
+    hash.update(digest);
+    hash.update([state]);
+    Ok(hash.finalize().into())
 }
 
 fn validate_peer_memory(packages: &[Package], peers: &[protobuf::wire::PeerMemory]) -> Result<()> {
@@ -476,6 +554,48 @@ fn validate_peer_memory(packages: &[Package], peers: &[protobuf::wire::PeerMemor
 mod tests {
     use super::*;
     use protobuf::wire;
+
+    #[test]
+    fn disabled_offload_needs_no_model_metadata_or_cuda_resources() {
+        let progress = StartupProgress::silent();
+        let mut model = NativeModel {
+            ranks: Vec::new(),
+            server_config: serde_json::Value::Null,
+            engram: None,
+            offload: None,
+        };
+        for prefix_cache in [
+            crate::offload::PrefixCacheOffload::default(),
+            crate::offload::PrefixCacheOffload {
+                memory_bytes: Some(0),
+                disk: Some("unopened-prefix-cache".into()),
+                disk_limit: Some(0),
+                transport: Some(crate::offload::Transport::Direct),
+            },
+        ] {
+            let options = LoadOptions {
+                prefix_cache,
+                ..Default::default()
+            };
+            unsafe {
+                model
+                    .prepare_offload(Path::new("unopened-package"), &options, &progress)
+                    .unwrap();
+            }
+            assert!(model.offload.is_none());
+        }
+        let options = LoadOptions {
+            prefix_cache: crate::offload::PrefixCacheOffload {
+                memory_bytes: Some(1 << 30),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let error =
+            unsafe { model.prepare_offload(Path::new("unopened-package"), &options, &progress) }
+                .unwrap_err();
+        assert!(error.to_string().contains("lacks an identity"));
+    }
 
     #[test]
     fn peer_ownership_covers_virtual_extents_before_cache_backing() {

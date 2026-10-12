@@ -138,6 +138,8 @@ impl Fixture {
                 metrics: self.metrics.clone(),
                 qualification: false,
                 observation: Some(false),
+                host_lookup: true,
+                readmitted: false,
             },
             Generation {
                 events: receiver,
@@ -367,6 +369,87 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
 }
 
 #[test]
+fn disabled_host_store_preserves_decode_prefix_reuse_and_cancellation() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (incoming, mut generation) = fixture.incoming(vec![0; 13], 1);
+    sender.send(incoming).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert!(worker.store.is_none());
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    for (kind, fence, token) in [
+        (GraphKind::Init, 1, None),
+        (GraphKind::Prefill, 2, Some(1)),
+        (GraphKind::Snapshot, 3, None),
+    ] {
+        advance(&mut worker, kind, fence, token);
+        assert!(!worker.service_store().unwrap());
+        assert!(worker.scheduler.take_publications().is_empty());
+    }
+    assert!(worker.publish().unwrap());
+    assert!(worker.scheduler.take_publications().is_empty());
+    assert!(matches!(
+        generation.events.try_recv().unwrap(),
+        GenerationEvent::ObservedToken { token: 1, .. }
+    ));
+    let mut finished = false;
+    while let Ok(event) = generation.events.try_recv() {
+        match event {
+            GenerationEvent::Finished {
+                generated_tokens: 1,
+                reused_prompt_tokens: 0,
+                ..
+            } => finished = true,
+            GenerationEvent::Error(error) => panic!("{error}"),
+            _ => {}
+        }
+    }
+    assert!(finished);
+    let (incoming, mut generation) = fixture.incoming(vec![0; 13], 2);
+    sender.send(incoming).unwrap();
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let handle = worker.active[0].as_ref().unwrap().request;
+    let request = worker.scheduler.request(handle).unwrap();
+    assert_eq!(
+        (request.phase, request.reused_prompt_tokens()),
+        (RequestPhase::Restore, 13)
+    );
+    advance(&mut worker, GraphKind::Restore, 4, None);
+    advance(&mut worker, GraphKind::Resume, 5, Some(2));
+    assert!(matches!(
+        generation.events.try_recv().unwrap(),
+        GenerationEvent::ObservedToken { token: 2, .. }
+    ));
+    generation.cancelled.store(true, Ordering::Release);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert!(worker.scheduler.request(handle).is_err());
+    assert!(!worker.service_store().unwrap());
+    assert_eq!(fixture.metrics.cancelled.load(Ordering::Relaxed), 1);
+    assert_eq!(worker.prefill_started.capacity(), 0);
+    assert_eq!(worker.prefill_rate, crate::offload::INITIAL_PREFILL_RATE);
+    let stats = worker.scheduler.stats();
+    assert_eq!((stats.cache_hits, stats.reused_tokens), (1, 13));
+    assert_eq!(
+        (stats.host_lookups, stats.host_hits, stats.inbound_waiting),
+        (0, 0, 0)
+    );
+    let metrics = fixture.metrics.snapshot(false);
+    assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 2));
+    assert_eq!(
+        (metrics.host_memory_records, metrics.host_disk_records),
+        (0, 0)
+    );
+    assert_eq!((metrics.host_bytes_out, metrics.host_bytes_in), (0, 0));
+    let mut shutdown = Shutdown {
+        drained: true,
+        error: None,
+    };
+    worker.close_store(&mut shutdown);
+    assert!(shutdown.drained);
+    assert!(shutdown.error.is_none());
+}
+
+#[test]
 fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
     for copy in [false, true] {
         let mut fixture = Fixture::new();
@@ -530,4 +613,369 @@ fn fatal_broadcast_preserves_first_failure_and_reaches_pending_and_ingress() {
     }
     assert_eq!(fixture.metrics.failed.load(Ordering::Relaxed), 3);
     assert_eq!(worker.scheduler.stats().active_requests, 1);
+}
+
+/// A host store that answers lookups from a script and reports completions on demand.
+struct FakeStore {
+    hit: Option<crate::offload::HostHit>,
+    reject_fetch: bool,
+    stored: Vec<crate::offload::PublishedCheckpoint>,
+    fetched: Vec<(crate::offload::HostHit, crate::offload::InboundTicket)>,
+    events: VecDeque<crate::offload::StoreEvent>,
+    close_error: Option<Error>,
+    close_panics: bool,
+    close_calls: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl FakeStore {
+    fn new(hit: Option<crate::offload::HostHit>) -> Self {
+        Self {
+            hit,
+            reject_fetch: false,
+            stored: Vec::new(),
+            fetched: Vec::new(),
+            events: VecDeque::new(),
+            close_error: None,
+            close_panics: false,
+            close_calls: Arc::new(AtomicUsize::new(0)),
+            drops: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl crate::offload::PrefixStore for FakeStore {
+    fn lookup(
+        &mut self,
+        history: &crate::cache::PrefixHistory,
+        resident: u64,
+    ) -> Option<crate::offload::HostHit> {
+        self.hit.clone().filter(|hit| {
+            hit.consumed_tokens > resident && hit.consumed_tokens <= history.token_count()
+        })
+    }
+    fn store(&mut self, checkpoint: &crate::offload::PublishedCheckpoint) -> Result<bool> {
+        self.stored.push(checkpoint.clone());
+        Ok(true)
+    }
+    fn fetch(
+        &mut self,
+        hit: crate::offload::HostHit,
+        ticket: crate::offload::InboundTicket,
+    ) -> Result<()> {
+        if self.reject_fetch {
+            return Err("fetch rejected".into());
+        }
+        self.fetched.push((hit, ticket));
+        Ok(())
+    }
+    fn poll(&mut self, events: &mut Vec<crate::offload::StoreEvent>) {
+        events.extend(self.events.drain(..));
+    }
+    fn stats(&self) -> crate::offload::StoreStats {
+        crate::offload::StoreStats::default()
+    }
+    fn close(&mut self) -> Result<()> {
+        self.close_calls.fetch_add(1, Ordering::Relaxed);
+        assert!(!self.close_panics, "transfer drain panicked");
+        self.close_error.clone().map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for FakeStore {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn shutdown_releases_the_store_after_both_drains_complete() {
+    let fixture = Fixture::new();
+    let (_sender, receiver) = mpsc::channel();
+    let mut worker = fixture.worker(receiver);
+    let store = FakeStore::new(None);
+    let close_calls = store.close_calls.clone();
+    let drops = store.drops.clone();
+    worker.attach_store(Some(Box::new(store)));
+    let mut shutdown = Shutdown {
+        drained: true,
+        error: None,
+    };
+    worker.close_store(&mut shutdown);
+    assert!(shutdown.drained);
+    assert!(shutdown.error.is_none());
+    assert!(worker.store.is_none());
+    assert_eq!(close_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    worker.close_store(&mut shutdown);
+    drop(worker);
+    assert_eq!(close_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn shutdown_retains_the_store_when_its_drain_fails() {
+    for previous_error in [None, Some(Error::from("model failed"))] {
+        let fixture = Fixture::new();
+        let (_sender, receiver) = mpsc::channel();
+        let mut worker = fixture.worker(receiver);
+        let mut store = FakeStore::new(None);
+        store.close_error = Some("transfer drain failed".into());
+        let close_calls = store.close_calls.clone();
+        let drops = store.drops.clone();
+        worker.attach_store(Some(Box::new(store)));
+        let expected_error = previous_error
+            .clone()
+            .unwrap_or_else(|| "transfer drain failed".into());
+        let mut shutdown = Shutdown {
+            drained: true,
+            error: previous_error,
+        };
+        worker.close_store(&mut shutdown);
+        assert!(!shutdown.drained);
+        assert_eq!(
+            shutdown.error.unwrap().to_string(),
+            expected_error.to_string()
+        );
+        assert!(worker.store.is_none());
+        drop(worker);
+        assert_eq!(close_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn shutdown_retains_the_store_without_closing_when_the_executor_did_not_drain() {
+    let fixture = Fixture::new();
+    let (_sender, receiver) = mpsc::channel();
+    let mut worker = fixture.worker(receiver);
+    let store = FakeStore::new(None);
+    let close_calls = store.close_calls.clone();
+    let drops = store.drops.clone();
+    worker.attach_store(Some(Box::new(store)));
+    let mut shutdown = Shutdown {
+        drained: false,
+        error: Some("model drain failed".into()),
+    };
+    worker.close_store(&mut shutdown);
+    assert!(!shutdown.drained);
+    assert_eq!(shutdown.error.unwrap().to_string(), "model drain failed");
+    assert!(worker.store.is_none());
+    drop(worker);
+    assert_eq!(close_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn shutdown_retains_the_store_when_its_drain_panics() {
+    let fixture = Fixture::new();
+    let (_sender, receiver) = mpsc::channel();
+    let mut worker = fixture.worker(receiver);
+    let mut store = FakeStore::new(None);
+    store.close_panics = true;
+    let close_calls = store.close_calls.clone();
+    let drops = store.drops.clone();
+    worker.attach_store(Some(Box::new(store)));
+    let mut shutdown = Shutdown {
+        drained: true,
+        error: None,
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        worker.close_store(&mut shutdown);
+    }));
+    assert!(result.is_err());
+    assert!(!shutdown.drained);
+    assert!(worker.store.is_none());
+    drop(worker);
+    assert_eq!(close_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+}
+
+fn host_hit(history: &crate::cache::PrefixHistory, consumed: u64) -> crate::offload::HostHit {
+    let key = history.key_at(consumed).unwrap();
+    crate::offload::HostHit {
+        key,
+        consumed_tokens: consumed,
+        resident_tokens: 0,
+        pages: (consumed / 64) as usize,
+        bytes: 1 << 20,
+        tier: crate::offload::Tier::Memory,
+        estimated_seconds: 0.0,
+        chain: crate::offload::index::Match {
+            key,
+            consumed_tokens: consumed,
+            resident_tokens: 0,
+            nodes: vec![key],
+            skip_pages: 0,
+            pages: (consumed / 64) as usize,
+        },
+    }
+}
+
+fn fake_store<'w>(worker: &'w mut Worker<'_, Qwen4Exp>) -> &'w mut FakeStore {
+    let store = worker.store.as_mut().unwrap().as_mut() as *mut dyn crate::offload::PrefixStore;
+    // SAFETY: The worker holds the only store and it was constructed as a FakeStore.
+    unsafe { &mut *(store as *mut FakeStore) }
+}
+
+#[test]
+fn host_hit_holds_the_request_inbound_until_the_restore_completes() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
+    let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+    history.append(&incoming.prompt.tokens, &[]).unwrap();
+    sender.send(incoming).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker.attach_store(Some(Box::new(FakeStore::new(Some(host_hit(&history, 70))))));
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let handle = worker.active[0].as_ref().unwrap().request;
+    let live = worker.scheduler.request(handle).unwrap();
+    assert_eq!(
+        (
+            live.phase,
+            live.consumed_tokens,
+            live.reused_prompt_tokens()
+        ),
+        (RequestPhase::Inbound, 70, 70)
+    );
+    assert_eq!(worker.plan(0).unwrap().0, None);
+    assert_eq!(worker.scheduler.stats().inbound_waiting, 1);
+    assert_eq!(
+        (
+            worker.scheduler.stats().host_lookups,
+            worker.scheduler.stats().host_hits
+        ),
+        (1, 1)
+    );
+    let (hit, ticket) = fake_store(&mut worker).fetched.pop().unwrap();
+    assert_eq!((ticket.key, ticket.pages.len()), (hit.key, 1));
+    fake_store(&mut worker)
+        .events
+        .push_back(crate::offload::StoreEvent::Fetched {
+            key: ticket.key,
+            result: Ok(1 << 20),
+        });
+    assert!(worker.service_store().unwrap());
+    let live = worker.scheduler.request(handle).unwrap();
+    assert_eq!(
+        (live.phase, live.pages().count()),
+        (RequestPhase::Restore, 1)
+    );
+    let restored = live.prefix().unwrap();
+    // The restored checkpoint became ready during this pass; the next pass
+    // drains its publication and copies it out under its own pin.
+    assert_eq!(fake_store(&mut worker).stored.len(), 0);
+    assert!(worker.service_store().unwrap());
+    assert_eq!(fake_store(&mut worker).stored.len(), 1);
+    let publication = fake_store(&mut worker).stored[0].clone();
+    assert_eq!(
+        (
+            publication.id,
+            publication.chain_pages.len(),
+            publication.tail_pages
+        ),
+        (restored, 1, 1)
+    );
+    assert_eq!(publication.key, history.key_at(70).unwrap());
+    assert_eq!(
+        worker
+            .scheduler
+            .cache()
+            .checkpoint(restored)
+            .unwrap()
+            .pin_count(),
+        2
+    );
+    fake_store(&mut worker)
+        .events
+        .push_back(crate::offload::StoreEvent::Stored {
+            checkpoint: restored,
+            key: publication.key,
+            result: Ok(1 << 20),
+        });
+    assert!(worker.service_store().unwrap());
+    assert_eq!(
+        worker
+            .scheduler
+            .cache()
+            .checkpoint(restored)
+            .unwrap()
+            .pin_count(),
+        1
+    );
+    advance(&mut worker, GraphKind::Restore, 1, None);
+    advance(&mut worker, GraphKind::Resume, 2, Some(1));
+    assert_eq!(
+        worker.scheduler.request(handle).unwrap().phase,
+        RequestPhase::Decode
+    );
+    assert_eq!(fixture.metrics.snapshot(false).prefill_tokens, 0);
+}
+
+#[test]
+fn failed_restores_readmit_the_request_without_the_host_store() {
+    for reject_at_fetch in [false, true] {
+        let fixture = Fixture::new();
+        let (sender, receiver) = mpsc::channel();
+        let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
+        let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+        history.append(&incoming.prompt.tokens, &[]).unwrap();
+        sender.send(incoming).unwrap();
+        let mut worker = fixture.worker(receiver);
+        let mut store = FakeStore::new(Some(host_hit(&history, 70)));
+        store.reject_fetch = reject_at_fetch;
+        worker.attach_store(Some(Box::new(store)));
+        let free_pages = worker.scheduler.free_page_count();
+        let free_snapshots = worker.scheduler.free_snapshot_count();
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        if !reject_at_fetch {
+            let handle = worker.active[0].as_ref().unwrap().request;
+            assert_eq!(
+                worker.scheduler.request(handle).unwrap().phase,
+                RequestPhase::Inbound
+            );
+            let (_, ticket) = fake_store(&mut worker).fetched.pop().unwrap();
+            fake_store(&mut worker)
+                .events
+                .push_back(crate::offload::StoreEvent::Fetched {
+                    key: ticket.key,
+                    result: Err("transfer failed".into()),
+                });
+            assert!(worker.service_store().unwrap());
+            assert!(worker.active[0].is_none());
+            assert_eq!(worker.pending.len(), 1);
+            assert!(!worker.pending[0].host_lookup);
+            assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        }
+        let handle = worker.active[0].as_ref().unwrap().request;
+        let live = worker.scheduler.request(handle).unwrap();
+        assert_eq!(
+            (
+                live.phase,
+                live.consumed_tokens,
+                live.reused_prompt_tokens()
+            ),
+            (RequestPhase::Initialize, 0, 0)
+        );
+        assert_eq!(fixture.metrics.admitted.load(Ordering::Relaxed), 1);
+        assert_eq!(worker.scheduler.stats().inbound_waiting, 0);
+        advance(&mut worker, GraphKind::Init, 1, None);
+        advance(&mut worker, GraphKind::Prefill, 2, None);
+        advance(&mut worker, GraphKind::Prefill, 3, Some(1));
+        assert_eq!(
+            worker.scheduler.request(handle).unwrap().consumed_tokens,
+            70
+        );
+        worker.retire(&[handle]).unwrap();
+        worker
+            .scheduler
+            .release_after_shutdown(&Shutdown {
+                drained: true,
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(worker.scheduler.free_page_count(), free_pages);
+        assert_eq!(worker.scheduler.free_snapshot_count(), free_snapshots);
+    }
 }

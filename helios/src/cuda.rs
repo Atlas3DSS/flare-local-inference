@@ -23,6 +23,49 @@ type EventElapsed = unsafe extern "C" fn(*mut f32, Handle, Handle) -> c_int;
 type StreamWait = unsafe extern "C" fn(Handle, Handle, c_uint) -> c_int;
 type WaitValue = unsafe extern "C" fn(Handle, u64, u32, c_uint) -> c_int;
 type HostPointer = unsafe extern "C" fn(*mut u64, Handle, c_uint) -> c_int;
+type StreamCreatePriority = unsafe extern "C" fn(*mut Handle, c_uint, c_int) -> c_int;
+type PriorityRange = unsafe extern "C" fn(*mut c_int, *mut c_int) -> c_int;
+type HostRegister = unsafe extern "C" fn(Handle, usize, c_uint) -> c_int;
+type HostUnregister = unsafe extern "C" fn(Handle) -> c_int;
+type DeviceAttribute = unsafe extern "C" fn(*mut c_int, c_int, c_int) -> c_int;
+type MemcpyBatch = unsafe extern "C" fn(
+    *const u64,
+    *const u64,
+    *const usize,
+    usize,
+    *const CopyAttributes,
+    *const usize,
+    usize,
+    Handle,
+) -> c_int;
+
+/// `CUmemcpyAttributes`: source access order, source and destination location
+/// hints as `CUmemLocation {type, id}`, and flags.
+#[repr(C)]
+struct CopyAttributes {
+    source_order: c_int,
+    source_location: [c_int; 2],
+    destination_location: [c_int; 2],
+    flags: c_uint,
+}
+
+/// `CU_MEMCPY_SRC_ACCESS_ORDER_STREAM`: the source is read in stream order.
+const SOURCE_ORDER_STREAM: c_int = 1;
+/// `CU_MEMHOSTREGISTER_PORTABLE`: the registration is visible to every context.
+const HOST_REGISTER_PORTABLE: c_uint = 0x1;
+/// `CU_DEVICE_ATTRIBUTE_INTEGRATED`.
+const ATTRIBUTE_INTEGRATED: c_int = 18;
+/// `CU_STREAM_NON_BLOCKING`: the stream never synchronizes with the legacy default stream.
+const STREAM_NON_BLOCKING: c_uint = 0x1;
+/// `CU_EVENT_BLOCKING_SYNC`: a thread waiting on the event sleeps instead of spinning.
+const EVENT_BLOCKING_SYNC: c_uint = 0x1;
+/// `CU_EVENT_DISABLE_TIMING`: the event records no timestamp.
+const EVENT_DISABLE_TIMING: c_uint = 0x2;
+
+/// Most bytes one batched copy may carry.
+pub const BATCH_BYTES: usize = 16 << 20;
+/// Most entries one batched copy may carry.
+pub const BATCH_ENTRIES: usize = 4096;
 
 struct Driver {
     _library: Library,
@@ -47,6 +90,13 @@ struct Driver {
     stream_wait: StreamWait,
     wait_value: WaitValue,
     host_pointer: HostPointer,
+    stream_create_priority: StreamCreatePriority,
+    priority_range: PriorityRange,
+    host_register: HostRegister,
+    host_unregister: HostUnregister,
+    device_attribute: DeviceAttribute,
+    event_synchronize: StreamOperation,
+    memcpy_batch: MemcpyBatch,
 }
 
 impl Driver {
@@ -92,6 +142,13 @@ impl Driver {
                 stream_wait: symbol!("cuStreamWaitEvent"),
                 wait_value: symbol!("cuStreamWaitValue32_v2"),
                 host_pointer: symbol!("cuMemHostGetDevicePointer_v2"),
+                stream_create_priority: symbol!("cuStreamCreateWithPriority"),
+                priority_range: symbol!("cuCtxGetStreamPriorityRange"),
+                host_register: symbol!("cuMemHostRegister_v2"),
+                host_unregister: symbol!("cuMemHostUnregister"),
+                device_attribute: symbol!("cuDeviceGetAttribute"),
+                event_synchronize: symbol!("cuEventSynchronize"),
+                memcpy_batch: symbol!("cuMemcpyBatchAsync_v2"),
                 _library: library,
             }))
         }
@@ -145,14 +202,127 @@ pub fn current_context() -> Result<(usize, i32)> {
     Driver::load()?.current()
 }
 
+/// Whether the device owning `context` shares physical memory with the host.
+pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    let driver = Driver::load()?;
+    // SAFETY: The context handle was produced by the driver and outlives this call.
+    driver.check("cuCtxSetCurrent", unsafe {
+        (driver.set_context)(context as Handle)
+    })?;
+    let (_, device) = driver.current()?;
+    let mut value = 0;
+    // SAFETY: `value` is a valid output pointer and `device` came from the current context.
+    driver.check("cuDeviceGetAttribute", unsafe {
+        (driver.device_attribute)(&mut value, ATTRIBUTE_INTEGRATED, device)
+    })?;
+    Ok(value != 0)
+}
+
+/// Page-locked registration of process memory, released on drop.
+pub(crate) struct HostRegistration {
+    driver: Arc<Driver>,
+    address: usize,
+    nbytes: usize,
+}
+
+impl HostRegistration {
+    pub(crate) fn address(&self) -> usize {
+        self.address
+    }
+    pub(crate) fn nbytes(&self) -> usize {
+        self.nbytes
+    }
+}
+
+impl Drop for HostRegistration {
+    fn drop(&mut self) {
+        // SAFETY: The registration was made by `register_host` on this range.
+        unsafe {
+            (self.driver.host_unregister)(self.address as Handle);
+        }
+    }
+}
+
+/// Register `nbytes` at `address`, which must be page aligned, as portable
+/// page-locked memory with `context` current. The range stays mapped and
+/// unchanged in size until the registration is dropped.
+pub(crate) unsafe fn register_host(
+    context: usize,
+    address: usize,
+    nbytes: usize,
+) -> Result<HostRegistration> {
+    // SAFETY: sysconf has no memory-safety preconditions.
+    let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
+    if address == 0 || !address.is_multiple_of(page) || nbytes == 0 {
+        return Err(Error::execution(
+            ExecutionError::State,
+            format!(
+                "host registration requires a nonempty range at a {page}-byte aligned address, \
+                 got {nbytes} bytes at {address:#x}"
+            ),
+        ));
+    }
+    let driver = Driver::load()?;
+    // SAFETY: The context handle was produced by the driver, and the caller
+    // guarantees the range stays mapped until the registration is dropped.
+    unsafe {
+        driver.check("cuCtxSetCurrent", (driver.set_context)(context as Handle))?;
+        driver.check(
+            "cuMemHostRegister_v2",
+            (driver.host_register)(address as Handle, nbytes, HOST_REGISTER_PORTABLE),
+        )?;
+    }
+    Ok(HostRegistration {
+        driver,
+        address,
+        nbytes,
+    })
+}
+
 pub(crate) struct Stream {
     driver: Arc<Driver>,
     handle: usize,
 }
 
+/// Reject a batch whose arrays disagree in length, that has more than
+/// [`BATCH_ENTRIES`] entries, that carries more than [`BATCH_BYTES`], or that
+/// contains an empty entry.
+fn check_batch(destinations: &[u64], sources: &[u64], sizes: &[usize]) -> Result<()> {
+    let invalid = |message: String| Error::execution(ExecutionError::State, message);
+    if destinations.len() != sources.len() || sources.len() != sizes.len() {
+        return Err(invalid(format!(
+            "batched copy arrays disagree: {} destinations, {} sources, {} sizes",
+            destinations.len(),
+            sources.len(),
+            sizes.len()
+        )));
+    }
+    if sizes.len() > BATCH_ENTRIES {
+        return Err(invalid(format!(
+            "batched copy has {} entries; at most {BATCH_ENTRIES} are allowed",
+            sizes.len()
+        )));
+    }
+    let total = sizes
+        .iter()
+        .try_fold(0usize, |total, size| {
+            (*size > 0).then_some(())?;
+            total.checked_add(*size)
+        })
+        .ok_or_else(|| invalid("batched copy contains an empty entry or overflows".into()))?;
+    if total > BATCH_BYTES {
+        return Err(invalid(format!(
+            "batched copy carries {total} bytes; at most {BATCH_BYTES} are allowed"
+        )));
+    }
+    Ok(())
+}
+
 impl Stream {
-    pub(crate) fn open(context: usize, expected_device: i32) -> Result<Self> {
+    /// Make `context` current on the calling thread and confirm its device.
+    fn bind(context: usize, expected_device: i32) -> Result<Arc<Driver>> {
         let driver = Driver::load()?;
+        // SAFETY: The context handle was produced by the driver and outlives this call.
         driver.check("cuCtxSetCurrent", unsafe {
             (driver.set_context)(context as Handle)
         })?;
@@ -165,13 +335,81 @@ impl Stream {
                 ),
             ));
         }
+        Ok(driver)
+    }
+
+    pub(crate) fn open(context: usize, expected_device: i32) -> Result<Self> {
+        let driver = Self::bind(context, expected_device)?;
         let mut handle = std::ptr::null_mut();
+        // SAFETY: The bound context is current and `handle` is a valid output pointer.
         driver.check("cuStreamCreate", unsafe {
-            (driver.stream_create)(&mut handle, 1)
+            (driver.stream_create)(&mut handle, STREAM_NON_BLOCKING)
         })?;
         Ok(Self {
             driver,
             handle: handle as usize,
+        })
+    }
+
+    /// A stream at the lowest priority the context supports, for copies that
+    /// must yield to model work.
+    pub(crate) fn open_lowest_priority(context: usize, expected_device: i32) -> Result<Self> {
+        let driver = Self::bind(context, expected_device)?;
+        let (mut least, mut greatest) = (0, 0);
+        // SAFETY: The bound context is current and both outputs are valid pointers.
+        driver.check("cuCtxGetStreamPriorityRange", unsafe {
+            (driver.priority_range)(&mut least, &mut greatest)
+        })?;
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: As above; `least` is within the range the driver reported.
+        driver.check("cuStreamCreateWithPriority", unsafe {
+            (driver.stream_create_priority)(&mut handle, STREAM_NON_BLOCKING, least)
+        })?;
+        Ok(Self {
+            driver,
+            handle: handle as usize,
+        })
+    }
+
+    /// Issue one batched copy of `destinations[i] <- sources[i]` for `sizes[i]`
+    /// bytes each, in stream order on both sides. Every address is a device
+    /// address or a registered host address. The batch carries at most
+    /// [`BATCH_BYTES`] and [`BATCH_ENTRIES`]; larger batches are rejected, as
+    /// are empty entries. An empty batch issues nothing.
+    ///
+    /// # Safety
+    /// Every range stays valid and, for host sources, unchanged until the
+    /// stream passes the copy.
+    pub(crate) unsafe fn copy_batch(
+        &self,
+        destinations: &[u64],
+        sources: &[u64],
+        sizes: &[usize],
+    ) -> Result<()> {
+        check_batch(destinations, sources, sizes)?;
+        if sizes.is_empty() {
+            return Ok(());
+        }
+        let attributes = CopyAttributes {
+            source_order: SOURCE_ORDER_STREAM,
+            source_location: [0; 2],
+            destination_location: [0; 2],
+            flags: 0,
+        };
+        let first_entry = [0usize];
+        // SAFETY: The arrays have equal validated lengths, the single attribute
+        // applies from entry 0, and the caller guarantees every range's lifetime.
+        self.driver.check("cuMemcpyBatchAsync_v2", unsafe {
+            (self.driver.memcpy_batch)(
+                destinations.as_ptr(),
+                sources.as_ptr(),
+                sizes.as_ptr(),
+                sizes.len(),
+                &attributes,
+                first_entry.as_ptr(),
+                1,
+                self.handle as Handle,
+            )
         })
     }
 
@@ -204,13 +442,26 @@ impl Stream {
         })
     }
 
+    /// An untimed event whose waits spin, observing completion with the least latency.
     pub(crate) fn event(&self) -> Result<Event> {
         self.event_with_timing(false)
     }
     pub(crate) fn event_with_timing(&self, timing: bool) -> Result<Event> {
+        self.create_event(if timing { 0 } else { EVENT_DISABLE_TIMING })
+    }
+
+    /// An untimed event whose [`Event::synchronize`] sleeps the calling thread
+    /// until the work completes: for offload threads that wait on long copies
+    /// and must not occupy a core while doing so.
+    pub(crate) fn blocking_event(&self) -> Result<Event> {
+        self.create_event(EVENT_BLOCKING_SYNC | EVENT_DISABLE_TIMING)
+    }
+
+    fn create_event(&self, flags: c_uint) -> Result<Event> {
         let mut handle = std::ptr::null_mut();
+        // SAFETY: The driver owns the ABI and `handle` is a valid output pointer.
         self.driver.check("cuEventCreate", unsafe {
-            (self.driver.event_create)(&mut handle, if timing { 0 } else { 2 })
+            (self.driver.event_create)(&mut handle, flags)
         })?;
         Ok(Event {
             driver: self.driver.clone(),
@@ -319,6 +570,14 @@ impl Event {
         Ok((f64::from(millis) * 1_000_000.0).round() as u64)
     }
 
+    /// Block the calling thread until the event's work completes. The thread
+    /// spins unless the event came from [`Stream::blocking_event`].
+    pub(crate) fn synchronize(&self) -> Result<()> {
+        self.driver.check("cuEventSynchronize", unsafe {
+            (self.driver.event_synchronize)(self.handle as Handle)
+        })
+    }
+
     pub(crate) fn completed(&self) -> Result<bool> {
         let status = unsafe { (self.driver.event_query)(self.handle as Handle) };
         if status == 600 {
@@ -371,5 +630,289 @@ impl Drop for Stream {
                 (self.driver.stream_destroy)(self.handle as Handle);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_attributes_match_the_driver_layout() {
+        assert_eq!(std::mem::size_of::<CopyAttributes>(), 24);
+        assert_eq!(std::mem::align_of::<CopyAttributes>(), 4);
+    }
+
+    #[test]
+    fn batch_bounds_reject_mismatch_oversize_and_empty_entries() {
+        assert!(check_batch(&[], &[], &[]).is_ok());
+        assert!(check_batch(&[1, 2], &[3, 4], &[8, 8]).is_ok());
+        assert!(check_batch(&[1], &[3, 4], &[8]).is_err());
+        assert!(check_batch(&[1, 2], &[3, 4], &[8]).is_err());
+        assert!(check_batch(&[1], &[3], &[0]).is_err());
+        let full = vec![1u64; BATCH_ENTRIES];
+        assert!(check_batch(&full, &full, &vec![1; BATCH_ENTRIES]).is_ok());
+        let over = vec![1u64; BATCH_ENTRIES + 1];
+        assert!(check_batch(&over, &over, &vec![1; BATCH_ENTRIES + 1]).is_err());
+        assert!(check_batch(&[1], &[2], &[BATCH_BYTES]).is_ok());
+        assert!(check_batch(&[1], &[2], &[BATCH_BYTES + 1]).is_err());
+        assert!(check_batch(&[1, 2], &[3, 4], &[BATCH_BYTES, 1]).is_err());
+        assert!(check_batch(&[1, 2], &[3, 4], &[usize::MAX, 2]).is_err());
+    }
+
+    /// Scattered entries: device offsets ascend with odd gaps while host
+    /// offsets descend, so neither side is contiguous or aligned.
+    fn scattered_entries(capacity: usize) -> Vec<(usize, usize, usize)> {
+        let sizes: Vec<usize> = (0..220)
+            .map(|i| match i % 50 {
+                0 => (1 << 20) + 4096 + i * 64,
+                n if n % 3 == 0 => 100 + i,
+                n if n % 3 == 1 => 4096 + 7 * i,
+                _ => 2000 + i * 3,
+            })
+            .collect();
+        let mut device = Vec::with_capacity(sizes.len());
+        let mut cursor = 0;
+        for size in &sizes {
+            device.push(cursor);
+            cursor += size + 37;
+        }
+        assert!(cursor <= capacity);
+        let mut host = vec![0; sizes.len()];
+        cursor = 0;
+        for (index, size) in sizes.iter().enumerate().rev() {
+            host[index] = cursor;
+            cursor += size + 11;
+        }
+        assert!(cursor <= capacity);
+        sizes
+            .into_iter()
+            .zip(device)
+            .zip(host)
+            .map(|((size, device), host)| (device, host, size))
+            .collect()
+    }
+
+    fn pattern(offset: usize) -> u8 {
+        ((offset * 7) ^ (offset >> 9)) as u8
+    }
+
+    fn thread_cpu_time() -> std::time::Duration {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `time` is a valid output pointer for the calling thread's clock.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        std::time::Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+    }
+
+    /// Read a patterned file with `O_DIRECT` into the registered mapping and
+    /// compare. Returns `false` when the directory refuses direct I/O.
+    fn direct_read_matches(host: *mut u8, capacity: usize) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        const FILE_BYTES: usize = 4 << 20;
+        assert!(FILE_BYTES <= capacity);
+        let directory = std::env::var_os("FLARE_OFFLOAD_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("flare-cuda-direct-{}.bin", std::process::id()));
+        let content: Vec<u8> = (0..FILE_BYTES).map(|i| pattern(i * 3)).collect();
+        std::fs::write(&path, &content).unwrap();
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: The path is NUL terminated and the mapping covers FILE_BYTES.
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECT | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            std::fs::remove_file(&path).unwrap();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                eprintln!(
+                    "skipping direct read: {} refuses O_DIRECT",
+                    directory.display()
+                );
+                return false;
+            }
+            panic!("open {} with O_DIRECT: {error}", path.display());
+        }
+        unsafe {
+            std::ptr::write_bytes(host, 0xA5, capacity);
+            let mut done = 0;
+            while done < FILE_BYTES {
+                let read = libc::pread(fd, host.add(done).cast(), FILE_BYTES - done, done as i64);
+                assert!(read > 0, "pread: {}", std::io::Error::last_os_error());
+                done += read as usize;
+            }
+            libc::close(fd);
+        }
+        std::fs::remove_file(&path).unwrap();
+        // SAFETY: The mapping stays valid for the comparison.
+        let read = unsafe { std::slice::from_raw_parts(host, capacity) };
+        assert!(read[..FILE_BYTES] == content[..]);
+        assert!(read[FILE_BYTES..].iter().all(|byte| *byte == 0xA5));
+        true
+    }
+
+    #[cfg(feature = "runtime-package")]
+    #[test]
+    #[ignore = "requires a CUDA device; FLARE_OFFLOAD_TEST_DIR names a directory supporting direct I/O"]
+    fn batched_copies_round_trip_through_registered_memory() {
+        use crate::runtime_package::driver::Driver as Loader;
+        const BYTES: usize = 8 << 20;
+        let loader = Loader::load().unwrap();
+        let mut context = std::ptr::null_mut();
+        let (mut a, mut b) = (0u64, 0u64);
+        // SAFETY: Driver signatures match cuda.h and every output pointer is valid.
+        unsafe {
+            loader.check("cuInit", (loader.init)(0)).unwrap();
+            let mut device = 0;
+            loader
+                .check("cuDeviceGet", (loader.device)(&mut device, 0))
+                .unwrap();
+            loader
+                .check(
+                    "cuCtxCreate_v2",
+                    (loader.context_create)(&mut context, 0, device),
+                )
+                .unwrap();
+            loader
+                .check("cuMemAlloc_v2", (loader.allocate)(&mut a, BYTES))
+                .unwrap();
+            loader
+                .check("cuMemAlloc_v2", (loader.allocate)(&mut b, BYTES))
+                .unwrap();
+        }
+        let stream = Stream::open_lowest_priority(context as usize, 0).unwrap();
+        let event = stream.blocking_event().unwrap();
+        // SAFETY: An anonymous private mapping of BYTES, released at the end.
+        let host = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                BYTES,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(host, libc::MAP_FAILED);
+        let host = host.cast::<u8>();
+        assert_eq!(host as usize % 4096, 0);
+        let registration =
+            unsafe { register_host(context as usize, host as usize, BYTES) }.unwrap();
+        assert_eq!(registration.address(), host as usize);
+        assert_eq!(registration.nbytes(), BYTES);
+
+        let image_a: Vec<u8> = (0..BYTES).map(pattern).collect();
+        let entries = scattered_entries(BYTES);
+        assert!(entries.len() >= 200);
+        assert!(entries.iter().any(|(_, _, size)| *size < 4096));
+        assert!(entries.iter().any(|(_, _, size)| *size > 1 << 20));
+        unsafe {
+            loader
+                .check(
+                    "cuMemcpyHtoD_v2",
+                    (loader.upload)(a, image_a.as_ptr().cast(), BYTES),
+                )
+                .unwrap();
+            loader
+                .check("cuMemsetD8_v2", (loader.zero)(b, 0, BYTES))
+                .unwrap();
+        }
+
+        let sizes: Vec<usize> = entries.iter().map(|entry| entry.2).collect();
+        let to_host: Vec<u64> = entries.iter().map(|e| host as u64 + e.1 as u64).collect();
+        let from_a: Vec<u64> = entries.iter().map(|e| a + e.0 as u64).collect();
+        unsafe { stream.copy_batch(&to_host, &from_a, &sizes) }.unwrap();
+        stream.record(&event).unwrap();
+        event.synchronize().unwrap();
+        let mut expected_host = vec![0u8; BYTES];
+        for (device, host_offset, size) in &entries {
+            expected_host[*host_offset..host_offset + size]
+                .copy_from_slice(&image_a[*device..device + size]);
+        }
+        // SAFETY: The mapping stays valid and no copy is in flight.
+        let host_bytes = unsafe { std::slice::from_raw_parts(host, BYTES) };
+        assert!(
+            host_bytes == &expected_host[..],
+            "device to host batch differs"
+        );
+
+        let poison = vec![0xEEu8; BYTES];
+        unsafe {
+            loader
+                .check(
+                    "cuMemcpyHtoD_v2",
+                    (loader.upload)(a, poison.as_ptr().cast(), BYTES),
+                )
+                .unwrap();
+        }
+        let to_b: Vec<u64> = entries.iter().map(|e| b + e.0 as u64).collect();
+        let from_host: Vec<u64> = entries.iter().map(|e| host as u64 + e.1 as u64).collect();
+        unsafe { stream.copy_batch(&to_b, &from_host, &sizes) }.unwrap();
+        stream.record(&event).unwrap();
+        event.synchronize().unwrap();
+        let mut image_b = vec![0u8; BYTES];
+        unsafe {
+            loader
+                .check(
+                    "cuMemcpyDtoH_v2",
+                    (loader.download)(image_b.as_mut_ptr().cast(), b, BYTES),
+                )
+                .unwrap();
+        }
+        let mut expected_b = vec![0u8; BYTES];
+        for (device, _, size) in &entries {
+            expected_b[*device..device + size].copy_from_slice(&image_a[*device..device + size]);
+        }
+        assert!(image_b == expected_b, "host to device batch differs");
+        assert!(unsafe { stream.copy_batch(&[b], &[a], &[BATCH_BYTES + 1]) }.is_err());
+        stream.synchronize().unwrap();
+
+        // Waiting on the blocking event must sleep rather than spin: queue
+        // enough host-to-device traffic to outlast its issue and compare the
+        // thread's CPU time against the wall time of the wait.
+        for _ in 0..600 {
+            unsafe { stream.copy_batch(&[b], &[host as u64], &[BYTES]) }.unwrap();
+        }
+        stream.record(&event).unwrap();
+        let (wall, cpu) = (std::time::Instant::now(), thread_cpu_time());
+        event.synchronize().unwrap();
+        let (wall, cpu) = (wall.elapsed(), thread_cpu_time() - cpu);
+        eprintln!("blocking event wait: {wall:?} wall, {cpu:?} thread CPU");
+        if wall >= std::time::Duration::from_millis(40) {
+            assert!(
+                cpu * 4 < wall,
+                "the blocking event wait spun: {cpu:?} CPU over {wall:?}"
+            );
+        }
+
+        let direct = direct_read_matches(host, BYTES);
+
+        drop(registration);
+        unsafe {
+            assert_eq!(libc::munmap(host.cast(), BYTES), 0);
+        }
+        drop(event);
+        drop(stream);
+        unsafe {
+            loader.check("cuMemFree_v2", (loader.free)(a)).unwrap();
+            loader.check("cuMemFree_v2", (loader.free)(b)).unwrap();
+            loader
+                .check("cuCtxDestroy_v2", (loader.context_destroy)(context))
+                .unwrap();
+        }
+        assert!(
+            direct || std::env::var_os("FLARE_OFFLOAD_TEST_DIR").is_none(),
+            "the configured test directory refused direct I/O"
+        );
     }
 }

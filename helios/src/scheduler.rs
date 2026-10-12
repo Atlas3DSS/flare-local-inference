@@ -2,13 +2,15 @@
 
 pub mod speculation;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::cache::{
-    CheckpointId, ConditioningEvent, EvictionTarget, Fence, PageId, PrefixCheckpointCache,
-    PrefixHistory, Publication, PublishResult, SnapshotId, StateSnapshot,
+    CheckpointId, CompletionUpdate, ConditioningEvent, EvictionTarget, Fence, Lookup, PageId,
+    PrefixCheckpointCache, PrefixHistory, PrefixKey, Publication, PublishResult, SnapshotId,
+    StateSnapshot,
 };
 use crate::execution::{CompletionRecord, GraphKind, REQUEST_LANES};
+use crate::offload::{InboundTicket, PublishedCheckpoint};
 use crate::{Result, Shutdown};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -90,6 +92,11 @@ pub struct SchedulerStats {
     pub free_snapshots: usize,
     pub cached_checkpoints: usize,
     pub cached_pages: usize,
+    pub host_lookups: u64,
+    pub host_hits: u64,
+    pub host_reused_tokens: u64,
+    /// Requests waiting in `Inbound` for a host restore; they count as active.
+    pub inbound_waiting: usize,
 }
 
 #[derive(Clone)]
@@ -105,6 +112,8 @@ pub struct RequestSpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestPhase {
     Initialize,
+    /// Waiting for a host-restored checkpoint; never selected by `next_step`.
+    Inbound,
     Restore,
     Vision,
     Prefill,
@@ -236,6 +245,52 @@ struct Slot {
     retiring: bool,
 }
 
+/// A validated request with its prefix history and GPU cache lookup, before any
+/// reservation. The worker consults the host store between `plan_admission` and
+/// `admit_planned`.
+pub struct AdmissionPlan {
+    history: PrefixHistory,
+    lookup: Lookup,
+}
+
+impl AdmissionPlan {
+    pub fn history(&self) -> &PrefixHistory {
+        &self.history
+    }
+    /// Consumed count of the GPU checkpoint the lookup matched; zero on a miss.
+    pub fn resident_tokens(&self) -> u64 {
+        self.lookup.consumed_tokens
+    }
+}
+
+/// A host record chain the worker chose to restore above the plan's GPU hit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboundRequest {
+    pub key: PrefixKey,
+    pub consumed_tokens: u64,
+    /// Complete pages at `consumed_tokens` minus complete pages at the plan's
+    /// resident count.
+    pub pages: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Admitted {
+    pub handle: RequestHandle,
+    /// Destination ids of the restore this admission started; `None` when the
+    /// request joined a restore already in flight or needs none.
+    pub ticket: Option<InboundTicket>,
+}
+
+/// Scheduler-owned destination of one host-to-GPU restore. Its pages, snapshot,
+/// and pin on the GPU ancestor outlive the requests waiting for it.
+struct Ticket {
+    parent: Option<CheckpointId>,
+    pages: Vec<PageId>,
+    snapshot: SnapshotId,
+    history: PrefixHistory,
+    waiters: Vec<RequestHandle>,
+}
+
 pub struct RequestScheduler {
     limits: SchedulerLimits,
     capabilities: SchedulerCapabilities,
@@ -256,6 +311,9 @@ pub struct RequestScheduler {
     prefill_catalog: Vec<usize>,
     proposal_source: speculation::ProposalSource,
     controller: speculation::WidthController,
+    tickets: HashMap<PrefixKey, Ticket>,
+    track_publications: bool,
+    publications: Vec<CheckpointId>,
 }
 
 impl RequestScheduler {
@@ -315,6 +373,9 @@ impl RequestScheduler {
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
             proposal_source: speculation::ProposalSource::Mtp,
             controller: speculation::WidthController::default(),
+            tickets: HashMap::new(),
+            track_publications: false,
+            publications: Vec::new(),
         })
     }
 
@@ -501,6 +562,18 @@ impl RequestScheduler {
             free_snapshots: self.free_snapshots.len(),
             cached_checkpoints: cache.published_checkpoints,
             cached_pages: cache.cached_pages,
+            inbound_waiting: if self.tickets.is_empty() {
+                0
+            } else {
+                self.slots
+                    .iter()
+                    .filter(|slot| {
+                        slot.request
+                            .as_ref()
+                            .is_some_and(|request| request.phase == RequestPhase::Inbound)
+                    })
+                    .count()
+            },
             ..self.stats
         }
     }
@@ -543,10 +616,7 @@ impl RequestScheduler {
             });
             self.stats.snapshot_evictions += evicted.retired.len() as u64;
             let update = self.cache.advance_completed(self.completed)?;
-            self.stats.snapshot_publications += update.published.len() as u64;
-            let reusable = update.reusable;
-            self.free_pages.extend(reusable.pages);
-            self.free_snapshots.extend(reusable.snapshots);
+            self.apply_completion(update);
         }
         if self.free_pages.len() < pages || self.free_snapshots.len() < snapshots {
             return Err(crate::Error::admission(
@@ -558,19 +628,23 @@ impl RequestScheduler {
     }
 
     pub fn admit(&mut self, spec: RequestSpec) -> Result<RequestHandle> {
-        self.admit_with_prefix(spec, true)
+        let plan = self.plan_admission(&spec)?;
+        Ok(self.admit_planned(spec, plan, None)?.handle)
     }
 
     #[cfg(any(test, feature = "server"))]
     pub(crate) fn admit_cold(&mut self, spec: RequestSpec) -> Result<RequestHandle> {
-        self.admit_with_prefix(spec, false)
+        let plan = self.plan(&spec, false)?;
+        Ok(self.admit_planned(spec, plan, None)?.handle)
     }
 
-    fn admit_with_prefix(
-        &mut self,
-        spec: RequestSpec,
-        reuse_prefix: bool,
-    ) -> Result<RequestHandle> {
+    /// Validates the request, builds its prefix history, and looks up the GPU
+    /// cache without reserving anything.
+    pub fn plan_admission(&mut self, spec: &RequestSpec) -> Result<AdmissionPlan> {
+        self.plan(spec, true)
+    }
+
+    fn plan(&mut self, spec: &RequestSpec, reuse_prefix: bool) -> Result<AdmissionPlan> {
         if spec.prompt.is_empty()
             || spec
                 .system_boundary
@@ -587,8 +661,28 @@ impl RequestScheduler {
                 "request requires a nonempty prompt, positive output limit, and bounded total tokens",
             ));
         }
-        let slot = self
-            .slots
+        self.free_slot()?;
+        let mut history = PrefixHistory::new(self.identity);
+        history.append(&spec.prompt, &spec.conditioning)?;
+        let lookup = if reuse_prefix {
+            let lookup = self.cache.lookup(&history)?;
+            self.stats.cache_lookups += 1;
+            self.stats.cache_hits += u64::from(lookup.checkpoint.is_some());
+            self.stats.reused_tokens += lookup.consumed_tokens;
+            lookup
+        } else {
+            Lookup {
+                checkpoint: None,
+                consumed_tokens: 0,
+                pages: Vec::new(),
+                snapshot: None,
+            }
+        };
+        Ok(AdmissionPlan { history, lookup })
+    }
+
+    fn free_slot(&self) -> Result<usize> {
+        self.slots
             .iter()
             .position(|slot| {
                 slot.request.is_none() && !slot.retiring && slot.generation < i64::MAX as u64
@@ -598,24 +692,54 @@ impl RequestScheduler {
                     crate::AdmissionError::Capacity,
                     "all request slots are active, retired, or generation-exhausted",
                 )
-            })?;
-        let mut history = PrefixHistory::new(self.identity);
-        history.append(&spec.prompt, &spec.conditioning)?;
-        let prefix = if reuse_prefix {
-            let prefix = self.cache.lookup(&history)?;
-            self.stats.cache_lookups += 1;
-            self.stats.cache_hits += u64::from(prefix.checkpoint.is_some());
-            self.stats.reused_tokens += prefix.consumed_tokens;
-            prefix
-        } else {
-            crate::cache::Lookup {
-                checkpoint: None,
-                consumed_tokens: 0,
-                pages: Vec::new(),
-                snapshot: None,
+            })
+    }
+
+    /// Reserves resources and creates the request described by `plan`.
+    ///
+    /// Without `inbound` the plan's GPU lookup becomes the request's prefix. With
+    /// `inbound` at consumed count `c`, the request reserves as if it had hit a
+    /// GPU prefix of depth `c`, starts in `Inbound`, and waits for the restore of
+    /// `inbound.key`. A new restore takes `inbound.pages` page ids and one
+    /// snapshot from the free lists, pins the plan's GPU checkpoint until
+    /// `finish_inbound`, and is returned as the ticket for the worker to fill; a
+    /// restore already in flight gains this request as a waiter and `ticket` is
+    /// `None`. A failure leaves no reservation, ticket, or request behind.
+    pub fn admit_planned(
+        &mut self,
+        spec: RequestSpec,
+        plan: AdmissionPlan,
+        inbound: Option<InboundRequest>,
+    ) -> Result<Admitted> {
+        let AdmissionPlan { history, lookup } = plan;
+        let page_tokens = self.capabilities.page_tokens as u64;
+        if let Some(inbound) = &inbound {
+            let consumed = inbound.consumed_tokens;
+            if inbound.key.consumed_tokens != consumed
+                || consumed <= lookup.consumed_tokens
+                || history.key_at(consumed) != Some(inbound.key)
+                || inbound.pages as u64
+                    != consumed / page_tokens - lookup.consumed_tokens / page_tokens
+            {
+                return Err(
+                    "inbound checkpoint does not extend the admission plan's prefix history".into(),
+                );
             }
+        }
+        let slot = self.free_slot()?;
+        let consumed = inbound
+            .as_ref()
+            .map_or(lookup.consumed_tokens, |inbound| inbound.consumed_tokens);
+        let creating = inbound
+            .as_ref()
+            .is_some_and(|inbound| !self.tickets.contains_key(&inbound.key));
+        // The request pins its own prefix; a new ticket pins the ancestor instead.
+        let pinned = if inbound.is_none() || creating {
+            lookup.checkpoint
+        } else {
+            None
         };
-        if let Some(id) = prefix.checkpoint {
+        if let Some(id) = pinned {
             self.cache.pin(id)?;
         }
         let extra = self.speculative_widths.last().copied().unwrap_or(1) - 1;
@@ -630,14 +754,16 @@ impl RequestScheduler {
             0
         };
         let reserved_count = execution_limit.div_ceil(self.capabilities.page_tokens)
-            - prefix.consumed_tokens as usize / self.capabilities.page_tokens
+            - (consumed / page_tokens) as usize
             + draft_page;
-        let need_system = spec
-            .system_boundary
-            .is_some_and(|n| n as u64 > prefix.consumed_tokens);
-        let need_prompt = spec.prompt.len() as u64 > prefix.consumed_tokens
+        let need_system = spec.system_boundary.is_some_and(|n| n as u64 > consumed);
+        let need_prompt = spec.prompt.len() as u64 > consumed
             && spec.system_boundary != Some(spec.prompt.len())
             && spec.max_new_tokens > 1;
+        let (ticket_pages, ticket_snapshots) = match &inbound {
+            Some(inbound) if creating => (inbound.pages, 1),
+            _ => (0, 0),
+        };
         let execution_rows = self
             .speculative_catalog
             .iter()
@@ -646,13 +772,50 @@ impl RequestScheduler {
             .max()
             .unwrap_or(1);
         if let Err(error) = self.ensure_resources(
-            reserved_count,
-            1 + usize::from(need_system) + usize::from(need_prompt),
+            reserved_count + ticket_pages,
+            1 + usize::from(need_system) + usize::from(need_prompt) + ticket_snapshots,
         ) {
-            if let Some(id) = prefix.checkpoint {
+            if let Some(id) = pinned {
                 self.cache.unpin(id)?;
             }
             return Err(error);
+        }
+        let generation = self.slots[slot].generation + 1;
+        let handle = RequestHandle {
+            slot: slot as u32,
+            generation,
+        };
+        let mut ticket = None;
+        if let Some(inbound) = &inbound {
+            if creating {
+                let pages: Vec<_> = (0..inbound.pages)
+                    .map(|_| self.free_pages.pop_first().unwrap())
+                    .collect();
+                let snapshot = self.free_snapshots.pop_first().unwrap();
+                self.tickets.insert(
+                    inbound.key,
+                    Ticket {
+                        parent: lookup.checkpoint,
+                        pages: pages.clone(),
+                        snapshot,
+                        history: history.clone(),
+                        waiters: vec![handle],
+                    },
+                );
+                ticket = Some(InboundTicket {
+                    key: inbound.key,
+                    pages,
+                    slot: self.snapshot_slot(snapshot),
+                });
+            } else {
+                self.tickets
+                    .get_mut(&inbound.key)
+                    .unwrap()
+                    .waiters
+                    .push(handle);
+            }
+            self.stats.host_hits += 1;
+            self.stats.host_reused_tokens += consumed - lookup.consumed_tokens;
         }
         let terminal_snapshot = self.free_snapshots.pop_first().unwrap();
         let system_snapshot = need_system.then(|| self.free_snapshots.pop_first().unwrap());
@@ -661,22 +824,25 @@ impl RequestScheduler {
             .map(|_| self.free_pages.pop_first().unwrap())
             .rev()
             .collect();
-        let generation = self.slots[slot].generation + 1;
-        let handle = RequestHandle {
-            slot: slot as u32,
-            generation,
+        let (phase, prefix, prefix_snapshot, shared_pages) = if inbound.is_some() {
+            (RequestPhase::Inbound, None, None, Vec::new())
+        } else if lookup.checkpoint.is_some() {
+            (
+                RequestPhase::Restore,
+                lookup.checkpoint,
+                lookup.snapshot,
+                lookup.pages,
+            )
+        } else {
+            (RequestPhase::Initialize, None, None, Vec::new())
         };
         self.slots[slot].generation = generation;
         self.slots[slot].request = Some(LiveRequest {
             handle,
             state_slot: StateSlotId((1 + slot * execution_rows) as u32),
             terminal_snapshot,
-            phase: if prefix.checkpoint.is_some() {
-                RequestPhase::Restore
-            } else {
-                RequestPhase::Initialize
-            },
-            consumed_tokens: prefix.consumed_tokens,
+            phase,
+            consumed_tokens: consumed,
             generated_tokens: 0,
             prompt_tokens: spec.prompt.len(),
             grammar_constrained: spec.grammar_constrained,
@@ -686,25 +852,176 @@ impl RequestScheduler {
             copy_proposal: None,
             history,
             tokens: spec.prompt,
-            prefix: prefix.checkpoint,
-            prefix_tokens: prefix.consumed_tokens,
-            admission_reused_tokens: prefix.consumed_tokens,
+            prefix,
+            prefix_tokens: consumed,
+            admission_reused_tokens: consumed,
             system_boundary: spec.system_boundary,
             system_snapshot,
             prompt_snapshot,
             boundary_capture: None,
-            prefix_snapshot: prefix.snapshot,
-            shared_pages: prefix.pages,
+            prefix_snapshot,
+            shared_pages,
             private_pages: Vec::new(),
             reserved_pages,
             max_new_tokens: spec.max_new_tokens,
-            scheduled_consumed: prefix.consumed_tokens,
+            scheduled_consumed: consumed,
             last_use: Fence(0),
             pending: 0,
             terminal_snapshot_ready: false,
             vision_patches: VecDeque::new(),
         });
-        Ok(handle)
+        Ok(Admitted { handle, ticket })
+    }
+
+    /// Completes the restore for `key`.
+    ///
+    /// On success the ticket's pages and snapshot become a GPU checkpoint under
+    /// the ticket's ancestor, ready at the completed fence, or return to the free
+    /// lists when the cache already holds that key; every waiter is pinned to the
+    /// resulting checkpoint and proceeds through `Restore` as a GPU prefix hit,
+    /// and the returned list is empty. On failure the ticket's resources return
+    /// to the free lists and every waiter is retired immediately, as a cancelled
+    /// request that never executed; the returned handles identify them so the
+    /// caller can admit them again.
+    pub fn finish_inbound(&mut self, key: PrefixKey, success: bool) -> Result<Vec<RequestHandle>> {
+        let ticket = self
+            .tickets
+            .remove(&key)
+            .ok_or("no inbound restore is in flight for the supplied prefix key")?;
+        if !success {
+            return self.fail_ticket(ticket);
+        }
+        let proposal = Publication {
+            parent: ticket.parent,
+            consumed_tokens: key.consumed_tokens,
+            tail_pages: ticket.pages.clone(),
+            snapshot: StateSnapshot {
+                id: ticket.snapshot,
+                consumed_tokens: key.consumed_tokens,
+            },
+            ready_after: self.completed,
+        };
+        let result = match self.cache.publish(&ticket.history, &proposal) {
+            Ok(result) => result,
+            Err(error) => {
+                self.fail_ticket(ticket)?;
+                return Err(error);
+            }
+        };
+        let (id, ready) = match result {
+            PublishResult::Created { id, ready } => (id, ready),
+            PublishResult::Existing { id, ready } => {
+                self.free_pages.extend(ticket.pages.iter().copied());
+                self.free_snapshots.insert(ticket.snapshot);
+                (id, ready)
+            }
+        };
+        if let Some(parent) = ticket.parent {
+            self.cache.unpin(parent)?;
+        }
+        if !ready {
+            // The checkpoint becomes ready at a later fence; the waiters are
+            // re-admitted rather than left waiting without a ticket.
+            for handle in &ticket.waiters {
+                self.retire(*handle, false)?;
+            }
+            return Ok(ticket.waiters);
+        }
+        if matches!(result, PublishResult::Created { .. }) {
+            self.stats.snapshot_publications += 1;
+            self.record_publication(id);
+        }
+        let snapshot = self.cache.checkpoint(id)?.snapshot();
+        let shared_pages = self.cache.page_chain(id)?;
+        for handle in ticket.waiters {
+            self.request(handle)?;
+            self.cache.pin(id)?;
+            let request = self.request_mut(handle)?;
+            request.prefix = Some(id);
+            request.prefix_tokens = key.consumed_tokens;
+            request.prefix_snapshot = Some(snapshot);
+            request.shared_pages = shared_pages.clone();
+            request.phase = RequestPhase::Restore;
+        }
+        Ok(Vec::new())
+    }
+
+    fn fail_ticket(&mut self, ticket: Ticket) -> Result<Vec<RequestHandle>> {
+        self.free_pages.extend(ticket.pages);
+        self.free_snapshots.insert(ticket.snapshot);
+        if let Some(parent) = ticket.parent {
+            self.cache.unpin(parent)?;
+        }
+        for handle in &ticket.waiters {
+            self.retire(*handle, false)?;
+        }
+        Ok(ticket.waiters)
+    }
+
+    /// Queue GPU-ready checkpoint notifications for an attached host store.
+    pub fn enable_publications(&mut self) {
+        self.track_publications = true;
+    }
+
+    /// Checkpoints that became GPU-ready since tracking was enabled or the
+    /// previous call, in that order and each once, omitting retired checkpoints.
+    pub fn take_publications(&mut self) -> Vec<PublishedCheckpoint> {
+        std::mem::take(&mut self.publications)
+            .into_iter()
+            .filter_map(|id| self.publication(id))
+            .collect()
+    }
+
+    fn publication(&self, id: CheckpointId) -> Option<PublishedCheckpoint> {
+        let checkpoint = self.cache.checkpoint(id).ok()?;
+        let parent = match checkpoint.parent() {
+            Some(parent) => Some(self.cache.checkpoint(parent).ok()?.prefix()),
+            None => None,
+        };
+        Some(PublishedCheckpoint {
+            id,
+            key: checkpoint.prefix(),
+            parent,
+            bucket: checkpoint.bucket(),
+            chain_pages: self.cache.page_chain(id).ok()?,
+            tail_pages: checkpoint.tail_pages().len(),
+            slot: self.snapshot_slot(checkpoint.snapshot()),
+        })
+    }
+
+    fn record_publication(&mut self, id: CheckpointId) {
+        if !self.track_publications {
+            return;
+        }
+        // Bound queued notifications when the store delays draining them.
+        if self.publications.len() >= 2 * self.limits.snapshots as usize {
+            self.publications
+                .retain(|id| self.cache.checkpoint(*id).is_ok());
+        }
+        self.publications.push(id);
+    }
+
+    fn apply_completion(&mut self, update: CompletionUpdate) {
+        self.stats.snapshot_publications += update.published.len() as u64;
+        for id in update.published {
+            self.record_publication(id);
+        }
+        self.free_pages.extend(update.reusable.pages);
+        self.free_snapshots.extend(update.reusable.snapshots);
+    }
+
+    /// Pins a GPU-ready checkpoint for the worker's copy-out; eviction and
+    /// compaction skip it until `unpin_checkpoint`.
+    pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<()> {
+        self.cache.pin(id)
+    }
+
+    pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<()> {
+        self.cache.unpin(id)
+    }
+
+    pub fn record_host_lookup(&mut self) {
+        self.stats.host_lookups += 1;
     }
 
     pub fn set_vision_images(&mut self, handle: RequestHandle, patches: &[usize]) -> Result<()> {
@@ -1173,6 +1490,7 @@ impl RequestScheduler {
             if !ready {
                 return Err("completed boundary copy was not GPU-ready".into());
             }
+            self.record_publication(id);
             self.cache.pin(id)?;
             if let Some(parent) = self.request(handle)?.prefix {
                 self.cache.unpin(parent)?;
@@ -1210,10 +1528,7 @@ impl RequestScheduler {
 
     fn advance_retirement(&mut self, fence: Fence) -> Result<()> {
         let update = self.cache.advance_completed(fence)?;
-        self.stats.snapshot_publications += update.published.len() as u64;
-        let reusable = update.reusable;
-        self.free_pages.extend(reusable.pages);
-        self.free_snapshots.extend(reusable.snapshots);
+        self.apply_completion(update);
         self.completed = fence;
         let mut waiting = Vec::new();
         for retired in self.retired.drain(..) {
@@ -1246,9 +1561,14 @@ impl RequestScheduler {
 
     /// Releases live ownership after the executor confirms both streams drained.
     /// Unconfirmed shutdown leaves every live resource and pending fence intact.
+    /// Inbound tickets are dropped with their resources; the host store has
+    /// drained its transfers before this point.
     pub fn release_after_shutdown(&mut self, shutdown: &Shutdown) -> Result<()> {
         if !shutdown.drained {
             return Err("cannot release request resources before confirmed CUDA drain".into());
+        }
+        for ticket in std::mem::take(&mut self.tickets).into_values() {
+            self.fail_ticket(ticket)?;
         }
         let handles: Vec<_> = self
             .slots
@@ -1263,6 +1583,11 @@ impl RequestScheduler {
     }
 
     fn retire(&mut self, handle: RequestHandle, publish: bool) -> Result<Option<CheckpointId>> {
+        if self.request(handle)?.phase == RequestPhase::Inbound {
+            for ticket in self.tickets.values_mut() {
+                ticket.waiters.retain(|waiter| *waiter != handle);
+            }
+        }
         let request = self.request(handle)?;
         let publication = (publish && request.terminal_snapshot_ready).then(|| Publication {
             parent: request.prefix,
@@ -1287,8 +1612,9 @@ impl RequestScheduler {
         let mut request = self.slots[handle.slot as usize].request.take().unwrap();
         let mut snapshot = Some(request.terminal_snapshot);
         if matches!(result, Some(PublishResult::Created { .. })) {
-            if matches!(result, Some(PublishResult::Created { ready: true, .. })) {
+            if let Some(PublishResult::Created { id, ready: true }) = result {
                 self.stats.snapshot_publications += 1;
+                self.record_publication(id);
             }
             request
                 .private_pages

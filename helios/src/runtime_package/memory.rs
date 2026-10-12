@@ -4,7 +4,11 @@ use super::{
     NativeModel,
     format::{Package, invalid},
 };
-use crate::{Result, startup::StartupProgress};
+use crate::{
+    Result,
+    offload::{CacheGeometry, Plane},
+    startup::StartupProgress,
+};
 
 // Graphs are uploaded before sizing caches; leave room for driver bookkeeping
 // and the execution streams and events created when the server starts.
@@ -173,6 +177,15 @@ impl NativeModel {
         }
         let (rows, pages, snapshots) =
             capacities(packages, &available, active as u64, width, page_tokens)?;
+        // Scheduler page ids count the model contract's tokens per page, which
+        // exceeds the physical page when pages are sharded across ranks.
+        let logical_page_tokens = self.server_config["model_contract"]["page_tokens"]
+            .as_u64()
+            .unwrap_or(page_tokens);
+        let geometry = packages
+            .iter()
+            .map(|package| cache_geometry(package, logical_page_tokens, rows, pages))
+            .collect::<Result<Vec<_>>>()?;
         let mut gpu_bytes = 0;
         for package in packages.iter_mut() {
             for allocation in &mut package.allocations {
@@ -196,7 +209,8 @@ impl NativeModel {
             pool.nbytes = rows * pool.shape[1];
         }
         let phase = progress.phase("Allocate cache", Some(gpu_bytes));
-        for (rank, package) in self.ranks.iter_mut().zip(packages) {
+        for ((rank, package), geometry) in self.ranks.iter_mut().zip(packages).zip(geometry) {
+            rank.cache = Some(geometry);
             unsafe {
                 rank.allocate(package, &phase)?;
                 let binding = package
@@ -231,6 +245,48 @@ impl NativeModel {
         ));
         Ok(())
     }
+}
+
+/// The row plane and page planes of one rank in package order, read before
+/// the sizing records are consumed. Peer allocations never carry sizing.
+fn cache_geometry(
+    package: &Package,
+    page_tokens: u64,
+    rows: u64,
+    pages: u64,
+) -> Result<CacheGeometry> {
+    let mut row = None;
+    let mut planes = Vec::new();
+    for allocation in &package.allocations {
+        let Some(sizing) = allocation.sizing.as_ref() else {
+            continue;
+        };
+        let plane = Plane {
+            name: allocation.name.clone(),
+            address: allocation
+                .address
+                .ok_or_else(|| invalid("runtime-sized allocation lacks an address"))?,
+            unit_bytes: sizing.unit_bytes,
+        };
+        if sizing.capacity == 0 {
+            if row.replace(plane).is_some() {
+                return Err(invalid(
+                    "rank declares more than one continuation-row allocation",
+                ));
+            }
+        } else {
+            planes.push(plane);
+        }
+    }
+    let geometry = CacheGeometry {
+        page_tokens,
+        page_capacity: pages,
+        row_capacity: rows,
+        row: row.ok_or_else(|| invalid("rank lacks a continuation-row allocation"))?,
+        planes,
+    };
+    geometry.validate()?;
+    Ok(geometry)
 }
 
 #[cfg(test)]
@@ -292,6 +348,74 @@ mod tests {
             })
             .collect(),
         }
+    }
+
+    #[test]
+    fn cache_geometry_lists_planes_in_package_order_and_skips_peers() {
+        let mut p = package(100 << 20, 2 << 20, 100000);
+        p.allocations.push(Allocation {
+            name: "kv-draft".into(),
+            nbytes: 0,
+            alignment: 65536,
+            file: None,
+            data_spans: vec![],
+            relocations: vec![],
+            address: Some(0x300000000000),
+            memory: Memory::Device,
+            sizing: Some(Sizing {
+                capacity: 1,
+                unit_bytes: 4096,
+                maximum: 100000,
+            }),
+        });
+        p.allocations.push(Allocation {
+            name: "peer-0".into(),
+            nbytes: 1 << 20,
+            alignment: 65536,
+            file: None,
+            data_spans: vec![],
+            relocations: vec![],
+            address: Some(0x400000000000),
+            memory: Memory::Peer,
+            sizing: None,
+        });
+        let geometry = cache_geometry(&p, 256, 40, 5000).unwrap();
+        assert_eq!(geometry.page_tokens, 256);
+        assert_eq!((geometry.row_capacity, geometry.page_capacity), (40, 5000));
+        assert_eq!(geometry.row.name, "state");
+        assert_eq!(geometry.row.unit_bytes, 100 << 20);
+        assert_eq!(
+            geometry
+                .planes
+                .iter()
+                .map(|plane| (plane.name.as_str(), plane.unit_bytes))
+                .collect::<Vec<_>>(),
+            [("kv", 2 << 20), ("kv-draft", 4096)]
+        );
+        assert_eq!(geometry.planes[1].address, 0x300000000000);
+        let mut options = package(4096, 4096, 16);
+        assert_eq!(
+            crate::offload::geometry::fingerprint(&[cache_geometry(&options, 64, 8, 16).unwrap()]),
+            crate::offload::geometry::fingerprint(
+                &[cache_geometry(&options, 64, 80, 160).unwrap()]
+            )
+        );
+        options.allocations.push(Allocation {
+            name: "state-2".into(),
+            nbytes: 0,
+            alignment: 65536,
+            file: None,
+            data_spans: vec![],
+            relocations: vec![],
+            address: Some(0x500000000000),
+            memory: Memory::Device,
+            sizing: Some(Sizing {
+                capacity: 0,
+                unit_bytes: 4096,
+                maximum: 16,
+            }),
+        });
+        assert!(cache_geometry(&options, 64, 8, 16).is_err());
     }
 
     #[test]

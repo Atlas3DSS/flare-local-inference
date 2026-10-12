@@ -15,6 +15,7 @@ pub struct LoadOptions {
     pub adaptive_verification: Option<bool>,
     /// User-visible ordinals when the launcher renumbers CUDA devices.
     pub device_labels: Option<Vec<i32>>,
+    pub prefix_cache: crate::offload::PrefixCacheOffload,
 }
 
 impl LoadOptions {
@@ -414,6 +415,88 @@ mod tests {
 
     fn config() -> Value {
         serde_json::json!({"speculative_widths": [1,2,3,4,5,6], "speculative_fixed_width": null})
+    }
+
+    #[test]
+    fn offload_identity_separates_selected_state_without_fragmenting_compatible_limits() {
+        let mut identities = HashMap::new();
+        for source in ["mtp", "copy"] {
+            for concurrency in 1..=4 {
+                for drafts in 0..=5 {
+                    for adaptive in [false, true] {
+                        let mut package = package();
+                        for graph in &mut package.execution.as_mut().unwrap().graphs {
+                            if graph.kind == "speculative" {
+                                graph.draft_source = if source == "mtp" { 1 } else { 2 };
+                            }
+                        }
+                        let mut config = config();
+                        config["identity"] = "01".repeat(32).into();
+                        config["speculative_proposal_source"] = source.into();
+                        LoadOptions {
+                            max_concurrency: Some(concurrency),
+                            mtp_draft_tokens: Some(drafts),
+                            adaptive_verification: Some(adaptive),
+                            ..Default::default()
+                        }
+                        .select(std::slice::from_mut(&mut package), &mut config)
+                        .unwrap();
+                        let identity = super::super::model::offload_identity(&config).unwrap();
+                        assert_ne!(identity, [1; 32]);
+                        let state = if drafts == 0 { "ordinary" } else { source };
+                        assert_eq!(*identities.entry(state).or_insert(identity), identity);
+                    }
+                }
+            }
+        }
+        assert_eq!(identities.values().collect::<HashSet<_>>().len(), 3);
+
+        let mut config = config();
+        config["identity"] = "01".repeat(32).into();
+        config["speculative_fixed_width"] = 1.into();
+        LoadOptions::default()
+            .select(&mut [package()], &mut config)
+            .unwrap();
+        assert_eq!(
+            super::super::model::offload_identity(&config).unwrap(),
+            identities["ordinary"]
+        );
+        config["identity"] = "02".repeat(32).into();
+        assert_ne!(
+            super::super::model::offload_identity(&config).unwrap(),
+            identities["ordinary"]
+        );
+    }
+
+    #[test]
+    fn offload_identity_respects_default_proposals_and_overridden_fixed_policy() {
+        let mut adaptive_config = config();
+        adaptive_config["identity"] = "ab".repeat(32).into();
+        LoadOptions::default()
+            .select(&mut [package()], &mut adaptive_config)
+            .unwrap();
+        let speculative = super::super::model::offload_identity(&adaptive_config).unwrap();
+        adaptive_config["speculative_proposal_source"] = "mtp".into();
+        adaptive_config["identity"] = "AB".repeat(32).into();
+        assert_eq!(
+            super::super::model::offload_identity(&adaptive_config).unwrap(),
+            speculative
+        );
+        for adaptive in [None, Some(false), Some(true)] {
+            let mut config = config();
+            config["identity"] = "ab".repeat(32).into();
+            config["speculative_fixed_width"] = 1.into();
+            LoadOptions {
+                adaptive_verification: adaptive,
+                ..Default::default()
+            }
+            .select(&mut [package()], &mut config)
+            .unwrap();
+            assert_eq!(
+                super::super::model::offload_identity(&config).unwrap() == speculative,
+                adaptive == Some(true)
+            );
+        }
     }
 
     #[test]

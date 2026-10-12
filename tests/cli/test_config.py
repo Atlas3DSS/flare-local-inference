@@ -55,6 +55,18 @@ max_concurrency = 2
     assert configuration.max_concurrency("qwen3.8-flash", 4, 9) == Setting(9, "flag")
 
 
+def test_prefix_cache_settings_validate_and_forward(tmp_path):
+    configuration = load(tmp_path, "[prefix_cache]\nmemory = \"4G\"\ndisk_transport = \"direct\"\n")
+    assert configuration.get("prefix_cache.memory") == Setting("4G", "[prefix_cache]")
+    assert configuration.directory("prefix_cache") is None
+    assert configuration.prefix_cache_flags() == ["--prefix-cache-memory", "4G", "--prefix-cache-disk-transport", "direct"]
+    assert load(tmp_path, "").prefix_cache_flags() == []
+    with pytest.raises(UsageError, match="prefix_cache disk_limit"):
+        load(tmp_path, "[prefix_cache]\ndisk_limit = \"lots\"\n")
+    with pytest.raises(UsageError, match="disk_transport"):
+        load(tmp_path, "[prefix_cache]\ndisk_transport = \"nvme\"\n")
+
+
 def test_recipe_supplies_concurrency_when_the_file_is_silent(tmp_path):
     configuration = load(tmp_path, "[server]\nport = 8001\n")
     assert configuration.max_concurrency("qwen3.8-flash", 4) == Setting(4, "recipe")

@@ -143,6 +143,8 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
     }
     ExecutionManifest {
         engram: None,
+        cache: None,
+        offload: None,
         abi_version: if speculative {
             crate::execution::SPECULATIVE_ABI_VERSION
         } else {

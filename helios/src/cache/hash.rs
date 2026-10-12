@@ -3,7 +3,8 @@ use blake2::{Blake2b, Digest};
 
 use crate::Result;
 
-const HASH_BLOCK_TOKENS: usize = 64;
+/// Tokens per hash block; aligned boundaries and bucket digests use this unit.
+pub const HASH_BLOCK_TOKENS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PrefixKey {
@@ -95,6 +96,13 @@ impl PrefixHistory {
 
     pub fn aligned_boundaries(&self) -> &[PrefixKey] {
         &self.boundaries[1..]
+    }
+
+    /// Digest of the aligned boundary at or below `consumed_tokens`, which keys
+    /// every endpoint inside that hash block in host-store buckets.
+    pub fn bucket_at(&self, consumed_tokens: u64) -> Option<[u8; 16]> {
+        let aligned = consumed_tokens - consumed_tokens % HASH_BLOCK_TOKENS as u64;
+        self.key_at(aligned).map(|key| key.digest)
     }
 
     pub fn append(&mut self, tokens: &[u32], events: &[ConditioningEvent]) -> Result<()> {

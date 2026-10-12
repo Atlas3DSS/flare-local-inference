@@ -1460,3 +1460,848 @@ fn prefill_capacities_step_after_doubling_and_end_at_the_chunk() {
         ]
     );
 }
+
+fn history(tokens: usize) -> PrefixHistory {
+    let mut history = PrefixHistory::new([9; 32]);
+    history
+        .append(&(0..tokens as u32).collect::<Vec<_>>(), &[])
+        .unwrap();
+    history
+}
+fn free(scheduler: &RequestScheduler) -> (usize, usize) {
+    (scheduler.free_page_count(), scheduler.free_snapshot_count())
+}
+fn host_scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
+    let mut scheduler = scheduler(active, pages, snapshots);
+    scheduler.enable_publications();
+    scheduler
+}
+fn inbound(scheduler: &mut RequestScheduler, spec: RequestSpec, consumed: u64) -> Admitted {
+    let plan = scheduler.plan_admission(&spec).unwrap();
+    let key = plan.history().key_at(consumed).unwrap();
+    let pages = (consumed / 64 - plan.resident_tokens() / 64) as usize;
+    scheduler
+        .admit_planned(
+            spec,
+            plan,
+            Some(InboundRequest {
+                key,
+                consumed_tokens: consumed,
+                pages,
+            }),
+        )
+        .unwrap()
+}
+/// Publishes a 64-token prompt as a terminal checkpoint through the ordinary path.
+fn seed_checkpoint(scheduler: &mut RequestScheduler, fence: u64) -> CheckpointId {
+    let seed = scheduler.admit(spec(64, 1)).unwrap();
+    init(scheduler, fence);
+    let step = scheduler.next_step().unwrap();
+    scheduler
+        .record_submission(&step, Fence(fence + 1))
+        .unwrap();
+    scheduler
+        .complete(Fence(fence + 1), &records(seed, fence + 1, 64, 1, 88, 2))
+        .unwrap();
+    freeze(scheduler, seed, fence + 2);
+    scheduler.finish(seed).unwrap().unwrap()
+}
+
+#[test]
+fn disabled_publication_tracking_keeps_gpu_reuse_without_allocating_a_notification_queue() {
+    let mut scheduler = scheduler(1, 4, 2);
+    for round in 0..32 {
+        let checkpoint = seed_checkpoint(&mut scheduler, round * 3 + 1);
+        assert_eq!(scheduler.stats().snapshot_publications, round + 1);
+        assert_eq!(scheduler.publications.capacity(), 0);
+        assert!(scheduler.take_publications().is_empty());
+        let hit = scheduler.admit(spec(64, 2)).unwrap();
+        let request = scheduler.request(hit).unwrap();
+        assert_eq!(request.phase, RequestPhase::Restore);
+        assert_eq!(request.prefix(), Some(checkpoint));
+        assert_eq!(request.reused_prompt_tokens(), 64);
+        scheduler.cancel(hit).unwrap();
+        scheduler.ensure_resources(4, 2).unwrap();
+        assert_eq!(free(&scheduler), (4, 2));
+        assert_eq!(scheduler.stats().snapshot_evictions, round + 1);
+    }
+    let stats = scheduler.stats();
+    assert_eq!((stats.cache_hits, stats.reused_tokens), (32, 32 * 64));
+    assert_eq!(
+        (
+            stats.host_lookups,
+            stats.host_hits,
+            stats.host_reused_tokens
+        ),
+        (0, 0, 0)
+    );
+    assert!(scheduler.tickets.is_empty());
+    assert_eq!(scheduler.tickets.capacity(), 0);
+}
+
+#[test]
+fn inbound_request_waits_unscheduled_then_restores_like_a_gpu_prefix_hit() {
+    let mut scheduler = host_scheduler(2, 8, 4);
+    let admitted = inbound(&mut scheduler, spec(65, 2), 64);
+    let handle = admitted.handle;
+    let ticket = admitted.ticket.unwrap();
+    let key = history(65).key_at(64).unwrap();
+    assert_eq!(ticket.key, key);
+    assert_eq!(ticket.pages.len(), 1);
+    assert_eq!(ticket.slot, scheduler.snapshot_slot(SnapshotId(0)));
+    let request = scheduler.request(handle).unwrap();
+    assert_eq!(request.phase, RequestPhase::Inbound);
+    assert_eq!(request.consumed_tokens, 64);
+    assert_eq!(request.reused_prompt_tokens(), 64);
+    assert!(request.prefix().is_none());
+    assert!(request.prefix_snapshot().is_none());
+    assert_eq!(request.pages().count(), 0);
+    assert!(scheduler.next_step().is_none());
+    let stats = scheduler.stats();
+    assert_eq!(
+        (
+            stats.active_requests,
+            stats.inbound_waiting,
+            stats.free_slots
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        (stats.cache_lookups, stats.cache_hits, stats.reused_tokens),
+        (1, 0, 0)
+    );
+    assert_eq!((stats.host_hits, stats.host_reused_tokens), (1, 64));
+    // The ticket holds one page and one snapshot; the request holds one reserved
+    // page with its terminal and prompt snapshots.
+    assert_eq!(free(&scheduler), (6, 1));
+    assert!(scheduler.take_publications().is_empty());
+
+    assert!(scheduler.finish_inbound(key, true).unwrap().is_empty());
+    let request = scheduler.request(handle).unwrap();
+    assert_eq!(request.phase, RequestPhase::Restore);
+    let restored = request.prefix().unwrap();
+    assert_eq!(
+        request
+            .prefix_snapshot()
+            .map(|s| scheduler.snapshot_slot(s)),
+        Some(ticket.slot)
+    );
+    assert_eq!(request.pages().collect::<Vec<_>>(), ticket.pages);
+    assert_eq!(request.consumed_tokens, 64);
+    assert_eq!(request.reused_prompt_tokens(), 64);
+    let checkpoint = scheduler.cache().checkpoint(restored).unwrap();
+    assert_eq!(checkpoint.prefix(), key);
+    assert!(checkpoint.ready());
+    assert_eq!(checkpoint.tail_pages(), &ticket.pages[..]);
+    assert_eq!(checkpoint.pin_count(), 1);
+    let stats = scheduler.stats();
+    assert_eq!(
+        (
+            stats.inbound_waiting,
+            stats.snapshot_publications,
+            stats.cached_checkpoints
+        ),
+        (0, 1, 1)
+    );
+    assert_eq!(free(&scheduler), (6, 1));
+    assert_eq!(
+        scheduler.take_publications(),
+        vec![PublishedCheckpoint {
+            id: restored,
+            key,
+            parent: None,
+            bucket: key.digest,
+            chain_pages: ticket.pages.clone(),
+            tail_pages: 1,
+            slot: ticket.slot,
+        }]
+    );
+    assert!(scheduler.take_publications().is_empty());
+
+    init(&mut scheduler, 1);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(
+        (
+            step.kind,
+            step.lanes[0].start_position,
+            step.lanes[0].tokens
+        ),
+        (GraphKind::Prefill, 64, 1)
+    );
+    scheduler.record_submission(&step, Fence(2)).unwrap();
+    scheduler
+        .complete(Fence(2), &records(handle, 2, 65, 1, 77, 1))
+        .unwrap();
+    retain_prompt(&mut scheduler, 3);
+    assert_eq!(
+        scheduler.request(handle).unwrap().phase,
+        RequestPhase::Decode
+    );
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(step.kind, GraphKind::Decode);
+    scheduler.record_submission(&step, Fence(4)).unwrap();
+    scheduler
+        .complete(Fence(4), &records(handle, 4, 66, 2, 78, 2))
+        .unwrap();
+    freeze(&mut scheduler, handle, 5);
+    let terminal = scheduler.finish(handle).unwrap().unwrap();
+    let published = scheduler.take_publications();
+    assert_eq!(published.len(), 2);
+    let prompt = &published[0];
+    assert_eq!(prompt.key, history(65).key_at(65).unwrap());
+    assert_eq!(prompt.parent, Some(key));
+    assert_eq!(prompt.bucket, key.digest);
+    assert_eq!(prompt.chain_pages, ticket.pages);
+    assert_eq!(prompt.tail_pages, 0);
+    assert_eq!(prompt.slot, scheduler.snapshot_slot(SnapshotId(2)));
+    let end = &published[1];
+    assert_eq!(end.id, terminal);
+    assert_eq!(
+        end.key,
+        scheduler.cache().checkpoint(terminal).unwrap().prefix()
+    );
+    assert_eq!(end.key.consumed_tokens, 66);
+    assert_eq!(end.parent, Some(prompt.key));
+    assert_eq!(end.bucket, key.digest);
+    assert_eq!(end.chain_pages, ticket.pages);
+    assert_eq!(end.tail_pages, 0);
+    assert_eq!(end.slot, scheduler.snapshot_slot(SnapshotId(1)));
+    // Three checkpoints own one page and three snapshots; evicting them frees every id.
+    assert_eq!(free(&scheduler), (7, 1));
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+    assert!(scheduler.take_publications().is_empty());
+}
+
+#[test]
+fn inbound_full_prompt_hit_resumes_without_prefill() {
+    let mut scheduler = host_scheduler(1, 4, 2);
+    let admitted = inbound(&mut scheduler, spec(64, 2), 64);
+    let handle = admitted.handle;
+    let ticket = admitted.ticket.unwrap();
+    assert!(scheduler.request(handle).unwrap().prompt_snapshot.is_none());
+    assert_eq!(free(&scheduler), (2, 0));
+    scheduler.finish_inbound(ticket.key, true).unwrap();
+    let restored = scheduler.request(handle).unwrap().prefix().unwrap();
+    init(&mut scheduler, 1);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(
+        (step.kind, step.lanes[0].start_position),
+        (GraphKind::Resume, 64)
+    );
+    scheduler.record_submission(&step, Fence(2)).unwrap();
+    scheduler
+        .complete(Fence(2), &records(handle, 2, 64, 1, 77, 1))
+        .unwrap();
+    assert_eq!(
+        scheduler.request(handle).unwrap().phase,
+        RequestPhase::Decode
+    );
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(step.kind, GraphKind::Decode);
+    scheduler.record_submission(&step, Fence(3)).unwrap();
+    scheduler
+        .complete(Fence(3), &records(handle, 3, 65, 2, 78, 2))
+        .unwrap();
+    freeze(&mut scheduler, handle, 4);
+    let terminal = scheduler.finish(handle).unwrap().unwrap();
+    assert_eq!(
+        scheduler
+            .take_publications()
+            .iter()
+            .map(|p| (p.id, p.parent, p.tail_pages, p.chain_pages.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (restored, None, 1, ticket.pages.clone()),
+            (terminal, Some(ticket.key), 0, ticket.pages.clone())
+        ]
+    );
+    assert_eq!(free(&scheduler), (3, 0));
+    scheduler.ensure_resources(4, 2).unwrap();
+    assert_eq!(free(&scheduler), (4, 2));
+}
+
+#[test]
+fn inbound_restore_above_a_resident_checkpoint_pins_the_ancestor_until_completion() {
+    let mut scheduler = host_scheduler(2, 8, 4);
+    let ancestor = seed_checkpoint(&mut scheduler, 1);
+    let ancestor_key = history(64).key_at(64).unwrap();
+    let ancestor_pages = scheduler.cache().page_chain(ancestor).unwrap();
+    assert_eq!(
+        scheduler
+            .take_publications()
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>(),
+        [ancestor]
+    );
+    assert_eq!(free(&scheduler), (7, 3));
+    let request = spec(130, 2);
+    let plan = scheduler.plan_admission(&request).unwrap();
+    assert_eq!(plan.resident_tokens(), 64);
+    let key = plan.history().key_at(128).unwrap();
+    let admitted = scheduler
+        .admit_planned(
+            request,
+            plan,
+            Some(InboundRequest {
+                key,
+                consumed_tokens: 128,
+                pages: 1,
+            }),
+        )
+        .unwrap();
+    let handle = admitted.handle;
+    let ticket = admitted.ticket.unwrap();
+    assert_eq!(ticket.pages.len(), 1);
+    let stats = scheduler.stats();
+    assert_eq!(
+        (stats.cache_lookups, stats.cache_hits, stats.reused_tokens),
+        (2, 1, 64)
+    );
+    assert_eq!((stats.host_hits, stats.host_reused_tokens), (1, 64));
+    // Ticket: one page and one snapshot. Request: one page beyond the two
+    // complete pages, with terminal and prompt snapshots.
+    assert_eq!(free(&scheduler), (5, 0));
+    assert_eq!(
+        scheduler.cache().checkpoint(ancestor).unwrap().pin_count(),
+        1
+    );
+    assert!(scheduler.ensure_resources(8, 4).is_err());
+    assert!(scheduler.cache().checkpoint(ancestor).is_ok());
+    assert_eq!(scheduler.stats().snapshot_evictions, 0);
+    assert_eq!(free(&scheduler), (5, 0));
+
+    scheduler.finish_inbound(key, true).unwrap();
+    let request = scheduler.request(handle).unwrap();
+    let restored = request.prefix().unwrap();
+    let mut chain = ancestor_pages.clone();
+    chain.extend(&ticket.pages);
+    assert_eq!(request.pages().collect::<Vec<_>>(), chain);
+    assert_eq!(request.consumed_tokens, 128);
+    assert_eq!(request.reused_prompt_tokens(), 128);
+    assert_eq!(request.phase, RequestPhase::Restore);
+    let checkpoint = scheduler.cache().checkpoint(restored).unwrap();
+    assert_eq!(checkpoint.parent(), Some(ancestor));
+    assert_eq!(checkpoint.tail_pages(), &ticket.pages[..]);
+    assert_eq!(checkpoint.pin_count(), 1);
+    // The ticket's pin is released; the waiter's pin on the child reaches the ancestor.
+    assert_eq!(
+        scheduler.cache().checkpoint(ancestor).unwrap().pin_count(),
+        1
+    );
+    assert_eq!(
+        scheduler.take_publications(),
+        vec![PublishedCheckpoint {
+            id: restored,
+            key,
+            parent: Some(ancestor_key),
+            bucket: key.digest,
+            chain_pages: chain.clone(),
+            tail_pages: 1,
+            slot: ticket.slot,
+        }]
+    );
+    init(&mut scheduler, 4);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(
+        (
+            step.kind,
+            step.lanes[0].start_position,
+            step.lanes[0].tokens
+        ),
+        (GraphKind::Prefill, 128, 2)
+    );
+    scheduler.record_submission(&step, Fence(5)).unwrap();
+    scheduler
+        .complete(Fence(5), &records(handle, 5, 130, 1, 77, 1))
+        .unwrap();
+    retain_prompt(&mut scheduler, 6);
+    let published = scheduler.take_publications();
+    assert_eq!(published.len(), 1);
+    assert_eq!(
+        (
+            published[0].key,
+            published[0].parent,
+            published[0].bucket,
+            published[0].tail_pages,
+            &published[0].chain_pages
+        ),
+        (
+            history(130).key_at(130).unwrap(),
+            Some(key),
+            key.digest,
+            0,
+            &chain
+        )
+    );
+    scheduler.cancel(handle).unwrap();
+    assert_eq!(
+        scheduler.cache().checkpoint(ancestor).unwrap().pin_count(),
+        0
+    );
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+}
+
+#[test]
+fn finish_inbound_attaches_to_an_existing_checkpoint_and_frees_the_ticket() {
+    let mut scheduler = host_scheduler(2, 8, 4);
+    let cold = scheduler.admit(spec(64, 1)).unwrap();
+    let admitted = inbound(&mut scheduler, spec(64, 2), 64);
+    let ticket = admitted.ticket.unwrap();
+    // The cold request prefills the same prefix and publishes it first; the
+    // inbound request never appears in a step.
+    init(&mut scheduler, 1);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(step.lanes.len(), 1);
+    assert_eq!(step.lanes[0].request, cold);
+    scheduler.record_submission(&step, Fence(2)).unwrap();
+    scheduler
+        .complete(Fence(2), &records(cold, 2, 64, 1, 88, 2))
+        .unwrap();
+    freeze(&mut scheduler, cold, 3);
+    let existing = scheduler.finish(cold).unwrap().unwrap();
+    assert_eq!(
+        scheduler.cache().checkpoint(existing).unwrap().prefix(),
+        ticket.key
+    );
+    assert_eq!(
+        scheduler
+            .take_publications()
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>(),
+        [existing]
+    );
+    let before = free(&scheduler);
+    assert!(
+        scheduler
+            .finish_inbound(ticket.key, true)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(free(&scheduler), (before.0 + 1, before.1 + 1));
+    let request = scheduler.request(admitted.handle).unwrap();
+    assert_eq!(request.phase, RequestPhase::Restore);
+    assert_eq!(request.prefix(), Some(existing));
+    assert_eq!(
+        request.prefix_snapshot(),
+        Some(scheduler.cache().checkpoint(existing).unwrap().snapshot())
+    );
+    assert_eq!(
+        request.pages().collect::<Vec<_>>(),
+        scheduler.cache().page_chain(existing).unwrap()
+    );
+    assert_eq!(
+        scheduler.cache().checkpoint(existing).unwrap().pin_count(),
+        1
+    );
+    assert_eq!(scheduler.stats().cached_checkpoints, 1);
+    assert!(scheduler.take_publications().is_empty());
+    assert!(scheduler.finish_inbound(ticket.key, true).is_err());
+    init(&mut scheduler, 4);
+    assert_eq!(scheduler.next_step().unwrap().kind, GraphKind::Resume);
+    scheduler.cancel(admitted.handle).unwrap();
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+}
+
+#[test]
+fn failed_inbound_frees_the_ticket_and_returns_waiters_for_readmission() {
+    let mut scheduler = host_scheduler(2, 8, 6);
+    let first = inbound(&mut scheduler, spec(65, 2), 64);
+    let ticket = first.ticket.unwrap();
+    let second = inbound(&mut scheduler, spec(66, 2), 64);
+    assert!(second.ticket.is_none());
+    assert_eq!(scheduler.stats().inbound_waiting, 2);
+    assert_eq!(scheduler.stats().free_slots, 0);
+    // Ticket: one page and one snapshot. Each waiter: one page, terminal and prompt snapshots.
+    assert_eq!(free(&scheduler), (5, 1));
+    let returned = scheduler.finish_inbound(ticket.key, false).unwrap();
+    assert_eq!(returned, [first.handle, second.handle]);
+    assert!(scheduler.request(first.handle).is_err());
+    assert!(scheduler.request(second.handle).is_err());
+    let stats = scheduler.stats();
+    assert_eq!(
+        (
+            stats.active_requests,
+            stats.inbound_waiting,
+            stats.free_slots,
+            stats.retiring_slots,
+            stats.cached_checkpoints
+        ),
+        (0, 0, 2, 0, 0)
+    );
+    assert_eq!(free(&scheduler), (8, 6));
+    assert!(scheduler.finish_inbound(ticket.key, false).is_err());
+    assert!(scheduler.take_publications().is_empty());
+    let again = scheduler.admit(spec(65, 2)).unwrap();
+    assert_eq!(
+        scheduler.request(again).unwrap().phase,
+        RequestPhase::Initialize
+    );
+}
+
+#[test]
+fn waiters_sharing_one_ticket_restore_together_and_both_complete() {
+    let mut scheduler = host_scheduler(2, 8, 4);
+    let first = inbound(&mut scheduler, spec(65, 1), 64);
+    let ticket = first.ticket.unwrap();
+    let second = inbound(&mut scheduler, spec(66, 1), 64);
+    assert!(second.ticket.is_none());
+    let stats = scheduler.stats();
+    assert_eq!(
+        (
+            stats.host_hits,
+            stats.host_reused_tokens,
+            stats.inbound_waiting
+        ),
+        (2, 128, 2)
+    );
+    assert_eq!(free(&scheduler), (5, 1));
+    assert!(scheduler.next_step().is_none());
+    scheduler.finish_inbound(ticket.key, true).unwrap();
+    let restored = scheduler.request(first.handle).unwrap().prefix().unwrap();
+    assert_eq!(
+        scheduler.request(second.handle).unwrap().prefix(),
+        Some(restored)
+    );
+    assert_eq!(
+        scheduler.cache().checkpoint(restored).unwrap().pin_count(),
+        2
+    );
+    for handle in [first.handle, second.handle] {
+        let request = scheduler.request(handle).unwrap();
+        assert_eq!(request.phase, RequestPhase::Restore);
+        assert_eq!(request.pages().collect::<Vec<_>>(), ticket.pages);
+        assert_eq!(request.consumed_tokens, 64);
+    }
+    init(&mut scheduler, 1);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(
+        (step.kind, step.lanes[0].request),
+        (GraphKind::Prefill, first.handle)
+    );
+    scheduler.record_submission(&step, Fence(2)).unwrap();
+    scheduler
+        .complete(Fence(2), &records(first.handle, 2, 65, 1, 77, 2))
+        .unwrap();
+    freeze(&mut scheduler, first.handle, 3);
+    let first_terminal = scheduler.finish(first.handle).unwrap().unwrap();
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(
+        (step.kind, step.lanes[0].request, step.lanes[0].tokens),
+        (GraphKind::Prefill, second.handle, 2)
+    );
+    scheduler.record_submission(&step, Fence(4)).unwrap();
+    scheduler
+        .complete(Fence(4), &records(second.handle, 4, 66, 1, 78, 2))
+        .unwrap();
+    freeze(&mut scheduler, second.handle, 5);
+    let second_terminal = scheduler.finish(second.handle).unwrap().unwrap();
+    assert_ne!(first_terminal, second_terminal);
+    for terminal in [first_terminal, second_terminal] {
+        assert_eq!(
+            scheduler.cache().checkpoint(terminal).unwrap().parent(),
+            Some(restored)
+        );
+    }
+    assert_eq!(
+        scheduler.cache().checkpoint(restored).unwrap().pin_count(),
+        0
+    );
+    assert_eq!(
+        scheduler
+            .take_publications()
+            .iter()
+            .map(|p| (p.id, p.parent))
+            .collect::<Vec<_>>(),
+        [
+            (restored, None),
+            (first_terminal, Some(ticket.key)),
+            (second_terminal, Some(ticket.key))
+        ]
+    );
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+}
+
+#[test]
+fn cancelled_inbound_waiter_leaves_ticket_resources_until_finish_inbound() {
+    let mut scheduler = host_scheduler(2, 8, 4);
+    let admitted = inbound(&mut scheduler, spec(65, 2), 64);
+    let ticket = admitted.ticket.unwrap();
+    scheduler.cancel(admitted.handle).unwrap();
+    assert!(scheduler.request(admitted.handle).is_err());
+    let stats = scheduler.stats();
+    assert_eq!(
+        (
+            stats.active_requests,
+            stats.inbound_waiting,
+            stats.free_slots,
+            stats.retiring_slots
+        ),
+        (0, 0, 2, 0)
+    );
+    assert_eq!(free(&scheduler), (7, 3));
+    assert!(
+        scheduler
+            .finish_inbound(ticket.key, true)
+            .unwrap()
+            .is_empty()
+    );
+    let published = scheduler.take_publications();
+    assert_eq!(published.len(), 1);
+    let restored = published[0].id;
+    assert_eq!(published[0].chain_pages, ticket.pages);
+    assert_eq!(
+        scheduler.cache().checkpoint(restored).unwrap().pin_count(),
+        0
+    );
+    assert_eq!(free(&scheduler), (7, 3));
+    let hit = scheduler.admit(spec(65, 2)).unwrap();
+    let request = scheduler.request(hit).unwrap();
+    assert_eq!(request.prefix(), Some(restored));
+    assert_eq!(request.phase, RequestPhase::Restore);
+    assert_eq!(request.pages().collect::<Vec<_>>(), ticket.pages);
+    scheduler.cancel(hit).unwrap();
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+
+    let admitted = inbound(&mut scheduler, spec(65, 2), 64);
+    let ticket = admitted.ticket.unwrap();
+    scheduler.cancel(admitted.handle).unwrap();
+    assert_eq!(free(&scheduler), (7, 3));
+    assert!(
+        scheduler
+            .finish_inbound(ticket.key, false)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(free(&scheduler), (8, 4));
+    assert_eq!(scheduler.stats().cached_checkpoints, 0);
+}
+
+#[test]
+fn invalid_inbound_requests_reserve_nothing_and_planned_admission_matches_admit() {
+    let mut scheduler = host_scheduler(1, 8, 4);
+    let request = spec(65, 2);
+    let key = history(65).key_at(64).unwrap();
+    let root = history(65).key_at(0).unwrap();
+    for inbound in [
+        InboundRequest {
+            key,
+            consumed_tokens: 65,
+            pages: 1,
+        },
+        InboundRequest {
+            key: PrefixKey {
+                consumed_tokens: 64,
+                digest: [0; 16],
+            },
+            consumed_tokens: 64,
+            pages: 1,
+        },
+        InboundRequest {
+            key,
+            consumed_tokens: 64,
+            pages: 2,
+        },
+        InboundRequest {
+            key: root,
+            consumed_tokens: 0,
+            pages: 0,
+        },
+    ] {
+        let plan = scheduler.plan_admission(&request).unwrap();
+        assert!(
+            scheduler
+                .admit_planned(request.clone(), plan, Some(inbound))
+                .is_err()
+        );
+        assert_eq!(free(&scheduler), (8, 4));
+        assert_eq!(scheduler.stats().active_requests, 0);
+    }
+    assert_eq!(scheduler.stats().host_hits, 0);
+    let plan = scheduler.plan_admission(&request).unwrap();
+    assert_eq!(plan.resident_tokens(), 0);
+    let lookups = scheduler.stats().cache_lookups;
+    let admitted = scheduler
+        .admit_planned(request.clone(), plan, None)
+        .unwrap();
+    assert!(admitted.ticket.is_none());
+    assert_eq!(scheduler.stats().cache_lookups, lookups);
+    let live = scheduler.request(admitted.handle).unwrap();
+    assert_eq!(live.phase, RequestPhase::Initialize);
+    assert_eq!(live.consumed_tokens, 0);
+    assert!(scheduler.plan_admission(&request).is_err());
+    scheduler.cancel(admitted.handle).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+}
+
+#[test]
+fn pinned_checkpoints_survive_eviction_pressure_until_unpinned() {
+    let mut scheduler = host_scheduler(1, 4, 2);
+    let checkpoint = seed_checkpoint(&mut scheduler, 1);
+    assert_eq!(free(&scheduler), (3, 1));
+    assert!(scheduler.unpin_checkpoint(checkpoint).is_err());
+    scheduler.pin_checkpoint(checkpoint).unwrap();
+    assert_eq!(
+        scheduler
+            .cache()
+            .checkpoint(checkpoint)
+            .unwrap()
+            .pin_count(),
+        1
+    );
+    assert!(scheduler.ensure_resources(4, 2).is_err());
+    assert!(scheduler.cache().checkpoint(checkpoint).is_ok());
+    assert_eq!(scheduler.stats().snapshot_evictions, 0);
+    scheduler.unpin_checkpoint(checkpoint).unwrap();
+    scheduler.ensure_resources(4, 2).unwrap();
+    assert!(scheduler.cache().checkpoint(checkpoint).is_err());
+    assert_eq!(free(&scheduler), (4, 2));
+    assert!(scheduler.pin_checkpoint(checkpoint).is_err());
+    // A checkpoint retired before its publication is taken is omitted.
+    assert!(scheduler.take_publications().is_empty());
+    scheduler.record_host_lookup();
+    scheduler.record_host_lookup();
+    assert_eq!(scheduler.stats().host_lookups, 2);
+}
+
+#[test]
+fn take_publications_reports_boundary_and_terminal_checkpoints_once() {
+    let mut scheduler = host_scheduler(1, 8, 4);
+    let handle = scheduler
+        .admit(RequestSpec {
+            system_boundary: Some(64),
+            ..spec(130, 2)
+        })
+        .unwrap();
+    let (system_snapshot, prompt_snapshot, terminal_snapshot) = {
+        let request = scheduler.request(handle).unwrap();
+        (
+            request.system_snapshot.unwrap(),
+            request.prompt_snapshot.unwrap(),
+            request.terminal_snapshot,
+        )
+    };
+    let history = history(130);
+    init(&mut scheduler, 1);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!((step.kind, step.lanes[0].tokens), (GraphKind::Prefill, 64));
+    scheduler.record_submission(&step, Fence(2)).unwrap();
+    scheduler
+        .complete(Fence(2), &records(handle, 2, 64, 0, -1, 1))
+        .unwrap();
+    assert!(scheduler.take_publications().is_empty());
+    let first_page = scheduler
+        .request(handle)
+        .unwrap()
+        .pages()
+        .collect::<Vec<_>>();
+    assert_eq!(first_page.len(), 1);
+    retain_prompt(&mut scheduler, 3);
+    let system = scheduler.request(handle).unwrap().prefix().unwrap();
+    assert_eq!(
+        scheduler.take_publications(),
+        vec![PublishedCheckpoint {
+            id: system,
+            key: history.key_at(64).unwrap(),
+            parent: None,
+            bucket: history.key_at(64).unwrap().digest,
+            chain_pages: first_page.clone(),
+            tail_pages: 1,
+            slot: scheduler.snapshot_slot(system_snapshot),
+        }]
+    );
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(
+        (
+            step.kind,
+            step.lanes[0].start_position,
+            step.lanes[0].tokens
+        ),
+        (GraphKind::Prefill, 64, 66)
+    );
+    scheduler.record_submission(&step, Fence(4)).unwrap();
+    scheduler
+        .complete(Fence(4), &records(handle, 4, 130, 1, 77, 1))
+        .unwrap();
+    retain_prompt(&mut scheduler, 5);
+    let prompt = scheduler.request(handle).unwrap().prefix().unwrap();
+    let pages = scheduler
+        .request(handle)
+        .unwrap()
+        .pages()
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 3);
+    assert_eq!(pages[0], first_page[0]);
+    let step = scheduler.next_step().unwrap();
+    assert_eq!(step.kind, GraphKind::Decode);
+    scheduler.record_submission(&step, Fence(6)).unwrap();
+    scheduler
+        .complete(Fence(6), &records(handle, 6, 131, 2, 78, 2))
+        .unwrap();
+    freeze(&mut scheduler, handle, 7);
+    let terminal = scheduler.finish(handle).unwrap().unwrap();
+    let published = scheduler.take_publications();
+    assert_eq!(
+        published,
+        vec![
+            PublishedCheckpoint {
+                id: prompt,
+                key: history.key_at(130).unwrap(),
+                parent: Some(history.key_at(64).unwrap()),
+                bucket: history.key_at(128).unwrap().digest,
+                chain_pages: pages[..2].to_vec(),
+                tail_pages: 1,
+                slot: scheduler.snapshot_slot(prompt_snapshot),
+            },
+            PublishedCheckpoint {
+                id: terminal,
+                key: scheduler.cache().checkpoint(terminal).unwrap().prefix(),
+                parent: Some(history.key_at(130).unwrap()),
+                bucket: history.key_at(128).unwrap().digest,
+                chain_pages: pages[..2].to_vec(),
+                tail_pages: 0,
+                slot: scheduler.snapshot_slot(terminal_snapshot),
+            },
+        ]
+    );
+    assert_eq!(published[1].key.consumed_tokens, 131);
+    assert_eq!(published[1].tail(), &[]);
+    assert!(scheduler.take_publications().is_empty());
+    assert_eq!(free(&scheduler), (6, 1));
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+}
+
+#[test]
+fn shutdown_release_drops_inbound_tickets_and_their_ancestor_pins() {
+    let mut scheduler = host_scheduler(2, 8, 4);
+    let ancestor = seed_checkpoint(&mut scheduler, 1);
+    let admitted = inbound(&mut scheduler, spec(130, 2), 128);
+    let ticket = admitted.ticket.unwrap();
+    assert_eq!(free(&scheduler), (5, 0));
+    assert_eq!(
+        scheduler.cache().checkpoint(ancestor).unwrap().pin_count(),
+        1
+    );
+    scheduler
+        .release_after_shutdown(&Shutdown {
+            drained: true,
+            error: None,
+        })
+        .unwrap();
+    assert!(scheduler.request(admitted.handle).is_err());
+    assert!(scheduler.finish_inbound(ticket.key, true).is_err());
+    assert_eq!(
+        scheduler.cache().checkpoint(ancestor).unwrap().pin_count(),
+        0
+    );
+    assert_eq!(free(&scheduler), (7, 3));
+    scheduler.ensure_resources(8, 4).unwrap();
+    assert_eq!(free(&scheduler), (8, 4));
+}

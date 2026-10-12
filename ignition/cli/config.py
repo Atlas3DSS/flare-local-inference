@@ -17,24 +17,29 @@ _SECTIONS = {
     "server": {"host": str, "port": int, "api_key": str},
     "defaults": {"model": str, "max_concurrency": int},
     "memory": {"reserve": str},
-    "paths": {"hub_cache": str, "kernel_cache": str, "package_cache": str, "cuda": str},
+    "prefix_cache": {"memory": str, "disk_limit": str, "disk_transport": str},
+    "paths": {"hub_cache": str, "kernel_cache": str, "package_cache": str, "prefix_cache": str, "cuda": str},
 }
 _MODEL_KEYS = {"max_concurrency": int}
+# Empty prefix-cache values leave the decision to Flare, which derives them from the host.
 _BUILT_IN = {
     "server.host": "127.0.0.1", "server.port": 8000, "server.api_key": "",
     "memory.reserve": "0",
+    "prefix_cache.memory": "", "prefix_cache.disk_limit": "", "prefix_cache.disk_transport": "",
     "paths.hub_cache": "~/.cache/huggingface/hub", "paths.kernel_cache": "~/.cache/flare/kernels",
     "paths.package_cache": "~/.cache/flare/packages",
+    "paths.prefix_cache": "",
     "paths.cuda": "",
 }
+_TRANSPORTS = ("staged", "direct")
 _SIZE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:([KMGT])(?:iB|B)?)?", re.IGNORECASE)
 
 
-def parse_size(text: str) -> int:
+def parse_size(text: str, what: str = "memory size") -> int:
     """Parse a byte count with an optional binary K, M, G, or T suffix."""
     match = _SIZE.fullmatch(text.strip())
     if match is None:
-        raise UsageError(f'memory size {text!r} must be a number with an optional K, M, G, or T suffix, such as "16G"')
+        raise UsageError(f'{what} {text!r} must be a number with an optional K, M, G, or T suffix, such as "16G"')
     return int(float(match[1]) * (1 << 10 * " KMGT".index((match[2] or " ").upper())))
 
 
@@ -71,6 +76,12 @@ class Configuration:
                 raise UsageError(f"{resolved}: unknown section [{section}]")
         configuration = cls(resolved, values, True)
         parse_size(configuration.get("memory.reserve").value)
+        for key in ("prefix_cache.memory", "prefix_cache.disk_limit"):
+            if configuration.get(key).value:
+                parse_size(configuration.get(key).value, key.replace(".", " "))
+        transport = configuration.get("prefix_cache.disk_transport").value
+        if transport and transport not in _TRANSPORTS:
+            raise UsageError(f"{resolved}: disk_transport in [prefix_cache] must be one of {', '.join(_TRANSPORTS)}")
         return configuration
 
     @staticmethod
@@ -113,6 +124,19 @@ class Configuration:
     def reserve_bytes(self) -> int:
         return parse_size(self.get("memory.reserve").value)
 
+    def prefix_cache_flags(self) -> list[str]:
+        """The `flare run` flags carrying the host prefix cache settings that are set."""
+        flags = []
+        directory = self.directory("prefix_cache")
+        if directory is not None:
+            flags += ["--prefix-cache-disk", str(directory)]
+        for key, flag in (("memory", "--prefix-cache-memory"), ("disk_limit", "--prefix-cache-disk-limit"),
+                          ("disk_transport", "--prefix-cache-disk-transport")):
+            value = self.get(f"prefix_cache.{key}").value
+            if value:
+                flags += [flag, value]
+        return flags
+
     def directory(self, name: str) -> Path | None:
         """Return a `[paths]` entry with the home directory expanded, or None when it is empty."""
         value = self.get(f"paths.{name}").value
@@ -132,10 +156,15 @@ class Configuration:
             "", "[memory]",
             f'# reserve = "{self.get("memory.reserve").value}"'
             "                   # GPU memory left untouched for processes that start later",
+            "", "[prefix_cache]",
+            '# memory = "16G"                 # host RAM retaining prefix checkpoints; 0 disables the memory tier',
+            '# disk_limit = "200G"            # record files kept under paths.prefix_cache; 0 disables the disk tier',
+            '# disk_transport = "staged"      # staged, or direct for GPUDirect Storage',
             "", "[paths]",
             f'# hub_cache = "{self.get("paths.hub_cache").value}"',
             f'# kernel_cache = "{self.get("paths.kernel_cache").value}"',
             f'# package_cache = "{self.get("paths.package_cache").value}"',
+            '# prefix_cache = "~/.cache/flare/prefix-cache"   # prefix checkpoint records; empty: no disk tier',
             '# cuda = "/opt/cuda"              # used only when the toolkit is not found in installed packages',
         ]
         self.path.parent.mkdir(parents=True, exist_ok=True)
