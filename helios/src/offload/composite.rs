@@ -512,6 +512,25 @@ impl CompositeStore {
                     continue;
                 }
             }
+            if tail_pages == 0 && !row {
+                // An ancestor whose endpoint shares its parent's last page
+                // contributes no bytes; an empty resident copy stands in for it.
+                let placed = self
+                    .memory
+                    .allocate_record(key, bucket, 0, false)
+                    .and_then(|record| {
+                        record.ok_or_else(|| invalid("no host memory record could be indexed"))
+                    })
+                    .and_then(|_| self.memory.complete_record(&key, true))
+                    .and_then(|()| self.memory.pin_record(&key));
+                match placed {
+                    Ok(()) => inbound.nodes[index].state = NodeState::Resident,
+                    Err(error) => {
+                        inbound.error.get_or_insert(error);
+                    }
+                }
+                continue;
+            }
             match self.start_read(fetch, key, tail_pages, bucket, row) {
                 Ok(()) => {
                     inbound.nodes[index].state = NodeState::Reading {
@@ -2146,6 +2165,155 @@ mod tests {
                 store.jobs.keys().collect::<Vec<_>>()
             );
         }
+        // A grandchild under a page-less child: the child's endpoint shares its
+        // parent's last page, so its record holds only a row. After a restart the
+        // chain restores through disk with the child contributing no bytes.
+        let (pair, base) = (2u32, 9u32);
+        let root_consumed = 3 * page_tokens;
+        let child_consumed = 3 * page_tokens + 5;
+        let grandchild_consumed = 4 * page_tokens + 7;
+        let mut history = PrefixHistory::new(IDENTITY);
+        let tokens: Vec<u32> = (0..grandchild_consumed as u32 + 8)
+            .map(|t| t.wrapping_mul(2654435761).wrapping_add(pair))
+            .collect();
+        history.append(&tokens, &[]).unwrap();
+        let root_pages: Vec<PageId> = (base..base + 3).map(PageId).collect();
+        let grandchild_page = PageId(base + 3);
+        for (plane, geometry) in rank.planes.iter().enumerate() {
+            for id in base..=base + 3 {
+                write_unit(
+                    geometry.unit_address(u64::from(id)),
+                    geometry.unit_bytes as usize,
+                    plane as u64 * 100 + u64::from(id),
+                );
+            }
+        }
+        for slot in 5..=6u64 {
+            write_unit(
+                rank.row.unit_address(slot),
+                rank.row.unit_bytes as usize,
+                900 + slot,
+            );
+        }
+        let root = PublishedCheckpoint {
+            id: ids.next(),
+            key: history.key_at(root_consumed).unwrap(),
+            parent: None,
+            bucket: history.bucket_at(root_consumed).unwrap(),
+            chain_pages: root_pages.clone(),
+            tail_pages: 3,
+            slot: StateSlotId(5),
+        };
+        let child = PublishedCheckpoint {
+            id: ids.next(),
+            key: history.key_at(child_consumed).unwrap(),
+            parent: Some(root.key),
+            bucket: history.bucket_at(child_consumed).unwrap(),
+            chain_pages: root_pages.clone(),
+            tail_pages: 0,
+            slot: StateSlotId(6),
+        };
+        let grandchild = PublishedCheckpoint {
+            id: ids.next(),
+            key: history.key_at(grandchild_consumed).unwrap(),
+            parent: Some(child.key),
+            bucket: history.bucket_at(grandchild_consumed).unwrap(),
+            chain_pages: root_pages
+                .iter()
+                .copied()
+                .chain([grandchild_page])
+                .collect(),
+            tail_pages: 1,
+            slot: StateSlotId(5),
+        };
+        let mut events = Vec::new();
+        for checkpoint in [&root, &child, &grandchild] {
+            assert!(store.store(checkpoint).unwrap());
+            drain(&mut store, &mut events, &|store| store.outbound.is_empty());
+        }
+        assert_eq!(store.stats().stored, 7);
+        store.close().unwrap();
+        drop(store);
+
+        // Restart: a fresh composite over the scanned directory and an empty memory pool.
+        let scanned =
+            crate::offload::record::scan(&directory, &IDENTITY, &fingerprint, &geometry).unwrap();
+        assert_eq!(scanned.len(), 7);
+        let mut pool = SlabPool::new(
+            layout.page_record_bytes,
+            16,
+            layout.row_record_bytes,
+            4,
+            true,
+        )
+        .unwrap();
+        pool.register(context).unwrap();
+        let transfers = Arc::new(Mutex::new(
+            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+        ));
+        let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
+        let disk = DiskStore::new(
+            directory.clone(),
+            IDENTITY,
+            fingerprint,
+            1 << 40,
+            geometry.clone(),
+            scanned,
+            Box::new(Staged::new(
+                None,
+                transfers,
+                DiskThread::start("flare-offload-disk").unwrap(),
+            )),
+        )
+        .unwrap();
+        let mut store = CompositeStore::new(memory, disk).unwrap();
+        let hit = store.lookup(&history, 0).unwrap();
+        assert_eq!(
+            (hit.key, hit.pages, hit.tier),
+            (grandchild.key, 4, Tier::Disk)
+        );
+        let targets: Vec<PageId> = (base + 10..base + 14).map(PageId).collect();
+        let ticket = InboundTicket {
+            key: grandchild.key,
+            pages: targets.clone(),
+            slot: StateSlotId(7),
+        };
+        store.fetch(hit, ticket).unwrap();
+        let mut events = Vec::new();
+        drain(&mut store, &mut events, &|store| store.inbound.is_empty());
+        assert!(
+            matches!(
+                events.as_slice(),
+                [StoreEvent::Fetched { result: Ok(_), .. }]
+            ),
+            "{events:?}"
+        );
+        let read_unit = |address: u64, bytes: usize| -> Vec<u8> {
+            unsafe { stream.download(&staging, address as usize, bytes) }.unwrap();
+            stream.synchronize().unwrap();
+            staging.bytes()[..bytes].to_vec()
+        };
+        let pattern = |seed: u64, bytes: usize| -> Vec<u8> {
+            (0..bytes)
+                .map(|index| (index as u64).wrapping_mul(31).wrapping_add(seed) as u8)
+                .collect()
+        };
+        for (plane, geometry) in rank.planes.iter().enumerate() {
+            for (source, target) in (base..=base + 3).zip(&targets) {
+                let bytes = geometry.unit_bytes as usize;
+                assert!(
+                    read_unit(geometry.unit_address(u64::from(target.0)), bytes)
+                        == pattern(plane as u64 * 100 + u64::from(source), bytes),
+                    "plane {} page {} differs from page {source}",
+                    geometry.name,
+                    target.0
+                );
+            }
+        }
+        let bytes = rank.row.unit_bytes as usize;
+        assert!(read_unit(rank.row.unit_address(7), bytes) == pattern(905, bytes));
+        assert_eq!(store.stats().fetched, 1);
+        assert!(store.memory.record(&child.key).is_some());
         store.close().unwrap();
         fs::remove_dir_all(&directory).unwrap();
     }
