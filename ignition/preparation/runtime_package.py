@@ -463,6 +463,10 @@ class RuntimePackage:
                 if any(data):
                     raise ValueError("device-updatable kernel nodes require explicit export support")
                 continue
+            # An unset preferred shared-memory carveout reads as zero; restoring it explicitly would
+            # request the minimum shared memory and cut occupancy of every kernel using shared memory.
+            if attribute == 14 and not any(data):
+                continue
             relocations = []
             if attribute == 1 and value[1]:
                 relocations = [{"offset": 0, "kind": "pointer", "target": self._reference(value[0], value[1])}]
