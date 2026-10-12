@@ -779,7 +779,23 @@ with raw numbers recorded and noisy results rerun:
 
 A correctness failure in any scenario blocks performance claims.
 
-## 5. Deferred
+## 5. Known limitations
+
+- A record larger than the memory pool is never copied out through a
+  composite, because the disk write reads the memory slabs, and a chain whose
+  non-resident pages exceed the pool cannot be restored through it; the
+  composite's lookup does not yet exclude such chains, so an unfetchable hit
+  fails its restore and evicts durable residents while trying.
+- Disk compaction of a record is not propagated to its memory copy, whose row
+  slab stays allocated until the whole copy is evicted.
+- A publication whose key still names a stale memory copy pinned by an upload
+  in flight is skipped rather than written again.
+- Closing a composite bounds each tier's drain separately, so a stuck job can
+  take three times the single bound.
+- `bytes_out` counts every memory copy that landed, including copies the disk
+  limit then refused; `stored` counts only records that reached disk.
+
+## 6. Deferred
 
 - A split operation in the GPU cache, the inverse of ancestor compaction, so a
   compacted ancestor's row can be restored onto pages its child still holds
