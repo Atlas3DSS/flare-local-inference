@@ -1,8 +1,10 @@
-//! Bounded pinned staging overlaps file reads with asynchronous GPU uploads.
+//! Bounded pinned staging overlaps direct file reads with asynchronous GPU uploads.
 
 use std::{
     collections::VecDeque,
-    os::unix::fs::FileExt,
+    fs::{File, OpenOptions},
+    io,
+    os::unix::fs::{FileExt, OpenOptionsExt},
     ptr::null_mut,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -17,7 +19,8 @@ use crate::{Result, startup::Phase};
 
 const CHUNK: usize = 4 << 20;
 const SLOTS: usize = 4;
-const READERS: usize = 2;
+const READERS: usize = 4;
+const BLOCK: usize = 4096;
 
 struct Staging<'a> {
     driver: &'a Driver,
@@ -84,6 +87,34 @@ struct Chunk {
     memory: Memory,
 }
 
+impl Chunk {
+    fn read_range(&self) -> (u64, usize, usize) {
+        let skip = self.file_offset as usize % BLOCK;
+        (
+            self.file_offset - skip as u64,
+            skip,
+            (skip + self.nbytes).next_multiple_of(BLOCK),
+        )
+    }
+
+    fn read<'a>(&self, file: &File, buffer: &'a mut [u8]) -> io::Result<&'a [u8]> {
+        let (offset, skip, nbytes) = self.read_range();
+        let read = loop {
+            match file.read_at(&mut buffer[..nbytes], offset) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        if read < skip + self.nbytes {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "short model payload read",
+            ));
+        }
+        Ok(&buffer[skip..skip + self.nbytes])
+    }
+}
+
 /// The owner's mapped allocations must be live and unused by graph execution.
 pub(super) unsafe fn load(
     owner: &NativeResources,
@@ -117,7 +148,16 @@ pub(super) unsafe fn load(
         return Ok(());
     }
     let count = SLOTS.min(chunks.len());
-    let chunk_size = chunks.iter().map(|chunk| chunk.nbytes).max().unwrap();
+    let chunk_size = chunks
+        .iter()
+        .map(|chunk| chunk.read_range().2)
+        .max()
+        .unwrap();
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(&archive.path)
+        .map_err(|e| invalid(format!("open model payload for direct I/O: {e}")))?;
     // SAFETY: The owning context is current throughout loading and cleanup.
     let staging = unsafe { Staging::new(&owner.driver, count, chunk_size)? };
     let buffers: Vec<_> = staging
@@ -130,37 +170,42 @@ pub(super) unsafe fn load(
         let available = Arc::new(Mutex::new(available));
         let (ready, finished) = mpsc::sync_channel(count);
         for index in 0..READERS.min(count) {
+            let file = &file;
             let (available, chunks, buffers, ready) =
                 (available.clone(), &chunks, &buffers, ready.clone());
             thread::Builder::new()
                 .name(format!("helios-reader-{index}"))
                 .spawn_scoped(scope, move || {
-                    let file = &archive.file;
                     loop {
                         let Ok((slot, index)) = available.lock().unwrap().recv() else {
                             break;
                         };
                         let chunk = &chunks[index];
                         let result = (|| -> Result<()> {
-                            let address = match chunk.memory {
-                                Memory::Device => buffers[slot],
-                                Memory::MappedHost => chunk.destination as usize,
-                                Memory::Peer => unreachable!("peer allocations carry no payload"),
-                            };
+                            let (_, _, nbytes) = chunk.read_range();
                             // SAFETY: A slot has one reader and is returned only after
                             // its upload event completes. Host chunks are disjoint
                             // validated ranges in mappings retained until scope exit.
                             let destination = unsafe {
-                                std::slice::from_raw_parts_mut(address as *mut u8, chunk.nbytes)
+                                std::slice::from_raw_parts_mut(buffers[slot] as *mut u8, nbytes)
                             };
-                            file.read_exact_at(destination, chunk.file_offset)
-                                .map_err(|e| {
-                                    invalid(format!(
-                                        "read {} at {}: {e}",
-                                        archive.path.display(),
-                                        chunk.file_offset
-                                    ))
-                                })
+                            let bytes = chunk.read(file, destination).map_err(|error| {
+                                invalid(format!(
+                                    "read {} at {}: {error}",
+                                    archive.path.display(),
+                                    chunk.file_offset
+                                ))
+                            })?;
+                            if matches!(chunk.memory, Memory::MappedHost) {
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        bytes.as_ptr(),
+                                        chunk.destination as *mut u8,
+                                        chunk.nbytes,
+                                    );
+                                }
+                            }
+                            Ok(())
                         })();
                         if ready.send((slot, index, result)).is_err() {
                             break;
@@ -197,7 +242,7 @@ pub(super) unsafe fn load(
                             "cuMemcpyHtoDAsync_v2",
                             (owner.driver.upload_async)(
                                 chunk.destination,
-                                staging.buffers[slot],
+                                staging.buffers[slot].byte_add(chunk.read_range().1),
                                 chunk.nbytes,
                                 staging.stream,
                             ),
@@ -232,4 +277,49 @@ pub(super) unsafe fn load(
         drop(work);
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+
+    #[repr(align(4096))]
+    struct Aligned([u8; 3 * BLOCK]);
+
+    #[test]
+    fn direct_reads_preserve_unaligned_payloads_and_accept_partial_final_blocks() {
+        let path = std::env::temp_dir().join(format!("helios-direct-read-{}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let payload: Vec<_> = (0..BLOCK + 37).map(|i| (i % 251) as u8).collect();
+        for offset in [0, 7, BLOCK as u64 - 1, BLOCK as u64, (1u64 << 32) + 7] {
+            file.set_len(0).unwrap();
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            file.write_all(&payload).unwrap();
+            let chunk = Chunk {
+                file_offset: offset,
+                destination: 0,
+                nbytes: payload.len(),
+                memory: Memory::Device,
+            };
+            let mut buffer = Aligned([0xa5; 3 * BLOCK]);
+            assert_eq!(chunk.read(&reader, &mut buffer.0).unwrap(), payload);
+            file.set_len(offset + payload.len() as u64 - 1).unwrap();
+            assert_eq!(
+                chunk.read(&reader, &mut buffer.0).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
 }

@@ -337,12 +337,16 @@ Cubins are mapped from their file spans while loading; no anonymous copy of
 the full kernel catalog is required. Frontend assets are read from their own
 file spans. The index and loader metadata are released after startup.
 
-Payload loading uses two file-reader threads and four pinned staging buffers
-per rank. Each buffer holds `4 MiB / rank_count`, keeping total staging capacity
-at 16 MiB. Each rank uploads device chunks asynchronously on its own CUDA stream;
-completion events guard buffer reuse. Host-resident
-payloads are read directly into their final mapped allocations. Readers join
-and uploads drain before relocations, module loading, or graph execution.
+Payload loading opens the package with `O_DIRECT`, bypassing the page cache.
+Each rank uses four file-reader threads and four pinned staging buffers of
+`4 MiB / rank_count`. Total staging is 16 MiB plus at most one 4 KiB alignment
+block per buffer. Reads cover complete 4 KiB blocks; only declared payload
+bytes are copied to their destinations. A partial final file block is accepted
+when it contains the entire requested payload; missing payload bytes fail loading.
+Each rank uploads device chunks asynchronously on its own CUDA stream, with
+completion events guarding buffer reuse. Host-resident payloads are copied
+from staging into their final mapped allocations. Readers join and uploads
+drain before relocations, module loading, or graph execution.
 
 A rebuilt process holds no Python mapping, which its tests assert by reading
 `/proc/self/maps`. On a 16 MiB working set the rebuild costs 0.5 s, of which
