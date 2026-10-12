@@ -530,6 +530,13 @@ Offload limits interference through bounded work and explicit ownership:
   probe rejects the direct path. Once the probe exists, the default becomes
   direct where the probe accepts it.
 - The staged transport's staging pool size is derived; it is not a setting.
+- A memory store retains at most as many records as it has row slabs, and
+  rows take one quarter of the pool, so on Qwen, whose rows are 112 MiB, a
+  4 GiB pool holds eight records while the GPU cache holds dozens. A memory
+  tier that cannot hold more records than the GPU cache rarely has a record
+  the GPU has already lost; the derived default's lower clamp exists for the
+  staging minimum, and the sizing guidance for operators is a pool whose row
+  slabs exceed the GPU's state rows.
 - `LoadOptions` gains `prefix_cache: PrefixCacheOffload` with the resolved
   memory size, directory, limit, and transport.
 - The startup phase reports the selected store, transport, pool sizes, the
@@ -669,7 +676,7 @@ on the file format fixed in step 5.
     memory size and no disk: a conversation's checkpoints are evicted from the
     GPU by distinct prompts, its continuation reports the host hit, the reused
     token count equals the terminal endpoint, and generated tokens agree with
-    the no-offload run under the token agreement check in `qualify`.
+    the no-offload run under the retrieval check in `qualify/host_cache.py`.
 
 12. **Disk configurations.** Directory resolution for `ignition run` and
     standalone `flare run`, the `[prefix_cache]` and `[paths] prefix_cache`
@@ -677,7 +684,7 @@ on the file format fixed in step 5.
     `ignition/cli/serve.py`. Acceptance: restart the server with the same
     package and directory, replay the conversation, and observe a disk hit,
     prefill launches limited to the new tokens through `prefill_launches` in
-    `qualify/server.py`, and token agreement, with the composite and with the
+    `qualify/server.py`, and the retrieval check, with the composite and with the
     disk store alone. A package exported with a different draft-token count
     must miss.
 
@@ -733,11 +740,20 @@ and keyed by environment variables that locate a package, following
 these scenarios, each with every store and transport that supports it:
 
 - Memory hit after GPU eviction, with the host hit counter, reused tokens, and
-  token agreement checked.
+  one restore and prefill launches limited to the new tokens.
 - Disk hit after a server restart, with prefill launches limited to the new
   tokens.
 - Branching: two continuations of one evicted prefix admitted together share
   one inbound ticket and both complete.
+
+Every continuation asks for nine facts spread across the whole restored
+context and must answer each one correctly, after GPU-cache restores and host
+restores alike. Generated tokens are not compared verbatim: two GPU-cache
+restores of one checkpoint diverge after about ten tokens at temperature zero
+on Qwen, with or without speculation, so verbatim agreement does not
+distinguish a faithful restore from an unfaithful one. The memory scenario
+sizes its pool so that its row slabs outnumber the GPU's cached rows, because
+the filler prompts that evict the GPU cache publish a checkpoint each.
 
 Isolation measurements gate the defaults. Each is run without offload as the
 baseline and then with the composite under the same package, flags, and GPU,
