@@ -130,7 +130,7 @@ pub struct Prepared {
 
 /// The loader's result: either prepared resources or the reason no store exists.
 pub enum Preparation {
-    Store(Prepared),
+    Store(Box<Prepared>),
     None(String),
 }
 
@@ -146,7 +146,7 @@ impl Preparation {
         match self {
             Self::Store(prepared) => Some(std::sync::Arc::new(Shared {
                 summary: prepared.summary(),
-                prepared: std::sync::Mutex::new(Some(prepared)),
+                prepared: std::sync::Mutex::new(Some(*prepared)),
             })),
             Self::None(_) => None,
         }
@@ -313,7 +313,7 @@ pub fn prepare(
         Some(directory) => record::scan(directory, &identity, &fingerprint, &geometry)?,
         None => Vec::new(),
     };
-    Ok(Preparation::Store(Prepared {
+    Ok(Preparation::Store(Box::new(Prepared {
         resolved: Resolved {
             memory_bytes,
             directory,
@@ -328,7 +328,7 @@ pub fn prepare(
         memory_pool,
         staging_pool,
         scanned,
-    }))
+    })))
 }
 
 /// Free bytes on the filesystem holding `path`.
@@ -345,7 +345,7 @@ fn free_space(path: &std::path::Path) -> Result<u64> {
         )
         .into());
     }
-    Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
+    Ok(stats.f_bavail * stats.f_frsize)
 }
 
 /// Open the configured store over the prepared resources, starting its

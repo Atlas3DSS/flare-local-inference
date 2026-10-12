@@ -92,6 +92,7 @@ pub(super) struct Metrics {
     host_disk_bytes: AtomicU64,
     host_outbound_rate: AtomicU64,
     host_inbound_rate: AtomicU64,
+    host_inbound_waiting: AtomicU64,
 }
 
 impl Metrics {
@@ -208,6 +209,10 @@ impl Metrics {
 
     pub fn scheduler(&self, stats: SchedulerStats) {
         for (target, value) in [
+            (&self.host_lookups, stats.host_lookups),
+            (&self.host_hits, stats.host_hits),
+            (&self.host_reused_tokens, stats.host_reused_tokens),
+            (&self.host_inbound_waiting, stats.inbound_waiting as u64),
             (&self.cache_lookups, stats.cache_lookups),
             (&self.cache_hits, stats.cache_hits),
             (&self.cache_misses, stats.cache_lookups - stats.cache_hits),
@@ -229,11 +234,10 @@ impl Metrics {
     }
 
     /// Host prefix store counters and gauges, written from the model thread.
+    /// Lookups, hits, and reused tokens come from the scheduler, which applies
+    /// the fetch policy.
     pub fn store(&self, stats: StoreStats) {
         for (target, value) in [
-            (&self.host_lookups, stats.lookups),
-            (&self.host_hits, stats.hits),
-            (&self.host_reused_tokens, stats.reused_tokens),
             (&self.host_stored, stats.stored),
             (&self.host_store_skipped, stats.store_skipped),
             (&self.host_store_failed, stats.store_failed),
@@ -556,6 +560,11 @@ impl Metrics {
                 &self.host_inbound_in_flight,
             ),
             (
+                "host_cache_inbound_waiting",
+                "Admitted requests waiting for a host store restore.",
+                &self.host_inbound_waiting,
+            ),
+            (
                 "host_cache_memory_records",
                 "Checkpoint records resident in the host store's registered memory.",
                 &self.host_memory_records,
@@ -654,15 +663,16 @@ mod tests {
             cache_hits: 2,
             reused_tokens: 192,
             free_pages: 10,
+            host_lookups: 4,
+            host_hits: 1,
+            host_reused_tokens: 640,
+            inbound_waiting: 1,
             ..SchedulerStats::default()
         });
         metrics.launched(GraphKind::Restore);
         metrics.launched(GraphKind::Decode);
         metrics.launched(GraphKind::Decode);
         metrics.store(StoreStats {
-            lookups: 4,
-            hits: 1,
-            reused_tokens: 640,
             bytes_out: 1 << 20,
             memory_records: 3,
             outbound_rate: 2.5e9,
@@ -672,6 +682,7 @@ mod tests {
         assert!(text.contains("flare_host_cache_lookups_total 4\n"));
         assert!(text.contains("flare_host_cache_hits_total 1\n"));
         assert!(text.contains("flare_host_cache_reused_tokens_total 640\n"));
+        assert!(text.contains("flare_host_cache_inbound_waiting 1\n"));
         assert!(text.contains("flare_host_cache_bytes_out_total 1048576\n"));
         assert!(text.contains("flare_host_cache_memory_records 3\n"));
         assert!(text.contains("flare_host_cache_outbound_bytes_per_second 2500000000\n"));

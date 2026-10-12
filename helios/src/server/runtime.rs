@@ -92,6 +92,10 @@ struct Incoming<M: ModelContract> {
     metrics: Arc<super::metrics::Metrics>,
     qualification: bool,
     observation: Option<bool>,
+    /// Consult the host prefix store at admission; cleared after a failed restore.
+    host_lookup: bool,
+    /// Admitted once already, so the admission counter is not advanced again.
+    readmitted: bool,
 }
 impl<M: ModelContract> Incoming<M> {
     fn fail(&self, error: Error) {
@@ -309,8 +313,8 @@ impl<M: ModelContract> ModelRuntime<M> {
                     scheduler,
                     receiver,
                     queue_capacity,
-                    store,
                 );
+                worker.store = store;
                 worker_metrics.scheduler(worker.scheduler.stats());
                 worker_health.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
@@ -331,6 +335,18 @@ impl<M: ModelContract> ModelRuntime<M> {
                 });
                 worker.fail_all(&final_error);
                 let mut shutdown = executor.close();
+                // The store's streams and registrations are released only after a
+                // confirmed drain; otherwise they are retained like the executor's.
+                if let Some(mut store) = worker.store.take() {
+                    if shutdown.drained {
+                        if let Err(error) = store.close() {
+                            shutdown.drained = false;
+                            shutdown.error.get_or_insert(error);
+                        }
+                    } else {
+                        std::mem::forget(store);
+                    }
+                }
                 if shutdown.drained {
                     let _ = worker.scheduler.release_after_shutdown(&shutdown);
                     worker_metrics.scheduler(worker.scheduler.stats());
@@ -454,6 +470,8 @@ impl<M: ModelContract> ModelRuntime<M> {
             metrics: self.metrics.clone(),
             qualification,
             observation,
+            host_lookup: true,
+            readmitted: false,
         };
         let enqueue_ns = observation
             .filter(|timestamps| *timestamps)
@@ -529,6 +547,10 @@ struct Worker<'a, M: ModelContract> {
     inputs: Option<M::Inputs>,
     queue_capacity: usize,
     store: Option<Box<dyn crate::offload::PrefixStore>>,
+    /// Prefill tokens per second measured from completed prefill frames, which
+    /// the host-store fetch policy compares with transfer time.
+    prefill_rate: f64,
+    prefill_started: VecDeque<(crate::cache::Fence, std::time::Instant, u64)>,
 }
 
 impl<'a, M: ModelContract> Worker<'a, M> {
@@ -540,7 +562,6 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         scheduler: RequestScheduler,
         receiver: mpsc::Receiver<Incoming<M>>,
         queue_capacity: usize,
-        store: Option<Box<dyn crate::offload::PrefixStore>>,
     ) -> Self {
         Self {
             config,
@@ -550,11 +571,13 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             scheduler,
             receiver,
             queue_capacity,
-            store,
+            store: None,
             pending: VecDeque::with_capacity(queue_capacity),
             active: (0..config.limits.max_active).map(|_| None).collect(),
             admissions: (0..config.limits.max_active).map(|_| None).collect(),
             inputs: None,
+            prefill_rate: crate::offload::INITIAL_PREFILL_RATE,
+            prefill_started: VecDeque::new(),
         }
     }
 
@@ -571,6 +594,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 progress = true;
             }
             progress |= self.publish()?;
+            progress |= self.service_store()?;
             let (step, planned) = self.plan(executor.outstanding())?;
             progress |= planned;
             if let Some(step) = step {
@@ -653,6 +677,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             };
             let admission = if incoming.qualification {
                 self.scheduler.admit_cold(spec)
+            } else if let Some(store) = self.store.as_mut().filter(|_| incoming.host_lookup) {
+                admit_with_host_store(&mut self.scheduler, store.as_mut(), spec, self.prefill_rate)
             } else {
                 self.scheduler.admit(spec)
             };
@@ -664,7 +690,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 }
             };
             let slot = handle.slot as usize;
-            self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
+            if !incoming.readmitted {
+                self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(images) = &incoming.prompt.images {
                 if let Err(error) = self.scheduler.set_vision_images(
                     handle,
@@ -757,6 +785,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             .complete(completion.fence, &completion.records)?;
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
+        if kind == GraphKind::Prefill {
+            self.observe_prefill_rate(completion.fence, prefill);
+        }
         if !acceptance_rows.is_empty() {
             self.scheduler.observe_acceptance(&acceptance_rows);
         }
@@ -1039,6 +1070,16 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         )?;
         let fence = executor.next_fence()?;
         self.reserve_and_pack(step, fence)?;
+        if step.kind == GraphKind::Prefill && self.store.is_some() {
+            if self.prefill_started.len() >= 8 {
+                self.prefill_started.pop_front();
+            }
+            self.prefill_started.push_back((
+                fence,
+                std::time::Instant::now(),
+                step.lanes.iter().map(|lane| lane.tokens as u64).sum(),
+            ));
+        }
         if executor.submit(
             graph,
             &M::uploads(
@@ -1055,6 +1096,77 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         Ok(true)
     }
 
+    /// Copy newly ready checkpoints out, apply finished host transfers, and
+    /// re-admit the waiters of a failed restore without the host store.
+    fn service_store(&mut self) -> Result<bool> {
+        let Some(store) = self.store.as_mut() else {
+            return Ok(false);
+        };
+        let mut progress = false;
+        for publication in self.scheduler.take_publications() {
+            progress = true;
+            // The checkpoint may have been evicted between readiness and this drain.
+            if self.scheduler.pin_checkpoint(publication.id).is_err() {
+                continue;
+            }
+            if !matches!(store.store(&publication), Ok(true)) {
+                self.scheduler.unpin_checkpoint(publication.id)?;
+            }
+        }
+        let mut events = Vec::new();
+        store.poll(&mut events);
+        let mut requeued = Vec::new();
+        for event in events {
+            progress = true;
+            match event {
+                crate::offload::StoreEvent::Stored { checkpoint, .. } => {
+                    // The pin taken before `store` is released; a checkpoint retired
+                    // meanwhile has no pin left and is ignored.
+                    let _ = self.scheduler.unpin_checkpoint(checkpoint);
+                }
+                crate::offload::StoreEvent::Fetched { key, result } => {
+                    requeued.extend(self.scheduler.finish_inbound(key, result.is_ok())?);
+                }
+            }
+        }
+        if progress {
+            self.metrics.store(store.stats());
+        }
+        for handle in requeued {
+            self.requeue(handle);
+        }
+        Ok(progress)
+    }
+
+    /// Return a request whose restore failed to the front of the queue; its next
+    /// admission skips the host store.
+    fn requeue(&mut self, handle: RequestHandle) {
+        let slot = handle.slot as usize;
+        let Some(active) = self.active[slot].take_if(|active| active.request == handle) else {
+            return;
+        };
+        self.admissions[slot] = None;
+        let mut incoming = active.incoming;
+        incoming.host_lookup = false;
+        incoming.readmitted = true;
+        self.pending.push_front(incoming);
+    }
+
+    fn observe_prefill_rate(&mut self, fence: crate::cache::Fence, tokens: u64) {
+        let Some(position) = self
+            .prefill_started
+            .iter()
+            .position(|(started, _, _)| *started == fence)
+        else {
+            return;
+        };
+        let (_, instant, _) = self.prefill_started.remove(position).unwrap();
+        let seconds = instant.elapsed().as_secs_f64();
+        if tokens > 0 && seconds > 0.0 {
+            self.prefill_rate = 0.8 * self.prefill_rate + 0.2 * (tokens as f64 / seconds);
+        }
+    }
+
     fn fail_all(&self, error: &Error) {
         for request in self.active.iter().flatten() {
             request.incoming.fail(error.clone());
@@ -1066,6 +1178,41 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             request.fail(error.clone());
         }
     }
+}
+
+/// Plan the admission, look the history up in the host store above the GPU
+/// checkpoint, and start a restore when the transfer beats recomputation.
+fn admit_with_host_store(
+    scheduler: &mut RequestScheduler,
+    store: &mut dyn crate::offload::PrefixStore,
+    spec: RequestSpec,
+    prefill_rate: f64,
+) -> Result<RequestHandle> {
+    let plan = scheduler.plan_admission(&spec)?;
+    scheduler.record_host_lookup();
+    let hit = store
+        .lookup(plan.history(), plan.resident_tokens())
+        .filter(|hit| crate::offload::worth_fetching(hit, prefill_rate));
+    let Some(hit) = hit else {
+        return Ok(scheduler.admit_planned(spec, plan, None)?.handle);
+    };
+    let inbound = crate::scheduler::InboundRequest {
+        key: hit.key,
+        consumed_tokens: hit.consumed_tokens,
+        pages: hit.pages,
+    };
+    let admitted = scheduler.admit_planned(spec.clone(), plan, Some(inbound))?;
+    let Some(ticket) = admitted.ticket else {
+        return Ok(admitted.handle);
+    };
+    let key = ticket.key;
+    if store.fetch(hit, ticket).is_err() {
+        // No event follows a rejected fetch; this request is the ticket's only
+        // waiter, so retire it and admit the request again without the store.
+        scheduler.finish_inbound(key, false)?;
+        return scheduler.admit(spec);
+    }
+    Ok(admitted.handle)
 }
 
 fn cancel_stopped<M: ModelContract>(
@@ -1423,6 +1570,8 @@ mod tests {
             metrics: Arc::new(super::super::metrics::Metrics::default()),
             qualification: false,
             observation: None,
+            host_lookup: true,
+            readmitted: false,
         };
         (
             incoming,
