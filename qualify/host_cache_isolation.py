@@ -91,11 +91,15 @@ def percentile(values: list[float], fraction: float) -> float | None:
     return ordered[min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))]
 
 
+ROUND_GAP_NS = 1_000_000
+
+
 def round_intervals(stamps: list[int]) -> list[int]:
-    """Intervals between distinct completion timestamps: tokens accepted in one
-    speculative round share a timestamp, so per-token intervals would be zero."""
-    distinct = [stamp for index, stamp in enumerate(stamps) if index == 0 or stamp != stamps[index - 1]]
-    return [b - a for a, b in zip(distinct, distinct[1:])]
+    """Intervals between speculative rounds: tokens accepted in one round carry
+    timestamps a few hundred nanoseconds apart, so gaps under one millisecond
+    belong to the same round and per-token intervals would be meaningless."""
+    rounds = [stamp for index, stamp in enumerate(stamps) if index == 0 or stamp - stamps[index - 1] >= ROUND_GAP_NS]
+    return [b - a for a, b in zip(rounds, rounds[1:])]
 
 
 def summarize_itl(observations: list[dict]) -> dict:
@@ -221,6 +225,8 @@ def compare(baseline: dict, offload: dict) -> list[tuple[str, float, float, floa
     rows = []
     for name, key, higher_is_better in (("decode round p50 (us)", ("decode", "round_p50_us"), False),
                                         ("decode round p99 (us)", ("decode", "round_p99_us"), False),
+                                        ("first token p50 (ms)", ("decode", "ttft_p50_ms"), False),
+                                        ("first token p99 (ms)", ("decode", "ttft_p99_ms"), False),
                                         ("decode tokens/s", ("decode", "tokens_per_second"), True),
                                         ("prefill tokens/s (median)", ("prefill", "prefill_tokens_per_second_median"), True)):
         base, value = baseline[key[0]][key[1]], offload[key[0]][key[1]]
