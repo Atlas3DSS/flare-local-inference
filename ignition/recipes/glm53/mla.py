@@ -332,8 +332,9 @@ class PreparedGlmMLA:
             s.visible.copy_(self.metadata.positions + 1)
             if chain is not None:
                 chain.finish()
-            self.attention()
-            self.value_expansion(s.attended.transpose(0, 1))
+            # The expansion BMM uses no arena scratch, so it reads the attention output in place.
+            attended, _ = self.attention.attend_in_scratch()
+            self.value_expansion(attended.transpose(0, 1))
         elif self.mode == "prefill":
             self.attend_gathered_context()
         else:
@@ -345,6 +346,7 @@ class PreparedGlmMLA:
                 else:
                     absorb(s.query[start:end].transpose(0, 1))
                     gather(s.absorbed_query[:count].view(count, -1))
-                attention()
-                expand(combine(attention.output, attention.lse).transpose(0, 1))
+                # The head exchange uses its own channel, so it reads the partial output and LSE in place.
+                partial, lse = attention.attend_in_scratch()
+                expand(combine(partial, lse).transpose(0, 1))
         return p["o_proj"](s.expanded.view(s.output.shape[0], -1))
