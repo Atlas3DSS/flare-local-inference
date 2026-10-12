@@ -1958,7 +1958,9 @@ mod tests {
         );
         assert!(store.memory.record(&root.key).unwrap().durable);
         assert_eq!(store.stats().stored, 1);
-        assert!(store.store(&root).is_err() || !store.store(&root).unwrap());
+        // The closed store still answers: the key is indexed, so it is skipped.
+        assert!(!store.store(&root).unwrap());
+        assert_eq!(store.stats().store_skipped, 1);
         fs::remove_dir_all(&directory).unwrap();
     }
 
