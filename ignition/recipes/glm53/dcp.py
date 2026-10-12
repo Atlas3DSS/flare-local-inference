@@ -76,38 +76,78 @@ def _orderable(scores):
 
 
 @triton.jit
+def _candidate_keys(score, pool):
+    # Higher scores first, then lower pool ids; missing candidates below every present one.
+    keys = (_orderable(score).to(tl.int64) << 32) | (2147483647 - pool)
+    return tl.where(pool >= 0, keys, -9223372036854775808)
+
+
+@triton.jit
 def _pack_candidates(Pools, Scores, Packed, Rank, WORLD: tl.constexpr, TOPK: tl.constexpr):
-    # (score, global pool id) pairs; ids are exact in FP32 below 2^24 pools.
+    # (score, global pool id) pairs in descending key order; ids are exact in FP32 below 2^24 pools.
     row = tl.program_id(0)
     rank = tl.load(Rank)
     index = tl.arange(0, TOPK)
     local = tl.load(Pools + row * TOPK + index)
     score = tl.load(Scores + row * TOPK + index)
-    pool = tl.where(local >= 0, local * WORLD + rank, -1)
-    tl.store(Packed + (row * TOPK + index) * 2, tl.where(local >= 0, score, -float("inf")))
-    tl.store(Packed + (row * TOPK + index) * 2 + 1, pool.to(tl.float32))
+    keys = tl.sort(_candidate_keys(score, tl.where(local >= 0, local * WORLD + rank, -1).to(tl.int64)),
+                   descending=True)
+    present = keys != -9223372036854775808
+    # The orderable transform is its own inverse.
+    score = _orderable((keys >> 32).to(tl.int32)).to(tl.float32, bitcast=True)
+    pool = 2147483647 - (keys & 4294967295)
+    tl.store(Packed + (row * TOPK + index) * 2, tl.where(present, score, -float("inf")))
+    tl.store(Packed + (row * TOPK + index) * 2 + 1, tl.where(present, pool, -1).to(tl.float32))
+
+
+@triton.jit
+def _merge_row(Gathered, Pools, row, CANDIDATES: tl.constexpr, TOPK: tl.constexpr):
+    # The TOPK highest keys of every rank's candidates; each rank's list arrives in descending key order.
+    if CANDIDATES == 2 * TOPK:
+        # Two descending lists: pairing the i-th of one with the (TOPK-1-i)-th of the other and keeping the
+        # higher key selects exactly the top TOPK, as in one step of a bitonic merge.
+        index = tl.arange(0, TOPK)
+        first = row * CANDIDATES + index
+        second = row * CANDIDATES + 2 * TOPK - 1 - index
+        keys = tl.maximum(
+            _candidate_keys(tl.load(Gathered + first * 2), tl.load(Gathered + first * 2 + 1).to(tl.int64)),
+            _candidate_keys(tl.load(Gathered + second * 2), tl.load(Gathered + second * 2 + 1).to(tl.int64)))
+    else:
+        index = tl.arange(0, CANDIDATES)
+        keys = _candidate_keys(tl.load(Gathered + (row * CANDIDATES + index) * 2),
+                               tl.load(Gathered + (row * CANDIDATES + index) * 2 + 1).to(tl.int64))
+        keys = tl.sort(keys, descending=True)
+    # Expansion reads the first min(pools, TOPK) entries, so present pools are compacted to the front. Two ranks
+    # with fewer than TOPK pools between them leave the second rank's pools at the back of the pairing.
+    rank = tl.arange(0, keys.shape[0])
+    present = keys != -9223372036854775808
+    slot = tl.cumsum(present.to(tl.int32), 0) - 1
+    tl.store(Pools + row * TOPK + rank, tl.full(keys.shape, -1, tl.int32), mask=rank < TOPK)
+    tl.debug_barrier()
+    tl.store(Pools + row * TOPK + slot, (2147483647 - (keys & 4294967295)).to(tl.int32), mask=present & (slot < TOPK))
 
 
 @triton.jit
 def _merge_candidates(Gathered, Pools, CANDIDATES: tl.constexpr, TOPK: tl.constexpr):
-    # Highest scores first; ties keep the lower pool id; missing candidates sort last.
-    row = tl.program_id(0)
-    index = tl.arange(0, CANDIDATES)
-    score = tl.load(Gathered + (row * CANDIDATES + index) * 2)
-    pool = tl.load(Gathered + (row * CANDIDATES + index) * 2 + 1).to(tl.int64)
-    keys = (_orderable(score).to(tl.int64) << 32) | (2147483647 - pool)
-    keys = tl.where(pool >= 0, keys, -9223372036854775808)
-    keys = tl.sort(keys, descending=True)
-    rank = tl.arange(0, CANDIDATES)
-    selected = tl.where(keys != -9223372036854775808, 2147483647 - (keys & 4294967295), -1)
-    tl.store(Pools + row * TOPK + rank, selected.to(tl.int32), mask=rank < TOPK)
+    _merge_row(Gathered, Pools, tl.program_id(0), CANDIDATES, TOPK)
 
 
 @triton.jit
-def _expand_local(Pools, Positions, Requests, Tables, Output, Counts, table_stride, columns,
-                  Rank, WORLD: tl.constexpr, TOPK: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
-    # Selected pools and the incomplete tail as this rank's records, compacted to the front.
+def _merge_expand_local(Gathered, Pools, Positions, Requests, Tables, Output, Counts, table_stride, columns,
+                        Rank, WORLD: tl.constexpr, CANDIDATES: tl.constexpr, TOPK: tl.constexpr,
+                        WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    # Merge one row's global pools, then expand them and its incomplete pool into this rank's records.
     row = tl.program_id(0)
+    _merge_row(Gathered, Pools, row, CANDIDATES, TOPK)
+    tl.debug_barrier()
+    _expand_local_row(Pools, Positions, Requests, Tables, Output, Counts, table_stride, columns, row, Rank,
+                      WORLD, TOPK, WIDTH, BLOCK)
+
+
+@triton.jit
+def _expand_local_row(Pools, Positions, Requests, Tables, Output, Counts, table_stride, columns, row,
+                      Rank, WORLD: tl.constexpr, TOPK: tl.constexpr, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    # Selected pools and the incomplete tail as this rank's records, compacted to the front.
     rank = tl.load(Rank)
     column = tl.arange(0, BLOCK)
     length = tl.load(Positions + row).to(tl.int64) + 1
@@ -189,22 +229,23 @@ def _launch(kernel, grid, args, **meta):
 def pack_candidates(pools, scores, packed, shards):
     """Write this rank's local top pools as (score, global pool) pairs into packed [rows, TOPK, 2] FP32."""
     _launch(_pack_candidates, (pools.shape[0],), (pools, scores, packed, shards.index),
-            WORLD=shards.world, TOPK=POOL_TOPK, num_warps=4)
+            WORLD=shards.world, TOPK=POOL_TOPK, num_warps=8)
 
 
 def merge_candidates(gathered, pools):
     """Select the global top pools from every rank's gathered [rows, W * TOPK, 2] candidates."""
     candidates = gathered.shape[1]
     _launch(_merge_candidates, (pools.shape[0],), (gathered, pools),
-            CANDIDATES=candidates, TOPK=POOL_TOPK, num_warps=8)
+            CANDIDATES=candidates, TOPK=POOL_TOPK, num_warps=8 if candidates == 2 * POOL_TOPK else 16)
 
 
-def expand_local(pools, positions, requests, tables, output, counts, shards):
-    """Expand global pools and each row's incomplete pool into compacted local physical records."""
+def merge_expand_local(gathered, pools, positions, requests, tables, output, counts, shards):
+    """Select the global top pools from every rank's gathered [rows, W * TOPK, 2] candidates, then expand them
+    and each row's incomplete pool into compacted local physical records."""
     width = output.shape[1]
-    _launch(_expand_local, (pools.shape[0],), (pools, positions, requests, tables, output, counts,
-            tables.stride(0), tables.shape[1], shards.index),
-            WORLD=shards.world, TOPK=POOL_TOPK, WIDTH=width, BLOCK=triton.next_power_of_2(width), num_warps=8)
+    _launch(_merge_expand_local, (pools.shape[0],), (gathered, pools, positions, requests, tables, output, counts,
+            tables.stride(0), tables.shape[1], shards.index), WORLD=shards.world, CANDIDATES=gathered.shape[1],
+            TOPK=POOL_TOPK, WIDTH=width, BLOCK=triton.next_power_of_2(width), num_warps=8)
 
 
 def expand_tokens(pools, positions, output, counts):
