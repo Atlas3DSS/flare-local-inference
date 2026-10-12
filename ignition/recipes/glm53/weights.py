@@ -150,12 +150,10 @@ class GlmWeightLoader(DirectWeightLoader):
         if layer < 45 and layer % 4 != 3:
             return self._load_kda(prefix)
         head_channels = self.shard.partition(64 * 256, alignment=256)
-        result = {
-            name: self._projection(f"{prefix}.{name}")
-            for name in ("indexer.wq_b", "indexer.wk", "indexer.weights_proj")
-        }
+        result = {"indexer.wq_b": self._projection(f"{prefix}.indexer.wq_b")}
+        # Every projection of the layer input shares one GEMM: low-rank query, latent, index key and head weights.
         result["qkv_a_proj"] = self.load_linear_group(
-            tuple(f"{prefix}.{name}" for name in ("q_a_proj", "kv_a_proj_with_mqa")))
+            tuple(f"{prefix}.{name}" for name in ("q_a_proj", "kv_a_proj_with_mqa", "indexer.wk", "indexer.weights_proj")))
         result["q_b_proj"] = self._projection(f"{prefix}.q_b_proj", rows=head_channels)
         from ignition.preparation.quantization import linear_format
 

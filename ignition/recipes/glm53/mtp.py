@@ -165,7 +165,7 @@ class PreparedMTP:
                 self.eps, round_before_weight=True)
             a.writer()
             index = a.indexer
-            index.scratch.normalized_key.copy_(index.module.k_norm(index.key_projection(self.normalized)))
+            index.scratch.normalized_key.copy_(index.module.k_norm(index.key_input))
             index.gate_projection(self.normalized)
             glm_pool.update_pools(*index.pool_arguments, plan=index.pool_plan)
             return

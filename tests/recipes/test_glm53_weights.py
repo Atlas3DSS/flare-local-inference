@@ -122,8 +122,9 @@ def test_actual_dense_and_attention_shards(manifest, world, rank):
     assert_mxfp8(manifest, mla["o_proj"], f"{prefix}.o_proj", columns=shard.partition(16384))
     assert_mxfp8(manifest, mla["qkv_a_proj"], f"{prefix}.q_a_proj", output_rows=(0, 1536))
     assert_mxfp8(manifest, mla["qkv_a_proj"], f"{prefix}.kv_a_proj_with_mqa", output_rows=(1536, 2048))
-    for name in ("indexer.wk", "indexer.wq_b", "indexer.weights_proj"):
-        assert_mxfp8(manifest, mla[name], f"{prefix}.{name}")
+    assert_mxfp8(manifest, mla["qkv_a_proj"], f"{prefix}.indexer.wk", output_rows=(2048, 2176))
+    assert_mxfp8(manifest, mla["qkv_a_proj"], f"{prefix}.indexer.weights_proj", output_rows=(2176, 2208))
+    assert_mxfp8(manifest, mla["indexer.wq_b"], f"{prefix}.indexer.wq_b")
     prefix = f"{TEXT_PREFIX}.layers.0.mlp"
     extent = slice(*shard.partition(12288))
     expected = torch.cat([read(manifest, f"{prefix}.{name}.weight", extent) for name in ("gate_proj", "up_proj")])

@@ -60,14 +60,15 @@ class MLAScratch:
             return torch.zeros(shape, dtype=dtype, device=device)
         def buffer(*shape):
             return zeros(tokens, *shape)
-        projected = buffer(2048)
+        # Fused layer-input projection: query 1536, latent 512, index key 128 and index head weights 32.
+        projected = buffer(2208)
         prefill = context_ranks > 1 and mode == "prefill"
         exchange = min(tokens, SLICE_ROWS) if context_ranks > 1 and not prefill else 0
         # Context-parallel rows absorb, attend and expand one slice at a time; otherwise every row at once.
         absorbed = exchange or (min(tokens, PREFILL_SLICE_ROWS) if prefill else tokens)
         # One 528-byte record per global position: `blocks` pages of 256 records on every rank.
         positions = blocks * 256 * context_ranks if prefill else 0
-        return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:], buffer(512),
+        return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:2048], buffer(512),
             buffer(heads, 256), zeros(absorbed, heads, 512), zeros(absorbed, heads, 512), buffer(heads, 256),
             buffer(4096), zeros(tokens, dtype=torch.int32), index,
             zeros(exchange, heads * context_ranks, 512), zeros(exchange, heads * context_ranks, 512),
@@ -173,7 +174,8 @@ class PreparedGlmMLA:
                  metadata: IndexMetadata, *, mode, session, name, workspace, max_cache_pages=None, context=None):
         rows, heads = scratch.query.shape[:2]
         if (source.shape != (rows, 4096) or source.dtype != torch.bfloat16
-                or source.device != scratch.query.device):
+                or source.device != scratch.query.device or scratch.projected_input.shape[1] != 2208
+                or scratch.latent_input.shape[1] != 512):
             raise ValueError("GLM MLA requires BF16 [token_capacity, 4096] input on the scratch device")
         if (module.num_heads, module.q_lora_rank, module.kv_lora_rank, module.qk_nope_head_dim,
                 module.qk_rope_head_dim, module.v_head_dim) != (64, 1536, 512, 256, 0, 256):
@@ -209,6 +211,7 @@ class PreparedGlmMLA:
                 self.expand_weights, scratch.expanded.transpose(0, 1), major="k",
                 session=session, name=f"{name}.expand_value")
         self.indexer = PreparedGlmIndexer(module.indexer, weights, source, scratch.query_residual,
+            scratch.projected_input[:, 2048:2176], scratch.projected_input[:, 2176:2208],
             scratch.index, state.index, metadata, mode=mode, session=session, name=f"{name}.indexer",
             workspace=workspace, max_cache_pages=max_cache_pages, context=context)
         self.writer = PreparedLatentCacheWriter(scratch.latent, state.cache, metadata.token_slots,
