@@ -57,6 +57,10 @@ const HOST_REGISTER_PORTABLE: c_uint = 0x1;
 const ATTRIBUTE_INTEGRATED: c_int = 18;
 /// `CU_STREAM_NON_BLOCKING`: the stream never synchronizes with the legacy default stream.
 const STREAM_NON_BLOCKING: c_uint = 0x1;
+/// `CU_EVENT_BLOCKING_SYNC`: a thread waiting on the event sleeps instead of spinning.
+const EVENT_BLOCKING_SYNC: c_uint = 0x1;
+/// `CU_EVENT_DISABLE_TIMING`: the event records no timestamp.
+const EVENT_DISABLE_TIMING: c_uint = 0x2;
 
 /// Most bytes one batched copy may carry.
 pub const BATCH_BYTES: usize = 16 << 20;
@@ -438,13 +442,26 @@ impl Stream {
         })
     }
 
+    /// An untimed event whose waits spin, observing completion with the least latency.
     pub(crate) fn event(&self) -> Result<Event> {
         self.event_with_timing(false)
     }
     pub(crate) fn event_with_timing(&self, timing: bool) -> Result<Event> {
+        self.create_event(if timing { 0 } else { EVENT_DISABLE_TIMING })
+    }
+
+    /// An untimed event whose [`Event::synchronize`] sleeps the calling thread
+    /// until the work completes: for offload threads that wait on long copies
+    /// and must not occupy a core while doing so.
+    pub(crate) fn blocking_event(&self) -> Result<Event> {
+        self.create_event(EVENT_BLOCKING_SYNC | EVENT_DISABLE_TIMING)
+    }
+
+    fn create_event(&self, flags: c_uint) -> Result<Event> {
         let mut handle = std::ptr::null_mut();
+        // SAFETY: The driver owns the ABI and `handle` is a valid output pointer.
         self.driver.check("cuEventCreate", unsafe {
-            (self.driver.event_create)(&mut handle, if timing { 0 } else { 2 })
+            (self.driver.event_create)(&mut handle, flags)
         })?;
         Ok(Event {
             driver: self.driver.clone(),
@@ -553,7 +570,8 @@ impl Event {
         Ok((f64::from(millis) * 1_000_000.0).round() as u64)
     }
 
-    /// Block the calling thread until the event's work completes.
+    /// Block the calling thread until the event's work completes. The thread
+    /// spins unless the event came from [`Stream::blocking_event`].
     pub(crate) fn synchronize(&self) -> Result<()> {
         self.driver.check("cuEventSynchronize", unsafe {
             (self.driver.event_synchronize)(self.handle as Handle)
@@ -679,6 +697,19 @@ mod tests {
         ((offset * 7) ^ (offset >> 9)) as u8
     }
 
+    fn thread_cpu_time() -> std::time::Duration {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `time` is a valid output pointer for the calling thread's clock.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        std::time::Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+    }
+
     /// Read a patterned file with `O_DIRECT` into the registered mapping and
     /// compare. Returns `false` when the directory refuses direct I/O.
     fn direct_read_matches(host: *mut u8, capacity: usize) -> bool {
@@ -760,7 +791,7 @@ mod tests {
                 .unwrap();
         }
         let stream = Stream::open_lowest_priority(context as usize, 0).unwrap();
-        let event = stream.event().unwrap();
+        let event = stream.blocking_event().unwrap();
         // SAFETY: An anonymous private mapping of BYTES, released at the end.
         let host = unsafe {
             libc::mmap(
@@ -845,6 +876,24 @@ mod tests {
         assert!(image_b == expected_b, "host to device batch differs");
         assert!(unsafe { stream.copy_batch(&[b], &[a], &[BATCH_BYTES + 1]) }.is_err());
         stream.synchronize().unwrap();
+
+        // Waiting on the blocking event must sleep rather than spin: queue
+        // enough host-to-device traffic to outlast its issue and compare the
+        // thread's CPU time against the wall time of the wait.
+        for _ in 0..600 {
+            unsafe { stream.copy_batch(&[b], &[host as u64], &[BYTES]) }.unwrap();
+        }
+        stream.record(&event).unwrap();
+        let (wall, cpu) = (std::time::Instant::now(), thread_cpu_time());
+        event.synchronize().unwrap();
+        let (wall, cpu) = (wall.elapsed(), thread_cpu_time() - cpu);
+        eprintln!("blocking event wait: {wall:?} wall, {cpu:?} thread CPU");
+        if wall >= std::time::Duration::from_millis(40) {
+            assert!(
+                cpu * 4 < wall,
+                "the blocking event wait spun: {cpu:?} CPU over {wall:?}"
+            );
+        }
 
         let direct = direct_read_matches(host, BYTES);
 
