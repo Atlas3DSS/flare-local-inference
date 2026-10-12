@@ -943,6 +943,16 @@ impl MemoryStore {
         self.core.remove_record(key)
     }
 
+    /// Hold a record in place while a job outside this store references its
+    /// slabs: eviction and removal refuse pinned records.
+    pub(crate) fn pin_record(&mut self, key: &PrefixKey) -> Result<()> {
+        self.core.index.pin(key)
+    }
+
+    pub(crate) fn unpin_record(&mut self, key: &PrefixKey) -> Result<()> {
+        self.core.index.unpin(key)
+    }
+
     /// Copy a chain of resident records into the ticket's ids. An error means
     /// nothing was submitted and no event follows.
     pub(crate) fn fetch_chain(&mut self, chain: &Match, ticket: InboundTicket) -> Result<()> {
