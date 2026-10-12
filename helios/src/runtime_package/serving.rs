@@ -69,6 +69,8 @@ impl NativeResources {
             .collect::<Result<Vec<_>>>()?;
         let manifest = ExecutionManifest {
             engram: None,
+            cache: self.cache.clone(),
+            offload: None,
             abi_version: execution.abi_version,
             context: self.context as usize,
             device: self.device,

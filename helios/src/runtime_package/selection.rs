@@ -15,6 +15,7 @@ pub struct LoadOptions {
     pub adaptive_verification: Option<bool>,
     /// User-visible ordinals when the launcher renumbers CUDA devices.
     pub device_labels: Option<Vec<i32>>,
+    pub prefix_cache: crate::offload::PrefixCacheOffload,
 }
 
 impl LoadOptions {

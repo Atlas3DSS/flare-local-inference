@@ -105,6 +105,7 @@ impl Fixture {
             scheduler,
             receiver,
             4,
+            None,
         );
         worker.inputs = Some(Default::default());
         worker

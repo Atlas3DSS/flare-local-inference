@@ -142,6 +142,10 @@ pub struct GraphDescriptor {
 #[derive(Clone, Debug)]
 pub struct ExecutionManifest {
     pub engram: Option<crate::engram::Binding>,
+    /// This rank's prefix checkpoint storage, present after cache allocation.
+    pub cache: Option<crate::offload::CacheGeometry>,
+    /// Host prefix store resources shared by every rank, present when configured.
+    pub offload: Option<crate::offload::Binding>,
     pub abi_version: u32,
     pub context: usize,
     pub device: i32,

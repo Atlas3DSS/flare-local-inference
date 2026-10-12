@@ -371,6 +371,16 @@ fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
         (Some(_), None) | (None, Some(_)) => return false,
         _ => {}
     }
+    match (&a.offload, &b.offload) {
+        (Some(a), Some(b)) if !a.shares(b) || a.rank() == b.rank() => return false,
+        (Some(_), None) | (None, Some(_)) => return false,
+        _ => {}
+    }
+    match (&a.cache, &b.cache) {
+        (Some(a), Some(b)) if !a.same_layout(b) => return false,
+        (Some(_), None) | (None, Some(_)) => return false,
+        _ => {}
+    }
     a.abi_version == b.abi_version
         && a.max_active == b.max_active
         && a.input_frame_bytes == b.input_frame_bytes
@@ -424,6 +434,18 @@ mod tests {
         assert!(!same_layout(&root, &peer));
         peer = root.clone();
         peer.graphs[0].token_capacity += 1;
+        assert!(!same_layout(&root, &peer));
+        let geometry = crate::offload::geometry::tests::geometry(64, &[("k", 8192)], 4096);
+        peer = root.clone();
+        peer.cache = Some(geometry.clone());
+        assert!(!same_layout(&root, &peer));
+        let mut root = root;
+        root.cache = Some(geometry.clone());
+        for plane in &mut peer.cache.as_mut().unwrap().planes {
+            plane.address += 0x1000;
+        }
+        assert!(same_layout(&root, &peer));
+        peer.cache.as_mut().unwrap().planes[0].unit_bytes += 1;
         assert!(!same_layout(&root, &peer));
     }
 }

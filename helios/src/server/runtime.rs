@@ -206,6 +206,19 @@ impl<M: ModelContract> ModelRuntime<M> {
         let thread = thread::Builder::new()
             .name("flare-model".into())
             .spawn(move || {
+                if matches!(peers, Some(crate::execution::RankPeers::Processes(_)))
+                    && manifest.offload.is_some()
+                {
+                    let error = Error::execution(
+                        ExecutionError::Manifest,
+                        "the host prefix store requires every rank in one process",
+                    );
+                    let _ = ready_tx.send(Err(error.clone()));
+                    return Shutdown {
+                        drained: true,
+                        error: Some(error),
+                    };
+                }
                 // SAFETY: start's caller retains all prepared resources through
                 // confirmed drain. This thread exclusively owns the executor;
                 // construction binds both streams to the manifest's context.
@@ -270,6 +283,24 @@ impl<M: ModelContract> ModelRuntime<M> {
                     shutdown.error = Some(error);
                     return shutdown;
                 }
+                // The host prefix store opens its transfer threads on every
+                // rank's context, which the loader prepared for this process.
+                let store = match executor
+                    .manifest()
+                    .offload
+                    .as_ref()
+                    .and_then(|binding| binding.take())
+                    .map(crate::offload::open)
+                    .transpose()
+                {
+                    Ok(store) => store,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.clone()));
+                        let mut shutdown = executor.close();
+                        shutdown.error = Some(error);
+                        return shutdown;
+                    }
+                };
                 let mut worker = Worker::<M>::new(
                     &worker_config,
                     &frontend,
@@ -278,6 +309,7 @@ impl<M: ModelContract> ModelRuntime<M> {
                     scheduler,
                     receiver,
                     queue_capacity,
+                    store,
                 );
                 worker_metrics.scheduler(worker.scheduler.stats());
                 worker_health.store(true, Ordering::Release);
@@ -496,6 +528,7 @@ struct Worker<'a, M: ModelContract> {
     admissions: Vec<Option<crate::model::Admission<M>>>,
     inputs: Option<M::Inputs>,
     queue_capacity: usize,
+    store: Option<Box<dyn crate::offload::PrefixStore>>,
 }
 
 impl<'a, M: ModelContract> Worker<'a, M> {
@@ -507,6 +540,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         scheduler: RequestScheduler,
         receiver: mpsc::Receiver<Incoming<M>>,
         queue_capacity: usize,
+        store: Option<Box<dyn crate::offload::PrefixStore>>,
     ) -> Self {
         Self {
             config,
@@ -516,6 +550,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             scheduler,
             receiver,
             queue_capacity,
+            store,
             pending: VecDeque::with_capacity(queue_capacity),
             active: (0..config.limits.max_active).map(|_| None).collect(),
             admissions: (0..config.limits.max_active).map(|_| None).collect(),

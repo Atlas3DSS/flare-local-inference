@@ -82,13 +82,14 @@ pub struct FetchSegment {
 /// pool and the shared transfer threads. It also moves records between files
 /// and caller-owned registered buffers for the composite store.
 pub struct Staged {
-    pool: SlabPool,
+    /// Absent inside a composite store, whose memory slabs are the buffers.
+    pool: Option<SlabPool>,
     transfers: Arc<Mutex<Transfers>>,
     disk: DiskThread,
 }
 
 impl Staged {
-    pub fn new(pool: SlabPool, transfers: Arc<Mutex<Transfers>>, disk: DiskThread) -> Self {
+    pub fn new(pool: Option<SlabPool>, transfers: Arc<Mutex<Transfers>>, disk: DiskThread) -> Self {
         Self {
             pool,
             transfers,
@@ -96,8 +97,8 @@ impl Staged {
         }
     }
 
-    pub fn pool(&self) -> &SlabPool {
-        &self.pool
+    pub fn pool(&self) -> Option<&SlabPool> {
+        self.pool.as_ref()
     }
 
     /// Write a record whose page and row bytes already sit in caller-owned

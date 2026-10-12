@@ -14,6 +14,7 @@ pub struct NativeModel {
     pub(super) ranks: Vec<NativeResources>,
     pub(super) server_config: serde_json::Value,
     engram: Option<std::sync::Arc<crate::engram::Shared>>,
+    offload: Option<std::sync::Arc<crate::offload::Shared>>,
 }
 
 impl NativeModel {
@@ -205,6 +206,7 @@ impl NativeModel {
             ranks: Vec::new(),
             server_config,
             engram: None,
+            offload: None,
         };
         unsafe {
             let phase = progress.phase(
@@ -311,8 +313,41 @@ impl NativeModel {
             }
             model.allocate_caches(&mut packages, progress, active)?;
             model.grant_peer_access(&descriptor.peer_memory)?;
+            model.prepare_offload(root, options, progress)?;
         }
         Ok(model)
+    }
+
+    /// Resolve the host prefix store configuration, map and register its
+    /// pools, and scan its record directory.
+    unsafe fn prepare_offload(
+        &mut self,
+        root: &Path,
+        options: &LoadOptions,
+        progress: &StartupProgress,
+    ) -> Result<()> {
+        let phase = progress.phase("Prepare host prefix cache", None);
+        let identity = identity(&self.server_config)?;
+        let geometry = self
+            .ranks
+            .iter()
+            .map(|rank| {
+                rank.cache_geometry()
+                    .cloned()
+                    .ok_or_else(|| invalid("rank lacks cache geometry"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let contexts: Vec<_> = self
+            .ranks
+            .iter()
+            .map(|rank| rank.context_handle())
+            .collect();
+        let prepared =
+            crate::offload::prepare(&options.prefix_cache, root, identity, geometry, contexts)?;
+        let summary = prepared.summary();
+        self.offload = prepared.into_shared();
+        phase.finish(summary);
+        Ok(())
     }
 
     unsafe fn grant_peer_access(&self, peers: &[protobuf::wire::PeerMemory]) -> Result<()> {
@@ -393,6 +428,9 @@ impl NativeModel {
             .enumerate()
             .map(|(index, rank)| {
                 let mut manifest = rank.execution_manifest()?;
+                if let Some(shared) = &self.offload {
+                    manifest.offload = Some(crate::offload::Binding::new(shared.clone(), index));
+                }
                 if let Some(shared) = &self.engram {
                     let events = shared
                         .index
@@ -423,10 +461,27 @@ impl NativeModel {
 
 impl Drop for NativeModel {
     fn drop(&mut self) {
+        self.offload.take();
         self.engram.take();
         // Rank zero owns the shared reservations and releases them after every peer.
         while self.ranks.pop().is_some() {}
     }
+}
+
+/// The 32-byte model identity recorded by preparation as 64 hexadecimal digits.
+fn identity(config: &serde_json::Value) -> Result<[u8; 32]> {
+    let text = config["identity"]
+        .as_str()
+        .ok_or_else(|| invalid("model package lacks an identity"))?;
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid("model identity must be 64 hexadecimal characters"));
+    }
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .map_err(|_| invalid("model identity must be hexadecimal"))?;
+    }
+    Ok(digest)
 }
 
 fn validate_peer_memory(packages: &[Package], peers: &[protobuf::wire::PeerMemory]) -> Result<()> {
