@@ -23,6 +23,43 @@ type EventElapsed = unsafe extern "C" fn(*mut f32, Handle, Handle) -> c_int;
 type StreamWait = unsafe extern "C" fn(Handle, Handle, c_uint) -> c_int;
 type WaitValue = unsafe extern "C" fn(Handle, u64, u32, c_uint) -> c_int;
 type HostPointer = unsafe extern "C" fn(*mut u64, Handle, c_uint) -> c_int;
+type StreamCreatePriority = unsafe extern "C" fn(*mut Handle, c_uint, c_int) -> c_int;
+type PriorityRange = unsafe extern "C" fn(*mut c_int, *mut c_int) -> c_int;
+type HostRegister = unsafe extern "C" fn(Handle, usize, c_uint) -> c_int;
+type HostUnregister = unsafe extern "C" fn(Handle) -> c_int;
+type DeviceAttribute = unsafe extern "C" fn(*mut c_int, c_int, c_int) -> c_int;
+type MemcpyBatch = unsafe extern "C" fn(
+    *const u64,
+    *const u64,
+    *const usize,
+    usize,
+    *const CopyAttributes,
+    *const usize,
+    usize,
+    Handle,
+) -> c_int;
+
+/// `CUmemcpyAttributes`: source access order, source and destination location
+/// hints as `CUmemLocation {type, id}`, and flags.
+#[repr(C)]
+struct CopyAttributes {
+    source_order: c_int,
+    source_location: [c_int; 2],
+    destination_location: [c_int; 2],
+    flags: c_uint,
+}
+
+/// `CU_MEMCPY_SRC_ACCESS_ORDER_STREAM`: the source is read in stream order.
+const SOURCE_ORDER_STREAM: c_int = 1;
+/// `CU_MEMHOSTREGISTER_PORTABLE`: the registration is visible to every context.
+const HOST_REGISTER_PORTABLE: c_uint = 0x1;
+/// `CU_DEVICE_ATTRIBUTE_INTEGRATED`.
+const ATTRIBUTE_INTEGRATED: c_int = 18;
+
+/// Most bytes one batched copy may carry.
+pub const BATCH_BYTES: usize = 16 << 20;
+/// Most entries one batched copy may carry.
+pub const BATCH_ENTRIES: usize = 4096;
 
 struct Driver {
     _library: Library,
@@ -47,6 +84,13 @@ struct Driver {
     stream_wait: StreamWait,
     wait_value: WaitValue,
     host_pointer: HostPointer,
+    stream_create_priority: StreamCreatePriority,
+    priority_range: PriorityRange,
+    host_register: HostRegister,
+    host_unregister: HostUnregister,
+    device_attribute: DeviceAttribute,
+    event_synchronize: StreamOperation,
+    memcpy_batch: MemcpyBatch,
 }
 
 impl Driver {
@@ -92,6 +136,13 @@ impl Driver {
                 stream_wait: symbol!("cuStreamWaitEvent"),
                 wait_value: symbol!("cuStreamWaitValue32_v2"),
                 host_pointer: symbol!("cuMemHostGetDevicePointer_v2"),
+                stream_create_priority: symbol!("cuStreamCreateWithPriority"),
+                priority_range: symbol!("cuCtxGetStreamPriorityRange"),
+                host_register: symbol!("cuMemHostRegister_v2"),
+                host_unregister: symbol!("cuMemHostUnregister"),
+                device_attribute: symbol!("cuDeviceGetAttribute"),
+                event_synchronize: symbol!("cuEventSynchronize"),
+                memcpy_batch: symbol!("cuMemcpyBatchAsync_v2"),
                 _library: library,
             }))
         }
@@ -145,6 +196,49 @@ pub fn current_context() -> Result<(usize, i32)> {
     Driver::load()?.current()
 }
 
+/// Whether the device owning `context` shares physical memory with the host.
+pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    let _ = (context, ATTRIBUTE_INTEGRATED);
+    todo!("set the context current and query CU_DEVICE_ATTRIBUTE_INTEGRATED")
+}
+
+/// Page-locked registration of process memory, released on drop.
+pub(crate) struct HostRegistration {
+    driver: Arc<Driver>,
+    address: usize,
+    nbytes: usize,
+}
+
+impl HostRegistration {
+    pub(crate) fn address(&self) -> usize {
+        self.address
+    }
+    pub(crate) fn nbytes(&self) -> usize {
+        self.nbytes
+    }
+}
+
+impl Drop for HostRegistration {
+    fn drop(&mut self) {
+        // SAFETY: The registration was made by `register_host` on this range.
+        unsafe {
+            (self.driver.host_unregister)(self.address as Handle);
+        }
+    }
+}
+
+/// Register `nbytes` at `address`, which must be page aligned, as portable
+/// page-locked memory with `context` current. The range stays mapped and
+/// unchanged in size until the registration is dropped.
+pub(crate) unsafe fn register_host(
+    context: usize,
+    address: usize,
+    nbytes: usize,
+) -> Result<HostRegistration> {
+    let _ = (context, address, nbytes, HOST_REGISTER_PORTABLE);
+    todo!("cuMemHostRegister_v2 with the portable flag")
+}
+
 pub(crate) struct Stream {
     driver: Arc<Driver>,
     handle: usize,
@@ -173,6 +267,31 @@ impl Stream {
             driver,
             handle: handle as usize,
         })
+    }
+
+    /// A stream at the lowest priority the context supports, for copies that
+    /// must yield to model work.
+    pub(crate) fn open_lowest_priority(context: usize, expected_device: i32) -> Result<Self> {
+        let _ = (context, expected_device, SOURCE_ORDER_STREAM);
+        todo!("cuCtxGetStreamPriorityRange then cuStreamCreateWithPriority with the least priority")
+    }
+
+    /// Issue one batched copy of `destinations[i] <- sources[i]` for `sizes[i]`
+    /// bytes each, in stream order on both sides. Every address is a device
+    /// address or a registered host address. The batch carries at most
+    /// [`BATCH_BYTES`] and [`BATCH_ENTRIES`]; larger batches are rejected.
+    ///
+    /// # Safety
+    /// Every range stays valid and, for host sources, unchanged until the
+    /// stream passes the copy.
+    pub(crate) unsafe fn copy_batch(
+        &self,
+        destinations: &[u64],
+        sources: &[u64],
+        sizes: &[usize],
+    ) -> Result<()> {
+        let _ = (destinations, sources, sizes);
+        todo!("cuMemcpyBatchAsync_v2 with one stream-ordered attribute")
     }
 
     pub(crate) fn launch(&self, graph: usize) -> Result<()> {
@@ -317,6 +436,13 @@ impl Event {
             ));
         }
         Ok((f64::from(millis) * 1_000_000.0).round() as u64)
+    }
+
+    /// Block the calling thread until the event's work completes.
+    pub(crate) fn synchronize(&self) -> Result<()> {
+        self.driver.check("cuEventSynchronize", unsafe {
+            (self.driver.event_synchronize)(self.handle as Handle)
+        })
     }
 
     pub(crate) fn completed(&self) -> Result<bool> {

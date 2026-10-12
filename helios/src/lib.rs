@@ -6,6 +6,7 @@ pub mod execution;
 #[cfg(feature = "grammar")]
 pub mod grammar;
 pub mod model;
+pub mod offload;
 #[cfg(feature = "server")]
 pub mod output;
 mod replay;

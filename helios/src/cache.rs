@@ -5,7 +5,7 @@ mod hash;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::Result;
-pub use hash::{ConditioningEvent, PrefixHistory, PrefixKey};
+pub use hash::{ConditioningEvent, HASH_BLOCK_TOKENS, PrefixHistory, PrefixKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageId(pub u32);

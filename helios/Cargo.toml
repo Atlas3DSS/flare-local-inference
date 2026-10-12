@@ -42,6 +42,7 @@ llguidance = { version = "=1.9.1", default-features = false, features = ["lark",
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
 crossterm = { version = "0.28", default-features = false, optional = true }
 io-uring = "0.7"
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64"] }
 
 [build-dependencies]
 prost-build = { version = "0.14", optional = true }
