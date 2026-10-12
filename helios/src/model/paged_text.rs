@@ -81,7 +81,7 @@ impl Inputs {
                     capacity,
                     0..live.pages().count().min(capacity),
                 )?;
-                if config.has_draft_cache() {
+                if M::scheduler_capabilities(config).draft_pages_per_request > 0 {
                     let available = live.pages().count().saturating_sub(1).min(capacity);
                     append_pages(
                         &mut self.staging,
@@ -233,7 +233,7 @@ impl Inputs {
     }
 }
 
-pub(crate) fn required_buffers(
+pub(crate) fn required_buffers<M: ModelContract>(
     config: &crate::model::ModelConfig,
     page_tokens: usize,
 ) -> Vec<crate::model::catalog::BufferSpec> {
@@ -282,7 +282,7 @@ pub(crate) fn required_buffers(
         ("state_operation", I32, vec![slots]),
         ("state_num_ops", I32, vec![1]),
     ];
-    if config.has_draft_cache() {
+    if M::scheduler_capabilities(config).draft_pages_per_request > 0 {
         buffers.push((
             "draft_page_tables",
             I32,

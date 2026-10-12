@@ -9,7 +9,7 @@ use crate::{Result, execution::BATCH_CAPACITIES};
 
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
-    pub ngram_storage: crate::engram::Storage,
+    pub embedding_table_storage: crate::engram::Storage,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
     pub adaptive_verification: Option<bool>,
@@ -95,9 +95,11 @@ impl LoadOptions {
                 fixed.unwrap_or_else(|| widths.last().copied().unwrap_or(1).min(drafts + 1))
             })
         };
+        let enabled = drafts > 0 && fixed != Some(1) && !widths.is_empty();
+        let fixed = enabled.then_some(fixed).flatten();
         let widths: Vec<_> = widths
             .into_iter()
-            .filter(|width| *width <= drafts + 1)
+            .filter(|width| enabled && *width <= drafts + 1)
             .collect();
         let source = match config
             .get("speculative_proposal_source")
@@ -137,6 +139,10 @@ impl LoadOptions {
                     }
                 };
                 if !valid
+                    || (kind == crate::execution::GraphKind::Speculative
+                        && graph.speculation_enabled == Some(false))
+                    || (kind == crate::execution::GraphKind::Decode
+                        && graph.speculation_enabled == Some(true))
                     || if kind == crate::execution::GraphKind::Speculative {
                         graph.verify_tokens != Some(graph.token_capacity as u32)
                             || graph
@@ -155,6 +161,7 @@ impl LoadOptions {
                         graph.token_capacity,
                         graph.draft_tokens,
                         graph.draft_source,
+                        graph.speculation_enabled,
                     ))
                 {
                     return Err(invalid("invalid or duplicate serving graph variant"));
@@ -175,6 +182,10 @@ impl LoadOptions {
             }
             execution.graphs.retain(|graph| {
                 graph.batch_capacity <= active.next_power_of_two() as u64
+                    && graph
+                        .speculation_enabled
+                        .is_none_or(|value| value == enabled)
+                    && (graph.kind != "decode" || !enabled)
                     && (graph.kind != "speculative"
                         || (graph.draft_source == source
                             && graph.draft_tokens.is_some_and(|n| n as usize <= drafts)
@@ -199,6 +210,19 @@ impl LoadOptions {
                         == drafts
                 })
             });
+            let mut selected_variants = HashSet::new();
+            for graph in &execution.graphs {
+                if !selected_variants.insert((
+                    graph.kind.as_str(),
+                    graph.sampling_mode.as_str(),
+                    graph.batch_capacity,
+                    graph.token_capacity,
+                )) {
+                    return Err(invalid(
+                        "ambiguous graph variants for the selected speculation mode",
+                    ));
+                }
+            }
             for batch in BATCH_CAPACITIES
                 .into_iter()
                 .filter(|batch| *batch <= active.next_power_of_two())
@@ -260,6 +284,9 @@ impl LoadOptions {
         object.insert("max_active".into(), active.into());
         object.insert("speculative_widths".into(), serde_json::json!(widths));
         object.insert("speculative_fixed_width".into(), serde_json::json!(fixed));
+        if !enabled {
+            object.insert("history_drafts".into(), false.into());
+        }
         Ok(active)
     }
 }
@@ -295,15 +322,21 @@ mod tests {
             ..Default::default()
         };
         for batch in [1, 2, 4] {
-            for kind in ["init", "restore", "snapshot", "resume"] {
-                execution.graphs.push(wire::ExecutionGraph {
-                    name: format!("{kind}{batch}"),
-                    kind: kind.into(),
-                    sampling_mode: "general".into(),
-                    batch_capacity: batch,
-                    token_capacity: 1,
-                    ..Default::default()
-                });
+            for enabled in [false, true] {
+                for kind in ["init", "restore", "snapshot", "resume", "decode"] {
+                    if enabled && kind == "decode" {
+                        continue;
+                    }
+                    execution.graphs.push(wire::ExecutionGraph {
+                        name: format!("{kind}{batch}-{}", if enabled { "mtp" } else { "no-mtp" }),
+                        kind: kind.into(),
+                        sampling_mode: "general".into(),
+                        batch_capacity: batch,
+                        token_capacity: 1,
+                        speculation_enabled: Some(enabled),
+                        ..Default::default()
+                    });
+                }
             }
             for width in 1..=6 {
                 execution.graphs.push(wire::ExecutionGraph {
@@ -516,7 +549,7 @@ mod tests {
                     assert_eq!(config["max_active"], concurrency);
                     assert_eq!(
                         config["speculative_widths"].as_array().unwrap().len(),
-                        drafts + 1
+                        if drafts == 0 { 0 } else { drafts + 1 }
                     );
                 }
             }
@@ -626,5 +659,122 @@ mod tests {
         assert_eq!(packages[0].graphs.len(), 5);
         assert_eq!(packages[0].modules.len(), 6);
         assert_eq!(packages[0].modules.last().unwrap().name, "data");
+    }
+
+    #[test]
+    fn pinned_zero_selects_ordinary_operations_and_disables_draft_scheduling() {
+        for adaptive in [None, Some(false), Some(true)] {
+            let mut p = package();
+            let mut config = config();
+            config["history_drafts"] = true.into();
+            LoadOptions {
+                mtp_draft_tokens: Some(0),
+                adaptive_verification: adaptive,
+                ..Default::default()
+            }
+            .select(std::slice::from_mut(&mut p), &mut config)
+            .unwrap();
+            assert_eq!(config["speculative_widths"], serde_json::json!([]));
+            assert!(config["speculative_fixed_width"].is_null());
+            assert_eq!(config["history_drafts"], false);
+            assert!(
+                p.execution
+                    .as_ref()
+                    .unwrap()
+                    .graphs
+                    .iter()
+                    .all(|g| g.speculation_enabled == Some(false))
+            );
+            assert_eq!(
+                p.execution
+                    .as_ref()
+                    .unwrap()
+                    .graphs
+                    .iter()
+                    .filter(|g| g.kind == "decode")
+                    .count(),
+                3
+            );
+        }
+        let mut config = config();
+        config["speculative_fixed_width"] = 1.into();
+        LoadOptions::default()
+            .select(&mut [package()], &mut config)
+            .unwrap();
+        assert_eq!(config["speculative_widths"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn pinned_zero_requires_ordinary_decode_instead_of_using_speculative_width_one() {
+        let mut p = package();
+        let names: HashSet<_> = p
+            .execution
+            .as_ref()
+            .unwrap()
+            .graphs
+            .iter()
+            .filter(|g| g.kind == "decode")
+            .map(|g| g.name.clone())
+            .collect();
+        p.execution
+            .as_mut()
+            .unwrap()
+            .graphs
+            .retain(|g| !names.contains(&g.name));
+        p.graphs.retain(|g| !names.contains(&g.name));
+        let error = LoadOptions {
+            mtp_draft_tokens: Some(0),
+            ..Default::default()
+        }
+        .select(&mut [p], &mut config())
+        .unwrap_err();
+        assert!(error.to_string().contains("no captured decode graph"));
+    }
+
+    #[test]
+    fn prefill_selection_matches_the_decode_mode() {
+        for drafts in [0, 5] {
+            let mut p = package();
+            for enabled in [false, true] {
+                let name = format!("prefill64-{enabled}");
+                p.execution
+                    .as_mut()
+                    .unwrap()
+                    .graphs
+                    .push(wire::ExecutionGraph {
+                        name: name.clone(),
+                        kind: "prefill".into(),
+                        sampling_mode: "general".into(),
+                        batch_capacity: 1,
+                        token_capacity: 64,
+                        speculation_enabled: Some(enabled),
+                        ..Default::default()
+                    });
+                p.graphs.push(Graph {
+                    name,
+                    resource: "prefill".into(),
+                    node_count: 1,
+                    edge_count: 0,
+                    flags: 0,
+                    functions: vec![0],
+                });
+            }
+            LoadOptions {
+                mtp_draft_tokens: Some(drafts),
+                ..Default::default()
+            }
+            .select(std::slice::from_mut(&mut p), &mut config())
+            .unwrap();
+            let selected: Vec<_> = p
+                .execution
+                .as_ref()
+                .unwrap()
+                .graphs
+                .iter()
+                .filter(|g| g.kind == "prefill")
+                .collect();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].speculation_enabled, Some(drafts > 0));
+        }
     }
 }

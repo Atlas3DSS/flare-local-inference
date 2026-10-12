@@ -146,6 +146,7 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
         setattr(operation, name, torch.zeros(batch, dtype=torch.int64))
     operation.previous = torch.zeros((batch, 10240), dtype=torch.bfloat16)
     operation.previous_rope = torch.zeros((batch, 3), dtype=torch.int64)
+    operation.rope_delta = torch.zeros(batch, dtype=torch.int64)
     operation.active = torch.zeros(batch, dtype=torch.bool)
     operation.drafts = torch.zeros((batch, width - 1), dtype=torch.int64)
     operation.draft_valid = torch.zeros((batch, width - 1), dtype=torch.bool)

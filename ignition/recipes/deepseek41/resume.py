@@ -26,14 +26,17 @@ class PreparedResume:
             session=session, name=name + ".head")
         args = (requests, inputs.row_slot_ids[:rows], inputs.row_generations[:rows], inputs.live_rows,
                 records, frame, sequence)
-        self.completion = (PreparedSampling(self.logits, *args) if weights.shard.rank == 0
+        self.replicated_sampling = weights.draft is not None
+        self.completion = (PreparedSampling(self.logits, *args) if weights.shard.rank == 0 or self.replicated_sampling
                            else PreparedCompletion(*args))
         self.completion.prepare()
         self.peer_completion = PreparedCompletion(*args)
         self.peer_completion.prepare()
-        self.compilation_variant = "sample" if weights.shard.rank == 0 else "consume"
+        self.compilation_variant = "sample" if weights.shard.rank == 0 or self.replicated_sampling else "consume"
 
     def compilation_variants(self):
+        if self.replicated_sampling:
+            return {"sample": self}
         peer = copy(self)
         peer.completion = self.peer_completion
         return {"sample": self, "consume": peer}

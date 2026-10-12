@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
         return Err(
-            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification] [--ngram-storage disk|ram]"
+            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification] [--embedding-table-storage disk|ram]\n\n--embedding-table-storage  Storage for auxiliary embedding tables (PLE/Engram); default: disk."
                 .into(),
         );
     };
@@ -50,11 +50,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
-            "--ngram-storage" => {
-                options.ngram_storage = match value.as_str() {
+            "--embedding-table-storage" => {
+                options.embedding_table_storage = match value.as_str() {
                     "disk" => flare_helios::engram::Storage::Disk,
                     "ram" => flare_helios::engram::Storage::Ram,
-                    _ => return Err("--ngram-storage must be disk or ram".into()),
+                    _ => return Err("--embedding-table-storage must be disk or ram".into()),
                 }
             }
             "--max-concurrency" => options.max_concurrency = Some(value.parse()?),

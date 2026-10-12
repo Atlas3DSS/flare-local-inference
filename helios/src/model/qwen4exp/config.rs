@@ -81,7 +81,7 @@ pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype
             ("copy_expected_consumed", I64, vec![slots]),
             ("copy_generation", I64, vec![slots]),
         ]);
-        if config.has_draft_cache() {
+        if config.has_learned_drafts() {
             buffers.push(("draft_page_tables", I32, vec![slots, context / 64]));
         } else {
             buffers.extend([
@@ -102,8 +102,8 @@ pub(super) fn required_inputs(
     kind: GraphKind,
 ) -> impl Iterator<Item = &'static str> {
     let transfer = matches!(kind, GraphKind::Restore | GraphKind::Snapshot);
-    let draft = config.has_draft_cache() && (transfer || kind.samples());
-    let copy = kind == GraphKind::Speculative && !config.has_draft_cache();
+    let draft = config.has_learned_drafts() && (transfer || kind.samples());
+    let copy = kind == GraphKind::Speculative && !config.has_learned_drafts();
     base_inputs(kind).iter().copied().chain(
         [
             transfer.then_some("page_tables"),

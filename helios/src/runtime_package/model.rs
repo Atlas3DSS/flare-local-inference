@@ -284,7 +284,7 @@ impl NativeModel {
             })?;
             phase.finish(format!("concurrency {active}"));
             if let Some(index) = engram {
-                let phase = progress.phase("Prepare n-gram tables", None);
+                let phase = progress.phase("Prepare embedding tables", None);
                 let tokens = packages[0]
                     .execution
                     .as_ref()
@@ -302,9 +302,9 @@ impl NativeModel {
                     tokens,
                     model.ranks[0].context as usize,
                     devices[0],
-                    options.ngram_storage,
+                    options.embedding_table_storage,
                 )?);
-                phase.finish(match options.ngram_storage {
+                phase.finish(match options.embedding_table_storage {
                     crate::engram::Storage::Disk => "disk",
                     crate::engram::Storage::Ram => "RAM",
                 });

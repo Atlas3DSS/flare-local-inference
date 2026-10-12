@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     Result,
-    engram::{Hash, Index, Plane, Table},
+    engram::{Index, Plane, Table},
 };
 use std::collections::HashSet;
 
@@ -192,11 +192,7 @@ pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> R
         }
         tables.push(Table {
             planes,
-            hash: Hash {
-                multipliers: geometry.multipliers,
-                primes: geometry.primes,
-                offsets: geometry.offsets,
-            },
+            heads: geometry.primes.len(),
             weights: table.weight_buffer,
             scales: table.scale_buffer,
             hashes: table.hash_buffer,
@@ -205,12 +201,7 @@ pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> R
         });
     }
     Ok(Index {
-        pad: if value.token_map.is_empty() {
-            value.pad_token_id
-        } else {
-            value.token_map[value.pad_token_id as usize]
-        },
-        token_map: value.token_map,
+        vocabulary: value.token_map.len(),
         tables,
     })
 }

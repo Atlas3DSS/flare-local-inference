@@ -147,7 +147,7 @@ impl SamplingParameters {
 }
 
 impl ModelConfig {
-    pub fn has_draft_cache(&self) -> bool {
+    pub fn has_learned_drafts(&self) -> bool {
         !self.speculative_widths.is_empty()
             && self.speculative_proposal_source
                 == crate::scheduler::speculation::ProposalSource::Mtp

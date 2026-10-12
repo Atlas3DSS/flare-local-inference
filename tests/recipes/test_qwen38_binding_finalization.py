@@ -157,7 +157,7 @@ def test_qsa_binding_refreshes_selected_payload_and_resized_workspace(
     )
     assert not hasattr(operator, "binding")
     assert arena.nbytes == 0
-    assert captured["caps"].attention_splits == 16
+    assert not hasattr(captured["caps"], "attention_splits")
     assert (metadata.request_ids == -1).all() and (metadata.slot_mapping == -1).all()
     plan.version, plan.nbytes = 2, 32
     grown = arena.reserve(512)

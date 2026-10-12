@@ -47,3 +47,17 @@ def test_hidden_checkpoints_preserve_unselected_physical_slots():
     torch.testing.assert_close(pool.region("hidden")[1], source[2])
     torch.testing.assert_close(pool.region("hidden")[3], source[0])
     assert torch.equal(pool.backing[[0, 2, 4, 5]], before[[0, 2, 4, 5]])
+
+
+def test_declared_state_extent_does_not_depend_on_rank_local_device_memory():
+    class Storage:
+        def device_allocate(self, name, shape, dtype, *, group, maximum):
+            assert (name, group, maximum) == ("continuations", "STATE_ROWS", 73)
+            return torch.zeros(shape, dtype=dtype)
+
+    layout = StateLayout.from_specs((("hidden", (7,), torch.bfloat16),))
+    pool = StateStorage.allocate(layout, 6, "cpu", storage=Storage(), maximum_slots=73)
+    assert pool.backing.shape == (6, layout.row_bytes)
+    assert pool.memory_capacity.tolist() == [6, 0]
+    with pytest.raises(ValueError, match="extent"):
+        StateStorage.allocate(layout, 6, "cpu", storage=Storage(), maximum_slots=5)

@@ -29,7 +29,9 @@ class PreparedMaintenance:
     def _transfer(self):
         return PreparedStateTransfer(self.pool, self.commands, self.tables, pages=self.pool.partial_pages(),
             page_tokens=self.page_tokens, state_rows=self.state_rows, requests=self.requests,
-            trailing_pages=self.pool.draft_pages(), trailing_tables=self.draft_tables)
+            trailing_pages=() if self.draft_tables is None else self.pool.draft_pages(), trailing_tables=self.draft_tables,
+            excluded_regions=tuple(r.name for r in self.pool.layout.regions
+                                   if self.draft_tables is None and r.name.startswith("draft.")))
 
     def rebind_pages(self, pages):
         """Copy partial pages of the continuation pool's current page pools."""

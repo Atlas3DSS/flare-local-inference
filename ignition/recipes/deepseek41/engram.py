@@ -7,8 +7,9 @@ from b12x.norm import hyperconnection
 from b12x.preparation import PreparedCall
 from b12x.sequence import engram
 
-from ignition.components.engram import EngramInputs, PreparedEngramLookup
+from ignition.components.engram import EngramInputs, PreparedEngramLookup, PreparedEngramRequests
 from ignition.components.linear import QuantizedProjection
+from ignition.components.state import gather_rows, save_hidden
 from ignition.preparation.runtime_package import FileSource
 from ignition.preparation.tuning import declare
 from ignition.progress import phase
@@ -20,9 +21,11 @@ class Tables:
     token_map: tuple[int, ...]
     sources: dict
     inputs: dict
+    mailboxes: dict
+    sequence: torch.Tensor
 
     @classmethod
-    def prepare(cls, manifest, config, *, tokens, device, progress=None):
+    def prepare(cls, manifest, config, *, tokens, device, sequence, host_allocator, progress=None):
         from transformers import PreTrainedTokenizerFast
 
         tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(manifest.snapshot / "tokenizer.json"))
@@ -34,8 +37,8 @@ class Tables:
             base_table_size=text["engram_vocab_size"], compressed_vocab_size=size)
         if geometry.num_embeddings != tuple(text["engram_num_embeddings"]):
             raise ValueError("Engram hash geometry differs from checkpoint tables")
-        sources, inputs = {}, {}
-        with phase(progress, "Prepare Engram tables") as stage:
+        sources, inputs, mailboxes = {}, {}, {}
+        with phase(progress, "Prepare embedding tables") as stage:
             for index, layer in enumerate(geometry.layer_ids):
                 rows = geometry.num_embeddings[index]
                 pair = []
@@ -47,11 +50,14 @@ class Tables:
                     pair.append(FileSource(manifest.snapshot / metadata.shard, metadata.offset, rows * columns))
                 sources[layer] = tuple(pair)
                 inputs[layer] = EngramInputs.allocate(tokens, device)
+                mailboxes[layer] = host_allocator(f"engram_{layer}_requests", (tokens * 24 + 1,), torch.int64)
+                mailboxes[layer].host_view.zero_()
             stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB on disk")
-        return cls(geometry, tuple(token_map), sources, inputs)
+        return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence)
 
     def buffers(self):
-        return {name: tensor for layer, inputs in self.inputs.items() for name, tensor in inputs.buffers(layer).items()}
+        return {**{name: tensor for layer, inputs in self.inputs.items() for name, tensor in inputs.buffers(layer).items()},
+                **{f"engram_{layer}_requests": mailbox.device_view for layer, mailbox in self.mailboxes.items()}}
 
     def events(self):
         return {f"engram_{layer}_ready": inputs.ready.cuda_event for layer, inputs in self.inputs.items()}
@@ -68,7 +74,8 @@ class Tables:
             table = target.tables.add(layer=layer, rows=self.geometry.num_embeddings[ordinal],
                 embedding_width=256, scale_block=32, encoding=proto.EngramTable.FP8_E4M3_E8M0,
                 weight_buffer=f"engram_{layer}_weights", scale_buffer=f"engram_{layer}_scales",
-                hash_buffer=f"engram_{layer}_hashes", ready_event=f"engram_{layer}_ready")
+                hash_buffer=f"engram_{layer}_hashes", ready_event=f"engram_{layer}_ready",
+                request_buffer=f"engram_{layer}_requests")
             table.hash.method = proto.EngramHash.XOR_MODULO
             table.hash.orders.extend(order for order in (2, 3, 4) for _ in range(8))
             table.hash.multipliers.extend(self.geometry.multipliers[ordinal])
@@ -81,6 +88,36 @@ class Tables:
                 payload.append((cursor, source.path, source.offset, source.nbytes))
                 cursor += source.nbytes
         return cursor
+
+
+class PreparedTableRequests:
+    def __init__(self, tables, metadata, pool, *, session, name):
+        self.metadata, self.pool = metadata, pool
+        rows, device = metadata.starts.numel(), metadata.starts.device
+        self.raw_history = torch.zeros((rows, 3), dtype=torch.int64, device=device)
+        self.history = torch.zeros_like(self.raw_history)
+        self.columns = torch.arange(3, device=device)
+        self.token_map = torch.tensor(tables.token_map, dtype=torch.int64, device=device)
+        self.operations = tuple(PreparedEngramRequests(inputs, metadata.token_ids, metadata.query_start_loc,
+            self.history, metadata.live_counts, tables.mailboxes[layer].device_view, tables.sequence,
+            layer=layer, token_map=tables.token_map, geometry=tables.geometry, session=session,
+            name=f"{name}.{layer}") for layer, inputs in tables.inputs.items())
+
+    def __call__(self):
+        m = self.metadata
+        gather_rows(self.pool.region("engram_history"), m.state_rows, self.raw_history)
+        raw = torch.where(self.columns >= 3 - m.starts[:, None], self.raw_history, 2)
+        self.history.copy_(self.token_map[raw])
+        for operation in self.operations:
+            operation()
+
+    def commit(self, counts):
+        m = self.metadata
+        relative = counts[:, None].long() + self.columns - 3
+        indices = (m.query_start_loc[:-1, None] + relative).clamp(0, m.token_ids.numel() - 1)
+        history = torch.where(relative >= 0, m.token_ids[indices],
+                              self.raw_history.gather(1, (relative + 3).clamp(0, 2)))
+        save_hidden(history, self.pool.region("engram_history"), m.state_rows, counts > 0)
 
 
 class PreparedEngram:

@@ -20,19 +20,21 @@ struct Arena {
     driver: Driver,
     device: i32,
     granularity: usize,
+    gpudirect: bool,
     free: Vec<(u64, usize)>,
     mappings: BTreeMap<u64, usize>,
 }
 static ARENA: Mutex<Option<Arena>> = Mutex::new(None);
 static ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
-fn properties(device: i32) -> AllocationProperties {
+fn properties(device: i32, gpudirect: bool) -> AllocationProperties {
     AllocationProperties {
         kind: 1,
         handles: 1,
         location: Location { kind: 1, device },
         windows: null_mut(),
-        flags: [0; 8],
+        // cuFile registration requires gpuDirectRDMACapable on VMM allocations.
+        flags: [0, u8::from(gpudirect), 0, 0, 0, 0, 0, 0],
     }
 }
 
@@ -52,11 +54,15 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
             return Err(invalid("invalid package rank or device"));
         }
         let driver = Driver::load()?;
-        let (mut address, mut granularity) = (0, 0);
+        let (mut address, mut granularity, mut gpudirect) = (0, 0, 0);
         unsafe {
             driver.check(
+                "cuDeviceGetAttribute(GPU_DIRECT_RDMA_SUPPORTED)",
+                (driver.device_attribute)(&mut gpudirect, 116, device),
+            )?;
+            driver.check(
                 "cuMemGetAllocationGranularity",
-                (driver.granularity)(&mut granularity, &properties(device), 0),
+                (driver.granularity)(&mut granularity, &properties(device, gpudirect != 0), 0),
             )?;
             let mut reserved = Vec::new();
             for peer in 0..world {
@@ -79,6 +85,7 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
             driver,
             device,
             granularity,
+            gpudirect: gpudirect != 0,
             free: vec![(BASE + u64::from(rank) * EXTENT as u64, EXTENT / 2)],
             mappings: BTreeMap::new(),
         });
@@ -122,7 +129,12 @@ extern "C" fn flare_package_allocate(
         unsafe {
             a.driver.check(
                 "cuMemCreate",
-                (a.driver.physical_create)(&mut physical, size, &properties(device), 0),
+                (a.driver.physical_create)(
+                    &mut physical,
+                    size,
+                    &properties(device, a.gpudirect),
+                    0,
+                ),
             )?;
             let mapped = (a.driver.map)(address, size, 0, physical, 0);
             (a.driver.physical_release)(physical);

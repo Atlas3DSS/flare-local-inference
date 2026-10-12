@@ -91,7 +91,7 @@ impl ModelContract for Qwen4Exp {
             && kind == GraphKind::Speculative
             && record.vector.is_some_and(|vector| {
                 vector.draft_cache_consumed
-                    != if config.has_draft_cache() {
+                    != if config.has_learned_drafts() {
                         (record.consumed_tokens - 1).max(0)
                     } else {
                         -1

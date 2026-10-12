@@ -19,12 +19,19 @@ class GraphSignature:
     token_capacity: int
     inputs: tuple[str, ...] = ()
     sampling_mode: str = "general"
+    speculation_enabled: bool | None = None
 
     def __post_init__(self):
         if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative"):
             raise ValueError("unknown prepared graph operation")
         if self.sampling_mode != "general":
             raise ValueError("graphs use the general stochastic sampling path")
+        if self.speculation_enabled is not None and type(self.speculation_enabled) is not bool:
+            raise TypeError("graph speculation mode must be a boolean or None")
+        if self.kind == "speculative" and self.speculation_enabled is False:
+            raise ValueError("speculative graphs require speculation")
+        if self.kind == "decode" and self.speculation_enabled is True:
+            raise ValueError("ordinary decode graphs require disabled speculation")
         if any(type(value) is not int or value <= 0 for value in (self.batch_capacity, self.token_capacity)):
             raise ValueError("graph capacities must be positive integers")
         if self.kind == "speculative" and (
@@ -65,7 +72,7 @@ class PreparedExecution(PreparedGraphBundle):
         self.export_zero_ranges = tuple(export_zero_ranges)
         self.export_events = dict(export_events or {})
 
-    def manifest(self) -> dict[str, Any]:
+    def manifest(self, *, all_variants=False) -> dict[str, Any]:
         context, handles, spans = self._validate_resources()
         descriptors = []
         offsets = {}
@@ -82,14 +89,19 @@ class PreparedExecution(PreparedGraphBundle):
                 offsets[name] = (cursor, nbytes)
                 cursor += nbytes
         graphs = []
+        speculative = any(signature.kind == "speculative" for signature in self.signatures.values())
         for (name, _), handle in zip(self.graphs.items(), handles, strict=True):
             signature = self.signatures[name]
+            if not all_variants and signature.speculation_enabled not in (None, speculative):
+                continue
             inputs = ("frame_index", "submission_sequence", *signature.inputs)
             graphs.append({"name": name, "kind": signature.kind, "handle": handle,
                 "sampling_mode": signature.sampling_mode,
                 "batch_capacity": signature.batch_capacity, "token_capacity": signature.token_capacity,
                 "input_bindings": [{"buffer_name": field, "host_offset": offsets[field][0],
                                     "nbytes": offsets[field][1]} for field in inputs]})
+            if signature.speculation_enabled is not None:
+                graphs[-1]["speculation_enabled"] = signature.speculation_enabled
         abi_version = 3 if self.buffers["completion_records"].shape[-1] == 24 else 2
         return {"abi_version": abi_version, "context": context, "device": self.device,
                 "max_active": self.max_active, "input_frame_bytes": (cursor + 7) // 8 * 8,

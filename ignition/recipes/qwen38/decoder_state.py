@@ -214,7 +214,7 @@ class PreparedDecoderState:
     """
 
     def __init__(self, inputs: DecoderInputs, requests: DeviceRequestState, pool: HybridStatePool,
-                 *, tokens: int, rows: int, mode: str):
+                 *, tokens: int, rows: int, mode: str, maintain_draft_state=True):
         if mode not in ("prefill", "decode") or type(rows) is not int or not 1 <= rows <= inputs.row_slot_ids.numel():
             raise ValueError("decoder mode requires prefill/decode and rows within request capacity")
         if (type(tokens) is not int or tokens <= 0
@@ -225,6 +225,7 @@ class PreparedDecoderState:
             raise ValueError("prefill has one row; decode has one token per row")
         self.inputs, self.requests, self.pool = inputs, requests, pool
         self.tokens, self.rows, self.mode = tokens, rows, mode
+        self.maintain_draft_state = maintain_draft_state
         device = inputs.token_ids.device
         self.gdn = DeltaMetadata.allocate(rows, device)
         self.qsa = QSAMetadata.allocate(tokens=tokens, batch=rows,
@@ -263,7 +264,7 @@ class PreparedDecoderState:
              self.mode == "prefill", triton.next_power_of_2(self.tokens * 3), 4096, self.requests.capacity), (self.rows, 1, 1))
 
     def prepare_residual(self, residual):
-        if self.pool.layout.speculative_tokens:
+        if self.pool.layout.speculative_tokens and self.maintain_draft_state:
             saved = self.pool.region("target_residual")
             rope = self.pool.region("target_residual_position")
             self._residual = compile_kernel(_residual_checkpoint,

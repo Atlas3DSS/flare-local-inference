@@ -145,17 +145,18 @@ Indirect delivery is the sole n-gram execution mechanism. Graphs bind compact
 GPU row buffers and named external event waits at their lookup consumers.
 Table storage is selected when loading and does not change graph bindings.
 
-For DeepSeek ordinary decode, Helios hashes committed request tokens on the
-CPU, including the three preceding tokens across prefill chunks and reused
-prefixes. Qwen hashes tokens in its graph, including GPU-produced MTP proposals.
+DeepSeek and Qwen hash tokens in their graphs, including GPU-produced proposals.
+DeepSeek retains the three preceding tokens in continuation state across prefill
+chunks and reused prefixes; Qwen preserves its EOS-bounded history.
 The graph copies row IDs to a mapped host mailbox and publishes its submission
 sequence with a system-scope release operation. The reader observes that
-sequence with an acquire operation before accessing the IDs. Qwen publishes
-after input-state preparation, before layer 0; layer 1 consumes the rows.
+sequence with an acquire operation before accessing the IDs. Both models publish
+after input-state preparation, before target layer 0. Qwen consumes rows at
+layer 1; DeepSeek consumes its two tables at layers 1 and 14.
 
-A shared reader gathers each step's rows once. `--ngram-storage disk` uses
+A shared reader gathers each step's rows once. `--embedding-table-storage disk` uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
-registered buffers per table. `--ngram-storage ram` holds tables in ordinary
+registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
 resident memory and gathers the same rows. Both modes write bounded pinned
 staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
 512 KiB request mailbox per rank. The two DeepSeek tables need 49.5 MiB of
@@ -278,7 +279,13 @@ body reads. Selection does not infer semantics from graph names.
 `--mtp-adaptive-verification` or `--no-mtp-adaptive-verification`. Unspecified
 settings retain package defaults. Reductions must be supported by captured
 graphs; a concurrency limit of three still requires the batch-four bucket.
-Zero drafts selects width-one verification, retaining MTP state and weights.
+Zero drafts selects ordinary prefill, decode, resume, and prefix-cache operations.
+The graph catalog's optional `speculation_enabled` field declares which serving
+mode an operation supports; absent means shared by both modes. Preparation includes
+ordinary operations alongside speculative operations, including width-one rounds
+that maintain draft state for subsequent wider rounds. Selection removes all
+unneeded variants before reading graph bodies. Captured weights and storage layouts
+remain shared; pinned zero does not execute draft generation or state maintenance.
 Missing variants and increases beyond package capacities fail before allocation.
 
 Unselected graph templates and executables are never reconstructed. Functions

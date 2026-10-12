@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import torch
 from b12x.preparation import PreparedCall
 from b12x.sequence import engram
-from b12x.sequence.engram._kernels import lookup_op
+from b12x.sequence.engram._kernels import hash_op, lookup_op
+
+from ignition.components.ngram_delivery import publish_requests
 
 from ignition.preparation.tuning import declare
 
@@ -70,3 +72,31 @@ class PreparedEngramLookup:
         _lookup(source, self.weights, self.scales, self.hashes, self.count,
                 self.output, self.plan.handle, self.handle)
         return self.output
+
+
+class PreparedEngramRequests:
+    """Hash packed token rows on the GPU and release their mapped delivery mailbox."""
+
+    def __init__(self, inputs, token_ids, starts, history, counts, mailbox, sequence, *,
+                 layer, token_map, geometry, session, name):
+        tokens, rows = token_ids.numel(), history.shape[0]
+        device = token_ids.device
+        self.mask = torch.ones(tokens, dtype=torch.bool, device=device)
+        self.slots = torch.arange(rows, dtype=torch.int32, device=device)
+        self.compressed = torch.empty(tokens, dtype=torch.int64, device=device)
+        self.requests = torch.empty(tokens, dtype=torch.int32, device=device)
+        self.hashes = inputs.hashes[:tokens]
+        self.mailbox, self.sequence = mailbox, sequence
+        self.args = (token_ids, self.mask, starts, self.slots, history, counts[1:], counts[:1],
+                     self.hashes, self.compressed, self.requests, tokens)
+        self.plan = engram.plan(engram.Caps(device=device, max_tokens=tokens, max_seqs=rows,
+            max_requests=rows, vocab_size=len(token_map), layer_id=layer, tp_size=1, tp_rank=0),
+            token_map=token_map, geometry=geometry, invocation={"operation": "hash"})
+        binding = SimpleNamespace(**dict(zip(("token_ids", "token_mask", "query_start_loc", "request_slots",
+            "committed_history", "num_seqs", "num_tokens", "hash_ids", "compressed", "request_ids"), self.args[:-1])))
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+            run=lambda: state.run(binding, tokens), owners=(binding,))),))
+
+    def __call__(self):
+        hash_op(self.plan.handle, *self.args)
+        publish_requests(self.hashes, self.mailbox, self.sequence)

@@ -44,25 +44,54 @@ class Metadata:
     requests: torch.Tensor
     positions: torch.Tensor
     page_table: torch.Tensor
+    token_page_table: torch.Tensor
     live_counts: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, rows, blocks, device):
+    def allocate(cls, tokens, rows, blocks, device, *, samples=None):
         def zeros(shape, dtype=torch.int32):
             return torch.zeros(shape, dtype=dtype, device=device)
-        return cls(zeros(tokens, torch.int64), zeros(rows, torch.int64), zeros(rows + 1),
+        pages = zeros((rows, blocks)) - 1
+        per_token = pages.expand(tokens, -1) if rows == 1 else zeros((tokens, blocks)) - 1
+        return cls(zeros(tokens, torch.int64), zeros(rows if samples is None else samples, torch.int64), zeros(rows + 1),
             zeros(rows, torch.int64), zeros(rows, torch.int64), zeros(rows), zeros(tokens, torch.int64),
-            zeros(tokens, torch.int64) - 1, zeros((rows, blocks)) - 1, zeros(2))
+            zeros(tokens, torch.int64) - 1, pages, per_token, zeros(2))
+
+    def set(self, starts, lengths, state_rows, pages, tokens, live_rows):
+        rows, width = tokens.shape
+        offsets = torch.arange(self.token_ids.numel(), device=tokens.device)
+        ends = lengths.cumsum(0)
+        begins = ends - lengths
+        request = (offsets[:, None] >= ends[None, :]).sum(1).clamp(max=rows - 1)
+        column = offsets - begins[request]
+        live = offsets < ends[-1]
+        self.query_start_loc[0].zero_()
+        self.query_start_loc[1:].copy_(ends)
+        self.lengths.copy_(lengths)
+        self.starts.copy_(starts)
+        self.state_rows.copy_(torch.where(lengths > 0, state_rows, 0))
+        self.page_table.copy_(pages)
+        if rows > 1:
+            self.token_page_table.copy_(pages[request])
+        self.live_counts[0:1].copy_(ends[-1:])
+        self.live_counts[1:].copy_(live_rows.clamp(0, rows))
+        self.requests.copy_(request)
+        self.positions.copy_(torch.where(live, starts[request] + column, -1))
+        indices = (request * width + column).clamp(0, tokens.numel() - 1)
+        self.token_ids.copy_(torch.where(live, tokens.reshape(-1)[indices], 0))
+        columns = torch.arange(self.sample_indices.numel() // rows, device=tokens.device)
+        self.sample_indices.copy_((begins[:, None] + columns).clamp(0, self.token_ids.numel() - 1).reshape(-1))
 
 
 class PreparedBatch:
-    def __init__(self, inputs, requests, metadata, *, mode, shard, pool):
+    def __init__(self, inputs, requests, metadata, *, mode, shard, pool, verification_width=1):
         self.inputs, self.requests, self.metadata, self.shard = inputs, requests, metadata, shard
         self.rows, self.tokens, self.mode = metadata.starts.numel(), metadata.token_ids.numel(), mode
         if mode not in ("prefill", "decode") or mode == "prefill" and self.rows != 1:
             raise ValueError("DeepSeek prefill requires one packed sequence")
         self.accept_unsampled = shard.rank != 0
         self.pool = pool
+        self.verification_width = verification_width
         device, capacity = metadata.token_ids.device, requests.capacity
         self.row_ids = torch.arange(self.rows, device=device)
         self.slot_ids = torch.arange(capacity, device=device)
@@ -82,10 +111,12 @@ class PreparedBatch:
         resident = (self.row_ids < b.live_rows) & (slots >= 0) & (slots < r.capacity)
         resident &= b.row_generations[:self.rows] == r.generation[safe]
         duplicate = ((slots[:, None] == slots[None, :]) & resident[:, None] & resident[None, :]).sum(1) > 1
-        lengths = b.query_lengths[:self.rows] if self.mode == "prefill" else torch.ones_like(safe)
+        lengths = (b.query_lengths[:self.rows] if self.mode == "prefill" or self.verification_width > 1
+                   else torch.ones_like(safe))
         position = r.consumed_tokens[safe]
         end = position + lengths
-        valid = ~duplicate & (b.live_rows <= self.rows) & (lengths > 0) & (lengths <= self.tokens)
+        capacity = self.tokens if self.mode == "prefill" else self.verification_width
+        valid = ~duplicate & (b.live_rows <= self.rows) & (lengths > 0) & (lengths <= capacity)
         valid &= (position >= 0) & (end <= b.page_tables.shape[1] * PAGE_TOKENS)
         pages = b.page_tables[safe]
         valid &= (((pages >= 0) & (pages < self.pool.memory_capacity[1]))
@@ -133,6 +164,8 @@ class PreparedBatch:
         request = (self.token_offsets[:, None] >= ends[None, :]).sum(1).clamp(max=self.rows - 1)
         live = self.token_offsets < ends[-1]
         m.requests.copy_(request)
+        if self.rows > 1:
+            m.token_page_table.copy_(m.page_table[request])
         m.positions.copy_(torch.where(live, t.positions[request] + self.token_offsets - starts[request], -1))
         m.token_ids.copy_(torch.where(live, b.token_ids[:self.tokens]
             if self.mode == "prefill" else b.token_ids[request], 0))

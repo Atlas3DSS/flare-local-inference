@@ -390,13 +390,13 @@ class PreparedSpeculativeCommit:
 
     def __init__(self, requests: DeviceRequestState, acceptance: SpeculativeAcceptance,
                  input_ids, slots, generations, live_rows, completion_records, frame_index,
-                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_cache_available=True, token_limits=None):
+                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_context_lag=1, token_limits=None):
         batch, width = input_ids.shape
         _geometry(batch, width)
         device = input_ids.device
-        if type(draft_cache_available) is not bool:
-            raise ValueError("draft_cache_available must be boolean")
-        self.draft_cache_available = draft_cache_available
+        if draft_context_lag is not None and (type(draft_context_lag) is not int or draft_context_lag < 0):
+            raise ValueError("draft_context_lag must be a nonnegative token count or None")
+        self.draft_context_lag = draft_context_lag
         self.history = getattr(requests, "ple_history", None)
         if token_limits is not None:
             _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
@@ -518,8 +518,8 @@ class PreparedSpeculativeCommit:
             record[9].copy_(torch.where(enabled & valid, offered, 0))
             record[10].copy_(emitted_drafts)
             record[11].copy_(torch.where(enabled & valid, self.copy_offered_mask.index_select(0, row)[0], 0))
-            if self.draft_cache_available:
-                record[13].copy_(torch.where(participating & (consumed > 0), consumed - 1, 0))
+            if self.draft_context_lag is not None:
+                record[13].copy_(torch.where(participating, (consumed - self.draft_context_lag).clamp_min(0), 0))
             else:
                 record[13].fill_(-1)
             record[15].copy_(torch.where(participating, columns.numel(), 0))

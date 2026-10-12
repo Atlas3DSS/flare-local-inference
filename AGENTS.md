@@ -63,15 +63,16 @@ Changing this default does not change an already exported package.
 
 N-gram tables use indirect delivery exclusively: every graph consumes compact
 GPU row buffers filled by Helios. Qwen PLE tables are stored once in the package.
-Use `flare run --ngram-storage ram` to keep the 26.8 GiB table in
+Use `flare run --embedding-table-storage ram` to keep the 26.8 GiB table in
 resident host memory. The graph publishes GPU-produced lookup IDs before layer
 0 and waits for row delivery at the layer-1 consumer. Disk and RAM delivery
 use the same prepared model graphs; the flag selects table storage only.
 
 DeepSeek V4.1 Flash supports TP4 text generation, reasoning, and DSML tool calls.
-DSpark and vision graphs are not prepared. Its 188.8 GiB of Engram tables are
+DSpark is its learned draft method, with up to five draft tokens per round;
+vision graphs are not prepared. Its 188.8 GiB of Engram tables are
 stored once in the package and read on demand through bounded direct-I/O
-staging. `flare run --ngram-storage ram` loads those tables into ordinary RAM;
+staging. `flare run --embedding-table-storage ram` loads those tables into ordinary RAM;
 both modes gather compact rows into shared pinned buffers, copy them to each
 rank, and signal captured consumer events. Preparation appends the immutable
 checkpoint slices without materializing the tables. Select four available
@@ -79,21 +80,23 @@ GPUs explicitly:
 
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
-  --max-concurrency 4 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4.flaretensors --verbose
+  --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.flaretensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/deepseek-v41-flash-tp4-c4.flaretensors \
+  /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.flaretensors \
   --gpus 0,4,6,8 --bind 127.0.0.1:8001
 ```
 
 DeepSeek's logical cache pages cover 128 tokens across compressed latent and
 index regions with different byte sizes. Continuation rows retain sliding
-windows, pending compression state, partial pages, and the
+windows, pending compression state, partial pages, DSpark context windows, and the
 last hidden state. Both use runtime-sized virtual ranges; exported packages
 contain their layouts and capacity bounds without cache payloads.
-Engram indexing uses the request's committed token history, including tokens
-covered by a reused prefix.
+Engram indexing runs in the graph over committed history and candidate tokens.
+The three preceding tokens live in continuation state, including reused prefixes.
+DSpark proposals, target verification, and accepted-state commit use the shared
+native speculative contract; Helios contains no DSpark model implementation.
 
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
@@ -123,8 +126,11 @@ Select a subset of a package's captured execution capacities:
 ```
 
 `--mtp-draft-tokens N` limits each round to N drafts plus its pending input.
-`--mtp-draft-tokens 0` selects target-only verification while retaining the MTP
-weights and cache layout. `--mtp-adaptive-verification` selects among the loaded
+`--mtp-draft-tokens 0` selects ordinary prefill, decode, and prefix-cache graphs
+without draft execution or draft-state updates. Every speculative package also
+contains these ordinary graphs. Adaptive width-one rounds retain draft state so
+later rounds can resume speculation. Ignition's `--no-mtp` excludes the draft model
+during preparation. `--mtp-adaptive-verification` selects among the loaded
 widths; `--no-mtp-adaptive-verification` selects the fixed width. Omitted flags
 use the package's serving defaults. Limits cannot exceed captured capacity;
 missing required batch/width combinations fail before GPU initialization.
@@ -365,6 +371,15 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   `compilation_variants()` on the rank-zero forward and select its key through
   `compilation_variant` on each rank. Rank zero must supply every selected variant
   before collective warmup; peers must not retrace or compile on a binding mismatch.
+- **Capture zero-draft rounds as decode.** Verification width one contains only
+  the pending target token. Use ordinary decode attention and direct cache updates;
+  do not inherit prefill kernels, speculative staging, or draft rollback work
+  merely because the graph belongs to the speculative catalog. Retain the draft
+  context updates and recurrent metadata required to alternate with wider rounds.
+  Compare the complete width-one graph against ordinary decode, attribute any
+  extra cost, and test transitions in both directions with partial/inactive rows
+  and cache-boundary crossings. Apply this check in each recipe's existing
+  preparation and tests.
 - **Prepare the whole serving shape range.** Include batch-one decode, packed
   decode, partial/inactive rows, and configurable chunked prefill through at
   least 4096 tokens. Test alternating graph variants with shared scratch and

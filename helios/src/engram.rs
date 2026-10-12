@@ -25,16 +25,9 @@ pub enum Storage {
 }
 
 #[derive(Debug)]
-pub(crate) struct Hash {
-    pub(crate) multipliers: Vec<u64>,
-    pub(crate) primes: Vec<u64>,
-    pub(crate) offsets: Vec<u64>,
-}
-
-#[derive(Debug)]
 pub(crate) struct Table {
     pub(crate) planes: [Plane; 2],
-    pub(crate) hash: Hash,
+    pub(crate) heads: usize,
     pub(crate) weights: String,
     pub(crate) scales: String,
     pub(crate) hashes: String,
@@ -44,51 +37,8 @@ pub(crate) struct Table {
 
 #[derive(Debug)]
 pub(crate) struct Index {
-    pub(crate) token_map: Vec<u32>,
-    pub(crate) pad: u32,
+    pub(crate) vocabulary: usize,
     pub(crate) tables: Vec<Table>,
-}
-
-impl Index {
-    pub(crate) fn hashes(
-        &self,
-        layer: usize,
-        tokens: &[u32],
-        begin: usize,
-        count: usize,
-        output: &mut Vec<i64>,
-    ) -> Result<()> {
-        let table = self.tables.get(layer).ok_or("missing Engram table")?;
-        if table.request.is_some() {
-            return Err("GPU-produced n-gram requests cannot use CPU hashing".into());
-        }
-        let end = begin
-            .checked_add(count)
-            .filter(|end| *end <= tokens.len())
-            .ok_or("Engram token extent exceeds request")?;
-        for position in begin..end {
-            let mut rolling = 0;
-            for lag in 0..4 {
-                let compressed = if let Some(previous) = position.checked_sub(lag) {
-                    *self
-                        .token_map
-                        .get(tokens[previous] as usize)
-                        .ok_or("Engram token exceeds vocabulary")?
-                } else {
-                    self.pad
-                };
-                rolling ^= compressed as u64 * table.hash.multipliers[lag];
-                if lag > 0 {
-                    for head in (lag - 1) * 8..lag * 8 {
-                        output.push(
-                            (rolling % table.hash.primes[head] + table.hash.offsets[head]) as i64,
-                        );
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 struct Staging {
@@ -190,7 +140,7 @@ impl Shared {
             let staging = Arc::new(Staging {
                 data: stream.mapped_host_buffer(
                     max_tokens
-                        * table.hash.primes.len()
+                        * table.heads
                         * table.planes.iter().map(|p| p.row_bytes).sum::<usize>(),
                 )?,
                 ready: stream.mapped_host_buffer(4)?,
@@ -257,7 +207,7 @@ impl Shared {
         requests: Requests,
     ) -> Result<(usize, u32)> {
         let rows = requests.rows();
-        if rows > self.max_tokens * self.index.tables[table].hash.primes.len() {
+        if rows > self.max_tokens * self.index.tables[table].heads {
             return Err("Engram input exceeds staged capacity".into());
         }
         let layer = &self.layers[table];
@@ -370,7 +320,7 @@ impl Transfers {
             .zip(&self.binding.shared.index.tables)
             .enumerate()
         {
-            let heads = table.hash.primes.len();
+            let heads = table.heads;
             let requests = if let Some((address, flag)) = transfer.request {
                 Requests::Device {
                     address,
@@ -440,71 +390,4 @@ pub(crate) fn consumes(kind: GraphKind) -> bool {
         kind,
         GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cpu_hashes_match_b12x_with_padding_and_chunk_history() {
-        let index = Index {
-            token_map: (0..32).collect(),
-            pad: 2,
-            tables: vec![Table {
-                planes: [Plane {
-                    offset: 0,
-                    nbytes: 0,
-                    row_bytes: 256,
-                }; 2],
-                weights: String::new(),
-                scales: String::new(),
-                hashes: String::new(),
-                event: String::new(),
-                request: None,
-                hash: Hash {
-                    multipliers: vec![
-                        237300864419207287,
-                        14987281307456977,
-                        111353620295905115,
-                        229111038857094539,
-                    ],
-                    primes: vec![
-                        101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173,
-                        179, 181, 191, 193, 197, 199, 211, 223, 227,
-                    ],
-                    offsets: vec![
-                        0, 101, 204, 311, 420, 533, 660, 791, 928, 1067, 1216, 1367, 1524, 1687,
-                        1854, 2027, 2206, 2387, 2578, 2771, 2968, 3167, 3378, 3601,
-                    ],
-                },
-            }],
-        };
-        let tokens = [13, 5, 7, 28, 13];
-        let mut output = Vec::new();
-        index.hashes(0, &tokens, 0, 5, &mut output).unwrap();
-        assert_eq!(
-            &output[..24],
-            &[
-                56, 123, 291, 344, 529, 616, 680, 794, 949, 1187, 1218, 1391, 1596, 1776, 1937,
-                2179, 2360, 2570, 2696, 2936, 3147, 3270, 3595, 3768
-            ]
-        );
-        assert_eq!(
-            &output[96..],
-            &[
-                68, 187, 222, 334, 484, 588, 664, 836, 1013, 1096, 1321, 1508, 1677, 1768, 1883,
-                2149, 2269, 2416, 2653, 2931, 2986, 3202, 3592, 3622
-            ]
-        );
-        for split in 0..=5 {
-            let mut chunks = Vec::new();
-            index.hashes(0, &tokens, 0, split, &mut chunks).unwrap();
-            index
-                .hashes(0, &tokens, split, 5 - split, &mut chunks)
-                .unwrap();
-            assert_eq!(chunks, output);
-        }
-        assert!(index.hashes(0, &[32], 0, 1, &mut Vec::new()).is_err());
-    }
 }

@@ -255,36 +255,40 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 
-    graph_count = (len(config.prefill_capacities) + 4 * len(config.batch_capacities)
-                   + (len(config.speculative_shapes) if config.mtp else len(config.batch_capacities)))
+    serving_modes = (True, False) if config.mtp else (False,)
+    graph_count = (len(serving_modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
+                   + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0))
     with phase(progress, "Construct graph catalog", total=graph_count) as stage:
-        def add(name, function, kind, rows, tokens, fields):
+        def add(name, function, kind, rows, tokens, fields, *, enabled=None):
             forwards[name] = function
-            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields))
+            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
             stage.update(advance=1)
 
-        for mode, capacities in (("prefill", reversed(config.prefill_capacities)), ("decode", () if config.mtp else config.batch_capacities)):
-            for capacity in capacities:
-                rows = 1 if mode == "prefill" else capacity
-                name = f"{mode}{capacity}"
-                metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
-                storage = prefill_storage if mode == "prefill" else decoder_storage
-                scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
-                feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if config.mtp else None
-                decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
-                    runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective,
-                    vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-                    session=session, name=name, workspace=arena, feedback=feedback,
-                    max_cache_pages=max_cache_pages, context=context)
-                batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard,
-                                      pages=pool.memory_capacity[1:], shards=shards)
-                forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
-                    pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation", replicated_sampling=config.mtp)
-                if speculation is not None:
-                    from .speculative import PreparedPrefill
+        for enabled in serving_modes:
+            suffix = "-no-mtp" if config.mtp and not enabled else ""
+            mode_inputs = tuple(field for field in forward_inputs if enabled or field != "draft_page_tables")
+            for mode, capacities in (("prefill", reversed(config.prefill_capacities)), ("decode", () if enabled else config.batch_capacities)):
+                for capacity in capacities:
+                    rows = 1 if mode == "prefill" else capacity
+                    name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
+                    metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
+                    storage = prefill_storage if mode == "prefill" else decoder_storage
+                    scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
+                    feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if enabled else None
+                    decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
+                        runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective,
+                        vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
+                        session=session, name=name, workspace=arena, feedback=feedback,
+                        max_cache_pages=max_cache_pages, context=context)
+                    batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard,
+                                          pages=pool.memory_capacity[1:], shards=shards)
+                    forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
+                        pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation", replicated_sampling=enabled)
+                    if enabled:
+                        from .speculative import PreparedPrefill
 
-                    forward = PreparedPrefill(speculation, forward, feedback, name)
-                add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs)
+                        forward = PreparedPrefill(speculation, forward, feedback, name)
+                    add(name, forward, mode, rows, capacity if mode == "prefill" else 1, mode_inputs, enabled=enabled)
         if speculation is not None:
             from .speculative import PreparedRound
 
@@ -292,24 +296,26 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 name = f"speculative{batch}x{width}"
                 operation = PreparedRound(speculation, batch, width, name)
                 operation.prepare()
-                add(name, operation, "speculative", batch, width, forward_inputs)
+                add(name, operation, "speculative", batch, width, forward_inputs, enabled=True)
 
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
-        for capacity in config.batch_capacities:
-            name = f"resume{capacity}"
-            resume = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
-                rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
-                coordinator=coordinator, session=session, name=name, replicated_sampling=config.mtp)
-            add(name, resume, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"))
-            for mode in ("init", "restore", "snapshot"):
-                name = f"{mode}{capacity}"
-                operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
-                    runtime=collective, coordinator=coordinator, session=session, name=name,
-                    capacity=capacity, admission_buffers=admission,
-                    draft_tables=None if speculation is None else speculation.draft_tables,
-                    page_tokens=config.page_tokens)
-                fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
-                add(name, operation, mode, capacity, 1, (*fields, "page_tables", *(("draft_page_tables",) if config.mtp else ()), *commands.buffers()))
+        for enabled in serving_modes:
+            suffix = "-no-mtp" if config.mtp and not enabled else ""
+            for capacity in config.batch_capacities:
+                name = f"resume{capacity}" + suffix
+                resume = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
+                    rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
+                    coordinator=coordinator, session=session, name=name, replicated_sampling=enabled)
+                add(name, resume, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"), enabled=enabled)
+                for mode in ("init", "restore", "snapshot"):
+                    name = f"{mode}{capacity}" + suffix
+                    operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                        runtime=collective, coordinator=coordinator, session=session, name=name,
+                        capacity=capacity, admission_buffers=admission,
+                        draft_tables=speculation.draft_tables if enabled else None,
+                        page_tokens=config.page_tokens)
+                    fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
+                    add(name, operation, mode, capacity, 1, (*fields, "page_tables", *(("draft_page_tables",) if enabled else ()), *commands.buffers()), enabled=enabled)
     with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")

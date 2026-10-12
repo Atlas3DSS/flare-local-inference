@@ -103,7 +103,7 @@ impl Inputs {
                     ("page_tables", 0, &mut self.page_counts),
                     ("draft_page_tables", 1, &mut self.draft_page_counts),
                 ] {
-                    if skip == 1 && !config.has_draft_cache() {
+                    if skip == 1 && !config.has_learned_drafts() {
                         continue;
                     }
                     let available = live.pages().count().saturating_sub(skip).min(capacity);

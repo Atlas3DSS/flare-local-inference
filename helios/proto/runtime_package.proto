@@ -167,6 +167,8 @@ message ExecutionGraph {
   // Target positions evaluated, including the pending input token.
   optional uint32 verify_tokens = 8;
   DraftSource draft_source = 9;
+  // Absent for shared operations; otherwise selects the complete serving mode.
+  optional bool speculation_enabled = 10;
 }
 enum DraftSource { NO_DRAFT = 0; MTP = 1; COPY_DRAFT = 2; }
 message InputBinding { string buffer_name = 1; uint64 host_offset = 2; uint64 nbytes = 3; }

@@ -2,11 +2,11 @@
 
 Flare's speculative engine supports the embedded MTP modules in
 `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD` and
-`local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` on SM120/121. Python prepares
+`local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD`, and the DSpark drafter in
+`deepseek-ai/DeepSeek-V4.1-Flash` on SM120/121. Python prepares
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
-Each recipe's `PreparationConfig(mtp=True)` prepares it, and `ignition run`
-prepares it for both recipes unless `--no-mtp` is given. The advanced flags
+Ignition prepares the recipe's learned drafter unless `--no-mtp` is given. The advanced flags
 select the draft-token maximum, the default verification policy, and the
 proposal source. Draft continuations from request history are
 disabled by default and enabled on the Qwen recipe with `--history-drafts`,
@@ -111,6 +111,34 @@ The draft cache contains `max(consumed_tokens - 1, 0)` pairs. Exact-prefix
 snapshots therefore preserve the draft partial page at that endpoint as well
 as target pages and recurrent state. Absorption, proposals, verification,
 sampling, and commit execute inside prepared CUDA graphs.
+
+## DeepSeek DSpark proposals and continuation state
+
+The [DSpark preparation code](../ignition/recipes/deepseek41/dspark.py) composes
+three draft layers with a five-position noncausal block. Their context comes
+from target inputs to layers 37, 38, and 39: collapsed mHC states are concatenated,
+projected, normalized, and written into each draft layer's 128-token window.
+The block begins with the pending target token and fills the remaining positions
+with the checkpoint's noise token. Sequential Markov logits condition each
+proposal on the preceding sampled token. The target and draft share token
+embeddings and the sharded vocabulary projection.
+
+Verification with draft tokens stages sliding-window writes and pending compression
+state. Width one uses ordinary decode attention and direct target-cache writes;
+it performs no draft forward or staged-cache commit. Both paths absorb committed
+target feedback into the draft windows so the scheduler can alternate widths.
+With drafts, commit publishes only the accepted input prefix. The draft windows
+contain `consumed_tokens` inputs and occupy
+continuation rows; DSpark requires no separate draft-page pool. Exact-prefix
+snapshots retain the draft windows and committed Engram token history together
+with target state. Graphs publish Engram lookup IDs for candidate tokens before
+target execution; Helios delivers the requested rows through the shared embedding
+table interface.
+
+DSpark uses the shared token-vector completion and adaptive verification contracts.
+Ignition captures verification widths one through six for every batch capacity;
+Flare can reduce draft count and concurrency when loading. Helios schedules and
+replays the selected graphs without interpreting DSpark layers or proposals.
 
 ## A speculative round is a state transaction
 
@@ -219,7 +247,15 @@ Capture includes the Cartesian product of prepared batch capacities and widths.
 With concurrency four and five drafts, this is eighteen speculative graphs.
 Flare reduces concurrency and draft depth by selecting the required subset
 before loading GPU resources; adaptive or fixed verification is a serving policy.
-The zero-draft path continues absorbing target feedback into the MTP cache so
+
+Every package also captures ordinary prefill, decode, resume, and prefix-cache
+operations without draft computation or state maintenance. A maximum draft count
+of zero selects those operations and disables speculative scheduling. Width one
+inside an enabled speculative catalog maintains draft state, allowing the next
+round to use a wider verification graph. Graphs declare their serving mode through
+`speculation_enabled`; shared operations leave the field absent.
+
+Adaptive width-one rounds continue absorbing target feedback into the MTP cache so
 requests can resume drafting when concurrency falls. The native adaptive
 controller chooses only among that batch's captured counts.
 `speculative_widths` may be any increasing set of widths that includes one, so

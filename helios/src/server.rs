@@ -353,7 +353,7 @@ impl<M: ModelContract> Server<M> {
             *dashboard = dashboard::Dashboard::start(
                 self.model.metrics_handle(),
                 format!("{} · {}", self.model.config().model_id, self.address),
-                self.model.config().has_draft_cache(),
+                self.model.config().has_learned_drafts(),
             )?;
         }
         Ok(dashboard.is_some())

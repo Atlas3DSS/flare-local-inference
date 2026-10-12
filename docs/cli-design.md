@@ -116,7 +116,7 @@ value; the flag overrides it.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round, 0 through 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 for Qwen and GLM |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to the recipe's limit (7 for Qwen and GLM; 5 for DeepSeek). Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
@@ -413,8 +413,13 @@ separate command with its own discovery, not a layer inside `run`.
 captured graph variants needed for N concurrent requests and at most K drafts
 per round. `--mtp-adaptive-verification` enables width selection;
 `--no-mtp-adaptive-verification` loads only width K+1. With omitted flags, the
-package supplies defaults. K=0 selects target-only verification without removing
-MTP weights. Capacity increases and missing variants are rejected before GPU
+package supplies defaults. K=0 selects ordinary prefill, decode, resume, and
+prefix-cache graphs without draft generation or draft-state maintenance. Adaptive
+width-one rounds retain draft state for later wider rounds. MTP weights remain
+loaded. Capacity increases and missing variants are rejected before GPU
 allocation. Fixed storage retains its prepared layout. Continuation rows and KV
 pages are sized after graph upload within their reserved virtual ranges; reducing
 concurrency or verification width leaves more physical memory for KV pages.
+
+`--embedding-table-storage disk|ram` selects storage for PLE and Engram tables.
+Both modes deliver compact GPU rows to the same prepared graphs; disk is the default.

@@ -5,7 +5,10 @@ pub mod output;
 
 use crate::{
     Result,
-    execution::{ABI_VERSION, CompletionRecord, ExecutionManifest, GraphKind, Upload},
+    execution::{
+        ABI_VERSION, CompletionRecord, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION,
+        Upload,
+    },
     model::{ContractMetadata, ModelConfig, ModelContract, VisionCapabilities, paged_text},
     scheduler::SchedulerCapabilities,
 };
@@ -15,13 +18,7 @@ pub const INPUT_SCHEMA: &str = "deepseek41.graph-inputs.v1";
 pub const VOCABULARY: usize = 129280;
 pub const PAGE_TOKENS: usize = 128;
 
-#[derive(Default)]
-pub struct Inputs {
-    text: paged_text::Inputs,
-    index: Option<std::sync::Arc<crate::engram::Index>>,
-    hashes: crate::model::inputs::UploadBatch,
-    rows: Vec<i64>,
-}
+pub type Inputs = paged_text::Inputs;
 
 impl DeepSeek41 {
     pub fn metadata() -> ContractMetadata {
@@ -38,28 +35,23 @@ impl ModelContract for DeepSeek41 {
     type Inputs = Inputs;
     type PromptData = ();
 
-    fn create_inputs(manifest: &ExecutionManifest) -> Result<Inputs> {
-        Ok(Inputs {
-            index: Some(
-                manifest
-                    .engram
-                    .as_ref()
-                    .ok_or("DeepSeek requires Engram delivery")?
-                    .index(),
-            ),
-            ..Default::default()
-        })
-    }
-
     fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
-        if config.contract != Self::metadata() || manifest.abi_version != ABI_VERSION {
+        if config.contract != Self::metadata()
+            || !matches!(manifest.abi_version, ABI_VERSION | SPECULATIVE_ABI_VERSION)
+        {
             return Err(
                 "unsupported DeepSeek V4.1 schema, vocabulary, cache page size, or completion ABI"
                     .into(),
             );
         }
-        if !config.speculative_widths.is_empty() || config.history_drafts {
-            return Err("DeepSeek V4.1 text catalog has no speculative decoder".into());
+        if config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
+            || config.history_drafts
+            || config.speculative_widths.iter().any(|w| *w > 6)
+        {
+            return Err(
+                "DeepSeek V4.1 speculation requires DSpark proposals with at most five drafts"
+                    .into(),
+            );
         }
         if config.limits.max_sequence_tokens > 1048576 {
             return Err("DeepSeek V4.1 context exceeds 1048576 tokens".into());
@@ -69,8 +61,9 @@ impl ModelContract for DeepSeek41 {
             .as_ref()
             .ok_or("DeepSeek requires Engram tables")?
             .index();
-        if index.token_map.len() != VOCABULARY
+        if index.vocabulary != VOCABULARY
             || index.tables.len() != 2
+            || index.tables.iter().any(|t| t.request.is_none())
             || index
                 .tables
                 .iter()
@@ -84,22 +77,24 @@ impl ModelContract for DeepSeek41 {
     }
 
     fn required_buffers(config: &ModelConfig) -> Vec<crate::model::catalog::BufferSpec> {
-        let mut buffers = paged_text::required_buffers(config, PAGE_TOKENS);
+        let mut buffers = paged_text::required_buffers::<Self>(config, PAGE_TOKENS);
         for name in ["engram_1_hashes", "engram_14_hashes"] {
             buffers.push((
                 name,
                 crate::execution::Dtype::Int64,
-                vec![config.limits.prefill_chunk_size, 24],
+                vec![
+                    config.limits.prefill_chunk_size.max(
+                        config.limits.request_capacity()
+                            * config.speculative_widths.iter().copied().max().unwrap_or(1),
+                    ),
+                    24,
+                ],
             ));
         }
         buffers
     }
     fn required_inputs(_: &ModelConfig, kind: GraphKind) -> impl Iterator<Item = &'static str> {
-        paged_text::required_inputs(kind).iter().copied().chain(
-            ["engram_1_hashes", "engram_14_hashes"]
-                .into_iter()
-                .filter(move |_| crate::engram::consumes(kind)),
-        )
+        paged_text::required_inputs(kind).iter().copied()
     }
     fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
         SchedulerCapabilities {
@@ -110,41 +105,24 @@ impl ModelContract for DeepSeek41 {
         }
     }
     fn pack(inputs: &mut Self::Inputs, step: &crate::model::InputStep<'_, Self>) -> Result<()> {
-        inputs.text.pack(step)?;
-        inputs.hashes.clear();
-        if crate::engram::consumes(step.step.kind) {
-            let index = inputs
-                .index
-                .as_ref()
-                .ok_or("DeepSeek input packer lacks Engram geometry")?;
-            let capacity = step.step.batch_capacity.max(step.step.token_capacity);
-            for (i, table) in index.tables.iter().enumerate() {
-                inputs.rows.clear();
-                for lane in &step.step.lanes {
-                    let live = step.scheduler.request(lane.request)?;
-                    let begin = usize::try_from(lane.start_position)
-                        .map_err(|_| "Engram input position exceeds host range")?;
-                    index.hashes(i, live.tokens(), begin, lane.tokens, &mut inputs.rows)?;
-                }
-                if inputs.rows.len() > capacity * 24 {
-                    return Err("Engram input exceeds graph capacity".into());
-                }
-                inputs.rows.resize(capacity * 24, -1);
-                inputs
-                    .hashes
-                    .i64(&table.hashes, 0, inputs.rows.iter().copied());
-            }
-        }
-        Ok(())
+        inputs.pack(step)
     }
     fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>> {
-        let mut uploads = inputs.text.uploads();
-        uploads.extend(inputs.hashes.uploads());
-        uploads
+        inputs.uploads()
     }
-    fn validate_completion(_: &ModelConfig, _: GraphKind, record: &CompletionRecord) -> Result<()> {
-        if record.vector.is_some()
-            || ((record.status == 1 || record.status == 2) && record.token_id >= VOCABULARY as i64)
+    fn validate_completion(
+        _: &ModelConfig,
+        kind: GraphKind,
+        record: &CompletionRecord,
+    ) -> Result<()> {
+        if ((record.status == 1 || record.status == 2) && record.token_id >= VOCABULARY as i64)
+            || record.vector.is_some_and(|v| {
+                v.model_reserved != -1
+                    || v.tokens.iter().any(|id| *id >= VOCABULARY as i64)
+                    || (kind == GraphKind::Speculative
+                        && record.status != 3
+                        && v.draft_cache_consumed != record.consumed_tokens)
+            })
         {
             return Err(crate::Error::execution(
                 crate::ExecutionError::Completion,
@@ -242,6 +220,72 @@ impl ModelContract for DeepSeek41 {
                 .cloned()
                 .unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::{execution::TokenVector, model::SamplingParameters, scheduler::SchedulerLimits};
+
+    fn config() -> ModelConfig {
+        ModelConfig {
+            contract: DeepSeek41::metadata(),
+            identity: [0; 32],
+            model_id: "deepseek".into(),
+            limits: SchedulerLimits {
+                max_active: 4,
+                request_slots: 4,
+                max_sequence_tokens: 4096,
+                prefill_chunk_size: 4096,
+                pages: 128,
+                snapshots: 8,
+            },
+            eos_token_ids: vec![1],
+            sampling_defaults: SamplingParameters::default(),
+            max_new_tokens: 128,
+            speculative_widths: vec![1, 2, 3, 4, 5, 6],
+            speculative_fixed_width: None,
+            history_drafts: false,
+            speculative_proposal_source: crate::scheduler::speculation::ProposalSource::Mtp,
+        }
+    }
+
+    #[test]
+    fn learned_drafts_do_not_require_separate_paged_storage() {
+        let config = config();
+        assert!(config.has_learned_drafts());
+        assert_eq!(
+            DeepSeek41::scheduler_capabilities(&config).draft_pages_per_request,
+            0
+        );
+        assert!(
+            !DeepSeek41::required_buffers(&config)
+                .iter()
+                .any(|(name, _, _)| *name == "draft_page_tables")
+        );
+        assert!(
+            !DeepSeek41::required_inputs(&config, GraphKind::Speculative)
+                .any(|name| name.ends_with("_hashes"))
+        );
+    }
+
+    #[test]
+    fn speculative_completion_requires_draft_context_through_the_accepted_target_prefix() {
+        let config = config();
+        let mut record = CompletionRecord {
+            consumed_tokens: 133,
+            status: 1,
+            token_id: 7,
+            vector: Some(TokenVector {
+                draft_cache_consumed: 133,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        DeepSeek41::validate_completion(&config, GraphKind::Speculative, &record).unwrap();
+        record.vector.as_mut().unwrap().draft_cache_consumed = 132;
+        assert!(DeepSeek41::validate_completion(&config, GraphKind::Speculative, &record).is_err());
     }
 }
 

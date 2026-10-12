@@ -14,7 +14,11 @@ def trace():
             'teacher_tokens': [78, 90], 'layer_outputs': layers}
 
 
-def test_pairs_shift_tokens_but_not_target_hidden_or_position():
+def test_pairs_shift_tokens_but_not_target_hidden_or_position(monkeypatch):
+    def unexpected_cuda_access():
+        pytest.fail("CPU draft fixtures must not access CUDA")
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", unexpected_cuda_access)
     source = trace()
     fixture = fixture_from_trace(source)
     first, second = fixture['cases']
@@ -25,7 +29,6 @@ def test_pairs_shift_tokens_but_not_target_hidden_or_position():
     assert second['positions'].tolist() == [3]
     assert torch.equal(second['hidden'], source['layer_outputs'][1][-1].bfloat16())
     assert fixture['unconsumed_target_contexts'] == 1
-    assert not torch.cuda.is_initialized()
 
 
 @pytest.mark.parametrize('change,match', [

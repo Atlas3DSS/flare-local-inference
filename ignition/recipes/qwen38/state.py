@@ -216,6 +216,7 @@ def _transfer(
     BLOCK: tl.constexpr,
     OP_BLOCK: tl.constexpr,
     LIVE: tl.constexpr = 4,
+    EXCLUDED: tl.constexpr = (),
 ):
     command, tile = tl.program_id(0), tl.program_id(1)
     count = tl.load(Count)
@@ -295,6 +296,8 @@ def _transfer(
     valid = live & (error == 0)
     offsets = tile.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     mask = valid & (offsets < ROW_BYTES)
+    for span in tl.static_range(len(EXCLUDED)):
+        mask &= (offsets < EXCLUDED[span][0]) | (offsets >= EXCLUDED[span][1])
     if operation == 1:
         history = (offsets >= HISTORY_OFFSET) & (offsets < HISTORY_OFFSET + 16)
         eos_byte = (
@@ -463,7 +466,7 @@ class PreparedStateTransfers:
             metadata.request_slots,
             exact.state_rows if exact is not None else None,
             exact is not None,
-            bool(pool.layout.speculative_tokens),
+            bool(pool.layout.speculative_tokens) if exact is None else exact.previous_accepted is not None,
             exact is not None and exact.draft is not None,
             pool.memory_capacity,
             exact.tables.shape[1] if exact is not None else 0,
@@ -475,6 +478,9 @@ class PreparedStateTransfers:
             block,
             triton.next_power_of_2(capacity),
             exact.tables.shape[0] if exact is not None else capacity,
+            tuple((r.offset, r.offset + r.nbytes) for r in pool.layout.regions
+                  if exact is not None and exact.previous_accepted is None
+                  and (r.name.startswith("draft_") or r.name.startswith("target_residual"))),
         )
         self._qsa_grid = (capacity, len(self.qsa_states), 1)
         self._qsa_args = (
@@ -633,8 +639,6 @@ class PreparedCheckpointCaches:
         self.copy_layout = checkpoint_copy_layout(pool.layout, self.copy_block).to(pool.backing.device)
         if len(self.states) != len(QSA_LAYERS):
             raise ValueError("exact checkpoints require all twelve target QSA states")
-        if pool.layout.speculative_tokens and speculation is None:
-            raise ValueError("speculative exact checkpoints require accepted-state ownership")
         if tables.ndim != 2 or slots <= 0 or tables.shape[1] == 0 or tables.dtype != torch.int32 or not tables.is_contiguous():
             raise ValueError("checkpoint page tables must be contiguous int32[capacity,pages]")
         if tables.device != pool.backing.device:
@@ -645,7 +649,7 @@ class PreparedCheckpointCaches:
                 or self.draft_tables.dtype != torch.int32 or not self.draft_tables.is_contiguous()
                 or self.draft_tables.device != tables.device):
             raise ValueError("draft checkpoint tables must match target table geometry")
-        if pool.layout.speculative_tokens:
+        if speculation is not None:
             previous = self.previous_accepted
             if (previous.shape != (slots,) or previous.dtype != torch.int32
                     or previous.device != pool.backing.device or not previous.is_contiguous()):

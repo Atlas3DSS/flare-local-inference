@@ -9,6 +9,13 @@ from ignition.recipes.qwen38.mtp_weights import MTPWeightLoader, _global_scales,
 from ignition.recipes.qwen38.weights import QwenWeightLoader
 
 
+@pytest.fixture(autouse=True)
+def forbid_cuda_initialization(monkeypatch):
+    def reject():
+        raise AssertionError("CPU preparation must not initialize CUDA")
+    monkeypatch.setattr(torch.cuda, "_lazy_init", reject)
+
+
 @pytest.fixture(scope="module")
 def manifest():
     snapshot = Path("/data/checkpoint-releases/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD")
@@ -36,7 +43,6 @@ def test_exact_module_geometry_and_mtp_only_selection(manifest):
     assert all(name.startswith("mtp.") for name in selected)
     assert not selected & QwenWeightLoader(manifest, "cpu")._selected_names()
     assert "mtp.layers.48.mlp.experts" not in selected
-    assert not torch.cuda.is_initialized()
 
 
 def scalar_sources():
@@ -118,4 +124,3 @@ def test_actual_packed_experts_use_a16_and_native_scales_in_up_gate_order(manife
             assert torch.equal(scales.view(torch.uint8), scale[:, first // 16:last // 16] if projection == "down_proj" else scale[first:last])
         assert weights.w13_global_scales[local] == sources[f"mtp.layers.0.mlp.experts.{expert}.up_proj.weight_scale_2"]
         assert weights.w2_global_scales[local] == sources[f"mtp.layers.0.mlp.experts.{expert}.down_proj.weight_scale_2"]
-    assert not torch.cuda.is_initialized()

@@ -9,8 +9,9 @@ from .pool import PAGE_TOKENS
 
 class PreparedMaintenance:
     def __init__(self, mode, requests, pool, commands, inputs, records, frame, sequence, *,
-                 runtime, coordinator, session, name, capacity, admission_buffers):
+                 runtime, coordinator, session, name, capacity, admission_buffers, dspark=True):
         self.pool, self.commands, self.inputs, self.requests = pool, commands, inputs, requests
+        self.excluded_regions = () if dspark else tuple(r.name for r in pool.layout.regions if r.name.startswith("draft"))
         if mode == "snapshot":
             slots, epochs, count = inputs.row_slot_ids, inputs.row_generations, inputs.live_rows
         else:
@@ -26,7 +27,7 @@ class PreparedMaintenance:
     def _transfer(self):
         return PreparedStateTransfer(self.pool, self.commands, self.inputs.page_tables,
             pages=self.pool.partial_pages(), page_tokens=PAGE_TOKENS,
-            state_rows=self.inputs.request_state_rows, requests=self.requests)
+            state_rows=self.inputs.request_state_rows, requests=self.requests, excluded_regions=self.excluded_regions)
 
     def __call__(self):
         self.validation(self.state.validate())

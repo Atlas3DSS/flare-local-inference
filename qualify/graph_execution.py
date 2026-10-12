@@ -154,7 +154,7 @@ class _ScratchArenaAudit:
                 self.plan_owners(f"{name}.variant.{capacity}", child)
 
     def projection(self, name, projection):
-        from ignition.components.linear import BF16Projection, QuantizedProjection
+        from ignition.components.linear import UnquantizedProjection, QuantizedProjection
 
         memory = projection.plan.memory_requirements()
         if isinstance(projection, QuantizedProjection):
@@ -165,7 +165,7 @@ class _ScratchArenaAudit:
                 raise AssertionError(f"{name} workspace is smaller than the selected plan")
             self.plan_owners(name, projection.plan)
             self.families["quantized_projection"] += 1
-        elif isinstance(projection, BF16Projection):
+        elif isinstance(projection, UnquantizedProjection):
             if memory.scratch_nbytes:
                 raise AssertionError(f"{name} BF16 projection requires unbound scratch")
             self.families["bf16_projection_without_scratch"] += 1

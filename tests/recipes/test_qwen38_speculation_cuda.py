@@ -131,7 +131,7 @@ def test_native_copy_conditional_grammar_and_stale_metadata(temperature, width):
         state, slots, epochs, live, rng=rng, draft_valid=valid, target_valid=distribution.valid)
     verify.prepare()
     commit = PreparedSpeculativeCommit(state, verify.output, inputs, slots, epochs, live,
-        records, frame, sequence, rng=rng, copy_offered_mask=copy_mask, draft_cache_available=False)
+        records, frame, sequence, rng=rng, copy_offered_mask=copy_mask, draft_context_lag=None)
     state_restore = snapshot(state)
 
     def restore():

@@ -31,7 +31,7 @@ pub(super) fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest
 }
 
 pub(super) fn required_buffers(config: &ModelConfig) -> Vec<crate::model::catalog::BufferSpec> {
-    crate::model::paged_text::required_buffers(config, Glm5Next::page_tokens(config))
+    crate::model::paged_text::required_buffers::<Glm5Next>(config, Glm5Next::page_tokens(config))
 }
 
 pub(super) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {

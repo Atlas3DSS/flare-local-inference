@@ -14,7 +14,7 @@ from ignition.components.moe import RouterScratch, PreparedRouter, PreparedRoute
 from ignition.components.vocabulary import PreparedVocabularyProjection
 
 from .attention import AttentionScratch, PreparedAttention, Rotary, normalize
-from .engram import PreparedEngram
+from .engram import PreparedEngram, PreparedTableRequests
 
 
 @dataclass(frozen=True)
@@ -49,15 +49,15 @@ class Scratch:
             ("hidden", "local_logits", "logits") else tokens) for field in fields(self)))
 
     @classmethod
-    def allocate(cls, tokens, samples, world, device):
+    def allocate(cls, tokens, samples, world, device, *, experts=384, top_k=6):
         def zeros(*shape, dtype=torch.bfloat16):
             return torch.zeros(shape, dtype=dtype, device=device)
         return cls(zeros(tokens, 5120), zeros(tokens, 4, 5120), zeros(tokens, 4, 5120),
             zeros(tokens, 4, dtype=torch.float32), zeros(tokens, 4, dtype=torch.float32),
             MHCScratch.allocate(tokens, 5120, device), MHCScratch.allocate(tokens, 5120, device),
             AttentionScratch.allocate(tokens, world, device), zeros(tokens, 5120),
-            MLPScratch.allocate(tokens, 5120, 2304 // world, device), zeros(tokens, 384, dtype=torch.float32),
-            RouterScratch.allocate(tokens, device, experts=384, top_k=6), zeros(tokens, 5120),
+            MLPScratch.allocate(tokens, 5120, 2304 // world, device), zeros(tokens, experts, dtype=torch.float32),
+            RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k), zeros(tokens, 5120),
             zeros(tokens, 5120), zeros(tokens, 5120), zeros(samples, 5120),
             zeros(samples, 129280 // world), zeros(samples, 129280))
 
@@ -141,12 +141,18 @@ class PreparedDecoder:
     def __init__(self, weights, tables, scratch, metadata, pool, *, mode, runtime,
                  vocabulary_runtime, coordinator, session, name, workspace):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
+        self.mode = mode
+        self.table_requests = PreparedTableRequests(tables, metadata, pool, session=session, name=name + ".table_requests")
+        self.aux_layers = () if weights.draft is None else weights.config.draft.target_layers
+        self.auxiliary = torch.zeros((metadata.token_ids.numel(), len(self.aux_layers) * 5120),
+                                    dtype=torch.bfloat16, device=scratch.embedding.device)
         self.embedding = PreparedEmbedding(weights.embedding, metadata.token_ids, scratch.embedding,
             num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         self.rotary = Rotary(weights.config, scratch.embedding.device)
         self.layers, carry = [], False
         for index, layer in enumerate(weights.layers):
-            defer = index + 1 < len(weights.layers) and weights.layers[index + 1].engram is None
+            defer = (index + 1 < len(weights.layers) and weights.layers[index + 1].engram is None
+                     and index + 1 not in self.aux_layers)
             self.layers.append(PreparedLayer(index, layer, tables, scratch, metadata, pool, self.rotary,
                 shard=weights.shard, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
@@ -157,14 +163,25 @@ class PreparedDecoder:
 
     def __call__(self):
         s, m = self.scratch, self.metadata
+        self.table_requests()
         s.residual.copy_(self.embedding()[:, None, :])
         s.pre_mix.zero_()
         s.pre_mix[:, 0].fill_(1)
-        for layer in self.layers:
+        for index, layer in enumerate(self.layers):
+            if index in self.aux_layers:
+                column = self.aux_layers.index(index)
+                self.auxiliary[:, column * 5120:(column + 1) * 5120].copy_(s.residual.float().mean(1))
             layer()
         residual = s.residual[m.sample_indices].float()
         premix = s.pre_mix[m.sample_indices, :, None]
         collapsed = (residual * premix).sum(1).bfloat16()
         normalize(collapsed, self.weights.norm, s.hidden, self.weights.config.text["rms_norm_eps"])
         self.head(s.hidden)
+        if self.mode != "verify":
+            self.table_requests.commit(m.lengths)
         return s.hidden
+
+    def commit(self, counts):
+        for layer in self.layers:
+            layer.attention.commit(counts)
+        self.table_requests.commit(counts)

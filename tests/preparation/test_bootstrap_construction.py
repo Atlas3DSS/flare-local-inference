@@ -21,6 +21,13 @@ from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.recipes.qwen38 import bootstrap
 
 
+@pytest.fixture(autouse=True)
+def forbid_cuda_initialization(monkeypatch):
+    def reject():
+        raise AssertionError("CPU preparation must not initialize CUDA")
+    monkeypatch.setattr(torch.cuda, "_lazy_init", reject)
+
+
 class MetadataValues(TorchDispatchMode):
     """Track small integer metadata on CPU while all large/model storage stays meta."""
 
@@ -640,7 +647,6 @@ def _install_boundaries(monkeypatch, checkpoint):
 def test_prepare_model_constructs_real_catalog_on_meta(
     monkeypatch, checkpoint, proposal, fixed, concurrency
 ):
-    assert not torch.cuda.is_initialized()
     session, signatures, constructors = _install_boundaries(monkeypatch, checkpoint)
     config = bootstrap.PreparationConfig(
         max_active=concurrency,
@@ -656,15 +662,18 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     ):
         bootstrap.prepare_model(checkpoint[0].snapshot, config)
     assert session.closed
+    modes = 1 if proposal == "ordinary" else 2
     expected = {
         "vision": 4,
-        "prefill": len(config.prefill_capacities),
-        "resume": len(config.batch_capacities),
-        "init": len(config.batch_capacities),
-        "restore": len(config.batch_capacities),
-        "snapshot": len(config.batch_capacities),
+        "prefill": modes * len(config.prefill_capacities),
+        "resume": modes * len(config.batch_capacities),
+        "init": modes * len(config.batch_capacities),
+        "restore": modes * len(config.batch_capacities),
+        "snapshot": modes * len(config.batch_capacities),
+        "decode": len(config.batch_capacities),
     }
-    expected.update({"decode": len(config.batch_capacities)} if proposal == "ordinary" else {"speculative": len(config.speculative_shapes)})
+    if proposal != "ordinary":
+        expected["speculative"] = len(config.speculative_shapes)
     assert Counter(signature.kind for signature in signatures) == expected
     assert {
         signature.token_capacity
@@ -683,15 +692,18 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     } == (set(config.speculative_shapes) if proposal != "ordinary" else set())
     assert all(signature.sampling_mode == "general" for signature in signatures)
     assert all(
-        ("draft_page_tables" in signature.inputs) == (proposal == "mtp")
+        ("draft_page_tables" in signature.inputs) == (proposal == "mtp" and signature.speculation_enabled)
         for signature in signatures
         if signature.kind in ("prefill", "resume", "speculative")
     )
     decoders = constructors["PreparedDecoder"]
-    assert len(decoders) == (len(config.prefill_capacities) + len(config.batch_capacities) if proposal == "ordinary" else len(config.prefill_capacities) + len(config.speculative_shapes))
+    assert len(decoders) == (modes * len(config.prefill_capacities) + len(config.batch_capacities)
+                             + (len(config.speculative_shapes) if proposal != "ordinary" else 0))
+    assert {s.batch_capacity for s in signatures if s.kind == "decode"} == set(config.batch_capacities)
+    assert all(s.speculation_enabled is False for s in signatures if s.kind == "decode")
     assert len(constructors["PreparedVision"]) == 4
-    assert len(constructors["PreparedMaintenance"]) == 3 * len(config.batch_capacities)
-    assert len(constructors["PreparedResume"]) == len(config.batch_capacities)
+    assert len(constructors["PreparedMaintenance"]) == modes * 3 * len(config.batch_capacities)
+    assert len(constructors["PreparedResume"]) == modes * len(config.batch_capacities)
     assert len(constructors["PreparedGDN"]) == 36 * len(decoders)
     assert len(constructors["PreparedPLE"]) == len(decoders)
     for decoder, args in decoders:
@@ -704,6 +716,8 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         )
         assert args["completion_records"].dtype == torch.int64
         pool = args["state"].pool
+        if not decoder.verification:
+            assert (args["state"]._residual is not None) == args["state"].maintain_draft_state
         assert pool.backing.dtype == torch.uint8
         assert pool.backing.shape[0] == 1 + config.request_capacity + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else (max(config.speculative_widths) - 1) * config.request_capacity)
         assert decoder.scratch.residual.dtype == torch.bfloat16
@@ -720,11 +734,11 @@ def test_prepare_model_constructs_real_catalog_on_meta(
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
     assert len(constructors["PreparedMTP"]) == ((len(config.prefill_capacities) + len(config.speculative_shapes) + sum(width > 1 for _, width in config.speculative_shapes)) if proposal == "mtp" else 0)
-    assert len(constructors["PreparedCheckpointCaches"]) == 3 * len(config.batch_capacities)
+    assert len(constructors["PreparedCheckpointCaches"]) == modes * 3 * len(config.batch_capacities)
     for owner, _ in constructors["PreparedMaintenance"]:
         assert owner.transfers.exact.pool is owner.pool
         assert owner.transfers.exact.tables is owner.forward_inputs.page_tables
-        assert (owner.transfers.exact.draft is not None) == (proposal == "mtp")
+        assert (owner.transfers.exact.draft is not None) == (proposal == "mtp" and owner.speculation is not None)
     assert len(constructors["PreparedStochasticVerification"]) == (
         0 if proposal == "ordinary" else len(config.speculative_shapes)
     )
@@ -754,7 +768,6 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     contract = construction_contract(session, signatures)
     assert [request["name"] for request in contract["requests"]] == list(session.requests)
     assert len(contract["graph_signatures"]) == len(signatures)
-    assert not torch.cuda.is_initialized()
 
 
 def test_recording_metadata_preserves_values_and_rejects_unknown_scalars():
@@ -792,4 +805,3 @@ def test_real_moe_constructor_rejects_incompatible_loaded_geometry(
     assert len(constructors["PreparedVision"]) == 4
     assert not constructors["PreparedDecoder"]
     assert session.closed
-    assert not torch.cuda.is_initialized()

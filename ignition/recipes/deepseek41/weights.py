@@ -26,6 +26,28 @@ class LayerWeights:
 
 
 @dataclass(frozen=True)
+class DSparkWeights:
+    layers: tuple[LayerWeights, ...]
+    main_projection: object
+    main_norm: torch.Tensor
+    norm: torch.Tensor
+    markov_embedding: torch.Tensor
+    markov_head: torch.Tensor
+    confidence: torch.Tensor
+
+    @classmethod
+    def load(cls, loader):
+        config, shard = loader.config.draft, loader.shard
+        last = f"mtp.{config.layers - 1}"
+        return cls(tuple(loader.load_layer(i, draft=True) for i in range(config.layers)),
+            loader.load_linear("mtp.0.main_proj"), loader.load_tensor("mtp.0.main_norm.weight"),
+            loader.load_tensor(last + ".norm.weight"), loader.load_tensor(last + ".markov_head.embed.weight"),
+            loader.load_tensor(last + ".markov_head.head.weight",
+                extent=slice(*shard.partition(129280, alignment=64))),
+            loader.load_tensor(last + ".confidence_head.proj.weight"))
+
+
+@dataclass(frozen=True)
 class ModelWeights:
     config: ModelConfig
     shard: object
@@ -33,29 +55,33 @@ class ModelWeights:
     norm: torch.Tensor
     head: torch.Tensor
     layers: tuple[LayerWeights, ...]
+    draft: DSparkWeights | None
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None):
+    def load(cls, manifest, device, *, shard, progress=None, dspark=False):
         config = ModelConfig.load(manifest.snapshot)
         before = torch.cuda.memory_allocated(device)
-        with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress) as loader:
+        with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
             head = loader.load_tensor("head.weight", extent=slice(*shard.partition(129280, alignment=64)))
             layers = tuple(loader.load_layer(i) for i in range(config.layers))
-        return cls(config, shard, embedding, norm, head, layers,
+            draft = DSparkWeights.load(loader) if dspark else None
+        return cls(config, shard, embedding, norm, head, layers, draft,
                    torch.cuda.memory_allocated(device) - before)
 
 
 class DeepSeekWeightLoader(DirectWeightLoader):
-    def __init__(self, manifest, device, *, shard, progress=None, prefixes=None):
+    def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=False):
+        self.dspark = dspark
         super().__init__(manifest, device, progress=progress, prefixes=prefixes)
         self.config = ModelConfig.load(manifest.snapshot)
         self.shard = shard
 
     def _selected_names(self):
         return {name for name in super()._selected_names()
-                if (name.startswith("layers.") or name in ("embed.weight", "norm.weight", "head.weight"))
+                if (name.startswith("layers.") or (self.dspark and name.startswith("mtp."))
+                    or name in ("embed.weight", "norm.weight", "head.weight"))
                 and ".engram.embed." not in name}
 
     def load_linear_group(self, prefixes, *, row_ranges=None, column_range=None):
@@ -97,8 +123,8 @@ class DeepSeekWeightLoader(DirectWeightLoader):
         return wo_projection.pack_weights(a, sa.view(torch.float8_e8m0fnu), b, sb.view(torch.float8_e8m0fnu),
             groups=8 // self.shard.world_size, group_width=4096, rank=1024, hidden=5120, block_size=(32, 32))
 
-    def load_layer(self, layer):
-        prefix = f"layers.{layer}"
+    def load_layer(self, layer, *, draft=False):
+        prefix = f"mtp.{layer}" if draft else f"layers.{layer}"
         text, shard = self.config.text, self.shard
         attn = prefix + ".attn"
         heads = shard.partition(64 * 512, alignment=512)
@@ -111,7 +137,9 @@ class DeepSeekWeightLoader(DirectWeightLoader):
             "kv_norm": self.load_tensor(attn + ".kv_norm.weight"),
             "sink": self.load_tensor(attn + ".attn_sink", extent=slice(*shard.partition(64))),
         }
-        if layer in text["kv_source_layer_ids"]:
+        if draft:
+            result["main_kv"] = self.load_linear(attn + ".wkv")
+        if not draft and layer in text["kv_source_layer_ids"]:
             ratio = text["compress_ratios"][layer]
             result["compressor"] = {
                 "values": self.load_tensor(attn + ".compressor.wkv.weight"),
@@ -121,14 +149,14 @@ class DeepSeekWeightLoader(DirectWeightLoader):
                 result["compressor"]["gates"] = self.load_tensor(attn + ".compressor.wgate.weight")
             result["index_k"] = self.load_tensor(attn + ".indexer.wk.weight")
             result["index_norm"] = self.load_tensor(attn + ".indexer.k_norm.weight")
-        if layer in text["index_source_layer_ids"]:
+        if not draft and layer in text["index_source_layer_ids"]:
             # Replicated index heads avoid a context-sized TP score reduction.
             result["index_q"] = self.load_linear(attn + ".indexer.wq_b")
             result["index_weights"] = self.load_tensor(attn + ".indexer.weights_proj.weight")
         ffn = prefix + ".ffn"
         interval = shard.partition(text["moe_intermediate_size"], alignment=32)
         experts = self.load_fp4_experts(
-            [f"{ffn}.experts.{i}" for i in range(text["n_routed_experts"])],
+            [f"{ffn}.experts.{i}" for i in range(self.config.draft.experts if draft else text["n_routed_experts"])],
             hidden_size=5120, intermediate_size=2304, format="mxfp4", activation_mode="a8",
             intermediate_range=interval, swiglu_limit=text["swiglu_limit"],
             projection_names=("w3", "w1", "w2"), scale_name="scale")
@@ -140,7 +168,7 @@ class DeepSeekWeightLoader(DirectWeightLoader):
             "hc_attn_fn", "hc_attn_base", "hc_attn_scale", "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale",
             "attn_norm.weight", "ffn_norm.weight")}
         engram = None
-        if layer in text["engram_layer_ids"]:
+        if not draft and layer in text["engram_layer_ids"]:
             engram = {"projection": self.load_linear(prefix + ".engram.wkv"),
                 "weight": self.load_tensor(prefix + ".engram.q_weight").float()
                           * self.load_tensor(prefix + ".engram.k_weight").float()}

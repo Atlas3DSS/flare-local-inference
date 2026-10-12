@@ -41,6 +41,8 @@ def endpoint_case(endpoint, device):
     expected = torch.tensor([endpoint], dtype=torch.int64, device=device)
     count = torch.ones(1, dtype=torch.int32, device=device)
     errors = torch.zeros(1, dtype=torch.int32, device=device)
+    requests = torch.tensor([2], dtype=torch.int64, device=device)
+    raw_slots = torch.tensor([-1], dtype=torch.int64, device=device)
     all_args, outputs, owned = [], [], []
     offset = 0
     for draft in (False, True):
@@ -58,7 +60,7 @@ def endpoint_case(endpoint, device):
             else:
                 value = torch.arange(5 * size, device=device).reshape(5, *shape).to(dtype)
             pointers = torch.tensor([[value.data_ptr(), offset, tags.data_ptr()]], dtype=torch.int64, device=device)
-            args = (pointers, backing, sources, destinations, operations, expected, count, errors,
+            args = (pointers, backing, sources, destinations, operations, expected, count, errors, requests, raw_slots,
                     row_bytes, size, ring, field, draft, triton.next_power_of_2(size))
             all_args.append((module._checkpoint_raw, (1, 1, 1), args))
             valid = (tags[3] >= 0) & (tags[3] < consumed)
@@ -83,7 +85,7 @@ def endpoint_case(endpoint, device):
             size = torch.tensor(shape).prod().item()
             cache = torch.arange(6, dtype=torch.bfloat16, device=device).view(6, *([1] * len(shape))).expand(6, *shape).contiguous()
             pointers = torch.tensor([[cache.data_ptr(), offset]], dtype=torch.int64, device=device)
-            args = (pointers, backing, tables, sources, destinations, operations, expected, count, errors,
+            args = (pointers, backing, tables, sources, destinations, operations, expected, count, errors, requests, raw_slots,
                     row_bytes, size, 4, part, 1024)
             all_args.append((module._checkpoint_pages, (1, 1, triton.cdiv(size, 1024)), args))
             page_expectations.append((cache, required, offset, size))
@@ -106,6 +108,8 @@ def endpoint_case(endpoint, device):
     for value, _, _, _, _ in outputs:
         value[2].fill_(77)
     sources.fill_(5); destinations.fill_(2)
+    requests.fill_(1)
+    raw_slots.fill_(0)
     if device == "cuda":
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -142,9 +146,12 @@ def endpoint_case(endpoint, device):
 
 
 @pytest.mark.parametrize("endpoint", [1, 2, 3, 15, 63, 64, 65, 66, 67, 127, 128])
-def test_exact_cache_endpoint_cpu(endpoint):
+def test_exact_cache_endpoint_cpu(endpoint, monkeypatch):
+    def unexpected_cuda_access():
+        pytest.fail("CPU cache checks must not access CUDA")
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", unexpected_cuda_access)
     endpoint_case(endpoint, "cpu")
-    assert not torch.cuda.is_initialized()
 
 
 @CUDA
@@ -172,9 +179,14 @@ def transfer_case(accepted, device):
     expected = torch.tensor([67], device=device, dtype=torch.int64)
     errors = torch.zeros(1, device=device, dtype=torch.int32)
     tables = torch.tensor([[0, 1, 2, 3]] * 4, device=device, dtype=torch.int32)
+    requests = torch.tensor([2], dtype=torch.int64, device=device)
+    states = torch.zeros((4, 8), dtype=torch.int64, device=device)
+    states[2, 0] = 3
+    states[2, 1:] = torch.arange(20, 27, device=device)
+    capacity = torch.tensor([slots, 6], dtype=torch.int64, device=device)
     args = (backing, consumed, source, destination, operation, raw, torch.ones_like(operation), count, errors,
-            expected, previous, layout, tables, tables, True, True, True, 6, 4, 4,
-            row_bytes, slots, 1, 5, 12304, consumed.stride(0), block, 1)
+            expected, previous, layout, tables, tables, requests, states, True, True, True, capacity, 4,
+            row_bytes, 1, 5, 12304, consumed.stride(0), block, 1)
     original = backing.clone()
     launch(module._transfer, (1, 4, 1), args, device)
     assert errors.item() == 0
@@ -228,7 +240,10 @@ def test_admission_failure_does_not_reset_other_speculative_state():
     operation.metadata = SimpleNamespace(num_ops=torch.tensor([2]),
         destination_slots=torch.tensor([1, 3, 0, 0]), errors=torch.zeros(4, dtype=torch.int32))
     # Admission prevalidation rejected lane0 despite a syntactically valid destination.
-    operation.filtered = SimpleNamespace(destination_slots=torch.tensor([0, 3, 0, 0]))
+    operation.filtered = SimpleNamespace(destination_slots=torch.tensor([0, 3, 0, 0]),
+        request_slots=torch.tensor([-1, 2, -1, -1]), errors=torch.zeros(4, dtype=torch.int32))
+    operation.stage_errors = torch.zeros(4, dtype=torch.int32)
+    operation.mode, operation.history = "init", lambda: None
     operation.requests = SimpleNamespace(generation=generations)
     operation.speculation = SimpleNamespace(previous_accepted=previous, accepted_generation=accepted_generation)
     operation.slots = 4

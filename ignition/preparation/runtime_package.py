@@ -688,7 +688,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
     package = RuntimePackage(allocations=allocations, modules=modules, kernels=kernels.values(), owners=(prepared, storage),
         reservations=[{"address": start, "nbytes": end - start} for start, end in merged], reachability=reachability,
         events=prepared.export_events)
-    execution = prepared.manifest()
+    execution = prepared.manifest(all_variants=True)
     execution.pop("context")
     execution.pop("device")
     for buffer in execution["buffers"]:

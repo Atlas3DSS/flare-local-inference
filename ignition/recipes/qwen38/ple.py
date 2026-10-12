@@ -107,7 +107,7 @@ class PLETable:
         if scale.dtype != torch.float32 or scale.shape != (1,) or not bool(torch.isfinite(scale).all() & (scale > 0).all()):
             raise ValueError("PLE global scale must be a finite positive FP32 scalar")
         sources = []
-        with phase(progress, "Prepare PLE table") as stage:
+        with phase(progress, "Prepare embedding tables") as stage:
             for suffix, columns, dtype in (("weight", 80, "U8"), ("weight_scale", 10, "F8_E4M3")):
                 plane = []
                 for shard in range(TABLE_ROWS // ROWS_PER_PLANE):

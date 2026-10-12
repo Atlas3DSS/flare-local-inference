@@ -53,7 +53,7 @@ impl ModelContract for Glm5Next {
         kind: GraphKind,
     ) -> impl Iterator<Item = &'static str> {
         config::required_inputs(kind).iter().copied().chain(
-            (config.has_draft_cache() && kind != GraphKind::Resume && kind != GraphKind::Vision)
+            (config.has_learned_drafts() && kind != GraphKind::Resume && kind != GraphKind::Vision)
                 .then_some("draft_page_tables"),
         )
     }
@@ -63,7 +63,7 @@ impl ModelContract for Glm5Next {
             page_tokens: Self::page_tokens(config),
             vision: config.contract.vision.clone(),
 
-            draft_pages_per_request: usize::from(config.has_draft_cache()),
+            draft_pages_per_request: usize::from(config.has_learned_drafts()),
         }
     }
 

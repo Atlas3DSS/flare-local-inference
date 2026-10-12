@@ -24,7 +24,7 @@ def page_bytes(config):
     return sum(shape[0] for _, shape in page_specs(config))
 
 
-def continuation_layout(config):
+def continuation_layout(config, *, dspark=False):
     regions = [(f"layer{i}.window", (config.text["sliding_window"] * SWA_RECORD_BYTES,), torch.uint8)
                for i in range(config.layers)]
     for source in config.sources:
@@ -35,9 +35,13 @@ def continuation_layout(config):
                 (f"layer{source.layer}.pending_position", (1,), torch.int64),
             ))
     regions.extend((name, shape, torch.uint8) for name, shape in page_specs(config))
+    if dspark:
+        regions.extend((f"draft{i}.window", (128 * SWA_RECORD_BYTES,), torch.uint8)
+                       for i in range(config.draft.layers))
     regions.extend((
         ("last_hidden", (config.text["hidden_size"],), torch.bfloat16),
         ("consumed_tokens", (1,), torch.int64),
+        ("engram_history", (3,), torch.int64),
     ))
     return StateLayout.from_specs(regions)
 
@@ -49,10 +53,11 @@ class ContinuationPool(StateStorage):
     window_backing: torch.Tensor
 
     @classmethod
-    def allocate(cls, config, slots, pages, device, *, storage=None, maximum_pages=None):
+    def allocate(cls, config, slots, pages, device, *, storage=None, maximum_pages=None, maximum_rows=None, dspark=False):
         if type(pages) is not int or pages <= 0:
             raise ValueError("DeepSeek cache requires positive logical page capacity")
-        backing = StateStorage.allocate(continuation_layout(config), slots, device, storage=storage)
+        backing = StateStorage.allocate(continuation_layout(config, dspark=dspark), slots, device,
+            storage=storage, maximum_slots=maximum_rows)
         maximum = pages if storage is None else maximum_pages
         if maximum is None or maximum < pages:
             raise ValueError("virtual cache extent must cover prepared physical pages")
@@ -73,9 +78,9 @@ class ContinuationPool(StateStorage):
                 device=backing.backing.device, nbytes=region.maximum * backing.layout.row_bytes)
         return cls(backing.backing, backing.layout, backing.memory_capacity, config, regions, window_backing)
 
-    def window(self, layer):
+    def window(self, layer, *, draft=False):
         """Expose the reserved row extent to cache writers; admission bounds physical rows."""
-        region = self.layout.region(f"layer{layer}.window")
+        region = self.layout.region(f"{'draft' if draft else 'layer'}{layer}.window")
         return self.window_backing[:, region.offset:region.offset + region.nbytes]
 
     @property

@@ -9,6 +9,7 @@ from qualify.checkpoint_http import (
     prompt_ids, terminal_branch,
 )
 from qualify.server import common_prefix, system_prefix_ids
+from .test_exact_checkpoint_http import tokenizer as tokenizer
 
 
 @pytest.mark.parametrize("nonce", ["000000000000", "abcdef123456", "999999999999"])

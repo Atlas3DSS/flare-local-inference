@@ -17,6 +17,34 @@ class CacheSource:
 
 
 @dataclass(frozen=True)
+class DSparkConfig:
+    layers: int
+    block_size: int
+    noise_token: int
+    target_layers: tuple[int, ...]
+    markov_rank: int
+    experts: int
+    top_k: int
+
+    @classmethod
+    def from_text(cls, text):
+        result = cls(text["num_nextn_predict_layers"], text["dspark_block_size"],
+            text["dspark_noise_token_id"], tuple(text["dspark_target_layer_ids"]),
+            text["dspark_markov_rank"], text["dspark_n_routed_experts"],
+            text["dspark_num_experts_per_tok"])
+        if (result.layers != 3 or result.block_size != 5 or result.markov_rank != 256
+                or result.experts != 128 or result.top_k != 3
+                or not 0 <= result.noise_token < text["vocab_size"]
+                or not result.target_layers or tuple(sorted(set(result.target_layers))) != result.target_layers
+                or any(not 0 <= i < text["num_hidden_layers"] for i in result.target_layers)):
+            raise ValueError("unsupported DeepSeek V4.1 Flash DSpark geometry")
+        start = text["num_hidden_layers"]
+        if text["compress_ratios"][start:start + result.layers] != [0] * result.layers:
+            raise ValueError("DSpark stages require uncompressed sliding-window attention")
+        return result
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     text: dict
     quantization: dict
@@ -75,6 +103,10 @@ class ModelConfig:
     @property
     def layers(self):
         return self.text["num_hidden_layers"]
+
+    @property
+    def draft(self):
+        return DSparkConfig.from_text(self.text)
 
     @property
     def sources(self):

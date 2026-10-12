@@ -267,11 +267,13 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     prefill_capacity=config.token_capacity, max_cache_pages=planned_pages,
                     proposal_source=config.speculative_proposal_source, **collectives)
                 buffers.update(speculation.buffers())
-        graph_count = 4 + len(config.prefill_capacities) + (len(config.speculative_shapes) if config.mtp else len(config.batch_capacities)) + 4 * len(config.batch_capacities)
+        serving_modes = (True, False) if config.mtp else (False,)
+        graph_count = (4 + len(serving_modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
+                       + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0))
         with phase(progress, "Construct graph catalog", total=graph_count) as stage:
-            def add(name, function, kind, batch, tokens, fields):
+            def add(name, function, kind, batch, tokens, fields, *, enabled=None):
                 functions[name] = function
-                signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields))
+                signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields), speculation_enabled=enabled)
                 stage.update(advance=1)
 
             vision_fields = tuple(vision_inputs.__dataclass_fields__)
@@ -292,61 +294,72 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 add(f"vision{capacity}", vision, "vision", 1, capacity, vision_fields)
                 owners.extend((handoff, encoder))
 
-            forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
-                              *(("draft_page_tables",) if has_mtp else ()))
-            modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
-            if not config.mtp:
-                modes += (("decode", reversed(config.batch_capacities)),)
-            for mode, capacities in modes:
-                for capacity in capacities:
-                    rows = 1 if mode == "prefill" else capacity
-                    metadata = PreparedDecoderState(inputs, requests, state, tokens=capacity, rows=rows, mode=mode)
-                    s = scratch.rows(capacity, rows)
-                    injection = None
-                    if mode == "prefill":
-                        injection = PreparedEmbeddingInjection(features, requests, inputs.vision_token_indices[:capacity],
-                            inputs.row_slot_ids, inputs.row_generations, inputs.query_lengths, inputs.live_rows,
-                            s.embedding, rows=rows)
-                        injection.prepare()
-                    decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
-                        completion, frame, sequence, session=session, name=f"{mode}{capacity}",
-                        embedding_injection=injection, max_cache_pages=planned_pages, **collectives)
-                    forward = decoder if speculation is None else speculation.prefill(decoder, f"{mode}{capacity}")
-                    add(f"{mode}{capacity}", forward, mode, rows,
-                        capacity if mode == "prefill" else 1, forward_fields)
-                    decoders.append(decoder)
+            for enabled in serving_modes:
+                suffix = "-no-mtp" if config.mtp and not enabled else ""
+                forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
+                                  *(("draft_page_tables",) if enabled and has_mtp else ()))
+                modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
+                if not enabled:
+                    modes += (("decode", reversed(config.batch_capacities)),)
+                for mode, capacities in modes:
+                    for capacity in capacities:
+                        rows = 1 if mode == "prefill" else capacity
+                        name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
+                        metadata = PreparedDecoderState(inputs, requests, state, tokens=capacity, rows=rows, mode=mode,
+                            maintain_draft_state=enabled)
+                        s = scratch.rows(capacity, rows)
+                        injection = None
+                        if mode == "prefill":
+                            injection = PreparedEmbeddingInjection(features, requests, inputs.vision_token_indices[:capacity],
+                                inputs.row_slot_ids, inputs.row_generations, inputs.query_lengths, inputs.live_rows,
+                                s.embedding, rows=rows)
+                            injection.prepare()
+                        decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
+                            completion, frame, sequence, session=session, name=name,
+                            embedding_injection=injection, max_cache_pages=planned_pages, **collectives)
+                        forward = speculation.prefill(decoder, name) if enabled else decoder
+                        add(name, forward, mode, rows,
+                            capacity if mode == "prefill" else 1, forward_fields, enabled=enabled)
+                        decoders.append(decoder)
 
             if speculation is not None:
+                forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
+                                  *(("draft_page_tables",) if has_mtp else ()))
                 fields = (*forward_fields, *(name for name in speculation.buffers() if name != "draft_page_tables"))
                 for batch, width in config.speculative_shapes:
                     name = f"speculative{batch}x{width}"
                     operation = speculation.round(batch, width, name)
                     operation.prepare()
-                    add(name, operation, "speculative", batch, width, fields)
+                    add(name, operation, "speculative", batch, width, fields, enabled=True)
                 decoders.extend(speculation.decoders)
                 owners.append(speculation)
 
             state_fields = tuple(f"state_{name}" for name in transfer.__dataclass_fields__ if name != "errors")
             admission_fields = tuple(admission.__dataclass_fields__)
-            for capacity in reversed(config.batch_capacities):
-                resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
-                    scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
-                    session=session, name=f"resume{capacity}", vocabulary_runtime=vocabulary_collective,
-                    local_logits=None if scratch.local_logits is None else scratch.local_logits[:capacity], coordinator=coordinator)
-                forward = resume if speculation is None else speculation.resume(resume)
-                add(f"resume{capacity}", forward, "resume", capacity, 1, forward_fields)
-                owners.append(resume)
-                for mode in ("init", "restore", "snapshot"):
-                    maintenance = PreparedMaintenance(mode, requests, state, transfer, completion, frame, sequence,
-                        admission_buffers=admission, forward_inputs=inputs,
-                        qsa_states=tuple(value for index, value in cache.items() if index < 48), capacity=capacity,
-                        speculation=speculation)
-                    maintenance.prepare()
-                    fields = state_fields + (forward_fields if mode == "snapshot" else ("request_state_rows", *admission_fields))
-                    if mode == "restore":
-                        fields += ("page_tables", *(("draft_page_tables",) if has_mtp else ()))
-                    add(f"{mode}{capacity}", maintenance, mode, capacity, 1, fields)
-                    owners.append(maintenance)
+            for enabled in serving_modes:
+                suffix = "-no-mtp" if config.mtp and not enabled else ""
+                forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
+                                  *(("draft_page_tables",) if enabled and has_mtp else ()))
+                for capacity in reversed(config.batch_capacities):
+                    name = f"resume{capacity}" + suffix
+                    resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
+                        scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
+                        session=session, name=name, vocabulary_runtime=vocabulary_collective,
+                        local_logits=None if scratch.local_logits is None else scratch.local_logits[:capacity], coordinator=coordinator)
+                    forward = speculation.resume(resume) if enabled else resume
+                    add(name, forward, "resume", capacity, 1, forward_fields, enabled=enabled)
+                    owners.append(resume)
+                    for mode in ("init", "restore", "snapshot"):
+                        maintenance = PreparedMaintenance(mode, requests, state, transfer, completion, frame, sequence,
+                            admission_buffers=admission, forward_inputs=inputs,
+                            qsa_states=tuple(value for index, value in cache.items() if index < 48), capacity=capacity,
+                            speculation=speculation if enabled else None)
+                        maintenance.prepare()
+                        fields = state_fields + (forward_fields if mode == "snapshot" else ("request_state_rows", *admission_fields))
+                        if mode == "restore":
+                            fields += ("page_tables", *(("draft_page_tables",) if enabled and has_mtp else ()))
+                        add(f"{mode}{capacity}" + suffix, maintenance, mode, capacity, 1, fields, enabled=enabled)
+                        owners.append(maintenance)
         session.register_scratch(workspaces)
         with phase(progress, "Prepare and tune kernels") as stage, transient:
             tuning = session.tune(show_progress=progress is not None, console=stage.console)

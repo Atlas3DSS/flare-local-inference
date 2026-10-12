@@ -136,14 +136,17 @@ def _validate_trailing(Sources, Destinations, Operations, Expected, Count, Error
 
 @triton.jit
 def _copy_rows(Backing, Sources, Destinations, Operations, Count, Errors,
-               ROW_BYTES: tl.constexpr, BLOCK: tl.constexpr):
+               ROW_BYTES: tl.constexpr, BLOCK: tl.constexpr, EXCLUDED: tl.constexpr):
     row, tile = tl.program_id(0), tl.program_id(1)
     source, destination = tl.load(Sources + row), tl.load(Destinations + row)
     copying = tl.load(Operations + row) == 0
     active = (row < tl.load(Count)) & (tl.load(Errors + row) == 0)
     index = tile * BLOCK + tl.arange(0, BLOCK)
-    value = tl.load(Backing + source * ROW_BYTES + index, active & copying & (index < ROW_BYTES), other=0)
-    tl.store(Backing + destination * ROW_BYTES + index, value, active & (index < ROW_BYTES))
+    mask = active & (index < ROW_BYTES)
+    for span in tl.static_range(len(EXCLUDED)):
+        mask &= (index < EXCLUDED[span][0]) | (index >= EXCLUDED[span][1])
+    value = tl.load(Backing + source * ROW_BYTES + index, mask & copying, other=0)
+    tl.store(Backing + destination * ROW_BYTES + index, value, mask)
 
 
 @triton.jit
@@ -185,7 +188,7 @@ class PreparedStateTransfer:
     """
 
     def __init__(self, pool: StateStorage, commands: StateCommands, tables, *, pages, page_tokens,
-                 state_rows, requests, trailing_pages=(), trailing_tables=None):
+                 state_rows, requests, trailing_pages=(), trailing_tables=None, excluded_regions=()):
         self.capacity = commands.source_slots.numel()
         device = pool.backing.device
         if device.type != "cuda" or pool.backing.shape[0] < self.capacity + 2:
@@ -239,7 +242,9 @@ class PreparedStateTransfer:
         self.validate_args = (c.source_slots, c.destination_slots, c.operation, c.expected_consumed, c.num_ops,
             c.errors, consumed, tables, c.request_slots, state_rows, requests.consumed_tokens, requests.consumed_tokens.stride(0), pool.memory_capacity, consumed.stride(0), tables.shape[1], page_tokens, self.capacity)
         self.row_args = (pool.backing, c.source_slots, c.destination_slots, c.operation, c.num_ops, c.errors,
-                         pool.layout.row_bytes, 4096)
+                         pool.layout.row_bytes, 4096,
+                         tuple((region.offset, region.offset + region.nbytes)
+                               for name in excluded_regions for region in (pool.layout.region(name),)))
         self.page_args = [(pointer, pool.backing, tables, c.source_slots, c.destination_slots, c.operation,
             c.expected_consumed, c.num_ops, c.errors, c.request_slots, state_rows, pool.layout.row_bytes, size, tables.shape[1], page_tokens, 1024, self.capacity)
             for size, pointer in self.pointers.items()]

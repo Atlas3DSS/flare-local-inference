@@ -58,6 +58,22 @@ def test_speculative_manifest_exports_vector_abi(monkeypatch):
     assert manifest["input_frame_bytes"] == 152
 
 
+def test_export_includes_ordinary_graphs_while_diagnostics_select_speculation(monkeypatch):
+    signatures = {
+        "decode": GraphSignature("decode", 1, 1, speculation_enabled=False),
+        "prefill": GraphSignature("prefill", 1, 16, speculation_enabled=True),
+        "prefill-no-mtp": GraphSignature("prefill", 1, 16, speculation_enabled=False),
+        "speculative": GraphSignature("speculative", 1, 2, speculation_enabled=True),
+    }
+    execution = _execution(graphs=dict.fromkeys(signatures, object()), signatures=signatures)
+    spans = [(4096, 4), (8192, 8), (12288, 512), (16384, 128), (20480, 1)]
+    monkeypatch.setattr(execution, "_validate_resources", lambda: (9, [11, 12, 13, 14], spans))
+    exported = execution.manifest(all_variants=True)["graphs"]
+    assert {g["name"]: g["speculation_enabled"] for g in exported} == {
+        name: signature.speculation_enabled for name, signature in signatures.items()}
+    assert [g["name"] for g in execution.manifest()["graphs"]] == ["prefill", "speculative"]
+
+
 @pytest.mark.parametrize("signature", [
     lambda: GraphSignature("callback", 1, 1),
     lambda: GraphSignature("decode", True, 1),

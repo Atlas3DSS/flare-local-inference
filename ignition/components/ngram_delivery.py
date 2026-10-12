@@ -22,6 +22,17 @@ def _publish(mailbox, sequence, FLAG: tl.constexpr):
     tl.atomic_xchg(mailbox + FLAG, value, sem="release", scope="sys")
 
 
+@torch.library.custom_op("flare::publish_embedding_requests", mutates_args=("mailbox",))
+def publish_requests(ids: torch.Tensor, mailbox: torch.Tensor, sequence: torch.Tensor) -> None:
+    _copy_requests[(triton.cdiv(ids.numel(), 256),)](ids, mailbox, ids.numel(), 256)
+    _publish[(1,)](mailbox, sequence, mailbox.numel() - 1)
+
+
+@publish_requests.register_fake
+def _publish_requests_fake(ids, mailbox, sequence):
+    pass
+
+
 @torch.library.custom_op("flare::ple_requests", mutates_args=("ids", "requests", "mailbox"))
 def _requests(token_ids: torch.Tensor, query_start: torch.Tensor, history: torch.Tensor,
               num_seqs: torch.Tensor, num_tokens: torch.Tensor, multipliers: torch.Tensor,
