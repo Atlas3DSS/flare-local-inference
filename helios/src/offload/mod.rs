@@ -389,8 +389,15 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
             )
         })
         .transpose()?;
+    // Inside a composite the disk index owns the tree; memory nodes are flat.
     let memory = memory_pool
-        .map(|pool| memory::MemoryStore::new(identity, pool, transfers.clone()))
+        .map(|pool| {
+            if disk.is_some() {
+                memory::MemoryStore::new_flat(identity, pool, transfers.clone())
+            } else {
+                memory::MemoryStore::new(identity, pool, transfers.clone())
+            }
+        })
         .transpose()?;
     match (memory, disk) {
         (Some(memory), Some(disk)) => Ok(Box::new(composite::CompositeStore::new(memory, disk)?)),
