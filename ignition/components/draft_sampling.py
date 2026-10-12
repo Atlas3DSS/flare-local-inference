@@ -131,6 +131,86 @@ def _select_and_sample(Candidates, Selected, Probabilities, Valid, TopK, TopP, P
     tl.store(Sampled + row, sampled.to(tl.int64))
 
 
+@triton.jit
+def _draft_scores(Logits, Histogram, Candidates, Slots, Params, GrammarMask, GrammarEnabled, Scores, BlockMax,
+                  BlockArg, hist_stride, mask_stride, candidate_stride, CAPACITY: tl.constexpr, V: tl.constexpr,
+                  PREFIX: tl.constexpr, BLOCK: tl.constexpr, BLOCKS: tl.constexpr):
+    # One vocabulary block of one row: the committed histogram plus the row's earlier drafts give the penalty
+    # counts; repetition, presence and frequency penalties, temperature and the grammar mask follow the
+    # unfused order of operations. Each block records its maximum and first maximal index.
+    row, block = tl.program_id(0), tl.program_id(1)
+    safe = tl.minimum(tl.maximum(tl.load(Slots + row).to(tl.int64), 0), CAPACITY - 1)
+    token = block * BLOCK + tl.arange(0, BLOCK)
+    inside = token < V
+    score = tl.load(Logits + row * V + token, mask=inside, other=0.).to(tl.float32)
+    count = tl.load(Histogram + safe * hist_stride + token, mask=inside, other=0)
+    for index in tl.static_range(PREFIX):
+        draft = tl.load(Candidates + row * candidate_stride + index)
+        count += ((token == draft) & (draft >= 0) & (draft < V)).to(tl.int32)
+    temperature = tl.load(Params + safe * 6)
+    repetition = tl.load(Params + safe * 6 + 3)
+    presence = tl.load(Params + safe * 6 + 4)
+    frequency = tl.load(Params + safe * 6 + 5)
+    # IEEE division and no FMA contraction (see the launch) reproduce the unfused arithmetic exactly.
+    adjusted = tl.where(score > 0, tl.math.div_rn(score, repetition), score * repetition)
+    score = tl.where(count > 0, adjusted, score)
+    score = score - (count > 0).to(tl.float32) * presence - count.to(tl.float32) * frequency
+    score = tl.math.div_rn(score, tl.where(temperature > 0, temperature, 1.))
+    word = tl.load(GrammarMask + safe * mask_stride + token // 32, mask=inside, other=0)
+    allowed = (((word >> (token % 32)) & 1) != 0) | (tl.load(GrammarEnabled + safe) == 0)
+    score = tl.where(allowed, score, -float("inf"))
+    tl.store(Scores + row * V + token, score, mask=inside)
+    score = tl.where(inside, score, -float("inf"))
+    maximum = tl.max(score, 0)
+    first = tl.min(tl.where(score == maximum, token, V), 0)
+    tl.store(BlockMax + row * BLOCKS + block, maximum)
+    tl.store(BlockArg + row * BLOCKS + block, first)
+
+
+@triton.jit
+def _selected_row(Slots, Generations, Generation, live_rows, row, CAPACITY: tl.constexpr, BATCH: tl.constexpr):
+    slot = tl.load(Slots + row).to(tl.int64)
+    safe = tl.minimum(tl.maximum(slot, 0), CAPACITY - 1)
+    selected = (row < live_rows) & (live_rows >= 0) & (live_rows <= BATCH) & (slot >= 0) & (slot < CAPACITY)
+    return selected & (tl.load(Generation + safe) == tl.load(Generations + row)), slot, safe
+
+
+@triton.jit
+def _draft_scores_finish(BlockMax, BlockArg, Candidates, Slots, Generations, LiveRows, Generation, Status, TopK,
+                         Params, Maximum, PointMass, Valid, PackedTopK, PackedTopP, candidate_stride,
+                         CAPACITY: tl.constexpr, BATCH: tl.constexpr, V: tl.constexpr, PREFIX: tl.constexpr,
+                         BLOCKS: tl.constexpr, BLOCK_COUNT: tl.constexpr, RUNNING: tl.constexpr):
+    # The row maximum and its first index, then the row's liveness (as speculation's _live), validity and filters.
+    row = tl.program_id(0)
+    block = tl.arange(0, BLOCK_COUNT)
+    present = block < BLOCKS
+    maxima = tl.load(BlockMax + row * BLOCKS + block, mask=present, other=-float("inf"))
+    firsts = tl.load(BlockArg + row * BLOCKS + block, mask=present, other=V)
+    maximum = tl.max(maxima, 0)
+    first = tl.min(tl.where(maxima == maximum, firsts, V), 0)
+    live_rows = tl.load(LiveRows)
+    selected, slot, safe = _selected_row(Slots, Generations, Generation, live_rows, row, CAPACITY, BATCH)
+    sharing = 0
+    for other in tl.static_range(BATCH):
+        other_selected, other_slot, _ = _selected_row(Slots, Generations, Generation, live_rows, other, CAPACITY, BATCH)
+        sharing += (other_selected & (other_slot == slot)).to(tl.int32)
+    live = selected & (sharing <= 1) & (tl.load(Status + safe) == RUNNING)
+    prefix_valid = True
+    for index in tl.static_range(PREFIX):
+        draft = tl.load(Candidates + row * candidate_stride + index)
+        prefix_valid &= (draft >= 0) & (draft < V)
+    finite = (maximum == maximum) & (tl.abs(maximum) < float("inf"))
+    tl.store(Maximum + row, maximum)
+    tl.store(PointMass + row, tl.minimum(first, V - 1).to(tl.int64))
+    tl.store(Valid + row, live & prefix_valid & finite)
+    top_k = tl.load(TopK + safe)
+    tl.store(PackedTopK + row, tl.where(top_k > 0, top_k, V))
+    tl.store(PackedTopP + row, tl.load(Params + safe * 6 + 1))
+
+
+_SCORE_BLOCK = 4096
+
+
 class PreparedDraftProposal:
     """Two captured launches over explicit request-policy inputs for one draft position."""
 
@@ -174,6 +254,11 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
                          prefix_offset=prefix_offset)
         if logits.shape[1] != 1:
             raise ValueError("draft proposals cover one position")
+        # Fused scoring: per-block maxima of each row before the row reduction.
+        blocks = triton.cdiv(logits.shape[2], _SCORE_BLOCK)
+        self.block_max = torch.empty((logits.shape[0], blocks), dtype=torch.float32, device=logits.device)
+        self.block_arg = torch.empty((logits.shape[0], blocks), dtype=torch.int32, device=logits.device)
+        self._score_kernels = None
         # Contiguous [B,1,...] storage is addressed by row; kernels receive the base tensors.
         self.proposal = PreparedDraftProposal(
             self.scores, self.probabilities, self.valid, self.packed_top_k, self.packed_top_p,
@@ -182,9 +267,32 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
     def prepare(self):
         if self.logits.device.type != "cuda":
             raise ValueError("draft proposals require CUDA")
+        from ignition.components.sampling import RUNNING
+        from ignition.preparation.triton import prepare_triton
+
+        state = self.state
+        batch, _, vocab = self.logits.shape
+        blocks = self.block_max.shape[1]
+        self._score_kernels = (
+            prepare_triton(_draft_scores, (self.logits, state.histogram, self.candidates, self.slots,
+                state.parameters, state.grammar_mask, state.grammar_enabled, self.scores, self.block_max,
+                self.block_arg, state.histogram.stride(0), state.grammar_mask.stride(0), self.candidates.stride(0)),
+                (batch, blocks, 1), CAPACITY=state.capacity, V=vocab, PREFIX=self.prefix_offset, BLOCK=_SCORE_BLOCK,
+                BLOCKS=blocks, num_warps=8, enable_fp_fusion=False),
+            prepare_triton(_draft_scores_finish, (self.block_max, self.block_arg, self.candidates, self.slots,
+                self.generations, self.live_rows, state.generation, state.status, state.top_k, state.parameters,
+                self.maximum, self.point_mass_ids, self.valid, self.packed_top_k,
+                self.packed_top_p, self.candidates.stride(0)), (batch, 1, 1), CAPACITY=state.capacity, BATCH=batch,
+                V=vocab, PREFIX=self.prefix_offset, BLOCKS=blocks, BLOCK_COUNT=triton.next_power_of_2(blocks),
+                RUNNING=RUNNING, num_warps=1))
         self._prepared = True
         self.prepare_scores()
         self.proposal.prepare()
+
+    def prepare_scores(self):
+        """One-position scores in two kernels, without materialized penalty counts or a separate maximum."""
+        for kernel in self._score_kernels:
+            kernel()
 
     def __call__(self):
         if not self._prepared:
