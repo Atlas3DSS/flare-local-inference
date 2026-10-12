@@ -219,6 +219,18 @@ impl<L> Index<L> {
         resident: u64,
         usable: impl Fn(&Node<L>) -> bool,
     ) -> Option<Match> {
+        self.lookup_where(history, resident, |node| node.ready && usable(node))
+    }
+
+    /// `lookup` with usability decided entirely by the predicate, including
+    /// readiness, for a store whose records can be served from elsewhere while
+    /// their own copies are incomplete.
+    pub fn lookup_where(
+        &mut self,
+        history: &PrefixHistory,
+        resident: u64,
+        usable: impl Fn(&Node<L>) -> bool,
+    ) -> Option<Match> {
         let block = HASH_BLOCK_TOKENS as u64;
         let total = history.token_count();
         let root = history.key_at(0)?;
@@ -258,7 +270,7 @@ impl<L> Index<L> {
         usable: &impl Fn(&Node<L>) -> bool,
     ) -> Option<Match> {
         let endpoint = self.nodes.get(key)?;
-        if !endpoint.row || !endpoint.ready || !usable(endpoint) {
+        if !endpoint.row || !usable(endpoint) {
             return None;
         }
         let mut nodes = vec![*key];
@@ -271,7 +283,7 @@ impl<L> Index<L> {
                 }
                 Some(parent) => {
                     let node = self.nodes.get(&parent)?;
-                    if !node.ready || !usable(node) {
+                    if !usable(node) {
                         return None;
                     }
                     nodes.push(parent);
@@ -588,5 +600,8 @@ mod tests {
         index.node_mut(&key).unwrap().ready = true;
         assert_eq!(index.lookup(&full, 0, |_| true).unwrap().key, key);
         assert!(index.lookup(&full, 0, |node| node.key != key).is_none());
+        index.node_mut(&key).unwrap().ready = false;
+        assert!(index.lookup(&full, 0, |_| true).is_none());
+        assert_eq!(index.lookup_where(&full, 0, |_| true).unwrap().key, key);
     }
 }

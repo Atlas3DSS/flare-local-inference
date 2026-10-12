@@ -284,3 +284,44 @@ pub(crate) mod tests {
         assert!(Layout::new(&[zero]).is_err());
     }
 }
+
+#[cfg(all(test, feature = "runtime-package"))]
+mod package_tests {
+    #[test]
+    #[ignore = "requires FLARE_OFFLOAD_TEST_PACKAGE naming an exported package and a free GPU 0"]
+    fn package_geometry_lists_every_plane() {
+        let Some(package) = std::env::var_os("FLARE_OFFLOAD_TEST_PACKAGE") else {
+            return;
+        };
+        let model = unsafe {
+            crate::runtime_package::NativeModel::load(
+                std::path::Path::new(&package),
+                &[0],
+                &crate::runtime_package::LoadOptions::default(),
+                &crate::startup::StartupProgress::silent(),
+            )
+        }
+        .unwrap();
+        let manifest = model.manifests().unwrap().remove(0);
+        let geometry = manifest.cache.unwrap();
+        eprintln!(
+            "page_tokens {} pages {} rows {} row {} {} bytes",
+            geometry.page_tokens,
+            geometry.page_capacity,
+            geometry.row_capacity,
+            geometry.row.name,
+            geometry.row.unit_bytes
+        );
+        for plane in &geometry.planes {
+            eprintln!(
+                "plane {} {} bytes at {:#x}",
+                plane.name, plane.unit_bytes, plane.address
+            );
+        }
+        eprintln!(
+            "page bytes {} record {}",
+            geometry.page_bytes(),
+            geometry.page_record_bytes()
+        );
+    }
+}

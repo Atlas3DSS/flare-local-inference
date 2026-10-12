@@ -186,7 +186,7 @@ impl Core {
     }
 
     fn next_job(&mut self) -> JobId {
-        let id = JobId(self.next_job);
+        let id = JobId(self.next_job * 2);
         self.next_job += 1;
         id
     }
@@ -1351,7 +1351,7 @@ mod tests {
             Ok(())
         });
         assert_eq!(accepted.len(), 2);
-        assert_eq!(accepted[1].id, JobId(2));
+        assert_eq!(accepted[1].id, JobId(4));
         core.absorb(reply(&accepted[1], Ok(())));
         core.settle(&mut events);
         assert_eq!(stored(&events), [(second.key, Some(4 * PAGE + ROW))]);
@@ -1674,6 +1674,175 @@ mod tests {
     }
 
     #[cfg(feature = "runtime-package")]
+    #[test]
+    #[ignore = "requires FLARE_OFFLOAD_TEST_PACKAGE naming an exported package and a free GPU 0"]
+    fn memory_store_round_trips_a_multi_window_checkpoint() {
+        use std::time::Instant;
+
+        use crate::{
+            cuda::Stream,
+            offload::CacheGeometry,
+            runtime_package::{LoadOptions, NativeModel},
+            startup::StartupProgress,
+        };
+
+        let Some(package) = std::env::var_os("FLARE_OFFLOAD_TEST_PACKAGE") else {
+            eprintln!("skipping: FLARE_OFFLOAD_TEST_PACKAGE is unset");
+            return;
+        };
+        let model = unsafe {
+            NativeModel::load(
+                std::path::Path::new(&package),
+                &[0],
+                &LoadOptions::default(),
+                &StartupProgress::silent(),
+            )
+        }
+        .unwrap();
+        let manifest = model.manifests().unwrap().remove(0);
+        let geometry = vec![manifest.cache.clone().unwrap()];
+        let rank: &CacheGeometry = &geometry[0];
+        let (context, device) = (manifest.context, manifest.device);
+        let layout = Layout::new(&geometry).unwrap();
+        let pt = layout.page_tokens;
+        let pages = 99u32;
+        assert!(rank.page_capacity >= 2 * u64::from(pages) + 400 && rank.row_capacity >= 4);
+        let sources: Vec<u32> = (1..=pages).collect();
+        let targets: Vec<u32> = (300..300 + pages).collect();
+        let (source_slot, target_slot) = (1u32, 2u32);
+
+        fn fill(bytes: &mut [u8], seed: u64) {
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                let index = index as u64;
+                *byte = (index.wrapping_mul(31) ^ seed.wrapping_mul(7919) ^ (index >> 8)) as u8;
+            }
+        }
+        let seed = |plane: usize, unit: u32| (plane as u64 + 1) * 1_000_003 + u64::from(unit);
+        let row_plane = rank.planes.len();
+        let stream = Stream::open(context, device).unwrap();
+        let largest = rank
+            .planes
+            .iter()
+            .chain([&rank.row])
+            .map(|plane| plane.unit_bytes as usize)
+            .max()
+            .unwrap();
+        let mut staging = stream.host_buffer(largest).unwrap();
+        let mut write_unit = |address: u64, bytes: usize, seed: u64| {
+            fill(&mut staging.bytes_mut()[..bytes], seed);
+            unsafe { stream.upload(address as usize, &staging, 0, bytes) }.unwrap();
+            stream.synchronize().unwrap();
+        };
+        for (plane, geometry) in rank.planes.iter().enumerate() {
+            for &id in &sources {
+                write_unit(
+                    geometry.unit_address(u64::from(id)),
+                    geometry.unit_bytes as usize,
+                    seed(plane, id),
+                );
+            }
+        }
+        write_unit(
+            rank.row.unit_address(u64::from(source_slot)),
+            rank.row.unit_bytes as usize,
+            seed(row_plane, source_slot),
+        );
+
+        let mut pool = SlabPool::sized(&layout, SlabPool::minimum_bytes(&layout)).unwrap();
+        pool.register(context).unwrap();
+        let transfers = Arc::new(Mutex::new(
+            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+        ));
+        let mut store = MemoryStore::new(IDENTITY, pool, transfers.clone()).unwrap();
+        let consumed = u64::from(pages) * pt;
+        let mut history = PrefixHistory::new(IDENTITY);
+        let tokens: Vec<u32> = (0..consumed as u32 + 40)
+            .map(|t| t.wrapping_mul(2654435761))
+            .collect();
+        history.append(&tokens, &[]).unwrap();
+        let checkpoint = PublishedCheckpoint {
+            id: checkpoint_id(1),
+            key: history.key_at(consumed).unwrap(),
+            parent: None,
+            bucket: history.bucket_at(consumed).unwrap(),
+            chain_pages: sources.iter().map(|id| PageId(*id)).collect(),
+            tail_pages: pages as usize,
+            slot: StateSlotId(source_slot),
+        };
+        let wait = |store: &mut MemoryStore| -> StoreEvent {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut events = Vec::new();
+            while events.is_empty() {
+                assert!(Instant::now() < deadline, "no store event within 60 s");
+                store.poll(&mut events);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(events.len(), 1, "{events:?}");
+            events.pop().unwrap()
+        };
+        assert!(store.store(&checkpoint).unwrap());
+        match wait(&mut store) {
+            StoreEvent::Stored { result, .. } => {
+                assert_eq!(
+                    result.unwrap(),
+                    u64::from(pages) * rank.page_bytes() + rank.row.unit_bytes
+                );
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        let hit = store.lookup(&history, 0).unwrap();
+        assert_eq!(hit.pages, pages as usize);
+        let ticket = InboundTicket {
+            key: checkpoint.key,
+            pages: targets.iter().map(|id| PageId(*id)).collect(),
+            slot: StateSlotId(target_slot),
+        };
+        store.fetch(hit, ticket).unwrap();
+        match wait(&mut store) {
+            StoreEvent::Fetched { result, .. } => {
+                assert_eq!(
+                    result.unwrap(),
+                    u64::from(pages) * rank.page_bytes() + rank.row.unit_bytes
+                );
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        let read_unit = |address: u64, bytes: usize| -> Vec<u8> {
+            unsafe { stream.download(&staging, address as usize, bytes) }.unwrap();
+            stream.synchronize().unwrap();
+            staging.bytes()[..bytes].to_vec()
+        };
+        let mut mismatches = Vec::new();
+        for (plane, geometry) in rank.planes.iter().enumerate() {
+            for (source, target) in sources.iter().zip(&targets) {
+                let mut wanted = vec![0u8; geometry.unit_bytes as usize];
+                fill(&mut wanted, seed(plane, *source));
+                let actual = read_unit(
+                    geometry.unit_address(u64::from(*target)),
+                    geometry.unit_bytes as usize,
+                );
+                if actual != wanted {
+                    mismatches.push((geometry.name.clone(), *source, *target));
+                }
+            }
+        }
+        let mut wanted = vec![0u8; rank.row.unit_bytes as usize];
+        fill(&mut wanted, seed(row_plane, source_slot));
+        let actual = read_unit(
+            rank.row.unit_address(u64::from(target_slot)),
+            rank.row.unit_bytes as usize,
+        );
+        assert!(
+            actual == wanted,
+            "row {target_slot} differs from row {source_slot}"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "mismatched planes and pages: {mismatches:?}"
+        );
+        store.close().unwrap();
+    }
+
     #[test]
     #[ignore = "requires FLARE_OFFLOAD_TEST_PACKAGE naming an exported package and a free GPU 0"]
     fn memory_store_round_trips_a_checkpoint_through_a_loaded_package() {
