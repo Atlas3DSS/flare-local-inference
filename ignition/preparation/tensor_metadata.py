@@ -151,9 +151,11 @@ def live_metadata(allocations, declared, buffers):
     import torch
     from triton.compiler import CompiledKernel
 
-    bounds = sorted((allocation.address, allocation.address + allocation.nbytes) for allocation in allocations)
+    bounds = sorted((allocation.address, allocation.address + allocation.nbytes) for allocation in allocations
+                    if allocation.initialize != "zero")
     starts = [start for start, _ in bounds]
     numeric, opaque, arguments = [], [], {}
+    seen = set()
     for value in gc.get_objects():
         if type(value) in (torch.Tensor, torch.nn.Parameter):
             if value.device.type != "cuda" or value.layout != torch.strided or not value.numel():
@@ -166,8 +168,13 @@ def live_metadata(allocations, declared, buffers):
                                                            for size, stride in zip(value.shape, value.stride())))
             if end > bounds[index][1]:
                 continue
+            floating = value.dtype.is_floating_point or value.dtype.is_complex
+            layout = address, value.element_size(), tuple(value.shape), tuple(value.stride()), floating
+            if layout in seen:
+                continue
+            seen.add(layout)
             spans = tensor_ranges(value)
-            if value.dtype.is_floating_point or value.dtype.is_complex:
+            if floating:
                 numeric.extend(spans)
             else:
                 opaque.extend(spans or [(address, end)])

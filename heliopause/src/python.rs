@@ -191,6 +191,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
         });
     }
     Ok(ExecutionManifest {
+        engram: None,
         abi_version: field!(value, "abi_version", u32),
         context: field!(value, "context", usize),
         device: field!(value, "device", i32),

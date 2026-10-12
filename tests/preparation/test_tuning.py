@@ -91,6 +91,7 @@ def backend(monkeypatch):
     monkeypatch.setattr(PreparationSession, "prepare", prepare)
     monkeypatch.setattr(PreparationSession, "candidate_memory_envelope", envelope)
     monkeypatch.setattr(PreparationSession, "configure_compile_workers", workers)
+    monkeypatch.setattr("ignition.preparation.host_memory.available_bytes", lambda: 128 << 30)
     monkeypatch.setattr(PreparationSession, "_check_thread", lambda self: None)
     monkeypatch.setattr(PreparationSession, "_synchronize", lambda self: events.append(("drain",)))
     monkeypatch.setattr(PreparationSession, "_allocated", lambda self: 4096 + sum(
@@ -309,8 +310,25 @@ def test_qwen_recipe_preserves_preparation_cache_identity(backend):
     assert session.namespace.to_dict() == {
         "checkpoint": "revision", "headers": "digest",
         "workload_schema": "qwen38-active-operators-v1",
-        "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-quantized-vision-nvfp4-a16-moe-a4-route-fp32",
+        "numerical_policy": "qsa16-gdn-sequential-k1-dense-mxfp8-auto-vision-nvfp4-a16-moe-a4-route-fp32",
     }
+
+
+def test_worker_budget_accounts_for_all_preparing_ranks(backend, monkeypatch):
+    monkeypatch.setattr("ignition.preparation.host_memory.available_bytes", lambda: 24 << 30)
+    limits = []
+
+    def configure(session, count):
+        limits.append(count)
+        session.compile_workers = 8 if count is None else count
+
+    monkeypatch.setattr(PreparationSession, "configure_compile_workers", configure)
+    coordinator = SimpleNamespace(ranks=(0, 1, 2, 3), barrier=lambda: None)
+    session = make_session(device=0, checkpoint="revision", coordinator=coordinator)
+    session.declare((declaration("op"),))
+    report = session.tune()
+    assert limits == [None, 2]
+    assert report["compile_workers"] == 2
 
 
 

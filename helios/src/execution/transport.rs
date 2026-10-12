@@ -172,6 +172,7 @@ struct Resources {
     model: Stream,
     copy: Stream,
     frames: [Frame; 2],
+    engram: Option<crate::engram::Transfers>,
 }
 
 /// Thread-bound executor over one borrowed prepared model and its CUDA context.
@@ -218,12 +219,18 @@ impl GraphExecutor {
             })
         };
         let frames = [frame()?, frame()?];
+        let engram = manifest
+            .engram
+            .clone()
+            .map(|binding| crate::engram::Transfers::new(binding, &manifest))
+            .transpose()?;
         Ok(Self {
             manifest,
             resources: Some(Resources {
                 model,
                 copy,
                 frames,
+                engram,
             }),
             resolved_uploads: Vec::with_capacity(upload_capacity),
             next_sequence: 1,
@@ -268,6 +275,7 @@ impl GraphExecutor {
         let Some(resources) = &self.resources else {
             return false;
         };
+        let grammar_constrained = grammar_constrained || resources.engram.is_some();
         self.poison.is_none()
             && resources.frames.iter().any(|frame| frame.pending.is_none())
             && !resources
@@ -337,7 +345,9 @@ impl GraphExecutor {
             self.manifest.graphs.get(graph_index).ok_or_else(|| {
                 Error::execution(ExecutionError::State, "graph index out of range")
             })?;
-        let grammar_constrained = grammar_constrained || graph.kind == GraphKind::Speculative;
+        let grammar_constrained = grammar_constrained
+            || graph.kind == GraphKind::Speculative
+            || resources.engram.is_some();
         let resolved = validate_uploads(
             &self.manifest,
             graph_index,
@@ -377,6 +387,15 @@ impl GraphExecutor {
         });
         self.next_sequence += 1;
         let operation = || -> Result<()> {
+            if crate::engram::consumes(graph.kind) {
+                if let Some(engram) = &resources.engram {
+                    engram.enqueue(
+                        fence.0,
+                        graph.batch_capacity * graph.token_capacity,
+                        uploads,
+                    )?;
+                }
+            }
             for upload in resolved.copies() {
                 // SAFETY: Validation resolved aligned device/host subranges within the
                 // retained manifest allocations and this pinned frame. The frame is
@@ -449,6 +468,14 @@ impl GraphExecutor {
             Ok(true) => {}
         }
         let pending = frame.pending.take().unwrap();
+        if crate::engram::consumes(self.manifest.graphs[pending.graph_index].kind) {
+            if let Some(engram) = &resources.engram {
+                if let Err(error) = engram.finish(pending.fence.0) {
+                    self.poison = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        }
         self.completed = pending.fence;
         let records = match decode_records(
             frame.output.bytes(),
@@ -486,10 +513,22 @@ impl GraphExecutor {
             return shutdown.clone();
         }
         let resources = self.resources.take().unwrap();
+        if let Some(engram) = &resources.engram {
+            engram.cancel();
+        }
         let compute = resources.model.synchronize().map_err(Error::drain);
         let copy = resources.copy.synchronize().map_err(Error::drain);
-        let drained = compute.is_ok() && copy.is_ok();
-        let error = compute.err().or(copy.err()).or(self.poison.take());
+        let engram = resources
+            .engram
+            .as_ref()
+            .map_or(Ok(()), |e| e.drain())
+            .map_err(Error::drain);
+        let drained = compute.is_ok() && copy.is_ok() && engram.is_ok();
+        let error = compute
+            .err()
+            .or(copy.err())
+            .or(engram.err())
+            .or(self.poison.take());
         if drained {
             drop(resources);
         } else {

@@ -15,7 +15,9 @@ pub struct OutputConfig {
 pub trait ToolDialect {
     const NAME: &'static str;
     const TRIM_NEWLINES: bool;
-    fn parse(body: &str, tools: &[Value]) -> Result<(String, String)>;
+    const OPEN: &'static str;
+    const CLOSE: &'static str;
+    fn parse(body: &str, tools: &[Value]) -> Result<Vec<(String, String)>>;
 }
 
 pub struct ThinkReasoning<D: ToolDialect> {
@@ -90,24 +92,32 @@ impl<D: ToolDialect> ToolCallParser for TaggedTools<D> {
         if self.buffer.len() > 1024 * 1024 {
             return Err("tool call exceeds the 1 MiB parser bound".into());
         }
-        let Some(end) = self.buffer.find("</tool_call>") else {
+        let Some(end) = self.buffer.find(D::CLOSE) else {
             return Ok(Progress::default());
         };
-        let (name, arguments) = D::parse(&self.buffer[..end], &self.tools)?;
-        self.buffer.drain(..end + "</tool_call>".len());
+        let calls = D::parse(&self.buffer[..end], &self.tools)?;
+        self.buffer.drain(..end + D::CLOSE.len());
+        let events = calls
+            .into_iter()
+            .enumerate()
+            .flat_map(|(offset, (name, arguments))| {
+                let index = self.index + offset;
+                [
+                    Event::ToolBegin {
+                        index,
+                        name,
+                        id: None,
+                    },
+                    Event::ToolArguments {
+                        index,
+                        text: arguments,
+                    },
+                    Event::ToolEnd { index },
+                ]
+            })
+            .collect();
         Ok(Progress {
-            events: vec![
-                Event::ToolBegin {
-                    index: self.index,
-                    name,
-                    id: None,
-                },
-                Event::ToolArguments {
-                    index: self.index,
-                    text: arguments,
-                },
-                Event::ToolEnd { index: self.index },
-            ],
+            events,
             remainder: Some(std::mem::take(&mut self.buffer)),
         })
     }
@@ -205,6 +215,11 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                     } else {
                         self.tool.as_mut().unwrap().push(Input::Text(&text))?
                     };
+                    self.calls += progress
+                        .events
+                        .iter()
+                        .filter(|event| matches!(event, Event::ToolBegin { .. }))
+                        .count();
                     output.extend(progress.events);
                     let Some(remainder) = progress.remainder else {
                         return Ok(output);
@@ -214,14 +229,13 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                     if reasoning {
                         self.trim_newlines = if D::TRIM_NEWLINES { 2 } else { 0 };
                     } else {
-                        self.calls += 1;
                         self.tool = None;
                     }
                 }
                 Mode::Content => {
                     let mut marker = self.buffer.find("<think>").map(|at| (at, false));
                     if !self.tools.is_empty() {
-                        if let Some(at) = self.buffer.find("<tool_call>") {
+                        if let Some(at) = self.buffer.find(D::OPEN) {
                             if marker.is_none_or(|(first, _)| at < first) {
                                 marker = Some((at, true));
                             }
@@ -241,13 +255,8 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                         if !prefix.is_empty() {
                             output.push(Event::Content(prefix.to_owned()));
                         }
-                        self.buffer.drain(
-                            ..at + if tool {
-                                "<tool_call>".len()
-                            } else {
-                                "<think>".len()
-                            },
-                        );
+                        self.buffer
+                            .drain(..at + if tool { D::OPEN.len() } else { "<think>".len() });
                         self.mode = if tool { Mode::Tool } else { Mode::Reasoning };
                         if tool {
                             self.tool = Some(TaggedTools {
@@ -264,10 +273,12 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                             };
                         }
                     } else {
+                        let newline = format!("\n{}", D::OPEN);
+                        let double_newline = format!("\n\n{}", D::OPEN);
                         let markers: &[&str] = if self.tools.is_empty() {
                             &["<think>"]
                         } else {
-                            &["<think>", "<tool_call>", "\n\n<tool_call>", "\n<tool_call>"]
+                            &["<think>", D::OPEN, &double_newline, &newline]
                         };
                         let hold = partial_marker(&self.buffer, markers);
                         let text: String = self.buffer.drain(..self.buffer.len() - hold).collect();
@@ -308,7 +319,10 @@ fn partial_marker(text: &str, markers: &[&str]) -> usize {
     markers
         .iter()
         .flat_map(|marker| {
-            (1..marker.len())
+            marker
+                .char_indices()
+                .map(|(index, _)| index)
+                .filter(|index| *index > 0)
                 .rev()
                 .filter(|length| text.ends_with(&marker[..*length]))
                 .take(1)

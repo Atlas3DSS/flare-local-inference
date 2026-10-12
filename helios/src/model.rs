@@ -2,8 +2,10 @@
 
 pub mod admission;
 pub mod catalog;
+pub mod deepseek41;
 pub mod glm5next;
 pub(crate) mod inputs;
+pub(crate) mod paged_text;
 pub mod qwen4exp;
 #[cfg(feature = "images")]
 use crate::scheduler::RequestHandle;
@@ -155,6 +157,9 @@ impl ModelConfig {
 pub trait ModelContract: Send + Sync + Sized + 'static {
     type PromptData: Clone + Send;
     type Inputs: Default;
+    fn create_inputs(_: &ExecutionManifest) -> Result<Self::Inputs> {
+        Ok(Self::Inputs::default())
+    }
     fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()>;
     fn required_buffers(config: &ModelConfig) -> Vec<catalog::BufferSpec>;
     fn required_inputs(config: &ModelConfig, kind: GraphKind)

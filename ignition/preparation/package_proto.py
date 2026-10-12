@@ -53,4 +53,4 @@ def bundle(document):
     return proto.BundleIndex(architecture=document["architecture"], allocations=allocations,
         modules=modules, functions=functions, graphs=document["graphs"], reservations=document.get("reservations", ()),
         execution=document.get("execution"), context={**context, "limits": [
-            {"id": key, "value": value} for key, value in context["limits"]]})
+            {"id": key, "value": value} for key, value in context["limits"]]}, events=document.get("events", ()))

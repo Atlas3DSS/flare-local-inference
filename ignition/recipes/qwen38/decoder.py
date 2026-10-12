@@ -255,8 +255,7 @@ class PreparedDecoder:
         self.ple = PreparedPLE(module,
             {key: getattr(module, key).weight for key in ("key_proj", "value_proj")},
             scratch.residual, scratch.ple, state.pool.ple_convolution, state.ple, ple_table,
-            mode=state.mode, session=session, name=f"{name}.ple", workspace=workspaces,
-            runtime=runtime, coordinator=coordinator, reduced_embedding=scratch.hidden)
+            mode=state.mode, session=session, name=f"{name}.ple", workspace=workspaces)
         self.final_mixer = PreparedHyperconnection(language.hyper_connection_mixer,
             scratch.hyperconnection, priming_state=scratch.residual,
             session=session, name=f"{name}.final_mixer")
@@ -295,6 +294,7 @@ class PreparedDecoder:
         if self.embedding_injection is not None:
             self.embedding_injection.validate()
         self.state.begin()
+        self.ple.embedding_lookup.publish()
         self.embedding()
         if self.embedding_injection is not None:
             self.embedding_injection.inject()

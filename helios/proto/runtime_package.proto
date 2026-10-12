@@ -8,6 +8,43 @@ message ModelIndex {
   repeated PeerMemory peer_memory = 3;
   google.protobuf.Struct server = 4;
   repeated Asset assets = 5;
+  Engram engram = 6;
+}
+message Engram {
+  // Raw token ID to normalized vocabulary ID; normalization runs only during preparation.
+  repeated uint32 token_map = 1;
+  uint32 pad_token_id = 2;
+  uint32 compressed_vocabulary = 3;
+  repeated EngramTable tables = 4;
+}
+message EngramTable {
+  enum Encoding { UNSPECIFIED = 0; FP8_E4M3_E8M0 = 1; NVFP4_E4M3_GLOBAL = 2; }
+  uint32 layer = 1;
+  uint64 rows = 2;
+  uint32 embedding_width = 3;
+  uint32 scale_block = 4;
+  // Row-major planes. Span offsets are relative to the package payload base.
+  Span weights = 5;
+  Span scales = 6;
+  EngramHash hash = 7;
+  string weight_buffer = 8;
+  string scale_buffer = 9;
+  string hash_buffer = 10;
+  string ready_event = 11;
+  Encoding encoding = 12;
+  // Mapped host int64 row IDs followed by the release-published submission sequence.
+  string request_buffer = 13;
+  float global_scale = 14;
+}
+message EngramHash {
+  enum Method { UNSPECIFIED = 0; XOR_MODULO = 1; EOS_XOR_MODULO = 2; }
+  Method method = 1;
+  // One order, modulus, and row offset per lookup head, in output-column order.
+  repeated uint32 orders = 2;
+  // Multipliers by lag: current token first, then preceding tokens. Missing history uses pad_token_id.
+  repeated uint64 multipliers = 3;
+  repeated uint64 primes = 4;
+  repeated uint64 offsets = 5;
 }
 message Asset { string name = 1; Span payload = 2; string sha256 = 3; }
 message BundleIndex {
@@ -20,6 +57,7 @@ message BundleIndex {
   Execution execution = 7;
   Context context = 8;
   map<string, Span> resources = 9;
+  repeated string events = 10;
 }
 message GraphIndex {
   string name = 1;
@@ -91,8 +129,15 @@ message Memset {
 }
 message Copy { Reference source = 1; Reference destination = 2; uint64 nbytes = 3; }
 message Empty {}
+message EventWait { string event = 1; }
 message Node {
-  oneof operation { Kernel kernel = 1; Memset memset = 2; Copy copy = 3; Empty empty = 4; }
+  oneof operation {
+    Kernel kernel = 1;
+    Memset memset = 2;
+    Copy copy = 3;
+    Empty empty = 4;
+    EventWait event_wait = 5;
+  }
 }
 message Edge { uint64 source = 1; uint64 destination = 2; bytes data = 3; }
 

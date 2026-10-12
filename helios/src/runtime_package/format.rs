@@ -17,6 +17,7 @@ pub(super) struct Package {
     pub reservations: Vec<Reservation>,
     pub execution: Option<super::protobuf::wire::Execution>,
     pub context: Context,
+    pub events: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -158,6 +159,9 @@ pub(super) enum Node {
         nbytes: usize,
     },
     Empty,
+    EventWait {
+        event: String,
+    },
 }
 
 #[derive(Debug)]
@@ -231,6 +235,11 @@ impl Dependencies {
 
 impl Package {
     pub fn validate(&self) -> Result<()> {
+        if self.events.iter().any(String::is_empty)
+            || self.events.iter().collect::<HashSet<_>>().len() != self.events.len()
+        {
+            return Err(invalid("external event names must be nonempty and unique"));
+        }
         if self.allocations.is_empty() || self.graphs.is_empty() {
             return Err(invalid("unsupported or empty runtime package"));
         }
@@ -515,6 +524,11 @@ impl Package {
                 self.validate_reference(destination, *nbytes)?;
             }
             Node::Empty => {}
+            Node::EventWait { event } => {
+                if !self.events.contains(event) {
+                    return Err(invalid("graph waits on an undeclared external event"));
+                }
+            }
         }
         Ok(())
     }
@@ -527,6 +541,7 @@ mod tests {
     fn package() -> Package {
         Package {
             resources: HashMap::new(),
+            events: vec![],
             architecture: [12, 0],
             allocations: vec![Allocation {
                 name: "state".into(),

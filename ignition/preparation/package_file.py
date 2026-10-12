@@ -38,6 +38,7 @@ def read_index(path):
     spans = chain(
         (span for rank in result.ranks for span in rank.resources.values()),
         (asset.payload for asset in result.assets),
+        (span for table in result.engram.tables for span in (table.weights, table.scales)),
     )
     if length < 0 or any(span.offset + span.nbytes > length for span in spans):
         raise ValueError("resource exceeds model package")
@@ -92,10 +93,17 @@ def combine(path, ranks, peer_memory):
             span.offset += cursor
         if rank == 0:
             result.server.CopyFrom(index.server)
+            if index.HasField("engram"):
+                result.engram.CopyFrom(index.engram)
+                for table in result.engram.tables:
+                    table.weights.offset += cursor
+                    table.scales.offset += cursor
             for asset in index.assets:
                 copied = result.assets.add()
                 copied.CopyFrom(asset)
                 copied.payload.offset += cursor
+        elif index.HasField("engram"):
+            raise ValueError("offloaded Engram tables must be stored once on rank zero")
         size = Path(source).stat().st_size - start
         payload.append((cursor, source, start, size))
         cursor += size

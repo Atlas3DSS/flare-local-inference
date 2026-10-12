@@ -68,6 +68,11 @@ numeric by their execution contract. These spans are leaves in the traversal:
 their storage is retained when referenced, but their values are not interpreted
 as addresses.
 
+Numeric-span discovery skips zero-initialized allocations, which have no
+payload to scan, and deduplicates identical live tensor views. Strided layouts
+retain their holes; fragmented persistent views without bounded span metadata
+remain conservative rather than expanding an unbounded interval catalog.
+
 Preparation uses temporary PyTorch pools backed by the package allocator during
 loading and tuning. Retiring a pool releases whole free segments before KV sizing;
 live tensors retain their storage and addresses. Address candidates must fall
@@ -122,6 +127,52 @@ has an empty span list and no payload. Helios zeroes omitted regions and
 copies only the stored spans to their declared offsets. Runtime-sized row and
 KV allocations carry no tensor payload. The loader accepts the indexed file
 format; incompatible packages must be exported again with Ignition.
+
+Each preparation rank writes its resource file before the model file is
+assembled. After all ranks finish exporting and peer ownership is recorded,
+Ignition drains and closes the prepared models, joins peer processes, and
+releases registered host buffers. Final file assembly requires only rank files
+and their indexes. N-gram table payloads are appended directly from checkpoint
+file ranges during rank export, without materializing their contents in
+preparation memory.
+
+**Offloaded n-gram tables.** The model index declares token normalization or
+EOS-bounded history, per-head n-gram orders, XOR multipliers, modulus sizes,
+row offsets, quantization, and separate weight and scale payload spans.
+DeepSeek uses FP8/E8M0 rows; Qwen PLE uses group-16 NVFP4 rows with FP8 block
+scales and a global FP32 scale. Each table is stored once for all TP ranks.
+Indirect delivery is the sole n-gram execution mechanism. Graphs bind compact
+GPU row buffers and named external event waits at their lookup consumers.
+Table storage is selected when loading and does not change graph bindings.
+
+For DeepSeek ordinary decode, Helios hashes committed request tokens on the
+CPU, including the three preceding tokens across prefill chunks and reused
+prefixes. Qwen hashes tokens in its graph, including GPU-produced MTP proposals.
+The graph copies row IDs to a mapped host mailbox and publishes its submission
+sequence with a system-scope release operation. The reader observes that
+sequence with an acquire operation before accessing the IDs. Qwen publishes
+after input-state preparation, before layer 0; layer 1 consumes the rows.
+
+A shared reader gathers each step's rows once. `--ngram-storage disk` uses
+direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
+registered buffers per table. `--ngram-storage ram` holds tables in ordinary
+resident memory and gathers the same rows. Both modes write bounded pinned
+staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
+512 KiB request mailbox per rank. The two DeepSeek tables need 49.5 MiB of
+pinned row staging. Direct-I/O buffers add 8 MiB per table in disk mode.
+
+Before launching a graph, each rank queues a readiness-generation wait, row
+copies, and an event record on a copy stream per table. Reader threads publish
+the generation only after filling the host buffers. Each table requires two
+H2D copies per rank per step: one contiguous weight plane and one contiguous
+scale plane. In RAM mode the CPU gathers each row into those planes before
+either upload. The captured graph waits
+on the recorded event at the table consumer, allowing preceding layers to run
+while reads and copies are pending. Storage mode does not change the model
+graph catalog. All rank completions must finish before staging storage is
+reused. Read failures release pending waits with zeroed rows, poison the
+executor, and suppress completion delivery. Shutdown cancels pending mailbox
+waits and drains the streams before releasing storage.
 
 **Kernels.** The same subscriber copies the image of every module and library
 the driver loads, from the driver-API load calls and from the resource

@@ -1,28 +1,23 @@
-"""Exact-checkpoint PLE mapped-table and native CUDA graph qualification."""
+"""Exact-checkpoint PLE compact rows and native CUDA graph continuity."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
 
 from ignition.preparation import inspect_qwen38_checkpoint
-from ignition.preparation.checkpoint import TensorMetadata
 from ignition.preparation.qwen38 import PLE_PREFIX
-from ignition.preparation.tensor_metadata import NumericStorage
 from ignition.recipes.qwen38.ple import (
     PLE_LAYER_PREFIX,
     TABLE_BYTES,
-    MappedPLETable,
+    PLETable,
     PLEMetadata,
     PLEScratch,
     PreparedPLE,
-    _copy_plane,
     _validate_geometry,
     allocate_convolution_state,
     table_layout,
@@ -75,13 +70,13 @@ def _parameters(module, load):
         )
 
 
-def test_exact_ple_geometry_and_mapped_storage_extent(manifest):
+def test_exact_ple_geometry_and_table_extent(manifest):
     module = _module(manifest)
     _validate_geometry(module)
     _, layout = table_layout(manifest, "cuda:0")
     assert layout.weight_shape == (128 * 2500012, 80)
     assert layout.weight_scale_shape == (128 * 2500012, 10)
-    assert layout.caps.table_memory == "mapped_host"
+    assert layout.caps.table_memory == "io_uring"
     assert layout.caps.eos_token_id == 248044
     assert TABLE_BYTES == 28800138240
     assert layout.geometry.prime_sizes == tuple(module.ple_embedding.head_vocab_sizes)
@@ -102,72 +97,6 @@ def test_exact_ple_geometry_and_mapped_storage_extent(manifest):
     )
     with pytest.raises(ValueError, match="FP32"):
         _validate_geometry(module)
-
-
-@pytest.mark.parametrize(
-    "dtype,stored", [(torch.uint8, "U8"), (torch.float8_e4m3fn, "F8_E4M3")]
-)
-def test_table_plane_copies_exact_stored_bytes(tmp_path, dtype, stored):
-    shape = (65539, 10)
-    source = (
-        (torch.arange(shape[0] * shape[1]) % 127)
-        .to(torch.uint8)
-        .reshape(shape)
-        .view(dtype)
-    )
-    save_file({"plane": source}, tmp_path / "part.safetensors")
-    with (tmp_path / "part.safetensors").open("rb") as stream:
-        offset = 8 + int.from_bytes(stream.read(8), "little")
-    entry = TensorMetadata(
-        "plane", "part.safetensors", offset, source.numel(), shape, stored
-    )
-    manifest = SimpleNamespace(snapshot=tmp_path, tensors={"plane": entry})
-    destination = torch.empty_like(source)
-    with NumericStorage() as numeric:
-        _copy_plane(manifest, "plane", destination)
-    assert numeric.ranges() == [(destination.data_ptr(), destination.data_ptr() + destination.nbytes)]
-    assert torch.equal(source.view(torch.uint8), destination.view(torch.uint8))
-    part = torch.empty((193, shape[1]), dtype=dtype)
-    _copy_plane(manifest, "plane", part, rows=(129, 322))
-    assert torch.equal(source[129:322].view(torch.uint8), part.view(torch.uint8))
-    with pytest.raises(ValueError, match="checkpoint shape"):
-        _copy_plane(manifest, "plane", destination[:-1])
-    with (tmp_path / "part.safetensors").open("r+b") as stream:
-        stream.truncate(offset + source.numel() - 1)
-    with pytest.raises(OSError, match="truncated checkpoint payload"):
-        _copy_plane(manifest, "plane", destination)
-
-
-def test_ple_mapping_checks_available_host_memory_before_allocation(
-    manifest, monkeypatch
-):
-    monkeypatch.setattr("ignition.recipes.qwen38.ple._available_host_bytes", lambda: 0)
-    with pytest.raises(MemoryError, match="PLE mapping requires"):
-        MappedPLETable.load(manifest, "cuda:0")
-
-
-def test_ple_mapping_releases_storage_after_checkpoint_read_failure(
-    manifest, monkeypatch
-):
-    closed = []
-    storage = SimpleNamespace(
-        weight_load_view=torch.empty(1), close=lambda: closed.append(True)
-    )
-    monkeypatch.setattr(
-        "ignition.recipes.qwen38.ple._available_host_bytes", lambda: 2 * TABLE_BYTES
-    )
-    monkeypatch.setattr(
-        "ignition.recipes.qwen38.ple.ple_embedding.allocate_storage",
-        lambda layout: storage,
-    )
-
-    def fail_read(*args, **kwargs):
-        raise OSError("injected checkpoint read failure")
-
-    monkeypatch.setattr("ignition.recipes.qwen38.ple._copy_plane", fail_read)
-    with pytest.raises(OSError, match="checkpoint read failure"):
-        MappedPLETable.load(manifest, "cuda:0")
-    assert closed == [True]
 
 
 def test_ple_fixed_buffer_contracts():
@@ -233,7 +162,8 @@ def cuda_components(manifest):
             name: loader.load_tensor(f"{PLE_LAYER_PREFIX}.{name}.weight")
             for name in ("key_proj", "value_proj")
         }
-    table = MappedPLETable.load(manifest, "cuda:0")
+    table = PLETable.load(manifest, "cuda:0", tokens=32)
+    table.sequence = torch.zeros(1, dtype=torch.int64, device="cuda:0")
     # Native owners retain mappings if stream drain cannot be confirmed.
     yield module, projections, table
 
@@ -282,6 +212,26 @@ def _metadata(metadata, tokens, caches, *, fresh):
             )
 
 
+def _stage_checkpoint_rows(table, lookup):
+    lookup.publish()
+    ids = lookup.ids.cpu().flatten().tolist()
+    for destination, sources, row_bytes in ((table.weights, table.sources[0], 80),
+                                            (table.scales, table.sources[1], 10)):
+        packed = bytearray(len(ids) * row_bytes)
+        for output_row, row in enumerate(ids):
+            if row < 0:
+                continue
+            plane, local = divmod(row, 2500012)
+            source = sources[plane]
+            with source.path.open("rb", buffering=0) as file:
+                file.seek(source.offset + local * row_bytes)
+                data = file.read(row_bytes)
+            assert len(data) == row_bytes
+            packed[output_row * row_bytes:(output_row + 1) * row_bytes] = data
+        destination[:len(ids)].copy_(torch.frombuffer(packed, dtype=torch.uint8).view(len(ids), row_bytes))
+    table.ready.record()
+
+
 @CUDA
 @torch.no_grad()
 @pytest.mark.parametrize("initial_tokens", (1, 17))
@@ -326,6 +276,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
             for name, source in sources.items()
         }
         for name, adapter in adapters.items():
+            adapter.embedding_lookup.publish()
             adapter(sources[name])
         torch.cuda.synchronize()
         session.freeze()
@@ -333,6 +284,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
         graphs = {name: torch.cuda.CUDAGraph() for name in sources}
         for name, graph in graphs.items():
             with torch.cuda.graph(graph, pool=pool):
+                adapters[name].embedding_lookup.publish()
                 adapters[name](sources[name])
         bundle = PreparedGraphBundle(
             device=0,
@@ -392,6 +344,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
                         )[0]
                     )
                     start += length
+                _stage_checkpoint_rows(table, adapters[mode].embedding_lookup)
                 torch.cuda.synchronize()
                 allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
                 ticket = worker.submit(bundle.graph_indices[mode])
@@ -432,7 +385,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
             assert torch.count_nonzero(scratch["prefill"].output) == 0
             torch.testing.assert_close(convolution, previous, rtol=0, atol=0)
             record_property("relative_l2", json.dumps(errors, sort_keys=True))
-            record_property("mapped_host_bytes", table.storage.mapped_host_nbytes)
+            record_property("compact_bytes", table.weights.nbytes + table.scales.nbytes)
         finally:
             worker.close()
             for graph in graphs.values():

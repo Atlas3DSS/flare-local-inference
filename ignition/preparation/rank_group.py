@@ -69,6 +69,9 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             raise RuntimeError("invalid prepared rank handoff")
         connection.close()
         model.close()
+        if storage is not None:
+            for region in storage.host_regions:
+                region.close()
         dist.destroy_process_group()
     except BaseException:  # noqa: BLE001 - Never unwind CUDA resources around a stranded collective.
         traceback.print_exc()

@@ -156,6 +156,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
         }
     }
     ExecutionManifest {
+        engram: None,
         abi_version: if config.speculative_widths.is_empty() {
             ABI_VERSION
         } else {

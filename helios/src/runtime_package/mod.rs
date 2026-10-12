@@ -2,6 +2,9 @@
 
 mod archive;
 pub mod driver;
+mod engram;
+#[cfg(test)]
+mod event_tests;
 mod format;
 mod memory;
 mod model;
@@ -51,6 +54,7 @@ pub struct NativeResources {
     names: Vec<String>,
     reservations: Vec<(u64, usize)>,
     execution: Option<protobuf::wire::Execution>,
+    events: HashMap<String, Handle>,
 }
 
 // SAFETY: CUDA contexts may move between threads. Resource operations bind the
@@ -67,7 +71,7 @@ impl NativeResources {
     pub unsafe fn load(path: impl AsRef<Path>, ordinal: i32) -> Result<Self> {
         let path = path.as_ref();
         let (archive, mut index) = Archive::open(path)?;
-        if index.ranks.len() != 1 || !index.peer_memory.is_empty() {
+        if index.ranks.len() != 1 || !index.peer_memory.is_empty() || index.engram.is_some() {
             return Err(invalid("resource loader requires one independent rank"));
         }
         let package = protobuf::decode(index.ranks.remove(0))?;
@@ -126,6 +130,7 @@ impl NativeResources {
                 names: vec![],
                 reservations: vec![],
                 execution: package.execution.clone(),
+                events: HashMap::new(),
             };
             for [limit, value] in &package.context.limits {
                 owner.driver.check(
@@ -494,6 +499,11 @@ impl NativeResources {
         let driver = self.driver.clone();
         unsafe {
             driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
+            for name in &package.events {
+                let mut event = null_mut();
+                driver.check("cuEventCreate", (driver.event_create)(&mut event, 2))?;
+                self.events.insert(name.clone(), event);
+            }
             for graph in &package.graphs {
                 let mut handle = null_mut();
                 driver.check("cuGraphCreate", (driver.graph_create)(&mut handle, 0))?;
@@ -591,6 +601,18 @@ impl NativeResources {
                             driver.check(
                                 "cuGraphAddEmptyNode",
                                 (driver.graph_empty)(&mut result, handle, null(), 0),
+                            )?;
+                        }
+                        Node::EventWait { event } => {
+                            driver.check(
+                                "cuGraphAddEventWaitNode",
+                                (driver.graph_event_wait)(
+                                    &mut result,
+                                    handle,
+                                    null(),
+                                    0,
+                                    self.events[event],
+                                ),
                             )?;
                         }
                         Node::Copy {
@@ -762,6 +784,9 @@ impl Drop for NativeResources {
             }
             for graph in self.templates.iter().rev() {
                 (self.driver.graph_destroy)(*graph);
+            }
+            for event in self.events.values() {
+                (self.driver.event_destroy)(*event);
             }
             for module in self.modules.iter().rev() {
                 (self.driver.module_unload)(*module);

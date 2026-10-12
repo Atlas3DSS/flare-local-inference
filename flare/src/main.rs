@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
         return Err(
-            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification]"
+            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification] [--ngram-storage disk|ram]"
                 .into(),
         );
     };
@@ -50,6 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
+            "--ngram-storage" => {
+                options.ngram_storage = match value.as_str() {
+                    "disk" => flare_helios::engram::Storage::Disk,
+                    "ram" => flare_helios::engram::Storage::Ram,
+                    _ => return Err("--ngram-storage must be disk or ram".into()),
+                }
+            }
             "--max-concurrency" => options.max_concurrency = Some(value.parse()?),
             "--mtp-draft-tokens" => options.mtp_draft_tokens = Some(value.parse()?),
             "--bind" => bind = value,
@@ -94,6 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
             serve::<Glm5Next>(owner, config, progress)
+        }
+        Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
+            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress)
         }
         _ => Err("unsupported model contract".into()),
     }

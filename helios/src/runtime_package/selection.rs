@@ -9,6 +9,7 @@ use crate::{Result, execution::BATCH_CAPACITIES};
 
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
+    pub ngram_storage: crate::engram::Storage,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
     pub adaptive_verification: Option<bool>,
@@ -354,6 +355,7 @@ mod tests {
             .collect();
         Package {
             resources: std::collections::HashMap::new(),
+            events: vec![],
             architecture: [12, 0],
             graphs,
             functions,

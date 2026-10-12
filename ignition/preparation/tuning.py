@@ -14,6 +14,7 @@ from b12x.preparation import MemoryRequirements, PreparationDisplay, Preparation
 from b12x.preparation.session import _declaration_key
 
 from .scratch import ScratchArena
+from .host_memory import worker_limit
 
 
 class RecordedPreparationSession(PreparationSession):
@@ -176,6 +177,11 @@ class RecordedPreparationSession(PreparationSession):
             requests = tuple(self._recorded_requests.values())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
+            pools = 1 if self._coordinator is None else len(self._coordinator.ranks)
+            if self.compile_workers:
+                bounded = worker_limit(self.compile_workers, pools=pools)
+                if bounded < self.compile_workers:
+                    self.configure_compile_workers(bounded)
             with ExitStack() as display_stack:
                 update = progress
                 if show_progress:

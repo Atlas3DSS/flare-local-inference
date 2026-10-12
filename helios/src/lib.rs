@@ -1,5 +1,6 @@
 pub mod cache;
 mod cuda;
+pub mod engram;
 pub mod error;
 pub mod execution;
 #[cfg(feature = "grammar")]

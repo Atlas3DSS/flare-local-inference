@@ -33,7 +33,7 @@ from .attention import QSAState, RotaryTables
 from .decoder import DecoderScratch, ModelWeights, PreparedDecoder
 from .decoder_state import DecoderInputs, PreparedDecoderState, PreparedResume
 from .maintenance import PreparedMaintenance
-from .ple import MappedPLETable
+from .ple import PLETable
 from .sampling import DeviceRequestState
 from .state import (
     HybridStateLayout,
@@ -207,7 +207,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             embedding_weight=weights.tree.model.language_model.embed_tokens.weight,
             lm_head_weight=weights.tree.lm_head.weight, progress=progress, shard=shard)
     host_storage = {} if package_storage is None else {"host_allocator": package_storage.host_allocate}
-    table = MappedPLETable.load(manifest, device, progress=progress, shard=shard, **host_storage)
+    table = PLETable.load(manifest, device, tokens=config.token_capacity, progress=progress, **host_storage)
     sample_rows = max(batch * width for batch, width in config.speculative_shapes) if config.mtp else config.request_capacity
     coordinator = CollectivePreparation(group) if group is not None else None
     ipc = None if package_storage is None else package_storage.peer_storage
@@ -245,11 +245,12 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             transfer = StateTransferMetadata.allocate(slots, device)
             frame = torch.zeros(1, dtype=torch.int32, device=device)
             sequence = torch.zeros(1, dtype=torch.int64, device=device)
+            table.sequence = sequence
             completion = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
             features = VisionFeatureState.allocate(device, capacity=slots)
             vision_inputs = VisionInputs.allocate(device)
             vision_scratch = VisionScratch.allocate(16384, device)
-            buffers = {**inputs.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
+            buffers = {**inputs.buffers(), **table.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
                 **{f"state_{name}": getattr(transfer, name) for name in transfer.__dataclass_fields__},
                 **{name: getattr(vision_inputs, name) for name in vision_inputs.__dataclass_fields__},
                 "frame_index": frame, "submission_sequence": sequence, "completion_records": completion,
@@ -414,7 +415,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         capture_catalog(compile_decoder=compile_decoder, materialize=materialize_cache)
         session.freeze()
         free, total = torch.cuda.mem_get_info(device)
-        memory = {"weights_bytes": weights.allocated_bytes, "mapped_ple_bytes": table.storage.mapped_host_nbytes,
+        memory = {"weights_bytes": weights.allocated_bytes, "ngram_request_bytes": table.mailbox.host_view.nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "state_rows": state_rows,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
             "cached_token_capacity": page_capacity * 64, "headroom_bytes": config.headroom_bytes, "page_tokens": 64,
@@ -459,7 +460,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         export_zero_ranges = disposable_ranges(cache=final_cache, scratch=scratch, workspaces=workspaces,
             vision_scratch=vision_scratch, decoders=decoders, owners=owners, speculation=speculation)
         return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
-            export_zero_ranges=export_zero_ranges,
+            export_zero_ranges=(*export_zero_ranges, *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
+            export_events=table.events(), package_data=table,
             resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
     except BaseException:
         torch.cuda.synchronize(device)

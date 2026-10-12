@@ -121,9 +121,9 @@ def test_actual_checkpoint_accounting(manifest):
     assert report["shard_count"] == 21
     assert report["payload_bytes"] == 102329644144
     assert report["gpu_stored_bytes"] == 71932785260
-    assert report["mapped_host_stored_bytes"] == 28800138244
+    assert report["ngram_stored_bytes"] == 28800138244
     assert report["excluded_stored_bytes"] == 1596720640
-    assert sum(report[key] for key in ("gpu_stored_bytes", "mapped_host_stored_bytes", "excluded_stored_bytes")) == report["payload_bytes"]
+    assert sum(report[key] for key in ("gpu_stored_bytes", "ngram_stored_bytes", "excluded_stored_bytes")) == report["payload_bytes"]
     assert report["quantization"]["excluded_mtp_aliases"] == ["mtp.layers.48.mlp.experts"]
     assert report["validation"]["tensor_payloads_verified"] is False
     assert {name: asset["sha256"] for name, asset in report["frontend_assets"].items()} == qwen38.FRONTEND_SHA256

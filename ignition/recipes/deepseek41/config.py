@@ -1,0 +1,92 @@
+"""Checkpoint geometry and source ownership for DeepSeek V4.1 Flash."""
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class CacheSource:
+    layer: int
+    ratio: int
+
+    def records(self, tokens):
+        if tokens % self.ratio:
+            raise ValueError("cache page tokens must be divisible by the compression ratio")
+        return tokens // self.ratio
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    text: dict
+    quantization: dict
+
+    @classmethod
+    def load(cls, snapshot):
+        return cls.from_dict(json.loads((Path(snapshot) / "config.json").read_text()))
+
+    @classmethod
+    def from_dict(cls, config):
+        if (config.get("model_type") != "deepseek_v41"
+                or config.get("architectures") != ["DeepseekV41ForCausalLM"]):
+            raise ValueError("DeepSeek V4.1 requires DeepseekV41ForCausalLM")
+        text, quant = config["text_config"], config["quantization_config"]
+        for name, value in {
+            "hidden_size": 5120, "num_hidden_layers": 40, "num_attention_heads": 64,
+            "num_key_value_heads": 1, "head_dim": 512, "qk_rope_head_dim": 64,
+            "q_lora_rank": 1280, "o_lora_rank": 1024, "o_groups": 8,
+            "vocab_size": 129280, "moe_intermediate_size": 2304, "n_routed_experts": 384,
+            "n_shared_experts": 1, "num_experts_per_tok": 6, "scoring_func": "sqrtsoftplus",
+            "index_n_heads": 32, "index_head_dim": 128, "index_topk": 512,
+            "candidate_topk_blocks": 2048, "candidate_block_size": 8, "hc_mult": 4,
+            "sliding_window": 128, "engram_max_ngram_size": 4, "engram_n_heads": 8,
+            "engram_head_dim": 256,
+        }.items():
+            if text.get(name) != value:
+                raise ValueError(f"DeepSeek V4.1 Flash {name} requires {value}, got {text.get(name)}")
+        if (quant.get("quant_method") != "fp8" or quant.get("weight_block_size") != [32, 32]
+                or quant.get("scale_fmt") != "ue8m0" or quant.get("expert_dtype") != "fp4"
+                or quant.get("activation_scheme") != "dynamic"):
+            raise ValueError("DeepSeek V4.1 requires block-32 FP8 weights and native MXFP4 experts")
+        result = cls(text, quant)
+        ratios = text["compress_ratios"]
+        if len(ratios) < result.layers or any(r not in (0, 1, 2) for r in ratios):
+            raise ValueError("unsupported DeepSeek compression schedule")
+        for name in ("kv_source_layer_ids", "index_source_layer_ids"):
+            ids = text[name]
+            if not ids or ids != sorted(set(ids)) or any(not 0 <= i < result.layers for i in ids):
+                raise ValueError(f"{name} must be ordered unique backbone layers")
+        if not set(text["kv_source_layer_ids"]) <= set(text["index_source_layer_ids"]):
+            raise ValueError("KV source layers must produce index keys")
+        for layer in range(result.layers):
+            source = result.source(layer)
+            if ratios[layer] and (source is None or source.ratio != ratios[layer]):
+                raise ValueError("shared KV consumers must match their source's compression ratio")
+            if layer in text["kv_source_layer_ids"] and not ratios[layer]:
+                raise ValueError("KV sources require compressed attention")
+        candidate = text["candidate_source_layer_id"]
+        if candidate not in text["index_source_layer_ids"]:
+            raise ValueError("candidate selection must belong to an index source")
+        if any(result.source(i) != result.source(candidate)
+               for i in text["index_source_layer_ids"] if i > candidate):
+            raise ValueError("candidate consumers must use the candidate source's KV history")
+        return result
+
+    @property
+    def layers(self):
+        return self.text["num_hidden_layers"]
+
+    @property
+    def sources(self):
+        return tuple(CacheSource(i, self.text["compress_ratios"][i])
+                     for i in self.text["kv_source_layer_ids"])
+
+    def source(self, layer):
+        if not self.text["compress_ratios"][layer]:
+            return None
+        return next((source for source in reversed(self.sources) if source.layer <= layer), None)
+
+    def index_source(self, layer):
+        if self.source(layer) is None:
+            return None
+        return next((i for i in reversed(self.text["index_source_layer_ids"]) if i <= layer), None)

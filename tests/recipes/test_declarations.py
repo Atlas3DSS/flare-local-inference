@@ -83,7 +83,7 @@ def test_qwen_stored_bytes_match_the_cached_checkpoint():
         sizes[tensor.component] += tensor.nbytes
     checkpoint = QWEN.checkpoint
     assert checkpoint.stored_bytes == sum(sizes.values())
-    assert checkpoint.mapped_host_bytes == sizes["ple_tables"]
+    assert checkpoint.mapped_host_bytes == 0
     assert checkpoint.device_bytes == sum(sizes.values()) - sizes["ple_tables"]
     assert checkpoint.draft_bytes == sizes["mtp"]
 

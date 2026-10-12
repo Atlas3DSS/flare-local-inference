@@ -92,11 +92,14 @@ def prepare(root):
             region = storage.host_allocate("table", (128,), torch.float32)
             region.host_view.fill_(3)
             module, function = global_kernel(root, storage, source)
+            ready = torch.cuda.Event(external=True)
+            ready.record()
             buffers = {"frame_index": torch.zeros(1, device="cuda", dtype=torch.int32),
                        "submission_sequence": torch.zeros(1, device="cuda", dtype=torch.int64),
                        "completion_records": torch.zeros((2, 1, 8), device="cuda", dtype=torch.int64),
                        "source": source, "output": output}
             def run():
+                ready.wait()
                 scratch = transient[:source.nbytes].view(source.dtype)
                 torch.add(source, region.device_view, out=scratch)
                 intermediate = scratch.clone()
@@ -123,8 +126,10 @@ def prepare(root):
             prepared = PreparedExecution(device=0, graphs={"decode": graph}, buffers=buffers,
                 signatures={"decode": GraphSignature("decode", 1, 1, ("source",))}, max_active=1,
                 resources=(storage, region, transient, floating_alias),
+                export_events={"input_ready": ready.cuda_event},
                 export_zero_ranges=((transient.data_ptr(), transient.nbytes),))
             prepared.server_config = {"assets": {}}
+            prepared.package_data = None
             del freed
             assert retained.sum().item() == 1024
             assert any(start <= freed_address < end for start, end in storage.inactive_ranges())

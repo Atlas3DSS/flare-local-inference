@@ -364,6 +364,13 @@ fn rank_loop(
 }
 
 fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
+    match (&a.engram, &b.engram) {
+        (Some(a), Some(b)) if !Arc::ptr_eq(&a.shared, &b.shared) || a.rank == b.rank => {
+            return false;
+        }
+        (Some(_), None) | (None, Some(_)) => return false,
+        _ => {}
+    }
     a.abi_version == b.abi_version
         && a.max_active == b.max_active
         && a.input_frame_bytes == b.input_frame_bytes

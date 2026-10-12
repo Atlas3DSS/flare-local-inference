@@ -41,6 +41,7 @@ base64 = { version = "0.22.1", optional = true }
 llguidance = { version = "=1.9.1", default-features = false, features = ["lark", "referencing", "ahash", "jsonschema_validation"], optional = true }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
 crossterm = { version = "0.28", default-features = false, optional = true }
+io-uring = "0.7"
 
 [build-dependencies]
 prost-build = { version = "0.14", optional = true }

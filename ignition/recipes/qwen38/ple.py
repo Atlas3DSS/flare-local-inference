@@ -1,11 +1,10 @@
-"""Mapped-host PLE table and prepared n-gram residual contribution."""
+"""Compact PLE row delivery and prepared n-gram residual contribution."""
 
 from __future__ import annotations
 
 import json
 import math
 from dataclasses import dataclass, fields
-from pathlib import Path
 
 import torch
 from b12x.preparation import PreparationSession, PreparedCall
@@ -58,12 +57,12 @@ def _caps(config: dict, device, tokens: int, sequences: int, *, rank=0, world_si
         tp_rank=rank,
         table_alignment=config["make_ngram_vocab_size_divisible_by"],
         quant_mode="nvfp4_group16",
-        table_memory="mapped_host",
+        table_memory="io_uring",
     )
 
 
 def table_layout(manifest: CheckpointManifest, device, *, rank=0, world_size=1):
-    """Validate exact checkpoint geometry without allocating its mapped table."""
+    """Validate exact checkpoint geometry without allocating its table."""
     config = json.loads((manifest.snapshot / "config.json").read_text())["text_config"]
     caps = _caps(config, torch.device(device), 1, 1, rank=rank, world_size=world_size)
     geometry = ple_embedding.compute_geometry(
@@ -83,105 +82,94 @@ def table_layout(manifest: CheckpointManifest, device, *, rank=0, world_size=1):
     return config, layout
 
 
-def _copy_plane(
-    manifest: CheckpointManifest, name: str, destination: torch.Tensor, *, rows=None
-) -> None:
-    from ignition.preparation.tensor_metadata import record_numeric_tensor
-
-    metadata = manifest.tensors[name]
-    first, last = (0, metadata.shape[0]) if rows is None else rows
-    expected = (last - first, *metadata.shape[1:])
-    if not 0 <= first < last <= metadata.shape[0] or destination.device.type != "cpu" or tuple(destination.shape) != expected:
-        raise ValueError(
-            f"{name} requires a CPU loading view with its checkpoint shape"
-        )
-    expected_dtype = {"U8": torch.uint8, "F8_E4M3": torch.float8_e4m3fn}[metadata.dtype]
-    if destination.dtype != expected_dtype:
-        raise ValueError(f"{name} loading view has the wrong dtype")
-    if not destination.is_contiguous() or destination.nbytes != (last - first) * metadata.nbytes // metadata.shape[0]:
-        raise ValueError(f"{name} loading view must cover the contiguous checkpoint bytes")
-    target = memoryview(destination.view(torch.uint8).numpy()).cast("B")
-    with (manifest.snapshot / metadata.shard).open("rb", buffering=0) as source:
-        source.seek(metadata.offset + first * metadata.nbytes // metadata.shape[0])
-        offset = 0
-        while offset < target.nbytes:
-            count = source.readinto(target[offset:])
-            if not count:
-                raise OSError(f"{name}: truncated checkpoint payload")
-            offset += count
-    record_numeric_tensor(destination)
-
-
-def _available_host_bytes() -> int:
-    for line in Path("/proc/meminfo").read_text().splitlines():
-        if line.startswith("MemAvailable:"):
-            return int(line.split()[1]) * 1024
-    raise RuntimeError("Linux MemAvailable is required before mapping the PLE table")
-
-
 @dataclass
-class MappedPLETable:
-    """Own all packed PLE rows and scales until the native replay worker joins.
-
-    Row payloads occupy 28,800,138,240 bytes of mapped host memory. The scalar
-    global scale and hash constants reside on the GPU. ``close`` is only valid
-    after every referencing graph has been drained and released.
-    """
-
+class PLETable:
     config: dict
     layout: ple_embedding.TableLayout
     geometry: ple_embedding.GeometryTensors
-    storage: ple_embedding.TableStorage
+    scale: torch.Tensor
+    weights: torch.Tensor
+    scales: torch.Tensor
+    hashes: torch.Tensor
+    mailbox: object
+    ready: object
+    sources: tuple
+    sequence: torch.Tensor | None = None
 
     @classmethod
-    def load(cls, manifest: CheckpointManifest, device, *, progress=None, shard=None, host_allocator=None) -> MappedPLETable:
-        from ignition.components.parallel import TensorParallelShard
+    def load(cls, manifest, device, *, tokens, progress=None, host_allocator=None):
+        from b12x.sequence._shared.disk_table import MappedHostAllocation
+        from ignition.preparation.runtime_package import FileSource
 
-        shard = TensorParallelShard(0, 1) if shard is None else shard
-        config, layout = table_layout(manifest, device, rank=shard.rank, world_size=shard.world_size)
-        required = TABLE_BYTES // shard.world_size + (1 << 30)
-        available = _available_host_bytes()
-        if available < required:
-            raise MemoryError(
-                f"PLE mapping requires {required} available host bytes; found {available}"
-            )
+        device = torch.device(device)
+        config, layout = table_layout(manifest, device)
         scale = _read_small(manifest, f"{PLE_PREFIX}.ngram_embedding.weight_scale_2")
-        if (
-            scale.dtype != torch.float32
-            or scale.shape != (1,)
-            or not bool(torch.isfinite(scale).all() & (scale > 0).all())
-        ):
+        if scale.dtype != torch.float32 or scale.shape != (1,) or not bool(torch.isfinite(scale).all() & (scale > 0).all()):
             raise ValueError("PLE global scale must be a finite positive FP32 scalar")
-        planes = range(layout.shard_start // ROWS_PER_PLANE, (layout.shard_end + ROWS_PER_PLANE - 1) // ROWS_PER_PLANE)
-        with phase(progress, "Load PLE table", total=len(planes)) as stage:
-            storage = ple_embedding.allocate_storage(layout, host_allocator=host_allocator)
+        sources = []
+        with phase(progress, "Prepare PLE table") as stage:
+            for suffix, columns, dtype in (("weight", 80, "U8"), ("weight_scale", 10, "F8_E4M3")):
+                plane = []
+                for shard in range(TABLE_ROWS // ROWS_PER_PLANE):
+                    name = f"{PLE_PREFIX}.ngram_embedding.shard_{shard}.{suffix}"
+                    metadata = manifest.tensors[name]
+                    if metadata.shape != (ROWS_PER_PLANE, columns) or metadata.dtype != dtype:
+                        raise ValueError(f"{name}: invalid PLE table geometry or dtype")
+                    plane.append(FileSource(manifest.snapshot / metadata.shard, metadata.offset, metadata.nbytes))
+                sources.append(tuple(plane))
+            heads = layout.caps.head_count
+            shape = (tokens * heads + 1,)
+            mailbox = (MappedHostAllocation(shape, torch.int64, device) if host_allocator is None
+                       else host_allocator("ple_requests", shape, torch.int64))
             try:
-                for plane in planes:
-                    base = plane * ROWS_PER_PLANE
-                    first, last = max(base, layout.shard_start), min(base + ROWS_PER_PLANE, layout.shard_end)
-                    start, stop = first - layout.shard_start, last - layout.shard_start
-                    selected = (first - base, last - base)
-                    prefix = f"{PLE_PREFIX}.ngram_embedding.shard_{plane}"
-                    _copy_plane(
-                        manifest, f"{prefix}.weight", storage.weight_load_view[start:stop], rows=selected
-                    )
-                    _copy_plane(
-                        manifest,
-                        f"{prefix}.weight_scale",
-                        storage.weight_scale_load_view[start:stop], rows=selected,
-                    )
-                    stage.update(advance=1)
-                storage.weight_scale_2_load_view.copy_(scale)
-                geometry = ple_embedding.allocate_geometry(
-                    layout.geometry, device=layout.caps.device
-                )
-                return cls(config, layout, geometry, storage)
+                mailbox.host_view.zero_()
+                ready = torch.cuda.Event(external=True)
+                ready.record(torch.cuda.current_stream(device))
+                table = cls(config, layout, ple_embedding.allocate_geometry(layout.geometry, device=device),
+                    scale.to(device), torch.zeros((tokens * heads, 80), dtype=torch.uint8, device=device),
+                    torch.zeros((tokens * heads, 10), dtype=torch.uint8, device=device),
+                    torch.full((tokens, heads), -1, dtype=torch.int64, device=device), mailbox, ready, tuple(sources))
             except BaseException:
-                storage.close()
+                mailbox.close()
                 raise
+            stage.update(f"{TABLE_BYTES / (1 << 30):.1f} GiB table")
+        return table
 
-    def close(self) -> None:
-        self.storage.close()
+    def buffers(self):
+        return dict(ple_weights=self.weights, ple_scales=self.scales, ple_hashes=self.hashes,
+                    ple_requests=self.mailbox.device_view)
+
+    def events(self):
+        return {"ple_ready": self.ready.cuda_event}
+
+    def append(self, index, payload, cursor):
+        from ignition.preparation.package_file import align
+        from ignition.preparation import runtime_package_pb2 as proto
+
+        target = index.engram
+        target.pad_token_id = self.layout.caps.eos_token_id
+        target.compressed_vocabulary = self.config["vocab_size"]
+        table = target.tables.add(layer=1, rows=TABLE_ROWS, embedding_width=160, scale_block=16,
+            encoding=proto.EngramTable.NVFP4_E4M3_GLOBAL, weight_buffer="ple_weights",
+            scale_buffer="ple_scales", hash_buffer="ple_hashes", ready_event="ple_ready",
+            request_buffer="ple_requests", global_scale=float(self.scale.item()))
+        table.hash.method = proto.EngramHash.EOS_XOR_MODULO
+        table.hash.orders.extend(order for order in range(2, self.config["ngram_size"] + 1)
+                                 for _ in range(self.config["heads_per_ngram"]))
+        for name in ("multipliers", "prime_sizes", "table_offsets"):
+            target_name = {"prime_sizes": "primes", "table_offsets": "offsets"}.get(name, name)
+            getattr(table.hash, target_name).extend(getattr(self.geometry, name).flatten().cpu().tolist())
+        for name, sources in zip(("weights", "scales"), self.sources, strict=True):
+            cursor = align(cursor)
+            span = getattr(table, name)
+            span.offset, span.nbytes = cursor, sum(source.nbytes for source in sources)
+            for source in sources:
+                payload.append((cursor, source.path, source.offset, source.nbytes))
+                cursor += source.nbytes
+        return cursor
+
+    def close(self):
+        self.mailbox.close()
 
 
 @dataclass(frozen=True)
@@ -299,13 +287,12 @@ class PreparedPLE:
         scratch: PLEScratch,
         convolution_state,
         metadata: PLEMetadata,
-        table: MappedPLETable,
+        table: PLETable,
         *,
         mode: str,
         session: PreparationSession,
         name: str,
         workspace=None,
-        runtime=None, coordinator=None, reduced_embedding=None,
     ):
         _validate_geometry(module)
         if mode not in ("decode", "prefill"):
@@ -363,43 +350,11 @@ class PreparedPLE:
         sequences = metadata.query_start_loc.numel() - 1
         caps = _caps(table.config, self.device, self.tokens, sequences,
                      rank=table.layout.caps.tp_rank, world_size=table.layout.caps.tp_size)
-        args = {
-            "weight": table.storage.weight,
-            "weight_scale": table.storage.weight_scale,
-            "weight_scale_2": table.storage.weight_scale_2,
-            "token_ids": metadata.token_ids,
-            "query_start_loc": metadata.query_start_loc,
-            "committed_history": metadata.committed_history,
-            "num_seqs": metadata.num_seqs,
-            "num_tokens": metadata.num_tokens,
-            "out": scratch.embedding,
-        }
-        geometry = table.geometry
-        self.embedding_plan = ple_embedding.plan(
-            caps,
-            geometry=geometry.geometry,
-            prime_sizes=geometry.prime_sizes,
-            table_offsets=geometry.table_offsets,
-            multipliers=geometry.multipliers,
-            invocation=ple_embedding.invocation_from_tensors(
-                **args,
-                prime_sizes=geometry.prime_sizes,
-                table_offsets=geometry.table_offsets,
-                multipliers=geometry.multipliers,
-            ),
-        )
-        self.embedding_binding = self._prepare_binding(
-            self.embedding_plan, args, session, f"{name}.embedding", ple_embedding.bind,
-            attribute="embedding_binding", workspace=workspace,
-        )
-        self.embedding_reduce = None
-        self.embedding_output = scratch.embedding
-        if runtime is not None:
-            from ignition.components.collectives import PreparedAllReduce
+        from ignition.components.ngram_delivery import PreparedPLELookup
 
-            self.embedding_reduce = PreparedAllReduce(scratch.embedding, reduced_embedding,
-                runtime=runtime, session=session, coordinator=coordinator, name=f"{name}.embedding_reduce")
-            self.embedding_output = reduced_embedding
+        self.embedding_lookup = PreparedPLELookup(table, metadata, scratch.embedding, caps,
+            session=session, name=f"{name}.embedding")
+        self.embedding_output = scratch.embedding
         self.key_projection = UnquantizedProjection(
             self.embedding_output,
             projections["key_proj"],
@@ -485,9 +440,7 @@ class PreparedPLE:
         ):
             raise ValueError("prepared PLE requires its fixed source storage")
         scratch, metadata = self.scratch, self.metadata
-        ple_embedding.run(self.embedding_binding)
-        if self.embedding_reduce is not None:
-            self.embedding_reduce(scratch.embedding)
+        self.embedding_lookup(source)
         self.key_projection(self.embedding_output)
         self.value_projection(self.embedding_output)
         key = self.module.norm_key(scratch.key).view(self.tokens, 4, 2560)
@@ -515,7 +468,7 @@ class PreparedPLE:
 
 
 __all__ = [
-    "MappedPLETable",
+    "PLETable",
     "PLEMetadata",
     "PLEScratch",
     "PreparedPLE",

@@ -186,6 +186,17 @@ limited to 16 MiB. It includes:
 - Modules, globals, function symbols, parameter sizes, and function attributes.
 - Graph declarations, function dependencies, and graph-body resource spans.
 - Serving configuration and frontend asset resource spans.
+- Offloaded Engram geometry, encoding, table spans, compact input names, and
+  named external event waits.
+
+Native manifests for models with Engram tables carry a shared host reader and
+rank-local event bindings. Table rows use separate preallocated GPU inputs;
+ordinary graph uploads contain the CPU-computed hash IDs. One step may be in
+flight while the reader owns the shared pinned row buffers. Each rank queues
+its readiness wait, H2D copies, and event record before launching the graph.
+Consumer event waits preserve the dependency between those transfers and the
+captured lookup. Reuse requires completion on every rank. Shutdown drains row
+copy streams in addition to model and completion streams.
 
 Graph declarations specify kind, sampling mode, batch capacity, token capacity,
 draft source, draft count, and verification count. Verification count includes
@@ -212,14 +223,16 @@ protoc --proto_path=helios/proto --python_out=ignition/preparation helios/proto/
 Allocation references name an allocation and byte offset. Explicit relocations
 support 64-bit pointers and 128-byte CUDA tensor maps. Model export preserves
 recorded addresses for opaque bindings. Device allocations use CUDA VMM;
-mapped host tables use registered host storage. Address collisions fail loading.
+request mailboxes use registered host storage. N-gram consumers read compact
+GPU buffers populated by the shared table reader and per-rank copy streams.
+Address collisions fail loading.
 Runtime-sized allocations map physical prefixes after fixed resources and
 selected graph executables have loaded. The configured headroom, selected
 concurrency and verification width, and remaining memory determine row and
 page counts. Serving performs no allocation or remapping.
 
-Supported graph nodes are kernels, empty nodes, memset operations, and
-contiguous device-to-device copies. Other node types and device-updatable
+Supported graph nodes are kernels, empty nodes, memset operations, named
+external event waits, and contiguous device-to-device copies. Other node types and device-updatable
 kernels reject export. Qwen and GLM use the shared native loader and scheduler.
 Packages are trusted executable input. Listener configuration and API keys are
 supplied when launching. Resources remain owned until replay drains; a failed

@@ -42,10 +42,13 @@ flashinfer-python = { path = "../flashinfer", editable = true }
 flare-heliopause = { path = "heliopause" }
 
 [tool.ignition.source-revisions]
-flashinfer = "ae3a205a0489095a975e6d6ca1f759850a25d5eb"
+flashinfer = "2b5c03eb29edf811af3fe6d1b19af324be6e0d75"
 
 [tool.setuptools.packages.find]
 include = ["ignition*"]
+
+[tool.setuptools.package-data]
+"ignition.recipes.deepseek41" = ["assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

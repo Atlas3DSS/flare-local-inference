@@ -168,6 +168,8 @@ class PackageStorage:
             raise RuntimeError("native package allocator failed") from self.error
 
 class HostRegion:
+    """Registered storage with identical CPU and device addresses."""
+
     def __init__(self, cuda, address, extent, shape, dtype, device):
         import torch
         from b12x.sequence._shared.disk_table import _tensor_from_pointer

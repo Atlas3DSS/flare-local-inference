@@ -57,7 +57,7 @@ policy in section 3, and MTP follows base serving.
   region of the acceptance model: Gated DeltaNet (GDN) prefill and decode, QSA
   sparse attention with its selector, fused NVFP4 mixture-of-experts with
   compressed scale planes (CSF), hyperconnection, PLE n-gram hashing and
-  embedding with a mapped-host table, MXFP8 and weight-only NVFP4 linear, BF16
+  embedding from compact GPU rows delivered by Helios, MXFP8 and weight-only NVFP4 linear, BF16
   vocabulary projection, and varlen attention for vision. Each computes its
   per-call metadata on device from device-resident counts, so no attention or
   state operator needs host planning between replays. Required additions are a

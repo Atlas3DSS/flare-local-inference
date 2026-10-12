@@ -53,6 +53,14 @@ impl Archive {
             .iter()
             .flat_map(|r| r.resources.values())
             .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
+            .chain(
+                index
+                    .engram
+                    .iter()
+                    .flat_map(|e| &e.tables)
+                    .flat_map(|t| [&t.weights, &t.scales])
+                    .filter_map(Option::as_ref),
+            )
         {
             if span
                 .offset

@@ -525,7 +525,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
 
     fn run(&mut self, executor: &mut RankExecutor) -> Result<()> {
         // Input construction stays inside the worker's unwind and drain boundary.
-        self.inputs = Some(M::Inputs::default());
+        self.inputs = Some(M::create_inputs(executor.manifest())?);
         while !self.stop.load(Ordering::Acquire) {
             let std::ops::ControlFlow::Continue(mut progress) = self.admit()? else {
                 return Ok(());

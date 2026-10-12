@@ -25,11 +25,15 @@ caller-owned scratch, and allocation-stable replay are required.
    Preserve ATen FP32 sigmoid results before multiplication and BF16 rounding.
    Retain native ATen LayerNorm to preserve its BF16 output rounding and affine
    normalization semantics.
-   `scripts/qualify_decoder.py --tune --compile` checks decoder correctness.
-   `qualify.gpu_replay flare --compile` measures compiled prefill, decode, and
-   resume forwards through model bootstrap. Bootstrap recompiles these forwards
-   after binding the final KV pools and retains their operator owners until
-   execution drains. Serving startup enables compilation for complete text
+   Measure serving through an exported `.flaretensors` package loaded by
+   `flare run --ngram-storage ram`, including Helios's asynchronous row delivery.
+   Compare `flare_speculative_rounds_total` divided by
+   `flare_speculative_gpu_nanoseconds_total` for matching batch and verification
+   width, converting nanoseconds to seconds. Token throughput also depends on
+   draft acceptance. GPU traces identify exposed copies, waits, and kernel work.
+   `tests/components/test_ple_delivery_cuda.py` checks asynchronous PLE delivery;
+   `tests/recipes/test_qwen38_ple.py` compares the PLE consumer with checkpoint
+   reference outputs across graph variants. Preparation enables compilation for complete text
    forwards, including learned-MTP absorption and speculative rounds. Vision
    and maintenance graphs capture their prepared operations directly.
    FlashInfer chain verification exposes token and acceptance-counter mutations

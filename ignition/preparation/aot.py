@@ -374,7 +374,8 @@ class ForwardCache:
 
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
         """Trace and compile in workers, then bind and warm on the owning rank."""
-        with self._publication_lock(coordinator):
+        # Compiler workers own parallel compilation; artifact binding needs no second worker pool.
+        with self._publication_lock(coordinator), torch._inductor.config.patch(compile_threads=1):
             return self._prepare_many(functions, signatures, progress=progress,
                                       coordinator=coordinator, materialize=materialize)
 

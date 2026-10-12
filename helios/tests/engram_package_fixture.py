@@ -1,0 +1,71 @@
+"""Export a compact b12x Engram graph and file-backed table for native replay tests."""
+
+from pathlib import Path
+import sys
+
+import torch
+from b12x.preparation import PreparationSession
+from b12x.sequence import engram
+
+from ignition.components.engram import EngramInputs, PreparedEngramLookup
+from ignition.preparation.execution import PreparedExecution, GraphSignature
+from ignition.preparation.module_images import ModuleImages
+from ignition.preparation.package_storage import PackageStorage
+from ignition.preparation.runtime_package import FileSource, export_model
+from ignition.recipes.deepseek41.engram import Tables
+
+
+@torch.no_grad()
+def prepare(root):
+    root.mkdir(parents=True, exist_ok=False)
+    geometry = engram.build_geometry(layer_ids=(1,), base_table_size=101, compressed_vocab_size=32)
+    rows = geometry.num_embeddings[0]
+    weight = (torch.arange(rows * 256).remainder(15).float() - 7).to(torch.float8_e4m3fn)
+    scales = torch.full((rows * 8,), 127, dtype=torch.uint8)
+    sources = []
+    for name, tensor in [('weights', weight), ('scales', scales)]:
+        path = root / name
+        path.write_bytes(tensor.view(torch.uint8).numpy().tobytes())
+        sources.append(FileSource(path, 0, tensor.nbytes))
+    torch.cuda.set_device(0)
+    with ModuleImages() as images, PackageStorage() as storage:
+        device = torch.device('cuda:0')
+        inputs = EngramInputs.allocate(4, device)
+        output = torch.empty((4, 6144), dtype=torch.bfloat16, device=device)
+        count = torch.full((1,), 4, dtype=torch.int32, device=device)
+        source = torch.zeros(1, dtype=torch.int32, device=device)
+        frame = torch.zeros(1, dtype=torch.int32, device=device)
+        sequence = torch.zeros(1, dtype=torch.int64, device=device)
+        records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
+        with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
+            lookup = PreparedEngramLookup(inputs, output, count, layer=1, token_map=tuple(range(32)),
+                geometry=geometry, session=session, name='engram')
+
+            def run():
+                source.add_(1)
+                lookup(source)
+                records.zero_()
+                records[:, 0, 0] = 1
+                records[:, 0, 1].copy_(sequence[0].expand(2))
+                records[:, 0, 4] = -1
+                records[:, 0, 5] = 1
+
+            run()
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph(keep_graph=True)
+            with session.capture(), torch.cuda.graph(graph, pool=storage.graph_pool.id):
+                run()
+            graph.instantiate()
+        tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs})
+        buffers = dict(tables.buffers(), output=output, frame_index=frame,
+                       submission_sequence=sequence, completion_records=records)
+        prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,
+            signatures={'decode': GraphSignature('decode', 4, 1, ('engram_1_hashes',))},
+            max_active=4, resources=(storage, lookup), export_events=tables.events())
+        prepared.server_config = {'assets': {}}
+        prepared.package_data = tables
+        export_model(prepared, images, storage, root / 'package', options={})
+
+
+if __name__ == '__main__':
+    prepare(Path(sys.argv[1]))

@@ -1,6 +1,7 @@
 """Typed data must not create spurious CUDA resource dependencies."""
 
 import gc
+import os
 import struct
 
 import pytest
@@ -132,3 +133,30 @@ def test_resized_checkpoint_storage_invalidates_numeric_metadata():
     tensor.resize_(256)
     with pytest.raises(ValueError, match="storage was resized"):
         numeric.ranges()
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="explicit CUDA assignment required")
+def test_metadata_skips_uninitialized_cache_and_deduplicates_live_views(monkeypatch):
+    import ignition.preparation.tensor_metadata as metadata
+
+    cache = torch.empty((32768, 64), dtype=torch.float32, device="cuda")
+    weights = torch.empty((4, 4), dtype=torch.float32, device="cuda")
+    objects = [cache[:, ::2], weights, weights.view_as(weights), weights.view(torch.uint8)[:2]]
+    monkeypatch.setattr(metadata.gc, "get_objects", lambda: objects)
+    ranges = metadata.tensor_ranges
+    visited = []
+
+    def inspect(tensor):
+        assert tensor.data_ptr() != cache.data_ptr()
+        visited.append(tensor)
+        return ranges(tensor)
+
+    monkeypatch.setattr(metadata, "tensor_ranges", inspect)
+    numeric, arguments = metadata.live_metadata([
+        Allocation("cache", cache.data_ptr(), cache.nbytes, initialize="zero"),
+        Allocation("weights", weights.data_ptr(), weights.nbytes),
+    ], NumericStorage(), {})
+    assert len(visited) == 2
+    assert numeric == [(weights.data_ptr() + 32, weights.data_ptr() + 64)]
+    assert arguments == {}

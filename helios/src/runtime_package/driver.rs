@@ -151,6 +151,7 @@ driver! {
     graph_memset: "cuGraphAddMemsetNode"(*mut Handle, Handle, *const Handle, usize, *const MemsetParams, Handle);
     graph_copy: "cuGraphAddMemcpyNode"(*mut Handle, Handle, *const Handle, usize, *const CopyParams, Handle);
     graph_empty: "cuGraphAddEmptyNode"(*mut Handle, Handle, *const Handle, usize);
+    graph_event_wait: "cuGraphAddEventWaitNode"(*mut Handle, Handle, *const Handle, usize, Handle);
     graph_attribute: "cuGraphKernelNodeSetAttribute"(Handle, c_int, *const c_void);
     graph_edges: "cuGraphAddDependencies_v2"(Handle, *const Handle, *const Handle, *const [u8; 8], usize);
     graph_instantiate: "cuGraphInstantiateWithFlags"(*mut Handle, Handle, u64);

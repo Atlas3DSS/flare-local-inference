@@ -13,6 +13,7 @@ use std::{collections::HashSet, path::Path, thread};
 pub struct NativeModel {
     pub(super) ranks: Vec<NativeResources>,
     pub(super) server_config: serde_json::Value,
+    engram: Option<std::sync::Arc<crate::engram::Shared>>,
 }
 
 impl NativeModel {
@@ -67,6 +68,21 @@ impl NativeModel {
         }
         server_config["assets"] = assets.into();
         let active = options.select(&mut packages, &mut server_config)?;
+        let engram = descriptor
+            .engram
+            .take()
+            .map(|value| super::engram::decode(value, archive.start, &packages))
+            .transpose()?;
+        if [
+            crate::model::deepseek41::INPUT_SCHEMA,
+            crate::model::qwen4exp::INPUT_SCHEMA,
+        ]
+        .iter()
+        .any(|schema| server_config["model_contract"]["schema"] == *schema)
+            && engram.is_none()
+        {
+            return Err(invalid("model requires an n-gram table catalog"));
+        }
         let state_rows = server_config["state_rows"]
             .as_u64()
             .filter(|rows| *rows > 0 && *rows < i32::MAX as u64)
@@ -188,6 +204,7 @@ impl NativeModel {
         let mut model = Self {
             ranks: Vec::new(),
             server_config,
+            engram: None,
         };
         unsafe {
             let phase = progress.phase(
@@ -266,6 +283,32 @@ impl NativeModel {
                 rank.prepare_graphs(archive, package, &phase)
             })?;
             phase.finish(format!("concurrency {active}"));
+            if let Some(index) = engram {
+                let phase = progress.phase("Prepare n-gram tables", None);
+                let tokens = packages[0]
+                    .execution
+                    .as_ref()
+                    .unwrap()
+                    .graphs
+                    .iter()
+                    .filter(|g| matches!(g.kind.as_str(), "prefill" | "decode" | "speculative"))
+                    .map(|g| (g.batch_capacity * g.token_capacity) as usize)
+                    .max()
+                    .unwrap();
+                model.engram = Some(crate::engram::Shared::new(
+                    index,
+                    root,
+                    devices.len(),
+                    tokens,
+                    model.ranks[0].context as usize,
+                    devices[0],
+                    options.ngram_storage,
+                )?);
+                phase.finish(match options.ngram_storage {
+                    crate::engram::Storage::Disk => "disk",
+                    crate::engram::Storage::Ram => "RAM",
+                });
+            }
             model.allocate_caches(&mut packages, progress, active)?;
             model.grant_peer_access(&descriptor.peer_memory)?;
         }
@@ -347,7 +390,29 @@ impl NativeModel {
     pub fn manifests(&self) -> Result<Vec<ExecutionManifest>> {
         self.ranks
             .iter()
-            .map(NativeResources::execution_manifest)
+            .enumerate()
+            .map(|(index, rank)| {
+                let mut manifest = rank.execution_manifest()?;
+                if let Some(shared) = &self.engram {
+                    let events = shared
+                        .index
+                        .tables
+                        .iter()
+                        .map(|t| {
+                            rank.events
+                                .get(&t.event)
+                                .map(|event| *event as usize)
+                                .ok_or_else(|| invalid("Engram readiness event missing"))
+                        })
+                        .collect::<Result<_>>()?;
+                    manifest.engram = Some(crate::engram::Binding {
+                        shared: shared.clone(),
+                        rank: index,
+                        events,
+                    });
+                }
+                Ok(manifest)
+            })
             .collect()
     }
 
@@ -358,6 +423,7 @@ impl NativeModel {
 
 impl Drop for NativeModel {
     fn drop(&mut self) {
+        self.engram.take();
         // Rank zero owns the shared reservations and releases them after every peer.
         while self.ranks.pop().is_some() {}
     }

@@ -45,7 +45,7 @@ class MHCScratch:
 
 
 class _BenchmarkInputs:
-    def __init__(self, residual, operation):
+    def __init__(self, residual, operation, lagged):
         tokens, _, hidden = residual.shape
         generator = torch.Generator(device=residual.device).manual_seed(3187)
         values = torch.randn(residual.shape, dtype=residual.dtype, device=residual.device,
@@ -60,7 +60,14 @@ class _BenchmarkInputs:
         self.seeds = self.inputs
         self.inputs = tuple(torch.empty_like(value) for value in self.seeds)
         self.scratch = MHCScratch.allocate(tokens, hidden, residual.device)
+        self.pre_mix = self.pre_out = None
+        if lagged:
+            self.pre_mix = torch.zeros((tokens, 4), dtype=torch.float32, device=residual.device)
+            self.pre_mix[:, 0] = 1
+            self.pre_out = torch.empty_like(self.pre_mix)
         self.nbytes = sum(t.nbytes for t in (*self.seeds, *self.inputs, *self.scratch.bind_args().values()))
+        if lagged:
+            self.nbytes += self.pre_mix.nbytes + self.pre_out.nbytes
 
     def produce(self):
         for target, seed in zip(self.inputs, self.seeds, strict=True):
@@ -77,7 +84,8 @@ class PreparedMHC:
     """
 
     def __init__(self, inputs, weights: MHCWeights, scratch: MHCScratch, *,
-                 session, name, workspace, rms_eps, hc_eps, sinkhorn_iters, norm_eps):
+                 session, name, workspace, rms_eps, hc_eps, sinkhorn_iters, norm_eps,
+                 pre_mix=None, pre_out=None):
         self.operation = "pre" if len(inputs) == 1 else "post_pre" if len(inputs) == 4 else None
         if self.operation is None:
             raise ValueError("mHC requires residual or branch/residual/post/comb inputs")
@@ -93,25 +101,34 @@ class PreparedMHC:
         self.weights, self.scratch = weights, scratch
         self.options = {"rms_eps": rms_eps, "hc_eps": hc_eps, "sinkhorn_iters": sinkhorn_iters,
                             "norm_weight": weights.norm, "norm_eps": norm_eps}
+        if (pre_mix is None) != (pre_out is None):
+            raise ValueError("lagged mHC requires incoming and outgoing coefficient buffers")
+        if pre_mix is not None:
+            self.options.update(pre_mix=pre_mix)
         self.plan = mhc.plan(mhc.Caps(device=residual.device, max_tokens=tokens, hidden_size=hidden),
             invocation={"operation": self.operation, "output_mode": "provided", "has_norm_weight": True,
                 "norm_weight_dtype": "bfloat16", "expanded_residual": self.operation == "pre",
-                "rms_eps": rms_eps, "hc_eps": hc_eps, "sinkhorn_iters": sinkhorn_iters, "norm_eps": norm_eps})
+                "rms_eps": rms_eps, "hc_eps": hc_eps, "sinkhorn_iters": sinkhorn_iters, "norm_eps": norm_eps,
+                "lagged_mix": pre_mix is not None})
         entry = getattr(_impl, f"_b12x_mhc_{self.operation}_impl")
         parameters = (weights.fn, weights.scale, weights.base)
 
         def call(state, values, buffers, fixture=None):
             storage = planned_scratch(state.scratch_specs(), workspace)
-            binding = state.bind(scratch=storage, tokens=tokens, **buffers.bind_args())
+            target_pre = pre_out if fixture is None else fixture.pre_out
+            binding = state.bind(scratch=storage, tokens=tokens, pre_out=target_pre, **buffers.bind_args())
+            options = dict(self.options)
+            if fixture is not None and pre_mix is not None:
+                options.update(pre_mix=fixture.pre_mix)
             return PreparedCall(
-                run=lambda: entry(*values, *parameters, **self.options, binding=binding, _state=state),
+                run=lambda: entry(*values, *parameters, **options, binding=binding, _state=state),
                 produce=None if fixture is None else fixture.produce,
                 output=tuple(buffers.bind_args().values()),
                 owners=(*prime_owners(workspace, storage, binding), fixture))
 
         def benchmark(state):
-            fixture = benchmark_resource(session, ("mhc", str(residual.device), tokens, hidden, self.operation),
-                                         lambda: _BenchmarkInputs(residual, self.operation))
+            fixture = benchmark_resource(session, ("mhc", str(residual.device), tokens, hidden, self.operation, pre_mix is not None),
+                                         lambda: _BenchmarkInputs(residual, self.operation, pre_mix is not None))
             return call(state, fixture.inputs, fixture.scratch, fixture)
 
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: call(state, inputs, scratch),
@@ -119,7 +136,7 @@ class PreparedMHC:
 
         def finalize():
             self.binding = mhc.bind(self.plan, scratch=planned_scratch(self.plan.scratch_specs(), workspace),
-                                    tokens=tokens, **scratch.bind_args())
+                                    tokens=tokens, pre_out=pre_out, **scratch.bind_args())
 
         register_finalizer(session, finalize, workspace=workspace)
 

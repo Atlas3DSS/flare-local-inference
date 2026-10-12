@@ -21,6 +21,8 @@ type EventCreate = unsafe extern "C" fn(*mut Handle, c_uint) -> c_int;
 type EventRecord = unsafe extern "C" fn(Handle, Handle) -> c_int;
 type EventElapsed = unsafe extern "C" fn(*mut f32, Handle, Handle) -> c_int;
 type StreamWait = unsafe extern "C" fn(Handle, Handle, c_uint) -> c_int;
+type WaitValue = unsafe extern "C" fn(Handle, u64, u32, c_uint) -> c_int;
+type HostPointer = unsafe extern "C" fn(*mut u64, Handle, c_uint) -> c_int;
 
 struct Driver {
     _library: Library,
@@ -43,6 +45,8 @@ struct Driver {
     event_query: StreamOperation,
     event_destroy: StreamOperation,
     stream_wait: StreamWait,
+    wait_value: WaitValue,
+    host_pointer: HostPointer,
 }
 
 impl Driver {
@@ -86,6 +90,8 @@ impl Driver {
                 event_query: symbol!("cuEventQuery"),
                 event_destroy: symbol!("cuEventDestroy_v2"),
                 stream_wait: symbol!("cuStreamWaitEvent"),
+                wait_value: symbol!("cuStreamWaitValue32_v2"),
+                host_pointer: symbol!("cuMemHostGetDevicePointer_v2"),
                 _library: library,
             }))
         }
@@ -176,9 +182,17 @@ impl Stream {
     }
 
     pub(crate) fn host_buffer(&self, nbytes: usize) -> Result<PinnedHost> {
+        self.allocate_host(nbytes, 0)
+    }
+
+    pub(crate) fn mapped_host_buffer(&self, nbytes: usize) -> Result<PinnedHost> {
+        self.allocate_host(nbytes, 3)
+    }
+
+    fn allocate_host(&self, nbytes: usize, flags: u32) -> Result<PinnedHost> {
         let mut handle = std::ptr::null_mut();
         self.driver.check("cuMemHostAlloc", unsafe {
-            (self.driver.host_alloc)(&mut handle, nbytes, 0)
+            (self.driver.host_alloc)(&mut handle, nbytes, flags)
         })?;
         unsafe {
             std::ptr::write_bytes(handle.cast::<u8>(), 0, nbytes);
@@ -205,9 +219,29 @@ impl Stream {
     }
 
     pub(crate) fn record(&self, event: &Event) -> Result<()> {
+        unsafe { self.record_borrowed(event.handle) }
+    }
+
+    /// The event belongs to this context and outlives all queued work.
+    pub(crate) unsafe fn record_borrowed(&self, event: usize) -> Result<()> {
         self.driver.check("cuEventRecord", unsafe {
-            (self.driver.event_record)(event.handle as Handle, self.handle as Handle)
+            (self.driver.event_record)(event as Handle, self.handle as Handle)
         })
+    }
+
+    /// The mapped flag remains allocated until this stream drains.
+    pub(crate) unsafe fn wait_value(&self, flag: usize, generation: u32) -> Result<()> {
+        self.driver.check("cuStreamWaitValue32_v2", unsafe {
+            (self.driver.wait_value)(self.handle as Handle, flag as u64, generation, 1)
+        })
+    }
+
+    pub(crate) fn mapped_address(&self, host: &PinnedHost) -> Result<usize> {
+        let mut address = 0;
+        self.driver.check("cuMemHostGetDevicePointer", unsafe {
+            (self.driver.host_pointer)(&mut address, host.handle as Handle, 0)
+        })?;
+        Ok(address as usize)
     }
 
     pub(crate) fn wait(&self, event: &Event) -> Result<()> {
@@ -310,6 +344,9 @@ pub(crate) struct PinnedHost {
 }
 
 impl PinnedHost {
+    pub(crate) fn address(&self) -> usize {
+        self.handle
+    }
     pub(crate) fn bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.handle as *const u8, self.nbytes) }
     }

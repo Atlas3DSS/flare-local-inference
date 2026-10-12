@@ -55,9 +55,9 @@ RECIPE = Recipe(
     checkpoints=(Checkpoint(
         alias="glm-5.3-flash", repository="local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
         revision="dec48abd33efa73c3bb7c95b74eee10cad34f9be", architecture="Glm5NextForConditionalGeneration",
-        stored_bytes=177_680_678_236,
+        stored_bytes=178_175_535_810,
         # Language model, draft layer, and output head; the vision tower is not loaded.
-        device_bytes=177_290_048_556,
+        device_bytes=177_784_906_130,
         # Decoder layer 45, the MTP module.
         draft_bytes=4_301_658_112),),
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,

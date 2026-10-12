@@ -403,6 +403,15 @@ def _install_boundaries(monkeypatch, checkpoint):
 
     def pack(values, scales, *, recipe="mxfp8", **kwargs):
         n, k = values.shape[:2]
+        if recipe == "nvfp4":
+            return NVFP4LinearWeight(
+                values,
+                scales,
+                kwargs["global_scale"],
+                kwargs["global_scale_kind"],
+                k * 2,
+                n,
+            )
         return MXFP8LinearWeight(
             MXFP8Rows(
                 values.reshape(n, k, 1),
@@ -557,25 +566,19 @@ def _install_boundaries(monkeypatch, checkpoint):
     monkeypatch.setattr(loader, "load_experts", experts)
     monkeypatch.setattr(mtp_weights.MTPWeightLoader, "load_experts", experts)
 
-    def load_table(cls, manifest, device, *, progress=None, shard=None):
-        geometry = ple.ple_embedding.allocate_geometry(
-            table_layout.geometry, device=device
-        )
-        storage = SimpleNamespace(
-            weight=torch.empty(
-                table_layout.weight_shape, dtype=torch.uint8, device=device
-            ),
-            weight_scale=torch.empty(
-                table_layout.weight_scale_shape,
-                dtype=torch.float8_e4m3fn,
-                device=device,
-            ),
-            weight_scale_2=torch.empty(1, dtype=torch.float32, device=device),
-            close=lambda: None,
-        )
-        return ple.MappedPLETable(table_config, table_layout, geometry, storage)
+    def load_table(cls, manifest, device, *, tokens, progress=None, host_allocator=None):
+        heads = table_layout.caps.head_count
+        mailbox = SimpleNamespace(device_view=torch.empty(tokens * heads + 1, dtype=torch.int64, device=device),
+                                  close=lambda: None)
+        return ple.PLETable(table_config, table_layout,
+            ple.ple_embedding.allocate_geometry(table_layout.geometry, device=device),
+            torch.empty(1, dtype=torch.float32, device=device),
+            torch.empty((tokens * heads, 80), dtype=torch.uint8, device=device),
+            torch.empty((tokens * heads, 10), dtype=torch.uint8, device=device),
+            torch.empty((tokens, heads), dtype=torch.int64, device=device),
+            mailbox, SimpleNamespace(cuda_event=1), ())
 
-    monkeypatch.setattr(ple.MappedPLETable, "load", classmethod(load_table))
+    monkeypatch.setattr(ple.PLETable, "load", classmethod(load_table))
     session = RecordingSession()
     monkeypatch.setattr(
         bootstrap, "preparation_session", lambda **kwargs: session
@@ -655,7 +658,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     assert session.closed
     expected = {
         "vision": 4,
-        "prefill": 6,
+        "prefill": len(config.prefill_capacities),
         "resume": len(config.batch_capacities),
         "init": len(config.batch_capacities),
         "restore": len(config.batch_capacities),
@@ -685,7 +688,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         if signature.kind in ("prefill", "resume", "speculative")
     )
     decoders = constructors["PreparedDecoder"]
-    assert len(decoders) == (6 + len(config.batch_capacities) if proposal == "ordinary" else 6 + len(config.speculative_shapes))
+    assert len(decoders) == (len(config.prefill_capacities) + len(config.batch_capacities) if proposal == "ordinary" else len(config.prefill_capacities) + len(config.speculative_shapes))
     assert len(constructors["PreparedVision"]) == 4
     assert len(constructors["PreparedMaintenance"]) == 3 * len(config.batch_capacities)
     assert len(constructors["PreparedResume"]) == len(config.batch_capacities)
@@ -702,7 +705,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         assert args["completion_records"].dtype == torch.int64
         pool = args["state"].pool
         assert pool.backing.dtype == torch.uint8
-        assert pool.backing.shape[0] == 1 + config.request_capacity + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else 7 * config.request_capacity)
+        assert pool.backing.shape[0] == 1 + config.request_capacity + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else (max(config.speculative_widths) - 1) * config.request_capacity)
         assert decoder.scratch.residual.dtype == torch.bfloat16
         assert decoder.scratch.logits.dtype == torch.bfloat16
         assert pool.layout.speculative_tokens == (0 if proposal == "ordinary" else 7)
@@ -716,7 +719,7 @@ def test_prepare_model_constructs_real_catalog_on_meta(
             assert type(layer[1]).__name__ == (
                 "PreparedAttention" if index % 4 == 3 else "PreparedGDN"
             )
-    assert len(constructors["PreparedMTP"]) == ((6 + len(config.speculative_shapes) + sum(width > 1 for _, width in config.speculative_shapes)) if proposal == "mtp" else 0)
+    assert len(constructors["PreparedMTP"]) == ((len(config.prefill_capacities) + len(config.speculative_shapes) + sum(width > 1 for _, width in config.speculative_shapes)) if proposal == "mtp" else 0)
     assert len(constructors["PreparedCheckpointCaches"]) == 3 * len(config.batch_capacities)
     for owner, _ in constructors["PreparedMaintenance"]:
         assert owner.transfers.exact.pool is owner.pool

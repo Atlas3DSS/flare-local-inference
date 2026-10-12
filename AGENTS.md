@@ -61,6 +61,40 @@ Compilation is enabled by default; `--no-compile` is for development.
 Qwen defaults to five MTP draft tokens, with explicit flags taking precedence.
 Changing this default does not change an already exported package.
 
+N-gram tables use indirect delivery exclusively: every graph consumes compact
+GPU row buffers filled by Helios. Qwen PLE tables are stored once in the package.
+Use `flare run --ngram-storage ram` to keep the 26.8 GiB table in
+resident host memory. The graph publishes GPU-produced lookup IDs before layer
+0 and waits for row delivery at the layer-1 consumer. Disk and RAM delivery
+use the same prepared model graphs; the flag selects table storage only.
+
+DeepSeek V4.1 Flash supports TP4 text generation, reasoning, and DSML tool calls.
+DSpark and vision graphs are not prepared. Its 188.8 GiB of Engram tables are
+stored once in the package and read on demand through bounded direct-I/O
+staging. `flare run --ngram-storage ram` loads those tables into ordinary RAM;
+both modes gather compact rows into shared pinned buffers, copy them to each
+rank, and signal captured consumer events. Preparation appends the immutable
+checkpoint slices without materializing the tables. Select four available
+GPUs explicitly:
+
+```sh
+.venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
+  --max-concurrency 4 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4.flaretensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/deepseek-v41-flash-tp4-c4.flaretensors \
+  --gpus 0,4,6,8 --bind 127.0.0.1:8001
+```
+
+DeepSeek's logical cache pages cover 128 tokens across compressed latent and
+index regions with different byte sizes. Continuation rows retain sliding
+windows, pending compression state, partial pages, and the
+last hidden state. Both use runtime-sized virtual ranges; exported packages
+contain their layouts and capacity bounds without cache payloads.
+Engram indexing uses the request's committed token history, including tokens
+covered by a reused prefix.
+
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
 `[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`

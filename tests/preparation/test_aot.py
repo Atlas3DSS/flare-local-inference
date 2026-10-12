@@ -75,6 +75,16 @@ def test_compile_before_materializing_storage(tmp_path, monkeypatch):
     cache = ForwardCache(namespace={"model": "deferred-buffer"}, device="cuda:0")
     pools = []
     shutdown = CompilePool.__exit__
+    load = torch.compiler.load_compiled_function
+    original_threads = torch._inductor.config.compile_threads
+    bindings = []
+
+    def bind(*args, **kwargs):
+        assert torch._inductor.config.compile_threads == 1
+        bindings.append(True)
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(torch.compiler, "load_compiled_function", bind)
 
     def close(pool, *args):
         shutdown(pool, *args)
@@ -94,6 +104,7 @@ def test_compile_before_materializing_storage(tmp_path, monkeypatch):
             monkeypatch.setattr(CompilePool, "submit", unexpected)
         compiled = cache.prepare_many({"decode": forward}, {"decode": GraphSignature("decode", 1, 1)},
                                       materialize=materialize)
+        assert bindings and torch._inductor.config.compile_threads == original_threads
         torch.testing.assert_close(forward.output, forward.source + 73.25)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=torch.cuda.Stream()):

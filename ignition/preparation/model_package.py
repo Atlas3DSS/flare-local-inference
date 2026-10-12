@@ -9,6 +9,7 @@ from .package_file import combine
 
 
 def export_package(prepared, images, storage, path, *, options, progress=None):
+    """Export every rank, close preparation resources, and assemble the model file."""
     import torch
     import torch.distributed as dist
 
@@ -33,6 +34,9 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
         for rank, allocations in enumerate(memory):
             for address, size in allocations:
                 peers.append(dict(owner=rank, address=address, nbytes=size, readers=list(range(storage.world))))
+        prepared.close()
+        for region in storage.host_regions:
+            region.close()
         combine(path, [stage / root for root in roots], peers)
     finally:
         if stage.exists():

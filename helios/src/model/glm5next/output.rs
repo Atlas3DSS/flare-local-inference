@@ -13,8 +13,10 @@ pub struct GlmArgumentTags;
 impl ToolDialect for GlmArgumentTags {
     const NAME: &'static str = "GLM";
     const TRIM_NEWLINES: bool = false;
+    const OPEN: &'static str = "<tool_call>";
+    const CLOSE: &'static str = "</tool_call>";
 
-    fn parse(body: &str, tools: &[Value]) -> Result<(String, String)> {
+    fn parse(body: &str, tools: &[Value]) -> Result<Vec<(String, String)>> {
         let body = body.trim();
         let split = body.find("<arg_key>").unwrap_or(body.len());
         let name = body[..split].trim();
@@ -53,12 +55,12 @@ impl ToolDialect for GlmArgumentTags {
             );
             rest = tail;
         }
-        Ok((
+        Ok(vec![(
             name.to_owned(),
             serde_json::to_string(&arguments).map_err(|error| {
                 crate::FrontendError::Input(crate::Failure::caused_by(error.to_string(), error))
             })?,
-        ))
+        )])
     }
 }
 

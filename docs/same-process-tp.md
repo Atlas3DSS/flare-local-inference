@@ -190,11 +190,11 @@ storage path as every other allocation. Mapping an imported handle at a fixed
 address in a second process has not been measured; `cuMemMap` takes the
 address, and fixed-base reservations above the carve block are honored.
 
-**Host regions.** Each rank's mapped host tables are registered by the rank's
-own context; the Qwen PLE table is sharded by rank, so no rank reads another's
-copy. A host region that several ranks' kernels read must be registered with
-`CU_MEMHOSTREGISTER_PORTABLE`; the loader registers with the device-map flag
-only.
+**Host regions.** N-gram tables are stored once and share one row gather across
+ranks. Each rank copies the gathered weights and scales into its compact GPU
+buffers. Shared staging and readiness flags use portable mapped host
+allocations; request mailboxes belong to their rank's context. Table storage
+can reside in RAM or on disk without changing rank graphs.
 
 **Per-context costs.** Module loading and the sm_120 TMA stub's device
 footprint of about 3.6 GiB apply per context, which is per rank in both

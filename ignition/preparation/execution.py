@@ -47,7 +47,7 @@ class PreparedExecution(PreparedGraphBundle):
     """
 
     def __init__(self, *, signatures: Mapping[str, GraphSignature], max_active: int = 4,
-                 export_zero_ranges=(), **kwargs):
+                 export_zero_ranges=(), export_events=None, **kwargs):
         super().__init__(**kwargs)
         request_capacity(max_active)
         if signatures.keys() != self.graphs.keys():
@@ -63,6 +63,7 @@ class PreparedExecution(PreparedGraphBundle):
         self.signatures = MappingProxyType(dict(signatures))
         self.max_active = max_active
         self.export_zero_ranges = tuple(export_zero_ranges)
+        self.export_events = dict(export_events or {})
 
     def manifest(self) -> dict[str, Any]:
         context, handles, spans = self._validate_resources()

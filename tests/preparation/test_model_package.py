@@ -17,6 +17,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     monkeypatch.setattr(torch.cuda, 'synchronize', lambda: None)
     monkeypatch.setattr(dist, 'barrier', lambda: None)
     exported = []
+    closed = []
     def export(prepared, images, storage, path, **kwargs):
         publish(path, ModelIndex(version=1, ranks=[BundleIndex()]), [])
         exported.append(path.name)
@@ -27,9 +28,16 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
             export(None, None, None, command[1])
         def recv(self):
             return {'peer_memory': [(0x210000000000, 65536)]}
-    prepared = SimpleNamespace(model=object(), controls=[Control()] if world == 2 else [])
+    prepared = SimpleNamespace(model=object(), controls=[Control()] if world == 2 else [],
+                               close=lambda: closed.append('model'))
     storage = SimpleNamespace(world=world, peer_storage=SimpleNamespace(
-        owned={0x200000000000: 65536}, reset=lambda: None))
+        owned={0x200000000000: 65536}, reset=lambda: None),
+        host_regions=[SimpleNamespace(close=lambda: closed.append('host'))])
+    def assemble(*args):
+        assert closed == ['model', 'host']
+        assert len(exported) == world
+        combine(*args)
+    monkeypatch.setattr(model_package, 'combine', assemble)
     output = tmp_path / 'model'
     model_package.export_package(prepared, None, storage, output, options={})
     descriptor, start = read_index(output)
@@ -80,3 +88,35 @@ def test_combined_file_preserves_rank_resources_and_frontend_ranges(tmp_path):
         source.truncate(model.stat().st_size - 1)
     with pytest.raises(ValueError, match='resource exceeds model package'):
         read_index(model)
+
+
+def test_offloaded_engram_planes_are_stored_once_and_bounds_checked(tmp_path):
+    source = tmp_path / 'table'
+    source.write_bytes(b'weights-and-scales')
+    ranks = []
+    for rank in range(2):
+        index = ModelIndex(version=1, ranks=[BundleIndex(events=['engram_ready'])])
+        payload = []
+        if rank == 0:
+            table = index.engram.tables.add(layer=1)
+            table.weights.CopyFrom(Span(offset=4096, nbytes=7))
+            table.scales.CopyFrom(Span(offset=8192, nbytes=6))
+            payload = [(4096, source, 0, 7), (8192, source, 12, 6)]
+        path = tmp_path / f'rank-{rank}.flaretensors'
+        publish(path, index, payload)
+        ranks.append(path)
+    output = tmp_path / 'model.flaretensors'
+    combine(output, ranks, [])
+    index, start = read_index(output)
+    assert len(index.engram.tables) == 1
+    with output.open('rb') as package:
+        for field, expected in [('weights', b'weights'), ('scales', b'scales')]:
+            span = getattr(index.engram.tables[0], field)
+            package.seek(start + span.offset)
+            assert package.read(span.nbytes) == expected
+    with pytest.raises(ValueError, match='stored once on rank zero'):
+        combine(tmp_path / 'duplicated', [ranks[0], ranks[0]], [])
+    with ranks[0].open('r+b') as package:
+        package.truncate(start + 8192 + 5)
+    with pytest.raises(ValueError, match='resource exceeds model package'):
+        read_index(ranks[0])

@@ -12,8 +12,10 @@ pub struct QwenCoder;
 impl ToolDialect for QwenCoder {
     const NAME: &'static str = "Qwen Coder";
     const TRIM_NEWLINES: bool = true;
-    fn parse(body: &str, tools: &[Value]) -> Result<(String, String)> {
-        parse_tool(body, tools)
+    const OPEN: &'static str = "<tool_call>";
+    const CLOSE: &'static str = "</tool_call>";
+    fn parse(body: &str, tools: &[Value]) -> Result<Vec<(String, String)>> {
+        Ok(vec![parse_tool(body, tools)?])
     }
 }
 pub type QwenOutput = TaggedOutput<QwenCoder>;

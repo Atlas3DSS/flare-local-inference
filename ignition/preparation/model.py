@@ -12,11 +12,12 @@ from .execution import PreparedExecution
 class PreparedModel(PreparedExecution):
     """Own frozen resources until export or diagnostic execution has finished."""
 
-    def __init__(self, *, server_config, memory_report, session, close_resources=(), **kwargs):
+    def __init__(self, *, server_config, memory_report, session, close_resources=(), package_data=None, **kwargs):
         super().__init__(**kwargs)
         self.server_config = server_config
         self.memory_report = memory_report
         self.session = session
+        self.package_data = package_data
         self._close_resources = tuple(close_resources)
         self._rank_drained = False
         self.runtime = None

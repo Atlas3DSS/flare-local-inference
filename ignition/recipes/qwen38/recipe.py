@@ -56,10 +56,9 @@ RECIPE = Recipe(
     name="qwen38", prepare=prepare, usage=usage,
     checkpoints=(Checkpoint(
         alias="qwen3.8-flash", repository=MODEL_ID, revision=REVISION, architecture=ARCHITECTURE,
-        stored_bytes=102_138_950_916,
-        # Decoder, vision, and draft tensors; the PLE tables stay in mapped host memory.
-        device_bytes=73_338_812_672,
-        mapped_host_bytes=28_800_138_244,
+        stored_bytes=102_329_644_144,
+        # Decoder, vision, and draft tensors; PLE rows are delivered through compact inputs.
+        device_bytes=73_529_505_900,
         # The MTP module's tensors.
         draft_bytes=1_596_720_640),),
     context=262144, page_tokens=64, concurrency=4, max_concurrency=64, prefill_chunk=4096,
@@ -76,5 +75,5 @@ RECIPE = Recipe(
         2: _costs(58_776_320, 69_632, _GRAPH_BYTES[2], speculating=False),
         4: _costs(29_911_808, 69_632, _GRAPH_BYTES[4], speculating=False),
     }),
-    mapped_host_name="PLE table", max_images=4, image_bytes=32 << 20,
+    max_images=4, image_bytes=32 << 20,
 )

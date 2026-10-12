@@ -74,6 +74,7 @@ pub(super) fn node(value: wire::Node) -> Result<Node> {
             nbytes: size(value.nbytes)?,
         },
         Operation::Empty(_) => Node::Empty,
+        Operation::EventWait(value) => Node::EventWait { event: value.event },
     })
 }
 
@@ -81,6 +82,7 @@ pub(super) fn decode(value: wire::BundleIndex) -> Result<Package> {
     let context = required(value.context, "CUDA context")?;
     let package = Package {
         resources: value.resources,
+        events: value.events,
         architecture: array(value.architecture, "architecture")?,
         context: Context {
             flags: context.flags,

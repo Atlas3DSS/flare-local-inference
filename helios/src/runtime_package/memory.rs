@@ -262,6 +262,7 @@ mod tests {
     fn package(row_bytes: u64, page_bytes: u64, maximum_pages: u64) -> Package {
         Package {
             resources: std::collections::HashMap::new(),
+            events: vec![],
             architecture: [12, 0],
             modules: vec![],
             functions: vec![],

@@ -32,6 +32,19 @@ class Argument:
 
 
 @dataclass(frozen=True)
+class FileSource:
+    """Immutable tensor bytes appended directly from a checkpoint file."""
+
+    path: Path
+    offset: int
+    nbytes: int
+
+    def __post_init__(self):
+        if self.offset < 0 or self.nbytes <= 0 or self.offset + self.nbytes > self.path.stat().st_size:
+            raise ValueError("tensor source must name a nonempty range within its checkpoint file")
+
+
+@dataclass(frozen=True)
 class Allocation:
     name: str
     address: int
@@ -173,7 +186,7 @@ class RuntimePackage:
     completes; graph templates must have been captured with keep_graph=True.
     """
 
-    def __init__(self, *, allocations, modules, kernels, owners=(), reservations=(), reachability=None):
+    def __init__(self, *, allocations, modules, kernels, owners=(), reservations=(), reachability=None, events=None):
         self.allocations = tuple(allocations)
         self.modules = dict(modules)
         kernels = tuple(kernels)
@@ -184,6 +197,9 @@ class RuntimePackage:
         self.owners = tuple(owners)
         self.reservations = tuple(reservations)
         self.reachability = reachability
+        self.events = dict(events or {})
+        if any(not name or handle <= 0 for name, handle in self.events.items()) or len(set(self.events.values())) != len(self.events):
+            raise ValueError("external events require unique names and live handles")
         self._by_name = {allocation.name: allocation for allocation in self.allocations}
         if len(self._by_name) != len(self.allocations):
             raise ValueError("allocation names must be unique")
@@ -273,7 +289,7 @@ class RuntimePackage:
                 if C.string_at(aligned, 128) != original:
                     raise ValueError(f"tensor-map binding does not match {relocation.target}")
 
-    def write(self, path, graphs, *, execution=None, server=None, progress=None):
+    def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None):
         """Synchronize and publish an indexed model file without overwriting."""
         path = Path(path)
         if path.exists():
@@ -385,7 +401,8 @@ class RuntimePackage:
             document = {"architecture": architecture, "allocations": allocations,
                         "modules": modules, "functions": functions, "graphs": serialized_graphs,
                         "reservations": self.reservations, "execution": execution,
-                        "context": {"flags": flags.value, "cache": cache.value, "limits": limits}}
+                        "context": {"flags": flags.value, "cache": cache.value, "limits": limits},
+                        "events": list(self.events)}
             index = ModelIndex(version=1, ranks=[bundle(document)])
             asset_files = {}
             if server is not None:
@@ -409,6 +426,8 @@ class RuntimePackage:
                     span.offset, span.nbytes = cursor, size
                 payload.append((cursor, source, 0, size))
                 cursor += size
+            if package_data is not None:
+                package_data.append(index, payload, cursor)
             publish(path, index, payload)
         finally:
             if stage.exists():
@@ -454,6 +473,13 @@ class RuntimePackage:
                            ("pitch", "value", "element_size", "width", "height")}}
             elif kind.value == 5:
                 node = {"kind": "empty"}
+            elif kind.value == 6:
+                event = C.c_void_p()
+                cuda.call("cuGraphEventWaitNodeGetEvent", C.c_void_p(handle), C.byref(event))
+                event_name = next((name for name, value in self.events.items() if value == event.value), None)
+                if event_name is None:
+                    raise ValueError(f"graph {name}: undeclared external readiness event")
+                node = {"kind": "event_wait", "event": event_name}
             else:
                 raise ValueError(f"graph {name}: unsupported CUDA graph node type {kind.value}")
             nodes.append(node)
@@ -660,7 +686,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
     reachability = Reachability(allocations, numeric=numeric, inactive=inactive,
                                roots=[a.name for a in allocations if a.address in peer_addresses])
     package = RuntimePackage(allocations=allocations, modules=modules, kernels=kernels.values(), owners=(prepared, storage),
-        reservations=[{"address": start, "nbytes": end - start} for start, end in merged], reachability=reachability)
+        reservations=[{"address": start, "nbytes": end - start} for start, end in merged], reachability=reachability,
+        events=prepared.export_events)
     execution = prepared.manifest()
     execution.pop("context")
     execution.pop("device")
@@ -672,5 +699,6 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
             graph["draft_tokens"] = graph["token_capacity"] - 1
             graph["verify_tokens"] = graph["token_capacity"]
             graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"
-    package.write(path, prepared.graphs, execution=execution, server={**prepared.server_config, **options}, progress=progress)
+    package.write(path, prepared.graphs, execution=execution, server={**prepared.server_config, **options}, progress=progress,
+                  package_data=prepared.package_data)
     return package

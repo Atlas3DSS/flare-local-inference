@@ -1,0 +1,94 @@
+"""Prepared MXFP4 sparse selection and hierarchical candidate sharing."""
+
+import torch
+from functools import partial
+from b12x.attention import dsa_indexer as dsa
+from b12x.preparation import PreparedCall
+from b12x.preparation.types import plan_from_handle
+
+from ignition.preparation.scratch import planned_scratch, prime_owners
+from ignition.preparation.tuning import declare, register_finalizer
+from ignition.preparation.fixtures.mxfp4_indexer import benchmark_call
+
+
+@torch.library.custom_op("flare::index_quantize", mutates_args=("packed", "scales"))
+def _quantize(query: torch.Tensor, packed: torch.Tensor, scales: torch.Tensor, handle: int) -> None:
+    dsa.quantize_q_mxfp4(plan_from_handle(handle), query, q_mxfp4=packed, q_scales=scales)
+
+
+@_quantize.register_fake
+def _quantize_fake(query, packed, scales, handle):
+    pass
+
+
+@torch.library.custom_op("flare::index_cache_write", mutates_args=("cache",))
+def _write(keys: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, handle: int) -> None:
+    dsa.quantize_write_index_k_mxfp4(plan_from_handle(handle), keys, index_k_cache=cache, slot_mapping=slots)
+
+
+@_write.register_fake
+def _write_fake(keys, cache, slots, handle):
+    pass
+
+
+@torch.library.custom_op("flare::mxfp4_index", mutates_args=("output", "scratch", "candidates_out", "counts_out"))
+def _select(query: torch.Tensor, scales: torch.Tensor, weights: torch.Tensor, cache: torch.Tensor,
+            pages: torch.Tensor, lengths: torch.Tensor, active: torch.Tensor, output: torch.Tensor,
+            scratch: torch.Tensor, candidates: torch.Tensor | None, counts: torch.Tensor | None,
+            candidates_out: torch.Tensor | None, counts_out: torch.Tensor | None, handle: int) -> None:
+    binding = dsa.bind(plan_from_handle(handle), scratch=scratch, q_mxfp4=query, q_scales=scales,
+        query_weights=weights, index_k_cache=cache, page_table=pages, cache_lengths=lengths,
+        active_width=active, output_indices=output, candidate_indices=candidates, candidate_lengths=counts,
+        candidate_output=candidates_out, candidate_output_lengths=counts_out)
+    dsa.run(binding)
+
+
+@_select.register_fake
+def _select_fake(query, scales, weights, cache, pages, lengths, active, output, scratch,
+                 candidates, counts, candidates_out, counts_out, handle):
+    pass
+
+
+class PreparedMXFP4Indexer:
+    def __init__(self, query, weights, cache, pages, lengths, active, output, *, page_size,
+                 session, name, workspace, candidates=None, counts=None, candidates_out=None, counts_out=None):
+        self.query, self.cache, self.output = query, cache, output
+        self.packed = torch.zeros((*query.shape[:-1], 64), dtype=torch.uint8, device=query.device)
+        self.scales = torch.full((*query.shape[:-1], 4), 127, dtype=torch.uint8, device=query.device)
+        caps = dsa.Caps(device=query.device, num_q_heads=query.shape[1], max_q_rows=query.shape[0],
+            max_page_table_width=pages.shape[1], topk=512, page_size=page_size, cache_format="mxfp4",
+            max_candidates=0 if candidates is None else candidates.shape[1],
+            candidate_topk_blocks=0 if candidates_out is None else candidates_out.shape[1] // 8)
+        self.plan = dsa.plan(caps)
+        self.arguments = dict(q_mxfp4=self.packed, q_scales=self.scales, query_weights=weights,
+            index_k_cache=cache, page_table=pages, cache_lengths=lengths, active_width=active,
+            output_indices=output, candidate_indices=candidates, candidate_lengths=counts,
+            candidate_output=candidates_out, candidate_output_lengths=counts_out)
+        self.workspace = workspace
+
+        def prepare(state):
+            scratch = planned_scratch(state.layout.scratch_specs(), workspace)
+            binding = state.bind(scratch=scratch, **self.arguments)
+            def run():
+                state.quantize_query(query, q_mxfp4=self.packed, q_scales=self.scales)
+                state.run(binding)
+            return PreparedCall(run=run, owners=prime_owners(workspace, scratch, binding))
+
+        declare(session, (self.plan.request(name=name, prepare_call=prepare,
+            benchmark_call=partial(benchmark_call, arguments=self.arguments, session=session, workspace=workspace)),))
+        register_finalizer(session, self.rebind, workspace=workspace)
+
+    def rebind(self):
+        self.scratch = planned_scratch(self.plan.scratch_specs(), self.workspace)
+
+    def write_keys(self, keys, slots):
+        _write(keys, self.cache, slots, self.plan.handle)
+
+    def __call__(self):
+        _quantize(self.query, self.packed, self.scales, self.plan.handle)
+        a = self.arguments
+        _select(self.packed, self.scales, a["query_weights"], self.cache, a["page_table"],
+            a["cache_lengths"], a["active_width"], self.output, self.scratch,
+            a["candidate_indices"], a["candidate_lengths"], a["candidate_output"],
+            a["candidate_output_lengths"], self.plan.handle)
+        return self.output

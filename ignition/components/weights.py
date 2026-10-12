@@ -310,7 +310,8 @@ class DirectWeightLoader:
         return pack_weight(values, scales, recipe="mxfp8")
 
     def load_fp4_experts(self, prefixes, *, hidden_size, intermediate_size, format, activation_mode,
-                         intermediate_range=None, scale_vectors=None, swiglu_limit=None):
+                         intermediate_range=None, scale_vectors=None, swiglu_limit=None,
+                         projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale"):
         """Prepare ordinary NVFP4 or MXFP4 expert storage through b12x."""
         import torch
         from b12x.moe import fused_moe as moe
@@ -318,6 +319,7 @@ class DirectWeightLoader:
 
         self._require_open()
         prefixes = tuple(prefixes)
+        up_name, gate_name, down_name = projection_names
         if format not in ("nvfp4", "mxfp4"):
             raise ValueError("ordinary FP4 experts require NVFP4 or MXFP4")
         group = 16 if format == "nvfp4" else 32
@@ -332,20 +334,25 @@ class DirectWeightLoader:
         for index, prefix in enumerate(prefixes):
             scales = {}
             for projection, values, blocks in (
-                ("up_proj", w13[index, :local], s13[index, :local]),
-                ("gate_proj", w13[index, local:], s13[index, local:]),
-                ("down_proj", w2[index], s2[index]),
+                (up_name, w13[index, :local], s13[index, :local]),
+                (gate_name, w13[index, local:], s13[index, local:]),
+                (down_name, w2[index], s2[index]),
             ):
                 source = self._sources[f"{prefix}.{projection}.weight"]
-                scale = self._sources[f"{prefix}.{projection}.weight_scale"]
-                rows, columns = ((hidden_size, intermediate_size) if projection == "down_proj"
+                scale = self._sources[f"{prefix}.{projection}.{scale_name}"]
+                if format == "mxfp4":
+                    if source.dtype == torch.int8:
+                        source = source.view(torch.uint8)
+                    if scale.dtype == torch.float8_e8m0fnu:
+                        scale = scale.view(torch.uint8)
+                rows, columns = ((hidden_size, intermediate_size) if projection == down_name
                                  else (intermediate_size, hidden_size))
                 if source.dtype != torch.uint8 or source.shape != (rows, columns // 2):
                     raise ValueError(f"{prefix}.{projection}: packed FP4 weight geometry mismatch")
                 if scale.shape != (rows, columns // group) or scale.dtype != scale_dtype:
                     raise ValueError(f"{prefix}.{projection}: {format.upper()} block scale geometry or dtype mismatch")
-                self._copy(values, source[:, first // 2:last // 2] if projection == "down_proj" else source[first:last])
-                self._copy(blocks, scale[:, first // group:last // group] if projection == "down_proj" else scale[first:last])
+                self._copy(values, source[:, first // 2:last // 2] if projection == down_name else source[first:last])
+                self._copy(blocks, scale[:, first // group:last // group] if projection == down_name else scale[first:last])
                 if format == "mxfp4":
                     continue
                 value = self._sources[f"{prefix}.{projection}.weight_scale_2"]
@@ -354,10 +361,10 @@ class DirectWeightLoader:
                 scales[projection] = value.item()
             if format == "mxfp4":
                 continue
-            if scales["gate_proj"] != scales["up_proj"]:
+            if scales[gate_name] != scales[up_name]:
                 raise ValueError(f"{prefix}: gate/up global scales differ")
-            globals13.append(scales["up_proj"])
-            globals2.append(scales["down_proj"])
+            globals13.append(scales[up_name])
+            globals2.append(scales[down_name])
         if activation_mode == "a4":
             if scale_vectors is None or len(scale_vectors) != 4:
                 raise ValueError("NVFP4 A4 experts require weight and activation scale vectors")

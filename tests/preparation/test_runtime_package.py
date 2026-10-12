@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from ignition.preparation.runtime_package import (
-    Allocation, Argument, Kernel, Reference, Relocation, RuntimePackage,
+    Allocation, Argument, FileSource, Kernel, Reference, Relocation, RuntimePackage,
     _external_allocations, _merge_ranges, _without_zero_ranges, _write_allocation,
 )
 
@@ -118,6 +118,15 @@ def test_declared_zero_ranges_are_not_downloaded(tmp_path):
     file = tmp_path / "mixed.bin"
     _, spans = _write_allocation(Cuda(), allocation, file)
     assert spans == [[0, 64], [256, 64]] and file.read_bytes() == bytes([13]) * 128
+
+
+def test_checkpoint_source_requires_a_complete_nonempty_file_range(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.write_bytes(b"header" + bytes(128))
+    assert FileSource(checkpoint, 6, 128).nbytes == 128
+    for offset, size in ((-1, 1), (6, 0), (6, 129)):
+        with pytest.raises(ValueError, match="within its checkpoint"):
+            FileSource(checkpoint, offset, size)
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
