@@ -356,14 +356,15 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
         identity,
         fingerprint,
         geometry,
-        layout,
+        layout: _,
         contexts,
         memory_pool,
         staging_pool,
         scanned,
     } = prepared;
     let transfers = std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
-        &contexts, geometry,
+        &contexts,
+        geometry.clone(),
     )?));
     let disk = resolved
         .directory
@@ -383,7 +384,7 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
                 identity,
                 fingerprint,
                 resolved.disk_limit,
-                layout.page_tokens,
+                geometry,
                 scanned,
                 Box::new(transport),
             )
