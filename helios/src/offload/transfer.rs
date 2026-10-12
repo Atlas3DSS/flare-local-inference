@@ -1,14 +1,19 @@
 //! Per-rank threads that move checkpoint bytes between GPU ids and host slabs.
 //!
 //! Each thread makes its rank's context current, owns one stream at the lowest
-//! priority and one event, and receives jobs naming page ids, a state slot, and
-//! slab addresses. The thread expands ids into device and host addresses from
-//! its rank's geometry and the cross-rank [`Layout`], issues batched copies of
-//! at most [`BATCH_BYTES`] and [`BATCH_ENTRIES`] per call, records its event,
-//! waits on it, and replies. A failure is reported only after the stream has
-//! been synchronized, so destination ids are quiescent when the scheduler
-//! frees them. The model stream never waits on these streams: host-observed
-//! completion orders later model work after the copies.
+//! priority and one blocking event, and receives jobs naming page ids, a state
+//! slot, and slab addresses. The thread expands ids into device and host
+//! addresses from its rank's geometry and the cross-rank [`Layout`], issues
+//! batched copies of at most [`BATCH_BYTES`] and [`BATCH_ENTRIES`] per call,
+//! records its event, sleeps until the event completes, and replies. A failure
+//! is reported only after the stream has drained, so destination ids are
+//! quiescent when the scheduler frees them. The model stream never waits on
+//! these streams: host-observed completion orders later model work after the
+//! copies.
+//!
+//! Copies within one batch execute in no defined order, so a job may not name
+//! a page id or a slab address twice: either would be two writes to one range
+//! in one direction.
 //!
 //! Descriptor arrays are sized at startup for one window and one batch and
 //! reused for every job; steady-state jobs allocate nothing on the GPU side
@@ -115,8 +120,8 @@ pub(crate) struct Descriptor {
 /// Expand a job's ids into copy descriptors for one rank: pages in job order
 /// with planes in geometry order, then the row. A unit larger than
 /// [`BATCH_BYTES`] becomes several descriptors. Ids outside the rank's
-/// capacities, a null slab address, or more than [`WINDOW_PAGES`] pages are
-/// rejected without touching the driver.
+/// capacities, a null slab address, a page id or slab address named twice, or
+/// more than [`WINDOW_PAGES`] pages are rejected without touching the driver.
 pub(crate) fn expand(
     geometry: &CacheGeometry,
     rank: &RankLayout,
@@ -137,6 +142,7 @@ pub(crate) fn expand(
             "record layout and cache geometry disagree on the plane count",
         ));
     }
+    reject_repeats(job)?;
     for (page, slab) in &job.pages {
         let id = u64::from(page.0);
         if id >= geometry.page_capacity {
@@ -173,6 +179,40 @@ pub(crate) fn expand(
         );
     }
     Ok(())
+}
+
+/// A page id or a slab address named twice would place two copies of one
+/// range in a batch whose entries execute in no defined order.
+fn reject_repeats(job: &Job) -> Result<()> {
+    for (index, (page, slab)) in job.pages.iter().enumerate() {
+        if job.pages[..index]
+            .iter()
+            .any(|(earlier, _)| earlier == page)
+        {
+            return Err(invalid(format!(
+                "transfer job {} window {} names page id {} twice",
+                job.id.0, job.window, page.0
+            )));
+        }
+        if job.pages[..index]
+            .iter()
+            .any(|(_, earlier)| earlier == slab)
+        {
+            return Err(invalid(format!(
+                "transfer job {} window {} names slab {slab:#x} twice",
+                job.id.0, job.window
+            )));
+        }
+    }
+    match job.row {
+        Some((_, row_slab)) if job.pages.iter().any(|(_, slab)| *slab == row_slab) => {
+            Err(invalid(format!(
+                "transfer job {} window {} names slab {row_slab:#x} for both a page and the row",
+                job.id.0, job.window
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn slab_address(slab: usize) -> Result<u64> {
@@ -253,7 +293,7 @@ impl RankWorker {
         layout: RankLayout,
     ) -> Result<Self> {
         let stream = Stream::open_lowest_priority(context, device)?;
-        let event = stream.event()?;
+        let event = stream.blocking_event()?;
         let chunks = |bytes: u64| bytes.div_ceil(BATCH_BYTES as u64) as usize;
         let window = geometry
             .planes
@@ -308,6 +348,14 @@ impl RankWorker {
         Ok(bytes)
     }
 
+    /// Wait for every copy issued so far, sleeping on the blocking event where
+    /// it can be recorded and spinning on the stream otherwise.
+    fn drain(&self) {
+        if self.stream.record(&self.event).is_err() || self.event.synchronize().is_err() {
+            let _ = self.stream.synchronize();
+        }
+    }
+
     fn serve(mut self, jobs: Receiver<Job>, replies: Sender<RankReply>) {
         for job in jobs {
             let (result, bytes) = match self.run(&job) {
@@ -315,7 +363,7 @@ impl RankWorker {
                 Err(error) => {
                     // Drain the stream before reporting, so destination ids
                     // are quiescent when the caller frees them.
-                    let _ = self.stream.synchronize();
+                    self.drain();
                     (Err(error), 0)
                 }
             };
@@ -330,7 +378,7 @@ impl RankWorker {
                 break;
             }
         }
-        let _ = self.stream.synchronize();
+        self.drain();
     }
 }
 
@@ -660,7 +708,7 @@ mod tests {
         assert!(expand(&ranks[0], &layout.ranks[0], &null_slab, &mut descriptors).is_err());
         let mut wide = job(Direction::Out);
         wide.pages = (0..=WINDOW_PAGES as u32)
-            .map(|id| (PageId(id), 0x10000))
+            .map(|id| (PageId(id), 0x100000 + id as usize * 0x10000))
             .collect();
         assert!(expand(&ranks[0], &layout.ranks[0], &wide, &mut descriptors).is_err());
         wide.pages.pop();
@@ -671,6 +719,32 @@ mod tests {
         empty.row = None;
         expand(&ranks[0], &layout.ranks[0], &empty, &mut descriptors).unwrap();
         assert!(descriptors.is_empty());
+    }
+
+    #[test]
+    fn expansion_rejects_repeated_page_ids_and_slabs() {
+        let ranks = [geometry(64, &[("k", 8192)], 4096)];
+        let layout = Layout::new(&ranks).unwrap();
+        let mut descriptors = Vec::new();
+        let mut check = |job: &Job| {
+            expand(&ranks[0], &layout.ranks[0], job, &mut descriptors)
+                .map_err(|error| error.to_string())
+        };
+        for direction in [Direction::Out, Direction::In] {
+            let mut repeated_id = job(direction);
+            repeated_id.pages[1].0 = repeated_id.pages[0].0;
+            let error = check(&repeated_id).unwrap_err();
+            assert!(error.contains("page id 5 twice"), "{error}");
+            let mut repeated_slab = job(direction);
+            repeated_slab.pages[1].1 = repeated_slab.pages[0].1;
+            let error = check(&repeated_slab).unwrap_err();
+            assert!(error.contains("slab 0x10000 twice"), "{error}");
+            let mut row_on_page_slab = job(direction);
+            row_on_page_slab.row = Some((StateSlotId(3), 0x20000));
+            let error = check(&row_on_page_slab).unwrap_err();
+            assert!(error.contains("both a page and the row"), "{error}");
+            check(&job(direction)).unwrap();
+        }
     }
 
     #[test]
@@ -814,6 +888,96 @@ mod tests {
             "{error}"
         );
         assert_eq!(transfers.in_flight(), 1);
+    }
+
+    /// A rank whose send fails after the pre-check counts as a failed rank
+    /// reply: the ranks that accepted the job run it and the merged reply
+    /// carries the refusal.
+    #[test]
+    fn submit_keeps_accepted_ranks_when_a_later_send_fails() {
+        let (reply_sender, receiver) = mpsc::channel();
+        let geometry = geometry(64, &[("k", 8192)], 4096);
+        let layout = Layout::new(&[geometry.clone(), geometry.clone(), geometry]).unwrap();
+        // Threads parked on a channel stand in for running workers.
+        let mut parks = Vec::new();
+        let mut spawn = || {
+            let (park, parked) = mpsc::channel::<()>();
+            parks.push(park);
+            std::thread::spawn(move || {
+                let _ = parked.recv();
+            })
+        };
+        let (accepting, accepted) = mpsc::sync_channel(QUEUE_DEPTH);
+        let (full, _full_receiver) = mpsc::sync_channel(1);
+        full.try_send(job(Direction::In)).unwrap();
+        let (disconnected, gone) = mpsc::sync_channel(1);
+        drop(gone);
+        let mut rank = |sender| RankThread {
+            sender: Some(sender),
+            thread: Some(spawn()),
+            outstanding: 0,
+        };
+        let mut transfers = Transfers {
+            layout,
+            ranks: vec![rank(accepting), rank(full), rank(disconnected)],
+            receiver,
+            pending: HashMap::new(),
+        };
+        transfers.submit(job(Direction::Out)).unwrap();
+        assert_eq!(transfers.in_flight(), 1);
+        assert_eq!(accepted.try_recv().unwrap(), job(Direction::Out));
+        assert_eq!(transfers.ranks[0].outstanding, 1);
+        assert_eq!(transfers.ranks[1].outstanding, 0);
+        let pending = &transfers.pending[&(JobId(9), 2)];
+        assert_eq!(pending.remaining, 1);
+        assert!(
+            pending
+                .error
+                .as_ref()
+                .is_some_and(|error| error.to_string().contains("rank 1")
+                    && error.to_string().contains("queue is full")),
+            "{:?}",
+            pending.error
+        );
+        let mut replies = Vec::new();
+        transfers.poll(&mut replies);
+        assert!(replies.is_empty());
+        reply_sender
+            .send(RankReply {
+                id: JobId(9),
+                window: 2,
+                rank: 0,
+                result: Ok(()),
+                bytes: 40,
+            })
+            .unwrap();
+        transfers.poll(&mut replies);
+        assert_eq!(replies.len(), 1);
+        let reply = &replies[0];
+        assert_eq!((reply.id, reply.window), (JobId(9), 2));
+        assert_eq!(reply.bytes, 40);
+        let error = reply.result.as_ref().unwrap_err().to_string();
+        assert!(
+            error.contains("rank 1") && error.contains("queue is full"),
+            "{error}"
+        );
+        assert_eq!(transfers.in_flight(), 0);
+        assert_eq!(transfers.ranks[0].outstanding, 0);
+        // Every rank refusing leaves nothing in flight and reports the refusal.
+        transfers.ranks[0].sender = Some(disconnected_sender());
+        transfers.ranks[1].sender = Some(disconnected_sender());
+        transfers.ranks[2].sender = Some(disconnected_sender());
+        let error = transfers.submit(job(Direction::Out)).unwrap_err();
+        assert!(error.to_string().contains("thread has stopped"), "{error}");
+        assert_eq!(transfers.in_flight(), 0);
+        drop(parks);
+        drop(transfers);
+    }
+
+    fn disconnected_sender() -> SyncSender<Job> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        sender
     }
 
     #[cfg(feature = "runtime-package")]
@@ -1024,7 +1188,7 @@ mod tests {
                     geometry.unit_bytes as usize,
                 );
                 assert!(
-                    actual == &wanted[..],
+                    actual == wanted,
                     "plane {} ({plane}) page {target} differs from page {source}",
                     geometry.name
                 );
@@ -1037,7 +1201,7 @@ mod tests {
             rank.row.unit_bytes as usize,
         );
         assert!(
-            actual == &wanted[..],
+            actual == wanted,
             "row {target_slot} differs from row {source_slot}"
         );
 
