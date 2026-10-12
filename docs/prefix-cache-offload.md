@@ -734,7 +734,14 @@ on the file format fixed in step 5.
 CPU tests cover steps 3 through 6, 8 through 10, 15's decision table, and
 the worker's use of the trait without a GPU. GPU tests are ignored by default
 and keyed by environment variables that locate a package, following
-`helios/src/runtime_package/event_tests.rs`.
+`helios/src/runtime_package/event_tests.rs`. Each package-backed test loads
+the whole package, so they run one at a time:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 FLARE_OFFLOAD_TEST_PACKAGE=/path/to/package.flaretensors \
+FLARE_OFFLOAD_TEST_DIR=/data/offload-tests \
+cargo test --manifest-path helios/Cargo.toml --all-features -- --ignored --test-threads=1 offload::
+```
 
 `qualify/host_cache.py` launches Flare with and without a host store and runs
 these scenarios, each with every store and transport that supports it:
