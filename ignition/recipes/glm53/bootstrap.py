@@ -223,13 +223,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             # Ranks on separate Sparks reduce and gather through one RoCEnante runtime.
             if config.context_parallel:
                 raise ValueError("GLM decode context parallelism requires every rank on one host")
-            from ignition.preparation.nccl import NcclCommunicator
-
-            collective = vocabulary_collective = create_roce_runtime(
-                group, device, max_tokens=config.token_capacity, hidden_size=4096,
+            # Decode rows reduce one-shot; prefill chunks through the pipelined two-shot path.
+            decode_tokens = max(config.request_capacity, sample_rows)
+            collective = prefill_collective = vocabulary_collective = create_roce_runtime(
+                group, device, max_tokens=decode_tokens, pipe_tokens=config.token_capacity, hidden_size=4096,
                 gather_bytes=sample_rows * (154880 // shard.world_size) * 2)
-            # Long prefill chunks reduce through NCCL's ring instead of one-shot RDMA to every peer.
-            prefill_collective = NcclCommunicator(group, device)
         elif group is not None:
             collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity,
                                                    hidden_size=4096, ipc=ipc)

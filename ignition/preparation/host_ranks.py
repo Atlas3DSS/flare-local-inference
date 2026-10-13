@@ -5,7 +5,7 @@ peer can reach, such as a DGX Spark's RoCE fabric address. A peer knocks on
 that rendezvous with its rank, the world size, its source identity, and its
 host topology. Rank zero admits every rank once and later hands each peer the
 preparation it runs. Ranks then form a Gloo group through a TCP store on rank
-zero, which collectives use to exchange their RDMA and NCCL endpoints.
+zero, which collectives use to exchange their RDMA endpoints.
 
 Every peer holds two TCP connections to rank zero. The control connection
 carries the handshake, the preparation assignment, memory reports and the serve
@@ -142,10 +142,8 @@ def interface_of(address):
 
 
 def _use_interface(address):
-    # Gloo and NCCL bind their sockets to the interface that reaches rank zero.
-    name = interface_of(address)
-    os.environ["GLOO_SOCKET_IFNAME"] = name
-    os.environ["NCCL_SOCKET_IFNAME"] = name
+    # Gloo binds its sockets to the interface that reaches rank zero.
+    os.environ["GLOO_SOCKET_IFNAME"] = interface_of(address)
 
 
 def parse_address(text):

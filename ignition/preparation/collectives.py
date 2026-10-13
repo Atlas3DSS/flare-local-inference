@@ -12,21 +12,26 @@ def host_identity():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def create_roce_runtime(group, device, *, max_tokens, hidden_size, gather_bytes):
+def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, gather_bytes):
     """Allocate RoCEnante for ranks on separate DGX Sparks: BF16 hidden reductions and logit gathers.
 
-    One runtime serves every reduction and gather in rank-serial order. Its pinned
-    region holds one slot per peer and transfer, sized for the largest operation.
+    One runtime serves every reduction and gather in rank-serial order. Reductions of up
+    to `max_tokens` rows, and at least the two-shot threshold, run one-shot: every rank
+    sends its whole payload to every peer, which is fastest for decode rows. Longer
+    reductions, up to `pipe_tokens` rows, run as a pipelined two-shot reduce-scatter and
+    all-gather, which moves a ring's bytes for prefill chunks.
     """
     from b12x.comm import roce
 
-    if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size, gather_bytes)):
+    if any(type(value) is not int or value <= 0 for value in (max_tokens, pipe_tokens, hidden_size, gather_bytes)):
         raise ValueError("RoCE capacities must be positive integers")
-    nbytes = max_tokens * hidden_size * 2
-    if nbytes % 16 or gather_bytes % 16:
+    # Below this size the runtime always reduces one-shot (b12x's two-shot threshold is 1 or 2 MiB).
+    nbytes = max(max_tokens * hidden_size * 2, 2 << 20)
+    pipe_bytes = pipe_tokens * hidden_size * 2
+    if nbytes % 16 or pipe_bytes % 16 or gather_bytes % 16:
         raise ValueError("RoCE capacities must occupy complete 16-byte packs")
-    return roce.AllReduce(exchange_group=group, device=device, max_size=nbytes, max_gather_bytes=gather_bytes)
-
+    return roce.AllReduce(exchange_group=group, device=device, max_size=nbytes, max_gather_bytes=gather_bytes,
+                          pipe_bytes=pipe_bytes)
 
 def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
     """Allocate one b12x IPC channel for the largest BF16 hidden activation.

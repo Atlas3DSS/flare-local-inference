@@ -46,16 +46,6 @@ def _fake_all_reduce(source, output, handle):
     pass
 
 
-@torch.library.custom_op("flare::nccl_all_reduce", mutates_args=("output",))
-def _nccl_all_reduce(source: torch.Tensor, output: torch.Tensor, handle: int) -> None:
-    _OWNERS[handle].runtime.all_reduce(source, output)
-
-
-@_nccl_all_reduce.register_fake
-def _fake_nccl_all_reduce(source, output, handle):
-    pass
-
-
 class PreparedAllReduce:
     """One fixed-shape reduction through an established b12x PCIe runtime.
 
@@ -77,22 +67,11 @@ class PreparedAllReduce:
             if source.shape != output.shape or source.dtype != output.dtype:
                 raise ValueError("a single-rank reduction copies its source into a matching output")
             return
-        from ignition.preparation.nccl import NcclCommunicator
-
-        if isinstance(runtime, NcclCommunicator):
-            # NCCL needs no kernel preparation; ranks enter it in the same captured order.
-            if (source.shape != output.shape or source.dtype != torch.bfloat16 or output.dtype != source.dtype
-                    or not source.is_contiguous() or not output.is_contiguous()):
-                raise ValueError("NCCL reductions require contiguous BF16 tensors of one shape")
-            self.nccl = True
-            self.handle = next(_HANDLES)
-            _OWNERS[self.handle] = self
-            return
-        self.nccl = False
         if _roce(runtime):
             if (source.shape != output.shape or source.dtype != torch.bfloat16 or output.dtype != source.dtype
                     or not source.is_contiguous() or not output.is_contiguous()
-                    or not 0 < source.numel() * 2 <= runtime.max_size or source.numel() * 2 % 16):
+                    or not 0 < source.numel() * 2 <= max(runtime.max_size, runtime.pipe_bytes)
+                    or source.numel() * 2 % 16):
                 raise ValueError("RoCE reductions require contiguous BF16 16-byte packs within the runtime's capacity")
             self.plan = _roce_plan(runtime, coordinator, "AllReduce.all_reduce")
             group = runtime._group
@@ -134,7 +113,7 @@ class PreparedAllReduce:
         if self.single:
             self.output.copy_(source)
             return self.output
-        (_nccl_all_reduce if self.nccl else _all_reduce)(source, self.output, self.handle)
+        _all_reduce(source, self.output, self.handle)
         return self.output
 
 
