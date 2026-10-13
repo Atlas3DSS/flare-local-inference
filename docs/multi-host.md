@@ -97,12 +97,13 @@ On each peer host, with ranks numbered 1 through N-1:
 Rank zero admits each rank once and plans from every rank's GPU. It sends each
 peer the checkpoint files the peer lacks, all peers at once; the first
 preparation on a new peer copies the whole checkpoint, and later ones copy
-nothing. All ranks prepare together. Rank zero compiles forwards and sends peers
-those they lack. Each peer then exports its rank and streams it over its
-connection to rank zero, which appends it to a staging file as it arrives. Rank
-zero then publishes the signed package, encrypting executables, and removes the
-staging. The package exists only on rank zero; it holds every rank and records
-the cluster's size and an export id.
+nothing. All ranks prepare together. The ranks compile each forward once, each a
+share, and receive the shares they lack from the ranks that compiled them. Each
+peer then exports its rank and streams it over its connection to rank zero,
+which appends it to a staging file as it arrives. Rank zero then publishes the
+signed package, encrypting executables, and removes the staging. The package
+exists only on rank zero; it holds every rank and records the cluster's size and
+an export id.
 
 GLM-5.3 Flash shards each page's attention context across the ranks (decode
 context parallelism), so N ranks hold about N times the KV of unsharded pages.

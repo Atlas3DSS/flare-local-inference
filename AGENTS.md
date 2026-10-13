@@ -519,14 +519,17 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   available system RAM. Recipes pass byte headroom, not hardware flags. Forward
   compilation uses memory-bounded parallel workers on both integrated and discrete
   GPUs; artifact binding starts no additional compiler pool.
-- **Compile tensor-parallel forwards on rank zero.** Pass the preparation
-  coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
-  tensors and native handles, and participate in ordered warmup and local capture.
-  Keep shard offsets and native handles in runtime bindings when they do not
-  change the computation. For distinct rank behavior, expose
-  `compilation_variants()` on the rank-zero forward and select its key through
-  `compilation_variant` on each rank. Rank zero must supply every selected variant
-  before collective warmup; peers must not retrace or compile on a binding mismatch.
+- **Compile tensor-parallel forwards once, sharded across ranks.** Pass the
+  preparation coordinator to `capture_forwards`. Each forward variant compiles on
+  one rank that selects it, from that rank's own forward, with a compiler pool
+  budgeted for its host's ranks. Ranks on one host share its cache directory;
+  ranks on other hosts receive the artifacts they lack. Every rank loads the same
+  artifacts, binds its tensors and native handles, and participates in ordered
+  warmup and local capture. Keep shard offsets and native handles in runtime
+  bindings when they do not change the computation. For distinct rank behavior,
+  select a variant key through `compilation_variant` on each rank. Every
+  selected variant must compile before collective warmup; ranks must not retrace
+  or compile on a binding mismatch.
 - **Capture zero-draft rounds as decode.** Verification width one contains only
   the pending target token. Use ordinary decode attention and direct cache updates;
   do not inherit prefill kernels, speculative staging, or draft rollback work
