@@ -54,9 +54,56 @@ impl ByteTensor {
     }
 }
 
+/// Byte ranges of a package file of `length` bytes, payload at `start`, that serving `rank` reads.
+/// Verifying stored weights reads the whole data group instead.
+fn rank_ranges(
+    index: &wire::ModelIndex,
+    rank: usize,
+    start: u64,
+    payload: u64,
+    length: u64,
+) -> Result<Vec<(u64, u64)>> {
+    let bundle = index.ranks.get(rank).ok_or_else(|| {
+        invalid(format!(
+            "rank {rank} is outside the package's {} ranks",
+            index.ranks.len()
+        ))
+    })?;
+    let index_start = start + payload;
+    let mut ranges: Vec<(u64, u64)> = bundle
+        .resources
+        .values()
+        .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
+        .chain(
+            index
+                .engram
+                .iter()
+                .flat_map(|e| &e.tables)
+                .flat_map(|t| [&t.weights, &t.scales])
+                .filter_map(Option::as_ref),
+        )
+        .map(|span| (start + span.offset, span.nbytes))
+        .chain([(0, start), (index_start, length - index_start)])
+        .filter(|&(_, nbytes)| nbytes > 0)
+        .collect();
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (offset, nbytes) in ranges {
+        match merged.last_mut() {
+            Some((first, extent)) if offset <= *first + *extent => {
+                *extent = (*extent).max(offset + nbytes - *first);
+            }
+            _ => merged.push((offset, nbytes)),
+        }
+    }
+    Ok(merged)
+}
+
 pub(super) struct Archive {
     pub path: PathBuf,
     pub start: u64,
+    /// Payload bytes after `start`; the signed index follows them to the end of the file.
+    pub payload: u64,
     pub file: Arc<File>,
     pub(super) protection: Protection,
     pub(super) accepted: bool,
@@ -107,12 +154,20 @@ impl Archive {
             Self {
                 path: PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
                 start,
+                payload,
                 file: Arc::new(file),
                 protection,
                 accepted: false,
             },
             index,
         ))
+    }
+
+    /// File byte ranges, in offset order, that a host serving `rank` of `index` reads: the header,
+    /// the signed index, that rank's bundle, and the assets and tables every rank shares.
+    pub fn rank_ranges(&self, index: &wire::ModelIndex, rank: usize) -> Result<Vec<(u64, u64)>> {
+        let length = self.file.metadata().map_err(|e| e.to_string())?.len();
+        rank_ranges(index, rank, self.start, self.payload, length)
     }
     pub fn span<'a>(&self, package: &'a Package, key: &str) -> Result<&'a wire::Span> {
         package
@@ -222,6 +277,61 @@ impl Records {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn a_rank_reads_its_bundle_and_shared_spans_only() {
+        let span = |offset, nbytes| Some(wire::Span { offset, nbytes });
+        let bundle = |offset| wire::BundleIndex {
+            resources: [(
+                "storage.bin".to_owned(),
+                wire::Span {
+                    offset,
+                    nbytes: 100,
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let index = wire::ModelIndex {
+            version: 3,
+            ranks: vec![bundle(0), bundle(4096)],
+            assets: vec![wire::Asset {
+                name: "tokenizer".into(),
+                payload: span(100, 50),
+                sha256: String::new(),
+            }],
+            engram: Some(wire::Engram {
+                tables: vec![wire::EngramTable {
+                    weights: span(8192, 1000),
+                    scales: span(9192, 8),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (start, payload, length) = (4096, 10_000, 4096 + 10_000 + 300);
+        let index_start = start + payload;
+        // Rank zero's bundle abuts the header and its tokenizer.
+        assert_eq!(
+            rank_ranges(&index, 0, start, payload, length).unwrap(),
+            vec![
+                (0, start + 150),
+                (start + 8192, 1008),
+                (index_start, length - index_start)
+            ]
+        );
+        assert_eq!(
+            rank_ranges(&index, 1, start, payload, length).unwrap(),
+            vec![
+                (0, start),
+                (start + 100, 50),
+                (start + 4096, 100),
+                (start + 8192, 1008),
+                (index_start, length - index_start)
+            ]
+        );
+        assert!(rank_ranges(&index, 2, start, payload, length).is_err());
+    }
 
     #[test]
     fn header_and_index_lengths_are_bounded_before_reading() {

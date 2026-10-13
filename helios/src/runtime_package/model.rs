@@ -146,6 +146,18 @@ pub fn package_cluster(package: &AuthorizedPackage) -> Option<(usize, String)> {
         .map(|c| (c.world as usize, c.export_id.clone()))
 }
 
+/// The byte ranges of an authorized multi-host package, in offset order, that the host serving
+/// `rank` reads. A copy holding only these, at the same offsets and length, verifies and loads as
+/// that rank unless its stored weights are verified, which reads the whole data group.
+pub fn rank_ranges(package: &AuthorizedPackage, rank: usize) -> Result<Vec<(u64, u64)>> {
+    if package.index.cluster.is_none() {
+        return Err(invalid(
+            "only a multi-host package has ranks for separate hosts",
+        ));
+    }
+    package.archive.rank_ranges(&package.index, rank)
+}
+
 impl NativeModel {
     /// # Safety
     /// All rank bundles must be trusted and obey the CUDA execution contract.

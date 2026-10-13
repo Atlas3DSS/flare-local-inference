@@ -18,7 +18,7 @@ pub mod test_support;
 pub use protection::{AuthorizedPackage, Publisher, VerifiedPackage};
 mod selection;
 mod serving;
-pub use model::{ClusterRank, NativeModel, RoceSpec, package_cluster};
+pub use model::{ClusterRank, NativeModel, RoceSpec, package_cluster, rank_ranges};
 pub use selection::LoadOptions;
 
 use std::collections::HashMap;

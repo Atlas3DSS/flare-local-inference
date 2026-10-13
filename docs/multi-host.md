@@ -22,8 +22,9 @@ ranks, and serves HTTP.
   preparation. Ranks with different sources refuse to join.
 - On rank zero, free disk for both rank staging and the signed package during
   publication: about twice the whole model (GLM-5.3 Flash NVFP4: about 360 GB).
-  Staging is removed after publication. Each peer keeps one package copy in
-  `~/.cache/flare/packages`.
+  Staging is removed after publication. Each peer keeps only its own rank's part
+  of the newest package it received, in `~/.cache/flare/packages`, or the whole
+  package when serving with `--verify-weights`.
 
 ## One-time setup: the Flare agent
 
@@ -67,7 +68,8 @@ journalctl --user -u flare-agent -n 5
 ```
 
 The agent's own executable changes only with its protocol; the ranks it runs use
-whatever executable rank zero sends.
+whatever executable rank zero sends. An agent built before peers kept only their
+rank receives whole packages; reinstall it to keep only the rank's bytes.
 
 Rank zero authenticates the package and obtains publisher acceptance before
 starting peers. Its authenticated agent request carries that accepted publisher's
@@ -107,8 +109,13 @@ On rank zero:
 Name the peer hosts in rank order (`--hosts faraday,hertz,ampere` for four
 ranks); they must be reachable at port 29900. Rank zero then:
 
-1. sends each agent its own executable and the package, unless the host already
-   holds them, into `~/.cache/flare`;
+1. sends each agent its own executable and the parts of the package that host's
+   rank reads, unless the host already holds them, into `~/.cache/flare`. The
+   copy is a sparse file of the package's length: the signed index, its rank's
+   bundle and the tables every rank shares are written, and other ranks' storage
+   takes no disk. With `--verify-weights` every peer receives the whole package,
+   since verifying stored weights reads all of them. A received package or
+   executable replaces older ones no running rank uses;
 2. starts each peer's rank with the same serving options (concurrency,
    speculation, embedding-table storage), joining rank zero's rendezvous at port
    29800 (`--rendezvous 0.0.0.0:PORT` changes it);
