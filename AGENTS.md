@@ -1,5 +1,17 @@
 # Flare design principles
 
+## Required setup and commit review
+
+On entering a clone or worktree, and after pulling changes, re-read this file and
+[the design self-review](docs/design-review.md). Before committing, ensure the
+repository's `.githooks/commit-msg` hook is enabled by following that document's
+installation instructions. Preserve any existing active hooks when installing.
+
+Before every commit, follow the staged-diff review and acknowledgment instructions
+in `docs/design-review.md`. A rejected acknowledgment requires reading that
+document and reviewing the staged change before retrying; do not treat the
+rejection as a formatting repair.
+
 Flare is a local inference server for NVIDIA SM120/SM121 GPUs. Ignition, the
 Python package in `ignition/`, prepares models with PyTorch, Transformers, and
 FlashInfer, including b12x. Its `flare_heliopause` extension is built by the
@@ -264,6 +276,18 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 
 ## Flexible recipes, reusable components, shared native machinery
 
+- Keep Helios as simple as possible. Model-specific execution behavior,
+  composition, and optimization belong in Ignition and its captured programs.
+  Limit model-specific Helios support to K/V cache management and how cache
+  storage is exposed to captured graphs, through contracts kept as general as
+  possible. Model state-update computation belongs in Ignition; native code
+  manages its declared storage without implementing per-model algorithms.
+- Introducing a captured-graph operation family requires prior explicit approval
+  from project owner Luke Alonso <lalonso@gmail.com>. Shape and capacity variants
+  of an existing family do not constitute a new type when its operation contract
+  stays unchanged. A new operation contract requires approval even if it reuses
+  an existing graph kind or enum value. A design acknowledgment does not grant
+  that approval.
 - Recipes in `ignition/recipes/` own model-specific composition, checkpoint mapping,
   state layouts, and graph preparation. They may retain canonical forwards or
   compose prepared components as the model requires.
@@ -271,9 +295,10 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   able to use components independently without adopting a rigid model framework.
   Shared/routed expert overlap, projections, collectives, and state transfers
   are examples of mechanisms that should not be copied between recipes.
-- Helios uses explicit model contracts for model-specific input packing, state
-  interpretation, and output parsing. Keep transport, scheduling, cache
-  machinery, and request handling shared rather than duplicating them per model.
+- Keep native input packing, frontend processing, transport, scheduling, cache
+  machinery, and request handling shared. Express model-dependent behavior through
+  prepared metadata and frontend assets; keep native model-specific execution
+  contracts focused on cache management and graph cache bindings.
 
 ## Python prepares; Helios serves
 

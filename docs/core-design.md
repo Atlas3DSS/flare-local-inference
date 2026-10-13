@@ -272,6 +272,15 @@ rank ownership and coordination.
 
 ### Design principles
 
+- **Helios stays minimal.** Model-specific execution behavior, composition,
+  state-update computation, and optimization belong in Ignition and its captured
+  programs. Limit model-specific Helios support to K/V cache management and how
+  cache storage is exposed to captured graphs, through contracts kept as general
+  as possible. Introducing a captured-graph operation family requires
+  prior explicit approval from project owner Luke Alonso <lalonso@gmail.com>.
+  Shape and capacity variants preserve an existing family's operation contract;
+  a new operation contract requires approval even when it reuses an existing
+  graph kind or enum value.
 - **FlashInfer supplies GPU execution.** Preparation uses FlashInfer and its
   b12x operators directly. Flare has no interchangeable kernel backend.
 - **Graphs define model execution.** Preparation resolves kernel calls,
@@ -293,9 +302,11 @@ rank ownership and coordination.
   the smallest coherent module needed to control dataflow. Reusable
   projections, experts, collectives, and state transfers belong in
   `ignition/components/`.
-- **One native lifecycle serves every model.** A model contract supplies input
-  packing, state interpretation, prompt semantics, and output parsing.
-  Transport, scheduling, cache ownership, and request handling stay shared.
+- **One native lifecycle serves every model.** Transport, scheduling, cache
+  ownership, input packing, frontend processing, and request handling stay shared.
+  Express model-dependent behavior through prepared metadata and frontend assets;
+  keep model-specific native execution contracts focused on cache management
+  and graph cache bindings.
 - **Numerical and performance requirements are separate.** State copies and
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine
