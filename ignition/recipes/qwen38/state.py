@@ -315,8 +315,6 @@ def _transfer(
             region_start = tl.load(CopyLayout + tile * 4 + 1)
             history = tl.load(CopyLayout + tile * 4 + 2)
             state_history = tl.load(CopyLayout + tile * 4 + 3)
-            if snapshot & (kind == 1):
-                read_slot = tl.load(StateRows + physical_slot * 8 + selected - 1)
             if snapshot & (kind == 2):
                 relative = offsets - region_start
                 column = (relative // 2) % state_history
@@ -601,12 +599,14 @@ def _checkpoint_pages(Pointers, Backing, Tables, Sources, Destinations, Operatio
 
 
 def checkpoint_copy_layout(layout, block=4096):
-    """Classify whole transfer tiles for selected recurrence/history normalization."""
+    """Classify whole transfer tiles for selected history normalization.
+
+    Recurrent state needs none: each round commits accepted verification records
+    into the live slot, so snapshots copy it as is.
+    """
     result = torch.zeros((triton.cdiv(layout.row_bytes, block), 4), dtype=torch.int64)
     for region in layout.regions:
-        if region.name.endswith(".recurrent"):
-            kind, history, capacity = 1, 0, 0
-        elif region.name.endswith(".convolution") or region.name == "ple_convolution":
+        if region.name.endswith(".convolution") or region.name == "ple_convolution":
             kind, history, capacity = 2, region.shape[1] - layout.speculative_tokens, region.shape[1]
         else:
             continue
@@ -653,7 +653,7 @@ class PreparedCheckpointCaches:
             previous = self.previous_accepted
             if (previous.shape != (slots,) or previous.dtype != torch.int32
                     or previous.device != pool.backing.device or not previous.is_contiguous()):
-                raise ValueError("speculative checkpoints require eight accepted columns per live slot")
+                raise ValueError("speculative checkpoints require an accepted count per live slot")
         self.operations, self.pointers = [], []
         groups = [(self.states, tuple(f"qsa.{layer}." for layer in QSA_LAYERS), False)]
         if self.draft is not None:

@@ -190,8 +190,8 @@ def transfer_case(accepted, device):
     original = backing.clone()
     launch(module._transfer, (1, 4, 1), args, device)
     assert errors.item() == 0
-    selected_slot = 3 if accepted == 1 else 6 + 2 * 7 + accepted - 2
-    assert torch.equal(backing[5, :block], original[selected_slot, :block])
+    # Recurrent state is committed into the live slot each round; snapshots copy it as is.
+    assert torch.equal(backing[5, :block], original[3, :block])
     relative = torch.arange(block, device=device)
     keep = ((relative // 2) % 10) < 3
     expected_conv = torch.where(keep, original[3, block + relative + (accepted - 1) * 2], 0)
@@ -209,7 +209,7 @@ def transfer_case(accepted, device):
 
 
 @pytest.mark.parametrize("accepted", [1, 2, 5, 8])
-def test_selected_recurrence_and_convolution_cpu(accepted):
+def test_committed_recurrence_and_selected_convolution_cpu(accepted):
     result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(accepted)],
         env=dict(os.environ, TRITON_INTERPRET="1", CUDA_VISIBLE_DEVICES=""),
         text=True, capture_output=True, timeout=60)
@@ -218,7 +218,7 @@ def test_selected_recurrence_and_convolution_cpu(accepted):
 
 @CUDA
 @pytest.mark.parametrize("accepted", [1, 2, 5, 8])
-def test_selected_recurrence_and_convolution_cuda(accepted):
+def test_committed_recurrence_and_selected_convolution_cuda(accepted):
     transfer_case(accepted, "cuda")
 
 
@@ -257,13 +257,13 @@ def test_admission_failure_does_not_reset_other_speculative_state():
     assert previous.tolist() == [8, 7, 6, 5]
 
 
-def test_actual_layout_normalization_map_covers_every_history_and_recurrent_region():
+def test_actual_layout_normalization_map_covers_every_history_region():
     for speculative in (0, 7):
         layout = module.HybridStateLayout.build(speculative_tokens=speculative)
         tiles = module.checkpoint_copy_layout(layout)
         for region in layout.regions:
-            kind = 1 if region.name.endswith(".recurrent") else (2 if
-                region.name.endswith(".convolution") or region.name == "ple_convolution" else 0)
+            # Committed recurrent state needs no normalization; histories shift by the accepted count.
+            kind = 2 if region.name.endswith(".convolution") or region.name == "ple_convolution" else 0
             begin, end = region.offset // 4096, (region.offset + region.nbytes + 4095) // 4096
             assert tiles[begin:end, 0].eq(kind).all(), region.name
             if kind == 2:

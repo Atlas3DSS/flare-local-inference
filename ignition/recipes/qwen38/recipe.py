@@ -62,9 +62,10 @@ RECIPE = Recipe(
         # The MTP module's tensors.
         draft_bytes=1_596_720_640),),
     context=262144, page_tokens=64, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    # Rounds adapt among zero through five drafts. Verification retains recurrent
-    # state for seven draft positions per request whatever the captured counts.
-    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, history_copy=True,
+    # Rounds adapt among zero through five drafts, up to seven. Verification records
+    # corrections and commits accepted tokens into the live state row, so it keeps
+    # no extra rows.
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, verification_rows=0, history_copy=True,
     ranks=MappingProxyType({
         1: _costs(122_932_224, 135_168, _GRAPH_BYTES[1], speculating=True),
         2: _costs(61_705_216, 69_632, _GRAPH_BYTES[2], speculating=True),

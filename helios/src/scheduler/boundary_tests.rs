@@ -25,6 +25,7 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
+            state_rows_per_request: None,
         },
     )
     .unwrap();

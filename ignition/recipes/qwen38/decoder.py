@@ -194,7 +194,7 @@ class PreparedDecoder:
                  stage_outputs: dict[str, torch.Tensor] | None = None,
                  max_cache_pages: int | None = None,
                  residual_output: torch.Tensor | None = None, verification: bool = False,
-                 runtime=None, vocabulary_runtime=None, coordinator=None):
+                 gdn_records=None, gdn_in_place: bool = False, runtime=None, vocabulary_runtime=None, coordinator=None):
         from ignition.components.embedding import PreparedEmbedding
         from ignition.components.linear import UnquantizedProjection
 
@@ -239,7 +239,8 @@ class PreparedDecoder:
                 attention = PreparedGDN(module.linear_attn, layer_weights.attention, source,
                     scratch.gdn, state.pool.gdn[index], state.gdn, mode=state.mode,
                     session=session, name=f"{prefix}.gdn", checkpoint_export=False,
-                    workspace=workspaces, projection_workspace=workspaces)
+                    workspace=workspaces, projection_workspace=workspaces,
+                    records=None if gdn_records is None else gdn_records[index], in_place=gdn_in_place)
             moe = PreparedQwenMoe(source, layer_weights.moe, session=session, name=f"{prefix}.moe",
                 scratch=scratch.moe, workspace=workspaces,
                 projection_workspace=workspaces)

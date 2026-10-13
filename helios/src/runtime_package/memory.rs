@@ -221,16 +221,24 @@ impl NativeModel {
         let page_tokens = self.server_config["page_tokens"]
             .as_u64()
             .ok_or_else(|| invalid("model requires physical page geometry"))?;
-        let width = packages[0]
-            .execution
-            .as_ref()
-            .unwrap()
-            .graphs
-            .iter()
-            .filter(|g| g.kind == "speculative")
-            .map(|g| g.token_capacity)
-            .max()
-            .unwrap_or(1);
+        // Each active request holds one execution state row per verified position of the
+        // widest speculative graph, unless the model declares how many rows a request holds.
+        let width = match self.server_config.get("state_rows_per_request") {
+            Some(rows) => rows
+                .as_u64()
+                .filter(|rows| (1..=8).contains(rows))
+                .ok_or_else(|| invalid("state rows per request must be 1 through 8"))?,
+            None => packages[0]
+                .execution
+                .as_ref()
+                .unwrap()
+                .graphs
+                .iter()
+                .filter(|g| g.kind == "speculative")
+                .map(|g| g.token_capacity)
+                .max()
+                .unwrap_or(1),
+        };
         let mut available = Vec::new();
         for rank in &self.ranks {
             let (free, total) = unsafe {

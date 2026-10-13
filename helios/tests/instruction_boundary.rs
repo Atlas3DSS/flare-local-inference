@@ -72,6 +72,7 @@ impl Fixture {
             speculative_fixed_width: None,
             history_drafts: false,
             speculative_proposal_source: Default::default(),
+            state_rows_per_request: None,
         };
         let compiler =
             GrammarCompiler::new(frontend.tokenizer(), 248320, &config.eos_token_ids).unwrap();

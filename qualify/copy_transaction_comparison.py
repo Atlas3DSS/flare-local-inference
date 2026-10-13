@@ -76,10 +76,11 @@ def case_plan(batch, width):
             "unexercised_clipped_emission_counts": list(range(1, width))}
 
 
-def state_column(slot, accepted, extra_base):
+def state_column(slot, accepted):
+    """Recurrent state row: rounds commit accepted tokens into the live row whatever the count."""
     if type(slot) is not int or not 0 <= slot < 4 or type(accepted) is not int or not 1 <= accepted <= 8:
         raise ValueError("physical slot and accepted-column count are out of range")
-    return slot + 1 if accepted == 1 else extra_base + slot * 7 + accepted - 2
+    return slot + 1
 
 
 def byte_equal(a, b):
@@ -151,7 +152,7 @@ def committed_state(owner, builder, slots):
     for slot in slots:
         request = builder.requests[slot]
         count, position = accepted[slot], request["consumed"]
-        recurrent_row = state_column(slot, count, owner.extra_base)
+        recurrent_row = state_column(slot, count)
         prefix = f"slot{slot}."
         metadata[str(slot)] = {"consumed": position, "accepted_column": count,
                                "recurrent_row": recurrent_row, "pages": request["pages"], "raw_anchors": {}}
@@ -289,8 +290,7 @@ class Replay:
             checks.update({"transfer." + key: value for key, value in
                 checkpoint_transfer_checks(self.owner.pool, self.owner.cache, slot=slot,
                     snapshot=operation["snapshot"], pages=request["pages"],
-                    consumed=request["consumed"], accepted=self.builder.previous[slot],
-                    extra_base=self.owner.extra_base).items()})
+                    consumed=request["consumed"], accepted=self.builder.previous[slot]).items()})
         self.commands.append({**command, "records": records, "checks": checks,
                               "allocations_before": before, "allocations_after": after})
         self.checks.update({f"command{len(self.commands) - 1}.{key}": value for key, value in checks.items()})
@@ -361,8 +361,8 @@ def run_selected_restore(model, owner, reset, fixture, plan, artifacts, result, 
     consumed = plan["positions"]["transaction"]
     source_pages = [list(builder.requests[slot]["pages"]) for slot in plan["slots"]]
     used_pages = sorted({page for pages in source_pages for page in pages[:(consumed + 63) // 64]})
-    source_rows = [row for slot in plan["slots"] for row in
-                   (slot + 1, state_column(slot, plan["width"], owner.extra_base))]
+    source_rows = sorted({row for slot in plan["slots"] for row in
+                          (slot + 1, state_column(slot, plan["width"]))})
 
     def observe(stage, slots, *, label, anchor):
         tensors, metadata, checks = committed_state(owner, builder, slots)

@@ -9,6 +9,7 @@ from ignition.components.state import gather_rows
 
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
+from .gdn_recovery import GDNLayerRecords, PreparedGDNCommit
 from .mtp import MTPScratch, PreparedMTP
 from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedCopyProposals, PreparedSpeculativeCommit,
@@ -49,6 +50,11 @@ class SpeculativePreparation:
         self.draft_rng_generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.draft_rng_offset = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.mtp_scratch = MTPScratch.allocate(prefill_capacity, requests.capacity, device, world_size=weights.shard.world_size) if proposal_source == "mtp" else None
+        # Verification records of every target GDN layer, indexed by model slot.
+        heads = next(iter(pool.gdn.values())).recurrent.shape[1] if pool.gdn else 0
+        self.gdn_records = (GDNLayerRecords.allocate(pool.gdn, requests.capacity, device,
+                                                     key_heads=heads // 3, value_heads=heads)
+                            if pool.gdn else None)
         self.owners, self.decoders, self.mtp_modules = [], [], []
 
     def buffers(self):
@@ -144,7 +150,9 @@ class PreparedSpeculativeRound:
         self.decoder = PreparedDecoder(owner.weights, scratch, self.state, owner.cache, owner.rotary,
             owner.table, owner.workspaces, owner.completion, owner.frame, owner.sequence,
             session=owner.session, name=f"{name}.target", max_cache_pages=owner.max_cache_pages,
-            residual_output=self.target_residual, verification=True, **owner.collectives)
+            residual_output=self.target_residual, verification=True,
+            gdn_records=owner.gdn_records if width > 1 else None,
+            gdn_in_place=width == 1 and owner.gdn_records is not None, **owner.collectives)
         owner.decoders.append(self.decoder)
         self.copy_only = owner.proposal_source == "copy"
         self.draft_metadata = (DraftMetadata(tokens=batch, rows=batch, context=owner.context, device=device)
@@ -208,6 +216,11 @@ class PreparedSpeculativeRound:
         self.state.prepare_commit(commit.emitted_count, commit.consumed_before,
                                   self.target_residual, self.decoder.scratch.sample_hidden)
         model_commit = tuple(self.state._commit)
+        if o.gdn_records is not None and w > 1:
+            heads = o.gdn_records.delta.shape[2]
+            model_commit += (PreparedGDNCommit(o.pool.backing,
+                {layer: state.recurrent for layer, state in o.pool.gdn.items()}, o.gdn_records, self.state.gdn,
+                commit.emitted_count, key_heads=heads // 3, value_heads=heads),)
         self.operations = (target, proposals, verify, commit, model_commit)
 
     def __call__(self):

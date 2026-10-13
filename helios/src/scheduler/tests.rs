@@ -67,6 +67,7 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
+            state_rows_per_request: None,
         },
     )
     .unwrap()
@@ -298,6 +299,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
+                state_rows_per_request: None,
             },
         )
         .unwrap();
@@ -365,6 +367,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
+                state_rows_per_request: None,
             },
         );
         assert!(matches!(
@@ -1343,6 +1346,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             patch_capacities: vec![8, 32],
         },
         draft_pages_per_request: 1,
+        state_rows_per_request: None,
     };
     let limits = SchedulerLimits {
         request_slots: 1,
@@ -1395,6 +1399,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         },
         SchedulerCapabilities {
             draft_pages_per_request: 9,
+            state_rows_per_request: None,
             ..capabilities
         },
     ] {

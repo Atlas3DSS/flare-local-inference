@@ -60,6 +60,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         speculative_fixed_width: None,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
+        state_rows_per_request: None,
     };
     let compiler = flare_helios::grammar::GrammarCompiler::new(
         frontend.tokenizer(),

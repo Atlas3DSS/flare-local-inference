@@ -61,7 +61,7 @@ def test_compare_clones_native_upload_defaults_after_reset_before_handoff(tmp_pa
     grammar = runtime.buffers["sampling_grammar_mask"]
     grammar.fill_(-1)
     initial = grammar.clone()
-    owner = SimpleNamespace(owners=[], cache={}, extra_base=9,
+    owner = SimpleNamespace(owners=[], cache={},
         pool=SimpleNamespace(backing=torch.empty((1, 0), dtype=torch.uint8),
                              layout=SimpleNamespace(regions=[], row_bytes=0)))
     builders, handoffs = [], []

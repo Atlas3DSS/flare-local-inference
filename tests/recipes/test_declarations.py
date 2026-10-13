@@ -70,7 +70,10 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     for speculation in (None, COPY):
         assert recipe.weights_bytes(checkpoint, world, speculation) == -(
             -(checkpoint.device_bytes - checkpoint.draft_bytes) // world)
-    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * 6 + 12 and recipe.live_rows(4, None) == 1 + 4 + 12
+    # Qwen commits verified tokens into the live row; GLM keeps a row per verified position.
+    verification = 0 if model is QWEN else recipe.speculation.draft_tokens
+    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * (1 + verification) + 12
+    assert recipe.live_rows(4, None) == 1 + 4 + 12
 
 
 def test_qwen_stored_bytes_match_the_cached_checkpoint():
@@ -137,8 +140,8 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     assert config.headroom_bytes == planning.HEADROOM_BYTES + (2 << 30)
     layout = HybridStateLayout.build(speculative_tokens=7, world_size=1)
     assert layout.snapshot_capacity(config.snapshot_budget_bytes) == plan.snapshots
-    # The pool holds a null row, live and speculative rows per slot, and the snapshot rows.
-    assert 1 + config.request_capacity * max(config.speculative_widths) + plan.snapshots == plan.live_rows + plan.cache_states
+    # The pool holds a null row, one live row per slot, and the snapshot rows.
+    assert 1 + config.request_capacity + plan.snapshots == plan.live_rows + plan.cache_states
 
 
 def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):

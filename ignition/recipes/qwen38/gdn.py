@@ -22,6 +22,8 @@ from ignition.preparation.scratch import ScratchArena
 from ignition.components import sm103
 from ignition.components.gdn_prefill_sm103 import PreparedGdnPrefill, PrefillBuffers
 
+from .gdn_recovery import GDNRecords, PreparedRecoveredRecurrence
+
 
 @dataclass(frozen=True)
 class GDNState(DeltaState):
@@ -140,6 +142,8 @@ class PreparedGDN:
         checkpoint_export: bool = False,
         workspace: torch.Tensor | None = None,
         projection_workspace: torch.Tensor | None = None,
+        records: GDNRecords | None = None,
+        in_place: bool = False,
     ) -> None:
         self.world_size = 48 // module.num_v_heads
         self.key_heads, self.value_heads = module.num_k_heads, module.num_v_heads
@@ -307,7 +311,16 @@ class PreparedGDN:
             "a": scratch.a,
             "b": scratch.b,
         }
-        if mode == "decode":
+        self.recovered = None
+        self.chunked = None
+        if mode == "decode" and (records is not None or in_place):
+            # Speculative verification records corrections and the round commits the accepted ones;
+            # single-token rounds advance the committed state in place.
+            self.recovered = PreparedRecoveredRecurrence(
+                mixed_qkv=scratch.convolved_qkv, a=scratch.a, b=scratch.b, A_log=module.A_log,
+                dt_bias=module.dt_bias, state=state.recurrent, metadata=metadata, output=scratch.recurrence,
+                records=records, key_heads=self.key_heads, value_heads=self.value_heads)
+        elif mode == "decode":
             caps = gdn_decode.Caps(
                 device=self.device,
                 max_tokens=self.tokens,
@@ -376,23 +389,25 @@ class PreparedGDN:
             self.recurrent_binding = binding
             self.workspace = binding.scratch
 
-        self.recurrent_binding = prepare_sequence_binding(
-            self.recurrent_plan,
-            args,
-            session=session,
-            name=f"{name}.{mode}",
-            public_bind=operation.bind,
-            workspace=workspace,
-            mode=mode,
-            set_binding=set_recurrent_binding,
-            run_options={"eps": module.norm.variance_epsilon} if mode == "decode" else None,
-        )
-        self.row_ids = torch.arange(
-            self.tokens, dtype=torch.int32, device=self.device
-        ).view(-1, 1)
-        self.inactive_rows = torch.empty(
-            (self.tokens, 1), dtype=torch.bool, device=self.device
-        )
+        if self.recovered is None and self.chunked is None:
+            self.recurrent_binding = prepare_sequence_binding(
+                self.recurrent_plan,
+                args,
+                session=session,
+                name=f"{name}.{mode}",
+                public_bind=operation.bind,
+                workspace=workspace,
+                mode=mode,
+                set_binding=set_recurrent_binding,
+                run_options={"eps": module.norm.variance_epsilon} if mode == "decode" else None,
+            )
+        if mode != "decode" or self.recovered is not None:
+            # Qwen's gated norm, fused: it rounds normalized values to BF16 before weighting.
+            self.output_norm = PreparedGatedRMSNorm(
+                scratch.recurrence.view(self.tokens, self.value_heads, 128),
+                scratch.z.view(self.tokens, self.value_heads, 128), module.norm.weight,
+                scratch.gated.view(self.tokens, self.value_heads, 128), metadata.num_tokens,
+                eps=module.norm.variance_epsilon, round_normalized=True, activation=module.norm.activation)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         scratch = self.scratch
@@ -402,7 +417,10 @@ class PreparedGDN:
         else:
             self.parallel_projections(source)
         short_conv.run(self.conv_binding)
-        if self.mode == "decode":
+        if self.recovered is not None:
+            self.recovered()
+            self.output_norm()
+        elif self.mode == "decode":
             gdn_decode.run(
                 self.recurrent_binding, eps=self.module.norm.variance_epsilon
             )

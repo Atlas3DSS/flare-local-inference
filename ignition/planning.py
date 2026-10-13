@@ -15,9 +15,13 @@ from pathlib import Path
 from ignition.errors import CapacityError, UsageError
 from ignition.recipes.declaration import Checkpoint, Recipe, Speculation
 
-# Preparation headroom covers compiled warm-up and graph capture, measured at
-# 0.83 GiB for one Qwen rank. Helios sizes its caches after graph upload with a
-# separate driver margin. Graphs, scratch, and the CUDA context are planned separately.
+# Free memory kept after the final KV allocation during preparation. Headroom
+# covers the transient working memory of compiled warm-up and graph capture,
+# measured at 0.83 GiB for one Qwen rank with 4096-token prefill chunks. Part of
+# it holds chunk activations, so chunk tokens past 4096 add HEADROOM_CHUNK_TOKEN_BYTES
+# each (8192-token chunks need about 1.3 GiB on GB300). Helios sizes its caches
+# after graph upload with a separate driver margin. Graphs, scratch, and the CUDA
+# context are planned separately.
 HEADROOM_BYTES = 1 << 30
 HEADROOM_CHUNK_TOKENS = 4096
 HEADROOM_CHUNK_TOKEN_BYTES = 128 << 10
@@ -254,7 +258,8 @@ class Plan:
 
 
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
-        speculation: Speculation | None, prefill_chunk: int | None = None, context_parallel: bool = True) -> Plan:
+        speculation: Speculation | None, prefill_chunk: int | None = None,
+        context_parallel: bool = True) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from

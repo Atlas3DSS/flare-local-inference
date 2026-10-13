@@ -127,7 +127,7 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     regions = {"target_residual": torch.zeros((5, 10240), dtype=torch.bfloat16),
                "target_residual_position": torch.zeros((5, 3), dtype=torch.int64)}
     pool = SimpleNamespace(backing=torch.zeros(1, dtype=torch.uint8), region=regions.__getitem__,
-                           rope_delta=torch.zeros((5, 1), dtype=torch.int64))
+                           rope_delta=torch.zeros((5, 1), dtype=torch.int64), gdn={})
     inputs = SimpleNamespace(row_slot_ids=slots, row_generations=epochs, live_rows=live,
         query_lengths=torch.full((batch,), width, dtype=torch.int32),
         request_state_rows=torch.arange(1, 5)[:, None].expand(4, 8).clone())

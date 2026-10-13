@@ -298,4 +298,9 @@ def test_gpu_lists_and_restrictions():
     for text in ("7", "GPU-", "1,1", "GPU-9"):
         with pytest.raises(UsageError):
             planning.restrict_gpus(gpus, text)
+def test_unified_memory_gpus_plan_from_their_reported_free_memory():
+    # The PLE table reaches the GPU through compact row delivery, so no mapped table is subtracted.
     discrete, unified = derive(gpus=(gpu(0, 95),)), derive(gpus=(spark(0, 95),))
+    assert discrete.free_bytes == unified.free_bytes == 95 * GIB
+
+

@@ -1500,6 +1500,8 @@ mod tests {
                 },
 
                 draft_pages_per_request: 1,
+
+                state_rows_per_request: None,
             },
         )
         .unwrap();
@@ -1618,6 +1620,8 @@ mod tests {
                 vision: Qwen4Exp::metadata().vision,
 
                 draft_pages_per_request: 0,
+
+                state_rows_per_request: None,
             },
         )
         .unwrap()
@@ -2108,6 +2112,8 @@ mod tests {
                 },
 
                 draft_pages_per_request: 1,
+
+                state_rows_per_request: None,
             },
         )
         .unwrap();

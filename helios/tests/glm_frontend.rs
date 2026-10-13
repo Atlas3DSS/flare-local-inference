@@ -55,6 +55,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         speculative_fixed_width: None,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
+        state_rows_per_request: None,
     };
     let compiler =
         GrammarCompiler::new(frontend.tokenizer(), 154880, &config.eos_token_ids).unwrap();

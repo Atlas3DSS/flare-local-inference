@@ -382,7 +382,8 @@ class ForwardCache:
         from .compile_pool import single_process_compilation
 
         # Compiler workers own parallel compilation; artifact binding needs no second worker pool.
-        with self._publication_lock(coordinator), torch._inductor.config.patch(compile_threads=1):
+        with self._publication_lock(coordinator), torch._inductor.config.patch(compile_threads=1), (
+                single_process_compilation() if self.unified_memory else nullcontext()):
             return self._prepare_many(functions, signatures, progress=progress,
                                       coordinator=coordinator, materialize=materialize)
 

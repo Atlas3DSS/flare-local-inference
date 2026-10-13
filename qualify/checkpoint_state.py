@@ -11,8 +11,7 @@ def _equal(left, right):
                             right.contiguous().reshape(-1).view(torch.uint8)))
 
 
-def checkpoint_transfer_checks(pool, caches, *, slot, snapshot, pages, consumed,
-                               accepted=1, extra_base=None):
+def checkpoint_transfer_checks(pool, caches, *, slot, snapshot, pages, consumed, accepted=1):
     """Compare committed live state with its normalized immutable snapshot.
 
     The same comparison applies after Snapshot and Restore. Callers separately
@@ -26,10 +25,9 @@ def checkpoint_transfer_checks(pool, caches, *, slot, snapshot, pages, consumed,
             or type(consumed) is not int or consumed <= 0
             or type(accepted) is not int or not 1 <= accepted <= 8):
         raise ValueError("checkpoint transfer requires valid slots, endpoint, and accepted count")
-    if accepted > 1 and extra_base is None:
-        raise ValueError("speculative checkpoint requires its recurrent-column base")
+    # Rounds commit accepted recurrent state into the live row; histories keep accepted columns.
     live, frozen = slot + 1, 5 + snapshot
-    recurrent = live if accepted == 1 else extra_base + slot * 7 + accepted - 2
+    recurrent = live
     checks = {}
     for layer, state in pool.gdn.items():
         name = f"gdn.{layer}."

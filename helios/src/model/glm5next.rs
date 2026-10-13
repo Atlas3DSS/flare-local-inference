@@ -64,6 +64,7 @@ impl ModelContract for Glm5Next {
             vision: config.contract.vision.clone(),
 
             draft_pages_per_request: usize::from(config.has_learned_drafts()),
+            state_rows_per_request: config.state_rows_per_request,
         }
     }
 
