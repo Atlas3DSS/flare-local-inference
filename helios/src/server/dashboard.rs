@@ -265,7 +265,13 @@ fn render_pane(
         Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
         area,
     );
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    render_header(frame, title, history, rows[0]);
     let tab = |name, active| {
         Span::styled(
             name,
@@ -286,17 +292,13 @@ fn render_pane(
             Span::raw(" "),
             tab(" Scheduler ", pane == Pane::Scheduler),
         ])),
-        rows[0],
+        rows[1],
     );
     match pane {
-        Pane::Overview => render_overview(frame, title, history, rows[1]),
-        Pane::Scheduler => scheduler.render(
-            frame,
-            rows[1],
-            title,
-            history.snapshot,
-            &metrics.scheduler_trace,
-        ),
+        Pane::Overview => render_overview(frame, history, rows[2]),
+        Pane::Scheduler => {
+            scheduler.render(frame, rows[2], history.snapshot, &metrics.scheduler_trace)
+        }
     }
 }
 
@@ -386,43 +388,8 @@ fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-fn render_overview(frame: &mut Frame, title: &str, history: &History, area: Rect) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
-        area,
-    );
+fn render_header(frame: &mut Frame, title: &str, history: &History, area: Rect) {
     let s = history.snapshot;
-    let r = history.rates;
-    let acceptance = r
-        .acceptance
-        .map_or_else(|| "—".into(), |v| format!("{v:.2}"));
-    let depth = r.depth.map_or_else(|| "—".into(), |v| format!("{v:.2}"));
-    if area.width < 64 || area.height < 22 {
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(" FLARE / HELIOS")
-                    .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-                Line::from(format!(" {title}")),
-                Line::from(format!(" Prefill      {} tok/s", rate(r.prefill))),
-                Line::from(format!(" Generation   {} tok/s", rate(r.generated))),
-                Line::from(format!(" Verify       {} steps/s", rate(r.verify))),
-                Line::from(format!(" Acceptance   {acceptance} drafts/round")),
-                Line::from(format!(" Verify depth {depth} drafts/step")),
-                Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
-                Line::from(" Enlarge terminal for history plots.")
-                    .style(Style::default().fg(MUTED)),
-            ]),
-            area,
-        );
-        return;
-    }
-    let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(8),
-        Constraint::Min(8),
-        Constraint::Length(3),
-    ])
-    .split(area);
     let age = history.points.back().map_or(0, |(t, _)| *t as u64);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -448,12 +415,47 @@ fn render_overview(frame: &mut Frame, title: &str, history: &History, area: Rect
             ),
             Span::styled(format!("    {title}"), Style::default().fg(MUTED)),
         ])),
-        rows[0],
+        area,
     );
+}
+
+fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
+        area,
+    );
+    let s = history.snapshot;
+    let r = history.rates;
+    let acceptance = r
+        .acceptance
+        .map_or_else(|| "—".into(), |v| format!("{v:.2}"));
+    let depth = r.depth.map_or_else(|| "—".into(), |v| format!("{v:.2}"));
+    if area.width < 64 || area.height < 22 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(format!(" Prefill      {} tok/s", rate(r.prefill))),
+                Line::from(format!(" Generation   {} tok/s", rate(r.generated))),
+                Line::from(format!(" Verify       {} steps/s", rate(r.verify))),
+                Line::from(format!(" Acceptance   {acceptance} drafts/round")),
+                Line::from(format!(" Verify depth {depth} drafts/step")),
+                Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
+                Line::from(" Enlarge terminal for history plots.")
+                    .style(Style::default().fg(MUTED)),
+            ]),
+            area,
+        );
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Min(8),
+        Constraint::Min(8),
+        Constraint::Length(3),
+    ])
+    .split(area);
     let top =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
     let bottom =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[2]);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
     plot(
         frame,
         top[0],
@@ -507,7 +509,7 @@ fn render_overview(frame: &mut Frame, title: &str, history: &History, area: Rect
             ))
             .style(Style::default().fg(MUTED)),
         ]),
-        rows[3],
+        rows[2],
     );
 }
 
@@ -577,6 +579,35 @@ fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, series: &
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn panes_share_one_status_header_above_navigation() {
+        let start = Instant::now();
+        let mut history = History::new(start, Snapshot::default());
+        history.sample(start + Duration::from_secs(23), Snapshot::default());
+        let metrics = Metrics::default();
+        let scheduler = scheduler::SchedulerView::default();
+        let title = "deepseek-ai/DeepSeek-V4.1-Flash · 127.0.0.1:8001";
+        let mut headers = Vec::new();
+        for pane in [Pane::Overview, Pane::Scheduler] {
+            let mut terminal = Terminal::new(TestBackend::new(150, 35)).unwrap();
+            terminal
+                .draw(|frame| render_pane(frame, title, &history, &scheduler, &metrics, pane))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let lines: Vec<String> = buffer
+                .content
+                .chunks(150)
+                .map(|line| line.iter().map(|cell| cell.symbol()).collect())
+                .collect();
+            assert!(lines[0].contains("FLARE  / HELIOS  ● READY    00:00:23"));
+            assert!(lines[0].contains(title));
+            assert!(lines[1].contains("Overview") && lines[1].contains("Scheduler"));
+            assert_eq!(lines.join("\n").matches(title).count(), 1);
+            headers.push(lines[0].clone());
+        }
+        assert_eq!(headers[0], headers[1]);
+    }
 
     #[test]
     fn arrows_switch_panes_without_treating_key_release_as_another_press() {
@@ -696,9 +727,7 @@ mod tests {
         for (width, height) in [(120, 35), (80, 24), (40, 12), (1, 1), (0, 0)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| {
-                    render_overview(frame, "Qwen · 127.0.0.1:8000", &history, frame.area())
-                })
+                .draw(|frame| render_overview(frame, &history, frame.area()))
                 .unwrap();
             let content: String = terminal
                 .backend()

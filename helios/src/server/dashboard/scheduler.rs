@@ -180,13 +180,12 @@ impl SchedulerView {
         &self,
         frame: &mut Frame,
         area: Rect,
-        title: &str,
         snapshot: Snapshot,
         metrics: &SchedulerMetrics,
     ) {
         let catalog = metrics.catalog.get().map_or(&[][..], Vec::as_slice);
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Percentage(42),
             Constraint::Min(4),
             Constraint::Length(2),
@@ -215,8 +214,6 @@ impl SchedulerView {
         );
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(format!(" SCHEDULER  {title}"))
-                    .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                 Line::from(format!(
                     " ACTIVE {}   QUEUED {}   IN FLIGHT {}   state age {:.1}s",
                     snapshot.active,
