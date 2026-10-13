@@ -78,6 +78,10 @@ class RecurrentBenchmarkInputs:
         self.state_name = "conv_state" if "conv_state" in original else "recurrent_state"
         self.output_name = "out" if "out" in original else "output"
         immutable = {"A_log", "dt_bias", "norm_weight", "conv_weight"}
+        # Verification records are transient scratch the trials may share with serving.
+        immutable |= {"correction_cache", "kg_cache"}
+        # Recording verification reads one live row per sequence instead of a checkpoint per column.
+        self.recording = "correction_cache" in original
         self.packed_source, packed_views = _packed_qkv(original) if "q" in original else (None, {})
         self.args = {}
         for name, value in original.items():
@@ -97,8 +101,9 @@ class RecurrentBenchmarkInputs:
         quotient, remainder = divmod(self.tokens, self.live_sequences)
         self.lengths = tuple(quotient + (index < remainder) for index in range(self.live_sequences))
         columns = original["state_indices"].shape[1] if "state_indices" in original else 1
-        self.live_slots = tuple(1 + index * columns for index in range(self.live_sequences))
-        self.state_rows = self.live_sequences * columns + 1
+        rows = 1 if self.recording else columns
+        self.live_slots = tuple(1 + index * rows for index in range(self.live_sequences))
+        self.state_rows = self.live_sequences * rows + 1
         if mode == "prefill" and "checkpoint_state_indices" in original:
             self.state_rows += self.live_sequences
         if self.state_rows > self.state.shape[0]:
@@ -147,7 +152,8 @@ class RecurrentBenchmarkInputs:
                 a["state_slot_ids"][row] = self.live_slots[row]
             if "state_indices" in a:
                 for column in range(columns):
-                    a["state_indices"][row, column] = self.live_slots[row] + column
+                    a["state_indices"][row, column] = (0 if self.recording and column
+                                                       else self.live_slots[row] + column)
             if "final_state_indices" in a:
                 a["final_state_indices"][row] = self.live_slots[row]
             if "checkpoint_offsets" in a:
