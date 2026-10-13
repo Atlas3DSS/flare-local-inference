@@ -72,8 +72,7 @@ class PreparedAllReduce:
         return self.output
 
 
-@torch.library.custom_op("flare::pcie_all_gather", mutates_args=("output",))
-def _all_gather(source: torch.Tensor, output: torch.Tensor, handle: int) -> None:
+def _gather_columns(source, output, handle):
     owner = _OWNERS[handle]
     runtime = owner.runtime
     runtime.all_gather_heads(
@@ -82,9 +81,16 @@ def _all_gather(source: torch.Tensor, output: torch.Tensor, handle: int) -> None
         plan=owner.plan)
 
 
+@torch.library.custom_op("flare::pcie_all_gather", mutates_args=("output",))
+def _all_gather(source: torch.Tensor, output: torch.Tensor, handle: int) -> None:
+    _gather_columns(source, output, handle)
+
+
 @_all_gather.register_fake
 def _fake_all_gather(source, output, handle):
     pass
+
+
 
 
 class PreparedAllGather:
@@ -121,6 +127,11 @@ class PreparedAllGather:
 
     def __call__(self, source):
         _all_gather(source, self.output, self.handle)
+        return self.output
+
+    def run_eager(self, source):
+        """Gather on the current stream from inside another eager operation."""
+        _gather_columns(source, self.output, self.handle)
         return self.output
 
 

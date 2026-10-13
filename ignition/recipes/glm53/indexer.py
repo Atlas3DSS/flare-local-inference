@@ -54,10 +54,8 @@ class IndexScratch:
     query: torch.Tensor
     query_fp8: torch.Tensor
     query_scales: torch.Tensor
-    key: torch.Tensor
     normalized_key: torch.Tensor
     gate: torch.Tensor
-    projected_weights: torch.Tensor
     weights: torch.Tensor
     pool_lengths: torch.Tensor
     active_width: torch.Tensor
@@ -78,7 +76,7 @@ class IndexScratch:
         def tensor(width, dtype=torch.bfloat16):
             return torch.zeros((tokens, width), dtype=dtype, device=device)
         return cls(tensor(4096), tensor(4096, torch.float8_e4m3fn), tensor(32, torch.float32),
-            tensor(128), tensor(128), tensor(128), tensor(32), tensor(32, torch.float32),
+            tensor(128), tensor(128), tensor(32, torch.float32),
             torch.zeros(tokens, dtype=torch.int32, device=device),
             torch.tensor([blocks * 64], dtype=torch.int32, device=device), tensor(512, torch.int32),
             tensor(2051, torch.int32), torch.zeros(tokens, dtype=torch.int32, device=device),
@@ -99,8 +97,7 @@ class IndexScratch:
         if sequences > self.page_table.shape[0]:
             raise ValueError("GLM index request rows exceed page-table capacity")
         return IndexScratch(self.query[:tokens], self.query_fp8[:tokens], self.query_scales[:tokens],
-            self.key[:tokens], self.normalized_key[:tokens], self.gate[:tokens],
-            self.projected_weights[:tokens], self.weights[:tokens], self.pool_lengths[:tokens],
+            self.normalized_key[:tokens], self.gate[:tokens], self.weights[:tokens], self.pool_lengths[:tokens],
             self.active_width, self.pools[:tokens], self.physical[:tokens], self.selected_lengths[:tokens],
             self.page_table[:sequences], self.scores[:tokens], self.candidates[:tokens], self.gathered[:tokens],
             self.global_pools[:tokens])
@@ -116,7 +113,7 @@ class PreparedGlmIndexer:
     layers. Returned physical indices address a latent cache of 64-record pages.
     """
 
-    def __init__(self, module, weights, source, query_residual, scratch: IndexScratch,
+    def __init__(self, module, weights, source, query_residual, key_input, weight_input, scratch: IndexScratch,
                  state: IndexState, metadata: IndexMetadata, *, mode, session, name, workspace,
                  max_cache_pages=None, context=None):
         rows = source.shape[0]
@@ -134,18 +131,20 @@ class PreparedGlmIndexer:
             raise ValueError("GLM index scratch and metadata capacities differ")
         self.module, self.scratch, self.state, self.metadata, self.mode = module, scratch, state, metadata, mode
         self.context = context
+        # Layers of one forward share index scratch and metadata; only the first fills the selection tables.
+        self.prepares_tables = True
         if context is not None and scratch.gathered.shape != (rows, context.shards.world * 512, 2):
             raise ValueError("GLM context-parallel selection requires candidate scratch for every row")
+        # The index key and head weights arrive as columns of the layer's fused input projection.
+        if key_input.shape != (rows, 128) or weight_input.shape != (rows, 32):
+            raise ValueError("GLM index key and weight inputs require [rows, 128] and [rows, 32] projections")
         self.source, self.query_residual = source, query_residual
+        self.key_input, self.weight_input = key_input, weight_input
         module.k_norm.weight = torch.nn.Parameter(weights["indexer.k_norm.weight"], requires_grad=False)
         module.k_norm.bias = torch.nn.Parameter(weights["indexer.k_norm.bias"], requires_grad=False)
         self.ape = weights["indexer.index_kpool_compress_ape"]
         self.query_projection = QuantizedProjection(query_residual, weights["indexer.wq_b"], scratch.query,
             session=session, name=f"{name}.query", workspace=workspace, activation_mode="auto")
-        self.key_projection = QuantizedProjection(source, weights["indexer.wk"], scratch.key,
-            session=session, name=f"{name}.key", workspace=workspace, activation_mode="auto")
-        self.weight_projection = QuantizedProjection(source, weights["indexer.weights_proj"], scratch.projected_weights,
-            session=session, name=f"{name}.weights", workspace=workspace, activation_mode="auto")
         self.gate_projection = UnquantizedProjection(source, weights["indexer.index_kpool_compress_gate"], scratch.gate,
             session=session, name=f"{name}.gate")
         self.query_arguments = (scratch.query.view(-1, 128), scratch.query_fp8.view(-1, 128),
@@ -202,34 +201,35 @@ class PreparedGlmIndexer:
     def __call__(self):
         s, m = self.scratch, self.metadata
         self.query_projection(self.query_residual)
-        s.normalized_key.copy_(self.module.k_norm(self.key_projection(self.source)))
+        s.normalized_key.copy_(self.module.k_norm(self.key_input))
         self.gate_projection(self.source)
-        s.weights.copy_(self.weight_projection(self.source))
+        s.weights.copy_(self.weight_input)
         glm_pool.quantize_queries(*self.query_arguments, plan=self.query_plan)
         glm_pool.update_pools(*self.pool_arguments, plan=self.pool_plan)
-        pools = (m.positions + 1) // 4
-        s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
-        if self.mode == "prefill":
-            s.page_table.copy_(m.block_table)
-        else:
-            s.page_table.copy_(m.block_table[m.requests.long()])
+        if self.prepares_tables:
+            pools = (m.positions + 1) // 4
+            s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
+            if self.mode == "prefill":
+                s.page_table.copy_(m.block_table)
+            else:
+                s.page_table.copy_(m.block_table[m.requests.long()])
         for selector in self.selectors:
             selector()
         if self.context is None:
             sparse_mla.expand_pooled_topk_to_physical_slots(*self.expand_arguments,
                 **self.expand_options, plan=self.expand_plan)
             return s.physical
-        from .dcp import expand_local, expand_tokens, merge_candidates, pack_candidates
+        from .dcp import expand_tokens, merge_candidates, merge_expand_local, pack_candidates
 
         # Every rank merges identical global candidates, then keeps the records it owns.
         pack_candidates(s.pools, s.scores, s.candidates, self.context.shards)
         for gather, (start, end) in zip(self.gathers, self.context.slices(s.pools.shape[0]), strict=True):
             gather(s.candidates[start:end].view(torch.bfloat16).view(end - start, -1))
-        merge_candidates(s.gathered, s.global_pools)
         if self.mode == "prefill":
             # Prefill attends over gathered context blocks addressed by global position.
+            merge_candidates(s.gathered, s.global_pools)
             expand_tokens(s.global_pools, m.positions, s.physical, s.selected_lengths)
         else:
-            expand_local(s.global_pools, m.positions, m.requests, m.block_table, s.physical, s.selected_lengths,
-                         self.context.shards)
+            merge_expand_local(s.gathered, s.global_pools, m.positions, m.requests, m.block_table, s.physical,
+                               s.selected_lengths, self.context.shards)
         return s.physical

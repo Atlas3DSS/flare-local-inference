@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from ignition.components.linear import QuantizedProjection
+
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.compilation import compile_forward
@@ -55,11 +57,17 @@ def test_glm_indexer_checkpoint_native_replay(model_weights, mode, rows):
             workload_schema="glm-indexer-layer-v1", numerical_policy="default") as session:
         try:
             session.register_scratch(arena)
-            indexer = PreparedGlmIndexer(module, weights, source, query_residual, scratch, state, metadata,
+            # The index key and head weights are columns of the layer's fused input projection.
+            projected = torch.zeros((rows, 2208), dtype=torch.bfloat16, device=device)
+            projection = QuantizedProjection(source, weights["qkv_a_proj"], projected, session=session,
+                name="qkv_a_proj", workspace=arena, activation_mode="auto")
+            indexer = PreparedGlmIndexer(module, weights, source, query_residual, projected[:, 2048:2176],
+                projected[:, 2176:2208], scratch, state, metadata,
                 mode=mode, session=session, name="indexer", workspace=arena)
             session.tune()
 
             def forward():
+                projection(source)
                 indexer()
                 arena.tensor.fill_(255)
 

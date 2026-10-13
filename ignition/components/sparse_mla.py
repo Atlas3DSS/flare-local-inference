@@ -81,3 +81,13 @@ class PreparedSparseMLA:
         else:
             self.output.copy_(result)
         return self.output
+
+    def attend_in_scratch(self):
+        """Attend without copying out: the output (and LSE) alias arena scratch at fixed addresses.
+
+        The caller must consume them before the next operator that uses the arena.
+        """
+        result = sparse_mla.run(self.binding)
+        if isinstance(result, tuple):
+            return result if self.lse is not None else (result[0], None)
+        return result, None
