@@ -7,7 +7,9 @@ from b12x.attention import dsa_indexer, sparse_mla
 from b12x.attention.dsa_indexer import glm_pool
 from b12x.preparation import PreparedCall
 
+from ignition.components import sm103
 from ignition.components.indexer import PreparedSparseIndexer
+from ignition.components.indexer_sm103 import Sm103SparseIndexer
 from ignition.components.linear import QuantizedProjection, UnquantizedProjection
 from ignition.preparation.tuning import declare
 
@@ -162,10 +164,13 @@ class PreparedGlmIndexer:
         page_table = scratch.page_table.expand(rows, -1) if mode == "prefill" else scratch.page_table
         # Prefill selection scratch grows with query rows (about 140 KB each), so long chunks select in slices.
         step = _SELECT_ROWS if mode == "prefill" else rows
-        caps = dsa_indexer.Caps(device=source.device, num_q_heads=32, max_q_rows=min(rows, step),
+        # SM103 selects through FlashInfer's paged FP8 logits and top-k; b12x's indexer serves SM120/SM121.
+        selector = Sm103SparseIndexer if sm103.is_sm103(source.device) else PreparedSparseIndexer
+        caps = None if selector is Sm103SparseIndexer else dsa_indexer.Caps(device=source.device, num_q_heads=32,
+            max_q_rows=min(rows, step),
             max_page_table_width=page_table.shape[1], topk=512, mode=mode)
         cache = state.cache.view(state.cache.shape[0], -1)
-        self.selectors = tuple(PreparedSparseIndexer(scratch.query_fp8[start:end].view(end - start, 32, 128),
+        self.selectors = tuple(selector(scratch.query_fp8[start:end].view(end - start, 32, 128),
             scratch.weights[start:end], cache, page_table[start:end], scratch.pool_lengths[start:end],
             scratch.active_width, scratch.pools[start:end], caps=caps, session=session,
             name=f"{name}.select" if end - start == rows else f"{name}.select{start}", workspace=workspace,
@@ -180,8 +185,12 @@ class PreparedGlmIndexer:
                 scratch.gathered[start:end].view(torch.bfloat16).view(-1, 2 * columns * world),
                 runtime=context.candidates, session=session, coordinator=context.coordinator,
                 name=f"{name}.candidates{start}") for start, end in context.slices(rows))
+        # SM103 prefill attends over a slab of the request's context, so it selects positions, not records.
+        self.logical = context is None and mode == "prefill" and sm103.is_sm103(source.device)
         self.expand_arguments = (scratch.pools, metadata.positions, metadata.requests,
                                  metadata.block_table, scratch.physical, scratch.selected_lengths)
+        if self.logical:
+            return
         self.expand_options = {"pool_size": 4, "block_size": 256, "block_stride_rows": 256,
                                "num_cache_blocks": state.cache.shape[0]}
         self.expand_plan = sparse_mla.plan_pooled_selection(device=source.device, max_rows=rows,
@@ -196,7 +205,8 @@ class PreparedGlmIndexer:
         self.pool_arguments = (cache, *self.pool_arguments[1:])
         for selector in self.selectors:
             selector.rebind_cache(cache.view(cache.shape[0], -1))
-        self.expand_options["num_cache_blocks"] = cache.shape[0]
+        if not self.logical:
+            self.expand_options["num_cache_blocks"] = cache.shape[0]
 
     def __call__(self):
         s, m = self.scratch, self.metadata
@@ -215,6 +225,11 @@ class PreparedGlmIndexer:
                 s.page_table.copy_(m.block_table[m.requests.long()])
         for selector in self.selectors:
             selector()
+        if self.logical:
+            from .dcp import expand_tokens
+
+            expand_tokens(s.pools, m.positions, s.physical, s.selected_lengths)
+            return s.physical
         if self.context is None:
             sparse_mla.expand_pooled_topk_to_physical_slots(*self.expand_arguments,
                 **self.expand_options, plan=self.expand_plan)

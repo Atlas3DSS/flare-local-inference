@@ -9,7 +9,9 @@ from b12x.attention import sparse_mla
 from flashinfer.triton.norm import rms_norm
 
 from ignition.components.linear import BatchedQuantizedProjection, QuantizedProjection
+from ignition.components import sm103
 from ignition.components.sparse_mla import PreparedLatentCacheWriter, PreparedSparseMLA
+from ignition.components.sparse_mla_sm103 import Sm103PrefillSparseMLA, Sm103SparseMLA
 from ignition.preparation.tuning import register_finalizer
 
 from .indexer import IndexMetadata, IndexScratch, IndexState, PreparedGlmIndexer
@@ -144,10 +146,10 @@ class QueryChain:
             self.workspace = torch.empty((nbytes + 255) // 256 * 256, dtype=torch.uint8, device=self.source.device)
 
     def run(self, source, workspace):
-        from b12x.gemm.blockscaled._ops import _out_workspace
+        from ignition.components.sm103_projection import packed_out_workspace
 
-        _out_workspace(source, self.values, self.scales, None, None, self.projection.output, workspace, "none",
-                       None, self.projection.plan.handle, "any")
+        packed_out_workspace(source, self.values, self.scales, None, None, self.projection.output, workspace, "none",
+                             None, self.projection.plan.handle, "any")
         rows = self.absorbed.shape[0]
         self.absorb(self.query[:rows].transpose(0, 1))
         if self.gather is not None:
@@ -226,8 +228,18 @@ class PreparedGlmMLA:
             model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528,
             mode="decode" if mode == "decode" else "extend",
             **({} if context is None else {"return_lse": True, "lse_scale": "natural"}))
+        self.end = None
+        if context is None and mode == "prefill" and sm103.is_sm103(source.device):
+            # SM103 prefill dequantizes the request's records into a slab and attends to selected positions.
+            self.end = torch.zeros(1, dtype=torch.int64, device=source.device)
+            self.attention = Sm103PrefillSparseMLA(scratch.absorbed_query, state.cache, scratch.index.physical,
+                scratch.index.selected_lengths, metadata.block_table[0], self.end, scratch.attended, caps=caps,
+                session=session, name=f"{name}.attention", workspace=workspace)
+            return
         if context is None:
-            self.attention = PreparedSparseMLA(scratch.absorbed_query, state.cache, scratch.index.physical,
+            # SM103 decode attends through Triton or Cake; b12x's sparse MLA serves SM120/SM121.
+            attend = Sm103SparseMLA if sm103.is_sm103(source.device) else PreparedSparseMLA
+            self.attention = attend(scratch.absorbed_query, state.cache, scratch.index.physical,
                 scratch.visible, scratch.index.selected_lengths, scratch.attended, caps=caps,
                 session=session, name=f"{name}.attention", workspace=workspace)
             if mode != "prefill":
@@ -333,6 +345,8 @@ class PreparedGlmMLA:
         self.indexer()
         if self.context is None:
             s.visible.copy_(self.metadata.positions + 1)
+            if self.end is not None:
+                self.end.copy_(self.metadata.positions.max().reshape(1) + 1)
             if chain is not None:
                 chain.finish()
             # The expansion BMM uses no arena scratch, so it reads the attention output in place.
