@@ -79,9 +79,12 @@ _COMMIT_HANDLES = itertools.count()
 
 
 class PreparedKDACommit:
-    """Replay each request's accepted verification records into its live KDA rows, for every layer."""
+    """Replay each request's accepted verification records into its live KDA rows, for every layer.
 
-    def __init__(self, pool, records, plan, state_indices, *, session, workspace):
+    Without a b12x recording plan (SM103), a Triton launch replays the records.
+    """
+
+    def __init__(self, pool, records, plan, state_indices, num_seqs, *, session, workspace):
         layers = delta_layers(pool)
         if tuple(layers) != records.layers:
             raise ValueError("KDA commit requires records for every KDA layer")
@@ -90,6 +93,12 @@ class PreparedKDACommit:
         self.pool, self.plan, self.workspace = pool, plan, workspace
         self.sources = state_indices
         self.lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+        self.replay = None
+        if plan is None:
+            from .kda_recovery import PreparedKDAReplay
+
+            self.replay = PreparedKDAReplay(pool.backing, states, records, state_indices, self.lengths, num_seqs)
+            return
         self.finals = torch.zeros(batch, dtype=torch.int32, device=device)
         # Slot zero is the null row: no boundary checkpoint is exported.
         self.boundaries = torch.zeros(batch, dtype=torch.int32, device=device)
@@ -120,6 +129,9 @@ class PreparedKDACommit:
 
     def __call__(self, counts):
         self.lengths.copy_(counts)
+        if self.replay is not None:
+            self.replay()
+            return
         self.finals.copy_(self.sources)
         _kda_commit(self.pool.backing, self.reads, self.handle)
 
@@ -220,7 +232,8 @@ class PreparedRound:
             kda_records=o.kda_records, **o.collectives)
         first = self.decoder.layers[o.kda_records.layers[0]].attention
         self.kda_commit = PreparedKDACommit(o.pool, o.kda_records, first.recurrent_plan,
-            self.metadata.recurrent.state_indices[:, 0], session=o.session, workspace=o.workspace)
+            self.metadata.recurrent.state_indices[:, 0], self.metadata.recurrent.num_seqs,
+            session=o.session, workspace=o.workspace)
         self.draft_metadata = DraftMetadata(b, b, blocks, device, shards=o.shards)
         self.draft = o.draft(self.draft_metadata, f"{name}.draft") if w > 1 else None
         self.draft_logits = torch.empty_like(self.draft.logits) if self.draft is not None else None

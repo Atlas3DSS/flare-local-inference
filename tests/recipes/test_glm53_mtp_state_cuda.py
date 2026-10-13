@@ -56,7 +56,7 @@ def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
                 mode="decode", session=session, name=f"decode{width}", workspace=arena,
                 records=records.layer(0) if width > 1 else None)
         op.kda_commit = PreparedKDACommit(pool, records, operators[6].recurrent_plan,
-            metas[6].state_indices[:, 0], session=session, workspace=arena)
+            metas[6].state_indices[:, 0], metas[6].num_seqs, session=session, workspace=arena)
         session.tune()
         for width, meta in metas.items():
             meta.query_start_loc.copy_(torch.tensor([0, width], dtype=torch.int32))
@@ -78,6 +78,24 @@ def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
             operators[6](sources[6])
             op.commit_state(slots.long(), counts)
         session.freeze()
+        # Each verified token's output matches decoding the tokens one at a time. Plain decode and verification
+        # read different columns of an arbitrary convolution history, so this check starts from an empty one.
+        plain = []
+        state.recurrent.copy_(initial_r)
+        state.convolution.zero_()
+        for index in range(6):
+            sources[1].copy_(chain[index:index + 1])
+            plain.append(operators[1](sources[1]).clone())
+        state.recurrent.copy_(initial_r)
+        state.convolution.zero_()
+        counts.fill_(1)
+        graph.replay()
+        torch.cuda.synchronize()
+        verified = operators[6].projections["o_proj"].output.float()
+        expected = torch.cat(plain).float()
+        relative = ((verified - expected).norm() / expected.norm()).item()
+        # Recording rounds the recurrence to BF16 before the gated norm, as b12x's recording does.
+        assert relative < 1e-2, relative
         for accepted in range(1, 7):
             state.recurrent.copy_(initial_r)
             state.convolution.copy_(initial_c)

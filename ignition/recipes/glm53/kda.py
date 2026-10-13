@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields
 import torch
 from b12x.sequence import gdn_decode, kda_prefill, short_conv
 
+from ignition.components import sm103
 from ignition.components.gated_norm import PreparedGatedRMSNorm
 from ignition.components.linear import QuantizedProjection
 from ignition.components.projection_overlap import ConcurrentProjectionChain
@@ -141,7 +142,7 @@ class PreparedGlmKDA:
         if records is not None and mode != "decode":
             raise ValueError("KDA verification records belong to decode rounds")
         self.module, self.weights, self.scratch = module, weights, scratch
-        self.records = None
+        self.records = self.verification = None
         self.state, self.metadata, self.mode = state, metadata, mode
         module.o_norm.weight = torch.nn.Parameter(weights["o_norm.weight"], requires_grad=False)
         self.projections = {}
@@ -181,6 +182,21 @@ class PreparedGlmKDA:
             "output": (scratch.gated if mode == "decode" else scratch.recurrence).view(self.tokens, self.heads, 128),
         }
         self.run_options = {"lower_bound": -5.0}
+        if mode == "decode" and records is not None and sm103.is_sm103(self.device):
+            # On SM103 Triton records verification (b12x's CuTe recording runs 1.6x slower there); the gated
+            # output norm follows as a separate launch.
+            from .kda_recovery import PreparedKDAVerification
+
+            self.verification = PreparedKDAVerification(mixed_qkv=scratch.convolved_qkv, raw_g=common["raw_g"],
+                raw_beta=scratch.raw_beta, A_log=weights["A_log"], dt_bias=common["dt_bias"],
+                state=state.recurrent, metadata=metadata, output=scratch.recurrence, records=records,
+                heads=self.heads)
+            self.output_norm = PreparedGatedRMSNorm(scratch.recurrence.view(self.tokens, self.heads, 128),
+                scratch.z.view(self.tokens, self.heads, 128), module.o_norm.weight,
+                scratch.gated.view(self.tokens, self.heads, 128), metadata.num_tokens,
+                eps=module.layer_norm_epsilon)
+            self.recurrent_plan = None
+            return
         if mode == "decode":
             self.run_options["eps"] = module.layer_norm_epsilon
             # Speculative rounds record each verified token instead of persisting its FP32 state.
@@ -228,7 +244,10 @@ class PreparedGlmKDA:
         p["f_b_proj"](s.forget_input)
         self.gate_overlap.finish(source, s.raw_g)
         short_conv.run(self.conv_binding)
-        if self.mode == "decode" and self.records is not None:
+        if self.verification is not None:
+            self.verification()
+            self.output_norm()
+        elif self.mode == "decode" and self.records is not None:
             m = self.metadata
             _verify([s.convolved_qkv, s.raw_g, s.raw_beta, s.z, self.state.recurrent, m.query_start_loc,
                      m.state_indices, m.num_seqs, m.num_tokens], s.gated, *self.records, self.handle)
