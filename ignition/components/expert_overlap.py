@@ -9,11 +9,11 @@ from ignition.preparation.tuning import register_finalizer
 
 def _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
                        workspace, plans, limit, round_silu, auxiliary):
-    from ignition.components.sm103_projection import packed_out_workspace
+    from ignition.components.sm103_projection import bf16_out, packed_out_workspace
 
     def project(value, index, output):
         if scales[index] is None:
-            torch.ops.b12x.bf16_gemv_small_n_out(value, weights[index], output, plans[index], None)
+            bf16_out(value, weights[index], output, plans[index])
         else:
             packed_out_workspace(
                 value, weights[index], scales[index], gains[index], None, output,

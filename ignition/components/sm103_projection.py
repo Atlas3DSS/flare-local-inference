@@ -596,6 +596,15 @@ def dense_plan(query: DenseProjectionQuery, device) -> Plan:
                        materialize=PreparedDenseProjection)
 
 
+def bf16_out(source, weight, out, plan_handle):
+    """Run a prepared BF16 projection by its plan handle: FlashInfer's GEMM on SM103, b12x's GEMV elsewhere."""
+    plan = plan_from_handle(plan_handle)
+    if plan.component_id == DENSE_COMPONENT:
+        require_prepared(plan, DENSE_COMPONENT, source.device).run(source, weight, out=out)
+        return
+    torch.ops.b12x.bf16_gemv_small_n_out(source, weight, out, plan_handle, None)
+
+
 @torch.library.custom_op("flare::sm103_dense_out", mutates_args=("out",))
 def _dense_out(source: torch.Tensor, weight: torch.Tensor, out: torch.Tensor, plan_handle: int) -> None:
     require_prepared(plan_from_handle(plan_handle), DENSE_COMPONENT, source.device).run(source, weight, out=out)
