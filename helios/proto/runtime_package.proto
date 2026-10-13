@@ -9,13 +9,14 @@ message ModelIndex {
   google.protobuf.Struct server = 4;
   repeated Asset assets = 5;
   Engram engram = 6;
-  // Present when this file holds one rank of a model whose ranks run on separate hosts.
+  // Present when the ranks run on separate hosts: the file holds every rank, and each host
+  // loads the one it serves.
   Cluster cluster = 7;
 }
 message Cluster {
   uint32 world = 1;
-  uint32 rank = 2;
-  // Names the export every rank's file came from; ranks of different exports refuse to join.
+  reserved 2;
+  // Names the export; hosts serving different exports refuse to join.
   string export_id = 3;
 }
 message Engram {

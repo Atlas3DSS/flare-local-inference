@@ -138,14 +138,14 @@ def publish(path, index, payload):
 def combine(path, ranks, peer_memory, *, cluster=None):
     """Place every rank's tensor storage before execution resources and the index.
 
-    `cluster` (world, rank, export id) marks a file holding one rank of a model whose ranks run
-    on separate hosts; that rank's bundle is the file's only one.
+    `cluster` (world, export id) marks a package whose ranks run on separate hosts; it holds every
+    rank, and each host loads the one it serves.
     """
     result = proto.ModelIndex(version=1, peer_memory=peer_memory)
     if cluster is not None:
-        if len(ranks) != 1:
-            raise ValueError("a multi-host package file holds exactly one rank")
-        result.cluster.world, result.cluster.rank, result.cluster.export_id = cluster
+        if len(ranks) != cluster[0]:
+            raise ValueError("a multi-host package holds every rank of its cluster")
+        result.cluster.world, result.cluster.export_id = cluster
     storage, execution = [], []
     for rank, source in enumerate(ranks):
         index, start = read_index(source)

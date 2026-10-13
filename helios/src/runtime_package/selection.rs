@@ -17,6 +17,8 @@ pub struct LoadOptions {
     /// User-visible ordinals when the launcher renumbers CUDA devices.
     pub device_labels: Option<Vec<i32>>,
     pub prefix_cache: crate::offload::PrefixCacheOffload,
+    /// For a package whose ranks run on separate hosts: the one rank this host loads.
+    pub cluster_rank: Option<usize>,
 }
 
 impl LoadOptions {

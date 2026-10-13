@@ -357,20 +357,28 @@ class HostRankGroup:
         return self.model.manifest()
 
     def export(self, path, *, options, export_id, images, storage, progress=None):
-        """Write every rank's own package file on its host: rank zero's here, each peer's at `path` on its host."""
-        from .model_package import export_rank_package
+        """Write one package holding every rank at `path` here; `flare run --hosts` serves it.
+
+        Each peer exports its rank on its own host; rank zero pulls those files over ssh, which
+        must reach every peer without a password, and combines them.
+        """
+        from .model_package import export_cluster_package
 
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
-        world = self.rendezvous.world
-        for rank, control in enumerate(self.controls, 1):
-            send_object(control, ("export", str(path), options, (world, rank, export_id)))
-        export_rank_package(self.model, images, storage, path, options=options, cluster=(world, 0, export_id),
-                            progress=progress)
-        for rank, control in enumerate(self.controls, 1):
-            reply = receive_object(control)
-            if "exported" not in reply:
-                raise RuntimeError(f"rank {rank} export failed: {reply}")
+        for control in self.controls:
+            send_object(control, ("export", options))
+        sources = {rank: self.rendezvous.peers[rank].control.getpeername()[0] for rank in range(1, self.rendezvous.world)}
+
+        def peer_files():
+            for rank, control in enumerate(self.controls, 1):
+                reply = receive_object(control)
+                if "exported" not in reply:
+                    raise RuntimeError(f"rank {rank} export failed: {reply}")
+                yield sources[rank], reply["exported"]
+
+        export_cluster_package(self.model, images, storage, path, peer_files=peer_files(), options=options,
+                               export_id=export_id, world=self.rendezvous.world, progress=progress)
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:
@@ -482,13 +490,17 @@ def serve_peer(control, executor, rank, world, *, resolve_snapshot, progress=Non
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)
         if isinstance(command, tuple) and command[0] == "export":
-            from .model_package import export_rank_package
+            import tempfile
 
-            _, path, options, cluster = command
+            from .runtime_package import export_model
+
+            _, options = command
+            # Rank zero pulls this file and removes it once its package is written.
+            path = Path(tempfile.mkdtemp(prefix="flare-rank-")) / f"rank-{rank}.safetensors"
             if progress is not None:
                 progress(f"exporting rank {rank} to {path}")
-            export_rank_package(model, recorder, storage, path, options=options, cluster=cluster)
-            send_object(control, {"exported": path})
+            export_model(model, recorder, storage, path, options=options)
+            send_object(control, {"exported": str(path)})
             command = receive_object(control)
         if command == "serve":
             if progress is not None:

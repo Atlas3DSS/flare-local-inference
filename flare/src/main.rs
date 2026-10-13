@@ -3,6 +3,7 @@
 mod cli;
 mod cluster;
 mod environment;
+mod launch;
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -38,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
     let options = args.load_options();
+    let rank_options = args.rank_options();
     let devices = args.gpus;
     let inherited =
         std::env::var("CUDA_VISIBLE_DEVICES")
@@ -56,9 +58,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("CUDA_DISABLE_JIT", "1");
     }
     let progress = StartupProgress::stderr();
+    // Rank zero of a multi-host package starts its peers first, so every host loads in parallel.
+    let mut rendezvous = args.rendezvous;
+    let _peers = if args.hosts.is_empty() {
+        None
+    } else {
+        let (world, export_id) = flare_helios::runtime_package::package_cluster(&root)?
+            .ok_or("--hosts applies only to a multi-host package")?;
+        if args.hosts.len() + 1 != world {
+            return Err(format!(
+                "the package has {world} ranks; --hosts names {} peer hosts",
+                args.hosts.len()
+            )
+            .into());
+        }
+        if args.rank.is_some_and(|rank| rank != 0) {
+            return Err("--hosts starts peers from rank zero".into());
+        }
+        let listen = rendezvous.get_or_insert_with(|| "0.0.0.0:29800".into());
+        let port = listen
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .ok_or("--rendezvous needs HOST:PORT")?;
+        let address = launch::address_toward(&args.hosts[0]).map_err(|e| e.to_string())?;
+        let phase = progress.phase("Start peer ranks", None);
+        let peers = launch::start(
+            &args.hosts,
+            &root,
+            &export_id,
+            &format!("{address}:{port}"),
+            &rank_options,
+        )
+        .map_err(|e| e.to_string())?;
+        phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));
+        Some(peers)
+    };
     // SAFETY: The trusted package owners remain live until every rank drains.
     let owner = unsafe { NativeModel::load(&root, &local_devices, &options, &progress)? };
-    let cluster = match (owner.cluster().cloned(), args.rendezvous) {
+    let cluster = match (owner.cluster().cloned(), rendezvous) {
         (Some(cluster), Some(address)) => Some((cluster, address)),
         (Some(_), None) => {
             return Err("a multi-host package requires --rendezvous HOST:PORT".into());

@@ -20,12 +20,12 @@ pub struct NativeModel {
     roce: Vec<Option<RoceSpec>>,
 }
 
-/// This file's place in a model whose ranks run on separate hosts, one rank per file.
+/// The rank this host serves of a model whose ranks run on separate hosts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClusterRank {
     pub world: usize,
     pub rank: usize,
-    /// Every rank's file of one export carries the same identifier.
+    /// Names the export; every host must load the same one.
     pub export_id: String,
 }
 
@@ -135,6 +135,13 @@ fn roce_spec(
     Ok(spec)
 }
 
+/// The cluster a package's ranks form, read from its index alone: (world, export id), or None
+/// when every rank runs on one host.
+pub fn package_cluster(root: &Path) -> Result<Option<(usize, String)>> {
+    let (_, descriptor) = Archive::open(root)?;
+    Ok(descriptor.cluster.map(|c| (c.world as usize, c.export_id)))
+}
+
 impl NativeModel {
     /// # Safety
     /// All rank bundles must be trusted and obey the CUDA execution contract.
@@ -150,22 +157,38 @@ impl NativeModel {
         }
         let phase = progress.phase("Prepare model", None);
         let (archive, mut descriptor) = Archive::open(root)?;
-        let cluster = descriptor.cluster.take().map(|c| ClusterRank {
-            world: c.world as usize,
-            rank: c.rank as usize,
-            export_id: c.export_id,
-        });
-        if let Some(cluster) = &cluster {
-            if !(2..=16).contains(&cluster.world)
-                || cluster.rank >= cluster.world
-                || descriptor.ranks.len() != 1
-                || cluster.export_id.is_empty()
-            {
-                return Err(invalid(
-                    "a multi-host package file holds exactly one rank of its cluster",
-                ));
+        // A multi-host package holds every rank; each host keeps only the bundle it serves, so
+        // it never maps another rank's storage.
+        let cluster = match (descriptor.cluster.take(), options.cluster_rank) {
+            (Some(c), rank) => {
+                let rank = rank.unwrap_or(0);
+                if !(2..=16).contains(&(c.world as usize))
+                    || descriptor.ranks.len() != c.world as usize
+                    || c.export_id.is_empty()
+                {
+                    return Err(invalid(
+                        "a multi-host package must hold every rank of its cluster",
+                    ));
+                }
+                if rank >= descriptor.ranks.len() {
+                    return Err(invalid(format!(
+                        "rank {rank} is outside the package's {} ranks",
+                        descriptor.ranks.len()
+                    )));
+                }
+                let bundle = descriptor.ranks.swap_remove(rank);
+                descriptor.ranks = vec![bundle];
+                Some(ClusterRank {
+                    world: c.world as usize,
+                    rank,
+                    export_id: c.export_id,
+                })
             }
-        }
+            (None, Some(_)) => {
+                return Err(invalid("--rank applies only to a multi-host package"));
+            }
+            (None, None) => None,
+        };
         let transports: Vec<_> = descriptor
             .ranks
             .iter_mut()

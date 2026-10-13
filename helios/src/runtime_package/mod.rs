@@ -12,7 +12,7 @@ mod payload;
 mod protobuf;
 mod selection;
 mod serving;
-pub use model::{ClusterRank, NativeModel, RoceSpec};
+pub use model::{ClusterRank, NativeModel, RoceSpec, package_cluster};
 pub use selection::LoadOptions;
 
 use std::collections::HashMap;

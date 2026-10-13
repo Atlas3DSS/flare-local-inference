@@ -49,11 +49,25 @@ pub struct Run {
         help_heading = "Serving options")]
     pub gpus: Vec<i32>,
 
-    /// Rank zero's address for a package whose ranks run on separate hosts: rank zero listens
-    /// there and every other host's rank joins it. Run each host's own rank file with the same
-    /// serving options.
-    #[arg(long, value_name = "HOST:PORT", help_heading = "Serving options")]
+    /// Peer hosts of a multi-host package, ranks 1 onward. Flare copies the package and itself into
+    /// each host's ~/.cache/flare, starts their ranks over ssh with these serving options, and
+    /// serves as rank zero.
+    #[arg(
+        long,
+        value_name = "HOST[,HOST...]",
+        value_delimiter = ',',
+        help_heading = "Multi-host options"
+    )]
+    pub hosts: Vec<String>,
+
+    /// Rank zero's rendezvous address: with --hosts, where rank zero listens [default:
+    /// 0.0.0.0:29800]; on a peer, where it joins rank zero.
+    #[arg(long, value_name = "HOST:PORT", help_heading = "Multi-host options")]
     pub rendezvous: Option<String>,
+
+    /// This host's rank of a multi-host package; rank zero's launcher sets it for each peer.
+    #[arg(long, value_name = "N", help_heading = "Multi-host options")]
+    pub rank: Option<usize>,
 
     /// File containing the serving API key; omit to disable authentication.
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
@@ -110,6 +124,36 @@ pub struct Run {
 }
 
 impl Run {
+    /// Serving options every rank of a multi-host package must load with: they select the same
+    /// graphs and capacities on every host.
+    pub fn rank_options(&self) -> Vec<String> {
+        let mut options = Vec::new();
+        if let Some(n) = self.max_concurrency {
+            options.extend(["--max-concurrency".into(), n.to_string()]);
+        }
+        if let Some(n) = self.mtp_draft_tokens {
+            options.extend(["--mtp-draft-tokens".into(), n.to_string()]);
+        }
+        if self.mtp_adaptive_verification {
+            options.push("--mtp-adaptive-verification".into());
+        }
+        if self.no_mtp_adaptive_verification {
+            options.push("--no-mtp-adaptive-verification".into());
+        }
+        if let Some(storage) = self.embedding_table_storage {
+            options.extend([
+                "--embedding-table-storage".into(),
+                if storage == Storage::Disk {
+                    "disk"
+                } else {
+                    "ram"
+                }
+                .into(),
+            ]);
+        }
+        options
+    }
+
     pub fn load_options(&self) -> LoadOptions {
         LoadOptions {
             embedding_table_storage: self.embedding_table_storage,
@@ -129,6 +173,7 @@ impl Run {
                 disk_limit: self.prefix_cache_disk_limit,
                 transport: self.prefix_cache_disk_transport,
             },
+            cluster_rank: self.rank,
         }
     }
 }
