@@ -1,8 +1,7 @@
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use crate::execution::{ExecutionManifest, FrameCompletion, OwnedUpload};
+use crate::execution::{ExecutionManifest, FrameCompletion, OwnedUpload, RankStream};
 use crate::{Error, ExecutionError, Failure, Result};
 
 pub(super) const HELLO: u8 = 1;
@@ -30,12 +29,13 @@ fn io(error: std::io::Error) -> Error {
 }
 
 pub(super) struct Channel {
-    pub stream: UnixStream,
+    pub stream: RankStream,
     received: Vec<u8>,
 }
 
 impl Channel {
-    pub fn new(stream: UnixStream) -> Result<Self> {
+    pub fn new(stream: impl Into<RankStream>) -> Result<Self> {
+        let stream = stream.into();
         stream.set_read_timeout(Some(TIMEOUT)).map_err(io)?;
         stream.set_write_timeout(Some(TIMEOUT)).map_err(io)?;
         stream.set_nonblocking(false).map_err(io)?;
@@ -101,10 +101,16 @@ impl Channel {
         }
     }
 
+    /// Wait for the next message, without a deadline when `idle`.
+    pub fn wait(&mut self, idle: bool) -> Result<(u8, Vec<u8>)> {
+        self.idle(idle)?;
+        let message = self.poll();
+        self.idle(false)?;
+        message?.ok_or_else(|| invalid("tensor-parallel control deadline expired"))
+    }
+
     pub fn receive(&mut self, expected: u8) -> Result<Vec<u8>> {
-        let (tag, data) = self
-            .poll()?
-            .ok_or_else(|| invalid("tensor-parallel control deadline expired"))?;
+        let (tag, data) = self.wait(false)?;
         if tag != expected {
             return Err(invalid(format!(
                 "expected rank message {expected}, received {tag}"

@@ -1,8 +1,7 @@
-use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
-use super::{ExecutionManifest, FrameCompletion, RankExecutor, Upload};
+use super::{ExecutionManifest, FrameCompletion, RankExecutor, RankStream, Upload};
 use crate::{Error, ExecutionError, Failure, Result, Shutdown, cache::Fence};
 
 pub struct OwnedUpload {
@@ -45,12 +44,12 @@ impl ExecutionWorker {
     /// TensorParallelExecutor::new's rank and resource lifetime contract applies.
     pub unsafe fn new_parallel(
         manifest: ExecutionManifest,
-        peers: Vec<UnixStream>,
+        peers: Vec<RankStream>,
     ) -> Result<Self> {
         unsafe { Self::start(manifest, Some(peers)) }
     }
 
-    unsafe fn start(manifest: ExecutionManifest, peers: Option<Vec<UnixStream>>) -> Result<Self> {
+    unsafe fn start(manifest: ExecutionManifest, peers: Option<Vec<RankStream>>) -> Result<Self> {
         manifest.validate()?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let (ready_sender, ready) = mpsc::sync_channel(1);

@@ -1,12 +1,12 @@
 //! Direct scheduler execution on one CUDA rank or a coordinated rank group.
 
-use std::os::unix::net::UnixStream;
-
-use super::{ExecutionManifest, FrameCompletion, GraphExecutor, TensorParallelExecutor, Upload};
+use super::{
+    ExecutionManifest, FrameCompletion, GraphExecutor, RankStream, TensorParallelExecutor, Upload,
+};
 use crate::{Result, Shutdown, cache::Fence};
 
 pub enum RankPeers {
-    Processes(Vec<UnixStream>),
+    Processes(Vec<RankStream>),
     Threads(Vec<ExecutionManifest>),
 }
 

@@ -2,8 +2,10 @@
 
 mod manifest;
 mod parallel;
+mod rank_stream;
 mod ranks;
 mod threaded;
+pub use rank_stream::RankStream;
 pub use ranks::RankPeers;
 mod transport;
 mod worker;

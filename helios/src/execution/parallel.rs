@@ -1,13 +1,12 @@
-//! Native rank coordination over process-local CUDA executors and Unix sockets.
+//! Native rank coordination over process-local CUDA executors and control sockets.
 
 #[cfg(test)]
 mod tests;
 mod wire;
 
-use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
-use super::{ExecutionManifest, FrameCompletion, GraphExecutor, Upload};
+use super::{ExecutionManifest, FrameCompletion, GraphExecutor, RankStream, Upload};
 use crate::{Error, Result, Shutdown, cache::Fence};
 use wire::*;
 
@@ -32,7 +31,7 @@ impl TensorParallelExecutor {
     /// GraphExecutor's ownership contract applies. Each socket must connect to a
     /// distinct prepared rank in order 1..world; every owner includes its b12x IPC
     /// runtime and remains retained until coordinated shutdown confirms drain.
-    pub unsafe fn new(manifest: ExecutionManifest, sockets: Vec<UnixStream>) -> Result<Self> {
+    pub unsafe fn new(manifest: ExecutionManifest, sockets: Vec<RankStream>) -> Result<Self> {
         let world = sockets.len() + 1;
         if world > 16 {
             return Err(invalid("tensor parallelism supports at most sixteen ranks"));
@@ -321,7 +320,7 @@ pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()
 /// reclaiming those resources; this function never synchronizes a stranded graph.
 pub unsafe fn serve_rank(
     manifest: ExecutionManifest,
-    socket: UnixStream,
+    socket: RankStream,
     rank: usize,
     world: usize,
 ) -> Shutdown {
@@ -349,11 +348,7 @@ pub unsafe fn serve_rank(
                 return Err(invalid("unexpected coordinator readiness payload"));
             }
             loop {
-                channel.idle(true)?;
-                let (tag, bytes) = channel
-                    .poll()?
-                    .ok_or_else(|| invalid("rank control deadline expired"))?;
-                channel.idle(false)?;
+                let (tag, bytes) = channel.wait(true)?;
                 if tag == DRAIN && bytes.is_empty() {
                     let shutdown = executor.close();
                     if !shutdown.drained {

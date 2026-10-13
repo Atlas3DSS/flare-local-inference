@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 
 use super::*;
 use crate::execution::{CompletionRecord, Dtype};

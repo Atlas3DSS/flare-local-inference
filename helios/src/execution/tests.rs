@@ -3,7 +3,10 @@ use super::*;
 #[test]
 fn tensor_parallel_capacity_rejects_more_than_sixteen_ranks() {
     let pairs: Vec<_> = (0..16)
-        .map(|_| std::os::unix::net::UnixStream::pair().unwrap())
+        .map(|_| {
+            let (local, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            (RankStream::from(local), peer)
+        })
         .collect();
     let (sockets, _peers): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
     let result = unsafe { TensorParallelExecutor::new(manifest(), sockets) };

@@ -1,5 +1,4 @@
 use std::os::fd::BorrowedFd;
-use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -344,7 +343,7 @@ impl PreparedGraphExecutor {
     }
 }
 
-fn rank_socket(fd: i32) -> PyResult<UnixStream> {
+fn rank_socket(fd: i32) -> PyResult<crate::execution::RankStream> {
     if fd < 0 {
         return Err(PyValueError::new_err(
             "rank socket descriptor must be nonnegative",
@@ -355,11 +354,8 @@ fn rank_socket(fd: i32) -> PyResult<UnixStream> {
     let socket = unsafe { BorrowedFd::borrow_raw(fd) }
         .try_clone_to_owned()
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let socket = UnixStream::from(socket);
-    socket
-        .peer_addr()
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    Ok(socket)
+    crate::execution::RankStream::from_socket(socket)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pyfunction]
