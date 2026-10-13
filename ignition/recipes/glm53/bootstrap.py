@@ -360,7 +360,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         with phase(progress, "Allocate KV cache") as stage:
             if package_storage is not None:
                 package_storage.grow("KV_PAGES", pages)
-                if config.context_parallel:
+                if context_ranks > 1:
                     pool.share_pages(package_storage, group)
             else:
                 from ignition.components.shared_pages import SharedPages
@@ -414,5 +414,6 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         max_active=config.max_active, resources=resources, session=session,
         export_zero_ranges=disposable_ranges((decoder_storage, prefill_storage), arena, forwards),
         close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
-                         prefill_collective, vocabulary_collective, collective),
+                         *(runtime for runtime in (prefill_collective, vocabulary_collective, collective)
+                           if runtime is not None)),
         server_config=server_config, memory_report=memory)
