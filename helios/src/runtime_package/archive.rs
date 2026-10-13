@@ -2,6 +2,7 @@
 
 use super::{
     format::{Package, invalid},
+    protection::{Protection, Publisher, ResourceReader},
     protobuf::wire,
 };
 use crate::Result;
@@ -9,13 +10,14 @@ use prost::Message;
 use serde::Deserialize;
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom, Take},
+    io::{BufReader, Read, Take},
     os::{fd::AsRawFd, unix::fs::FileExt},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const MAX_HEADER: usize = 64 << 10;
-const MAX_INDEX: usize = 16 << 20;
+const MAX_INDEX: usize = 128 << 20;
 const MAX_RECORD: usize = 1 << 20;
 
 #[derive(Deserialize)]
@@ -55,10 +57,12 @@ impl ByteTensor {
 pub(super) struct Archive {
     pub path: PathBuf,
     pub start: u64,
-    pub file: File,
+    pub file: Arc<File>,
+    pub(super) protection: Protection,
+    pub(super) accepted: bool,
 }
 impl Archive {
-    pub fn open(path: &Path) -> Result<(Self, wire::ModelIndex)> {
+    pub fn open(path: &Path, publishers: &[Publisher]) -> Result<(Self, wire::ModelIndex)> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let mut prefix = [0u8; 8];
         file.read_exact_at(&mut prefix, 0)
@@ -98,38 +102,14 @@ impl Archive {
         let mut bytes = vec![0; size as usize];
         file.read_exact_at(&mut bytes, start + payload)
             .map_err(|e| e.to_string())?;
-        let index = wire::ModelIndex::decode(bytes.as_slice())
-            .map_err(|e| invalid(format!("invalid model index: {e}")))?;
-        if index.version != 1 || ![1, 2, 4].contains(&index.ranks.len()) {
-            return Err(invalid("unsupported model index"));
-        }
-        for span in index
-            .ranks
-            .iter()
-            .flat_map(|r| r.resources.values())
-            .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
-            .chain(
-                index
-                    .engram
-                    .iter()
-                    .flat_map(|e| &e.tables)
-                    .flat_map(|t| [&t.weights, &t.scales])
-                    .filter_map(Option::as_ref),
-            )
-        {
-            if span
-                .offset
-                .checked_add(span.nbytes)
-                .is_none_or(|n| n > payload)
-            {
-                return Err(invalid("resource exceeds model package"));
-            }
-        }
+        let (protection, index) = Protection::verify(&bytes, publishers, payload)?;
         Ok((
             Self {
-                path: path.to_owned(),
+                path: PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
                 start,
-                file,
+                file: Arc::new(file),
+                protection,
+                accepted: false,
             },
             index,
         ))
@@ -185,85 +165,33 @@ impl Archive {
             libc::posix_fadvise(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
         }
     }
+    fn reader(&self, package: &Package, key: &str) -> Result<ResourceReader> {
+        if !self.accepted {
+            return Err(invalid(
+                "publisher acceptance required before resource access",
+            ));
+        }
+        self.protection
+            .reader(self.file.clone(), self.start, self.span(package, key)?)
+    }
     pub fn read(&self, package: &Package, key: &str) -> Result<Vec<u8>> {
-        let span = self.span(package, key)?;
-        let mut bytes = vec![0; super::protobuf::size(span.nbytes)?];
-        self.file
-            .read_exact_at(&mut bytes, self.start + span.offset)
-            .map_err(|e| e.to_string())?;
+        let mut reader = self.reader(package, key)?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
         Ok(bytes)
     }
-    pub fn map(&self, package: &Package, key: &str) -> Result<Mapped> {
-        let span = self.span(package, key)?;
-        let offset = self.start + span.offset;
-        // mmap offsets must be multiples of the host page size, which is 64 KiB on some Arm kernels.
-        // SAFETY: sysconf has no preconditions.
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
-        let base = offset / page * page;
-        let skip = (offset - base) as usize;
-        let size = super::protobuf::size(span.nbytes)?;
-        let length = size
-            .checked_add(skip)
-            .ok_or_else(|| invalid("module mapping overflow"))?;
-        if length == 0 {
-            return Err(invalid("empty module image"));
-        }
-        // SAFETY: The index bounds this read-only mapping within the open file.
-        let pointer = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                length,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                self.file.as_raw_fd(),
-                base as libc::off_t,
-            )
-        };
-        if pointer == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error().to_string().into());
-        }
-        Ok(Mapped {
-            pointer,
-            length,
-            skip,
-            size,
-        })
-    }
     pub fn records(&self, package: &Package, key: &str) -> Result<Records> {
-        let span = self.span(package, key)?;
-        let mut file = File::open(&self.path).map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::Start(self.start + span.offset))
-            .map_err(|e| e.to_string())?;
+        let reader = self.reader(package, key)?;
+        let nbytes = reader.len();
         Ok(Records {
-            reader: BufReader::with_capacity(16 << 10, file).take(span.nbytes),
+            reader: BufReader::with_capacity(16 << 10, reader).take(nbytes),
             buffer: Vec::new(),
         })
     }
 }
 
-pub(super) struct Mapped {
-    pointer: *mut libc::c_void,
-    length: usize,
-    skip: usize,
-    size: usize,
-}
-impl Mapped {
-    pub fn bytes(&self) -> &[u8] {
-        // SAFETY: The validated file range remains mapped for this borrow.
-        unsafe { std::slice::from_raw_parts(self.pointer.cast::<u8>().add(self.skip), self.size) }
-    }
-}
-impl Drop for Mapped {
-    fn drop(&mut self) {
-        // SAFETY: This object exclusively owns the mapping.
-        unsafe {
-            libc::munmap(self.pointer, self.length);
-        }
-    }
-}
-
 pub(super) struct Records {
-    reader: Take<BufReader<File>>,
+    reader: Take<BufReader<ResourceReader>>,
     buffer: Vec<u8>,
 }
 impl Records {
@@ -294,167 +222,38 @@ impl Records {
 mod tests {
     use super::*;
     use std::io::Write;
-    struct Fixture(PathBuf);
-    impl Fixture {
-        fn new(index: &wire::ModelIndex, payload: &[u8]) -> Self {
-            let bytes = index.encode_to_vec();
-            let header = serde_json::json!({
-                "__metadata__": {"format": "flare"},
-                "flare.payload": {"dtype": "U8", "shape": [payload.len()], "data_offsets": [0, payload.len()]},
-                "flare.metadata": {"dtype": "U8", "shape": [bytes.len()], "data_offsets": [payload.len(), payload.len() + bytes.len()]},
-            });
-            Self::with_header(&header, &bytes, payload)
-        }
-        fn with_header(header: &serde_json::Value, index: &[u8], payload: &[u8]) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "flare-package-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            let mut bytes = serde_json::to_vec(header).unwrap();
-            bytes.resize((8 + bytes.len()).div_ceil(4096) * 4096 - 8, b' ');
-            let mut file = File::create(&path).unwrap();
-            file.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
-            file.write_all(&bytes).unwrap();
-            file.write_all(payload).unwrap();
-            file.write_all(index).unwrap();
-            Self(path)
-        }
-    }
-    #[test]
-    fn safetensors_header_checks_types_extents_and_metadata_bounds() {
-        let index = wire::ModelIndex {
-            version: 1,
-            ranks: vec![wire::BundleIndex::default()],
-            ..Default::default()
-        };
-        let bytes = index.encode_to_vec();
-        let header = serde_json::json!({
-            "__metadata__": {"format": "flare"},
-            "flare.payload": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]},
-            "flare.metadata": {"dtype": "U8", "shape": [bytes.len()], "data_offsets": [4, 4 + bytes.len()]},
-        });
-        let fixture = Fixture::with_header(&header, &bytes, b"data");
-        let (archive, decoded) = Archive::open(&fixture.0).unwrap();
-        assert_eq!(archive.start, 4096);
-        assert_eq!(decoded, index);
-        for (path, value) in [
-            ("/__metadata__/format", serde_json::json!("pt")),
-            ("/flare.payload/dtype", serde_json::json!("F32")),
-            ("/flare.payload/shape", serde_json::json!([2, 2])),
-            ("/flare.payload/data_offsets", serde_json::json!([1, 5])),
-            ("/flare.metadata/data_offsets/0", serde_json::json!(3)),
-            (
-                "/flare.metadata/data_offsets/1",
-                serde_json::json!(u64::MAX),
-            ),
-            ("/flare.metadata/shape/0", serde_json::json!(MAX_INDEX + 1)),
-        ] {
-            let mut invalid = header.clone();
-            *invalid.pointer_mut(path).unwrap() = value;
-            let fixture = Fixture::with_header(&invalid, &bytes, b"data");
-            assert!(Archive::open(&fixture.0).is_err(), "{path}");
-        }
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&fixture.0)
-            .unwrap();
-        file.set_len(4096 + 4 + bytes.len() as u64 - 1).unwrap();
-        assert!(Archive::open(&fixture.0).is_err());
-        file.write_all_at(&((MAX_HEADER + 1) as u64).to_le_bytes(), 0)
-            .unwrap();
-        assert!(Archive::open(&fixture.0).is_err());
-    }
 
     #[test]
-    fn resources_cannot_address_the_protobuf_tensor() {
-        let index = wire::ModelIndex {
-            version: 1,
-            ranks: vec![wire::BundleIndex {
-                resources: [(
-                    "outside".into(),
-                    wire::Span {
-                        offset: 4,
-                        nbytes: 1,
-                    },
-                )]
-                .into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let fixture = Fixture::new(&index, b"data");
+    fn header_and_index_lengths_are_bounded_before_reading() {
+        let path =
+            std::env::temp_dir().join(format!("flare-header-{}.safetensors", std::process::id()));
+        for size in [0, MAX_HEADER as u64 + 1, u64::MAX] {
+            std::fs::write(&path, size.to_le_bytes()).unwrap();
+            assert!(
+                Archive::open(&path, &[])
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("header size")
+            );
+        }
+        let header = serde_json::json!({
+            "__metadata__": {"format": "flare"},
+            "flare.payload": {"dtype": "U8", "shape": [0], "data_offsets": [0,0]},
+            "flare.metadata": {"dtype": "U8", "shape": [MAX_INDEX + 1], "data_offsets": [0,MAX_INDEX + 1]},
+        });
+        let mut bytes = serde_json::to_vec(&header).unwrap();
+        bytes.resize(4088, b' ');
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&4088u64.to_le_bytes()).unwrap();
+        file.write_all(&bytes).unwrap();
         assert!(
-            Archive::open(&fixture.0)
+            Archive::open(&path, &[])
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("resource exceeds")
+                .contains("index size")
         );
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    #[test]
-    fn graph_records_are_read_independently_and_reject_truncation() {
-        let node = wire::Node {
-            operation: Some(wire::node::Operation::Empty(wire::Empty {})),
-        }
-        .encode_to_vec();
-        let mut payload = (node.len() as u32).to_le_bytes().to_vec();
-        payload.extend_from_slice(&node);
-        payload.extend_from_slice(&u32::MAX.to_le_bytes());
-        let mut rank = wire::BundleIndex::default();
-        rank.context = Some(wire::Context::default());
-        rank.architecture = vec![12, 0];
-        rank.resources.insert(
-            "selected".into(),
-            wire::Span {
-                offset: 0,
-                nbytes: 4 + node.len() as u64,
-            },
-        );
-        rank.resources.insert(
-            "unselected".into(),
-            wire::Span {
-                offset: 4 + node.len() as u64,
-                nbytes: 4,
-            },
-        );
-        let index = wire::ModelIndex {
-            version: 1,
-            ranks: vec![rank],
-            ..Default::default()
-        };
-        let fixture = Fixture::new(&index, &payload);
-        let (archive, mut index) = Archive::open(&fixture.0).unwrap();
-        let package = super::super::protobuf::decode(index.ranks.remove(0)).unwrap();
-        let mut records = archive.records(&package, "selected").unwrap();
-        assert!(records.read::<wire::Node>().unwrap().operation.is_some());
-        records.finish().unwrap();
-        assert!(
-            archive
-                .records(&package, "unselected")
-                .unwrap()
-                .read::<wire::Node>()
-                .is_err()
-        );
-        let mut rank = wire::BundleIndex::default();
-        rank.resources.insert(
-            "overflow".into(),
-            wire::Span {
-                offset: u64::MAX,
-                nbytes: 4,
-            },
-        );
-        index.ranks.push(rank);
-        let overflow = Fixture::new(&index, &[0]);
-        assert!(Archive::open(&overflow.0).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }

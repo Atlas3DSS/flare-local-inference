@@ -20,8 +20,10 @@ ranks, and serves HTTP.
   its own shard.
 - The same Flare, Ignition and FlashInfer sources on every host during
   preparation. Ranks with different sources refuse to join.
-- On rank zero, free disk for the package: about the whole model (GLM-5.3 Flash
-  NVFP4: about 180 GB). Each peer keeps a copy in `~/.cache/flare/packages`.
+- On rank zero, free disk for both rank staging and the signed package during
+  publication: about twice the whole model (GLM-5.3 Flash NVFP4: about 360 GB).
+  Staging is removed after publication. Each peer keeps one package copy in
+  `~/.cache/flare/packages`.
 
 ## One-time setup: the Flare agent
 
@@ -66,6 +68,11 @@ journalctl --user -u flare-agent -n 5
 
 The agent's own executable changes only with its protocol; the ranks it runs use
 whatever executable rank zero sends.
+
+Rank zero authenticates the package and obtains publisher acceptance before
+starting peers. Its authenticated agent request carries that accepted publisher's
+profile and exact signing-key approval. Each peer verifies the package with that
+profile before loading its rank; `--verify-weights` also applies to peers.
 
 ## Prepare the package
 

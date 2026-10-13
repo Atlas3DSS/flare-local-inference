@@ -28,6 +28,13 @@ into a **runtime package**: a single `.safetensors` file with two `U8` tensors.
 The protobuf describes independently addressed resources. Tensor-parallel
 packages contain one resource bundle per rank, with all ranks' storage before
 execution resources.
+Final packages use a format-3 signed envelope and encrypted cubins and graph
+records. Ignition creates a per-user development signing key when `[publishing]`
+is absent. `ignition run` passes the exact export key and publisher to Flare for
+unattended approval; direct `flare run` needs the corresponding publisher profile
+and first-use acceptance. See [signing and development](docs/cli-design.md#signing-and-local-development).
+Unsigned rank staging is private to preparation and cannot load in Helios.
+
 Flare loads the file without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 

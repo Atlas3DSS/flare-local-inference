@@ -4,6 +4,7 @@ import ctypes as C
 import json
 import os
 from pathlib import Path
+from signing import publisher
 import sys
 import subprocess
 
@@ -147,7 +148,7 @@ def prepare(root):
             assert any(start <= freed_address < end for start, end in storage.unused_ranges())
             graph_segments = storage.graph_pool.snapshot(include_traces=False)
             assert graph_segments
-    package = export_model(prepared, images, storage, root / "package", options={})
+    package = export_model(prepared, images, storage, root / "package", options={}, publisher=publisher())
     assert not any(a.address <= unused_address < a.address + a.nbytes for a in package.allocations)
     assert not any(a.address <= freed_address < a.address + a.nbytes for a in package.allocations)
     assert any(a.address == segment["address"] for a in package.allocations for segment in graph_segments)

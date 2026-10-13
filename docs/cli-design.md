@@ -64,7 +64,8 @@ allocation contents, graph descriptions, and frontend assets to one `.safetensor
 that must not exist, then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
-preparation source contents. Qwen, GLM, and DeepSeek provide native package storage support.
+preparation source contents, signing-key fingerprint, publisher namespace, and
+source URL. Qwen, GLM, and DeepSeek provide native package storage support.
 Tensor-parallel packages contain one resource bundle per selected GPU and load
 in one process with one execution thread per rank. API keys are excluded from
 the package.
@@ -104,6 +105,10 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--port N` | Listening port. `run` only. | `server.port`, else `8000` |
 | `--verbose` | Per-phase detail on stderr | off |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
+| `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
+| `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
+| `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
+| `--verify-weights` | Check the complete stored allocation/table region; `run` only | off |
 
 Advanced flags appear in their own section of `--help`. Recipe values apply when flags are omitted; explicit flags take precedence.
 
@@ -136,6 +141,11 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 
 | Flag | Meaning | Default |
 |---|---|---|
+| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution | Embedded profiles |
+| `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
+| `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
+| `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
+| `--verify-weights` | Verify the complete stored allocation/table region before CUDA initialization | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
 | `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
@@ -151,6 +161,49 @@ width `N+1` for each required batch; adaptive verification loads the permitted
 widths. Missing variants fail before GPU allocation. Continuation rows and
 KV pages receive physical backing after graph upload, within fixed virtual
 extents. Reducing execution state can leave more memory for KV pages.
+
+### Signing and local development
+
+Final exports always carry signatures and encrypted executable resources.
+Configure published exports with all three values:
+
+```toml
+[publishing]
+signing_key = "/private/flare-signing-key.pem"
+namespace = "local-inference-lab"
+official_source = "https://huggingface.co/local-inference-lab/foobar"
+```
+
+The key must be an unencrypted Ed25519 PKCS#8 PEM file. Keep it private;
+runtime publisher profiles contain only its verification key. `--official-source`
+overrides the configured repository URL. A partial publishing configuration is
+an error and never falls back to local credentials.
+
+With no publishing configuration, Ignition creates and reuses
+`development-signing-key.pem` beside its configuration file, with owner-only
+permissions. It also writes `development-publisher.json` containing the public
+verification profile. These packages use the explicit namespace and source
+`local-development`, with no claim to be an official published checkpoint.
+
+`ignition run` supplies Flare with the development profile when applicable and
+automatically passes the exact fingerprint and namespace from its export
+credentials through Flare's two dangerous-approval arguments. It does not infer
+approval from the cached package's claimed publisher. An unrecognized key still
+prints its first-use warning; subsequent loads remember that exact pair. There
+is no unsigned runtime mode and no blanket approval for development keys.
+
+To load a locally exported package directly, supply its public profile:
+
+```sh
+flare run model.safetensors \
+  --publisher-keys ~/.config/flare/development-publisher.json --gpus 0
+```
+
+First interactive use requires typing `local-development`. For unattended
+loading, supply both dangerous-approval flags with the exact fingerprint and
+namespace. `flare trust revoke FINGERPRINT --trust-store PATH` removes acceptance;
+omitting the path uses the default trust store. No official release key is
+required for independent preparation and signing.
 
 ### 3.3 Configuration file
 

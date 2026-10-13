@@ -2,6 +2,30 @@ syntax = "proto3";
 package flare.runtime;
 import "google/protobuf/struct.proto";
 
+// Signed bodies retain their exact wire bytes for verification.
+message ProtectedIndex {
+  uint32 version = 1;
+  bytes package_id = 2;
+  bytes signer = 3;
+  repeated SignedGroup groups = 4;
+}
+message SignedGroup { uint32 kind = 1; bytes body = 2; bytes signature = 3; }
+message PublisherMetadata {
+  ModelIndex index = 1;
+  string namespace = 2;
+  string official_source = 3;
+  repeated bytes group_hashes = 4;
+  bool development = 5;
+}
+message ResourceCatalog { repeated ProtectedResource resources = 1; }
+message ProtectedResource {
+  uint64 offset = 1;
+  uint64 stored_bytes = 2;
+  uint64 plain_bytes = 3;
+  repeated bytes sha256 = 4;
+}
+message StoredData { uint64 nbytes = 1; bytes sha256 = 2; }
+
 message ModelIndex {
   uint32 version = 1;
   repeated BundleIndex ranks = 2;

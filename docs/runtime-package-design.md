@@ -110,7 +110,10 @@ with spaces so the data buffer begins on a 4 KiB boundary. The JSON header is
 limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
 `flare.payload` covers the resource bytes, including alignment padding, from
 the start of the data buffer. `flare.metadata` immediately follows it and
-contains a serialized `ModelIndex` from `helios/proto/runtime_package.proto`.
+contains a serialized `ProtectedIndex` from `helios/proto/runtime_package.proto`.
+The envelope and its authenticated `ModelIndex` use version 3. Unsigned rank
+staging uses `format: flare-staging` and cannot be loaded by Helios. Incompatible
+packages require re-export.
 These tensors cover the entire data buffer without gaps or overlap. The
 protobuf is the authoritative resource description; safetensors describes
 only the two byte tensors.
@@ -125,13 +128,13 @@ may still scan the complete local file to compute its chunks and hashes.
 
 Every resource span stores its byte offset relative to `flare.payload` and
 its byte length. Spans cannot extend into `flare.metadata`. The index is
-limited to 16 MiB and contains ordered rank bundles, peer-memory ownership,
+limited to 128 MiB and contains ordered rank bundles, peer-memory ownership,
 serving configuration, frontend asset spans, allocation descriptions, kernel
 metadata, and graph declarations. TP1, TP2, and TP4 require distinct exports.
 
 Graph bodies, cubins, module globals, packed tensor data, tokenizer data, and
 other frontend assets live in separate indexed payload spans inside the same
-file. A graph body contains its declared number of nodes followed by its
+file. A decrypted graph body contains its declared number of nodes followed by its
 edges. Each record is a little-endian u32 length followed by one Protobuf
 `Node` or `Edge`, with a 1 MiB record limit. Kernel arguments, node attributes,
 and edge data are Protobuf byte strings. Graph bodies are independent; the
@@ -234,6 +237,76 @@ Pointer and tensor-map fields may additionally be declared as relocations,
 which lets a loader place storage elsewhere and rewrite the fields, tensor
 maps through `cuTensorMapReplaceAddress`; the model export does not declare
 them and relies on identical addresses instead.
+
+### Publisher authentication and executable access
+
+Every final package carries four ordered Ed25519 signature groups:
+
+| Group | Authenticated contents | Payload checks |
+|---|---|---|
+| 1 | Model index, publisher namespace, source URL, development marker, and SHA-256 commitments to groups 2–4 | Before publisher acceptance or CUDA initialization |
+| 2 | Cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes | Each selected resource chunk before decryption |
+| 3 | Module globals and frontend asset spans and hashes | Before those contents are consumed |
+| 4 | Length and SHA-256 of the complete stored allocation/table region, including padding | With `flare run --verify-weights` |
+
+All four signatures are mandatory even when the stored-data scan is omitted.
+Resource classification follows actual consumers in the signed index. Missing,
+overlapping, unclassified, or incorrectly classified spans fail loading. The
+128 MiB metadata limit applies to the complete signed envelope. The package
+contains the signing-key fingerprint, not the verification key. Keys come from
+Helios's embedded publisher profiles or explicitly supplied profile files.
+
+Cubins and graph records use AES-256-GCM in independent 4 MiB plaintext chunks,
+each followed by a 16-byte tag. Each package has a random 32-byte identifier.
+HKDF-SHA256 derives a resource key from the publisher verification key, with
+the package identifier as salt and a domain-separated encoding of the resource
+offset and accepted namespace as context. Chunk nonces encode the chunk index;
+authenticated data binds the package identifier, offset, plaintext length, and
+chunk index. Field encodings use little-endian u64 byte lengths followed by the
+field bytes; the exporter and native reader define the matching domain strings
+in `ignition/preparation/protection.py` and
+`helios/src/runtime_package/protection.rs`. Re-signing ciphertext with another
+key or namespace does not produce a loadable package. Weights and tables stay
+plaintext and retain direct-I/O compatibility and storage deduplication.
+
+`VerifiedPackage::open` authenticates the index and publisher binding.
+`VerifiedPackage::authorize` requires the exact accepted namespace and optionally
+checks the stored-data contents. Only its `AuthorizedPackage` result can enter
+`NativeModel::load` or `NativeResources::load`. Executable resources are
+hash-checked and decrypted before CUDA receives them. Frontend assets retain
+signed digest checks. The open package descriptor remains alive through native
+use, including deferred frontend and embedding-table reads; replacing the
+pathname cannot redirect those reads. Package files must remain immutable while
+loaded. Signatures authenticate bytes and do not sandbox executable code.
+Encryption does not prevent a user controlling the runtime from recovering code.
+
+Helios reserves an ELF `.flare_publishers` section for release-provisioned keys.
+A source build contains no publisher keys. The private release command stamps a
+JSON profile array into a separately named executable:
+
+```sh
+.venv/bin/python -m ignition.release flare/target/release/flare \
+  --output /path/to/distribution/flare --publishers /private/publishers.json
+```
+
+Each profile has `name`, `namespace`, and `public_key` (32 integer bytes), plus
+an optional boolean `development`. The public key belongs to the Ed25519 key
+used by Ignition. A release profile can name `Local Inference Lab, Inc.` and
+namespace `local-inference-lab`; names in externally supplied profiles remain
+unverified claims. Profile import does not grant execution trust. An external
+key claiming an embedded publisher's name or namespace still receives the
+unrecognized-key warning. A key with conflicting profile attributes is rejected.
+
+Flare displays the authenticated namespace, source, and full key fingerprint.
+First use asks for the exact namespace and remembers the key/namespace pair.
+An external key receives a prominent warning about unverified identity and
+executable code. Unattended approval requires both
+`--dangerously-approve-key FINGERPRINT` and
+`--dangerously-accept-publisher NAMESPACE`; both must match even if trust was
+previously remembered. Trust never transfers to a replacement key merely
+because it uses the same namespace. `flare trust revoke FINGERPRINT` removes
+remembered acceptance. This local acceptance mechanism does not contact a
+website or establish ownership of a publisher's claimed domain or account.
 
 ## 3. Address rules
 

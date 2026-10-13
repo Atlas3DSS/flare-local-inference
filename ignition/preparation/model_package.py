@@ -1,6 +1,5 @@
 """Publish a model package containing one native resource bundle per rank."""
 
-import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -9,8 +8,10 @@ from .runtime_package import export_model
 from .package_file import combine
 
 
-def export_package(prepared, images, storage, path, *, options, progress=None):
+def export_package(prepared, images, storage, path, *, options, publisher, progress=None):
     """Export every rank, close preparation resources, and assemble the model file."""
+    if publisher is None:
+        raise ValueError("final model publication requires a signing publisher")
     import torch
     import torch.distributed as dist
 
@@ -38,21 +39,26 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
         prepared.close()
         for region in storage.host_regions:
             region.close()
-        combine(path, [stage / root for root in roots], peers)
+        combine(path, [stage / root for root in roots], peers, publisher=publisher)
     finally:
         if stage.exists():
             shutil.rmtree(stage)
 
 
 def export_cluster_package(prepared, images, storage, path, *, peer_files, options, export_id, world,
-                           progress=None):
-    """Export rank zero, append every peer's exported rank, and publish one package holding every rank.
+                           publisher, progress=None):
+    """Assemble private rank exports and sign one package holding every rank.
 
     `peer_files` yields a readable stream of each peer's exported rank file, ranks 1 onward, in
-    order; each is appended to the package as it arrives, so this disk holds the package once. The
+    order; each is appended to a staging file as it arrives. Publication copies stored data and
+    encrypts executables into the final package before removing staging. The
     package names its cluster and export id; `flare run --hosts` serves each rank on its own host.
     """
-    from .package_file import extend_cluster
+    from .package_file import extend_cluster, publish, read_index
+    from .protection import resource_roles
+
+    if publisher is None:
+        raise ValueError("final model publication requires a signing publisher")
 
     path = Path(path)
     if path.exists():
@@ -64,6 +70,9 @@ def export_cluster_package(prepared, images, storage, path, *, peer_files, optio
     try:
         export_model(prepared, images, storage, partial, options=options, progress=progress)
         extend_cluster(partial, peer_files, (world, export_id))
-        os.link(partial, path)
+        index, start = read_index(partial)
+        payload = sorted((span.offset, partial, start + span.offset, span.nbytes)
+                         for _, span in resource_roles(index))
+        publish(path, index, payload, publisher=publisher)
     finally:
         partial.unlink(missing_ok=True)

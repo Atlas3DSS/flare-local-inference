@@ -4,6 +4,7 @@ import argparse
 import ctypes as C
 import json
 from pathlib import Path
+from signing import publisher
 
 
 def prepare(root):
@@ -125,7 +126,7 @@ def _prepare(root, images):
                              kernels=[Kernel(function, "dense", tuple(arguments)),
                                       Kernel(int(fill.func), "fill", fill_arguments)],
                              owners=(gemm, tensors))
-    package.write(root / "package", graphs)
+    package.write(root / "package", graphs, publisher=publisher())
     tensors["input"].copy_((tensors["input"].float() * 0.25 + 0.5).to(torch.float8_e4m3fn))
     (root / "modified-input.bin").write_bytes(tensors["input"].view(torch.uint8).cpu().numpy().tobytes())
     for rows in (32, 64):

@@ -24,6 +24,11 @@ pub enum Command {
     Run(Run),
     /// Accept rank zero's packages and executables and run its peer ranks on this host.
     Agent(AgentArgs),
+    /// Manage remembered publisher trust.
+    Trust {
+        #[command(subcommand)]
+        command: TrustCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -37,12 +42,42 @@ pub struct AgentArgs {
     pub token_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TrustCommand {
+    /// Remove all remembered publisher identities for a signing key.
+    Revoke {
+        fingerprint: String,
+        #[arg(long, value_name = "PATH")]
+        trust_store: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Args)]
 #[command(
     args_override_self = true,
     after_help = "Examples:\n  flare run model.safetensors --gpus 0 --bind 127.0.0.1:8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
 )]
 pub struct Run {
+    /// Additional publisher verification profiles (JSON); does not grant execution trust.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    pub publisher_keys: Vec<PathBuf>,
+    /// Verify the complete stored allocation and table region before CUDA initialization.
+    #[arg(long)]
+    pub verify_weights: bool,
+    /// Permanently accept this exact signing key together with --dangerously-accept-publisher.
+    #[arg(
+        long,
+        requires = "dangerously_accept_publisher",
+        value_name = "FINGERPRINT"
+    )]
+    pub dangerously_approve_key: Option<String>,
+    /// Exact Hugging Face publisher namespace acknowledged for unattended first use.
+    #[arg(long, requires = "dangerously_approve_key", value_name = "NAMESPACE")]
+    pub dangerously_accept_publisher: Option<String>,
+    /// Persistent trust file [default: ~/.config/flare/trust.toml].
+    #[arg(long, value_name = "PATH")]
+    pub trust_store: Option<PathBuf>,
+
     /// Path to the prepared .safetensors package.
     #[arg(value_name = "PACKAGE")]
     pub package: PathBuf,
@@ -145,6 +180,9 @@ impl Run {
     /// graphs and capacities on every host.
     pub fn rank_options(&self) -> Vec<String> {
         let mut options = Vec::new();
+        if self.verify_weights {
+            options.push("--verify-weights".into());
+        }
         if let Some(n) = self.max_concurrency {
             options.extend(["--max-concurrency".into(), n.to_string()]);
         }
@@ -200,10 +238,10 @@ mod tests {
     use super::*;
 
     fn run(arguments: &[&str]) -> Run {
-        match Cli::try_parse_from(arguments).unwrap().command {
-            Command::Run(args) => args,
-            Command::Agent(_) => panic!("expected flare run"),
-        }
+        let Command::Run(args) = Cli::try_parse_from(arguments).unwrap().command else {
+            panic!("expected run")
+        };
+        args
     }
 
     #[test]

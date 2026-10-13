@@ -23,7 +23,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("expected fixture directory")?,
     );
     let expected: Expected = serde_json::from_slice(&std::fs::read(root.join("expected.json"))?)?;
-    let owner = unsafe { NativeResources::load(root.join("package"), 0)? };
+    let owner = unsafe {
+        NativeResources::load(
+            flare_helios::runtime_package::test_support::authorize(root.join("package")),
+            0,
+        )?
+    };
     for (name, address) in expected.addresses {
         assert_eq!(owner.allocation(&name)?.address, address);
     }

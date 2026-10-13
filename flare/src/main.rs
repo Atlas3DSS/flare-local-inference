@@ -5,6 +5,7 @@ mod cli;
 mod cluster;
 mod environment;
 mod launch;
+mod trust;
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -14,7 +15,7 @@ use std::{
 use clap::Parser;
 use flare_helios::{
     model::{ModelContract, glm5next::Glm5Next, qwen4exp::Qwen4Exp},
-    runtime_package::NativeModel,
+    runtime_package::{NativeModel, VerifiedPackage},
     server::{Bootstrap, Server},
     startup::StartupProgress,
 };
@@ -37,11 +38,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return agent::serve(&agent_args.listen, token, agent::default_cache())
                 .map_err(|e| e.to_string().into());
         }
+        cli::Command::Trust {
+            command:
+                cli::TrustCommand::Revoke {
+                    fingerprint,
+                    trust_store,
+                },
+        } => {
+            return trust::revoke(&fingerprint, trust_store.as_deref());
+        }
     };
     let root = args
         .package
         .canonicalize()
         .map_err(|error| format!("cannot access package {}: {error}", args.package.display()))?;
+    let package = VerifiedPackage::open(&root, &trust::publishers(&args.publisher_keys)?)?;
+    let publisher = package.publisher().clone();
+    let authorized = trust::authorize(package, &args)?;
     let key = args
         .api_key_file
         .as_ref()
@@ -76,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _peers = if args.hosts.is_empty() {
         None
     } else {
-        let (world, export_id) = flare_helios::runtime_package::package_cluster(&root)?
+        let (world, export_id) = flare_helios::runtime_package::package_cluster(&authorized)
             .ok_or("--hosts applies only to a multi-host package")?;
         if args.hosts.len() + 1 != world {
             return Err(format!(
@@ -108,13 +121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &format!("{address}:{port}"),
             &rank_options,
             &token,
+            &publisher,
         )
         .map_err(|e| e.to_string())?;
         phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));
         Some(peers)
     };
     // SAFETY: The trusted package owners remain live until every rank drains.
-    let owner = unsafe { NativeModel::load(&root, &local_devices, &options, &progress)? };
+    let owner = unsafe { NativeModel::load(authorized, &local_devices, &options, &progress)? };
     let cluster = match (owner.cluster().cloned(), rendezvous) {
         (Some(cluster), Some(address)) => Some((cluster, address)),
         (Some(_), None) => {

@@ -27,6 +27,9 @@ def _parser() -> argparse.ArgumentParser:
                            help="destination .safetensors file; must not already exist")
     for preparing in (running, exporting):
         _preparation_arguments(preparing)
+    running.add_argument("--publisher-keys", type=Path, action="append", default=[], metavar="PATH")
+    running.add_argument("--trust-store", type=Path, metavar="PATH")
+    running.add_argument("--verify-weights", action="store_true")
     serving = command("serve", serve.serve, "prepare in this process and serve over HTTP, with peer ranks on other hosts")
     for listening in (running, serving):
         listening.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
@@ -51,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _preparation_arguments(running):
+    running.add_argument("--official-source", metavar="URL", help="published checkpoint repository URL")
     running.add_argument("model", nargs="?", metavar="MODEL",
                          help="recipe alias, repository id, or checkpoint directory (default: defaults.model)")
     running.add_argument("--gpus", metavar="LIST",

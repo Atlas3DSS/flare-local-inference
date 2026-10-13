@@ -1976,7 +1976,7 @@ mod tests {
         };
         let model = unsafe {
             NativeModel::load(
-                std::path::Path::new(&package),
+                crate::runtime_package::test_support::authorize(std::path::Path::new(&package)),
                 &[0],
                 &LoadOptions::default(),
                 &StartupProgress::silent(),
@@ -2145,7 +2145,7 @@ mod tests {
         };
         let model = unsafe {
             NativeModel::load(
-                std::path::Path::new(&package),
+                crate::runtime_package::test_support::authorize(std::path::Path::new(&package)),
                 &[0],
                 &LoadOptions::default(),
                 &StartupProgress::silent(),

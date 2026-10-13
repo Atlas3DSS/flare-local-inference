@@ -14,6 +14,7 @@ from ignition.errors import UsageError
 DEFAULT_PATH = Path("~/.config/flare/config.toml")
 
 _SECTIONS = {
+    "publishing": {"signing_key": str, "namespace": str, "official_source": str},
     "server": {"host": str, "port": int, "api_key": str},
     "defaults": {"model": str, "max_concurrency": int},
     "memory": {"reserve": str},

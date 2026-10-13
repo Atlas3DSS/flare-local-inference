@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use flare_helios::runtime_package::Publisher;
 use sha2::{Digest, Sha256};
 
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
@@ -299,10 +300,27 @@ fn run(cache: &Path, stream: TcpStream, request: &serde_json::Value) -> Result<(
                 .ok_or("arguments must be strings")
         })
         .collect::<Result<_, _>>()?;
+    let publisher: Publisher = serde_json::from_value(request["publisher"].clone())?;
+    publisher.validate().map_err(|e| e.to_string())?;
+    let profile = entry(
+        cache,
+        "publishers",
+        &format!("{}.json", publisher.fingerprint()),
+    )?;
+    fs::create_dir_all(profile.parent().unwrap())?;
+    fs::write(&profile, serde_json::to_vec(&vec![&publisher])?)?;
+    // Rank zero sends this identity only after local publisher acceptance. The peer
+    // still verifies the package and matches the exact key and namespace before loading.
     let mut child = Command::new(&binary)
         .arg("run")
         .arg(&package)
         .args(&arguments)
+        .arg("--publisher-keys")
+        .arg(&profile)
+        .arg("--dangerously-approve-key")
+        .arg(publisher.fingerprint())
+        .arg("--dangerously-accept-publisher")
+        .arg(&publisher.namespace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -395,10 +413,11 @@ impl Agent {
         binary: &str,
         package: &str,
         arguments: &[String],
+        publisher: &Publisher,
         mut output: impl FnMut(&str) + Send + 'static,
     ) -> Result<TcpStream, Failure> {
-        let request =
-            serde_json::json!({"binary": binary, "package": package, "arguments": arguments});
+        let request = serde_json::json!({"binary": binary, "package": package, "arguments": arguments,
+                              "publisher": publisher});
         write_frame(&mut self.stream, RUN, &serde_json::to_vec(&request)?)?;
         let keep = self.stream.try_clone()?;
         thread::spawn(move || {
@@ -471,11 +490,18 @@ mod tests {
         );
 
         let (sender, receiver) = std::sync::mpsc::channel();
+        let publisher = Publisher {
+            name: "Test".into(),
+            namespace: "test-publisher".into(),
+            public_key: [1; 32],
+            development: false,
+        };
         let _connection = agent
             .run(
                 &name,
                 "export-1.safetensors",
                 &["--rank".into(), "1".into()],
+                &publisher,
                 move |line| {
                     let _ = sender.send(line.to_owned());
                 },
@@ -483,8 +509,23 @@ mod tests {
             .unwrap();
         let first = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(
-            first.starts_with("run ") && first.ends_with("export-1.safetensors --rank 1"),
+            first.starts_with("run ") && first.contains("export-1.safetensors --rank 1"),
             "{first}"
+        );
+        assert!(first.contains(&format!(
+            "--dangerously-approve-key {}",
+            publisher.fingerprint()
+        )));
+        assert!(first.ends_with("--dangerously-accept-publisher test-publisher"));
+        let profile = entry(
+            &cache,
+            "publishers",
+            &format!("{}.json", publisher.fingerprint()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Vec<Publisher>>(&fs::read(profile).unwrap()).unwrap(),
+            vec![publisher]
         );
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(10)).unwrap(),

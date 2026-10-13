@@ -24,7 +24,7 @@ def binary():
 
 
 def package_key(model, plan, no_compile):
-    inputs = {"version": 1, "checkpoint": model.checkpoint.revision,
+    inputs = {"version": 3, "checkpoint": model.checkpoint.revision,
               "repository": model.checkpoint.repository, "compile": not no_compile,
               "concurrency": plan.concurrency, "prefill_chunk": plan.prefill_chunk,
               "context_parallel": plan.context_parallel,
@@ -54,10 +54,11 @@ def package_key(model, plan, no_compile):
 
 
 @contextmanager
-def cached_package(configuration, model, plan, no_compile):
+def cached_package(configuration, model, plan, no_compile, publisher):
     root = configuration.directory("package_cache")
     root.mkdir(parents=True, exist_ok=True)
-    key = package_key(model, plan, no_compile)
+    key = hashlib.sha256((package_key(model, plan, no_compile) + publisher.fingerprint.hex()
+                          + publisher.namespace + publisher.official_source).encode()).hexdigest()
     with (root / f"{key}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield root / f"{key}.safetensors"

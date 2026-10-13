@@ -1,7 +1,7 @@
 //! A model package owns a disjoint resource bundle for every tensor-parallel rank.
 
 use super::{
-    LoadOptions, NativeResources,
+    AuthorizedPackage, LoadOptions, NativeResources,
     archive::Archive,
     driver::{Access, Location},
     format::{Memory, Package, Reservation, invalid},
@@ -13,6 +13,7 @@ use std::{collections::HashSet, path::Path, thread};
 
 pub struct NativeModel {
     pub(super) ranks: Vec<NativeResources>,
+    _package_file: Option<std::sync::Arc<std::fs::File>>,
     pub(super) server_config: serde_json::Value,
     engram: Option<std::sync::Arc<crate::engram::Shared>>,
     offload: Option<std::sync::Arc<crate::offload::Shared>>,
@@ -135,18 +136,21 @@ fn roce_spec(
     Ok(spec)
 }
 
-/// The cluster a package's ranks form, read from its index alone: (world, export id), or None
+/// The cluster an authorized package's ranks form: (world, export id), or None
 /// when every rank runs on one host.
-pub fn package_cluster(root: &Path) -> Result<Option<(usize, String)>> {
-    let (_, descriptor) = Archive::open(root)?;
-    Ok(descriptor.cluster.map(|c| (c.world as usize, c.export_id)))
+pub fn package_cluster(package: &AuthorizedPackage) -> Option<(usize, String)> {
+    package
+        .index
+        .cluster
+        .as_ref()
+        .map(|c| (c.world as usize, c.export_id.clone()))
 }
 
 impl NativeModel {
     /// # Safety
     /// All rank bundles must be trusted and obey the CUDA execution contract.
     pub unsafe fn load(
-        root: &Path,
+        authorized: AuthorizedPackage,
         devices: &[i32],
         options: &LoadOptions,
         progress: &StartupProgress,
@@ -156,7 +160,11 @@ impl NativeModel {
             return Err(invalid("GPU label count must match selected devices"));
         }
         let phase = progress.phase("Prepare model", None);
-        let (archive, mut descriptor) = Archive::open(root)?;
+        let AuthorizedPackage {
+            archive,
+            index: mut descriptor,
+        } = authorized;
+        let root = archive.path.as_path();
         // A multi-host package holds every rank; each host keeps only the bundle it serves, so
         // it never maps another rank's storage.
         let cluster = match (descriptor.cluster.take(), options.cluster_rank) {
@@ -379,6 +387,7 @@ impl NativeModel {
             if devices.len() == 1 { "" } else { "s" }
         ));
         let mut model = Self {
+            _package_file: Some(archive.file.clone()),
             ranks: Vec::new(),
             server_config,
             engram: None,
@@ -765,6 +774,7 @@ mod tests {
     fn disabled_offload_needs_no_model_metadata_or_cuda_resources() {
         let progress = StartupProgress::silent();
         let mut model = NativeModel {
+            _package_file: None,
             ranks: Vec::new(),
             server_config: serde_json::Value::Null,
             engram: None,

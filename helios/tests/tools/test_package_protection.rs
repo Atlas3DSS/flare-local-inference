@@ -1,0 +1,25 @@
+//! Read authenticated Python-produced fixtures through the native resource reader.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().collect();
+    let path = args.get(1).ok_or("expected package path")?;
+    let namespace = args.get(2).ok_or("expected accepted namespace")?;
+    if namespace == "records" {
+        flare_helios::runtime_package::test_support::inspect_graph(
+            std::path::Path::new(path),
+            args.get(3).ok_or("expected graph name")?,
+        )?;
+        return Ok(());
+    }
+    let publishers = match args.get(4) {
+        Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+        None => vec![flare_helios::runtime_package::test_support::publisher()],
+    };
+    let contents = flare_helios::runtime_package::test_support::inspect(
+        std::path::Path::new(path),
+        namespace,
+        args.get(3).is_some_and(|s| s == "verify-weights"),
+        &publishers,
+    )?;
+    println!("{}", serde_json::to_string(&contents)?);
+    Ok(())
+}

@@ -39,6 +39,7 @@ pub fn start(
     rendezvous: &str,
     options: &[String],
     token: &[u8],
+    publisher: &flare_helios::runtime_package::Publisher,
 ) -> Result<Peers, Failure> {
     let binary = std::env::current_exe()?;
     let binary_name = agent::binary_name(&std::fs::read(&binary)?);
@@ -84,11 +85,13 @@ pub fn start(
         ];
         arguments.extend(options.iter().cloned());
         let prefix = format!("rank {rank} {host}");
-        connections.push(
-            agent.run(&binary_name, &package_name, &arguments, move |line| {
-                eprintln!("[{prefix}] {line}")
-            })?,
-        );
+        connections.push(agent.run(
+            &binary_name,
+            &package_name,
+            &arguments,
+            publisher,
+            move |line| eprintln!("[{prefix}] {line}"),
+        )?);
     }
     Ok(Peers {
         _connections: connections,

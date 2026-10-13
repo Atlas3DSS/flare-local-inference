@@ -70,10 +70,24 @@ def _exhausted(error, plan) -> CapacityError | None:
         f"{', '.join(relief[:-1]).capitalize()}, or {relief[-1]} need less memory.")
 
 
+def _publisher(configuration, args):
+    from ignition.preparation.protection import Publisher
+    values = configuration.values.get("publishing", {})
+    try:
+        if not values and not args.official_source:
+            from ignition.development import publisher
+            return publisher(configuration)
+        return Publisher.load(values["signing_key"], values["namespace"],
+                              args.official_source or values["official_source"])
+    except (KeyError, ValueError, OSError) as error:
+        raise UsageError(f"publishing requires an Ed25519 signing_key, namespace, and official_source: {error}") from error
+
+
 def run(args) -> int:
     from .runtime import binary, cached_package
 
     configuration = Configuration.load(args.config)
+    publisher = _publisher(configuration, args)
     model = resolve_model(configuration, args.model)
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
@@ -83,7 +97,7 @@ def run(args) -> int:
     runtime = binary()
     bind = _address(configuration.get("server.host", args.host).value,
                     configuration.get("server.port", args.port).value)
-    with cached_package(configuration, model, plan, args.no_compile) as package:
+    with cached_package(configuration, model, plan, args.no_compile, publisher) as package:
         if not package.exists():
             _prepare(args, export_path=package)
         else:
@@ -91,6 +105,17 @@ def run(args) -> int:
     environment.apply(configuration, plan.gpus)
     command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)), "--bind", bind]
     command += configuration.prefix_cache_flags()
+    for path in args.publisher_keys:
+        command += ["--publisher-keys", str(path)]
+    if publisher.development:
+        from ignition.development import profile
+        command += ["--publisher-keys", str(profile(configuration, publisher))]
+    command += ["--dangerously-approve-key", publisher.fingerprint.hex(),
+                "--dangerously-accept-publisher", publisher.namespace]
+    if args.trust_store is not None:
+        command += ["--trust-store", str(args.trust_store)]
+    if args.verify_weights:
+        command += ["--verify-weights"]
     key = configuration.get("server.api_key").value
     if key:
         key_file = tempfile.TemporaryFile()
@@ -174,7 +199,8 @@ def _export_hosts(args, *, export_path) -> int:
         with prepared:
             with phase(progress, "Export native packages") as stage:
                 prepared.export(export_path, options=options, export_id=uuid.uuid4().hex, images=recorder,
-                                storage=storage, progress=progress if args.verbose else None)
+                                storage=storage, publisher=_publisher(configuration, args),
+                                progress=progress if args.verbose else None)
                 stage.update(f"{export_path} on each of {plan.world_size} hosts")
         for region in storage.host_regions:
             region.close()
@@ -194,6 +220,7 @@ def _prepare(args, *, export_path) -> int:
 
     progress = Progress()
     configuration = Configuration.load(args.config)
+    publisher = _publisher(configuration, args)
     hub_cache = configuration.directory("hub_cache")
     with phase(progress, "Resolve checkpoint") as stage:
         model = resolve_model(configuration, args.model)
@@ -262,7 +289,7 @@ def _prepare(args, *, export_path) -> int:
             with phase(progress, "Export native package") as stage:
                 try:
                     options.pop("api_key")
-                    export_package(prepared, recorder, storage, export_path, options=options,
+                    export_package(prepared, recorder, storage, export_path, options=options, publisher=publisher,
                                  progress=progress if args.verbose else None)
                 except Exception as error:
                     if args.verbose:

@@ -31,7 +31,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let expected: Expected = serde_json::from_slice(&std::fs::read(root.join("expected.json"))?)?;
     let allocations = allocation_watch::AllocationWatch::new()?;
-    let owner = unsafe { NativeResources::load(root.join("package"), 0)? };
+    let owner = unsafe {
+        NativeResources::load(
+            flare_helios::runtime_package::test_support::authorize(root.join("package")),
+            0,
+        )?
+    };
     assert!(
         allocations.count() > 0,
         "CUDA allocation callbacks were not recorded"

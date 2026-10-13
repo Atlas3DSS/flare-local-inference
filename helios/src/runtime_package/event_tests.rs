@@ -9,7 +9,8 @@ use std::{
 #[ignore = "requires FLARE_EVENT_TEST_PACKAGE exported by fixed_package_fixture.py on the assigned GPU"]
 fn named_external_wait_survives_export_and_native_replay() {
     let root = std::path::PathBuf::from(std::env::var_os("FLARE_EVENT_TEST_PACKAGE").unwrap());
-    let owner = unsafe { NativeResources::load(root.join("package"), 0).unwrap() };
+    let owner =
+        unsafe { NativeResources::load(test_support::authorize(root.join("package")), 0).unwrap() };
     let stream = Stream::open(owner.context as usize, 0).unwrap();
     let flag = stream.mapped_host_buffer(4).unwrap();
     let address = stream.mapped_address(&flag).unwrap();
@@ -54,7 +55,8 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
         (Storage::Ram, false),
         (Storage::Disk, true),
     ] {
-        let (archive, mut index) = Archive::open(&root.join("package")).unwrap();
+        let AuthorizedPackage { archive, mut index } =
+            test_support::authorize(root.join("package"));
         let package = protobuf::decode(index.ranks.remove(0)).unwrap();
         package.validate().unwrap();
         archive.validate(&package).unwrap();

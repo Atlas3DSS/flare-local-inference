@@ -1,6 +1,7 @@
 """Export a compact b12x Engram graph and file-backed table for native replay tests."""
 
 from pathlib import Path
+from signing import publisher
 import sys
 
 import torch
@@ -8,6 +9,7 @@ from b12x.preparation import PreparationSession
 from b12x.sequence import engram
 
 from ignition.components.engram import EngramInputs, PreparedEngramLookup
+from ignition.components.ngram_delivery import publish_requests
 from ignition.preparation.execution import PreparedExecution, GraphSignature
 from ignition.preparation.module_images import ModuleImages
 from ignition.preparation.package_storage import PackageStorage
@@ -36,6 +38,8 @@ def prepare(root):
         source = torch.zeros(1, dtype=torch.int32, device=device)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
+        mailbox = storage.host_allocate("engram_1_requests", (4 * 24 + 1,), torch.int64)
+        mailbox.host_view.zero_()
         records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
         with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
             lookup = PreparedEngramLookup(inputs, output, count, layer=1, token_map=tuple(range(32)),
@@ -43,6 +47,7 @@ def prepare(root):
 
             def run():
                 source.add_(1)
+                publish_requests(inputs.hashes, mailbox.device_view, sequence)
                 lookup(source)
                 records.zero_()
                 records[:, 0, 0] = 1
@@ -56,15 +61,15 @@ def prepare(root):
             with session.capture(), torch.cuda.graph(graph, pool=storage.graph_pool.id):
                 run()
             graph.instantiate()
-        tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs})
+        tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs}, {1: mailbox}, sequence)
         buffers = dict(tables.buffers(), output=output, frame_index=frame,
                        submission_sequence=sequence, completion_records=records)
         prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,
             signatures={'decode': GraphSignature('decode', 4, 1, ('engram_1_hashes',))},
             max_active=4, resources=(storage, lookup), export_events=tables.events())
-        prepared.server_config = {'assets': {}}
+        prepared.server_config = {"assets": {}}
         prepared.package_data = tables
-        export_model(prepared, images, storage, root / 'package', options={})
+        export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher())
 
 
 if __name__ == '__main__':

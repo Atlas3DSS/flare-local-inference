@@ -6,6 +6,8 @@ rust-version = "1.87"
 publish = false
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 clap = { version = "4.6", features = ["derive"] }
 flare-helios = { path = "../helios", features = ["runtime-package", "server"] }
 libc = "0.2.189"

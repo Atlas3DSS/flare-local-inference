@@ -235,7 +235,9 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
 
     with safe_open(package_path, framework="numpy") as tensors:
         assert tensors.keys() == ["flare.metadata", "flare.payload"]
-        assert type(index).FromString(tensors.get_tensor("flare.metadata").tobytes()) == index
+        from ignition.preparation import runtime_package_pb2 as proto
+        protected = proto.ProtectedIndex.FromString(tensors.get_tensor("flare.metadata").tobytes())
+        assert proto.PublisherMetadata.FromString(protected.groups[0].body).index == index
     document = index.ranks[0]
     storage = {allocation.file for allocation in document.allocations if allocation.HasField("file")}
     storage_end = max((document.resources[key].offset + document.resources[key].nbytes for key in storage), default=0)
@@ -244,7 +246,23 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         span = document.resources[key]
         with package_path.open("rb") as source:
             source.seek(start + span.offset)
-            return source.read(span.nbytes)
+            stored = source.read(span.nbytes)
+        catalog = proto.ResourceCatalog.FromString(protected.groups[1].body)
+        resource = next((item for item in catalog.resources if item.offset == span.offset), None)
+        if resource is None:
+            return stored
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from helios.tests.signing import publisher
+        from ignition.preparation.protection import CHUNK, chunk_aad, resource_key
+        signer = publisher()
+        cipher = AESGCM(resource_key(signer.public_key, protected.package_id, span.offset, signer.namespace))
+        result, cursor = bytearray(), 0
+        for chunk in range(len(resource.sha256)):
+            size = min(CHUNK, resource.plain_bytes - len(result)) + 16
+            result.extend(cipher.decrypt(chunk.to_bytes(12, 'big'), stored[cursor:cursor + size],
+                chunk_aad(protected.package_id, span.offset, resource.plain_bytes, chunk)))
+            cursor += size
+        return bytes(result)
     for module in document.modules:
         assert b".py\0" not in contents(module.file)
         for symbol in module.globals:

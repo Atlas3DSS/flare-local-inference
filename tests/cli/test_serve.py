@@ -105,10 +105,11 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "package_key", lambda model, plan, no_compile:
         str((plan.concurrency, plan.prefill_chunk, plan.speculation, no_compile)))
 
-    def export_model(prepared, images, storage, path, *, options, progress):
+    def export_model(prepared, images, storage, path, *, options, publisher, progress):
         assert prepared is calls["prepared"] and not prepared.closed
         assert isinstance(images, Scope) and isinstance(storage, Scope)
         assert "api_key" not in options
+        calls["publisher"] = publisher
         calls["options"] = options
         calls["exports"] += 1
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,3 +269,14 @@ def test_tensor_parallel_run_preserves_rank_selection_in_native_launch(host):
     assert run("qwen3.8-flash", "--gpus", "0,1") == 0
     assert host["plan"].world_size == 2
     assert host["exec"][3:5] == ["--gpus", "0,1"]
+
+
+def test_run_approves_only_its_export_signer_and_namespace(host):
+    assert run("qwen3.8-flash") == 0
+    signer = host["publisher"]
+    args = host["exec"]
+    assert args[args.index("--dangerously-approve-key") + 1] == signer.fingerprint.hex()
+    assert args[args.index("--dangerously-accept-publisher") + 1] == signer.namespace
+    profile = json.loads(Path(args[args.index("--publisher-keys") + 1]).read_text())[0]
+    assert bytes(profile["public_key"]) == signer.public_key
+    assert profile["namespace"] == signer.namespace

@@ -376,7 +376,7 @@ class HostRankGroup:
     def manifest(self):
         return self.model.manifest()
 
-    def export(self, path, *, options, export_id, images, storage, progress=None):
+    def export(self, path, *, options, export_id, images, storage, publisher, progress=None):
         """Write one package holding every rank at `path` here; `flare run --hosts` serves it.
 
         Each peer exports its rank on its own host and sends the file over its control connection,
@@ -400,7 +400,8 @@ class HostRankGroup:
                     raise RuntimeError(f"rank {rank} sent {stream.remaining} bytes more than its export used")
 
         export_cluster_package(self.model, images, storage, path, peer_files=peer_files(), options=options,
-                               export_id=export_id, world=self.rendezvous.world, progress=progress)
+                               export_id=export_id, world=self.rendezvous.world, publisher=publisher,
+                               progress=progress)
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:

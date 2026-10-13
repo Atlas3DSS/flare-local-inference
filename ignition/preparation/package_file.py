@@ -1,6 +1,7 @@
 """Safetensors containers with an opaque payload and an authoritative protobuf index."""
 
 import json
+import hashlib
 import os
 from itertools import chain
 from pathlib import Path
@@ -12,7 +13,7 @@ from . import runtime_package_pb2 as proto
 
 ALIGNMENT = 4096
 MAX_HEADER_BYTES = 64 << 10
-MAX_INDEX_BYTES = 16 << 20
+MAX_INDEX_BYTES = 128 << 20
 
 
 def align(value):
@@ -41,7 +42,7 @@ def _byte_tensor(tensor):
 
 
 def _validate_spans(index, length):
-    if index.version != 1 or len(index.ranks) not in (1, 2, 4):
+    if index.version != 3 or not index.ranks:
         raise ValueError("unsupported model index")
     spans = chain(
         (span for rank in index.ranks for span in rank.resources.values()),
@@ -53,7 +54,7 @@ def _validate_spans(index, length):
 
 
 def read_index(path):
-    """Read the index without reading any tensor, module, asset, or graph body."""
+    """Inspect staging or signed metadata without authenticating it or reading payloads."""
     with Path(path).open("rb") as source:
         prefix = source.read(8)
         if len(prefix) != 8:
@@ -67,7 +68,7 @@ def read_index(path):
             raise ValueError("invalid or unaligned safetensors header")
         header = json.loads(header, object_pairs_hook=_unique_fields)
         if (set(header) != {"__metadata__", "flare.payload", "flare.metadata"}
-                or header["__metadata__"] != {"format": "flare"}):
+                or header["__metadata__"] not in ({"format": "flare"}, {"format": "flare-staging"})):
             raise ValueError("not a Flare safetensors package")
         payload_start, length = _byte_tensor(header["flare.payload"])
         index_start, end = _byte_tensor(header["flare.metadata"])
@@ -82,20 +83,39 @@ def read_index(path):
         index = source.read(size)
         if len(index) != size:
             raise ValueError("truncated model index")
-    result = proto.ModelIndex.FromString(index)
+    if header["__metadata__"]["format"] == "flare":
+        envelope = proto.ProtectedIndex.FromString(index)
+        if envelope.version != 3 or len(envelope.groups) != 4 or envelope.groups[0].kind != 1:
+            raise ValueError("invalid protected package envelope")
+        result = proto.PublisherMetadata.FromString(envelope.groups[0].body).index
+    else:
+        result = proto.ModelIndex.FromString(index)
     _validate_spans(result, length)
     return result, start
 
 
-def publish(path, index, payload):
+def publish(path, index, payload, *, publisher=None):
+    """Publish private rank staging or a publisher-protected final package."""
+    if publisher is None:
+        return _publish(path, index, payload)
+    from .protection import Protection
+    with tempfile.TemporaryDirectory(prefix="flare-protection-") as stage:
+        protected_index = type(index)()
+        protected_index.CopyFrom(index)
+        protection = Protection(protected_index, list(payload), publisher, stage)
+        return _publish(path, protected_index, protection.payload, protection)
+
+
+def _publish(path, index, payload, protection=None):
     """Publish an index and an ordered sequence of file ranges without overwriting."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise FileExistsError(path)
-    encoded = index.SerializeToString(deterministic=True)
+    encoded = (index.SerializeToString(deterministic=True) if protection is None
+               else protection.envelope(bytes(32)))
     if not 0 < len(encoded) <= MAX_INDEX_BYTES:
-        raise ValueError("model index exceeds its metadata limit")
+        raise ValueError(f"model index is {len(encoded)} bytes; metadata limit is {MAX_INDEX_BYTES} bytes")
     payload = list(payload)
     length = 0
     for destination, _, offset, size in payload:
@@ -104,7 +124,7 @@ def publish(path, index, payload):
         length = destination + size
     _validate_spans(index, length)
     header = json.dumps({
-        "__metadata__": {"format": "flare"},
+        "__metadata__": {"format": "flare" if protection is not None else "flare-staging"},
         "flare.payload": {"dtype": "U8", "shape": [length], "data_offsets": [0, length]},
         "flare.metadata": {"dtype": "U8", "shape": [len(encoded)],
                            "data_offsets": [length, length + len(encoded)]},
@@ -115,7 +135,16 @@ def publish(path, index, payload):
     try:
         with os.fdopen(descriptor, "wb") as output:
             output.write(struct.pack("<Q", len(header)) + header)
+            data_hash = hashlib.sha256()
+            written = 0
+            zeros = bytes(4 << 20)
             for destination, source, offset, size in payload:
+                if protection is not None:
+                    gap = max(0, min(destination, protection.data_end) - written)
+                    while gap:
+                        block = zeros[:min(gap, len(zeros))]
+                        data_hash.update(block)
+                        gap -= len(block)
                 output.seek(data_start + destination)
                 with Path(source).open("rb") as contents:
                     contents.seek(offset)
@@ -125,7 +154,17 @@ def publish(path, index, payload):
                         if not block:
                             raise ValueError(f"truncated package resource: {source}")
                         output.write(block)
+                        if protection is not None:
+                            begin = destination + size - remaining
+                            count = max(0, min(len(block), protection.data_end - begin))
+                            data_hash.update(block[:count])
                         remaining -= len(block)
+                written = destination + size
+            if protection is not None:
+                signed = protection.envelope(data_hash.digest())
+                if len(signed) != len(encoded):
+                    raise ValueError("signed envelope size changed during publication")
+                encoded = signed
             output.seek(data_start + length)
             output.write(encoded)
             output.flush()
@@ -135,9 +174,9 @@ def publish(path, index, payload):
         Path(temporary).unlink(missing_ok=True)
 
 
-def combine(path, ranks, peer_memory):
+def combine(path, ranks, peer_memory, *, publisher=None):
     """Place every rank's tensor storage before execution resources and the index."""
-    result = proto.ModelIndex(version=1, peer_memory=peer_memory)
+    result = proto.ModelIndex(version=3, peer_memory=peer_memory)
     storage, execution = [], []
     for rank, source in enumerate(ranks):
         index, start = read_index(source)
@@ -167,7 +206,7 @@ def combine(path, ranks, peer_memory):
         span.offset = cursor
         payload.append((cursor, source, offset, span.nbytes))
         cursor += span.nbytes
-    publish(path, result, payload)
+    publish(path, result, payload, publisher=publisher)
 
 
 def _copy(source, output, nbytes):
@@ -180,7 +219,7 @@ def _copy(source, output, nbytes):
 
 
 def extend_cluster(path, peers, cluster):
-    """Append ranks 1 onward to rank zero's exported file at `path`, making it a multi-host package.
+    """Append ranks 1 onward to rank zero's private staging file at `path`.
 
     `peers` yields binary streams, each a complete exported rank file of one bundle, in rank order;
     each is read once, front to back. Every rank's payload stays contiguous, rank zero's where its
@@ -189,11 +228,13 @@ def extend_cluster(path, peers, cluster):
     one it serves.
     """
     index, start = read_index(path)
-    if len(index.ranks) != 1:
-        raise ValueError("rank export must contain one resource bundle")
     with Path(path).open("rb") as source:
         source.seek(8)
         header = json.loads(source.read(start - 8), object_pairs_hook=_unique_fields)
+    if header["__metadata__"] != {"format": "flare-staging"}:
+        raise ValueError("cluster assembly requires unsigned rank staging")
+    if len(index.ranks) != 1:
+        raise ValueError("rank export must contain one resource bundle")
     cursor = _byte_tensor(header["flare.payload"])[1]
     result = proto.ModelIndex()
     result.CopyFrom(index)
@@ -203,12 +244,15 @@ def extend_cluster(path, peers, cluster):
             if not 0 < size <= MAX_HEADER_BYTES or (8 + size) % ALIGNMENT:
                 raise ValueError("invalid rank export header")
             peer = json.loads(stream.read(size), object_pairs_hook=_unique_fields)
+            if peer["__metadata__"] != {"format": "flare-staging"}:
+                raise ValueError("cluster assembly requires unsigned rank staging")
             length = _byte_tensor(peer["flare.payload"])[1]
             index_start, end = _byte_tensor(peer["flare.metadata"])
             base = align(cursor)
             output.seek(start + base)
             _copy(stream, output, length)
             peer_index = proto.ModelIndex.FromString(stream.read(end - index_start))
+            _validate_spans(peer_index, length)
             if len(peer_index.ranks) != 1 or peer_index.HasField("engram") or peer_index.assets:
                 raise ValueError("a peer rank export must hold one bundle and no shared tables or assets")
             bundle = result.ranks.add()
@@ -224,7 +268,7 @@ def extend_cluster(path, peers, cluster):
         if not 0 < len(encoded) <= MAX_INDEX_BYTES:
             raise ValueError("model index exceeds its metadata limit")
         header = json.dumps({
-            "__metadata__": {"format": "flare"},
+            "__metadata__": {"format": "flare-staging"},
             "flare.payload": {"dtype": "U8", "shape": [cursor], "data_offsets": [0, cursor]},
             "flare.metadata": {"dtype": "U8", "shape": [len(encoded)],
                                "data_offsets": [cursor, cursor + len(encoded)]},

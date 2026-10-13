@@ -9,7 +9,12 @@ mod format;
 mod memory;
 mod model;
 mod payload;
+mod protection;
 mod protobuf;
+mod publishers;
+#[cfg(any(test, feature = "test-tools"))]
+pub mod test_support;
+pub use protection::{AuthorizedPackage, Publisher, VerifiedPackage};
 mod selection;
 mod serving;
 pub use model::{ClusterRank, NativeModel, RoceSpec, package_cluster};
@@ -17,7 +22,6 @@ pub use selection::LoadOptions;
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
@@ -71,9 +75,8 @@ impl NativeResources {
     /// The package must be trusted. Its kernels and declared bindings must obey
     /// CUDA's memory and execution contracts, including any mapped host access.
     /// This method makes the owner's context current on the calling thread.
-    pub unsafe fn load(path: impl AsRef<Path>, ordinal: i32) -> Result<Self> {
-        let path = path.as_ref();
-        let (archive, mut index) = Archive::open(path)?;
+    pub unsafe fn load(authorized: AuthorizedPackage, ordinal: i32) -> Result<Self> {
+        let AuthorizedPackage { archive, mut index } = authorized;
         if index.ranks.len() != 1 || !index.peer_memory.is_empty() || index.engram.is_some() {
             return Err(invalid("resource loader requires one independent rank"));
         }
@@ -425,8 +428,7 @@ impl NativeResources {
             driver.check("cuCtxSetCurrent", (driver.context_set)(self.context))?;
             let mut modules = HashMap::new();
             for module in &package.modules {
-                let mapping = archive.map(package, &module.file)?;
-                let image = mapping.bytes();
+                let image = archive.read(package, &module.file)?;
                 if !image.starts_with(b"\x7fELF") {
                     return Err(invalid("module image is not a compiled cubin"));
                 }

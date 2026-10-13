@@ -14,12 +14,12 @@ from ignition.preparation.package_file import (
 
 
 def index():
-    return proto.ModelIndex(version=1, ranks=[proto.BundleIndex()])
+    return proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
 
 
 def header(payload_size, index_size):
     return {
-        "__metadata__": {"format": "flare"},
+        "__metadata__": {"format": "flare-staging"},
         "flare.payload": {"dtype": "U8", "shape": [payload_size], "data_offsets": [0, payload_size]},
         "flare.metadata": {"dtype": "U8", "shape": [index_size],
                            "data_offsets": [payload_size, payload_size + index_size]},
@@ -42,7 +42,7 @@ def test_official_safetensors_reader_sees_both_byte_tensors(tmp_path, data):
     publish(path, description, [(0, source, 0, len(data))])
     with safe_open(path, framework="numpy") as tensors:
         assert tensors.keys() == ["flare.metadata", "flare.payload"]
-        assert tensors.metadata() == {"format": "flare"}
+        assert tensors.metadata() == {"format": "flare-staging"}
         assert tensors.get_tensor("flare.payload").tobytes() == data
         assert proto.ModelIndex.FromString(tensors.get_tensor("flare.metadata").tobytes()) == description
     assert read_index(path) == (description, ALIGNMENT)
@@ -63,6 +63,22 @@ def test_metadata_growth_preserves_payload_bytes_and_offsets(tmp_path):
     with safe_open(packages[0], framework="numpy") as first, safe_open(packages[1], framework="numpy") as second:
         assert first.get_tensor("flare.payload").tobytes() == second.get_tensor("flare.payload").tobytes()
         assert first.get_slice("flare.metadata").get_shape() != second.get_slice("flare.metadata").get_shape()
+
+
+def test_tp8_kernel_catalogs_fit_the_combined_index(tmp_path):
+    ranks = []
+    for rank in range(8):
+        description = index()
+        for function in range(8192):
+            description.ranks[0].functions.add(module="kernels", symbol=f"kernel_{function}_" + "x" * 384)
+        path = tmp_path / f"rank-{rank}.safetensors"
+        publish(path, description, [])
+        ranks.append(path)
+    combined = tmp_path / "model.safetensors"
+    combine(combined, ranks, [])
+    description, _ = read_index(combined)
+    assert [len(rank.functions) for rank in description.ranks] == [8192] * 8
+    assert description.ByteSize() > 16 << 20
 
 
 def test_index_read_does_not_touch_the_payload(tmp_path, monkeypatch):
@@ -90,7 +106,7 @@ def test_index_read_does_not_touch_the_payload(tmp_path, monkeypatch):
     assert reads == [(0, 8), (8, ALIGNMENT - 8), (ALIGNMENT + (2 << 20), len(description))]
 
 
-@pytest.mark.parametrize("world", [1, 2, 4])
+@pytest.mark.parametrize("world", [1, 2, 3, 4, 8, 16])
 def test_tp_weights_and_tables_precede_all_execution_data(tmp_path, world):
     outputs = []
     for generation in range(2):
@@ -162,6 +178,13 @@ def test_resources_cannot_address_protobuf_bytes(tmp_path):
     path = tmp_path / "invalid.safetensors"
     write_container(path, header(4, len(encoded)), b"data", encoded)
     with pytest.raises(ValueError, match="resource exceeds"):
+        read_index(path)
+
+
+def test_index_size_is_bounded_before_reading(tmp_path):
+    path = tmp_path / "invalid.safetensors"
+    write_container(path, header(0, MAX_INDEX_BYTES + 1), b"", b"")
+    with pytest.raises(ValueError, match="invalid model index size"):
         read_index(path)
 
 

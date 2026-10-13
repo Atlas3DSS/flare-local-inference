@@ -341,7 +341,7 @@ class RuntimePackage:
                 if C.string_at(aligned, 128) != original:
                     raise ValueError(f"tensor-map binding does not match {relocation.target}")
 
-    def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None):
+    def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None, publisher=None):
         """Synchronize and publish an indexed model file without overwriting."""
         path = Path(path)
         if path.exists():
@@ -458,7 +458,7 @@ class RuntimePackage:
                         "reservations": self.reservations, "execution": execution,
                         "context": {"flags": flags.value, "cache": cache.value, "limits": limits},
                         "events": list(self.events)}
-            index = ModelIndex(version=1, ranks=[bundle(document)])
+            index = ModelIndex(version=3, ranks=[bundle(document)])
             for transport in self.transports:
                 _roce_transport(index.ranks[0].roce, transport)
             asset_files = {}
@@ -496,7 +496,7 @@ class RuntimePackage:
             for source in sources:
                 if source.name not in storage_files:
                     append_file(source)
-            publish(path, index, payload)
+            publish(path, index, payload, publisher=publisher)
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
@@ -658,7 +658,7 @@ def _roce_transport(message, transport):
             route.links.add(local=local, remote=remote)
 
 
-def export_model(prepared, images, storage, path, *, options, progress=None, bundle_only=False):
+def export_model(prepared, images, storage, path, *, options, progress=None, publisher=None, bundle_only=False):
     """Export one rank's graphs and storage with recorded virtual addresses.
 
     With `bundle_only`, a multi-host peer's export omits frontend assets and package-level
@@ -782,7 +782,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None, bun
                              for argument, (_, numeric) in zip(arguments, layout, strict=True)]
             kernels[function.value] = Kernel(function.value, name, tuple(arguments))
     ranges = [(storage.DEVICE_BASE, storage.DEVICE_BASE + storage.RESERVATION_BYTES)]
-    granule = storage.granularity
+    # CUDA may ignore small address hints; reserve large enclosing virtual ranges.
+    granule = max(storage.granularity, 1 << 30)
     ranges.extend((address & -granule, (address + size + granule - 1) & -granule)
                   for address, size in outside)
     merged = []
@@ -815,5 +816,5 @@ def export_model(prepared, images, storage, path, *, options, progress=None, bun
     if bundle_only:
         server["assets"] = {}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
-                  package_data=None if bundle_only else prepared.package_data)
+                  package_data=None if bundle_only else prepared.package_data, publisher=publisher)
     return package
