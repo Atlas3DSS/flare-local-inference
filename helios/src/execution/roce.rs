@@ -14,7 +14,9 @@ use crate::runtime_package::RoceSpec;
 use crate::{ExecutionError, Failure, Result};
 
 /// The proxy ABI compiled into this runtime; packages record the one their kernels use.
-pub const PROXY_ABI: u32 = 6;
+pub const PROXY_ABI: u32 = 7;
+/// Control word 7 after a variable-length all-gather met a byte count it cannot send.
+const INVALID_VARLEN_COUNT: u32 = 1;
 
 #[repr(C)]
 struct Context {
@@ -23,7 +25,13 @@ struct Context {
 
 unsafe extern "C" {
     fn roce_abi_version() -> c_int;
-    fn roce_layout(world: c_int, slot_bytes: u64, pipe_bytes: u64, out: *mut u64) -> c_int;
+    fn roce_layout(
+        world: c_int,
+        slot_bytes: u64,
+        pipe_bytes: u64,
+        varlen_bytes: u64,
+        out: *mut u64,
+    ) -> c_int;
     fn roce_blob_bytes() -> u64;
     fn roce_create(
         world: c_int,
@@ -36,6 +44,7 @@ unsafe extern "C" {
         region_bytes: u64,
         slot_bytes: u64,
         pipe_bytes: u64,
+        varlen_bytes: u64,
         err: *mut c_char,
         err_len: u64,
     ) -> *mut Context;
@@ -63,7 +72,8 @@ pub struct RoceTransport {
     context: *mut Context,
     spec: RoceSpec,
     topology: Topology,
-    // The control record: words 2, 3 and 6 name a timed-out wait's sequence, peer and rail.
+    // The control record: words 2, 3 and 6 name a failed wait's sequence, peer and rail; word 7
+    // why a kernel stopped without a timeout.
     control: *const AtomicU32,
 }
 
@@ -87,12 +97,13 @@ impl RoceTransport {
                 spec.proxy_abi
             )));
         }
-        let mut layout = [0u64; 13];
+        let mut layout = [0u64; 17];
         let status = unsafe {
             roce_layout(
                 spec.world as c_int,
                 spec.slot_bytes,
                 spec.pipe_bytes,
+                spec.varlen_bytes,
                 layout.as_mut_ptr(),
             )
         };
@@ -136,6 +147,7 @@ impl RoceTransport {
                 spec.region_bytes,
                 spec.slot_bytes,
                 spec.pipe_bytes,
+                spec.varlen_bytes,
                 message.as_mut_ptr(),
                 message.len() as u64,
             )
@@ -241,8 +253,16 @@ impl RoceTransport {
             )));
         }
         // SAFETY: The control record lies inside the region the transport was opened over.
-        let words = unsafe { std::slice::from_raw_parts(self.control, 7) };
+        let words = unsafe { std::slice::from_raw_parts(self.control, 8) };
         let sequence = words[2].load(Ordering::Acquire);
+        if sequence != 0 && words[7].load(Ordering::Relaxed) == INVALID_VARLEN_COUNT {
+            return Err(failure(format!(
+                "RoCE variable-length all-gather at sequence {sequence} received an unusable \
+                 byte count for rank {}; every rank stopped before sending, and the transport \
+                 is poisoned",
+                words[3].load(Ordering::Relaxed),
+            )));
+        }
         if sequence != 0 {
             return Err(failure(format!(
                 "RoCE collective on rank {} timed out waiting for rank {}, HCA {}, at sequence \

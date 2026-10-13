@@ -648,6 +648,7 @@ def _roce_transport(message, transport):
     message.counters_address = transport["counters"]["address"]
     message.counters_bytes = transport["counters"]["nbytes"]
     message.slot_bytes, message.pipe_bytes = transport["slot_bytes"], transport["pipe_bytes"]
+    message.varlen_bytes = transport.get("varlen_bytes", 0)
     message.ctrl_offset = transport["ctrl_offset"]
 
 

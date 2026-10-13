@@ -158,6 +158,8 @@ message RoceTransport {
   // Formerly the preparing hosts' devices, GID index, traffic class, rails and routes. Each
   // serving host discovers its own fabric instead.
   reserved 11 to 15;
+  // Per-rank capacity of the variable-length all-gather area; 0 without one (proxy ABI 7).
+  uint64 varlen_bytes = 16;
 }
 message GraphIndex {
   string name = 1;

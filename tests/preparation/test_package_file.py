@@ -223,10 +223,11 @@ def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path
         if rank == 0:
             description.server.update({"model_id": "glm"})
         _roce_transport(description.ranks[0].roce, {
-            "proxy_abi": 6, "world_size": 2, "rank": rank,
+            "proxy_abi": 7, "world_size": 2, "rank": rank,
             "region": {"address": 0x100000000000, "nbytes": 1 << 20},
             "counters": {"address": 0x200000001000, "nbytes": 1024},
             "slot_bytes": 1 << 20, "pipe_bytes": 64 << 20, "ctrl_offset": 4 << 20,
+            **({"varlen_bytes": 8 << 20} if rank == 1 else {}),
             # The preparing hosts' fabric is not recorded: each serving host discovers its own.
             "hca_names": ["rocep1s0f0", "roceP2p1s0f0"], "gid_index": 3, "traffic_class": 0, "rails": 2,
             "routes": [[], [[0, 0], [1, 1]]] if rank == 0 else [[[0, 0], [1, 1]], []]})
@@ -238,6 +239,8 @@ def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path
     assert (result.cluster.world, result.cluster.export_id) == (2, "export-a")
     assert result.server["model_id"] == "glm"
     assert [bundle.roce.rank for bundle in result.ranks] == [0, 1]
+    # A description from before the variable-length all-gather records none.
+    assert [bundle.roce.varlen_bytes for bundle in result.ranks] == [0, 8 << 20]
     assert all(field not in proto.RoceTransport.DESCRIPTOR.fields_by_name
                for field in ("hcas", "gid_index", "traffic_class", "rails", "routes"))
     with files[0].open("rb") as package:

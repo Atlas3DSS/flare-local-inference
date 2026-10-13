@@ -44,6 +44,8 @@ pub struct RoceSpec {
     pub counters_bytes: u64,
     pub slot_bytes: u64,
     pub pipe_bytes: u64,
+    /// Per-rank capacity of the variable-length all-gather area (0 without one).
+    pub varlen_bytes: u64,
     pub ctrl_offset: u64,
 }
 
@@ -61,6 +63,7 @@ fn roce_spec(
         counters_bytes: wire.counters_bytes,
         slot_bytes: wire.slot_bytes,
         pipe_bytes: wire.pipe_bytes,
+        varlen_bytes: wire.varlen_bytes,
         ctrl_offset: wire.ctrl_offset,
     };
     let within = |address: u64, nbytes: u64, memory: super::format::Memory| {
