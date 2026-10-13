@@ -522,7 +522,7 @@ def serve_peer(control, executor, rank, world, *, resolve_snapshot, progress=Non
                 path = directory / f"rank-{rank}.safetensors"
                 if progress is not None:
                     progress(f"exporting rank {rank}")
-                export_model(model, recorder, storage, path, options=options)
+                export_model(model, recorder, storage, path, options=options, bundle_only=True)
                 # Rank zero appends this file to its package as it arrives.
                 send_object(control, {"exported": path.stat().st_size})
                 with path.open("rb") as source:

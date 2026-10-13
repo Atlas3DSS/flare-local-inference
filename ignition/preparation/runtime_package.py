@@ -658,8 +658,12 @@ def _roce_transport(message, transport):
             route.links.add(local=local, remote=remote)
 
 
-def export_model(prepared, images, storage, path, *, options, progress=None):
-    """Export one rank's graphs and storage with recorded virtual addresses."""
+def export_model(prepared, images, storage, path, *, options, progress=None, bundle_only=False):
+    """Export one rank's graphs and storage with recorded virtual addresses.
+
+    With `bundle_only`, a multi-host peer's export omits frontend assets and package-level
+    tables: rank zero's package already holds them once for every host.
+    """
     cuda = _Cuda()
     cuda.call("cuCtxSynchronize")
     if storage.error is not None:
@@ -807,6 +811,9 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
             graph["draft_tokens"] = graph["token_capacity"] - 1
             graph["verify_tokens"] = graph["token_capacity"]
             graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"
-    package.write(path, prepared.graphs, execution=execution, server={**prepared.server_config, **options}, progress=progress,
-                  package_data=prepared.package_data)
+    server = {**prepared.server_config, **options}
+    if bundle_only:
+        server["assets"] = {}
+    package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
+                  package_data=None if bundle_only else prepared.package_data)
     return package
