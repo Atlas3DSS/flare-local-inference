@@ -213,6 +213,14 @@ memory types despite sharing DRAM; do not dereference a device allocation on
 the CPU or replace system-scope synchronization with volatile accesses. See
 [NVIDIA's Spark CUDA guidance](https://docs.nvidia.com/dgx/dgx-spark-porting-guide/porting/cuda.html).
 
+A model too large for one Spark runs tensor-parallel across two or four Sparks,
+one rank per host, reducing through b12x RoCEnante over their ConnectX-7 ports:
+`ignition export --ranks N --rendezvous ADDR:PORT` on rank zero with
+`ignition join` on each peer writes one package on rank zero, and
+`flare run PACKAGE --hosts H1,...` serves it, starting each peer's rank through
+that host's `flare agent`. See [serving across DGX Sparks](docs/multi-host.md)
+for setup, the agent's token, and failures.
+
 For preparation followed immediately by serving, use the cached workflow:
 
 ```sh
