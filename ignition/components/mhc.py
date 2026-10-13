@@ -7,6 +7,7 @@ from b12x.norm import mhc
 from b12x.norm.mhc import _impl
 from b12x.preparation import PreparedCall
 
+from ignition.components import mhc_sm103, sm103
 from ignition.preparation.scratch import planned_scratch, prime_owners
 from ignition.preparation.tuning import declare, benchmark_resource, register_finalizer
 
@@ -105,6 +106,12 @@ class PreparedMHC:
             raise ValueError("lagged mHC requires incoming and outgoing coefficient buffers")
         if pre_mix is not None:
             self.options.update(pre_mix=pre_mix)
+        self.composed = None
+        if pre_mix is None and tokens > mhc_sm103.MIN_ROWS and sm103.is_sm103(residual.device):
+            # SM103 prefill composes FlashInfer's mHC kernels; b12x's fused launches stay for decode.
+            self.composed = mhc_sm103.ComposedMHC(self.operation, weights, scratch, rms_eps=rms_eps,
+                hc_eps=hc_eps, sinkhorn_iters=sinkhorn_iters, norm_eps=norm_eps)
+            return
         self.plan = mhc.plan(mhc.Caps(device=residual.device, max_tokens=tokens, hidden_size=hidden),
             invocation={"operation": self.operation, "output_mode": "provided", "has_norm_weight": True,
                 "norm_weight_dtype": "bfloat16", "expanded_residual": self.operation == "pre",
@@ -141,6 +148,8 @@ class PreparedMHC:
         register_finalizer(session, finalize, workspace=workspace)
 
     def __call__(self, *inputs):
+        if self.composed is not None:
+            return self.composed(*inputs)
         entry = mhc.run_pre if self.operation == "pre" else mhc.run_post_pre
         entry(*inputs, self.weights.fn, self.weights.scale, self.weights.base,
               **self.options, binding=self.binding)
