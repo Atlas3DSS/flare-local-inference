@@ -131,11 +131,6 @@ class PreparationConfig:
         return self.minimum_pages or (self.context // self.page_tokens + int(self.mtp)) * self.max_active
 
     @property
-    def speculative_state_rows(self):
-        """Recurrent states kept per request for every verified position after the first."""
-        return max(self.speculative_widths) - 1
-
-    @property
     def page_tokens(self):
         """Global positions per KV page: 256 local records on each rank that shares the context."""
         return 256 * (len(self.devices) if self.context_parallel else 1)
@@ -186,7 +181,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             raise ValueError("GLM snapshot budget must hold at least one continuation row")
         pages, blocks = config.preparation_pages, config.context // config.page_tokens
         slots = config.request_capacity
-        state_rows = snapshots + slots * (max(config.speculative_widths) if config.mtp else 1)
+        # Speculative verification records its tokens and commits into the live row: one row per request.
+        state_rows = snapshots + slots
         page_bytes = (layer_types.count("indexed_attention") + int(config.mtp)) * (4 * 64 * 528 + 64 * 132)
         max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
         context_ranks = shard.world_size if config.context_parallel and group is not None else 1
@@ -403,7 +399,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             "page_tokens": config.page_tokens}}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
-            speculative_fixed_width=config.speculative_fixed_width)
+            speculative_fixed_width=config.speculative_fixed_width, state_rows_per_request=1)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,

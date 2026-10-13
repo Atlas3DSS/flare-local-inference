@@ -1,5 +1,8 @@
 """Captured GLM proposals, packed target verification and accepted state commits."""
 
+import itertools
+import weakref
+
 import torch
 import triton
 import triton.language as tl
@@ -13,35 +16,30 @@ from ignition.components.speculation import (
     PreparedStochasticVerification, SpeculativeRngState,
 )
 from ignition.components.state import gather_rows, save_hidden
+from ignition.preparation.scratch import planned_scratch
+from ignition.preparation.tuning import register_finalizer
 
 from .batch import PreparedBatch
 from .dcp import ContextShards
+from .kda import KDARecords
 from .mtp import DraftMetadata, MTPScratch, PreparedMTP
 from .stack import PreparedDecoder
 from .state import DecoderMetadata
 
 
 @triton.jit
-def _commit_delta_rows(Words, Slots, Counts, StateRows, Recurrent, Convolution, row_words, row_halves,
-                       RECURRENT_WORDS: tl.constexpr, CHANNELS: tl.constexpr, COLUMNS: tl.constexpr,
-                       WORD_BLOCK: tl.constexpr, CHANNEL_BLOCK: tl.constexpr):
-    # One program copies a slice of one layer's accepted recurrent state into the live row and shifts the
-    # same slice of its convolution history. Rows that kept at most one token already hold their state.
+def _shift_convolution(Halves, Slots, Counts, StateRows, Convolution, row_halves,
+                       CHANNELS: tl.constexpr, COLUMNS: tl.constexpr, CHANNEL_BLOCK: tl.constexpr):
+    # One program shifts a slice of one layer's convolution history in the live row past the emitted tokens.
+    # Rows that kept at most one token already hold their history.
     layer, row, chunk = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     count = tl.load(Counts + row).to(tl.int64)
     if count > 1:
         slot = tl.load(Slots + row).to(tl.int64)
         live = tl.load(StateRows + slot * 8)
-        selected = tl.load(StateRows + slot * 8 + count - 1)
-        recurrent = tl.load(Recurrent + layer)
-        words = chunk * WORD_BLOCK + tl.arange(0, WORD_BLOCK)
-        inside = words < RECURRENT_WORDS
-        values = tl.load(Words + selected * row_words + recurrent + words, inside)
-        tl.store(Words + live * row_words + recurrent + words, values, inside)
         channels = chunk * CHANNEL_BLOCK + tl.arange(0, CHANNEL_BLOCK)
         present = channels < CHANNELS
-        halves = Words.to(tl.pointer_type(tl.bfloat16))
-        history = halves + live * row_halves + tl.load(Convolution + layer) + channels * COLUMNS
+        history = Halves + live * row_halves + tl.load(Convolution + layer) + channels * COLUMNS
         first = tl.load(history + count - 1, present)
         second = tl.load(history + count, present)
         third = tl.load(history + count + 1, present)
@@ -50,18 +48,80 @@ def _commit_delta_rows(Words, Slots, Counts, StateRows, Recurrent, Convolution, 
         tl.store(history + 2, third, present)
 
 
-def delta_regions(pool):
-    """Word offsets of every KDA recurrent region, half offsets of its convolution, and their extents."""
-    delta = [i for i, layer in enumerate(pool.decoder.layers) if isinstance(layer, DeltaState)]
-    recurrent = [pool.layout.region(f"layer{i}.recurrent") for i in delta]
-    convolution = [pool.layout.region(f"layer{i}.convolution") for i in delta]
-    if (len({(r.shape, r.dtype) for r in recurrent}) != 1 or len({(r.shape, r.dtype) for r in convolution}) != 1
-            or recurrent[0].dtype != torch.float32 or convolution[0].dtype != torch.bfloat16):
-        raise ValueError("KDA commits require uniform FP32 recurrent and BF16 convolution regions")
-    device = pool.backing.device
-    return (torch.tensor([r.offset // 4 for r in recurrent], dtype=torch.int64, device=device),
-            torch.tensor([r.offset // 2 for r in convolution], dtype=torch.int64, device=device),
-            recurrent[0].nbytes // 4, *convolution[0].shape)
+def delta_layers(pool):
+    """Decoder indices of the KDA layers, whose states live in the hybrid pool."""
+    return [i for i, layer in enumerate(pool.decoder.layers) if isinstance(layer, DeltaState)]
+
+
+def convolution_regions(pool):
+    """Half offsets of every KDA convolution history region and its channel and column extents."""
+    convolution = [pool.layout.region(f"layer{i}.convolution") for i in delta_layers(pool)]
+    if len({(r.shape, r.dtype) for r in convolution}) != 1 or convolution[0].dtype != torch.bfloat16:
+        raise ValueError("KDA commits require uniform BF16 convolution regions")
+    return (torch.tensor([r.offset // 2 for r in convolution], dtype=torch.int64, device=pool.backing.device),
+            *convolution[0].shape)
+
+
+@torch.library.custom_op("flare::glm_kda_commit", mutates_args=("backing",))
+def _kda_commit(backing: torch.Tensor, reads: list[torch.Tensor], handle: int) -> None:
+    from b12x.sequence import gdn_decode
+
+    gdn_decode.run_kda_commit(_COMMITS[handle].binding, lower_bound=-5.0)
+
+
+@_kda_commit.register_fake
+def _fake_kda_commit(backing, reads, handle) -> None:
+    pass
+
+
+_COMMITS = weakref.WeakValueDictionary()
+_COMMIT_HANDLES = itertools.count()
+
+
+class PreparedKDACommit:
+    """Replay each request's accepted verification records into its live KDA rows, for every layer."""
+
+    def __init__(self, pool, records, plan, state_indices, *, session, workspace):
+        layers = delta_layers(pool)
+        if tuple(layers) != records.layers:
+            raise ValueError("KDA commit requires records for every KDA layer")
+        device, batch = pool.backing.device, state_indices.shape[0]
+        states = [pool.decoder.layers[i].recurrent for i in layers]
+        self.pool, self.plan, self.workspace = pool, plan, workspace
+        self.sources = state_indices
+        self.lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+        self.finals = torch.zeros(batch, dtype=torch.int32, device=device)
+        # Slot zero is the null row: no boundary checkpoint is exported.
+        self.boundaries = torch.zeros(batch, dtype=torch.int32, device=device)
+        self.boundary_lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+        def table(values):
+            return torch.tensor(values, dtype=torch.int64, device=device)
+        corrections, records_kg = records.corrections, records.keys_and_gates
+        self.tables = dict(
+            state_base_addrs=table([s.data_ptr() for s in states]),
+            state_block_strides=table([s.stride(0) for s in states]),
+            correction_cache_base_addrs=table([corrections[i].data_ptr() for i in range(len(layers))]),
+            correction_cache_block_strides=table([corrections.stride(1)] * len(layers)),
+            kg_cache_base_addrs=table([records_kg[i].data_ptr() for i in range(len(layers))]),
+            kg_cache_block_strides=table([records_kg.stride(1)] * len(layers)),
+            A_log=records.A_log, dt_bias=records.dt_bias)
+        self.reads = [corrections, records_kg, self.sources, self.lengths, self.finals]
+        self.handle = next(_COMMIT_HANDLES)
+        _COMMITS[self.handle] = self
+        register_finalizer(session, self.bind, workspace=workspace)
+
+    def bind(self):
+        from b12x.sequence import gdn_decode
+
+        self.binding = gdn_decode.bind_kda_commit(self.plan,
+            scratch=planned_scratch(self.plan.scratch_specs(), self.workspace), **self.tables,
+            state_indices=self.sources, commit_lens=self.lengths, final_state_indices=self.finals,
+            boundary_state_indices=self.boundaries, boundary_recovery_lens=self.boundary_lengths)
+
+    def __call__(self, counts):
+        self.lengths.copy_(counts)
+        self.finals.copy_(self.sources)
+        _kda_commit(self.pool.backing, self.reads, self.handle)
 
 
 class SpeculativePreparation:
@@ -86,6 +146,11 @@ class SpeculativePreparation:
         self.draft_tables = torch.full_like(inputs.page_tables, -1)
         self.draft_generation = torch.zeros_like(requests.generation)
         self.draft_offset = torch.zeros_like(requests.generation)
+        # Verification records every KDA layer's tokens, so each request keeps one recurrent row.
+        layers = delta_layers(pool)
+        recurrent = pool.decoder.layers[layers[0]].recurrent
+        self.kda_records = KDARecords.allocate({i: weights.layers[i].attention for i in layers},
+            recurrent.shape[0], recurrent.shape[1], device)
 
     def draft(self, metadata, name, *, cache_only=False, mode="decode"):
         shared = self.draft_scratch.get(mode)
@@ -139,7 +204,7 @@ class PreparedRound:
         self.rows, self.columns = torch.arange(b, device=device), torch.arange(w, device=device)
         self.offsets = torch.arange(b * w, device=device)
         self.state_columns = torch.arange(8, device=device)
-        self.delta_regions = delta_regions(o.pool)
+        self.convolution_regions = convolution_regions(o.pool)
         self.metadata = DecoderMetadata.allocate(b * w, b, blocks, device)
         self.metadata = DecoderMetadata(self.metadata.token_ids, torch.arange(b * w, device=device),
             DeltaMetadata.allocate(b, device, verification_columns=8), self.metadata.indexed)
@@ -151,7 +216,11 @@ class PreparedRound:
             session=o.session, name=f"{name}.validation")
         self.decoder = PreparedDecoder(o.weights, o.scratch.rows(b * w, "decode", sample_rows=b * w),
             o.pool.decoder, self.metadata, mode="decode", session=o.session, name=f"{name}.target",
-            workspace=o.workspace, max_cache_pages=o.max_cache_pages, context=o.context, **o.collectives)
+            workspace=o.workspace, max_cache_pages=o.max_cache_pages, context=o.context,
+            kda_records=o.kda_records, **o.collectives)
+        first = self.decoder.layers[o.kda_records.layers[0]].attention
+        self.kda_commit = PreparedKDACommit(o.pool, o.kda_records, first.recurrent_plan,
+            self.metadata.recurrent.state_indices[:, 0], session=o.session, workspace=o.workspace)
         self.draft_metadata = DraftMetadata(b, b, blocks, device, shards=o.shards)
         self.draft = o.draft(self.draft_metadata, f"{name}.draft") if w > 1 else None
         self.draft_logits = torch.empty_like(self.draft.logits) if self.draft is not None else None
@@ -209,7 +278,8 @@ class PreparedRound:
         g.convolution_slots.copy_(torch.where(self.active, states[:, 0], -1))
         g.fresh.zero_()
         g.accepted_tokens.fill_(1)
-        states = torch.where(self.state_columns < w, states, 0)
+        # Verification reads each request's live row in column zero and records its tokens.
+        states = torch.where(self.state_columns < 1, states, 0)
         g.state_indices.copy_(torch.where(self.active[:, None], states, 0))
         g.num_seqs.copy_(o.inputs.live_rows.clamp(0, b))
         g.num_tokens.copy_(ends[-1:])
@@ -228,19 +298,20 @@ class PreparedRound:
         m.sample_indices.copy_((starts[:, None] + self.columns).clamp(0, b * w - 1).reshape(-1))
 
     def commit_state(self, slots, counts):
-        """Keep each live KDA row's state after its last emitted token in one launch for all layers."""
+        """Replay each live KDA row's accepted records for every layer, then shift its convolution history."""
         o, w = self.owner, self.width
         states = o.inputs.request_state_rows[slots.clamp(0, o.requests.capacity - 1)]
         live = torch.where(counts > 0, states[:, 0], 0).long()
+        self.kda_commit(counts)
         backing = o.pool.backing
-        words, halves, extent, channels, columns = self.delta_regions
-        args = (backing.view(torch.int32), slots, counts, o.inputs.request_state_rows, words, halves,
-                backing.shape[1] // 4, backing.shape[1] // 2, extent, channels, columns, 4096, 128)
-        grid = (words.numel(), self.batch, max(triton.cdiv(extent, 4096), triton.cdiv(channels, 128)))
+        halves, channels, columns = self.convolution_regions
+        args = (backing.view(torch.bfloat16), slots, counts, o.inputs.request_state_rows, halves,
+                backing.shape[1] // 2, channels, columns, 128)
+        grid = (halves.numel(), self.batch, triton.cdiv(channels, 128))
         if torch.compiler.is_compiling() or get_proxy_mode() is not None:
-            torch.library.wrap_triton(_commit_delta_rows)[grid](*args, num_warps=4)
+            torch.library.wrap_triton(_shift_convolution)[grid](*args, num_warps=4)
         else:
-            _commit_delta_rows[grid](*args, num_warps=4)
+            _shift_convolution[grid](*args, num_warps=4)
         hidden = self.decoder.scratch.hidden.view(self.batch, w, 4096)
         selected_hidden = hidden[self.rows, (counts - 1).clamp_min(0).long()]
         save_hidden(selected_hidden, o.pool.last_hidden,

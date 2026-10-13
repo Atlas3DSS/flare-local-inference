@@ -1,4 +1,4 @@
-"""Accepted KDA prefixes remain valid when speculative widths change."""
+"""Accepted KDA prefixes, replayed from verification records, match plain decode across widths."""
 
 import os
 from pathlib import Path
@@ -12,10 +12,10 @@ from ignition.components.recurrent import DeltaMetadata
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
-from ignition.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
+from ignition.recipes.glm53.kda import KDARecords, KDAScratch, PreparedGlmKDA
 from ignition.recipes.glm53.model import create_model_tree
 from ignition.recipes.glm53.pool import ContinuationPool
-from ignition.recipes.glm53.speculative import PreparedRound, delta_regions
+from ignition.recipes.glm53.speculative import PreparedKDACommit, PreparedRound, convolution_regions
 from ignition.recipes.glm53.weights import GlmWeightLoader, TEXT_PREFIX
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
@@ -41,9 +41,10 @@ def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
     op = PreparedRound.__new__(PreparedRound)
     op.owner = SimpleNamespace(pool=pool, requests=SimpleNamespace(capacity=1),
                               inputs=SimpleNamespace(row_slot_ids=slots,
-                                  request_state_rows=torch.tensor([[1, 3, 4, 5, 6, 7, 8, 9]], device="cuda:0")))
+                                  request_state_rows=torch.tensor([[1, 0, 0, 0, 0, 0, 0, 0]], device="cuda:0")))
     op.width, op.batch, op.rows = 6, 1, torch.arange(1, device="cuda:0")
-    op.delta_regions = delta_regions(pool)
+    op.convolution_regions = convolution_regions(pool)
+    records = KDARecords.allocate({0: weights}, state.recurrent.shape[0], state.recurrent.shape[1], "cuda:0")
     op.decoder = SimpleNamespace(scratch=SimpleNamespace(hidden=torch.zeros((6, 4096), dtype=torch.bfloat16, device="cuda:0")))
     operators = {}
     with RecordedPreparationSession(device=torch.device("cuda:0"), checkpoint="glm53-mtp-state",
@@ -52,12 +53,16 @@ def test_learned_kda_verification_commits_each_prefix_before_plain_decode():
         for width in metas:
             operators[width] = PreparedGlmKDA(module, weights, sources[width],
                 KDAScratch.allocate(width, 16, "cuda:0"), state, metas[width],
-                mode="decode", session=session, name=f"decode{width}", workspace=arena)
+                mode="decode", session=session, name=f"decode{width}", workspace=arena,
+                records=records.layer(0) if width > 1 else None)
+        op.kda_commit = PreparedKDACommit(pool, records, operators[6].recurrent_plan,
+            metas[6].state_indices[:, 0], session=session, workspace=arena)
         session.tune()
         for width, meta in metas.items():
             meta.query_start_loc.copy_(torch.tensor([0, width], dtype=torch.int32))
             meta.convolution_slots.fill_(1)
-            meta.state_indices.copy_(torch.tensor([[1, 3, 4, 5, 6, 7, 8, 9]]))
+            # Verification reads the live row in column zero; plain decode writes it back there.
+            meta.state_indices.copy_(torch.tensor([[1, 0, 0, 0, 0, 0, 0, 0]]))
             meta.num_seqs.fill_(1)
             meta.num_tokens.fill_(width)
         generator = torch.Generator(device="cuda:0").manual_seed(531)

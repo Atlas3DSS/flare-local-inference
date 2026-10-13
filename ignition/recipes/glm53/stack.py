@@ -98,7 +98,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
                  metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
-                 workspace, progress=None, feedback=None, max_cache_pages=None, context=None):
+                 workspace, progress=None, feedback=None, max_cache_pages=None, context=None, kda_records=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
             raise ValueError("GLM text execution requires all 45 decoder layers")
@@ -120,7 +120,8 @@ class PreparedDecoder:
                 metadata.indexed if indexed else metadata.recurrent, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
                 carry=None if index == 0 else scratch.mlp_hc, defer_post=index < len(language.layers) - 1,
-                max_cache_pages=max_cache_pages, context=context)
+                max_cache_pages=max_cache_pages, context=context,
+                kda_records=None if kda_records is None or indexed else kda_records.layer(index))
             self.layers.append(layer)
             if progress is not None:
                 progress(f"declared {mode} layer {index + 1}/45")

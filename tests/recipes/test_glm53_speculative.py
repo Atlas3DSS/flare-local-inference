@@ -42,7 +42,8 @@ def test_shared_commit_without_previous_token_embeddings():
      [[1, 0, 0, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0, 0, 0]]),
     (6, [6, 2], [255, 256, 257, 258, 259, 260, 510, 511, -1, -1, -1, -1],
      [10 * 256 + 255, *range(11 * 256, 11 * 256 + 5), 21 * 256 + 254, 21 * 256 + 255],
-     [[1, 8, 9, 10, 11, 12, 0, 0], [2, 15, 16, 17, 18, 19, 0, 0]]),
+     # Verification records tokens against each request's live row only.
+     [[1, 0, 0, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0, 0, 0]]),
 ])
 def test_verification_packs_unequal_lengths_and_retains_request_output_rows(
         width, limits, positions, token_slots, state_indices):

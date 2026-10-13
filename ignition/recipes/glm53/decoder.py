@@ -62,7 +62,7 @@ class PreparedGlmLayer:
     def __init__(self, module, attention_weights, mlp_weights, residual_weights,
                  source, output, scratch: LayerScratch, state, metadata, *,
                  mode, runtime, coordinator, session, name, workspace, carry=None, defer_post=False,
-                 max_cache_pages=None, context=None):
+                 max_cache_pages=None, context=None, kda_records=None):
         if module.block_type not in ("linear_attention", "indexed_attention"):
             raise ValueError("prepared GLM layer requires canonical KDA or sparse MLA attention")
         rows = scratch.attention.output.shape[0]
@@ -85,7 +85,8 @@ class PreparedGlmLayer:
                           scratch.attention, state, metadata)
         if module.block_type == "linear_attention":
             self.attention = PreparedGlmKDA(*attention_args, mode=mode, session=session, name=f"{name}.kda",
-                                            workspace=workspace, checkpoint_export=mode == "prefill")
+                                            workspace=workspace, checkpoint_export=mode == "prefill",
+                                            records=kda_records)
         else:
             self.attention = PreparedGlmMLA(*attention_args, mode=mode, session=session, name=f"{name}.mla",
                                             workspace=workspace, max_cache_pages=max_cache_pages,

@@ -52,6 +52,39 @@ class KDAScratch:
         return KDAScratch(**views)
 
 
+@dataclass(frozen=True)
+class KDARecords:
+    """Verification records of every KDA layer, so speculative rounds keep one recurrent row per request.
+
+    Verification leaves each request's committed FP32 state unchanged and records, per verified
+    token, its FP32 delta-rule correction and BF16 raw key and gate; accepting a prefix replays
+    those records into the committed row for every layer in one launch. Records are indexed by
+    state row like the recurrent pool. ``A_log`` and ``dt_bias`` stack every layer's gate
+    parameters for that replay.
+    """
+
+    layers: tuple[int, ...]
+    corrections: torch.Tensor
+    keys_and_gates: torch.Tensor
+    A_log: torch.Tensor
+    dt_bias: torch.Tensor
+
+    @classmethod
+    def allocate(cls, attention_weights, slots, heads, device, *, window=8):
+        """``attention_weights`` maps each KDA layer's decoder index to its attention weights."""
+        layers = tuple(sorted(attention_weights))
+        count = len(layers)
+        return cls(layers,
+            torch.zeros((count, slots, heads, window, 128), dtype=torch.float32, device=device),
+            torch.zeros((count, slots, heads, window, 256), dtype=torch.bfloat16, device=device),
+            torch.stack([attention_weights[layer]["A_log"] for layer in layers]),
+            torch.stack([attention_weights[layer]["dt_bias"].view(heads, 128) for layer in layers]))
+
+    def layer(self, index):
+        position = self.layers.index(index)
+        return self.corrections[position], self.keys_and_gates[position]
+
+
 class PreparedGlmKDA:
     """One rank's KDA branch before the row-parallel output reduction.
 
@@ -62,7 +95,8 @@ class PreparedGlmKDA:
     """
 
     def __init__(self, module, weights, source, scratch: KDAScratch, state: DeltaState,
-                 metadata: DeltaMetadata, *, mode, session, name, workspace, checkpoint_export=False):
+                 metadata: DeltaMetadata, *, mode, session, name, workspace, checkpoint_export=False,
+                 records=None):
         if (source.ndim != 2 or source.shape[1] != 4096 or source.dtype != torch.bfloat16
                 or source.device.type != "cuda"):
             raise ValueError("GLM KDA requires BF16 [token_capacity, 4096] CUDA input")
@@ -84,6 +118,8 @@ class PreparedGlmKDA:
             raise ValueError("KDA preparation requires zero live counts")
         if mode == "decode" and (self.tokens > self.sequences * self.columns or self.columns > self.drafts + 1):
             raise ValueError("KDA decode capacity exceeds metadata or convolution history")
+        if records is not None and mode != "decode":
+            raise ValueError("KDA verification records belong to decode rounds")
         self.module, self.weights, self.scratch = module, weights, scratch
         self.state, self.metadata, self.mode = state, metadata, mode
         module.o_norm.weight = torch.nn.Parameter(weights["o_norm.weight"], requires_grad=False)
@@ -126,12 +162,16 @@ class PreparedGlmKDA:
         self.run_options = {"lower_bound": -5.0}
         if mode == "decode":
             self.run_options["eps"] = module.layer_norm_epsilon
+            # Speculative rounds record each verified token instead of persisting its FP32 state.
             caps = gdn_decode.Caps(device=self.device, max_tokens=self.tokens, max_seqs=self.sequences,
                 max_state_slots=state.recurrent.shape[0], key_heads=self.heads, value_heads=self.heads,
-                state_index_columns=self.columns, gate_activation="sigmoid", null_state_index=0)
+                state_index_columns=self.columns, gate_activation="sigmoid", null_state_index=0,
+                recover_speculative_state=records is not None)
             args = dict(common, mixed_qkv=scratch.convolved_qkv, z=scratch.z.view(self.tokens, self.heads, 128),
                 norm_weight=module.o_norm.weight, query_start_loc=metadata.query_start_loc,
                 num_accepted_tokens=metadata.accepted_tokens, state_indices=metadata.state_indices)
+            if records is not None:
+                args.update(correction_cache=records[0], kg_cache=records[1])
             self.recurrent_plan = gdn_decode.plan(caps, invocation=gdn_decode.invocation_from_tensors(caps, **args))
             public_bind, bind_method = gdn_decode.bind_kda, "bind_kda"
         else:
