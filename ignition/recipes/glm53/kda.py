@@ -1,5 +1,7 @@
 """Prepared GLM KDA projections, convolution, recurrence and gated output norm."""
 
+import itertools
+import weakref
 from dataclasses import dataclass, fields
 
 import torch
@@ -50,6 +52,24 @@ class KDAScratch:
         if tokens == 1:
             views["forget_input"] = views["projected_input"][:, -128:]
         return KDAScratch(**views)
+
+
+_VERIFIERS = weakref.WeakValueDictionary()
+_VERIFIER_HANDLES = itertools.count()
+
+
+# b12x launches recording verification directly, so compiled forwards see it as one operator whose
+# reads and writes are listed: it reads the live states and writes the output and the records.
+@torch.library.custom_op("flare::glm_kda_verify", mutates_args=("output", "corrections", "keys_and_gates"))
+def _verify(reads: list[torch.Tensor], output: torch.Tensor, corrections: torch.Tensor,
+            keys_and_gates: torch.Tensor, handle: int) -> None:
+    owner = _VERIFIERS[handle]
+    gdn_decode.run_kda(owner.recurrent_binding, **owner.run_options)
+
+
+@_verify.register_fake
+def _fake_verify(reads, output, corrections, keys_and_gates, handle) -> None:
+    pass
 
 
 @dataclass(frozen=True)
@@ -121,6 +141,7 @@ class PreparedGlmKDA:
         if records is not None and mode != "decode":
             raise ValueError("KDA verification records belong to decode rounds")
         self.module, self.weights, self.scratch = module, weights, scratch
+        self.records = None
         self.state, self.metadata, self.mode = state, metadata, mode
         module.o_norm.weight = torch.nn.Parameter(weights["o_norm.weight"], requires_grad=False)
         self.projections = {}
@@ -172,6 +193,9 @@ class PreparedGlmKDA:
                 num_accepted_tokens=metadata.accepted_tokens, state_indices=metadata.state_indices)
             if records is not None:
                 args.update(correction_cache=records[0], kg_cache=records[1])
+                self.records = records
+                self.handle = next(_VERIFIER_HANDLES)
+                _VERIFIERS[self.handle] = self
             self.recurrent_plan = gdn_decode.plan(caps, invocation=gdn_decode.invocation_from_tensors(caps, **args))
             public_bind, bind_method = gdn_decode.bind_kda, "bind_kda"
         else:
@@ -204,7 +228,11 @@ class PreparedGlmKDA:
         p["f_b_proj"](s.forget_input)
         self.gate_overlap.finish(source, s.raw_g)
         short_conv.run(self.conv_binding)
-        if self.mode == "decode":
+        if self.mode == "decode" and self.records is not None:
+            m = self.metadata
+            _verify([s.convolved_qkv, s.raw_g, s.raw_beta, s.z, self.state.recurrent, m.query_start_loc,
+                     m.state_indices, m.num_seqs, m.num_tokens], s.gated, *self.records, self.handle)
+        elif self.mode == "decode":
             gdn_decode.run_kda(self.recurrent_binding, **self.run_options)
         else:
             kda_prefill.run(self.recurrent_binding, **self.run_options)
