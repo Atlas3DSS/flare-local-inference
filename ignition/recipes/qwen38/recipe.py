@@ -60,7 +60,10 @@ RECIPE = Recipe(
         # Decoder, vision, and draft tensors; PLE rows are delivered through compact inputs.
         device_bytes=73_529_505_900,
         # The MTP module's tensors.
-        draft_bytes=1_596_720_640),),
+        draft_bytes=1_596_720_640,
+        # Routed-expert block scales expand at load from 3,965,911,336 CSF bytes to
+        # 48 layers x 512 experts x 307,200 bytes.
+        expansion_bytes=3_583_835_864),),
     context=262144, page_tokens=64, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     # Rounds adapt among zero through five drafts, up to seven. Verification records
     # corrections and commits accepted tokens into the live state row, so it keeps

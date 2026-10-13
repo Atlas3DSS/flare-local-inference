@@ -255,6 +255,24 @@ def test_complete_layer_csf_load_and_captured_expansion(manifest):
                     assert torch.equal(actual, expected.view(torch.uint8))
 
 
+def test_complete_layer_csf_scales_expand_once_without_scratch(manifest):
+    prefix = f'{TEXT_PREFIX}.layers.0.mlp.experts.'
+    with QwenWeightLoader(manifest, 'cuda:0', prefixes=(prefix,)) as loader:
+        expanded = loader.load_experts(0)
+    assert expanded._impl.nvfp4_csf is None
+    scratch = allocate_expert_scale_scratch('cuda:0')
+    with QwenWeightLoader(manifest, 'cuda:0', prefixes=(prefix,)) as loader:
+        routed = loader.load_experts(0, scale_scratch=scratch)
+    selected = (0, 7, 99, 501, 511)
+    routed._impl.nvfp4_csf.decode(torch.tensor(selected, dtype=torch.int32, device='cuda'), *scratch)
+    torch.cuda.synchronize()
+    for persistent, expansion in ((expanded._impl.w1_blockscale, scratch[0]),
+                                  (expanded._impl.w2_blockscale, scratch[1])):
+        persistent = persistent.view(torch.uint8).reshape(expansion.shape)
+        for expert in selected:
+            assert torch.equal(persistent[expert], expansion[expert].view(torch.uint8))
+
+
 @pytest.mark.parametrize("rank,world", [(0, 1), (1, 2), (3, 4)])
 def test_mtp_expert_shards_match_checkpoint_arithmetic(manifest, rank, world):
     from dataclasses import replace

@@ -18,7 +18,7 @@ from .hyperconnection import packed_down_projection
 from .model import create_model_tree
 from .moe import QwenMoeWeights
 from .vision import VisionWeights
-from .weights import QwenWeightLoader, allocate_expert_scale_scratch
+from .weights import QwenWeightLoader
 
 
 @dataclass(frozen=True)
@@ -34,14 +34,12 @@ class ModelWeights:
     Canonical quantized Linear and expert parameters remain on meta storage;
     their prepared replacements own the checkpoint's packed representations.
     PLE table ownership is separate because those tables reside in mapped host
-    memory. All expert layers share the same scale-expansion workspace and
-    therefore execute serially.
+    memory. Expert layers expand their CSF block scales once at load.
     """
 
     tree: torch.nn.Module
     layers: tuple[DecoderLayerWeights, ...]
     vision: VisionWeights
-    expert_scale_scratch: tuple[torch.Tensor, torch.Tensor]
     allocated_bytes: int
     shard: TensorParallelShard = TensorParallelShard(0, 1)
 
@@ -108,7 +106,7 @@ class ModelWeights:
                     module.num_v_heads //= shard.world_size
                     module.conv_dim //= shard.world_size
                 attention = load_projections(attention_prefix)
-                moe = QwenMoeWeights.load(loader, layer, scale_scratch=scale_scratch)
+                moe = QwenMoeWeights.load(loader, layer)
                 module = tree.get_submodule(f"{prefix}.mlp")
                 module.gate.weight = torch.nn.Parameter(moe.router, requires_grad=False)
                 module.shared_expert_gate.weight = torch.nn.Parameter(moe.shared.gate, requires_grad=False)
@@ -120,7 +118,7 @@ class ModelWeights:
                  "norm_query.weight", "norm_conv.weight")))
             vision = VisionWeights.load(tree.model.visual, loader)
         torch.cuda.synchronize(device)
-        return cls(tree, tuple(layers), vision, scale_scratch,
+        return cls(tree, tuple(layers), vision,
                    torch.cuda.memory_allocated(device) - before, shard)
 
 

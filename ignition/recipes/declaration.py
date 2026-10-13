@@ -28,6 +28,9 @@ class Checkpoint:
     mapped_host_bytes: int = 0
     # The share of `device_bytes` that holds the draft model, loaded only for learned drafts.
     draft_bytes: int = 0
+    # Device bytes that loading adds beyond the stored tensors, such as block scales
+    # expanded from a compressed encoding.
+    expansion_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,9 +139,10 @@ class Recipe:
             costs, page_bytes=costs.page_bytes - costs.draft_page_bytes, draft_page_bytes=0)
 
     def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None) -> int:
-        """Estimate one rank's device weights from the checkpoint's stored tensors."""
+        """Estimate one rank's device weights from the checkpoint's stored tensors and their expansion."""
         learned = speculation is not None and speculation.learned
-        return -(-(checkpoint.device_bytes - (0 if learned else checkpoint.draft_bytes)) // world_size)
+        return -(-(checkpoint.device_bytes + checkpoint.expansion_bytes
+                   - (0 if learned else checkpoint.draft_bytes)) // world_size)
 
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:
         """State rows held for running requests: null, live, speculative, and admission rows."""
