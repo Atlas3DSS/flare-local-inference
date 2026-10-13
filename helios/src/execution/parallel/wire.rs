@@ -150,7 +150,7 @@ impl<'a> Reader<'a> {
 pub(super) fn layout(manifest: &ExecutionManifest) -> Vec<u8> {
     let mut bytes = Vec::new();
     for value in [
-        1,
+        2,
         manifest.abi_version as usize,
         manifest.max_active,
         manifest.input_frame_bytes,
@@ -219,10 +219,46 @@ pub(super) fn completion(value: &FrameCompletion) -> Vec<u8> {
     let mut bytes = Vec::new();
     number(&mut bytes, value.fence.0 as usize);
     number(&mut bytes, value.graph_index);
+    number(&mut bytes, usize::from(value.timing.gpu_ns[0].is_some()));
+    number(&mut bytes, value.timing.gpu_ns[0].unwrap_or(0) as usize);
+    number(&mut bytes, value.timing.wall_ns as usize);
+    number(&mut bytes, usize::from(value.timing.queued));
     for record in value.records.iter() {
         for field in record.fields() {
             bytes.extend_from_slice(&field.to_le_bytes());
         }
     }
     bytes
+}
+
+pub(super) fn timing(reader: &mut Reader<'_>) -> Result<super::super::ExecutionTiming> {
+    let present = reader.number()?;
+    let gpu_ns = reader.number()? as u64;
+    let wall_ns = reader.number()? as u64;
+    let queued = reader.number()?;
+    if present > 1 || queued > 1 || (present == 0 && gpu_ns != 0) {
+        return Err(invalid("invalid rank timing interval"));
+    }
+    Ok(super::super::ExecutionTiming {
+        gpu_ns: [
+            (present == 1).then_some(gpu_ns),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        wall_ns,
+        queued: queued == 1,
+    })
 }

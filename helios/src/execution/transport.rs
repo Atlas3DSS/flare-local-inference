@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, rc::Rc};
+use std::{marker::PhantomData, rc::Rc, time::Instant};
 
 use crate::{
     Error, ExecutionError, Failure, Result, Shutdown,
@@ -147,8 +147,19 @@ impl<const N: usize> From<[CompletionRecord; N]> for CompletionRecords {
 pub struct FrameCompletion {
     pub fence: Fence,
     pub graph_index: usize,
-    pub elapsed_ns: Option<u64>,
+    pub timing: ExecutionTiming,
     pub records: CompletionRecords,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionTiming {
+    /// Local CUDA event intervals for up to sixteen ranks; absent ranks have no interval.
+    pub gpu_ns: [Option<u64>; 16],
+    /// Host interval from dispatch through observation of every rank's completion.
+    /// Includes input staging, coordination, device queueing and completion delivery.
+    pub wall_ns: u64,
+    /// Another frame was outstanding when this frame was dispatched.
+    pub queued: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -156,14 +167,15 @@ struct Pending {
     fence: Fence,
     graph_index: usize,
     grammar: bool,
-    timed: bool,
+    dispatched: Instant,
+    queued: bool,
 }
 
 struct Frame {
     input: PinnedHost,
     output: PinnedHost,
     produced: Event,
-    started: Option<Event>,
+    started: Event,
     transferred: Event,
     pending: Option<Pending>,
 }
@@ -204,16 +216,12 @@ impl GraphExecutor {
             .saturating_mul(manifest.request_capacity());
         let model = Stream::open(manifest.context, manifest.device)?;
         let copy = Stream::open(manifest.context, manifest.device)?;
-        let timed = manifest
-            .graphs
-            .iter()
-            .any(|g| g.kind == GraphKind::Speculative);
         let frame = || -> Result<Frame> {
             Ok(Frame {
                 input: model.host_buffer(manifest.input_frame_bytes)?,
                 output: model.host_buffer(manifest.completion_bytes())?,
-                produced: model.event_with_timing(timed)?,
-                started: timed.then(|| model.event_with_timing(true)).transpose()?,
+                produced: model.event_with_timing(true)?,
+                started: model.event_with_timing(true)?,
                 transferred: copy.event()?,
                 pending: None,
             })
@@ -377,13 +385,16 @@ impl GraphExecutor {
             ));
         }
         let fence = Fence(self.next_sequence);
+        let queued = resources.frames.iter().any(|frame| frame.pending.is_some());
         let frame = &mut resources.frames[index];
+        let dispatched = Instant::now();
         resolved.stage(frame.input.bytes_mut(), index as i32, fence.0 as i64);
         frame.pending = Some(Pending {
             fence,
             graph_index,
             grammar: grammar_constrained,
-            timed: graph.kind == GraphKind::Speculative,
+            dispatched,
+            queued,
         });
         self.next_sequence += 1;
         let operation = || -> Result<()> {
@@ -411,9 +422,7 @@ impl GraphExecutor {
                     )?;
                 }
             }
-            if graph.kind == GraphKind::Speculative {
-                resources.model.record(frame.started.as_ref().unwrap())?;
-            }
+            resources.model.record(&frame.started)?;
             resources.model.launch(graph.handle)?;
             resources.model.record(&frame.produced)?;
             resources.copy.wait(&frame.produced)?;
@@ -489,21 +498,42 @@ impl GraphExecutor {
                 return Err(error);
             }
         };
-        let elapsed_ns = if pending.timed {
-            match frame.produced.elapsed_ns(frame.started.as_ref().unwrap()) {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    self.poison = Some(error.clone());
-                    return Err(error);
-                }
+        let elapsed_ns = match frame.produced.elapsed_ns(&frame.started) {
+            Ok(value) => value,
+            Err(error) => {
+                self.poison = Some(error.clone());
+                return Err(error);
             }
-        } else {
-            None
         };
         Ok(Some(FrameCompletion {
             fence: pending.fence,
             graph_index: pending.graph_index,
-            elapsed_ns,
+            timing: ExecutionTiming {
+                gpu_ns: [
+                    Some(elapsed_ns),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                wall_ns: pending
+                    .dispatched
+                    .elapsed()
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64,
+                queued: pending.queued,
+            },
             records,
         }))
     }

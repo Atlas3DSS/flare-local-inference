@@ -109,7 +109,7 @@ def fixture(snapshot):
     for kind, capacities in GRAPH_CAPACITIES.items():
         for batch, tokens in capacities:
             graphs.append({"name": f"{kind}-{batch}-{tokens}", "kind": kind,
-                "sampling_mode": "general", "handle": len(graphs) + 1,
+                "sampling_mode": "general", "handle": len(graphs) + 1, "estimated_duration_ns": 1000,
                 "batch_capacity": batch, "token_capacity": tokens,
                 "input_bindings": deepcopy(bindings)})
     manifest = {"abi_version": ABI_VERSION, "context": 1, "device": 0, "max_active": 4,

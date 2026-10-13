@@ -29,6 +29,8 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
         },
     )
     .unwrap();
+    s.measured_graph_durations(&super::tests::duration_graphs(4))
+        .unwrap();
     if mtp {
         s.enable_speculation(&[1, 2, 4, 8]).unwrap();
     }
@@ -44,10 +46,10 @@ fn spec(system: Option<usize>, prompt: usize, output: u32) -> RequestSpec {
         host_stops: false,
     }
 }
-fn run_step(s: &mut RequestScheduler) -> ScheduledStep {
-    let step = s.next_step().unwrap();
+fn run_step(s: &mut RequestScheduler) -> ScheduledPlan {
+    let step = s.plan().unwrap();
     let fence = Fence(s.submitted.0 + 1);
-    s.record_submission(&step, fence).unwrap();
+    s.commit(&step, fence).unwrap();
     let mut records = [CompletionRecord::default(); 4];
     for lane in &step.lanes {
         let r = s.request(lane.request).unwrap();
@@ -138,7 +140,7 @@ fn exact_system_prompt_terminal_endpoints_and_partial_restore_pages() {
                 assert_eq!(r.shared_pages.len(), system / page_tokens);
                 assert_eq!(r.pages().collect::<Vec<_>>(), prior);
                 assert_eq!(r.reused_prompt_tokens(), 0);
-                let continuation = s.next_step().unwrap();
+                let continuation = s.plan().unwrap();
                 assert_eq!(continuation.kind, GraphKind::Prefill);
                 assert_eq!(continuation.lanes[0].start_position, system as u64);
                 assert_eq!(continuation.lanes[0].tokens, 67);
@@ -214,7 +216,7 @@ fn prompt_6459_retains_exact_prompt_and_terminal_with_immutable_admission_reuse(
     let h = s.admit(spec(Some(10), 6459, 144)).unwrap();
     assert_eq!(s.request(h).unwrap().reused_prompt_tokens(), 6459);
     assert_eq!(run_step(&mut s).kind, GraphKind::Restore);
-    assert_eq!(s.next_step().unwrap().kind, GraphKind::Resume);
+    assert_eq!(s.plan().unwrap().kind, GraphKind::Resume);
     run_step(&mut s);
     assert_eq!(s.request(h).unwrap().reused_prompt_tokens(), 6459);
 }
@@ -231,9 +233,9 @@ fn required_boundary_reservations_fail_transactionally_and_cancel_behind_fence()
     let h = s.admit(spec(Some(10), 70, 3)).unwrap();
     assert_eq!(s.free_snapshot_count(), 0);
     stop_at_capture(&mut s, h, 10);
-    let step = s.next_step().unwrap();
+    let step = s.plan().unwrap();
     let fence = Fence(s.submitted.0 + 1);
-    s.record_submission(&step, fence).unwrap();
+    s.commit(&step, fence).unwrap();
     s.cancel(h).unwrap();
     assert_eq!(s.free_snapshot_count(), 0);
     assert!(s.admit(spec(Some(10), 70, 3)).is_err());
@@ -275,9 +277,9 @@ fn failed_boundary_copy_is_not_published_and_all_reservations_retire() {
     let mut s = scheduler(3, false);
     let h = s.admit(spec(Some(3), 70, 3)).unwrap();
     stop_at_capture(&mut s, h, 3);
-    let step = s.next_step().unwrap();
+    let step = s.plan().unwrap();
     let fence = Fence(s.submitted.0 + 1);
-    s.record_submission(&step, fence).unwrap();
+    s.commit(&step, fence).unwrap();
     let mut records = [CompletionRecord::default(); 4];
     records[h.slot as usize] = CompletionRecord {
         generation: h.generation as i64,
@@ -388,7 +390,7 @@ fn atomic_prefill_spans_reject_invalid_geometry_before_execution() {
         let mut s = scheduler(8, false);
         let h = s.admit(spec(None, 1024, 1)).unwrap();
         assert!(s.set_prefill_spans(h, &spans).is_err());
-        assert_eq!(s.next_step().unwrap().kind, GraphKind::Init);
+        assert_eq!(s.plan().unwrap().kind, GraphKind::Init);
     }
     let mut s = scheduler(8, false);
     let h = s.admit(spec(Some(512), 1024, 1)).unwrap();

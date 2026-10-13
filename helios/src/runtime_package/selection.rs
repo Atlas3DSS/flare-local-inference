@@ -333,6 +333,7 @@ mod tests {
                         name: format!("{kind}{batch}-{}", if enabled { "mtp" } else { "no-mtp" }),
                         kind: kind.into(),
                         sampling_mode: "general".into(),
+                        estimated_duration_ns: 1000,
                         batch_capacity: batch,
                         token_capacity: 1,
                         speculation_enabled: Some(enabled),
@@ -345,6 +346,7 @@ mod tests {
                     name: format!("speculative{batch}x{width}"),
                     kind: "speculative".into(),
                     sampling_mode: "general".into(),
+                    estimated_duration_ns: 1000,
                     batch_capacity: batch,
                     token_capacity: width,
                     draft_tokens: Some(width as u32 - 1),
@@ -416,6 +418,15 @@ mod tests {
 
     fn config() -> Value {
         serde_json::json!({"speculative_widths": [1,2,3,4,5,6], "speculative_fixed_width": null})
+    }
+
+    #[test]
+    fn indeterminate_graph_durations_are_loadable() {
+        let mut package = package();
+        package.execution.as_mut().unwrap().graphs[0].estimated_duration_ns = 0;
+        LoadOptions::default()
+            .select(&mut [package], &mut config())
+            .unwrap();
     }
 
     #[test]
@@ -514,6 +525,7 @@ mod tests {
                         name: name.clone(),
                         kind: "speculative".into(),
                         sampling_mode: "general".into(),
+                        estimated_duration_ns: 1000,
                         batch_capacity: 2,
                         token_capacity: 2,
                         draft_tokens: Some(drafts),
@@ -829,6 +841,7 @@ mod tests {
                         name: name.clone(),
                         kind: "prefill".into(),
                         sampling_mode: "general".into(),
+                        estimated_duration_ns: 1000,
                         batch_capacity: 1,
                         token_capacity: 64,
                         speculation_enabled: Some(enabled),

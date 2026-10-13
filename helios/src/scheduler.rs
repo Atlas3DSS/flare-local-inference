@@ -1,8 +1,12 @@
 //! Bounded live-request resources and scheduling with CUDA-fenced retirement.
 
+mod cost;
+mod policy;
+pub use policy::{PolicyConfig, RequestAccounting};
 pub mod speculation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::cache::{
     CheckpointId, CompletionUpdate, ConditioningEvent, EvictionTarget, Fence, Lookup, PageId,
@@ -114,7 +118,7 @@ pub struct RequestSpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestPhase {
     Initialize,
-    /// Waiting for a host-restored checkpoint; never selected by `next_step`.
+    /// Waiting for a host-restored checkpoint; never selected by `plan`.
     Inbound,
     Restore,
     Vision,
@@ -139,6 +143,9 @@ struct BoundaryCapture {
 }
 
 pub struct LiveRequest {
+    epoch: u64,
+    acceptance: speculation::AcceptanceProfile,
+    accounting: RequestAccounting,
     pub handle: RequestHandle,
     pub state_slot: StateSlotId,
     pub terminal_snapshot: SnapshotId,
@@ -174,6 +181,14 @@ pub struct LiveRequest {
 }
 
 impl LiveRequest {
+    pub fn accounting(&self) -> &RequestAccounting {
+        &self.accounting
+    }
+
+    pub fn acceptance(&self) -> &speculation::AcceptanceProfile {
+        &self.acceptance
+    }
+
     pub fn prefix(&self) -> Option<CheckpointId> {
         self.prefix
     }
@@ -226,7 +241,47 @@ pub struct ScheduledStep {
     pub batch_capacity: usize,
     pub token_capacity: usize,
     pub lanes: Vec<ScheduledLane>,
-    pub grammar_constrained: bool,
+    /// Completion feedback must be processed before another action is submitted.
+    pub requires_feedback: bool,
+}
+
+/// An immutable selection tied to the participating requests' execution state.
+/// Unrelated admissions and cost observations do not invalidate it.
+#[derive(Clone, Debug)]
+pub struct ScheduledPlan {
+    owner: Arc<()>,
+    step: ScheduledStep,
+    epochs: Vec<u64>,
+    estimated_duration_ns: u64,
+    recovery_lateness_ns: f64,
+}
+
+impl ScheduledPlan {
+    pub fn estimated_duration_ns(&self) -> u64 {
+        self.estimated_duration_ns
+    }
+    pub fn recovery_lateness_ns(&self) -> f64 {
+        self.recovery_lateness_ns
+    }
+}
+
+struct Submission {
+    step: ScheduledStep,
+    expected_finish_ns: u64,
+}
+impl std::ops::Deref for Submission {
+    type Target = ScheduledStep;
+    fn deref(&self) -> &Self::Target {
+        &self.step
+    }
+}
+
+impl std::ops::Deref for ScheduledPlan {
+    type Target = ScheduledStep;
+
+    fn deref(&self) -> &Self::Target {
+        &self.step
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -295,6 +350,7 @@ struct Ticket {
 }
 
 pub struct RequestScheduler {
+    plan_owner: Arc<()>,
     limits: SchedulerLimits,
     capabilities: SchedulerCapabilities,
     identity: [u8; 32],
@@ -303,17 +359,19 @@ pub struct RequestScheduler {
     free_pages: BTreeSet<PageId>,
     free_snapshots: BTreeSet<SnapshotId>,
     retired: Vec<RetiredRequest>,
-    submissions: BTreeMap<Fence, ScheduledStep>,
+    submissions: BTreeMap<Fence, Submission>,
     completed: Fence,
     submitted: Fence,
-    prefer_prefill: bool,
+    now_ns: u64,
+    policy: PolicyConfig,
+    candidates: std::cell::RefCell<Vec<policy::Candidate>>,
     stats: SchedulerStats,
     speculative_widths: Vec<usize>,
     speculative_fixed_width: Option<usize>,
     speculative_catalog: [Vec<usize>; 7],
     prefill_catalog: Vec<usize>,
     proposal_source: speculation::ProposalSource,
-    controller: speculation::WidthController,
+    costs: cost::ActionCosts,
     tickets: HashMap<PrefixKey, Ticket>,
     track_publications: bool,
     publications: Vec<CheckpointId>,
@@ -351,6 +409,7 @@ impl RequestScheduler {
             capabilities.page_tokens,
         )?;
         Ok(Self {
+            plan_owner: Arc::new(()),
             limits,
             capabilities,
             identity,
@@ -368,14 +427,16 @@ impl RequestScheduler {
             submissions: BTreeMap::new(),
             completed: Fence(0),
             submitted: Fence(0),
-            prefer_prefill: true,
+            now_ns: 0,
+            policy: PolicyConfig::default(),
+            candidates: policy::scratch(),
             stats: SchedulerStats::default(),
             speculative_widths: Vec::new(),
             speculative_fixed_width: None,
             speculative_catalog: Default::default(),
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
             proposal_source: speculation::ProposalSource::Mtp,
-            controller: speculation::WidthController::default(),
+            costs: cost::ActionCosts::default(),
             tickets: HashMap::new(),
             track_publications: false,
             publications: Vec::new(),
@@ -399,6 +460,9 @@ impl RequestScheduler {
     }
 
     pub fn prefill_graphs(&mut self, capacities: &[usize]) -> Result<()> {
+        if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
+            return Err("prefill graphs must be selected before admission".into());
+        }
         let mut catalog = capacities.to_vec();
         catalog.sort_unstable();
         if catalog.last() != Some(&self.limits.prefill_chunk_size)
@@ -519,34 +583,34 @@ impl RequestScheduler {
         request.copy_proposal = Some(proposal);
         Ok(())
     }
-    pub fn observe_round(
+    pub fn graph_durations(&mut self, graphs: &[crate::execution::GraphDescriptor]) -> Result<()> {
+        if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
+            return Err("graph durations must be configured before admission".into());
+        }
+        self.costs = cost::ActionCosts::prepared(graphs)?;
+        self.costs
+            .advance_to(self.now_ns, self.policy.estimate_ttl_ns);
+        // Each graph contributes at most one candidate per request slot.
+        self.candidates = std::cell::RefCell::new(Vec::with_capacity(graphs.len() * REQUEST_LANES));
+        Ok(())
+    }
+
+    pub fn estimated_duration_ns(&self, step: &ScheduledStep) -> Option<u64> {
+        self.costs.get(step)
+    }
+
+    pub fn observe_execution(
         &mut self,
         step: &ScheduledStep,
-        elapsed_ns: u64,
-        emitted: usize,
-    ) -> Result<()> {
-        if step.kind != GraphKind::Speculative {
-            return Err("timing supplied for a non-speculative step".into());
-        }
-        self.controller.observe(
-            step.batch_capacity,
-            step.lanes
-                .iter()
-                .map(|l| l.start_position)
-                .max()
-                .unwrap_or(0),
-            step.token_capacity,
-            elapsed_ns,
-            emitted,
-        )
-    }
-    /// Per-row `(offered, accepted)` draft outcomes of a completed speculative round.
-    pub fn observe_acceptance(&mut self, rows: &[(usize, usize)]) {
-        self.controller.observe_acceptance(rows);
+        timing: crate::execution::ExecutionTiming,
+    ) {
+        self.costs.observe(step, timing);
+        self.initialize_credit_rates();
     }
     pub fn submitted_step(&self, fence: Fence) -> Result<&ScheduledStep> {
         self.submissions
             .get(&fence)
+            .map(|submission| &submission.step)
             .ok_or_else(|| "unknown scheduled submission".into())
     }
     pub fn cache(&self) -> &PrefixCheckpointCache {
@@ -609,11 +673,17 @@ impl RequestScheduler {
             .ok_or_else(|| "stale or retired request handle".into())
     }
     fn request_mut(&mut self, handle: RequestHandle) -> Result<&mut LiveRequest> {
-        self.slots
+        let request = self
+            .slots
             .get_mut(handle.slot as usize)
             .and_then(|slot| slot.request.as_mut())
             .filter(|request| request.handle == handle)
-            .ok_or_else(|| "stale or retired request handle".into())
+            .ok_or("stale or retired request handle")?;
+        request.epoch = request
+            .epoch
+            .checked_add(1)
+            .ok_or("request epoch exhausted")?;
+        Ok(request)
     }
 
     fn ensure_resources(&mut self, pages: usize, snapshots: usize) -> Result<()> {
@@ -644,17 +714,17 @@ impl RequestScheduler {
 
     #[cfg(any(test, feature = "server"))]
     pub(crate) fn admit_cold(&mut self, spec: RequestSpec) -> Result<RequestHandle> {
-        let plan = self.plan(&spec, false)?;
+        let plan = self.admission_plan(&spec, false)?;
         Ok(self.admit_planned(spec, plan, None)?.handle)
     }
 
     /// Validates the request, builds its prefix history, and looks up the GPU
     /// cache without reserving anything.
     pub fn plan_admission(&mut self, spec: &RequestSpec) -> Result<AdmissionPlan> {
-        self.plan(spec, true)
+        self.admission_plan(spec, true)
     }
 
-    fn plan(&mut self, spec: &RequestSpec, reuse_prefix: bool) -> Result<AdmissionPlan> {
+    fn admission_plan(&mut self, spec: &RequestSpec, reuse_prefix: bool) -> Result<AdmissionPlan> {
         if spec.prompt.is_empty()
             || spec
                 .system_boundary
@@ -842,6 +912,9 @@ impl RequestScheduler {
         };
         self.slots[slot].generation = generation;
         self.slots[slot].request = Some(LiveRequest {
+            epoch: 0,
+            acceptance: speculation::AcceptanceProfile::default(),
+            accounting: self.accounting(spec.prompt.len() - consumed as usize),
             handle,
             state_slot: StateSlotId((1 + slot * execution_rows) as u32),
             terminal_snapshot,
@@ -1080,181 +1153,57 @@ impl RequestScheduler {
     }
 
     /// Plans one operation without submitting GPU work or reserving new pages.
-    pub fn next_step(&self) -> Option<ScheduledStep> {
-        if self.submissions.len() >= 2
-            || self
-                .submissions
-                .values()
-                .any(|step| step.grammar_constrained)
+    pub fn plan(&self) -> Option<ScheduledPlan> {
+        self.select_plan()
+    }
+
+    fn speculative_tokens(&self, request: &LiveRequest, width: usize) -> usize {
+        let context = self.limits.max_sequence_tokens - request.scheduled_consumed as usize;
+        let output = (request.max_new_tokens - request.generated_tokens) as usize;
+        let proposal = if request.host_stops
+            || (request.grammar_constrained
+                && self.proposal_source == speculation::ProposalSource::Mtp)
         {
-            return None;
-        }
-        let requests: Vec<_> = self
-            .slots
-            .iter()
-            .filter_map(|slot| slot.request.as_ref())
-            .collect();
-        let select = |phase: RequestPhase, allow_pending: bool| {
-            requests
-                .iter()
-                .copied()
-                .filter(|request| {
-                    request.phase == phase
-                        && (request.pending == 0
-                            || (allow_pending
-                                && request.pending < 2
-                                && !request.grammar_constrained
-                                && !request.host_stops))
-                        && (phase != RequestPhase::Decode
-                            || self.speculative_widths.is_empty()
-                            || request.scheduled_consumed < self.limits.max_sequence_tokens as u64)
-                })
-                .collect::<Vec<_>>()
-        };
-        let (kind, selected) = if !select(RequestPhase::Initialize, false).is_empty() {
-            (GraphKind::Init, select(RequestPhase::Initialize, false))
-        } else if !select(RequestPhase::Restore, false).is_empty() {
-            (GraphKind::Restore, select(RequestPhase::Restore, false))
-        } else if !select(RequestPhase::Snapshot, false).is_empty() {
-            (GraphKind::Snapshot, select(RequestPhase::Snapshot, false))
-        } else if !select(RequestPhase::Vision, false).is_empty() {
-            (
-                GraphKind::Vision,
-                vec![select(RequestPhase::Vision, false)[0]],
-            )
-        } else if !select(RequestPhase::Resume, false).is_empty() {
-            (GraphKind::Resume, select(RequestPhase::Resume, false))
-        } else {
-            let prefill = select(RequestPhase::Prefill, false);
-            let decode = select(RequestPhase::Decode, true);
-            if !prefill.is_empty() && (self.prefer_prefill || decode.is_empty()) {
-                (GraphKind::Prefill, vec![prefill[0]])
-            } else if !decode.is_empty() {
-                (
-                    if self.speculative_widths.is_empty() {
-                        GraphKind::Decode
-                    } else {
-                        GraphKind::Speculative
-                    },
-                    decode,
-                )
-            } else {
-                return None;
-            }
-        };
-        let token_barrier = selected
-            .iter()
-            .any(|r| r.grammar_constrained || r.host_stops);
-        let width = if kind == GraphKind::Speculative {
-            let batch = selected.len().next_power_of_two();
-            let widths = &self.speculative_catalog[batch.trailing_zeros() as usize];
-            if self.speculative_fixed_width.is_some() {
-                *widths.last()?
-            } else {
-                self.controller.choose(
-                    widths,
-                    batch,
-                    selected
-                        .iter()
-                        .map(|r| r.scheduled_consumed)
-                        .max()
-                        .unwrap_or(0),
-                    8,
-                )?
-            }
-        } else {
             1
-        };
-        let lanes: Vec<_> = selected
-            .iter()
-            .map(|request| ScheduledLane {
-                request: request.handle,
-                start_position: request.scheduled_consumed,
-                tokens: match kind {
-                    GraphKind::Prefill => {
-                        let start = request.consumed_tokens as usize;
-                        let mut end = request
-                            .system_boundary
-                            .filter(|n| *n > start)
-                            .unwrap_or(request.prompt_tokens)
-                            .min(start + self.limits.prefill_chunk_size);
-                        if let Some(span) = request
-                            .prefill_spans
-                            .iter()
-                            .find(|s| s.start < end && end < s.end)
-                        {
-                            end = span.start;
-                        }
-                        end - start
-                    }
-                    GraphKind::Decode => 1,
-                    GraphKind::Speculative => {
-                        let remaining =
-                            self.limits.max_sequence_tokens - request.scheduled_consumed as usize;
-                        let limit = if request.host_stops
-                            || (request.grammar_constrained
-                                && self.proposal_source == speculation::ProposalSource::Mtp)
-                        {
-                            1
-                        } else if self.proposal_source == speculation::ProposalSource::Copy {
-                            request.copy_proposal().map_or(1, |p| p.count + 1)
-                        } else {
-                            width
-                        };
-                        width.min(remaining).min(limit)
-                    }
-                    _ => 0,
-                },
-            })
-            .collect();
-        let token_capacity = if kind == GraphKind::Prefill {
-            self.prefill_catalog
-                .iter()
-                .copied()
-                .find(|capacity| *capacity >= lanes[0].tokens)
-                .unwrap()
-        } else if kind == GraphKind::Vision {
-            let patches = selected[0].vision_patches[0];
-            self.capabilities
-                .vision
-                .patch_capacities
-                .iter()
-                .copied()
-                .find(|capacity| *capacity >= patches)
-                .unwrap()
+        } else if self.proposal_source == speculation::ProposalSource::Copy {
+            request.copy_proposal().map_or(1, |p| p.count + 1)
         } else {
             width
         };
-        let barrier = token_barrier || kind == GraphKind::Speculative;
-        if !self.submissions.is_empty() && barrier {
-            return None;
-        }
-        Some(ScheduledStep {
-            kind,
-            batch_capacity: selected.len().next_power_of_two(),
-            token_capacity,
-            lanes,
-            grammar_constrained: barrier,
-        })
+        width.min(context).min(output).min(proposal)
     }
 
     /// Records resource use before enqueueing the matching GPU operation.
     /// A CUDA submission failure requires stream drain before retirement can advance.
-    pub fn record_submission(&mut self, step: &ScheduledStep, fence: Fence) -> Result<()> {
+    pub fn commit(&mut self, plan: &ScheduledPlan, fence: Fence) -> Result<()> {
+        if !Arc::ptr_eq(&plan.owner, &self.plan_owner) {
+            return Err("execution plan belongs to another scheduler".into());
+        }
+        let step = &plan.step;
         if fence <= self.submitted || fence.0 > i64::MAX as u64 {
             return Err("submission fences must increase within int64 range".into());
         }
         if self.submissions.len() >= 2
-            || (step.grammar_constrained && !self.submissions.is_empty())
-            || self
-                .submissions
-                .values()
-                .any(|step| step.grammar_constrained)
+            || (step.requires_feedback && !self.submissions.is_empty())
+            || self.submissions.values().any(|step| step.requires_feedback)
         {
-            return Err("submission window or grammar barrier is full".into());
+            return Err("submission window or feedback barrier is full".into());
         }
-        if self.next_step().as_ref() != Some(step) {
-            return Err("scheduled step is stale or does not match request state".into());
+        let remaining = self
+            .window_remaining()
+            .ok_or("in-flight execution exceeded its duration estimate")?;
+        if !self.submissions.is_empty()
+            && (plan.estimated_duration_ns == 0
+                || plan.estimated_duration_ns > self.policy.max_slice_ns
+                || remaining.saturating_add(plan.estimated_duration_ns)
+                    > self.policy.submission_window_ns)
+        {
+            return Err("submission exceeds the execution-time window".into());
+        }
+        for (lane, epoch) in step.lanes.iter().zip(&plan.epochs) {
+            if self.request(lane.request)?.epoch != *epoch {
+                return Err("execution plan has stale request state".into());
+            }
         }
         let mut needed = Vec::new();
         let draft_page = if !self.speculative_widths.is_empty()
@@ -1297,13 +1246,17 @@ impl RequestScheduler {
             }
         }
         self.submitted = fence;
-        if matches!(
-            step.kind,
-            GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative
-        ) {
-            self.prefer_prefill = step.kind != GraphKind::Prefill;
-        }
-        self.submissions.insert(fence, step.clone());
+        let expected_finish_ns = self
+            .now_ns
+            .saturating_add(self.window_remaining().unwrap_or(0))
+            .saturating_add(plan.estimated_duration_ns);
+        self.submissions.insert(
+            fence,
+            Submission {
+                step: step.clone(),
+                expected_finish_ns,
+            },
+        );
         Ok(())
     }
 
@@ -1404,7 +1357,8 @@ impl RequestScheduler {
                 );
             }
         }
-        let step = self.submissions.remove(&fence).unwrap();
+        let step = self.submissions.remove(&fence).unwrap().step;
+        let now_ns = self.now_ns;
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
         for lane in step.lanes {
@@ -1445,8 +1399,29 @@ impl RequestScheduler {
             let record = records[lane.request.slot as usize];
             let finished =
                 record.status >= 2 || record.generated_tokens == request.max_new_tokens as i64;
+            if step.kind == GraphKind::Speculative && record.status != 3 {
+                let vector = record.vector.unwrap();
+                // ABI3 may count padded proposals in the physical capture. Only
+                // the lane's logical draft extent supplies acceptance observations.
+                let offered = (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
+                request.acceptance.observe(
+                    offered,
+                    (vector.accepted_drafts as usize).min(offered),
+                    vector.emitted_count > vector.accepted_drafts,
+                    vector.copy_offered_mask as u8,
+                );
+            }
             if record.status == 3 {
                 request.error_code = Some(record.error_code);
+            }
+            let prefill = if step.kind == GraphKind::Prefill {
+                record.consumed_tokens as u64 - request.consumed_tokens
+            } else {
+                0
+            };
+            let output = (record.generated_tokens - request.generated_tokens as i64) as u32;
+            if record.status != 3 {
+                request.accounting.credit(prefill, output, now_ns);
             }
             request.consumed_tokens = record.consumed_tokens as u64;
             if record.generated_tokens > request.generated_tokens as i64 {
@@ -1683,4 +1658,7 @@ impl RequestScheduler {
 #[cfg(test)]
 mod boundary_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+mod policy_tests;

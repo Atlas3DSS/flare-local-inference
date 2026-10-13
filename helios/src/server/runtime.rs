@@ -15,7 +15,9 @@ use crate::{
     cache::ConditioningEvent,
     execution::{ExecutionManifest, GraphKind, RankExecutor, SamplingMode},
     model::{ModelConfig, ModelContract, SamplingParameters},
-    scheduler::{RequestHandle, RequestPhase, RequestScheduler, RequestSpec, ScheduledStep},
+    scheduler::{
+        RequestHandle, RequestPhase, RequestScheduler, RequestSpec, ScheduledPlan, ScheduledStep,
+    },
 };
 
 pub struct Prompt<M: ModelContract> {
@@ -87,6 +89,8 @@ impl Drop for Generation {
 }
 
 struct Incoming<M: ModelContract> {
+    arrival_ns: u64,
+    publications: std::cell::Cell<u64>,
     prompt: Prompt<M>,
     events: async_mpsc::Sender<GenerationEvent>,
     cancelled: Arc<AtomicBool>,
@@ -128,12 +132,19 @@ impl<M: ModelContract> Incoming<M> {
         }
     }
     fn emit(&self, event: GenerationEvent) {
+        let publishes = matches!(
+            &event,
+            GenerationEvent::Token(_) | GenerationEvent::Protocol(_)
+        );
         if self.events.try_send(event).is_err() {
             self.fail(Error::execution(
                 ExecutionError::Capacity,
                 "generation consumer exceeded the bounded output queue",
             ));
             self.cancelled.store(true, Ordering::Release);
+        } else if publishes {
+            self.publications
+                .set(self.publications.get().saturating_add(1));
         }
     }
 }
@@ -252,7 +263,8 @@ impl<M: ModelContract> ModelRuntime<M> {
                     }
                 };
                 if let Err(error) = scheduler
-                    .enable_speculation(&worker_config.speculative_widths)
+                    .graph_durations(&executor.manifest().graphs)
+                    .and_then(|()| scheduler.enable_speculation(&worker_config.speculative_widths))
                     .and_then(|()| {
                         scheduler.proposal_source(worker_config.speculative_proposal_source)
                     })
@@ -454,6 +466,8 @@ impl<M: ModelContract> ModelRuntime<M> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
+            arrival_ns: super::observation::monotonic_ns(),
+            publications: Default::default(),
             prompt,
             events,
             cancelled: cancelled.clone(),
@@ -646,6 +660,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
     }
 
     fn admit(&mut self) -> Result<std::ops::ControlFlow<(), bool>> {
+        self.scheduler
+            .advance_to(super::observation::monotonic_ns())?;
         let mut progress = false;
         self.pending.retain(|request| {
             let cancelled = request.cancelled.load(Ordering::Acquire);
@@ -695,6 +711,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 grammar_constrained: incoming.prompt.grammar.is_some(),
                 host_stops: incoming.prompt.has_host_stops(),
             };
+            self.scheduler
+                .advance_to(super::observation::monotonic_ns())?;
             let admission = if incoming.qualification {
                 self.scheduler.admit_cold(spec)
             } else if let Some(store) = self.store.as_mut().filter(|_| incoming.host_lookup) {
@@ -709,6 +727,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     continue;
                 }
             };
+            self.scheduler.set_arrival(handle, incoming.arrival_ns)?;
             let slot = handle.slot as usize;
             if !incoming.readmitted {
                 self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
@@ -769,6 +788,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         kind: GraphKind,
         completion: crate::execution::FrameCompletion,
     ) -> Result<()> {
+        self.scheduler
+            .advance_to(super::observation::monotonic_ns())?;
         for record in completion.records.iter() {
             if record.status != 0 {
                 M::validate_completion(self.config, kind, record)?;
@@ -777,7 +798,6 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         let mut prefill = 0;
         let mut accepted = 0;
         let mut draft_rounds = 0;
-        let mut acceptance_rows = Vec::new();
         if matches!(kind, GraphKind::Prefill | GraphKind::Speculative) {
             let step = self.scheduler.submitted_step(completion.fence)?;
             for lane in &step.lanes {
@@ -793,21 +813,18 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                         .saturating_sub(live.consumed_tokens)
                         .min(lane.tokens as u64);
                 } else if record.generated_tokens > live.generated_tokens as i64 {
-                    if let Some(vector) = record.vector.filter(|v| v.offered_drafts > 0) {
-                        accepted += vector.accepted_drafts as u64;
-                        draft_rounds += 1;
-                        acceptance_rows.push((
-                            vector.offered_drafts as usize,
-                            vector.accepted_drafts.max(0) as usize,
-                        ));
+                    if let Some(vector) = record.vector {
+                        let offered =
+                            (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
+                        if offered > 0 {
+                            accepted += (vector.accepted_drafts as usize).min(offered) as u64;
+                            draft_rounds += 1;
+                        }
                     }
                 }
             }
         }
-        let measured_step = completion
-            .elapsed_ns
-            .map(|_| self.scheduler.submitted_step(completion.fence).cloned())
-            .transpose()?;
+        let measured_step = self.scheduler.submitted_step(completion.fence)?.clone();
         let generated = self
             .scheduler
             .complete(completion.fence, &completion.records)?;
@@ -816,12 +833,11 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         if kind == GraphKind::Prefill && self.store.is_some() {
             self.observe_prefill_rate(completion.fence, prefill);
         }
-        if !acceptance_rows.is_empty() {
-            self.scheduler.observe_acceptance(&acceptance_rows);
-        }
-        if let (Some(step), Some(nanos)) = (measured_step, completion.elapsed_ns) {
-            self.scheduler
-                .observe_round(&step, nanos, generated.len())?;
+        self.scheduler
+            .observe_execution(&measured_step, completion.timing);
+        if let Some(nanos) = completion.timing.gpu_ns[0].filter(|_| kind == GraphKind::Speculative)
+        {
+            let step = &measured_step;
             self.metrics.speculative_completed(
                 step.batch_capacity,
                 step.token_capacity,
@@ -838,7 +854,13 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 request.incoming.observe_token(token.token);
                 request.last_token = Some(token.token);
                 if request.incoming.qualification {
+                    let before = request.incoming.publications.get();
                     request.incoming.emit_token(token.token);
+                    if request.incoming.publications.get() != before {
+                        self.scheduler
+                            .advance_to(super::observation::monotonic_ns())?;
+                        self.scheduler.published_output(token.request)?;
+                    }
                     continue;
                 }
                 if let Some(grammar) = &mut request.incoming.prompt.grammar {
@@ -858,6 +880,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                         .unwrap()
                         .grammar_updated(grammar.mask());
                 }
+                let before = request.incoming.publications.get();
                 let stop = match request.emit_output(token.token, &self.config.eos_token_ids) {
                     Ok(matched) => matched,
                     Err(error) => {
@@ -866,6 +889,11 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                         continue;
                     }
                 };
+                if request.incoming.publications.get() != before {
+                    self.scheduler
+                        .advance_to(super::observation::monotonic_ns())?;
+                    self.scheduler.published_output(token.request)?;
+                }
                 if stop {
                     self.metrics.completed.fetch_add(1, Ordering::Relaxed);
                     let live = self.scheduler.request(token.request)?;
@@ -894,6 +922,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
     }
 
     fn publish(&mut self) -> Result<bool> {
+        self.scheduler
+            .advance_to(super::observation::monotonic_ns())?;
         let mut progress = false;
         for slot in 0..self.active.len() {
             if let Some(request) = &mut self.active[slot] {
@@ -1000,7 +1030,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         )
     }
 
-    fn plan(&mut self, outstanding: usize) -> Result<(Option<ScheduledStep>, bool)> {
+    fn plan(&mut self, outstanding: usize) -> Result<(Option<ScheduledPlan>, bool)> {
+        self.scheduler
+            .advance_to(super::observation::monotonic_ns())?;
         let mut progress = false;
         if self.config.speculative_proposal_source
             == crate::scheduler::speculation::ProposalSource::Copy
@@ -1045,11 +1077,11 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 }
             }
         }
-        Ok((self.scheduler.next_step(), progress))
+        Ok((self.scheduler.plan(), progress))
     }
 
-    fn reserve_and_pack(&mut self, step: &ScheduledStep, fence: crate::cache::Fence) -> Result<()> {
-        self.scheduler.record_submission(step, fence)?;
+    fn reserve_and_pack(&mut self, step: &ScheduledPlan, fence: crate::cache::Fence) -> Result<()> {
+        self.scheduler.commit(step, fence)?;
         let inputs = self
             .inputs
             .as_mut()
@@ -1083,8 +1115,14 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         Ok(())
     }
 
-    fn submit(&mut self, executor: &mut RankExecutor, step: &ScheduledStep) -> Result<bool> {
-        if !executor.can_submit(step.grammar_constrained) {
+    fn submit(&mut self, executor: &mut RankExecutor, step: &ScheduledPlan) -> Result<bool> {
+        self.scheduler
+            .advance_to(super::observation::monotonic_ns())?;
+        if !executor.can_submit(step.requires_feedback)
+            || !self
+                .scheduler
+                .submission_window_available(step.estimated_duration_ns())
+        {
             return Ok(false);
         }
         validate_sampling_admissions::<M>(step, &self.admissions)?;
@@ -1115,7 +1153,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     .as_ref()
                     .expect("worker inputs initialized before submission"),
             ),
-            step.grammar_constrained,
+            step.requires_feedback,
         )? != Some(fence)
         {
             return Err("executor refused a reserved scheduler submission".into());
@@ -1127,6 +1165,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
     /// Copy newly ready checkpoints out, apply finished host transfers, and
     /// re-admit the waiters of a failed restore without the host store.
     fn service_store(&mut self) -> Result<bool> {
+        self.scheduler
+            .advance_to(super::observation::monotonic_ns())?;
         let Some(store) = self.store.as_mut() else {
             return Ok(false);
         };
@@ -1385,7 +1425,7 @@ mod tests {
                 batch_capacity: 4,
                 token_capacity: 1,
                 lanes: vec![lane(3), lane(1)],
-                grammar_constrained: true,
+                requires_feedback: true,
             };
             validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
             let before = step.clone();
@@ -1406,7 +1446,7 @@ mod tests {
             batch_capacity: 1,
             token_capacity: 1,
             lanes: vec![lane(0)],
-            grammar_constrained: false,
+            requires_feedback: false,
         };
         validate_sampling_admissions::<Qwen4Exp>(&step, &admissions).unwrap();
         admissions[0] = None;
@@ -1445,10 +1485,10 @@ mod tests {
             metrics: &super::super::metrics::Metrics,
             sequence: u64,
             outstanding: usize,
-        ) -> ScheduledStep {
-            let step = scheduler.next_step().unwrap();
+        ) -> ScheduledPlan {
+            let step = scheduler.plan().unwrap();
             let fence = Fence(sequence * 2);
-            scheduler.record_submission(&step, fence).unwrap();
+            scheduler.commit(&step, fence).unwrap();
             observe_submission(metrics, scheduler, &step, outstanding).unwrap();
             let mut records = [CompletionRecord::default(); 4];
             for lane in &step.lanes {
@@ -1466,10 +1506,10 @@ mod tests {
             }
             scheduler.complete(fence, &records).unwrap();
             if step.kind == GraphKind::Prefill {
-                let capture = scheduler.next_step().unwrap();
+                let capture = scheduler.plan().unwrap();
                 assert_eq!(capture.kind, GraphKind::Snapshot);
                 let copy_fence = Fence(fence.0 + 1);
-                scheduler.record_submission(&capture, copy_fence).unwrap();
+                scheduler.commit(&capture, copy_fence).unwrap();
                 let mut copies = [CompletionRecord::default(); 4];
                 for lane in &capture.lanes {
                     let live = scheduler.request(lane.request).unwrap();
@@ -1515,22 +1555,18 @@ mod tests {
             },
         )
         .unwrap();
-        let mut constrained = None;
-        for grammar_constrained in [true, false, false] {
-            let handle = scheduler
-                .admit(RequestSpec {
-                    system_boundary: None,
-                    prompt: vec![7],
-                    conditioning: vec![],
-                    max_new_tokens: 20,
-                    grammar_constrained,
-                    host_stops: false,
-                })
-                .unwrap();
-            if grammar_constrained {
-                constrained = Some(handle);
-            }
-        }
+        scheduler
+            .measured_graph_durations(&crate::scheduler::tests::duration_graphs(4))
+            .unwrap();
+        let spec = |token, grammar_constrained| RequestSpec {
+            system_boundary: None,
+            prompt: vec![token],
+            conditioning: vec![],
+            max_new_tokens: 20,
+            grammar_constrained,
+            host_stops: false,
+        };
+        let constrained = scheduler.admit(spec(7, true)).unwrap();
         assert_eq!(submit(&mut scheduler, &metrics, 1, 1).kind, GraphKind::Init);
         assert_eq!(
             submit(&mut scheduler, &metrics, 2, 1).kind,
@@ -1539,34 +1575,37 @@ mod tests {
         let only_constrained = submit(&mut scheduler, &metrics, 3, 1);
         assert_eq!(only_constrained.kind, GraphKind::Decode);
         assert_eq!(only_constrained.lanes.len(), 1);
-        assert_eq!(scheduler.stats().active_requests, 3);
         assert!(
             metrics
                 .render()
                 .contains("flare_mixed_grammar_decode_steps_total 0\n")
         );
 
+        for token in [8, 9] {
+            scheduler.admit(spec(token, false)).unwrap();
+        }
+        assert_eq!(submit(&mut scheduler, &metrics, 4, 1).kind, GraphKind::Init);
         assert_eq!(
-            submit(&mut scheduler, &metrics, 4, 1).kind,
+            submit(&mut scheduler, &metrics, 5, 1).kind,
             GraphKind::Prefill
-        );
-        let mixed = submit(&mut scheduler, &metrics, 5, 1);
-        assert_eq!(mixed.kind, GraphKind::Decode);
-        assert_eq!(mixed.lanes.len(), 2);
-        assert!(
-            metrics
-                .render()
-                .contains("flare_mixed_grammar_decode_steps_total 1\n")
         );
         assert_eq!(
             submit(&mut scheduler, &metrics, 6, 1).kind,
             GraphKind::Prefill
         );
-        scheduler.cancel(constrained.unwrap()).unwrap();
-        let unconstrained = submit(&mut scheduler, &metrics, 7, 2);
+        let mixed = submit(&mut scheduler, &metrics, 7, 1);
+        assert_eq!(mixed.kind, GraphKind::Decode);
+        assert_eq!(mixed.lanes.len(), 3);
+        assert!(
+            metrics
+                .render()
+                .contains("flare_mixed_grammar_decode_steps_total 1\n")
+        );
+        scheduler.cancel(constrained).unwrap();
+        let unconstrained = submit(&mut scheduler, &metrics, 8, 2);
         assert_eq!(unconstrained.kind, GraphKind::Decode);
         assert_eq!(unconstrained.lanes.len(), 2);
-        assert!(!unconstrained.grammar_constrained);
+        assert!(!unconstrained.requires_feedback);
         let text = metrics.render();
         assert!(text.contains("flare_mixed_grammar_decode_steps_total 1\n"));
         assert!(text.contains("flare_constrained_max_inflight 1\n"));
@@ -1578,6 +1617,8 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
+            arrival_ns: super::super::observation::monotonic_ns(),
+            publications: Default::default(),
             prompt: Prompt {
                 tokens: vec![7],
                 system_boundary: None,
@@ -1614,8 +1655,29 @@ mod tests {
         )
     }
 
+    #[test]
+    fn only_successful_output_events_count_as_publication() {
+        let (mut incoming, mut generation) = stream(2);
+        incoming.observation = Some(false);
+        incoming.observe_token(7);
+        assert_eq!(incoming.publications.get(), 0);
+        incoming.emit_token(7);
+        assert_eq!(incoming.publications.get(), 1);
+        incoming.emit_token(8);
+        assert_eq!(incoming.publications.get(), 1);
+        assert!(incoming.cancelled.load(Ordering::Acquire));
+        assert!(matches!(
+            generation.events.try_recv(),
+            Ok(GenerationEvent::ObservedToken { .. })
+        ));
+        assert!(matches!(
+            generation.events.try_recv(),
+            Ok(GenerationEvent::Token(7))
+        ));
+    }
+
     fn retirement_scheduler() -> RequestScheduler {
-        RequestScheduler::new(
+        let mut scheduler = RequestScheduler::new(
             [3; 32],
             crate::scheduler::SchedulerLimits {
                 request_slots: 2,
@@ -1635,7 +1697,11 @@ mod tests {
                 state_rows_per_request: None,
             },
         )
-        .unwrap()
+        .unwrap();
+        scheduler
+            .measured_graph_durations(&crate::scheduler::tests::duration_graphs(2))
+            .unwrap();
+        scheduler
     }
 
     fn retirement_spec(grammar_constrained: bool) -> RequestSpec {
@@ -1687,9 +1753,9 @@ mod tests {
             (2, GraphKind::Prefill),
             (3, GraphKind::Snapshot),
         ] {
-            let step = scheduler.next_step().unwrap();
+            let step = scheduler.plan().unwrap();
             assert_eq!(step.kind, expected);
-            scheduler.record_submission(&step, Fence(sequence)).unwrap();
+            scheduler.commit(&step, Fence(sequence)).unwrap();
             let sampled = expected != GraphKind::Init;
             let mut records = [CompletionRecord::default(); 4];
             records[failed.slot as usize] = CompletionRecord {
@@ -1720,12 +1786,12 @@ mod tests {
                 },
             )
             .unwrap();
-        let step = scheduler.next_step().unwrap();
+        let step = scheduler.plan().unwrap();
         assert_eq!(
             (step.kind, step.token_capacity),
             (GraphKind::Speculative, 4)
         );
-        scheduler.record_submission(&step, Fence(4)).unwrap();
+        scheduler.commit(&step, Fence(4)).unwrap();
         let other = scheduler.admit(retirement_spec(false)).unwrap();
         let other_pages = scheduler
             .request(other)
@@ -1836,7 +1902,7 @@ mod tests {
             admissions[other.slot as usize].as_ref().unwrap().handle,
             other
         );
-        assert_eq!(scheduler.next_step().unwrap().lanes[0].request, other);
+        assert_eq!(scheduler.plan().unwrap().lanes[0].request, other);
         assert!(matches!(
             other_generation.events.try_recv(),
             Err(async_mpsc::error::TryRecvError::Empty)
@@ -1865,8 +1931,8 @@ mod tests {
 
         let mut scheduler = retirement_scheduler();
         let handle = scheduler.admit(retirement_spec(false)).unwrap();
-        let step = scheduler.next_step().unwrap();
-        scheduler.record_submission(&step, Fence(1)).unwrap();
+        let step = scheduler.plan().unwrap();
+        scheduler.commit(&step, Fence(1)).unwrap();
         let free_pages = scheduler.free_page_count();
         let free_snapshots = scheduler.free_snapshot_count();
         let mut active: [Option<Active<'_, Qwen4Exp>>; 4] = std::array::from_fn(|_| None);

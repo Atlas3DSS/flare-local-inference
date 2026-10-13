@@ -25,7 +25,7 @@ def _execution(**changes):
 
 
 def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
-    execution = _execution()
+    execution = _execution(estimated_durations_ns={"decode": 123_000, "prefill": 456_000})
     spans = [(4096, 4), (8192, 8), (12288, 512), (16384, 128), (20480, 1)]
     monkeypatch.setattr(execution, "_validate_resources", lambda: (9, [11, 12], spans))
     manifest = execution.manifest()
@@ -33,6 +33,12 @@ def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
     assert manifest["abi_version"] == 2
     assert manifest["input_frame_bytes"] == 152
     decode, prefill = manifest["graphs"]
+    assert decode["estimated_duration_ns"] == 123_000
+    assert prefill["estimated_duration_ns"] == 456_000
+    from ignition.preparation.runtime_package_pb2 import ExecutionGraph
+
+    encoded = ExecutionGraph(**{key: value for key, value in decode.items() if key != "handle"})
+    assert ExecutionGraph.FromString(encoded.SerializeToString()).estimated_duration_ns == 123_000
     assert decode["sampling_mode"] == prefill["sampling_mode"] == "general"
     assert decode["input_bindings"] == prefill["input_bindings"][:3]
     assert decode["input_bindings"][-1] == {"buffer_name": "tokens", "host_offset": 16, "nbytes": 128}
@@ -95,3 +101,12 @@ def test_signature_references_must_cover_exact_bundle():
     with pytest.raises(ValueError, match="unregistered"):
         _execution(signatures={"decode": GraphSignature("decode", 1, 1, ("missing",)),
                                "prefill": GraphSignature("prefill", 1, 16)})
+
+
+@pytest.mark.parametrize("durations", [
+    {"decode": 100}, {"decode": -1, "prefill": 100},
+    {"decode": True, "prefill": 100}, {"decode": 1 << 64, "prefill": 100},
+])
+def test_invalid_graph_durations_fail_before_cuda(durations):
+    with pytest.raises(ValueError, match="duration estimates"):
+        _execution(estimated_durations_ns=durations)

@@ -92,12 +92,42 @@ impl Fixture {
     }
 
     fn worker(&self, receiver: mpsc::Receiver<Incoming<Qwen4Exp>>) -> Worker<'_, Qwen4Exp> {
-        let scheduler = RequestScheduler::new(
+        let mut scheduler = RequestScheduler::new(
             self.config.identity,
             self.config.limits,
             Qwen4Exp::scheduler_capabilities(&self.config),
         )
         .unwrap();
+        let mut graphs = Vec::new();
+        for batch in [1, 2, 4] {
+            for kind in [
+                GraphKind::Init,
+                GraphKind::Restore,
+                GraphKind::Snapshot,
+                GraphKind::Resume,
+                GraphKind::Decode,
+                GraphKind::Speculative,
+                GraphKind::Prefill,
+            ] {
+                for width in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
+                    graphs.push(crate::execution::GraphDescriptor {
+                        name: format!("{kind:?}-{batch}-{width}"),
+                        kind,
+                        sampling_mode: crate::execution::SamplingMode::General,
+                        handle: 1,
+                        batch_capacity: batch,
+                        token_capacity: if kind == GraphKind::Prefill {
+                            64
+                        } else {
+                            width
+                        },
+                        estimated_duration_ns: 1000,
+                        input_bindings: vec![],
+                    });
+                }
+            }
+        }
+        scheduler.measured_graph_durations(&graphs).unwrap();
         let mut worker = Worker::new(
             &self.config,
             &self.frontend,
@@ -118,6 +148,8 @@ impl Fixture {
         let length = tokens.len();
         (
             Incoming {
+                arrival_ns: super::super::observation::monotonic_ns(),
+                publications: Default::default(),
                 prompt: Prompt {
                     tokens,
                     system_boundary: None,
@@ -153,7 +185,7 @@ impl Fixture {
     }
 }
 
-fn planned(worker: &mut Worker<'_, Qwen4Exp>, kind: GraphKind, sequence: u64) -> ScheduledStep {
+fn planned(worker: &mut Worker<'_, Qwen4Exp>, kind: GraphKind, sequence: u64) -> ScheduledPlan {
     let (step, _) = worker.plan(0).unwrap();
     let step = step.unwrap();
     assert_eq!(step.kind, kind);
@@ -183,7 +215,7 @@ fn completion(
     FrameCompletion {
         fence: Fence(sequence),
         graph_index: 0,
-        elapsed_ns: None,
+        timing: Default::default(),
         records: records.into(),
     }
 }
@@ -214,7 +246,8 @@ fn all_lanes_validate_before_scheduler_or_observation_mutation() {
         Err(Error::Execution(ExecutionError::Completion(_)))
     ));
     assert_eq!(worker.scheduler.completed(), Fence(0));
-    assert_eq!(worker.scheduler.submitted_step(Fence(1)).unwrap(), &step);
+    assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1000));
+    assert_eq!(worker.scheduler.submitted_step(Fence(1)).unwrap(), &*step);
     for lane in &step.lanes {
         let live = worker.scheduler.request(lane.request).unwrap();
         assert_eq!(live.phase, RequestPhase::Initialize);
@@ -226,6 +259,169 @@ fn all_lanes_validate_before_scheduler_or_observation_mutation() {
         .complete(GraphKind::Init, completion(&worker, &step, 1, None))
         .unwrap();
     assert_eq!(worker.scheduler.completed(), Fence(1));
+    assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1000));
+}
+
+#[test]
+fn worker_observes_prefill_decode_and_prerequisite_timings() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
+    sender.send(incoming).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    for (kind, fence, token) in [
+        (GraphKind::Init, 1, None),
+        (GraphKind::Prefill, 2, Some(1)),
+        (GraphKind::Snapshot, 3, None),
+        (GraphKind::Decode, 4, Some(2)),
+    ] {
+        let step = planned(&mut worker, kind, fence);
+        let mut frame = completion(&worker, &step, fence, token);
+        frame.timing.gpu_ns = [
+            Some(100),
+            Some(200),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ];
+        frame.timing.wall_ns = 350;
+        worker.complete(kind, frame).unwrap();
+        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(900));
+    }
+}
+
+#[test]
+fn worker_discovers_indeterminate_costs_and_initializes_useful_progress_credits() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
+    sender.send(incoming).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker
+        .scheduler
+        .graph_durations(&crate::scheduler::tests::duration_graphs(4))
+        .unwrap();
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let h = worker.active[0].as_ref().unwrap().request;
+    for (kind, fence, token) in [
+        (GraphKind::Init, 1, None),
+        (GraphKind::Prefill, 2, Some(1)),
+        (GraphKind::Snapshot, 3, None),
+        (GraphKind::Decode, 4, Some(2)),
+    ] {
+        let step = planned(&mut worker, kind, fence);
+        assert_eq!(step.estimated_duration_ns(), 0);
+        assert!(step.requires_feedback);
+        let mut frame = completion(&worker, &step, fence, token);
+        frame.timing.gpu_ns = [
+            Some(100),
+            Some(200),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ];
+        worker.complete(kind, frame).unwrap();
+        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(200));
+    }
+    let accounting = worker.scheduler.request(h).unwrap().accounting();
+    assert_eq!(accounting.decode_credit_ns, 200.0);
+    assert_eq!(accounting.committed_credit_ns, 600.0);
+}
+
+#[test]
+fn output_clock_advances_only_after_stop_buffering_releases_tokens() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (mut incoming, mut generation) = fixture.incoming(vec![0], 8);
+    let arrival = incoming.arrival_ns;
+    incoming.prompt.stop_sequences = vec![vec![1, 2]];
+    sender.send(incoming).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let h = worker.active[0].as_ref().unwrap().request;
+    assert_eq!(
+        worker.scheduler.request(h).unwrap().accounting().arrival_ns,
+        arrival
+    );
+    advance(&mut worker, GraphKind::Init, 1, None);
+    advance(&mut worker, GraphKind::Prefill, 2, Some(1));
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .last_output_ns,
+        None
+    );
+    assert!(matches!(
+        generation.events.try_recv(),
+        Ok(GenerationEvent::ObservedToken { token: 1, .. })
+    ));
+    assert!(generation.events.try_recv().is_err());
+    advance(&mut worker, GraphKind::Snapshot, 3, None);
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .last_output_ns,
+        None
+    );
+    advance(&mut worker, GraphKind::Decode, 4, Some(3));
+    let published = worker
+        .scheduler
+        .request(h)
+        .unwrap()
+        .accounting()
+        .last_output_ns;
+    assert!(published.is_some());
+    assert!(matches!(
+        generation.events.try_recv(),
+        Ok(GenerationEvent::ObservedToken { token: 3, .. })
+    ));
+    assert!(matches!(
+        generation.events.try_recv(),
+        Ok(GenerationEvent::Token(1))
+    ));
+    assert!(matches!(
+        generation.events.try_recv(),
+        Ok(GenerationEvent::Token(3))
+    ));
+    advance(&mut worker, GraphKind::Decode, 5, Some(1));
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .last_output_ns,
+        published
+    );
 }
 
 #[test]
@@ -259,7 +455,7 @@ fn packing_sees_reserved_pages_and_pack_failure_retains_submission_until_drain()
     );
     worker.admissions[handle.slot as usize] = None;
     assert!(worker.reserve_and_pack(&step, Fence(3)).is_err());
-    assert_eq!(worker.scheduler.submitted_step(Fence(3)).unwrap(), &step);
+    assert_eq!(worker.scheduler.submitted_step(Fence(3)).unwrap(), &*step);
     assert_eq!(worker.scheduler.request(handle).unwrap().pages().count(), 2);
     assert_eq!(
         worker.scheduler.request(handle).unwrap().last_use(),
@@ -494,7 +690,8 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
         let step = planned(&mut worker, GraphKind::Speculative, 4);
         assert_eq!(step.token_capacity, 4);
         let mut frame = completion(&worker, &step, 4, None);
-        frame.elapsed_ns = Some(1000);
+        frame.timing.gpu_ns[0] = Some(1000);
+        frame.timing.wall_ns = 1500;
         let record = &mut frame.records[step.lanes[0].request.slot as usize];
         record.consumed_tokens = 16;
         record.generated_tokens = 4;
@@ -503,6 +700,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
             emitted_count: 3,
             offered_drafts: 3,
             accepted_drafts: 2,
+            copy_offered_mask: if copy { 7 } else { 0 },
             verification_width: 4,
             draft_cache_consumed: if copy { -1 } else { 15 },
             tokens: [1, 1, 2, -1, -1, -1, -1, -1],
@@ -523,6 +721,15 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
         );
         assert_eq!(fixture.metrics.snapshot(!copy).generated_tokens, 1);
         worker.complete(GraphKind::Speculative, frame).unwrap();
+        let profile = worker
+            .scheduler
+            .request(step.lanes[0].request)
+            .unwrap()
+            .acceptance();
+        let source = fixture.config.speculative_proposal_source;
+        assert!(profile.probability(source, 0).unwrap() > 0.5);
+        assert!(profile.probability(source, 2).unwrap() < 0.5);
+        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1000));
         let metrics = fixture.metrics.snapshot(!copy);
         assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 4));
         assert_eq!((metrics.accepted_drafts, metrics.draft_rounds), (2, 1));
@@ -841,7 +1048,7 @@ fn host_hit_holds_the_request_inbound_until_the_restore_completes() {
         ),
         (RequestPhase::Inbound, 70, 70)
     );
-    assert_eq!(worker.plan(0).unwrap().0, None);
+    assert!(worker.plan(0).unwrap().0.is_none());
     assert_eq!(worker.scheduler.stats().inbound_waiting, 1);
     assert_eq!(
         (

@@ -231,37 +231,75 @@ finalizers and destructor draining. They use real PyTorch-captured executables.
 
 ## Live requests
 
-`scheduler::RequestScheduler` owns at most four live request slots and allocates
-private page tails and exact checkpoint snapshots from prepared capacities.
+`scheduler::RequestScheduler` owns up to 64 live request slots within the selected
+concurrency and allocates private page tails and exact checkpoint snapshots from
+prepared capacities.
 Request handles contain a physical slot and a positive int64-safe generation.
-Live recurrent-state slots are physical slot plus one, leaving state slot zero
-for padding. Cached pages remain immutable and shared through pinned ancestors.
+Each physical request slot owns a fixed range of execution-state rows, leaving
+state row zero for padding. Cached pages remain immutable and shared through pinned ancestors.
 Resource pressure evicts unpinned cache leaves; retirement fences determine
 when their page and snapshot IDs become reusable.
 
-`next_step` plans initialize, restore, prefill, resume-sampling or decode work.
-Prefill consumes up to the configured `prefill_chunk_size` logical tokens
-(4096 by default in server configuration). It selects the smallest captured
-capacity from 1, 16, powers of two from 64 through the chunk limit, and the
-chunk limit itself. The limit must be 64-aligned, at least 64, and within the
-context and 262144-token transport bound. Decode batches use capacities 1,2,4.
-Prefill and
-decode alternate when both are ready. Full prompt cache hits restore state and
+`RequestScheduler::plan` returns an immutable `ScheduledPlan` for initialize,
+restore, snapshot, vision, prefill, resume-sampling, decode or speculative work.
+The plan retains its scheduler identity and each participating request's state
+epoch. Admissions of unrelated requests and timing observations preserve its
+validity; mutation or retirement of a selected request invalidates it.
+Prefill selects among loaded capacities up to `prefill_chunk_size`, using graph
+duration, request age, and useful-progress deficit. Logical lengths pad to the
+smallest loaded capacity that covers them. The limit must be 64-aligned, at least 64, and within the context capacity. Decode batches use
+power-of-two capacities through the selected concurrency.
+Prefill, decode cohorts, speculative widths, and mandatory stages compete in
+one duration-aware selection policy. Full prompt cache hits restore state and
 resume sampling from saved hidden state without replaying prompt tokens.
 
 Before CUDA enqueue, callers check `GraphExecutor::can_submit`, obtain its
-`next_fence`, and call `record_submission` to reserve pages and record use of
-cache ancestors. Completion validation checks generations, physical slots,
-monotonic counters and per-step logical bounds before mutating request state.
+`next_fence`, and call `RequestScheduler::commit` with the plan to reserve pages
+and record use of cache ancestors. Commit validates the plan's epochs and
+resources without rerunning scheduling policy. Completion validation checks
+generations, physical slots, monotonic counters and per-step logical bounds before
+mutating request state.
 Two decode steps can reference a request concurrently; a repeated terminal
 completion does not emit its sampled token twice. A CUDA submission failure
 requires confirmed stream drain before `release_after_shutdown` releases
 resources associated with the attempted submission.
 
+Each request owns conditional draft-acceptance statistics by depth and proposal
+source. Validated speculative completions update only that request. The emitted
+accepted prefix supplies positive observations. When a correction token was
+emitted and an offered draft remained, the next draft supplies a rejection.
+Termination within an accepted prefix censors the remaining depths. Expected
+yield is clipped by the remaining output limit, context capacity, and available
+proposals. A fixed captured width may therefore contain fewer active tokens.
+Acceptance learning and accepted-draft metrics exclude proposals beyond the
+lane's logical token limit even when the completion reports physical padding.
+
+`estimated_duration_ns` returns one estimate per captured graph, initially zero
+(indeterminate). A valid completion sets its cost directly; further GPU replay
+intervals update it with an EMA of weight 1/8. After 30 seconds without a valid
+observation, the cost becomes indeterminate and the next observation resets it.
+Indeterminate candidates compete by useful work and can beat measured candidates;
+they require an empty queue and completion before another submission. Tensor-parallel
+observations use the maximum rank interval; host queue and completion-delivery delays do not enter the EMA.
+Speculative width selection combines this cost with request-local expected
+acceptance. Each request accrues equal entitlement while GPU work is outstanding;
+completion earns useful-progress credit at frozen reference rates. Unknown
+reference rates initialize from runtime observations and credit accumulated
+progress once. Prediction expiry does not alter those accounting units.
+The latency filter includes queued work and prerequisite stages, preserving
+separate clocks for prompt progress and published output.
+
+`PolicyConfig` defaults to a 20 ms graph slice, 20 ms submission window, 40 ms
+service-gap target, and 20 ms deficit scale. An overdue graph stops further queueing
+until completion. Unavoidable atomic singleton work may exceed a duration target
+with an empty queue. These are estimated-time preferences, not hard latency
+bounds. Residency rotation and mixed captures require further implementation;
+see [the native scheduling design](../docs/scheduling-runtime-design.md).
+
 Admission reserves checkpoints for unreused system, prompt and terminal endpoints.
 Prefill stops at the exact rendered system boundary and prompt end. Snapshot graphs
-copy live state and partial cache tails to immutable row `5 + SnapshotId` after
-model submissions drain. System and prompt publication retain the live physical
+copy live state and partial cache tails to immutable snapshot rows after the
+selected requests' model submissions complete. System and prompt publication retain the live physical
 page sequence while transferring complete pages to the cache. Admission reuse
 counts stay fixed. Duplicate publication never remaps the live request.
 

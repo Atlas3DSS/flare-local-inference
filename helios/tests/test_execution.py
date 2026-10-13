@@ -78,7 +78,7 @@ class Resources:
                 "dtype": str(tensor.dtype).removeprefix("torch."), "shape": list(tensor.shape), "strides": list(tensor.stride())}
                 for name, tensor in self.buffers.items()],
             "graphs": [{"name": f"decode{count}", "kind": "decode", "handle": graph.raw_cuda_graph_exec(),
-                "sampling_mode": "general",
+                "sampling_mode": "general", "estimated_duration_ns": 0,
                 "batch_capacity": count, "token_capacity": 1, "input_bindings": bindings}
                 for count, graph in zip((2,4), self.graphs)]}
 
@@ -116,16 +116,25 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIsNone(executor.submit(1, []))
                 self.assertIsNone(executor.submit(1, [], grammar_constrained=True))
                 first = self.complete(executor, 1)
+                self.assertGreater(first.gpu_ns[0], 0)
+                self.assertEqual(list(first.gpu_ns[1:]), [None] * 15)
+                self.assertGreaterEqual(first.wall_ns, first.gpu_ns[0])
+                self.assertFalse(first.queued)
                 self.assertEqual([row[5] for row in first.records], [0,1,0,1])
                 self.assertEqual(first.records[3][:6], [4,1,1,1,21,1])
                 self.assertEqual(first.records[1][:6], [2,1,1,1,32,1])
                 self.assertIsNone(executor.submit(0, [], grammar_constrained=True))
                 second = self.complete(executor, 2)
+                self.assertGreater(second.gpu_ns[0], 0)
+                self.assertGreaterEqual(second.wall_ns, second.gpu_ns[0])
+                self.assertTrue(second.queued)
                 self.assertEqual([row[4] for row in second.records], [53,75,64,31])
                 self.assertEqual([row[2] for row in second.records], [1,2,1,2])
                 self.assertEqual(executor.submit(0, [], grammar_constrained=True), 3)
                 self.assertIsNone(executor.submit(1, []))
                 third = self.complete(executor, 3)
+                self.assertGreater(third.gpu_ns[0], 0)
+                self.assertFalse(third.queued)
                 self.assertEqual([row[2] for row in third.records], [1,3,1,3])
                 self.assertEqual(executor.outstanding, 0)
         finally:
