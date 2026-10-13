@@ -45,8 +45,9 @@ def nvfp4_draft_head(weight: torch.Tensor, *, rows_per_chunk: int = 8192):
     from b12x.gemm.blockscaled import pack_weight
 
     rows, columns = weight.shape
-    if weight.dtype != torch.bfloat16 or columns % 128 or rows % 128 or not weight.is_contiguous():
-        raise ValueError("NVFP4 draft head requires a contiguous BF16 head with 128-aligned dimensions")
+    # Swizzled scales pad rows to 128; a TP4 vocabulary shard holds 38,720.
+    if weight.dtype != torch.bfloat16 or columns % 128 or rows % 64 or not weight.is_contiguous():
+        raise ValueError("NVFP4 draft head requires a contiguous BF16 head of 64-aligned rows and 128-aligned columns")
     global_scale = (6.0 * 448.0) / weight.abs().amax().float().clamp_min(1e-8)
     values = torch.empty((rows, columns // 2), dtype=torch.uint8, device=weight.device)
     scales = torch.empty((rows, columns // 16), dtype=torch.float8_e4m3fn, device=weight.device)
