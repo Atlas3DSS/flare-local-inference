@@ -427,6 +427,69 @@ fn large_cohort_search_covers_high_slots_without_growing_scratch() {
 }
 
 #[test]
+fn unmeasured_subsets_do_not_split_a_measured_cohort() {
+    for active in [4, 8] {
+        let mut s = engine(active, true);
+        let handles: Vec<_> = (1..=active as u32)
+            .map(|id| add(&mut s, id, 1, 64))
+            .collect();
+        ready(&mut s, &handles);
+        // The complete cohort's shapes are measured; smaller batches never ran or expired.
+        let mut graphs = super::tests::duration_graphs(active);
+        for g in &mut graphs {
+            g.estimated_duration_ns = match (g.kind, g.batch_capacity) {
+                (GraphKind::Speculative, b) if b < active => 0,
+                (GraphKind::Speculative, _) => MS + g.token_capacity as u64 * MS / 4,
+                _ => MS,
+            };
+        }
+        s.costs = super::tests::measured_costs(&graphs);
+        for _ in 0..16 {
+            let plan = step(&mut s, 1);
+            assert_eq!(plan.kind, GraphKind::Speculative);
+            assert_eq!(plan.lanes.len(), active);
+            let positions: std::collections::HashSet<_> =
+                plan.lanes.iter().map(|l| l.start_position).collect();
+            assert_eq!(positions.len(), 1, "cohort members advance together");
+        }
+    }
+}
+
+#[test]
+fn overdue_requests_are_not_rescued_one_at_a_time_through_unmeasured_graphs() {
+    let mut s = engine(16, true);
+    let decoding: Vec<_> = (1..=8).map(|id| add(&mut s, id, 1, 256)).collect();
+    ready(&mut s, &decoding);
+    // Another request is still prefilling, so no speculative cohort serves every runnable request.
+    add(&mut s, 9, 4096, 64);
+    let mut graphs = super::tests::duration_graphs(16);
+    for g in &mut graphs {
+        g.estimated_duration_ns = match (g.kind, g.batch_capacity, g.token_capacity) {
+            (GraphKind::Speculative, 8, w) => 2 * MS + w as u64 * MS,
+            (GraphKind::Speculative, 1, 1) => 3 * MS / 2,
+            (GraphKind::Speculative, _, _) => 0,
+            (GraphKind::Prefill, _, n) => (n as u64 / 64 + 1) * MS,
+            _ => MS / 10,
+        };
+    }
+    s.costs = super::tests::measured_costs(&graphs);
+    let mut lanes = 0;
+    let mut rounds = 0;
+    for _ in 0..64 {
+        let plan = step(&mut s, 1);
+        if plan.kind == GraphKind::Speculative {
+            lanes += plan.lanes.len();
+            rounds += 1;
+        }
+    }
+    assert!(rounds > 0);
+    assert!(
+        lanes >= 6 * rounds,
+        "{lanes} lanes over {rounds} speculative rounds"
+    );
+}
+
+#[test]
 fn prefix_restore_earns_no_credit_for_reused_prompt_tokens() {
     let mut s = engine(1, false);
     let seed = add(&mut s, 1, 65, 1);

@@ -371,14 +371,23 @@ impl RequestScheduler {
         kind: GraphKind,
         mask: u64,
         capacity: usize,
+        eligible: u64,
     ) {
         if mask == 0 {
             return;
         }
         let batch = (mask.count_ones() as usize).next_power_of_two();
-        let Some(duration_ns) = self.costs.duration(kind, batch, capacity) else {
+        let Some(mut duration_ns) = self.costs.duration(kind, batch, capacity) else {
             return;
         };
+        if duration_ns == 0 && mask != eligible {
+            // Running a graph is how its duration is learned, and an unmeasured step wins. Learning
+            // a smaller graph from part of a cohort delays the rest and leaves requests that advanced
+            // together at different positions, so a subset costs what the whole cohort, which it
+            // cannot outlast, costs at the same width until it runs on its merits.
+            let whole = (eligible.count_ones() as usize).next_power_of_two();
+            duration_ns = self.costs.duration(kind, whole, capacity).unwrap_or(0);
+        }
         let first = self.slots[mask.trailing_zeros() as usize]
             .request
             .as_ref()
@@ -412,14 +421,14 @@ impl RequestScheduler {
         });
     }
 
-    fn add_cohort(&self, output: &mut Vec<Candidate>, kind: GraphKind, mask: u64) {
+    fn add_cohort(&self, output: &mut Vec<Candidate>, kind: GraphKind, mask: u64, eligible: u64) {
         if kind == GraphKind::Speculative {
             let batch = (mask.count_ones() as usize).next_power_of_two();
             for width in &self.speculative_catalog[batch.ilog2() as usize] {
-                self.add_candidate(output, kind, mask, *width);
+                self.add_candidate(output, kind, mask, *width, eligible);
             }
         } else {
-            self.add_candidate(output, kind, mask, 1);
+            self.add_candidate(output, kind, mask, 1, eligible);
         }
     }
 
@@ -453,7 +462,7 @@ impl RequestScheduler {
             if kind == GraphKind::Prefill {
                 for slot in bits(mask) {
                     for capacity in &self.prefill_catalog {
-                        self.add_candidate(output, kind, 1 << slot, *capacity);
+                        self.add_candidate(output, kind, 1 << slot, *capacity, 1 << slot);
                     }
                 }
                 continue;
@@ -468,7 +477,7 @@ impl RequestScheduler {
                         .iter()
                         .find(|n| **n >= patches)
                     {
-                        self.add_candidate(output, kind, 1 << slot, *capacity);
+                        self.add_candidate(output, kind, 1 << slot, *capacity, 1 << slot);
                     }
                 }
                 continue;
@@ -477,14 +486,14 @@ impl RequestScheduler {
             if count <= 5 {
                 let mut subset = mask;
                 while subset != 0 {
-                    self.add_cohort(output, kind, subset);
+                    self.add_cohort(output, kind, subset, mask);
                     subset = subset.wrapping_sub(1) & mask;
                 }
             } else {
                 for slot in bits(mask) {
-                    self.add_cohort(output, kind, 1 << slot);
+                    self.add_cohort(output, kind, 1 << slot, mask);
                 }
-                self.add_cohort(output, kind, mask);
+                self.add_cohort(output, kind, mask, mask);
                 let mut order = [0usize; REQUEST_LANES];
                 for (i, slot) in bits(mask).enumerate() {
                     order[i] = slot;
@@ -513,7 +522,7 @@ impl RequestScheduler {
                     for (i, slot) in order[..count].iter().enumerate() {
                         subset |= 1 << slot;
                         if i > 0 && (i + 1).is_power_of_two() && i + 1 < count {
-                            self.add_cohort(output, kind, subset);
+                            self.add_cohort(output, kind, subset, mask);
                         }
                     }
                 }
