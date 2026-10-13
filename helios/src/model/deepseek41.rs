@@ -307,7 +307,10 @@ mod tests {
         let frontend = Frontend::load(
             FrontendAssets {
                 tokenizer: asset(root.join("tokenizer.json")),
-                tokenizer_config: asset(root.join("tokenizer_config.json")),
+                tokens: crate::frontend::test_support::tokens(&asset(
+                    root.join("tokenizer_config.json"),
+                ))
+                .unwrap(),
                 chat_template: asset(
                     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                         .join("../ignition/recipes/deepseek41/assets/chat_template.jinja"),

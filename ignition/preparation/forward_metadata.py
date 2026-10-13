@@ -129,6 +129,14 @@ class _ForwardPickler(pickle.Pickler):
         return NotImplemented
 
 
+class _ForwardUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith('transformers_modules.'):
+            from transformers.dynamic_module_utils import init_hf_modules
+            init_hf_modules()
+        return super().find_class(module, name)
+
+
 def dumps(forward):
     buffer = io.BytesIO()
     _ForwardPickler(buffer).dump(forward)
@@ -139,6 +147,6 @@ def loads(payload):
     token = _MODE.set(FakeTensorMode(allow_non_fake_inputs=True))
     _TENSOR_KINDS.set(WeakIdKeyDictionary())
     try:
-        return pickle.loads(payload)
+        return _ForwardUnpickler(io.BytesIO(payload)).load()
     finally:
         _MODE.reset(token)

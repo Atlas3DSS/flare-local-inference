@@ -189,6 +189,10 @@ def combine(path, ranks, peer_memory, *, publisher=None):
             (storage if name in stored else execution).append((span, source, start + span.offset))
         if rank == 0:
             result.server.CopyFrom(index.server)
+            if index.HasField("sampling_defaults"):
+                result.sampling_defaults.CopyFrom(index.sampling_defaults)
+            if index.HasField("frontend"):
+                result.frontend.CopyFrom(index.frontend)
             if index.HasField("engram"):
                 result.engram.CopyFrom(index.engram)
                 for table in result.engram.tables:

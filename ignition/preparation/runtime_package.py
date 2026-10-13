@@ -463,9 +463,9 @@ class RuntimePackage:
                 _roce_transport(index.ranks[0].roce, transport)
             asset_files = {}
             if server is not None:
-                from google.protobuf.json_format import ParseDict
+                from .package_proto import serving
 
-                ParseDict({k: v for k, v in server.items() if k != "assets"}, index.server)
+                serving(index, server)
                 for name, asset in server["assets"].items():
                     source = Path(asset["path"])
                     destination = f"asset-{name}{source.suffix}"

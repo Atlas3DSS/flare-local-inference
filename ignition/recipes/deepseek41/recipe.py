@@ -3,7 +3,7 @@
 from types import MappingProxyType
 
 from ignition.planning import HEADROOM_BYTES
-from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, Speculation
+from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, Speculation
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,
@@ -29,6 +29,8 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="deepseek41", prepare=prepare, usage=usage,
+    # Recommended sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash#minimal-inference.
+    sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
     checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="deepseek-ai/DeepSeek-V4.1-Flash",
         revision="fb2764a5cf321eaa5070ca8f9e892818f477c16d", architecture="DeepseekV41ForCausalLM",
         stored_bytes=510_286_023_000, device_bytes=306_557_453_640, draft_bytes=7_932_874_632),),

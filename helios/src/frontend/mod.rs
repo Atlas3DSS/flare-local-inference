@@ -77,8 +77,40 @@ impl Asset {
 
 pub struct FrontendAssets {
     pub tokenizer: Asset,
-    pub tokenizer_config: Asset,
+    pub tokens: TokenizerSettings,
     pub chat_template: Asset,
+}
+
+#[cfg(any(test, feature = "test-tools"))]
+#[path = "../../tests/support/frontend.rs"]
+pub mod test_support;
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenizerSettings {
+    pub bos_token: Option<String>,
+    pub eos_token: Option<String>,
+    pub unk_token: Option<String>,
+    pub sep_token: Option<String>,
+    pub pad_token: Option<String>,
+    pub cls_token: Option<String>,
+    pub mask_token: Option<String>,
+    pub additional_special_tokens: Option<TokenList>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenList {
+    pub values: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrontendSettings {
+    pub tokenizer: TokenizerSettings,
+    pub eos_token_ids: Vec<u32>,
+    #[cfg(feature = "images")]
+    pub image: Option<images::ImageSettings>,
 }
 
 pub struct RenderedPrompt {
@@ -115,27 +147,6 @@ impl Frontend {
             )))
         })?;
         tokenizer.with_padding(None);
-        let config: Json =
-            serde_json::from_slice(&assets.tokenizer_config.read()?).map_err(|error| {
-                Error::frontend(FrontendError::Tokenizer(Failure::caused_by(
-                    format!("invalid tokenizer config: {error}"),
-                    error,
-                )))
-            })?;
-        if !config.is_object() {
-            return Err(Error::frontend(FrontendError::Tokenizer(Failure::new(
-                "tokenizer config must be a JSON object",
-            ))));
-        }
-        if config
-            .get("clean_up_tokenization_spaces")
-            .and_then(Json::as_bool)
-            == Some(true)
-        {
-            return Err(Error::frontend(FrontendError::Tokenizer(Failure::new(
-                "frontend requires tokenizer clean_up_tokenization_spaces=false",
-            ))));
-        }
         let template_source = String::from_utf8(assets.chat_template.read()?).map_err(|error| {
             Error::frontend(FrontendError::Template(Failure::caused_by(
                 format!("chat template is not UTF-8: {error}"),
@@ -148,6 +159,9 @@ impl Frontend {
         environment
             .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         environment.add_filter("tojson", json::tojson);
+        environment.add_test("iterable", |value: &Value| {
+            !value.is_none() && value.try_iter().is_ok()
+        });
         environment.add_function(
             "raise_exception",
             |message: Value| -> std::result::Result<Value, TemplateError> {
@@ -166,19 +180,24 @@ impl Frontend {
                 )))
             })?;
         let mut defaults = Map::new();
-        for name in [
-            "bos_token",
-            "eos_token",
-            "unk_token",
-            "sep_token",
-            "pad_token",
-            "cls_token",
-            "mask_token",
-            "additional_special_tokens",
+        for (name, value) in [
+            ("bos_token", assets.tokens.bos_token),
+            ("eos_token", assets.tokens.eos_token),
+            ("unk_token", assets.tokens.unk_token),
+            ("sep_token", assets.tokens.sep_token),
+            ("pad_token", assets.tokens.pad_token),
+            ("cls_token", assets.tokens.cls_token),
+            ("mask_token", assets.tokens.mask_token),
         ] {
-            if let Some(value) = config.get(name).filter(|value| !value.is_null()) {
-                defaults.insert(name.into(), special_token_contents(value));
+            if let Some(value) = value {
+                defaults.insert(name.into(), Json::String(value));
             }
+        }
+        if let Some(tokens) = assets.tokens.additional_special_tokens {
+            defaults.insert(
+                "additional_special_tokens".into(),
+                Json::Array(tokens.values.into_iter().map(Json::String).collect()),
+            );
         }
         defaults.insert("add_generation_prompt".into(), Json::Bool(false));
         defaults.insert("tools".into(), Json::Null);
@@ -348,14 +367,6 @@ impl Frontend {
             prefix_index: 0,
             finished: false,
         }
-    }
-}
-
-fn special_token_contents(value: &Json) -> Json {
-    match value {
-        Json::Object(value) => value.get("content").cloned().unwrap_or(Json::Null),
-        Json::Array(values) => Json::Array(values.iter().map(special_token_contents).collect()),
-        _ => value.clone(),
     }
 }
 

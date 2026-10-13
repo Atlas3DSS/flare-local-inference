@@ -240,8 +240,23 @@ impl NativeModel {
                     .ok_or_else(|| invalid("model package lacks serving configuration"))?,
             )),
         })?;
+        server_config["sampling_defaults"] = protobuf::sampling_defaults(
+            descriptor
+                .sampling_defaults
+                .take()
+                .ok_or_else(|| invalid("model package lacks sampling defaults"))?,
+        )?;
+        server_config["frontend"] = protobuf::frontend_settings(
+            descriptor
+                .frontend
+                .take()
+                .ok_or_else(|| invalid("model package lacks frontend settings"))?,
+        )?;
         let mut assets = serde_json::Map::new();
         for asset in descriptor.assets {
+            if !matches!(asset.name.as_str(), "tokenizer" | "chat_template") {
+                return Err(invalid("unsupported runtime frontend asset"));
+            }
             let span = asset
                 .payload
                 .ok_or_else(|| invalid("frontend asset lacks a payload"))?;

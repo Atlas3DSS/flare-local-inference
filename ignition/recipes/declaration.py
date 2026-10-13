@@ -5,7 +5,8 @@ PyTorch.
 """
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+import math
 from types import MappingProxyType
 
 from ignition.components.capacity import request_capacity
@@ -13,6 +14,32 @@ from ignition.components.capacity import request_capacity
 # State rows one admitted request can hold while it runs: the terminal, system,
 # and prompt checkpoints that the scheduler reserves at admission.
 ADMISSION_SNAPSHOTS = 3
+
+
+@dataclass(frozen=True)
+class SamplingDefaults:
+    """Complete serving parameters manually verified against the model card."""
+
+    temperature: float
+    top_p: float
+    top_k: int
+    seed: int = 0
+    min_p: float = 0.
+    repetition_penalty: float = 1.
+    presence_penalty: float = 0.
+    frequency_penalty: float = 0.
+
+    def __post_init__(self):
+        values = (self.temperature, self.top_p, self.min_p, self.repetition_penalty,
+                  self.presence_penalty, self.frequency_penalty)
+        if (any(not math.isfinite(v) for v in values) or self.temperature < 0
+                or not 0 < self.top_p <= 1 or not 0 <= self.min_p <= 1
+                or self.repetition_penalty <= 0 or type(self.top_k) is not int or self.top_k < -1
+                or type(self.seed) is not int or not 0 <= self.seed < 2**64):
+            raise ValueError("invalid recipe sampling defaults")
+
+    def as_dict(self):
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -114,6 +141,7 @@ class Recipe:
     ranks: Mapping[int, RankCosts]
     prepare: Callable
     usage: Callable
+    sampling_defaults: SamplingDefaults
     mapped_host_name: str = ""
     max_images: int = 0
     image_bytes: int = 0

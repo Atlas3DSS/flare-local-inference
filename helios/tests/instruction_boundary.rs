@@ -1,5 +1,9 @@
 #![cfg(feature = "server")]
 
+use flare_helios::frontend;
+#[path = "support/frontend.rs"]
+mod support;
+
 use flare_helios::{
     frontend::{
         Asset, Frontend, FrontendAssets,
@@ -41,15 +45,14 @@ impl Fixture {
         let frontend = Frontend::load(
             FrontendAssets {
                 tokenizer: asset("tokenizer.json"),
-                tokenizer_config: asset("tokenizer_config.json"),
+                tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
                 chat_template: asset("chat_template.jinja"),
             },
             defaults,
         )
         .unwrap();
         let processor = ImageProcessor::load(
-            asset("preprocessor_config.json"),
-            asset("config.json"),
+            support::image(&asset("preprocessor_config.json"), &asset("config.json")).unwrap(),
             ImageLimits::default(),
         )
         .unwrap();

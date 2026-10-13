@@ -247,7 +247,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         frontend::{Asset, FrontendAssets},
-        model::qwen4exp::output::{OutputConfig, QwenOutput},
+        output::chatml::{ChatMlOutput, OutputConfig},
         output::{Progress, ReasoningParser, ToolCallParser},
     };
     use sha2::{Digest, Sha256};
@@ -293,7 +293,7 @@ pub(crate) mod tests {
                     "tokenizer.json",
                     tokenizer.to_string(false).unwrap().as_bytes(),
                 ),
-                tokenizer_config: asset("tokenizer_config.json", b"{}"),
+                tokens: Default::default(),
                 chat_template: asset("chat_template.jinja", b"{{ messages[0].content }}"),
             },
             Default::default(),
@@ -358,9 +358,9 @@ pub(crate) mod tests {
             ],
         };
         let mut streamed =
-            Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "test".into());
+            Presentation::<ChatMlOutput>::new(&frontend, &[99], config.clone(), "test".into());
         let mut collected =
-            Presentation::<QwenOutput>::new(&frontend, &[99], config, "test".into());
+            Presentation::<ChatMlOutput>::new(&frontend, &[99], config, "test".into());
         let mut deltas = Vec::new();
         for token in (0..pieces.len() as u32).chain([99]) {
             deltas.extend(streamed.push(token).unwrap());
@@ -636,9 +636,9 @@ pub(crate) mod tests {
             ],
         };
         let mut streamed =
-            Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "stop".into());
+            Presentation::<ChatMlOutput>::new(&frontend, &[99], config.clone(), "stop".into());
         let mut collected =
-            Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "stop".into());
+            Presentation::<ChatMlOutput>::new(&frontend, &[99], config.clone(), "stop".into());
         let mut filter =
             super::super::stops::TextStops::new(&frontend, vec!["STOP".into()]).unwrap();
         let mut deltas = vec![];
@@ -662,8 +662,12 @@ pub(crate) mod tests {
             "{\"query\":\"first\"}"
         );
         for cause in [Termination::Eos, Termination::OutputLimit] {
-            let mut presentation =
-                Presentation::<QwenOutput>::new(&frontend, &[99], config.clone(), "invalid".into());
+            let mut presentation = Presentation::<ChatMlOutput>::new(
+                &frontend,
+                &[99],
+                config.clone(),
+                "invalid".into(),
+            );
             presentation
                 .push_protocol(vec![crate::output::Piece::Text(
                     "<tool_call><function=lookup>".into(),
@@ -728,7 +732,7 @@ pub(crate) mod tests {
                 tools: vec![],
             };
             let mut presentation =
-                Presentation::<QwenOutput>::new(&frontend, &[99], config, "mixed".into());
+                Presentation::<ChatMlOutput>::new(&frontend, &[99], config, "mixed".into());
             if worker_first {
                 presentation
                     .push_protocol(vec![crate::output::Piece::Text("x".into())])

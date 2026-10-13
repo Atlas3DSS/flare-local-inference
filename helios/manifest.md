@@ -202,7 +202,7 @@ The index is limited to 16 MiB. It includes:
   and KV pages with fixed virtual bases and maximum virtual extents.
 - Modules, globals, function symbols, parameter sizes, and function attributes.
 - Graph declarations, function dependencies, and graph-body resource spans.
-- Serving configuration and frontend asset resource spans.
+- Serving configuration, typed sampling and frontend settings, and tokenizer/chat-template resource spans.
 - Offloaded Engram geometry, encoding, table spans, compact input names, and
   named external event waits.
 

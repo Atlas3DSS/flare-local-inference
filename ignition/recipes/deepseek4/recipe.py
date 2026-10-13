@@ -8,6 +8,7 @@ from ignition.recipes.declaration import (
     RankCosts,
     RankUsage,
     Recipe,
+    SamplingDefaults,
     Speculation,
 )
 
@@ -52,6 +53,8 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="deepseek4",
+    # Agent evaluation sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp#introduction.
+    sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
     prepare=prepare,
     usage=usage,
     checkpoints=(

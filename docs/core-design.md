@@ -311,6 +311,12 @@ rank ownership and coordination.
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine
   performance.
+- **Recipes declare model-card sampling defaults.** Agents must read the model
+  card and manually verify recommendations for the default serving mode. Checkpoint
+  config files remain authoritative for structural data, not sampling policy.
+  Ignition declares complete defaults and disables unspecified filters; explicit
+  request values override defaults. Runtime metadata contains typed sampling,
+  EOS, tokenizer, and image settings, with no raw configuration-file assets.
 
 Local serving includes cancellation, streaming, tool-call presentation,
 structured output, prefix reuse, and speculative decoding. Cross-node
@@ -1000,7 +1006,7 @@ The bundle exposes:
 | Resources | Page geometry, live-state and snapshot capacities |
 | State operations | Initialize, restore, snapshot, and reset graph entries, each an indirect copy kernel driven by device-resident slot-index buffers |
 | Execution ordering | Stream ownership and scratch-sharing constraints |
-| Frontend assets | Fingerprinted tokenizer, chat template, processor configuration, generation defaults, and native output-parser selection |
+| Frontend | Fingerprinted tokenizer and chat template; typed EOS, template-token, image-preprocessing, and sampling settings; native output-parser selection |
 | Lifetime | Strong owner reference and shutdown requirements |
 
 The scheduler and transport operate on page IDs, state-slot IDs, capacities,
@@ -1114,9 +1120,13 @@ directly by Rust. PyTorch's own replay wrapper performs RNG bookkeeping before
 launching its executable; a raw launch bypasses that bookkeeping.
 [PyTorch replay implementation](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/CUDAGraph.cpp)
 
-Generation defaults come from the checkpoint, with explicit request parameters
-taking precedence. For this snapshot, the default stochastic configuration is
-temperature 1.0, top-k 20, and top-p 0.95.
+Sampling defaults are declared in each Ignition recipe after manual verification
+against the model card for the default serving mode. `generation_config.json`
+and `config.json` do not select sampling policy. Unspecified filters are disabled
+and penalties are neutral. Complete defaults are stored in the package's
+`DefaultSamplingParameters` protobuf message; missing or invalid defaults reject
+loading. Explicit request parameters take precedence. Qwen's default thinking-mode
+recommendation is temperature 1.0, top-k 20, and top-p 0.95.
 
 ### Scheduling and output
 

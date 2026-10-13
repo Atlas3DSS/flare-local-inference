@@ -3,7 +3,7 @@
 mod config;
 pub mod inputs;
 #[cfg(feature = "server")]
-pub mod output;
+use crate::output::chatml as output;
 #[cfg(feature = "server")]
 mod prompt;
 #[cfg(test)]
@@ -146,7 +146,7 @@ impl ModelContract for Qwen4Exp {
     #[cfg(feature = "server")]
     type OutputConfig = output::OutputConfig;
     #[cfg(feature = "server")]
-    type Output = output::QwenOutput;
+    type Output = output::ChatMlOutput;
     #[cfg(feature = "server")]
     fn prepare_input(
         frontend: &crate::frontend::Frontend,

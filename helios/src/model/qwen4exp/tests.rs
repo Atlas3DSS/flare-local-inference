@@ -378,7 +378,7 @@ fn speculative_bootstrap_options_validate_before_assets_or_cuda() {
     let adaptive = manifest(&config);
     let body = json!({"model_contract":metadata_json(),"model_id":"qwen38","identity":"01".repeat(32),
         "max_sequence_tokens":2048,"prefill_chunk_size":512,"pages":64,"snapshots":8,
-        "eos_token_ids":[],"speculative_widths":[1,2,4,8]});
+        "frontend":{"tokenizer":{},"eos_token_ids":[]},"sampling_defaults":config.sampling_defaults,"speculative_widths":[1,2,4,8]});
     for width in [json!(null), json!(1), json!(2), json!(4), json!(8)] {
         for copy in [true, false] {
             config.speculative_fixed_width = width.as_u64().map(|w| w as usize);
@@ -691,7 +691,7 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
     config.limits.max_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
     let mut body = json!({"model_contract": metadata_json(),"model_id": "qwen38", "identity": "01".repeat(32),
-        "max_sequence_tokens": 8192, "pages": 64, "snapshots": 8, "eos_token_ids": []});
+        "max_sequence_tokens": 8192, "pages": 64, "snapshots": 8, "frontend":{"tokenizer":{},"eos_token_ids":[]},"sampling_defaults":config.sampling_defaults});
     let failure = |body: &serde_json::Value, config: &ModelConfig| {
         Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest(config))
             .err()
@@ -1259,7 +1259,7 @@ fn closed_metadata_rejects_unknown_or_mismatched_contract_before_assets() {
     let manifest = manifest(&config);
     let body = json!({"model_id":"qwen38","identity":"01".repeat(32),
         "max_sequence_tokens":2048,"prefill_chunk_size":512,"pages":64,"snapshots":8,
-        "eos_token_ids":[],"model_contract":metadata_json()});
+        "frontend":{"tokenizer":{},"eos_token_ids":[]},"sampling_defaults":config.sampling_defaults,"model_contract":metadata_json()});
     assert_eq!(
         Bootstrap::load::<Qwen4Exp>(&body.to_string(), &manifest)
             .err()

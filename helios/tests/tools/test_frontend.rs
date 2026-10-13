@@ -30,7 +30,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let frontend = Frontend::load(
         FrontendAssets {
             tokenizer: asset("tokenizer.json")?,
-            tokenizer_config: asset("tokenizer_config.json")?,
+            tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json")?)
+                .unwrap(),
             chat_template: asset("chat_template.jinja")?,
         },
         Map::new(),
@@ -121,7 +122,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let configured = Frontend::load(
         FrontendAssets {
             tokenizer: asset("tokenizer.json")?,
-            tokenizer_config: asset("tokenizer_config.json")?,
+            tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json")?)
+                .unwrap(),
             chat_template: asset("chat_template.jinja")?,
         },
         serde_json::json!({"enable_thinking": false, "add_generation_prompt": true})

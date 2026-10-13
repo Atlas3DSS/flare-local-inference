@@ -9,9 +9,9 @@ class TensorParallelShard:
     world_size: int
 
     def __post_init__(self):
-        if (type(self.world_size) is not int or self.world_size not in (1, 2, 4)
+        if (type(self.world_size) is not int or self.world_size < 1
                 or type(self.rank) is not int or not 0 <= self.rank < self.world_size):
-            raise ValueError("tensor parallelism requires a valid rank in TP1, TP2 or TP4")
+            raise ValueError("tensor parallelism requires a positive world size and a rank within it")
 
     def partition(self, extent: int, *, alignment: int = 1) -> tuple[int, int]:
         if (type(extent) is not int or extent <= 0 or type(alignment) is not int

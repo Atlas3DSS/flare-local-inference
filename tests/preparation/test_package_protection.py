@@ -258,9 +258,9 @@ def flare():
 
 
 def launch(flare, path, profile, store, *args):
-    # Stop immediately after trust handling; this CPU fixture has no executable CUDA program.
+    # A rank-count mismatch stops this CPU fixture after trust handling and before CUDA.
     return subprocess.run([str(flare), 'run', str(path), '--publisher-keys', str(profile),
-        '--trust-store', str(store), '--api-key-file', str(store.parent / 'absent-api-key'), *args],
+        '--trust-store', str(store), '--gpus', '0,1', *args],
         capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
 
@@ -275,15 +275,15 @@ def test_external_key_warns_once_and_remembers_exact_pair(flare, tmp_path):
     profile = profiles(tmp_path / 'publisher.json', signer)
     store = tmp_path / 'trust.toml'
     first = launch(flare, path, profile, store)
-    assert 'DANGER: UNRECOGNIZED SIGNING KEY' in first.stderr
+    assert 'Signing key acceptance' in first.stderr and 'Identity:   Unverified' in first.stderr
+    assert 'Executable GPU code can access your process and data.' in first.stderr
     assert 'unattended first use requires' in first.stderr and not store.exists()
     accepted = launch(flare, path, profile, store, *approval(signer))
-    assert 'DANGER: UNRECOGNIZED SIGNING KEY' in accepted.stderr
-    assert 'cannot read API key file' in accepted.stderr and store.exists()
+    assert 'Identity:   Unverified' in accepted.stderr
+    assert 'model rank count must match distinct selected devices' in accepted.stderr and store.exists()
     remembered = launch(flare, path, profile, store)
-    assert 'DANGER:' not in remembered.stderr
-    assert 'identity UNVERIFIED' in remembered.stderr
-    assert 'cannot read API key file' in remembered.stderr
+    assert 'Signing key acceptance' not in remembered.stderr
+    assert 'model rank count must match distinct selected devices' in remembered.stderr
     assert store.stat().st_mode & 0o777 == 0o600
     revoked = subprocess.run([str(flare), 'trust', 'revoke', signer.fingerprint.hex(),
                              '--trust-store', str(store)], capture_output=True, text=True)
@@ -306,7 +306,7 @@ def test_explicit_approval_never_ignores_mismatch_or_missing_value(flare, tmp_pa
         args = args[:2]
     result = launch(flare, path, profile, store, *args)
     assert result.returncode != 0 and not store.exists()
-    assert 'cannot read API key file' not in result.stderr
+    assert 'model rank count must match distinct selected devices' not in result.stderr
 
 
 def test_rotation_does_not_inherit_namespace_trust(flare, tmp_path):
@@ -321,7 +321,7 @@ def test_rotation_does_not_inherit_namespace_trust(flare, tmp_path):
     changed, _ = fixture(directory, size=41, signer=second)
     profiles(profile, second)
     result = launch(flare, changed, profile, store)
-    assert 'DANGER: UNRECOGNIZED SIGNING KEY' in result.stderr
+    assert 'Signing key acceptance' in result.stderr and 'Identity:   Unverified' in result.stderr
     assert 'unattended first use requires' in result.stderr
 
 
@@ -334,17 +334,17 @@ def test_release_stamping_recognizes_only_the_embedded_identity(flare, tmp_path)
     stamp(flare, executable, json.loads(profile.read_text()))
     store = tmp_path / 'trust.toml'
     known = launch(executable, path, profile, store, *approval(signer))
-    assert 'Recognized publisher: Local Inference Lab fixture' in known.stderr
-    assert 'DANGER:' not in known.stderr
-    assert 'cannot read API key file' in known.stderr
+    assert 'Publisher:  Local Inference Lab fixture' in known.stderr
+    assert 'Identity:   Verified' in known.stderr and 'Identity:   Unverified' not in known.stderr
+    assert 'model rank count must match distinct selected devices' in known.stderr
     directory = tmp_path / 'impersonation'
     directory.mkdir()
     impostor = Publisher(Ed25519PrivateKey.generate(), signer.namespace, signer.official_source)
     changed, _ = fixture(directory, size=41, signer=impostor)
     profiles(profile, impostor, 'Local Inference Lab fixture')
     result = launch(executable, changed, profile, store)
-    assert 'DANGER: UNRECOGNIZED SIGNING KEY' in result.stderr
-    assert 'identity UNVERIFIED' in result.stderr and 'Recognized publisher:' not in result.stderr
+    assert 'Signing key acceptance' in result.stderr
+    assert 'Identity:   Unverified' in result.stderr and 'Identity:   Verified' not in result.stderr
     with pytest.raises(ValueError, match='not an empty release slot'):
         stamp(executable, tmp_path / 'restamped', json.loads(profile.read_text()))
 
@@ -368,7 +368,7 @@ def test_corrupt_trust_store_fails_closed(flare, tmp_path):
     store = tmp_path / 'trust.toml'
     store.write_text('trusted = "everything"\n')
     result = launch(flare, path, profile, store, *approval(signer))
-    assert result.returncode != 0 and 'cannot read API key file' not in result.stderr
+    assert result.returncode != 0 and 'model rank count must match distinct selected devices' not in result.stderr
     assert store.read_text() == 'trusted = "everything"\n'
 
 

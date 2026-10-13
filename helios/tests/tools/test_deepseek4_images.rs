@@ -31,14 +31,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let case: Value = serde_json::from_slice(&fs::read(&args[3])?)?;
     let output = Path::new(&args[4]);
     let processor = ImageProcessor::load(
-        asset(assets.join("preprocessor_config.json")),
-        asset(snapshot.join("config.json")),
+        flare_helios::frontend::test_support::image(
+            &asset(assets.join("preprocessor_config.json")),
+            &asset(snapshot.join("config.json")),
+        )
+        .unwrap(),
         ImageLimits::default(),
     )?;
     let frontend = Frontend::load(
         FrontendAssets {
             tokenizer: asset(snapshot.join("tokenizer.json")),
-            tokenizer_config: asset(snapshot.join("tokenizer_config.json")),
+            tokens: flare_helios::frontend::test_support::tokens(&asset(
+                snapshot.join("tokenizer_config.json"),
+            ))
+            .unwrap(),
             chat_template: asset(assets.join("chat_template.jinja")),
         },
         Map::new(),

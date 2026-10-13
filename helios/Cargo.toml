@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 default = []
 test-tools = []
 runtime-package = ["dep:serde", "dep:serde_json", "dep:prost", "dep:prost-types", "dep:prost-build", "dep:ring"]
-frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
+frontend = ["dep:serde", "dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
 server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm"]
@@ -96,6 +96,13 @@ bench = false
 [[bin]]
 name = "test_deepseek4_images"
 path = "tests/tools/test_deepseek4_images.rs"
+required-features = ["server", "test-tools"]
+test = false
+bench = false
+
+[[bin]]
+name = "test_mimo_images"
+path = "tests/tools/test_mimo_images.rs"
 required-features = ["server", "test-tools"]
 test = false
 bench = false

@@ -19,6 +19,7 @@ from ignition.preparation.collectives import (CollectivePreparation, create_all_
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import release_unused
+from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
@@ -26,6 +27,7 @@ from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.progress import phase
 
 from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
+from .recipe import RECIPE
 from .decoder import PreparedDecoder, Scratch
 from ignition.components.dspark import PreparedContext, PreparedMarkov
 from .dspark import PreparedDraft
@@ -200,11 +202,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=PreparedContext)
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
         if speculation is not None:
-            from ignition.components.dspark import PreparedRound
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
 
             for batch, width in config.speculative_shapes:
                 name = f"speculative{batch}x{width}"
-                forward = PreparedRound(speculation, batch, width, name)
+                forward = PreparedParallelDraftRound(speculation, batch, width, name)
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
@@ -221,7 +223,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     name = f"{mode}{capacity}" + suffix
                     forward = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
                         runtime=collective, coordinator=coordinator, session=session, name=name,
-                        capacity=capacity, admission_buffers=admission, dspark=enabled)
+                        capacity=capacity, admission_buffers=admission, draft_state=enabled)
                     fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
                     add(name, forward, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()), enabled=enabled)
     if progress is not None:
@@ -262,13 +264,12 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     frontend = Path(__file__).parent / "assets"
     assets = {role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for role, path in (("tokenizer", snapshot / "tokenizer.json"),
-            ("tokenizer_config", snapshot / "tokenizer_config.json"),
-            ("chat_template", frontend / "chat_template.jinja"),
-            ("generation_config", frontend / "generation_config.json"))}
+            ("chat_template", frontend / "chat_template.jinja"))}
     server_config = {"identity": identity, "model_id": snapshot.name,
         "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
         "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": PAGE_TOKENS,
-        "eos_token_ids": [1], "assets": assets,
+        "frontend": prepare_frontend(snapshot, eos_token_ids=[1]),
+        "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
         "model_contract": {"schema": "deepseek41.graph-inputs.v1", "vocabulary": 129280,
             "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
             "page_tokens": PAGE_TOKENS}}

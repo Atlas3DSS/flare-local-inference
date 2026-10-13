@@ -2,7 +2,7 @@
 
 from types import MappingProxyType
 
-from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, Speculation
+from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, Speculation
 
 # Each sparse-attention layer stores four latent blocks and one index block per
 # 256-token page on every rank. The target has eleven such layers; learned drafts
@@ -62,6 +62,8 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="glm53", prepare=prepare, usage=usage,
+    # Model-card sampling: https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes.
+    sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
     checkpoints=(Checkpoint(
         alias="glm-5.3-flash", repository="local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
         revision="dec48abd33efa73c3bb7c95b74eee10cad34f9be", architecture="Glm5NextForConditionalGeneration",

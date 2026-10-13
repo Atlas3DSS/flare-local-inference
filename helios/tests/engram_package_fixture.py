@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from signing import publisher
+from fixture_frontend import server_config
 import sys
 
 import torch
@@ -67,7 +68,7 @@ def prepare(root):
         prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,
             signatures={'decode': GraphSignature('decode', 4, 1, ('engram_1_hashes',))},
             max_active=4, resources=(storage, lookup), export_events=tables.events())
-        prepared.server_config = {"assets": {}}
+        prepared.server_config = server_config(root)
         prepared.package_data = tables
         export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher())
 

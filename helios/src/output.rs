@@ -1,5 +1,7 @@
 //! Model-owned output protocols and transport-neutral incremental events.
 
+#[cfg(feature = "server")]
+pub mod chatml;
 pub mod tagged;
 
 use crate::Result;

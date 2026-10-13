@@ -4,6 +4,7 @@ import ast
 import pickle
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import replace
 
 import torch
 
@@ -35,7 +36,7 @@ def restore_prepared_device(kind, state):
     return value
 
 
-def _device_source(source, original, target):
+def _device_source(source, original, target, kernel_keys=None):
     tree = ast.parse(source)
     lines = source.splitlines(keepends=True)
     offsets, offset = [], 0
@@ -64,8 +65,13 @@ def _device_source(source, original, target):
                         raise ValueError("compiled kernel spans multiple CUDA devices")
                     replace(keyword.value, str(target))
         elif name == "async_compile.triton":
+            from torch._inductor.async_compile import CompiledTritonKernels
+
             kernel = node.args[1]
-            replace(kernel, repr(_device_source(kernel.value, original, target)))
+            rebound = _device_source(kernel.value, original, target)
+            if kernel_keys is not None:
+                kernel_keys[CompiledTritonKernels.key(kernel.value)] = CompiledTritonKernels.key(rebound)
+            replace(kernel, repr(rebound))
     data = source.encode()
     for start, end, value in sorted(replacements, reverse=True):
         data = data[:start] + value + data[end:]
@@ -86,7 +92,20 @@ def relocate_inductor(data, original):
         raise ValueError("device binding requires a compiled inference forward")
     if graph.device_idxs != OrderedSet((original.index,)):
         raise ValueError("compiled forward must use one CUDA device")
-    graph.source_code = _device_source(graph.source_code, original.index, target.index)
+    kernel_keys = {}
+    graph.source_code = _device_source(graph.source_code, original.index, target.index, kernel_keys)
     graph.cache_key = code_hash(graph.source_code)
     graph.device_idxs = OrderedSet((target.index,))
+    if bundle := graph._triton_bundle:
+        autotuners = []
+        for entry_kernel in bundle.static_autotuners:
+            kernel = entry_kernel.kernel
+            kernel.device_props = kernel.device_props._replace(index=target.index)
+            kernel.triton_meta["device"] = target.index
+            for result in kernel.compile_results:
+                result.compile_meta["device"] = target.index
+            autotuners.append(replace(entry_kernel, cache_key=kernel_keys[entry_kernel.cache_key]))
+        graph._triton_bundle = replace(bundle,
+            kernel_artifacts=[replace(item, device=target.index) for item in bundle.kernel_artifacts],
+            static_autotuners=autotuners)
     return pickle.dumps((entry, kernels, constants))

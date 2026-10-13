@@ -25,11 +25,11 @@ class PreparedMaintenance:
         name,
         capacity,
         admission_buffers,
-        dspark=True,
+        draft_state=True,
     ):
         self.pool, self.commands, self.inputs, self.requests = pool, commands, inputs, requests
         self.excluded_regions = (
-            () if dspark else tuple(r.name for r in pool.layout.regions if r.name.startswith("draft"))
+            () if draft_state else tuple(r.name for r in pool.layout.regions if r.name.startswith("draft"))
         )
         if mode == "snapshot":
             slots, epochs, count = inputs.row_slot_ids, inputs.row_generations, inputs.live_rows

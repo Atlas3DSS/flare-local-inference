@@ -26,12 +26,14 @@ from ignition.preparation.collectives import (
 )
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
+from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.progress import phase
 from ignition.preparation.tuning import RecordedPreparationSession
 
+from .recipe import RECIPE
 from .batch import BatchInputs, PreparedBatch
 from .generation import PreparedGeneration
 from .maintenance import PreparedMaintenance
@@ -506,12 +508,12 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "tuning": tuning, "compiled_decoder": config.compile_decoder, "breakdown": breakdown,
         "state_row_bytes": pool.backing.nbytes // max(1, state_rows + 1)}
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
-        for role, filename in (("tokenizer", "tokenizer.json"), ("tokenizer_config", "tokenizer_config.json"),
-                               ("chat_template", "chat_template.jinja"), ("generation_config", "generation_config.json"))}
+        for role, filename in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
     generation = json.loads((snapshot / "generation_config.json").read_text())
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,
         "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": config.page_tokens,
-        "eos_token_ids": generation["eos_token_id"], "assets": assets,
+        "frontend": prepare_frontend(snapshot, eos_token_ids=generation["eos_token_id"]),
+        "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
         "model_contract": {"schema": "glm5next.graph-inputs.v2", "vocabulary": 154880,
             "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
             "page_tokens": config.page_tokens}}

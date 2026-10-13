@@ -43,11 +43,11 @@ a JSON object with these fields:
 | `max_active` | Selected admission limit, no greater than captured concurrency |
 | `pages` | Physically backed KV page capacity |
 | `snapshots` | Immutable continuation rows in the prefix-cache partition |
-| `eos_token_ids` | Up to eight vocabulary token IDs |
+| `frontend` | Required typed EOS, template-token, and optional image settings decoded from `FrontendSettings` |
 | `model_contract` | Required closed model input-schema metadata shown below |
 | `assets` | Verified asset descriptors, each `{path, offset, nbytes, sha256}` for a range in the package |
 | `template_defaults` | Optional Jinja defaults |
-| `generation_defaults` | Optional overrides of checkpoint sampling defaults |
+| `sampling_defaults` | Required complete sampling parameters decoded from `DefaultSamplingParameters`; recipe-owned model-card recommendations |
 | `max_new_tokens` | Default output limit, 256 if omitted |
 | `speculative_widths` | Optional sorted unique subset of integers 1 through 8 including 1; empty or omitted disables speculative scheduling |
 | `speculative_fixed_width` | Optional width from that catalog; null or omitted selects adaptive scheduling |
@@ -73,12 +73,13 @@ Vocabulary-dependent masks and histograms are packed using the validated
 vocabulary. Qwen image geometry, rotary positions, state-row mappings, and
 speculative draft-cache interpretation live under `model/qwen4exp`.
 
-Asset keys are `tokenizer`, `tokenizer_config`, `chat_template`,
-`preprocessor_config`, `model_config` and `generation_config`. Paths must be
-absolute. Package offsets are absolute file byte offsets. Each asset is hashed
-and parsed from the same bounded byte range. Generation
-defaults come from the checkpoint; configured defaults override them; explicit
-request sampling values override configured defaults. The HTTP default sets
+Asset keys are `tokenizer` and `chat_template`. Paths must be absolute.
+Package offsets are absolute file byte offsets. Each asset is hashed and parsed
+from the same bounded byte range. EOS IDs, template token strings, image settings,
+and complete sampling defaults are typed Protobuf metadata. Ignition verifies
+sampling recommendations against the model card; Helios reads no checkpoint
+config files or model cards. Explicit request sampling values override the
+prepared defaults. The HTTP default sets
 `add_generation_prompt=true` unless configured otherwise. Explicit continuation
 selects `add_generation_prompt=false` unless the request sets that flag itself.
 

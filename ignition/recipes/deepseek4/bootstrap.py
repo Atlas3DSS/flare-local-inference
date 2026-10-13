@@ -31,12 +31,14 @@ from ignition.preparation.collectives import (
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import release_unused
+from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.progress import phase
 
+from .recipe import RECIPE
 from .decoder import PreparedDecoder, Scratch
 from .dspark import FORWARDS
 from .pool import PAGE_TOKENS, ContinuationPool, continuation_layout, page_bytes
@@ -316,11 +318,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         enabled=enabled,
                     )
         if speculation is not None:
-            from ignition.components.dspark import PreparedRound
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
 
             for batch, width in config.speculative_shapes:
                 name = f"speculative{batch}x{width}"
-                forward = PreparedRound(speculation, batch, width, name)
+                forward = PreparedParallelDraftRound(speculation, batch, width, name)
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
         for capacity in PATCH_CAPACITIES:
@@ -382,7 +384,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         name=name,
                         capacity=capacity,
                         admission_buffers=admission,
-                        dspark=enabled,
+                        draft_state=enabled,
                     )
                     fields = (
                         row_inputs
@@ -440,11 +442,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for role, path in (
             ("tokenizer", snapshot / "tokenizer.json"),
-            ("tokenizer_config", snapshot / "tokenizer_config.json"),
             ("chat_template", frontend / "chat_template.jinja"),
-            ("generation_config", frontend / "generation_config.json"),
-            ("preprocessor_config", frontend / "preprocessor_config.json"),
-            ("model_config", snapshot / "config.json"),
         )
     }
     server_config = {
@@ -456,7 +454,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "state_rows": state_rows,
         "snapshots": snapshots,
         "page_tokens": PAGE_TOKENS,
-        "eos_token_ids": [1],
+        "frontend": prepare_frontend(snapshot, eos_token_ids=[1], image_profile="deepseek4",
+            preprocessor=frontend / "preprocessor_config.json"),
+        "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,
         "model_contract": {
             "schema": "deepseek4.graph-inputs.v1",

@@ -33,15 +33,63 @@ message ModelIndex {
   google.protobuf.Struct server = 4;
   repeated Asset assets = 5;
   Engram engram = 6;
+  DefaultSamplingParameters sampling_defaults = 7;
+  FrontendSettings frontend = 8;
   // Present when the ranks run on separate hosts: the file holds every rank, and each host
   // loads the one it serves.
-  Cluster cluster = 7;
+  Cluster cluster = 9;
 }
 message Cluster {
   uint32 world = 1;
   reserved 2;
   // Names the export; hosts serving different exports refuse to join.
   string export_id = 3;
+}
+message DefaultSamplingParameters {
+  optional uint64 seed = 1;
+  optional float temperature = 2;
+  optional int32 top_k = 3;
+  optional float top_p = 4;
+  optional float min_p = 5;
+  optional float repetition_penalty = 6;
+  optional float presence_penalty = 7;
+  optional float frequency_penalty = 8;
+}
+message FrontendSettings {
+  TokenizerSettings tokenizer = 1;
+  ImageSettings image = 2;
+  repeated uint32 eos_token_ids = 3;
+}
+message TokenizerSettings {
+  optional string bos_token = 1;
+  optional string eos_token = 2;
+  optional string unk_token = 3;
+  optional string sep_token = 4;
+  optional string pad_token = 5;
+  optional string cls_token = 6;
+  optional string mask_token = 7;
+  TokenList additional_special_tokens = 8;
+}
+message TokenList { repeated string values = 1; }
+message ImageSettings {
+  oneof profile {
+    QwenImageSettings qwen = 1;
+    MimoImageSettings mimo = 2;
+    Empty deepseek4 = 3;
+  }
+}
+message QwenImageSettings {
+  uint64 min_pixels = 1;
+  uint64 max_pixels = 2;
+  uint32 position_side = 3;
+  uint32 image_token_id = 4;
+  uint32 video_token_id = 5;
+}
+message MimoImageSettings {
+  uint64 min_pixels = 1;
+  uint64 max_pixels = 2;
+  repeated float image_mean = 3;
+  repeated float image_std = 4;
 }
 message Engram {
   // Raw token ID to normalized vocabulary ID; normalization runs only during preparation.

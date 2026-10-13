@@ -153,7 +153,6 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | RAM on a discrete GPU when the tables take at most half of available host memory; otherwise `disk` |
-| `--weight-loading auto\|direct\|gds` | Automatic cuFile selection, staged direct I/O, or required cuFile weight loading | `auto` |
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
@@ -191,6 +190,12 @@ credentials through Flare's two dangerous-approval arguments. It does not infer
 approval from the cached package's claimed publisher. An unrecognized key still
 prints its first-use warning; subsequent loads remember that exact pair. There
 is no unsigned runtime mode and no blanket approval for development keys.
+
+Publisher identity, key, source, and verification disclosures appear only on
+first acceptance of a signing-key fingerprint and publisher namespace. On a
+terminal, the banner animation finishes before those disclosures and the
+acceptance prompt. Remembered acceptance suppresses the disclosures, while
+every load still verifies signatures and executable resources.
 
 To load a locally exported package directly, supply its public profile:
 
@@ -238,8 +243,10 @@ cuda = "/opt/cuda"                # Used when installed packages provide no tool
 Default request parameters, meaning the values a request receives for fields
 it does not set, such as thinking, reasoning effort, sampling, and output
 limit, are a separate mechanism that this specification does not yet define.
-Until it exists, requests receive the checkpoint's template and
-`generation_config.json` defaults and the engine's output limit.
+Requests receive the checkpoint's template defaults, the recipe's manually
+verified model-card sampling defaults, and the engine's output limit.
+Sampling defaults are explicit package metadata; config-file sampling values
+do not select them. Explicit request values override those defaults.
 
 `memory.reserve` exists for one case: a process that starts after Flare and
 needs GPU memory. Processes already running when Flare starts need no
@@ -305,7 +312,7 @@ disk settings require the implementation and measurements defined there.
 | Kernel selections | Autotuned during preparation; cached by checkpoint revision, recipe version, GPU, and settings |
 | HTTP queue, workers, event capacity, body limit | `--max-concurrency` and the recipe's image limits |
 | Compile workers | CPU count |
-| Generation defaults | Checkpoint `generation_config.json`, pending the default-request-parameter mechanism |
+| Sampling defaults | Complete Ignition recipe declaration, manually verified against the model card and exported in typed Protobuf fields |
 | Template defaults | The checkpoint template's own defaults, pending the same mechanism |
 | Served names | Recipe alias and repository id |
 
@@ -353,6 +360,10 @@ initialize GPUs, allocate model memory, load weights and compiled kernels,
 instantiate graphs, allocate caches, load frontend assets, and start HTTP.
 Loading performs no kernel compilation or graph capture. Helios reports each stage with a ten-column bracketed
 progress bar, a result, and elapsed time.
+The `Verify package` stage times signed metadata authentication before model
+loading. `--verify-weights` adds a timed `Verify stored data` stage after publisher
+acceptance. Executable resources are verified as part of kernel and graph
+preparation.
 Memory loading advances by bytes; kernel and execution preparation
 advance by resource counts. Stages with no known total show a cycling bar.
 Completed stages show `[    OK    ]`; a failed stage shows `[  FAILED  ]`.

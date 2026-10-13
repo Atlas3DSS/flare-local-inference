@@ -1,0 +1,2 @@
+[alias]
+flare = ["run", "--release", "--manifest-path", "flare/Cargo.toml", "--"]

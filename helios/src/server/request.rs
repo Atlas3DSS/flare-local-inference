@@ -588,4 +588,27 @@ mod tests {
         assert!(!boolean(object, "stream", true).unwrap());
         assert!(number(object, "large", 0.).is_err());
     }
+
+    #[test]
+    fn request_sampling_overrides_only_explicit_fields_in_prepared_defaults() {
+        let defaults = SamplingParameters {
+            seed: 123,
+            temperature: 1.,
+            top_p: 0.95,
+            top_k: -1,
+            ..SamplingParameters::default()
+        };
+        let empty = sampling_parameters(&Map::new(), &defaults).unwrap();
+        assert_eq!(empty.top_k, -1);
+        assert_eq!(empty.temperature, 1.);
+        let values = serde_json::json!({"seed":0,"temperature":0,"top_p":1,"top_k":0});
+        let explicit = sampling_parameters(values.as_object().unwrap(), &defaults).unwrap();
+        assert_eq!(explicit.seed, 0);
+        assert_eq!(explicit.temperature, 0.);
+        assert_eq!(explicit.top_k, 0);
+        assert_eq!(explicit.top_p, 1.);
+        assert_eq!(explicit.repetition_penalty, 1.);
+        assert_eq!(defaults.seed, 123);
+        assert_eq!(defaults.temperature, 1.);
+    }
 }

@@ -1,6 +1,7 @@
-"""Compiled b12x TP2/TP4 graphs replayed by native workers on every rank."""
+"""Compiled b12x tensor-parallel graphs replayed by native workers on every rank."""
 
 import os
+import sys
 from datetime import timedelta
 
 import pytest
@@ -9,7 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1",
-    reason="requires four explicitly assigned CUDA devices and FLARE_RUN_TP_CUDA_TESTS=1")
+    reason="requires explicitly assigned CUDA devices and FLARE_RUN_TP_CUDA_TESTS=1")
 
 
 def _rank(rank, world_size, rendezvous, rows, uneven=False):
@@ -110,21 +111,25 @@ def _rank(rank, world_size, rendezvous, rows, uneven=False):
         if worker is not None:
             worker.close()
         graph.reset()
-        runtime.close()
+        if sys.exception() is None:
+            runtime.close()
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
 @pytest.mark.parametrize("rows", [1, 8])
 def test_native_compiled_all_reduce(world_size, rows, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
-    assert torch.cuda.device_count() == 4
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"requires {world_size} assigned GPUs")
     mp.spawn(_rank, args=(world_size, (tmp_path / "rendezvous").as_uri(), rows),
              nprocs=world_size, join=True)
 
 
-@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
 def test_rank_local_projection_between_collectives(world_size, tmp_path):
-    assert os.environ.get("CUDA_VISIBLE_DEVICES") and torch.cuda.device_count() == 4
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"requires {world_size} assigned GPUs")
     mp.spawn(_rank, args=(world_size, (tmp_path / "rendezvous").as_uri(), 1, True),
              nprocs=world_size, join=True)

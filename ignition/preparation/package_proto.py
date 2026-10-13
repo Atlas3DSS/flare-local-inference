@@ -4,6 +4,24 @@ import struct
 from . import runtime_package_pb2 as proto
 
 
+def serving(index, server):
+    """Encode complete recipe defaults and the structural native frontend contract."""
+    from google.protobuf.json_format import ParseDict
+
+    if set(server["assets"]) != {"tokenizer", "chat_template"}:
+        raise ValueError("runtime assets must contain only tokenizer and chat_template")
+    if any(key in server for key in ("generation_defaults", "eos_token_ids")):
+        raise ValueError("sampling and token defaults require typed package fields")
+    sampling = server["sampling_defaults"]
+    expected = {field.name for field in proto.DefaultSamplingParameters.DESCRIPTOR.fields}
+    if set(sampling) != expected:
+        raise ValueError("sampling defaults must explicitly declare every parameter")
+    ParseDict(sampling, index.sampling_defaults)
+    ParseDict(server["frontend"], index.frontend)
+    ParseDict({key: value for key, value in server.items()
+               if key not in ("assets", "sampling_defaults", "frontend")}, index.server)
+
+
 def _relocations(values):
     return [{**value, "kind": value["kind"].upper()} for value in values]
 

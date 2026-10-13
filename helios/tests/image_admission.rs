@@ -1,4 +1,8 @@
 #![cfg(feature = "server")]
+
+use flare_helios::frontend;
+#[path = "support/frontend.rs"]
+mod support;
 use base64::Engine;
 use flare_helios::{
     frontend::{
@@ -29,15 +33,14 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     let frontend = Frontend::load(
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
-            tokenizer_config: asset("tokenizer_config.json"),
+            tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
             chat_template: asset("chat_template.jinja"),
         },
         Map::new(),
     )
     .unwrap();
     let processor = ImageProcessor::load(
-        asset("preprocessor_config.json"),
-        asset("config.json"),
+        support::image(&asset("preprocessor_config.json"), &asset("config.json")).unwrap(),
         ImageLimits::default(),
     )
     .unwrap();
@@ -120,8 +123,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         assert_eq!(prepared.prompt.tokens, expanded.token_ids);
         assert_eq!(prepared.prompt.conditioning.len(), 1);
         let limited = ImageProcessor::load(
-            asset("preprocessor_config.json"),
-            asset("config.json"),
+            support::image(&asset("preprocessor_config.json"), &asset("config.json")).unwrap(),
             ImageLimits {
                 max_encoded_bytes: bytes.len() - 1,
                 ..ImageLimits::default()

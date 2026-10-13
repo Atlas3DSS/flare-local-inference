@@ -5,10 +5,10 @@ import pytest
 from ignition.components.parallel import TensorParallelShard
 
 
-@pytest.mark.parametrize("world", (1, 2, 4))
+@pytest.mark.parametrize("world", (1, 2, 3, 4, 6, 8, 16))
 def test_fused_projections_partition_each_component(world):
     shards = [TensorParallelShard(rank, world) for rank in range(world)]
-    extents = (2048, 2048, 6144)
+    extents = (3072, 6144, 12288)
     partitions = [shard.fused_partitions(extents) for shard in shards]
     offset = 0
     for index, extent in enumerate(extents):
@@ -31,3 +31,17 @@ def test_unrepresentable_partitions_fail_before_loading():
     with pytest.raises(ValueError):
         TensorParallelShard(0, 4).replicated_partition(3)
     assert TensorParallelShard(3, 4).partition(640, alignment=16) == (480, 640)
+
+
+@pytest.mark.parametrize("world,rank", [(0, 0), (-1, 0), (True, 0), (8, -1), (8, 8), (8, True)])
+def test_invalid_rank_identity(world, rank):
+    with pytest.raises(ValueError):
+        TensorParallelShard(rank, world)
+
+
+@pytest.mark.parametrize("world", (3, 8, 16))
+def test_replicated_kv_partitions_cover_query_rank_groups(world):
+    for heads in (1, world):
+        ranges = [TensorParallelShard(rank, world).replicated_partition(heads) for rank in range(world)]
+        assert ranges == [(rank // (world // heads), rank // (world // heads) + 1)
+                          for rank in range(world)]

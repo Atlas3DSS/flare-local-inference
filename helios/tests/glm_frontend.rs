@@ -1,5 +1,9 @@
 #![cfg(feature = "server")]
 
+use flare_helios::frontend;
+#[path = "support/frontend.rs"]
+mod support;
+
 use flare_helios::{
     frontend::{Asset, Frontend, FrontendAssets},
     grammar::GrammarCompiler,
@@ -27,7 +31,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     let frontend = Frontend::load(
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
-            tokenizer_config: asset("tokenizer_config.json"),
+            tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
             chat_template: asset("chat_template.jinja"),
         },
         json!({"add_generation_prompt":true})

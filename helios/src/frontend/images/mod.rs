@@ -3,15 +3,15 @@
 #[cfg(test)]
 mod decoding_tests;
 mod deepseek4;
+mod mimo;
 mod orientation;
+mod patches;
 mod qwen;
 mod resize;
 
 use std::io::Cursor;
 
-use serde_json::Value;
-
-use super::{Asset, Frontend};
+use super::Frontend;
 use crate::{Error, Failure, FrontendError, Result};
 
 const PATCH: usize = 16;
@@ -108,13 +108,41 @@ pub struct ImageProcessor {
     profile: Profile,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImageSettings {
+    Qwen(QwenImageSettings),
+    Mimo(MimoImageSettings),
+    Deepseek4 {},
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QwenImageSettings {
+    pub min_pixels: usize,
+    pub max_pixels: usize,
+    pub position_side: usize,
+    pub image_token_id: u32,
+    pub video_token_id: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MimoImageSettings {
+    pub min_pixels: usize,
+    pub max_pixels: usize,
+    pub image_mean: [f32; 3],
+    pub image_std: [f32; 3],
+}
+
 enum Profile {
     Qwen(qwen::QwenProcessor),
+    MiMo(patches::PatchProcessor),
     DeepSeek4,
 }
 
 impl ImageProcessor {
-    pub fn load(preprocessor: Asset, model_config: Asset, limits: ImageLimits) -> Result<Self> {
+    pub fn load(settings: ImageSettings, limits: ImageLimits) -> Result<Self> {
         if [
             limits.max_input_pixels,
             limits.max_encoded_bytes,
@@ -129,17 +157,12 @@ impl ImageProcessor {
                 "image limits must be positive and total patches must fit int32",
             ))));
         }
-        let config: Value = serde_json::from_slice(&preprocessor.read()?).map_err(|e| {
-            Error::frontend(FrontendError::Asset(Failure::caused_by(e.to_string(), e)))
-        })?;
-        let model: Value = serde_json::from_slice(&model_config.read()?).map_err(|e| {
-            Error::frontend(FrontendError::Asset(Failure::caused_by(e.to_string(), e)))
-        })?;
-        let profile = if config["image_processor_type"] == "DeepSeekV4ImageProcessor" {
-            deepseek4::validate_profile(&config, &model)?;
-            Profile::DeepSeek4
-        } else {
-            Profile::Qwen(qwen::QwenProcessor::load(&config, &model, limits)?)
+        let profile = match settings {
+            ImageSettings::Deepseek4 {} => Profile::DeepSeek4,
+            ImageSettings::Mimo(settings) => Profile::MiMo(mimo::load(&settings, limits)?),
+            ImageSettings::Qwen(settings) => {
+                Profile::Qwen(qwen::QwenProcessor::load(&settings, limits)?)
+            }
         };
         Ok(Self { limits, profile })
     }
@@ -298,19 +321,22 @@ impl ImageProcessor {
 
     pub fn geometry(&self, width: usize, height: usize) -> Result<ImageGeometry> {
         match &self.profile {
-            Profile::Qwen(profile) => profile.geometry(width, height),
+            Profile::Qwen(profile) => profile.patches.geometry(width, height),
+            Profile::MiMo(profile) => profile.geometry(width, height),
             Profile::DeepSeek4 => deepseek4::geometry(self.limits, width, height),
         }
     }
     pub fn resized_rgb(&self, image: &RgbImage) -> Result<(ImageGeometry, Vec<u8>)> {
         match &self.profile {
-            Profile::Qwen(profile) => profile.resized_rgb(image),
+            Profile::Qwen(profile) => profile.patches.resized_rgb(image),
+            Profile::MiMo(profile) => profile.resized_rgb(image),
             Profile::DeepSeek4 => deepseek4::resized_rgb(self.limits, image),
         }
     }
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
         match &self.profile {
             Profile::Qwen(profile) => profile.process(images),
+            Profile::MiMo(profile) => profile.process(images),
             Profile::DeepSeek4 => deepseek4::process(self.limits, images),
         }
     }
@@ -323,6 +349,7 @@ impl ImageProcessor {
         match &self.profile {
             Profile::Qwen(profile) => profile.expand_prompt(frontend, text, images),
             Profile::DeepSeek4 => Err("DeepSeek image spans require its model contract".into()),
+            Profile::MiMo(_) => Err("MiMo image expansion requires its model contract".into()),
         }
     }
 }
@@ -345,17 +372,17 @@ mod tests {
     use super::*;
 
     pub(super) fn processor(limits: ImageLimits) -> ImageProcessor {
-        ImageProcessor {
-            limits,
-            profile: Profile::Qwen(qwen::QwenProcessor {
-                limits,
+        ImageProcessor::load(
+            ImageSettings::Qwen(QwenImageSettings {
                 min_pixels: 65_536,
                 max_pixels: 16_777_216,
                 position_side: 48,
                 image_token_id: 248056,
                 video_token_id: 248057,
             }),
-        }
+            limits,
+        )
+        .unwrap()
     }
 
     fn png(

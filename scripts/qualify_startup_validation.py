@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ignition.preparation.qwen38 import (
-    CONFIG_SHA256, FRONTEND_SHA256, GENERATION_SHA256, MODEL_ID, REVISION,
+    FRONTEND_SHA256, MODEL_ID, REVISION,
 )
 
 SNAPSHOT = Path.home() / ".cache/huggingface/hub" / (
@@ -114,15 +114,16 @@ def fixture(snapshot):
                 "input_bindings": deepcopy(bindings)})
     manifest = {"abi_version": ABI_VERSION, "context": 1, "device": 0, "max_active": 4,
         "input_frame_bytes": host, "buffers": buffers, "graphs": graphs}
+    from ignition.preparation.frontend import prepare_frontend
+    from ignition.recipes.qwen38.recipe import RECIPE
+
     assets = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
-        "tokenizer_config": ("tokenizer_config.json", FRONTEND_SHA256["tokenizer_config.json"]),
-        "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"]),
-        "preprocessor_config": ("preprocessor_config.json", FRONTEND_SHA256["preprocessor_config.json"]),
-        "model_config": ("config.json", CONFIG_SHA256),
-        "generation_config": ("generation_config.json", GENERATION_SHA256)}
+        "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"])}
     config = {"model_id": MODEL_ID, "identity": "01" * 32, "max_sequence_tokens": context,
         "prefill_chunk_size": 512,
-        "pages": 4096, "snapshots": 4, "eos_token_ids": [248046, 248044],
+        "pages": 4096, "snapshots": 4,
+        "frontend": prepare_frontend(snapshot, eos_token_ids=[248046, 248044], image_profile="qwen"),
+        "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "model_contract": {"schema": "qwen4exp.graph-inputs.v2", "vocabulary": vocabulary,
             "vision": {"features_per_request": 16384, "max_images": 4,
                 "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
@@ -178,7 +179,7 @@ def cases(snapshot):
     add("valid-shapes-reach-asset-validation", "assets must contain verified frontend descriptors",
         lambda m, c: c.pop("assets"))
     add("asset-checksum", "frontend asset SHA256 mismatch", lambda m, c:
-        c["assets"]["generation_config"].update(sha256="00" * 32))
+        c["assets"]["chat_template"].update(sha256="00" * 32))
     add("frontend-worker-capacity", "invalid HTTP admission limits", lambda m, c:
         c.update(frontend_workers=0))
     add("request-queue-capacity", "invalid native request/event queue capacity", lambda m, c:

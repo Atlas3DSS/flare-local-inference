@@ -64,14 +64,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         sha256: fixture["assets"][name].as_str().unwrap().into(),
     };
     let processor = ImageProcessor::load(
-        asset("preprocessor_config.json"),
-        asset("config.json"),
+        flare_helios::frontend::test_support::image(
+            &asset("preprocessor_config.json"),
+            &asset("config.json"),
+        )
+        .unwrap(),
         ImageLimits::default(),
     )?;
     let frontend = Frontend::load(
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
-            tokenizer_config: asset("tokenizer_config.json"),
+            tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json"))
+                .unwrap(),
             chat_template: asset("chat_template.jinja"),
         },
         Map::new(),
@@ -206,8 +210,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ..ImageLimits::default()
     };
     let geometry_processor = ImageProcessor::load(
-        asset("preprocessor_config.json"),
-        asset("config.json"),
+        flare_helios::frontend::test_support::image(
+            &asset("preprocessor_config.json"),
+            &asset("config.json"),
+        )
+        .unwrap(),
         large_limits,
     )?;
     for case in fixture["geometry_cases"].as_array().unwrap() {

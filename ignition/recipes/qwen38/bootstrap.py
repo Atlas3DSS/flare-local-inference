@@ -25,6 +25,7 @@ from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
+from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.qwen38 import (
@@ -35,6 +36,7 @@ from ignition.preparation.qwen38 import (
 from ignition.preparation.scratch import ScratchArena
 from ignition.progress import phase
 
+from .recipe import RECIPE
 from .attention import QSAState, RotaryTables
 from .decoder import DecoderScratch, ModelWeights, PreparedDecoder
 from .decoder_state import DecoderInputs, PreparedDecoderState, PreparedResume
@@ -438,16 +440,14 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 speculative_fixed_width=config.speculative_fixed_width,
                 history_drafts=config.history_drafts)
         hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
-            "tokenizer_config": ("tokenizer_config.json", FRONTEND_SHA256["tokenizer_config.json"]),
-            "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"]),
-            "preprocessor_config": ("preprocessor_config.json", FRONTEND_SHA256["preprocessor_config.json"]),
-            "model_config": ("config.json", manifest.metadata_sha256["config.json"]), "generation_config": ("generation_config.json", manifest.metadata_sha256["generation_config.json"])}
+            "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"])}
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 64,
             # Verification commits accepted tokens into each request's live row.
             "state_rows_per_request": 1,
-            "eos_token_ids": [248046, 248044],
+            "frontend": prepare_frontend(manifest.snapshot, eos_token_ids=[248046, 248044], image_profile="qwen"),
+            "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
             "model_contract": {"schema": "qwen4exp.graph-inputs.v3", "vocabulary": 248320,
                 "vision": {"features_per_request": 16384, "max_images": 4,
                     "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},

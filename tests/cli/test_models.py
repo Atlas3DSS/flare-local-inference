@@ -17,7 +17,7 @@ HUB = Path.home() / ".cache/huggingface/hub"
 def test_declarations_import_without_model_dependencies():
     result = subprocess.run(
         [sys.executable, "-c", "import sys; from ignition.recipes import aliases; from ignition import planning;"
-         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash');"
+         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash', 'mimo-v2.6-pro-mopd');"
          " assert not {'torch', 'transformers', 'flare_heliopause'} & set(sys.modules)"],
         cwd=ROOT, check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -173,7 +173,9 @@ def test_declared_ranges_are_consistent():
     for recipe in recipes():
         assert 1 <= recipe.concurrency <= recipe.max_concurrency <= 64
         assert recipe.context % recipe.page_tokens == 0
-        assert set(recipe.tensor_parallel) <= {1, 2, 4}
+        assert recipe.tensor_parallel and all(type(world) is int and world > 0 for world in recipe.tensor_parallel)
         for checkpoint in recipe.checkpoints:
             assert len(checkpoint.revision) == 40
-            assert checkpoint.device_bytes + checkpoint.mapped_host_bytes <= checkpoint.stored_bytes
+            assert 0 <= checkpoint.draft_bytes <= checkpoint.device_bytes
+            # A draft model may have its own checkpoint index.
+            assert checkpoint.device_bytes - checkpoint.draft_bytes + checkpoint.mapped_host_bytes <= checkpoint.stored_bytes

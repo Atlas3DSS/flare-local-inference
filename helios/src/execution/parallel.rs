@@ -36,8 +36,8 @@ impl TensorParallelExecutor {
         if world > 16 {
             return Err(invalid("tensor parallelism supports at most sixteen ranks"));
         }
-        if ![2, 4].contains(&world) {
-            return Err(invalid("tensor parallelism requires two or four ranks"));
+        if world < 2 {
+            return Err(invalid("tensor parallelism requires at least two ranks"));
         }
         manifest.validate()?;
         let expected = layout(&manifest);
@@ -334,7 +334,7 @@ pub unsafe fn serve_rank(
         }
     };
     let result = (|| -> Result<()> {
-        if ![2, 4].contains(&world) || !(1..world).contains(&rank) {
+        if world < 2 || !(1..world).contains(&rank) {
             return Err(invalid("invalid tensor-parallel peer identity"));
         }
         let mut channel = Channel::new(socket)?;

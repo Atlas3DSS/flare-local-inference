@@ -4,21 +4,6 @@ const PATCH: usize = 14;
 const MERGE: usize = 3;
 const FEATURES: usize = 3 * PATCH * PATCH;
 
-pub(super) fn validate_profile(config: &Value, model: &Value) -> Result<()> {
-    for (key, expected, model_key) in [
-        ("patch_size", 14, "vision_patch_size"),
-        ("merge_size", 3, "vision_downsample_ratio"),
-        ("max_image_tokens", 384, "vision_max_n_token"),
-        ("min_pixels", 147456, "vision_min_pixels"),
-        ("max_width_height_ratio", 8, "vision_max_wh_ratio"),
-    ] {
-        if config[key].as_u64() != Some(expected) || model[model_key].as_u64() != Some(expected) {
-            return Err(format!("unsupported DeepSeek V4 image processor {key}").into());
-        }
-    }
-    Ok(())
-}
-
 fn grid_tokens(height: usize, width: usize) -> usize {
     let rows = (height / PATCH).div_ceil(MERGE).next_multiple_of(2);
     let columns = (width / PATCH).div_ceil(MERGE) + 1;

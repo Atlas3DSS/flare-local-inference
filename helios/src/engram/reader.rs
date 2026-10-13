@@ -11,6 +11,8 @@ use std::{
 const BLOCK: usize = 4096;
 const CHUNK: usize = 64 << 10;
 const DEPTH: usize = 128;
+const LOAD_CHUNK: usize = 4 << 20;
+const LOAD_READERS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Plane {
@@ -35,12 +37,12 @@ struct Read {
 
 struct Aligned(usize);
 impl Aligned {
-    fn new() -> Result<Self> {
+    fn new(nbytes: usize) -> Result<Self> {
         let mut ptr = std::ptr::null_mut();
-        let status = unsafe { libc::posix_memalign(&mut ptr, BLOCK, DEPTH * CHUNK) };
+        let status = unsafe { libc::posix_memalign(&mut ptr, BLOCK, nbytes) };
         if status != 0 {
             return Err(format!(
-                "Engram I/O staging allocation: {}",
+                "Engram aligned allocation: {}",
                 std::io::Error::from_raw_os_error(status)
             )
             .into());
@@ -49,6 +51,103 @@ impl Aligned {
     }
     fn at(&self, slot: usize) -> *mut u8 {
         (self.0 + slot * CHUNK) as *mut u8
+    }
+}
+
+fn open_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(path)
+        .map_err(|e| format!("open Engram package for direct I/O: {e}").into())
+}
+
+pub(crate) struct Resident {
+    storage: Aligned,
+    skip: usize,
+    nbytes: usize,
+}
+
+impl Resident {
+    fn load(file: &File, plane: Plane) -> Result<Self> {
+        let skip = (plane.offset % BLOCK as u64) as usize;
+        let required = skip
+            .checked_add(plane.nbytes)
+            .ok_or("resident Engram plane exceeds host range")?;
+        let extent = required
+            .checked_add(BLOCK - 1)
+            .ok_or("resident Engram allocation exceeds host range")?
+            / BLOCK
+            * BLOCK;
+        let storage = Aligned::new(extent.max(BLOCK))?;
+        let offset = plane.offset - skip as u64;
+        std::thread::scope(|scope| -> Result<()> {
+            let mut workers = Vec::new();
+            for reader in 0..LOAD_READERS.min(extent.div_ceil(LOAD_CHUNK)) {
+                let address = storage.0;
+                workers.push(
+                    std::thread::Builder::new()
+                        .name(format!("helios-table-loader-{reader}"))
+                        .spawn_scoped(scope, move || -> Result<()> {
+                            for begin in (reader * LOAD_CHUNK..extent)
+                                .step_by(LOAD_READERS * LOAD_CHUNK)
+                            {
+                                let nbytes = LOAD_CHUNK.min(extent - begin);
+                                let source = offset
+                                    .checked_add(begin as u64)
+                                    .and_then(|n| libc::off_t::try_from(n).ok())
+                                    .ok_or("resident Engram file offset exceeds range")?;
+                                let count = loop {
+                                    // SAFETY: Workers own disjoint aligned ranges. Raw I/O
+                                    // initializes storage before any byte slice is exposed.
+                                    let count = unsafe {
+                                        libc::pread(
+                                            file.as_raw_fd(),
+                                            (address + begin) as *mut libc::c_void,
+                                            nbytes,
+                                            source,
+                                        )
+                                    };
+                                    if count >= 0 {
+                                        break count as usize;
+                                    }
+                                    let error = std::io::Error::last_os_error();
+                                    if error.kind() != std::io::ErrorKind::Interrupted {
+                                        return Err(format!("resident Engram read at {source}: {error}").into());
+                                    }
+                                };
+                                let needed = nbytes.min(required - begin);
+                                if count < needed {
+                                    return Err(format!(
+                                        "resident Engram read at {source} returned {count}, requires {needed} bytes"
+                                    ).into());
+                                }
+                            }
+                            Ok(())
+                        })
+                        .map_err(|e| format!("start resident Engram loader: {e}"))?,
+                );
+            }
+            for worker in workers {
+                worker
+                    .join()
+                    .map_err(|_| "resident Engram loader panicked")??;
+            }
+            Ok(())
+        })?;
+        Ok(Self {
+            storage,
+            skip,
+            nbytes: plane.nbytes,
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: Every logical byte was initialized by successful reads, and
+        // scoped readers joined before this immutable view becomes available.
+        unsafe {
+            std::slice::from_raw_parts((self.storage.0 + self.skip) as *const u8, self.nbytes)
+        }
     }
 }
 impl Drop for Aligned {
@@ -68,13 +167,9 @@ pub(crate) struct DiskReader {
 
 impl DiskReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(path)
-            .map_err(|e| format!("open Engram package for direct I/O: {e}"))?;
+        let file = open_file(path)?;
         let ring = IoUring::new(DEPTH as u32).map_err(|e| format!("Engram io_uring: {e}"))?;
-        let staging = Aligned::new()?;
+        let staging = Aligned::new(DEPTH * CHUNK)?;
         let buffers: Vec<_> = (0..DEPTH)
             .map(|i| libc::iovec {
                 iov_base: staging.at(i).cast(),
@@ -193,48 +288,22 @@ impl DiskReader {
         }
         Ok(())
     }
-
-    fn load(&mut self, plane: Plane) -> Result<Vec<u8>> {
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(plane.nbytes)
-            .map_err(|e| format!("resident Engram table: {e}"))?;
-        output.resize(plane.nbytes, 0);
-        // Reuse the direct-I/O gatherer to populate resident storage without a second page-cache copy.
-        let rows_per_chunk = (8 << 20) / plane.row_bytes;
-        let mut begin = 0;
-        while begin < plane.nbytes / plane.row_bytes {
-            let end = (begin + rows_per_chunk).min(plane.nbytes / plane.row_bytes);
-            let ids: Vec<_> = (begin..end).map(|i| i as i64).collect();
-            self.gather(
-                &[
-                    plane,
-                    Plane {
-                        offset: 0,
-                        nbytes: 0,
-                        row_bytes: 0,
-                    },
-                ],
-                &ids,
-                &mut output[begin * plane.row_bytes..end * plane.row_bytes],
-            )?;
-            begin = end;
-        }
-        Ok(output)
-    }
 }
 
 pub(crate) enum Reader {
     Disk(DiskReader),
-    Ram([Vec<u8>; 2]),
+    Ram([Resident; 2]),
 }
 impl Reader {
     pub fn open(path: &Path, planes: &[Plane; 2], resident: bool) -> Result<Self> {
-        let mut disk = DiskReader::open(path)?;
         if resident {
-            Ok(Self::Ram([disk.load(planes[0])?, disk.load(planes[1])?]))
+            let file = open_file(path)?;
+            Ok(Self::Ram([
+                Resident::load(&file, planes[0])?,
+                Resident::load(&file, planes[1])?,
+            ]))
         } else {
-            Ok(Self::Disk(disk))
+            Ok(Self::Disk(DiskReader::open(path)?))
         }
     }
     pub fn gather(&mut self, planes: &[Plane; 2], ids: &[i64], output: &mut [u8]) -> Result<()> {
@@ -254,6 +323,7 @@ impl Reader {
             Self::Ram(data) => {
                 let mut base = 0;
                 for (plane, data) in planes.iter().zip(data) {
+                    let data = data.bytes();
                     for (row, id) in ids.iter().copied().enumerate() {
                         let target = &mut output
                             [base + row * plane.row_bytes..base + (row + 1) * plane.row_bytes];
@@ -275,6 +345,51 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_load_covers_parallel_chunks_and_rejects_truncated_planes() {
+        let path =
+            std::env::temp_dir().join(format!("helios-engram-bulk-{}.bin", std::process::id()));
+        let rows = LOAD_CHUNK * 5 / 80 + 1;
+        let first = 123;
+        let second = first + rows * 80 + 37;
+        let bytes: Vec<_> = (0..second + rows * 10)
+            .map(|i| (i * 13 + i / 257) as u8)
+            .collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let planes = [
+            Plane {
+                offset: first as u64,
+                nbytes: rows * 80,
+                row_bytes: 80,
+            },
+            Plane {
+                offset: second as u64,
+                nbytes: rows * 10,
+                row_bytes: 10,
+            },
+        ];
+        let file = open_file(&path).unwrap();
+        for plane in planes {
+            let data = Resident::load(&file, plane).unwrap();
+            let begin = plane.offset as usize;
+            assert_eq!(data.bytes(), &bytes[begin..begin + plane.nbytes]);
+        }
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((first + LOAD_CHUNK + 17) as u64)
+            .unwrap();
+        assert!(
+            Resident::load(&file, planes[0])
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("requires")
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn disk_and_ram_gather_identical_rows_across_unaligned_planes() {

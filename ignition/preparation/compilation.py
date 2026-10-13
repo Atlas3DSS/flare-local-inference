@@ -81,6 +81,22 @@ def _fake_storage_call(reads, writes, handle, integers=None):
     pass
 
 
+@torch.library.custom_op('flare::materialize', mutates_args=())
+def _materialize(source: torch.Tensor) -> torch.Tensor:
+    return source.clone()
+
+
+@_materialize.register_fake
+def _fake_materialize(source):
+    return torch.empty_like(source)
+
+
+def _materialize_lowering(source):
+    # The storage pass gives this operation exclusive ownership of a fresh result.
+    source.realize()
+    return source
+
+
 @torch.library.custom_op('flare::mean', mutates_args=())
 def _mean(source: torch.Tensor, dim: list[int] | None, keepdim: bool = False,
           dtype: torch.dtype | None = None) -> torch.Tensor:
@@ -270,6 +286,9 @@ def compile_forward(fn, *, tracer=None):
 
 
 def _lower_storage(module):
+    from torch._inductor.lowering import register_lowering
+
+    register_lowering(torch.ops.flare.materialize.default)(_materialize_lowering)
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
@@ -340,6 +359,8 @@ def _lower_storage(module):
                                     *torch.fx.map_arg(node.args, lambda arg: arg.meta['val']),
                                     **torch.fx.map_arg(node.kwargs, lambda arg: arg.meta['val']))
                             break
+    mutations = {node: _mutated_tensors(node) for node in originals if node.op == 'call_function'}
+    materialize = _reads_across_mutations(originals, keys, mutations)
     dtypes, storage_references = {}, {}
     for node, key in keys.items():
         dtypes.setdefault(key, set()).add(node.meta['val'].dtype)
@@ -374,18 +395,7 @@ def _lower_storage(module):
         if node.op != 'call_function':
             continue
         target = node.target
-        mutated = []
-        if target is torch.ops.higher_order.triton_kernel_wrapper_mutation:
-            kwargs = node.kwargs
-            names = get_mutated_tensors(kwargs['kernel_idx'], kwargs['constant_args_idx'],
-                torch.fx.map_arg(kwargs['kwargs'], lambda arg: arg.meta['val']),
-                kwargs['tma_descriptor_metadata'])
-            mutated = [kwargs['kwargs'][name] for name in names]
-        elif isinstance(target, torch._ops.OpOverload):
-            for index, argument in enumerate(target._schema.arguments):
-                if argument.alias_info is not None and argument.alias_info.is_write:
-                    value = node.args[index] if index < len(node.args) else node.kwargs.get(argument.name)
-                    mutated.extend(tensor_nodes(value))
+        mutated = mutations[node]
         if not mutated:
             continue
         # Keep pointwise tensor work visible unless its operands alias shared storage.
@@ -463,6 +473,64 @@ def _lower_storage(module):
                     (typed, shape, stride, offset))
         node.replace_all_uses_with(view)
         graph.erase_node(node)
+    for node in materialize:
+        with graph.inserting_after(node):
+            value = graph.call_function(torch.ops.flare.materialize.default, (node,))
+            value.meta = node.meta.copy()
+        node.replace_all_uses_with(value)
+        value.args = (node,)
     graph.eliminate_dead_code()
     graph.lint()
     return calls
+
+
+def _mutated_tensors(node):
+    if node.target is torch.ops.higher_order.triton_kernel_wrapper_mutation:
+        kwargs = node.kwargs
+        names = get_mutated_tensors(kwargs['kernel_idx'], kwargs['constant_args_idx'],
+            torch.fx.map_arg(kwargs['kwargs'], lambda arg: arg.meta['val']),
+            kwargs['tma_descriptor_metadata'])
+        return [kwargs['kwargs'][name] for name in names]
+    mutated = []
+    if isinstance(node.target, torch._ops.OpOverload):
+        for index, argument in enumerate(node.target._schema.arguments):
+            if argument.alias_info is not None and argument.alias_info.is_write:
+                value = node.args[index] if index < len(node.args) else node.kwargs.get(argument.name)
+                leaves, _ = tree_flatten(value)
+                mutated.extend(leaf for leaf in leaves if isinstance(leaf, torch.fx.Node)
+                               and isinstance(leaf.meta.get('val'), torch.Tensor))
+    return mutated
+
+
+def _reads_across_mutations(nodes, keys, mutations):
+    """Materialize computed values that outlive an overwrite of their inputs."""
+    positions = {node: index for index, node in enumerate(nodes)}
+    last_use = {node: max((positions[user] for user in node.users), default=-1) for node in nodes}
+    # Inductor can inline an expression into a later consumer after its input was overwritten.
+    for node in reversed(nodes):
+        if (isinstance(node.target, torch._ops.OpOverload)
+                and node.target.namespace == 'aten' and not node.target._schema.is_mutable):
+            for operand in node.all_input_nodes:
+                last_use[operand] = max(last_use[operand], last_use[node])
+    mutations = {node: {keys[operand] for operand in operands}
+                 for node, operands in mutations.items() if operands}
+    mutable = set().union(*mutations.values()) if mutations else set()
+    live, fresh, required = {}, set(), set()
+    for index, node in enumerate(nodes):
+        operands = node.all_input_nodes
+        reads = set().union(*(live.get(arg, set()) for arg in operands)) if operands else set()
+        reads.update(keys[arg] for arg in operands if keys.get(arg) in mutable)
+        if node in mutations:
+            for previous, pending in live.items():
+                if previous in fresh and last_use[previous] > index and pending & mutations[node]:
+                    required.add(previous)
+                    pending.clear()
+        live = {value: pending for value, pending in live.items() if pending and last_use[value] > index}
+        if (node in keys and node.op == 'call_function'
+                and isinstance(node.target, torch._ops.OpOverload) and node.target.namespace == 'aten'):
+            if keys[node] not in {keys[arg] for arg in operands if arg in keys}:
+                fresh.add(node)
+            live[node] = reads
+        elif node in keys and keys[node] in mutable:
+            live[node] = {keys[node]}
+    return [node for node in nodes if node in required]

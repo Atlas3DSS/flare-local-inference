@@ -19,7 +19,7 @@ class PreparedResumeState:
         self.state_rows = state_rows
         self.capacity = requests.capacity
         rows, device = slots.numel(), requests.generation.device
-        if device.type != "cuda" or world_size not in (1, 2, 4) or not 1 <= rows <= self.capacity:
+        if device.type != "cuda" or (type(world_size) is not int or world_size < 1) or not 1 <= rows <= self.capacity:
             raise ValueError("resume requires CUDA request state, TP1/2/4, and rows within request capacity")
         if saved_hidden.ndim != 2 or saved_hidden.shape[0] < 2 or saved_hidden.shape[1] <= 0:
             raise ValueError("resume requires saved hidden outputs for all physical request slots")

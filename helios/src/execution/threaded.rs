@@ -73,8 +73,8 @@ impl ThreadedExecutor {
         if ranks.len() >= 16 {
             return Err(invalid("tensor parallelism supports at most sixteen ranks"));
         }
-        if ![2, 4].contains(&(ranks.len() + 1)) {
-            return Err(invalid("tensor parallelism requires two or four ranks"));
+        if ranks.is_empty() {
+            return Err(invalid("tensor parallelism requires at least two ranks"));
         }
         for rank in &ranks {
             rank.validate()?;

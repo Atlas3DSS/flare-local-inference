@@ -91,7 +91,7 @@ class PreparedMaintenance:
 
     def __init__(self, mode, requests, transfer, slots, epochs, count, records, frame, sequence, *,
                  world_size, capacity=4, admission_buffers=None):
-        if mode not in ("init", "restore", "snapshot") or world_size not in (1, 2, 4) or capacity not in BATCH_CAPACITIES or capacity > requests.capacity:
+        if mode not in ("init", "restore", "snapshot") or (type(world_size) is not int or world_size < 1) or capacity not in BATCH_CAPACITIES or capacity > requests.capacity:
             raise ValueError("maintenance requires a supported transition, rank count, and row capacity")
         self.slots = requests.capacity
         device = transfer.pool.backing.device

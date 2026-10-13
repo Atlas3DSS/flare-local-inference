@@ -3,7 +3,7 @@ use crate::{
     Result,
     execution::ExecutionManifest,
     frontend::{
-        Asset, Frontend, FrontendAssets,
+        Asset, Frontend, FrontendAssets, FrontendSettings,
         images::{ImageLimits, ImageProcessor},
     },
     model::{ModelConfig, ModelContract},
@@ -38,6 +38,9 @@ impl Bootstrap {
         let object = value
             .as_object()
             .ok_or("server configuration must be a JSON object")?;
+        if object.contains_key("generation_defaults") || object.contains_key("eos_token_ids") {
+            return Err("sampling and token defaults require typed package fields".into());
+        }
         let text = |name: &str| {
             object
                 .get(name)
@@ -57,6 +60,31 @@ impl Bootstrap {
                 })
         };
         let identity = text("identity")?;
+        let frontend_settings: FrontendSettings = serde_json::from_value(
+            object
+                .get("frontend")
+                .ok_or("prepared frontend settings are required")?
+                .clone(),
+        )
+        .map_err(|error| {
+            crate::ExecutionError::Manifest(crate::Failure::caused_by(
+                "invalid prepared frontend settings",
+                error,
+            ))
+        })?;
+        let sampling_defaults: crate::model::SamplingParameters = serde_json::from_value(
+            object
+                .get("sampling_defaults")
+                .ok_or("prepared sampling defaults are required")?
+                .clone(),
+        )
+        .map_err(|error| {
+            crate::ExecutionError::Manifest(crate::Failure::caused_by(
+                "invalid prepared sampling defaults",
+                error,
+            ))
+        })?;
+        sampling_defaults.validate()?;
         if identity.len() != 64 || !identity.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("model identity must be 64 hexadecimal characters".into());
         }
@@ -82,7 +110,7 @@ impl Bootstrap {
                 error,
             ))
         })?;
-        let mut model = ModelConfig {
+        let model = ModelConfig {
             contract,
             model_id: text("model_id")?.into(),
             identity: digest,
@@ -120,23 +148,8 @@ impl Bootstrap {
                     ))
                 })?,
             },
-            eos_token_ids: object
-                .get("eos_token_ids")
-                .and_then(Value::as_array)
-                .ok_or("eos_token_ids must be an array")?
-                .iter()
-                .map(|id| {
-                    id.as_u64()
-                        .and_then(|id| u32::try_from(id).ok())
-                        .ok_or_else(|| {
-                            crate::Error::execution(
-                                crate::ExecutionError::Manifest,
-                                "invalid EOS token ID",
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?,
-            sampling_defaults: crate::model::SamplingParameters::default(),
+            eos_token_ids: frontend_settings.eos_token_ids,
+            sampling_defaults,
             speculative_fixed_width: object
                 .get("speculative_fixed_width")
                 .filter(|v| !v.is_null())
@@ -198,6 +211,13 @@ impl Bootstrap {
             .get("assets")
             .and_then(Value::as_object)
             .ok_or("assets must contain verified frontend descriptors")?;
+        if assets.len() != 2
+            || assets
+                .keys()
+                .any(|key| !matches!(key.as_str(), "tokenizer" | "chat_template"))
+        {
+            return Err("runtime assets must contain only tokenizer and chat_template".into());
+        }
         let asset = |name: &str| -> Result<Asset> {
             let descriptor = assets
                 .get(name)
@@ -224,31 +244,6 @@ impl Bootstrap {
                     .into(),
             })
         };
-        let generation: Value = serde_json::from_slice(&asset("generation_config")?.read()?)
-            .map_err(|error| {
-                crate::ExecutionError::Manifest(crate::Failure::caused_by(
-                    format!("invalid generation config: {error}"),
-                    error,
-                ))
-            })?;
-        let mut generation = generation
-            .as_object()
-            .ok_or("generation config must be an object")?
-            .clone();
-        if let Some(overrides) = object.get("generation_defaults") {
-            generation.extend(
-                overrides
-                    .as_object()
-                    .ok_or("generation_defaults must be an object")?
-                    .clone(),
-            );
-        }
-        if generation.get("do_sample") == Some(&Value::Bool(false)) {
-            generation.insert("temperature".into(), Value::from(0));
-        }
-        model.sampling_defaults =
-            super::request::sampling_parameters(&generation, &model.sampling_defaults)?;
-        crate::model::catalog::validate::<M>(&model, manifest)?;
         let mut defaults = match object.get("template_defaults") {
             None => serde_json::Map::new(),
             Some(Value::Object(defaults)) => defaults.clone(),
@@ -260,21 +255,25 @@ impl Bootstrap {
         let frontend = Frontend::load(
             FrontendAssets {
                 tokenizer: asset("tokenizer")?,
-                tokenizer_config: asset("tokenizer_config")?,
+                tokens: frontend_settings.tokenizer,
                 chat_template: asset("chat_template")?,
             },
             defaults,
         )?;
         let images = if model.contract.vision.enabled() {
             Some(ImageProcessor::load(
-                asset("preprocessor_config")?,
-                asset("model_config")?,
+                frontend_settings
+                    .image
+                    .ok_or("vision requires prepared image settings")?,
                 ImageLimits {
                     max_total_patches: 65536,
                     ..ImageLimits::default()
                 },
             )?)
         } else {
+            if frontend_settings.image.is_some() {
+                return Err("text-only model must not declare image settings".into());
+            }
             None
         };
         let optional_text = |name: &str| match object.get(name) {

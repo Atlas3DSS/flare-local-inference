@@ -6,6 +6,7 @@ pub mod deepseek4;
 pub mod deepseek41;
 pub mod glm5next;
 pub(crate) mod inputs;
+pub mod mimo;
 pub(crate) mod paged_text;
 pub mod qwen4exp;
 #[cfg(feature = "images")]
@@ -92,6 +93,8 @@ pub struct ModelConfig {
     pub state_rows_per_request: Option<usize>,
 }
 
+#[cfg_attr(feature = "server", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "server", serde(deny_unknown_fields))]
 #[derive(Clone, Debug)]
 pub struct SamplingParameters {
     pub seed: u64,

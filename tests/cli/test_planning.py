@@ -10,7 +10,7 @@ import pytest
 from ignition import planning
 from ignition.cli import display
 from ignition.errors import CapacityError, UsageError
-from ignition.recipes.declaration import Checkpoint, RankCosts, Recipe, Speculation
+from ignition.recipes.declaration import Checkpoint, RankCosts, Recipe, SamplingDefaults, Speculation
 
 GIB, MIB = 1 << 30, 1 << 20
 
@@ -24,6 +24,7 @@ def recipe(name, device_gib, ranks, *, speculation=None, mapped_gib=0, draft_gib
                             mapped_host_bytes=mapped_gib * GIB, draft_bytes=draft_gib * GIB)
     speculating = speculation is not None
     return Recipe(name=name, checkpoints=(checkpoint,), context=262144, page_tokens=64, concurrency=4,
+                  sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
                   max_concurrency=64, max_draft_tokens=7 if speculating else 0, prefill_chunk=4096, prepare=None,
                   usage=None, mapped_host_name="lookup table", speculation=speculation, history_copy=speculating,
                   ranks=MappingProxyType({size: RankCosts(100 * MIB // size, 2 * MIB // size, 4 * GIB,

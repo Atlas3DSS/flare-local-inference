@@ -16,6 +16,7 @@ fn invalid(message: impl Into<String>) -> Error {
 
 const BASE: u64 = 0x200000000000;
 const EXTENT: usize = 1 << 40;
+const HOST_BASE: u64 = 0x100000000000;
 struct Arena {
     driver: Driver,
     device: i32,
@@ -50,8 +51,13 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
         if arena.is_some() {
             return Err(invalid("native package allocator is already initialized"));
         }
-        if ![1, 2, 4].contains(&world) || rank >= world || device < 0 {
+        if world == 0 || rank >= world || device < 0 {
             return Err(invalid("invalid package rank or device"));
+        }
+        if u64::from(world) * EXTENT as u64 > BASE - HOST_BASE {
+            return Err(invalid(
+                "package host reservations would overlap device reservations",
+            ));
         }
         let driver = Driver::load()?;
         let (mut address, mut granularity, mut gpudirect) = (0, 0, 0);

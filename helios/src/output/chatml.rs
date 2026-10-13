@@ -1,4 +1,4 @@
-//! Qwen reasoning delimiters and Coder function-tag serialization.
+//! ChatML reasoning delimiters and function/parameter-tag tool calls.
 
 pub use crate::output::tagged::OutputConfig;
 use crate::{
@@ -8,9 +8,9 @@ use crate::{
 };
 use serde_json::{Map, Value};
 
-pub struct QwenCoder;
-impl ToolDialect for QwenCoder {
-    const NAME: &'static str = "Qwen Coder";
+pub struct FunctionTags;
+impl ToolDialect for FunctionTags {
+    const NAME: &'static str = "function-tag";
     const TRIM_NEWLINES: bool = true;
     const OPEN: &'static str = "<tool_call>";
     const CLOSE: &'static str = "</tool_call>";
@@ -18,7 +18,7 @@ impl ToolDialect for QwenCoder {
         Ok(vec![parse_tool(body, tools)?])
     }
 }
-pub type QwenOutput = TaggedOutput<QwenCoder>;
+pub type ChatMlOutput = TaggedOutput<FunctionTags>;
 
 /// Initialize from the open assistant envelope, never an earlier message body.
 pub fn prepare_output(
@@ -121,13 +121,13 @@ mod tests {
     use crate::server::output::Accumulator;
     use serde_json::json;
     struct Harness {
-        parser: QwenOutput,
+        parser: ChatMlOutput,
         output: Accumulator,
     }
     impl Harness {
         fn new(config: OutputConfig, id: String) -> Self {
             Self {
-                parser: QwenOutput::new(config),
+                parser: ChatMlOutput::new(config),
                 output: Accumulator::new(id),
             }
         }
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn terminal_cause_preserves_incomplete_call_errors_and_never_fabricates_calls() {
         for cause in [Termination::Eos, Termination::OutputLimit] {
-            let mut parser = QwenOutput::new(OutputConfig {
+            let mut parser = ChatMlOutput::new(OutputConfig {
                 reasoning: false,
                 ..config()
             });
@@ -312,7 +312,7 @@ mod tests {
             Termination::ExecutionError,
             Termination::UserStop,
         ] {
-            let mut parser = QwenOutput::new(OutputConfig {
+            let mut parser = ChatMlOutput::new(OutputConfig {
                 reasoning: false,
                 ..config()
             });

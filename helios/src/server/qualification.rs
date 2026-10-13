@@ -194,7 +194,10 @@ fn validate_prepared<M: ModelContract>(
 mod tests {
     use super::*;
     use crate::model::SamplingParameters;
-    use crate::model::qwen4exp::{PromptData, Qwen4Exp, output::OutputConfig};
+    use crate::{
+        model::qwen4exp::{PromptData, Qwen4Exp},
+        output::chatml::OutputConfig,
+    };
 
     fn prepared() -> PreparedRequest<Qwen4Exp> {
         PreparedRequest {

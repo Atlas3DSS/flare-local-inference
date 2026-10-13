@@ -18,6 +18,7 @@ def _attention(
     cu: torch.Tensor,
     out: torch.Tensor,
     scratch: torch.Tensor,
+    sink: torch.Tensor | None,
     handle: int,
 ) -> None:
     binding = varlen.bind(
@@ -30,6 +31,7 @@ def _attention(
         max_seqlen_k=k.shape[0],
         softmax_scale=q.shape[-1] ** -0.5,
         causal=False,
+        attention_sink_bias=sink,
         scratch=scratch,
     )
     values, _ = varlen.run(binding)
@@ -37,15 +39,17 @@ def _attention(
 
 
 @_attention.register_fake
-def _fake_attention(q, k, v, cu, out, scratch, handle):
+def _fake_attention(q, k, v, cu, out, scratch, sink, handle):
     pass
 
 
 class PreparedVarlenAttention:
-    def __init__(self, q, k, v, cu, out, *, session, workspace, name):
+    def __init__(self, q, k, v, cu, out, *, session, workspace, name, window=None, sink=None):
         self.q, self.k, self.v, self.cu, self.out = q, k, v, cu, out
         self.workspace = workspace
-        self.plan = varlen.plan(q, k, v, cu, max_seqlen_q=q.shape[0], max_seqlen_k=k.shape[0], causal=False)
+        self.sink = sink
+        self.plan = varlen.plan(q, k, v, cu, max_seqlen_q=q.shape[0], max_seqlen_k=k.shape[0],
+                               causal=False, window_size=window, attention_sink_bias=sink)
         arguments = {
             "q": q,
             "k": k,
@@ -55,6 +59,7 @@ class PreparedVarlenAttention:
             "max_seqlen_k": k.shape[0],
             "softmax_scale": q.shape[-1] ** -0.5,
             "causal": False,
+            "attention_sink_bias": sink,
         }
 
         def prepare(state):
@@ -82,5 +87,5 @@ class PreparedVarlenAttention:
         self.scratch = planned_scratch(self.plan.scratch_specs(), self.workspace)
 
     def __call__(self):
-        _attention(self.q, self.k, self.v, self.cu, self.out, self.scratch, self.plan.handle)
+        _attention(self.q, self.k, self.v, self.cu, self.out, self.scratch, self.sink, self.plan.handle)
         return self.out

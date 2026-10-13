@@ -49,6 +49,42 @@ def test_metadata_size_is_independent_of_storage_size():
     assert restored.untyped_storage().device.type == 'meta'
 
 
+def test_checkpoint_model_class_loads_in_fresh_worker(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from transformers import dynamic_module_utils
+
+    cache = tmp_path / 'modules'
+    source = tmp_path / 'checkpoint'
+    source.mkdir()
+    (source / 'modeling_test.py').write_text(
+        'import torch\n'
+        'class CheckpointLayer(torch.nn.Linear):\n'
+        '    pass\n'
+    )
+    monkeypatch.setattr(dynamic_module_utils, 'HF_MODULES_CACHE', str(cache))
+    layer = dynamic_module_utils.get_class_from_dynamic_module(
+        'modeling_test.CheckpointLayer', str(source), local_files_only=True)
+    payload = tmp_path / 'forward.pkl'
+    payload.write_bytes(dumps(layer(16, 32, device='meta')))
+    code = '''
+import sys
+from pathlib import Path
+from transformers import dynamic_module_utils
+from torch._subclasses import FakeTensor
+from ignition.preparation.forward_metadata import loads
+dynamic_module_utils.HF_MODULES_CACHE = sys.argv[1]
+assert sys.argv[1] not in sys.path
+assert not any(name.startswith('transformers_modules.') for name in sys.modules)
+layer = loads(Path(sys.argv[2]).read_bytes())
+assert type(layer).__name__ == 'CheckpointLayer'
+assert isinstance(layer.weight, FakeTensor)
+assert tuple(layer.weight.shape) == (32, 16)
+'''
+    subprocess.run([sys.executable, '-c', code, str(cache), str(payload)],
+                   check=True, capture_output=True, text=True)
+
+
 def test_preparation_closures_cannot_execute_in_compiler():
     owner = SimpleNamespace(callback=lambda: pytest.fail('preparation must not run'))
     restored = loads(dumps(owner))

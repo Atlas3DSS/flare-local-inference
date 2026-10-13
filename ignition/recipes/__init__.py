@@ -20,8 +20,9 @@ def recipes() -> tuple[Recipe, ...]:
     from .deepseek41.recipe import RECIPE as deepseek41
     from .glm53.recipe import RECIPE as glm53
     from .qwen38.recipe import RECIPE as qwen38
+    from .mimo_v2.recipe import RECIPE as mimo_v2
 
-    return qwen38, glm53, deepseek41, deepseek4
+    return qwen38, glm53, deepseek41, deepseek4, mimo_v2
 
 
 @dataclass(frozen=True)

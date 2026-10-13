@@ -145,12 +145,14 @@ fn modify(path: &Path, update: impl FnOnce(&mut Store)) -> Result<()> {
     result
 }
 
-pub fn authorize(package: VerifiedPackage, args: &crate::cli::Run) -> Result<AuthorizedPackage> {
-    let recognized = package.identity_verified();
+pub fn authorize(
+    package: VerifiedPackage,
+    args: &crate::cli::Run,
+    progress: &mut flare_helios::startup::StartupProgress,
+) -> Result<AuthorizedPackage> {
     let publisher = package.publisher();
     let fingerprint = publisher.fingerprint();
     let namespace = publisher.namespace.clone();
-    let development = publisher.development;
     let path = store_path(args.trust_store.as_deref())?;
     let store = load(&path)?;
     // Security-critical publisher disclosure and consent: preserve these messages and
@@ -159,18 +161,6 @@ pub fn authorize(package: VerifiedPackage, args: &crate::cli::Run) -> Result<Aut
     // §1201(a)(3). Qualifying willful violations for commercial advantage or private
     // financial gain may carry criminal penalties under §1204, subject to applicable
     // statutory limitations and exceptions.
-    if recognized {
-        eprintln!("Recognized publisher: {} ({namespace})", publisher.name);
-    } else {
-        eprintln!(
-            "Publisher identity UNVERIFIED: claimed name {} ({namespace})",
-            publisher.name
-        );
-    }
-    eprintln!(
-        "Signature valid for key: {fingerprint}\nPackage source: {}",
-        package.official_source()
-    );
     let remembered = store
         .trusted
         .iter()
@@ -180,35 +170,31 @@ pub fn authorize(package: VerifiedPackage, args: &crate::cli::Run) -> Result<Aut
         (None, None) => false,
         _ => return Err("--dangerously-approve-key and --dangerously-accept-publisher must exactly match the authenticated key and namespace".into()),
     };
-    if !recognized && !remembered {
+    if !remembered {
+        progress.finish_animation();
         eprintln!(
-            "\nDANGER: UNRECOGNIZED SIGNING KEY.\nThis checkpoint contains executable code that may compromise your process and data.\nA valid signature does not establish who owns this key. Names and source URLs can be impersonated.\nProceed only if you independently trust this exact signing key."
+            "\n{}",
+            signing_info(&package, &fingerprint, args.verify_weights)
         );
     }
     if !remembered && !explicit {
-        eprintln!("\nThis checkpoint contains executable GPU code.");
-        if development {
-            eprintln!("Local development package; it is not an official published checkpoint.");
-        } else {
-            eprintln!(
-                "IF YOU OBTAINED THIS CHECKPOINT FROM ANYWHERE OTHER THAN\n{}, DO NOT PROCEED.",
-                package.official_source()
-            );
-        }
-        eprintln!(
-            "\nTo permanently trust this signer to supply executable checkpoint code,\ntype the publisher name exactly: {namespace}"
-        );
         if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
             return Err("unattended first use requires --dangerously-approve-key FINGERPRINT --dangerously-accept-publisher NAMESPACE".into());
         }
-        eprint!("Publisher: ");
+        eprint!("\nType \x1b[1m{namespace}\x1b[0m to trust this signing key: ");
         io::stderr().flush()?;
         let response = acceptance_line(io::stdin().lock())?;
         if response != namespace {
             return Err("publisher acceptance declined or did not match".into());
         }
     }
+    let phase = args
+        .verify_weights
+        .then(|| progress.phase("Verify stored data", None));
     let authorized = package.authorize(&namespace, args.verify_weights)?;
+    if let Some(phase) = phase {
+        phase.finish("stored-data contents");
+    }
     if !remembered {
         modify(&path, |store| {
             if !store
@@ -218,20 +204,102 @@ pub fn authorize(package: VerifiedPackage, args: &crate::cli::Run) -> Result<Aut
             {
                 store.trusted.push(Entry {
                     fingerprint,
-                    namespace,
+                    namespace: namespace.clone(),
                 });
             }
         })?;
     }
-    eprintln!(
-        "Executable and supporting resources: verified as loaded. Stored-data contents: {}.",
-        if args.verify_weights {
-            "verified"
-        } else {
-            "not checked (--verify-weights to check)"
-        }
-    );
+    if !remembered {
+        eprintln!("Signing key accepted for {namespace}.\n");
+    }
     Ok(authorized)
+}
+
+fn signing_info(package: &VerifiedPackage, fingerprint: &str, verify_weights: bool) -> String {
+    let publisher = package.publisher();
+    let mut lines = vec![
+        format!("Publisher:  {} ({})", publisher.name, publisher.namespace),
+        format!(
+            "Identity:   {}",
+            if package.identity_verified() {
+                "Verified"
+            } else {
+                "Unverified"
+            }
+        ),
+        "Signature:  Valid".into(),
+        format!("Source:     {}", package.official_source()),
+        format!(
+            "Stored data: {}",
+            if verify_weights {
+                "Verification enabled"
+            } else {
+                "Not checked (--verify-weights to check)"
+            }
+        ),
+        String::new(),
+        "Signing key:".into(),
+        fingerprint.to_owned(),
+        String::new(),
+        "Executable GPU code can access your process and data.".into(),
+    ];
+    if !package.identity_verified() {
+        lines.push("A valid signature does not verify the claimed name or source.".into());
+    }
+    if publisher.development {
+        lines.push("Local development package; not an official published checkpoint.".into());
+    } else {
+        lines.push("Do not proceed if this package came from another source.".into());
+    }
+    lines.push("Only approve a signing key you independently trust.".into());
+    if !io::stderr().is_terminal() {
+        return format!("Signing key acceptance\n{}", lines.join("\n"));
+    }
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: ioctl writes terminal dimensions into a valid winsize.
+    unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
+    let columns = if size.ws_col == 0 {
+        80
+    } else {
+        usize::from(size.ws_col)
+    };
+    if columns < 28 {
+        return format!("Signing key acceptance\n{}", lines.join("\n"));
+    }
+    let width = columns.min(80) - 4;
+    let color = if package.identity_verified() {
+        "36"
+    } else {
+        "33"
+    };
+    let border = format!("\x1b[{color}m");
+    let title = " Signing key acceptance ";
+    let mut output = format!(
+        "{border}╭─{title}{}╮\x1b[0m\n",
+        "─".repeat(width + 1 - title.len())
+    );
+    for line in lines {
+        let mut remaining = line.as_str();
+        while remaining.chars().count() > width {
+            let end = remaining.char_indices().nth(width).unwrap().0;
+            let split = remaining[..end]
+                .rfind(' ')
+                .filter(|n| *n > width / 2)
+                .unwrap_or(end);
+            let row = remaining[..split].trim_end();
+            output.push_str(&format!(
+                "{border}│\x1b[0m {row}{} {border}│\x1b[0m\n",
+                " ".repeat(width - row.chars().count())
+            ));
+            remaining = remaining[split..].trim_start();
+        }
+        output.push_str(&format!(
+            "{border}│\x1b[0m {remaining}{} {border}│\x1b[0m\n",
+            " ".repeat(width - remaining.chars().count())
+        ));
+    }
+    output.push_str(&format!("{border}╰{}╯\x1b[0m", "─".repeat(width + 2)));
+    output
 }
 
 fn acceptance_line(input: impl BufRead) -> io::Result<String> {

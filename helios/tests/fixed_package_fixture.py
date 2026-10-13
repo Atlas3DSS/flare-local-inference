@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from signing import publisher
+from fixture_frontend import server_config
 import sys
 import subprocess
 
@@ -141,7 +142,7 @@ def prepare(root):
                 resources=(storage, region, transient, floating_alias),
                 export_events={"input_ready": ready.cuda_event},
                 export_zero_ranges=((transient.data_ptr(), transient.nbytes),))
-            prepared.server_config = {"assets": {}}
+            prepared.server_config = server_config(root)
             prepared.package_data = None
             del freed
             assert retained.sum().item() == 1024

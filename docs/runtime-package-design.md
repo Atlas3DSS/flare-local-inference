@@ -118,6 +118,22 @@ These tensors cover the entire data buffer without gaps or overlap. The
 protobuf is the authoritative resource description; safetensors describes
 only the two byte tensors.
 
+The index stores complete recipe-declared sampling parameters in
+`DefaultSamplingParameters` and structural frontend settings in
+`FrontendSettings`. Sampling defaults are manually verified against model-card
+recommendations for the default serving mode; checkpoint configuration does not
+select sampling policy. Missing values reject loading rather than inheriting
+another model's settings. Explicit request parameters override these defaults.
+
+`FrontendSettings` contains EOS token IDs, the special-token strings used by the
+chat template, and optional image settings. Qwen image settings contain resize
+area limits, learned-position geometry, and image/video token IDs. MiMo image
+settings contain resize limits and channel normalization. DeepSeek's image profile
+has fixed geometry validated by Ignition. Preparation reads and validates structural
+checkpoint config files, then exports only these consumed fields. The only frontend
+payload assets are `tokenizer.json` and the Jinja chat template; raw generation,
+tokenizer, processor, and model configuration files are not included.
+
 Stored allocations from every rank and offloaded embedding tables precede all
 graph bodies, cubins, module globals, and frontend assets. The protobuf sits
 at the end of the file, located directly through the JSON header. Updating
@@ -130,7 +146,7 @@ Every resource span stores its byte offset relative to `flare.payload` and
 its byte length. Spans cannot extend into `flare.metadata`. The index is
 limited to 128 MiB and contains ordered rank bundles, peer-memory ownership,
 serving configuration, frontend asset spans, allocation descriptions, kernel
-metadata, and graph declarations. TP1, TP2, and TP4 require distinct exports.
+metadata, and graph declarations. Each tensor-parallel size requires a distinct export.
 
 Graph bodies, cubins, module globals, packed tensor data, tokenizer data, and
 other frontend assets live in separate indexed payload spans inside the same
@@ -182,7 +198,10 @@ A shared reader gathers each step's rows once. `--embedding-table-storage disk` 
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
 registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
 resident memory and gathers the same rows; on GB300, Qwen's disk reads lengthened
-32-request rounds by a quarter. Both modes write bounded pinned
+32-request rounds by a quarter. RAM startup loads each plane with four readers
+issuing contiguous 4 MiB direct reads into aligned resident storage. It does not
+construct row lookups, zero-fill the table, or copy through row staging while
+loading. Both modes write bounded pinned
 staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
 512 KiB request mailbox per rank. The two DeepSeek V4.1 tables need 49.5 MiB of
 pinned row staging. Direct-I/O buffers add 8 MiB per table in disk mode.

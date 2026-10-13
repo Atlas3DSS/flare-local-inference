@@ -68,8 +68,8 @@ uv pip install --python .venv/bin/python --no-deps ./heliopause
 Inspect GPU occupancy with `nvidia-smi` before preparation or loading. Select
 available GPUs explicitly on shared hosts. `--gpus 2` means one rank on GPU 2;
 `--gpus 0,1` means two ranks on GPUs 0 and 1. With `CUDA_VISIBLE_DEVICES` set,
-indices refer to the exposed device list. TP1, TP2, and TP4 require separately
-prepared packages; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 and
+indices refer to the exposed device list. Each tensor-parallel size requires a
+separately prepared package; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 and
 GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation.
 
 Export Qwen with up to five MTP draft tokens per round:
@@ -158,6 +158,30 @@ windows, partial pages, and DSpark context. Only accepted tokens update the
 continuation state. Bidirectional image spans stay within one prefill chunk;
 the scheduler shortens a preceding text chunk when necessary. Image preprocessing,
 feature delivery, text execution, and output parsing all run natively in Helios.
+
+MiMo V2.6 Pro MOPD uses `XiaomiMiMo/MiMo-V2.6-Pro-MOPD` with checkpoint
+MXFP4 experts, block-FP8 dense projections, and BF16 draft and vision weights.
+The `mimo-v2.6-pro-mopd` alias prepares text, up to four images per request,
+and seven DFlash draft tokens with adaptive verification. Audio is not prepared.
+Select eight available GPUs:
+
+```sh
+.venv/bin/ignition export mimo-v2.6-pro-mopd --gpus 0,1,2,3,4,5,6,7 \
+  --max-concurrency 4 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/mimo-v26-pro-mopd-tp8-c4-dflash7.safetensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/mimo-v26-pro-mopd-tp8-c4-dflash7.safetensors \
+  --gpus 0,1,2,3,4,5,6,7 --bind 127.0.0.1:8001
+```
+
+Global attention uses paged KV storage; continuation rows retain sliding-window
+KV, partial pages, and accepted DFlash context. DFlash consumes selected target
+layer features and predicts an eight-position block containing the pending
+token and seven proposals. Helios uses the shared speculative execution contract;
+draft modeling and state updates are captured by Ignition. The vision encoder
+publishes compact image features for causal text prefill. Loading with
+`--mtp-draft-tokens 0` selects ordinary execution without draft-state updates.
 
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
@@ -349,6 +373,22 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 - Tests may read variables that opt into GPU tests and locate their
   checkpoints, such as `FLARE_RUN_CUDA_TESTS`. A test variable must not change
   what the code under test does.
+
+## Model-card sampling and structured runtime metadata
+
+- Agents adding or changing a recipe must read the model card and manually verify
+  its recommended sampling parameters for the default serving mode. Declare the
+  complete defaults in the Ignition recipe and cite the recommendation at that
+  declaration. Never infer sampling policy from `generation_config.json`,
+  `config.json`, Transformers defaults, or another model. Model-card recommendations
+  take precedence over conflicting config files; unspecified filters are disabled
+  and penalties are neutral. Explicit request sampling parameters override defaults.
+- Ignition validates checkpoint configuration for structural data, including
+  EOS and template tokens, image preprocessing, and vision position geometry.
+  Export only the fields Helios consumes in first-class Protobuf messages.
+  Runtime assets are the tokenizer and chat template; do not package raw generation,
+  tokenizer, processor, or model configuration files. Helios consumes prepared
+  settings without per-model sampling policy or config-file interpretation.
 
 ## Use FlashInfer and plan memory explicitly
 

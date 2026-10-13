@@ -287,7 +287,7 @@ pub(super) mod string_tests {
                     "tokenizer.json",
                     tokenizer.to_string(false).unwrap().as_bytes(),
                 ),
-                tokenizer_config: asset("tokenizer_config.json", b"{}"),
+                tokens: Default::default(),
                 chat_template: asset("chat_template.jinja", b"{{ messages[0].content }}"),
             },
             Default::default(),

@@ -64,6 +64,116 @@ class BufferForward:
         return self.output
 
 
+class ElementwiseForward:
+    def __init__(self):
+        self.source = torch.randn(4096, device="cuda")
+        self.output = torch.empty_like(self.source)
+
+    def __call__(self):
+        self.output.copy_(self.source.sin() * self.source)
+
+
+class SharedResidualForward:
+    def __init__(self, triton_write=False):
+        self.triton_write = triton_write
+        self.source = torch.randn((128, 256), device="cuda", dtype=torch.bfloat16)
+        self.attention = torch.empty((4096, 256), device="cuda", dtype=torch.bfloat16)[:128]
+        self.feed_forward = torch.empty_like(self.attention)
+        self.observed = torch.empty((4, 128, 256), device="cuda", dtype=torch.bfloat16)
+        self.output = torch.empty_like(self.source)
+
+    def fill(self, output, value):
+        if self.triton_write:
+            torch.library.wrap_triton(_fill_shared)[(triton.cdiv(output.numel(), 256),)](
+                output, output.numel(), value + .25)
+        else:
+            _fill(output, value)
+
+    def __call__(self):
+        hidden = self.source
+        for layer in range(4):
+            self.fill(self.attention, layer + 1)
+            hidden = hidden + self.attention
+            self.observed[layer].copy_(hidden.square())
+            self.fill(self.feed_forward, layer + 5)
+            hidden = hidden + self.feed_forward
+        self.output.copy_(hidden)
+
+
+@triton.jit
+def _fill_shared(output, count: tl.constexpr, value: tl.constexpr):
+    index = tl.program_id(0) * 256 + tl.arange(0, 256)
+    tl.store(output + index, value, index < count)
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("triton_write", [False, True])
+def test_residual_reads_survive_shared_scratch_overwrites(tmp_path, triton_write):
+    forward = SharedResidualForward(triton_write)
+    forward()
+    expected = forward.output.clone()
+    observed = forward.observed.clone()
+    compiled = aot_forward(forward)
+    compiled(forward)
+    torch.testing.assert_close(forward.output, expected, rtol=0, atol=0)
+    torch.testing.assert_close(forward.observed, observed, rtol=0, atol=0)
+    path = tmp_path / "residual.bin"
+    compiled.save_compiled_function(str(path))
+    with path.open("rb") as file:
+        restored = torch.compiler.load_compiled_function(file)
+    restored(forward)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
+        restored(forward)
+    for _ in range(3):
+        forward.source.normal_()
+        forward()
+        expected = forward.output.clone()
+        observed = forward.observed.clone()
+        forward.output.fill_(float("nan"))
+        forward.observed.fill_(float("nan"))
+        allocated = torch.cuda.memory_allocated()
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_allocated() == allocated
+        torch.testing.assert_close(forward.output, expected, rtol=0, atol=0)
+        torch.testing.assert_close(forward.observed, observed, rtol=0, atol=0)
+
+
+@torch.no_grad()
+def test_generated_kernels_rebind_without_compilation(tmp_path, monkeypatch):
+    from ignition.preparation.device_binding import bind_device
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two assigned GPUs")
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
+    with torch.cuda.device(0):
+        original = ElementwiseForward()
+        compiled = aot_forward(original)
+        compiled(original)
+        path = tmp_path / "elementwise.bin"
+        compiled.save_compiled_function(str(path))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("binding compiled kernels must not invoke the compiler")
+
+    with torch.cuda.device(1):
+        fresh = ElementwiseForward()
+        with monkeypatch.context() as loading:
+            loading.setattr(torch, "compile", unexpected)
+            loading.setattr(triton, "compile", unexpected)
+            with bind_device("cuda:1"), path.open("rb") as file:
+                restored = torch.compiler.load_compiled_function(file)
+        restored(fresh)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=torch.cuda.Stream(device=1)):
+            restored(fresh)
+        fresh.source.normal_()
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(fresh.output, fresh.source.sin() * fresh.source)
+
+
 @torch.no_grad()
 def test_compile_before_materializing_storage(tmp_path, monkeypatch):
     import ignition.preparation.aot as aot
@@ -122,6 +232,7 @@ def test_compiled_forward_rebinds_cuda_device_without_tracing(tmp_path, monkeypa
 
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two assigned GPUs")
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     with torch.cuda.device(0):
         original = BufferForward(19)
         compiled = aot_forward(original)
@@ -135,8 +246,10 @@ def test_compiled_forward_rebinds_cuda_device_without_tracing(tmp_path, monkeypa
     monkeypatch.setattr(torch, "compile", unexpected)
     with torch.cuda.device(1):
         fresh = BufferForward(73)
-        with bind_device("cuda:1"), _guard_code_cache(tmp_path / "guards"), path.open("rb") as file:
-            restored = torch.compiler.load_compiled_function(file)
+        with monkeypatch.context() as loading:
+            loading.setattr(triton, "compile", unexpected)
+            with bind_device("cuda:1"), _guard_code_cache(tmp_path / "guards"), path.open("rb") as file:
+                restored = torch.compiler.load_compiled_function(file)
         restored(fresh)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=torch.cuda.Stream(device=1)):

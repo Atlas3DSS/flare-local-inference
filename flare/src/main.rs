@@ -52,9 +52,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .package
         .canonicalize()
         .map_err(|error| format!("cannot access package {}: {error}", args.package.display()))?;
-    let package = VerifiedPackage::open(&root, &trust::publishers(&args.publisher_keys)?)?;
-    let publisher = package.publisher().clone();
-    let authorized = trust::authorize(package, &args)?;
     let key = args
         .api_key_file
         .as_ref()
@@ -66,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     let options = args.load_options();
     let rank_options = args.rank_options();
-    let devices = args.gpus;
+    let devices = &args.gpus;
     let inherited =
         std::env::var("CUDA_VISIBLE_DEVICES")
             .map(Some)
@@ -74,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::env::VarError::NotPresent => Ok(None),
                 error => Err(error),
             })?;
-    let visibility = environment::visibility(&devices, inherited.as_deref())?;
+    let visibility = environment::visibility(devices, inherited.as_deref())?;
     let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
     // SAFETY: Startup is single-threaded here, before Helios starts workers or
     // loads CUDA. Packages contain compiled cubins and require no driver JIT.
@@ -83,7 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("CUDA_FORCE_PRELOAD_LIBRARIES", "0");
         std::env::set_var("CUDA_DISABLE_JIT", "1");
     }
-    let progress = StartupProgress::stderr();
+    let mut progress = StartupProgress::stderr();
+    let phase = progress.phase("Verify package", None);
+    let package = VerifiedPackage::open(&root, &trust::publishers(&args.publisher_keys)?)?;
+    let publisher = package.publisher().clone();
+    phase.finish("signatures");
+    let authorized = trust::authorize(package, &args, &mut progress)?;
     // Rank zero of a multi-host package starts its peers first, so every host loads in parallel.
     let mut rendezvous = args.rendezvous;
     let _peers = if args.hosts.is_empty() {
@@ -161,6 +163,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
             serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress, cluster)
+        }
+        Some(flare_helios::model::mimo::INPUT_SCHEMA) => {
+            serve::<flare_helios::model::mimo::MiMo>(owner, config, progress, cluster)
         }
         _ => Err("unsupported model contract".into()),
     }

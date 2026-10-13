@@ -251,9 +251,7 @@ fn bootstrap_loads_glm_assets_without_a_vision_processor() {
     let snapshot = std::path::PathBuf::from(std::env::var_os("FLARE_GLM_TEST_SNAPSHOT").unwrap());
     let assets: Map<_, _> = [
         ("tokenizer", "tokenizer.json"),
-        ("tokenizer_config", "tokenizer_config.json"),
         ("chat_template", "chat_template.jinja"),
-        ("generation_config", "generation_config.json"),
     ]
     .into_iter()
     .map(|(role, name)| {
@@ -268,7 +266,13 @@ fn bootstrap_loads_glm_assets_without_a_vision_processor() {
             "vision": {"features_per_request":0, "max_images":0, "patches_per_feature":0, "patch_capacities":[]}},
         "max_sequence_tokens": config.limits.max_sequence_tokens, "prefill_chunk_size": config.limits.prefill_chunk_size,
         "pages": config.limits.pages, "snapshots": config.limits.snapshots,
-        "eos_token_ids": config.eos_token_ids, "assets": assets,
+        "frontend": {"tokenizer": crate::frontend::test_support::tokens(&crate::frontend::Asset {
+            range: None, path: snapshot.join("tokenizer_config.json"),
+            sha256: format!("{:x}", Sha256::digest(std::fs::read(snapshot.join("tokenizer_config.json")).unwrap())),
+        }).unwrap(), "eos_token_ids": config.eos_token_ids},
+        "sampling_defaults": {"seed":0, "temperature":1., "top_p":0.95, "top_k":-1,
+            "min_p":0., "repetition_penalty":1., "presence_penalty":0., "frequency_penalty":0.},
+        "assets": assets,
     });
     let bootstrap =
         crate::server::Bootstrap::load::<Glm5Next>(&config.to_string(), &manifest).unwrap();

@@ -40,7 +40,7 @@ class PreparedMLP:
 
     def __init__(self, source, weights: MLPWeights, gate_up, intermediate, output, *,
                  session, name, workspace, swiglu_limit=float("inf"), round_silu=True,
-                 activation_mode="auto"):
+                 activation_mode="auto", gate_up_bias=None, down_bias=None):
         self.gate_up, self.intermediate, self.output = gate_up, intermediate, output
         self.swiglu_limit, self.round_silu = swiglu_limit, round_silu
         if source.ndim != 2 or intermediate.ndim != 2:
@@ -53,15 +53,21 @@ class PreparedMLP:
                     or tensor.device != source.device or not tensor.is_contiguous()):
                 raise ValueError("MLP buffers require contiguous BF16 storage with matching geometry and device")
 
-        def projection(input, weight, out, suffix):
+        def projection(input, weight, out, suffix, bias):
+            from ignition.components.block_fp8 import BlockFP8Projection, BlockFP8Weight
+
+            if isinstance(weight, BlockFP8Weight):
+                if bias is not None:
+                    raise ValueError("block-FP8 MLP projections do not support bias")
+                return BlockFP8Projection(input, weight, out, session=session, name=f"{name}.{suffix}")
             if isinstance(weight, torch.Tensor):
-                return UnquantizedProjection(input, weight, out, session=session, name=f"{name}.{suffix}")
+                return UnquantizedProjection(input, weight, out, session=session, name=f"{name}.{suffix}", bias=bias)
             return QuantizedProjection(input, weight, out, session=session,
                                        name=f"{name}.{suffix}", workspace=workspace,
-                                       activation_mode=activation_mode)
+                                       activation_mode=activation_mode, bias=bias)
 
-        self.up_projection = projection(source, weights.gate_up, gate_up, "gate_up")
-        self.down_projection = projection(intermediate, weights.down, output, "down")
+        self.up_projection = projection(source, weights.gate_up, gate_up, "gate_up", gate_up_bias)
+        self.down_projection = projection(intermediate, weights.down, output, "down", down_bias)
         self.activation_plan = hyperconnection.plan(
             hyperconnection.Caps(device=source.device, max_tokens=tokens, hidden_size=width),
             invocation={"operation": "swiglu", "limit": swiglu_limit, "round_silu": round_silu},

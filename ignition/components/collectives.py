@@ -91,9 +91,9 @@ class PreparedAllReduce:
                 return PreparedCall(run=lambda: state.run(source, out=output), output=output,
                                     owners=(runtime, source, output))
         else:
-            if (runtime.world_size not in (2, 4) or runtime.algorithm != "oneshot"
+            if (runtime.world_size < 2 or runtime.algorithm != "oneshot"
                     or not runtime.single_channel):
-                raise ValueError("prepared PCIe reductions require single-channel b12x TP2 or TP4 all-reduce")
+                raise ValueError("prepared PCIe reductions require single-channel b12x direct all-reduce")
             self.plan = runtime.plan(source, out=output)
             group = runtime.exchange_group
 
@@ -178,14 +178,14 @@ class PreparedAllGather:
             self.handle = next(_HANDLES)
             _OWNERS[self.handle] = self
             return
-        if (runtime.world_size not in (2, 4) or source.ndim != 2
+        if (runtime.world_size < 2 or source.ndim != 2
                 or source.dtype != torch.bfloat16 or output.dtype != source.dtype
                 or source.device != runtime.device or output.device != source.device
                 or not source.is_contiguous() or not output.is_contiguous()
                 or not 0 < source.shape[0] <= runtime.max_batch_size
                 or source.shape[1] != runtime.heads_per_rank * runtime.query_head_dim
                 or output.shape != (source.shape[0], source.shape[1] * runtime.world_size)):
-            raise ValueError("all-gather requires contiguous BF16 column partitions matching its TP2 or TP4 channel")
+            raise ValueError("all-gather requires contiguous BF16 column partitions matching its collective channel")
         self.runtime, self.output = runtime, output
         call = {"local_input": source.view(source.shape[0], runtime.heads_per_rank, runtime.query_head_dim),
                 "out": output.view(output.shape[0], runtime.total_heads, runtime.query_head_dim)}

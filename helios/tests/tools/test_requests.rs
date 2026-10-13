@@ -36,14 +36,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let frontend = Frontend::load(
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
-            tokenizer_config: asset("tokenizer_config.json"),
+            tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json"))
+                .unwrap(),
             chat_template: asset("chat_template.jinja"),
         },
         Map::new(),
     )?;
     let processor = ImageProcessor::load(
-        asset("preprocessor_config.json"),
-        asset("config.json"),
+        flare_helios::frontend::test_support::image(
+            &asset("preprocessor_config.json"),
+            &asset("config.json"),
+        )
+        .unwrap(),
         ImageLimits::default(),
     )?;
     let config = ModelConfig {
@@ -288,7 +292,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let frontend = Frontend::load(
             FrontendAssets {
                 tokenizer: asset("tokenizer.json"),
-                tokenizer_config: asset("tokenizer_config.json"),
+                tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json")).unwrap(),
                 chat_template: asset("chat_template.jinja"),
             },
             json!({"continue_final_message":continuation,"add_generation_prompt":false,"enable_thinking":false})
