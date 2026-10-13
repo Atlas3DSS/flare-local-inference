@@ -468,7 +468,11 @@ class RuntimePackage:
                     shutil.copyfile(source, stage / destination)
                     asset_files[destination] = (name, asset["sha256"])
             payload, cursor = [], 0
-            for source in sorted(stage.iterdir()):
+            sources = sorted(stage.iterdir())
+            storage_files = {allocation["file"] for allocation in allocations if allocation["file"]}
+
+            def append_file(source):
+                nonlocal cursor
                 cursor = align(cursor)
                 size = source.stat().st_size
                 if source.name in asset_files:
@@ -479,8 +483,15 @@ class RuntimePackage:
                     span.offset, span.nbytes = cursor, size
                 payload.append((cursor, source, 0, size))
                 cursor += size
+
+            for source in sources:
+                if source.name in storage_files:
+                    append_file(source)
             if package_data is not None:
-                package_data.append(index, payload, cursor)
+                cursor = package_data.append(index, payload, cursor)
+            for source in sources:
+                if source.name not in storage_files:
+                    append_file(source)
             publish(path, index, payload)
         finally:
             if stage.exists():

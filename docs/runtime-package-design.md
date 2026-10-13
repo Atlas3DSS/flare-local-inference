@@ -1,6 +1,6 @@
 # Runtime packages: the preparation boundary and native serving
 
-Flare serves a prepared model from a runtime package: a single `.flaretensors` file holding
+Flare serves a prepared model from a runtime package: a single `.safetensors` file holding
 everything a Rust process needs to rebuild the model's CUDA graphs and
 storage without a Python interpreter. Preparation still happens in Python
 with PyTorch, Transformers, and b12x. Serving requires the NVIDIA driver,
@@ -104,10 +104,27 @@ pool holds only graph-local intermediates and is also cleared, as are unused
 bytes in the preparation allocator. Weight tensors, MTP weights, rotary
 tables, pointer tables, and required initialized metadata retain their contents.
 
-A model file starts with eight bytes `FLAREPKG`, a little-endian u64 index
-length, and a serialized `ModelIndex` from `helios/proto/runtime_package.proto`.
-The payload begins at the next 4 KiB boundary. Every resource span stores its
-byte offset relative to that payload base and its byte length. The index is
+A model file is a valid safetensors container with two one-dimensional `U8`
+tensors. Its little-endian u64 header length precedes a JSON header padded
+with spaces so the data buffer begins on a 4 KiB boundary. The JSON header is
+limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
+`flare.payload` covers the resource bytes, including alignment padding, from
+the start of the data buffer. `flare.metadata` immediately follows it and
+contains a serialized `ModelIndex` from `helios/proto/runtime_package.proto`.
+These tensors cover the entire data buffer without gaps or overlap. The
+protobuf is the authoritative resource description; safetensors describes
+only the two byte tensors.
+
+Stored allocations from every rank and offloaded embedding tables precede all
+graph bodies, cubins, module globals, and frontend assets. The protobuf sits
+at the end of the file, located directly through the JSON header. Updating
+graphs or the index does not shift the preceding storage. The payload remains
+uncompressed, allowing [Hugging Face Xet's content-defined storage](https://huggingface.co/docs/xet/deduplication)
+to deduplicate unchanged byte ranges across package revisions. Upload clients
+may still scan the complete local file to compute its chunks and hashes.
+
+Every resource span stores its byte offset relative to `flare.payload` and
+its byte length. Spans cannot extend into `flare.metadata`. The index is
 limited to 16 MiB and contains ordered rank bundles, peer-memory ownership,
 serving configuration, frontend asset spans, allocation descriptions, kernel
 metadata, and graph declarations. TP1, TP2, and TP4 require distinct exports.

@@ -17,7 +17,7 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=path.parent))
     try:
-        roots = [f'rank-{rank}.flaretensors' for rank in range(storage.world)]
+        roots = [f'rank-{rank}.safetensors' for rank in range(storage.world)]
         if storage.world > 1:
             for rank, control in enumerate(prepared.controls, 1):
                 control.send(('export', stage / roots[rank], options))

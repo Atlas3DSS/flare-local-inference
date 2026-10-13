@@ -20,17 +20,17 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Serve an exported .flaretensors package without Python.
+    /// Serve an exported .safetensors package without Python.
     Run(Run),
 }
 
 #[derive(Debug, Args)]
 #[command(
     args_override_self = true,
-    after_help = "Examples:\n  flare run model.flaretensors --gpus 0 --bind 127.0.0.1:8000\n  flare run model.flaretensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
+    after_help = "Examples:\n  flare run model.safetensors --gpus 0 --bind 127.0.0.1:8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
 )]
 pub struct Run {
-    /// Path to the prepared .flaretensors package.
+    /// Path to the prepared .safetensors package.
     #[arg(value_name = "PACKAGE")]
     pub package: PathBuf,
 
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn omitted_limits_preserve_package_defaults() {
-        let args = run(&["flare", "run", "model.flaretensors"]);
+        let args = run(&["flare", "run", "model.safetensors"]);
         assert_eq!(args.bind.to_string(), "127.0.0.1:8000");
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
@@ -158,7 +158,7 @@ mod tests {
             "--gpus=2,0",
             "--bind",
             "[::1]:8001",
-            "model.flaretensors",
+            "model.safetensors",
             "--api-key-file",
             "key.txt",
             "--max-concurrency",
@@ -175,7 +175,7 @@ mod tests {
             "--prefix-cache-disk-transport",
             "direct",
         ]);
-        assert_eq!(args.package, PathBuf::from("model.flaretensors"));
+        assert_eq!(args.package, PathBuf::from("model.safetensors"));
         assert_eq!(args.bind.to_string(), "[::1]:8001");
         assert_eq!(args.api_key_file, Some(PathBuf::from("key.txt")));
         let options = args.load_options();
@@ -204,7 +204,7 @@ mod tests {
             (vec![enable, disable], false),
             (vec![disable, enable], true),
         ] {
-            let mut arguments = vec!["flare", "run", "model.flaretensors"];
+            let mut arguments = vec!["flare", "run", "model.safetensors"];
             arguments.extend(flags);
             assert_eq!(
                 run(&arguments).load_options().adaptive_verification,

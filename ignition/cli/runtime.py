@@ -60,4 +60,4 @@ def cached_package(configuration, model, plan, no_compile):
     key = package_key(model, plan, no_compile)
     with (root / f"{key}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        yield root / f"{key}.flaretensors"
+        yield root / f"{key}.safetensors"

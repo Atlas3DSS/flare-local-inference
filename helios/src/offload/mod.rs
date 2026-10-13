@@ -588,7 +588,7 @@ mod tests {
         ] {
             let prepared = prepare(
                 &options,
-                std::path::Path::new("/missing/model.flaretensors"),
+                std::path::Path::new("/missing/model.safetensors"),
                 [0; 32],
                 Vec::new(),
                 Vec::new(),
@@ -608,7 +608,7 @@ mod tests {
                 disk_limit: Some(0),
                 ..Default::default()
             },
-            std::path::Path::new("/missing/model.flaretensors"),
+            std::path::Path::new("/missing/model.safetensors"),
             [0; 32],
             vec![geometry::tests::geometry(64, &[("kv", 4096)], 4096)],
             Vec::new(),
@@ -638,7 +638,7 @@ mod tests {
                 disk_limit: Some(0),
                 ..Default::default()
             },
-            std::path::Path::new("/missing/model.flaretensors"),
+            std::path::Path::new("/missing/model.safetensors"),
             [0; 32],
             geometry,
             Vec::new(),
@@ -676,7 +676,7 @@ mod tests {
                 disk_limit: Some(0),
                 ..Default::default()
             },
-            std::path::Path::new("/missing/model.flaretensors"),
+            std::path::Path::new("/missing/model.safetensors"),
             [0; 32],
             geometry,
             Vec::new(),

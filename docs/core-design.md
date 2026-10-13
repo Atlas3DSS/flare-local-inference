@@ -265,7 +265,7 @@ The design has three ownership boundaries:
 
 Both Flare and Heliopause depend on Helios. Helios has no Python dependency.
 The [runtime package design](runtime-package-design.md) specifies the
-`.flaretensors` boundary. The [CLI design](cli-design.md) defines configuration
+`.safetensors` boundary. The [CLI design](cli-design.md) defines configuration
 and capacity selection; the [MTP design](mtp-design.md) defines speculative
 state transactions; the [tensor-parallel design](same-process-tp.md) defines
 rank ownership and coordination.

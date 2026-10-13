@@ -167,17 +167,21 @@ against the recipe before serving requests.
 
 ## Native runtime package
 
-`ignition export MODEL --gpus N[,N...] --output model.flaretensors` prepares a
-native package for `flare run model.flaretensors`. Each TP rank has its own
+`ignition export MODEL --gpus N[,N...] --output model.safetensors` prepares a
+native package for `flare run model.safetensors`. Each TP rank has its own
 resource bundle inside the file. Helios serves ranks as threads in one Rust
 process. Ignition exits or replaces its Python process through `execv` before
 the native server starts. The CUDA driver creates context, module, function,
 graph, and executable handles from the package descriptions.
 
-The file contains an eight-byte `FLAREPKG` magic, a little-endian u64 index
-length, a Protobuf `ModelIndex`, and a payload region aligned to 4 KiB.
-Resource spans are byte offsets relative to the payload base. The index is
-limited to 16 MiB. It includes:
+The safetensors file contains two one-dimensional `U8` tensors:
+`flare.payload` holds all resource bytes and alignment padding;
+`flare.metadata` holds the Protobuf `ModelIndex` at the end of the file.
+The JSON header is limited to 64 KiB, padded to place the payload on a 4 KiB
+boundary, and declares `__metadata__: {"format": "flare"}`. Stored allocations
+and embedding tables from all ranks precede execution resources. Resource
+spans are byte offsets relative to `flare.payload`, bounded by its size.
+The index is limited to 16 MiB. It includes:
 
 - Ordered rank bundles and peer-memory ownership and access declarations.
 - Architecture, context flags, limits, cache settings, and address reservations.

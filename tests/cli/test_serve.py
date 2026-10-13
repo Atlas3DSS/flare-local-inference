@@ -172,7 +172,7 @@ def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tm
     assert host["options"]["reserve_bytes"] == reserve
     assert "headroom_bytes" not in host["options"]
     assert host["prepared"].closed
-    assert output.with_suffix(".flaretensors").is_file()
+    assert output.with_suffix(".safetensors").is_file()
     assert main(["export", "qwen3.8-flash", "--output", str(output)]) == 2
     assert host["exports"] == 1
 

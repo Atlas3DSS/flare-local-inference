@@ -231,7 +231,15 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     from ignition.preparation.package_file import read_index
 
     index, start = read_index(package_path)
+    from safetensors import safe_open
+
+    with safe_open(package_path, framework="numpy") as tensors:
+        assert tensors.keys() == ["flare.metadata", "flare.payload"]
+        assert type(index).FromString(tensors.get_tensor("flare.metadata").tobytes()) == index
     document = index.ranks[0]
+    storage = {allocation.file for allocation in document.allocations if allocation.HasField("file")}
+    storage_end = max((document.resources[key].offset + document.resources[key].nbytes for key in storage), default=0)
+    assert all(span.offset >= storage_end for key, span in document.resources.items() if key not in storage)
     def contents(key):
         span = document.resources[key]
         with package_path.open("rb") as source:

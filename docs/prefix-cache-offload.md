@@ -86,7 +86,7 @@ belong to another rank and are excluded, so each byte is copied once under
 tensor and context parallelism.
 
 `CacheGeometry`, one per rank, records the row plane (name, address,
-`unit_bytes`), the page planes in package order, the row count, and the page
+`unit_bytes`), the page planes in name order, the row count, and the page
 count. `allocate_caches` in `helios/src/runtime_package/memory.rs` collects it
 before consuming the sizing records, and `execution_manifest` in
 `helios/src/runtime_package/model.rs` attaches it to the rank's
@@ -543,7 +543,7 @@ Offload limits interference through bounded work and explicit ownership:
   value of `[paths] prefix_cache` is empty; the derived defaults are
   `~/.cache/flare/prefix-cache` for `ignition run` and, for standalone
   `flare run`, a directory beside the package file named after it with the
-  `.flaretensors` extension replaced by `.prefix-cache`.
+  `.safetensors` extension replaced by `.prefix-cache`.
 - Disk limit: one tenth of the free space on the directory's filesystem at
   startup. `[prefix_cache] disk_limit` and `--prefix-cache-disk-limit SIZE`
   override; zero selects no disk store and does not create its directory.
@@ -762,7 +762,7 @@ multi-window transfers, RAM eviction, bounded disk streaming, and restarts:
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 \
-FLARE_OFFLOAD_TEST_PACKAGE=/data/flare-runtime/qwen38-tp1-c4-mtp5-ordinary.flaretensors \
+FLARE_OFFLOAD_TEST_PACKAGE=/data/flare-runtime/qwen38-tp1-c4-mtp5-ordinary.safetensors \
 FLARE_OFFLOAD_TEST_DIR=/data/flare-offload-tests \
 cargo test --manifest-path helios/Cargo.toml --all-features offload:: -- --ignored --test-threads=1
 ```
@@ -774,7 +774,7 @@ package containing ordinary and MTP5 graphs:
 ```sh
 cargo build --release --manifest-path flare/Cargo.toml
 CUDA_VISIBLE_DEVICES=0 FLARE_RUN_CUDA_TESTS=1 \
-FLARE_OFFLOAD_TEST_PACKAGE=/data/flare-runtime/qwen38-tp1-c4-mtp5-ordinary.flaretensors \
+FLARE_OFFLOAD_TEST_PACKAGE=/data/flare-runtime/qwen38-tp1-c4-mtp5-ordinary.safetensors \
 .venv/bin/python -m pytest tests/server/test_prefix_cache_offload.py -q \
   --basetemp /data/flare-offload-tests/http
 ```
@@ -791,7 +791,7 @@ and keyed by environment variables that locate a package, following
 the whole package, so they run one at a time:
 
 ```sh
-CUDA_VISIBLE_DEVICES=0 FLARE_OFFLOAD_TEST_PACKAGE=/path/to/package.flaretensors \
+CUDA_VISIBLE_DEVICES=0 FLARE_OFFLOAD_TEST_PACKAGE=/path/to/package.safetensors \
 FLARE_OFFLOAD_TEST_DIR=/data/offload-tests \
 cargo test --manifest-path helios/Cargo.toml --all-features -- --ignored --test-threads=1 offload::
 ```

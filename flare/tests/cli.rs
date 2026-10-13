@@ -17,7 +17,7 @@ fn help_exits_successfully_before_accessing_files() {
         vec!["help", "run"],
         vec![
             "run",
-            "/nonexistent/model.flaretensors",
+            "/nonexistent/model.safetensors",
             "--embedding-table-storage",
             "disk",
             "--bind",

@@ -248,47 +248,43 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
                 Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
                 Line::from(" Enlarge terminal for history plots.")
                     .style(Style::default().fg(MUTED)),
-                Line::from(" Ctrl-C stops server").style(Style::default().fg(MUTED)),
             ]),
             area,
         );
         return;
     }
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Min(8),
         Constraint::Min(8),
         Constraint::Length(3),
-        Constraint::Length(1),
     ])
     .split(area);
     let age = history.points.back().map_or(0, |(t, _)| *t as u64);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    " FLARE ",
-                    Style::default()
-                        .fg(BACKGROUND)
-                        .bg(CYAN)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" / HELIOS  ", Style::default().fg(CYAN)),
-                Span::styled(
-                    if s.active > 0 {
-                        "● RUNNING"
-                    } else {
-                        "● READY"
-                    },
-                    Style::default().fg(GREEN),
-                ),
-                Span::styled(
-                    format!("    {:02}:{:02}:{:02}", age / 3600, age / 60 % 60, age % 60),
-                    Style::default().fg(MUTED),
-                ),
-            ]),
-            Line::from(format!(" {title}")).style(Style::default().fg(MUTED)),
-        ]),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " FLARE ",
+                Style::default()
+                    .fg(BACKGROUND)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" / HELIOS  ", Style::default().fg(CYAN)),
+            Span::styled(
+                if s.active > 0 {
+                    "● RUNNING"
+                } else {
+                    "● READY"
+                },
+                Style::default().fg(GREEN),
+            ),
+            Span::styled(
+                format!("    {:02}:{:02}:{:02}", age / 3600, age / 60 % 60, age % 60),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(format!("    {title}"), Style::default().fg(MUTED)),
+        ])),
         rows[0],
     );
     let top =
@@ -349,13 +345,6 @@ fn render(frame: &mut Frame, title: &str, history: &History) {
             .style(Style::default().fg(MUTED)),
         ]),
         rows[3],
-    );
-    frame.render_widget(
-        Paragraph::new(
-            " 2s averages · 120s history · acceptance/depth in draft tokens · Ctrl-C stops server",
-        )
-        .style(Style::default().fg(MUTED)),
-        rows[4],
     );
 }
 

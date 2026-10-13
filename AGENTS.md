@@ -10,9 +10,12 @@ Heliopause depend on Helios; Helios has no Python or preparation-tool dependency
 ## Build and run model checkpoints
 
 Run commands from the repository root. Ignition prepares a source checkpoint
-into a **runtime package**: a single `.flaretensors` file with a bounded
-Protobuf index and independently addressed graph, kernel, tensor, and frontend
-payloads. Tensor-parallel packages contain one resource bundle per rank.
+into a **runtime package**: a single `.safetensors` file with two `U8` tensors.
+`flare.payload` holds stored tensors before graph, kernel, and frontend data;
+`flare.metadata` holds the bounded Protobuf index at the end of the file.
+The protobuf describes independently addressed resources. Tensor-parallel
+packages contain one resource bundle per rank, with all ranks' storage before
+execution resources.
 Flare loads the file without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
@@ -55,14 +58,14 @@ Export Qwen with up to five MTP draft tokens per round:
 ```sh
 .venv/bin/ignition export qwen3.8-flash --gpus 2 \
   --mtp-draft-tokens 5 --max-concurrency 4 \
-  --output /data/flare-runtime/qwen38-tp1-mtp5.flaretensors --verbose
+  --output /data/flare-runtime/qwen38-tp1-mtp5.safetensors --verbose
 
 .venv/bin/ignition export qwen3.8-flash --gpus 0,1 \
   --mtp-draft-tokens 5 --max-concurrency 4 \
-  --output /data/flare-runtime/qwen38-tp2-mtp5.flaretensors --verbose
+  --output /data/flare-runtime/qwen38-tp2-mtp5.safetensors --verbose
 ```
 
-Choose an unused output filename; export appends `.flaretensors` if needed and
+Choose an unused output filename; export appends `.safetensors` if needed and
 refuses to overwrite one. Do not
 delete an existing package merely to reuse its name. `MODEL` can also be a
 supported repository ID or a local source-checkpoint directory. Ignition
@@ -95,10 +98,10 @@ GPUs explicitly:
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
   --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.flaretensors --verbose
+  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.flaretensors \
+  /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors \
   --gpus 0,4,6,8 --bind 127.0.0.1:8001
 ```
 
@@ -121,10 +124,10 @@ Use four available GPUs for preparation and serving:
 ```sh
 .venv/bin/python -m ignition export deepseek-v4-flash --gpus 3,4,5,6 \
   --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.flaretensors --verbose
+  --output /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.flaretensors \
+  /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.safetensors \
   --gpus 3,4,5,6 --bind 127.0.0.1:8001
 ```
 
@@ -151,10 +154,10 @@ batch capacities through the concurrency limit
 and every verification width through the draft-token maximum. Flare can reduce
 concurrency and draft tokens at load time; prefill capacity stays prepared.
 
-Load an exported `.flaretensors` package directly with the native CLI:
+Load an exported `.safetensors` package directly with the native CLI:
 
 ```sh
-./flare/target/release/flare run /data/flare-runtime/qwen38-tp2-mtp5.flaretensors \
+./flare/target/release/flare run /data/flare-runtime/qwen38-tp2-mtp5.safetensors \
   --gpus 0,1 --bind 127.0.0.1:8001
 curl --fail http://127.0.0.1:8001/health
 ```
@@ -162,7 +165,7 @@ curl --fail http://127.0.0.1:8001/health
 Select a subset of a package's captured execution capacities:
 
 ```sh
-./flare/target/release/flare run /data/flare-runtime/qwen38-tp1-c4-mtp5.flaretensors \
+./flare/target/release/flare run /data/flare-runtime/qwen38-tp1-c4-mtp5.safetensors \
   --gpus 2 --max-concurrency 2 --mtp-draft-tokens 3 \
   --no-mtp-adaptive-verification --bind 127.0.0.1:8001
 ```

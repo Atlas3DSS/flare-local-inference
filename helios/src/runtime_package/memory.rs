@@ -325,7 +325,7 @@ impl NativeModel {
     }
 }
 
-/// The row plane and page planes of one rank in package order, read before
+/// The row plane and page planes of one rank in name order, read before
 /// the sizing records are consumed. Peer allocations never carry sizing.
 fn cache_geometry(
     package: &Package,
@@ -356,6 +356,7 @@ fn cache_geometry(
             planes.push(plane);
         }
     }
+    planes.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let geometry = CacheGeometry {
         page_tokens,
         page_capacity: pages,
@@ -454,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_geometry_lists_planes_in_package_order_and_skips_peers() {
+    fn cache_geometry_orders_named_planes_independently_of_allocation_traversal() {
         let mut p = package(100 << 20, 2 << 20, 100000);
         p.allocations.push(Allocation {
             name: "kv-draft".into(),
@@ -496,6 +497,17 @@ mod tests {
             [("kv", 2 << 20), ("kv-draft", 4096)]
         );
         assert_eq!(geometry.planes[1].address, 0x300000000000);
+        p.allocations.reverse();
+        let reordered = cache_geometry(&p, 256, 40, 5000).unwrap();
+        assert_eq!(geometry, reordered);
+        assert!(geometry.same_layout(&reordered));
+        let original_ranks = vec![geometry.clone(); 4];
+        let mut reordered_ranks = original_ranks.clone();
+        reordered_ranks[3] = reordered;
+        assert_eq!(
+            crate::offload::geometry::fingerprint(&original_ranks),
+            crate::offload::geometry::fingerprint(&reordered_ranks),
+        );
         let mut options = package(4096, 4096, 16);
         assert_eq!(
             crate::offload::geometry::fingerprint(&[cache_geometry(&options, 64, 8, 16).unwrap()]),

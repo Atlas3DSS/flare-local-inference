@@ -15,7 +15,7 @@ timelines with operator and layer attribution, kernel counts, summed kernel
 durations, and graph elapsed time. Host graph-launch traces alone cannot
 attribute GPU work.
 
-Verify improvements through an exported `.flaretensors` package loaded by
+Verify improvements through an exported `.safetensors` package loaded by
 `flare run --embedding-table-storage ram`, including Helios's asynchronous
 row delivery. Measure disk delivery separately when it is the deployment
 configuration. For matching batch and verification width, graph rounds per

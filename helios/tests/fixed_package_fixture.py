@@ -144,7 +144,7 @@ def prepare(root):
             prepared.package_data = None
             del freed
             assert retained.sum().item() == 1024
-            assert any(start <= freed_address < end for start, end in storage.inactive_ranges())
+            assert any(start <= freed_address < end for start, end in storage.unused_ranges())
             graph_segments = storage.graph_pool.snapshot(include_traces=False)
             assert graph_segments
     package = export_model(prepared, images, storage, root / "package", options={})

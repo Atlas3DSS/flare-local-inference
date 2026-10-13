@@ -125,6 +125,10 @@ fn serve<M: ModelContract>(
         eprintln!("Could not start dashboard: {error}");
     }
     while !STOP.load(Ordering::Relaxed) && server.wait(Duration::from_millis(250)) {}
+    server.stop_dashboard();
+    // Allow the terminal multiplexer to finish restoring the main screen.
+    std::thread::sleep(Duration::from_millis(50));
+    let phase = progress.phase("Shut down server", None);
     let shutdown = server.close();
     if !shutdown.drained {
         std::mem::forget(owner);
@@ -136,5 +140,8 @@ fn serve<M: ModelContract>(
     if !STOP.load(Ordering::Relaxed) {
         return Err("native server stopped unexpectedly".into());
     }
+    drop(server);
+    drop(owner);
+    phase.finish("");
     Ok(())
 }

@@ -43,7 +43,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     descriptor, start = read_index(output)
     assert descriptor.version == 1
     assert len(descriptor.ranks) == world
-    assert sorted(exported) == [f'rank-{rank}.flaretensors' for rank in range(world)]
+    assert sorted(exported) == [f'rank-{rank}.safetensors' for rank in range(world)]
     assert output.is_file()
     assert len(descriptor.peer_memory) == (2 if world == 2 else 0)
     for owner, peer in enumerate(descriptor.peer_memory):
@@ -70,10 +70,10 @@ def test_combined_file_preserves_rank_resources_and_frontend_ranges(tmp_path):
         if rank == 0:
             index.assets.append(Asset(name='tokenizer', payload=Span(offset=13, nbytes=9)))
             index.server.update({'model_id': 'test'})
-        path = tmp_path / f'rank-{rank}.flaretensors'
+        path = tmp_path / f'rank-{rank}.safetensors'
         publish(path, index, [(3, source, 0, len(data))])
         ranks.append(path)
-    model = tmp_path / 'model.flaretensors'
+    model = tmp_path / 'model.safetensors'
     combine(model, ranks, [])
     index, start = read_index(model)
     with model.open('rb') as source:
@@ -86,7 +86,7 @@ def test_combined_file_preserves_rank_resources_and_frontend_ranges(tmp_path):
     assert index.server['model_id'] == 'test'
     with model.open('r+b') as source:
         source.truncate(model.stat().st_size - 1)
-    with pytest.raises(ValueError, match='resource exceeds model package'):
+    with pytest.raises(ValueError, match='safetensors data length'):
         read_index(model)
 
 
@@ -102,10 +102,10 @@ def test_offloaded_engram_planes_are_stored_once_and_bounds_checked(tmp_path):
             table.weights.CopyFrom(Span(offset=4096, nbytes=7))
             table.scales.CopyFrom(Span(offset=8192, nbytes=6))
             payload = [(4096, source, 0, 7), (8192, source, 12, 6)]
-        path = tmp_path / f'rank-{rank}.flaretensors'
+        path = tmp_path / f'rank-{rank}.safetensors'
         publish(path, index, payload)
         ranks.append(path)
-    output = tmp_path / 'model.flaretensors'
+    output = tmp_path / 'model.safetensors'
     combine(output, ranks, [])
     index, start = read_index(output)
     assert len(index.engram.tables) == 1
@@ -116,7 +116,8 @@ def test_offloaded_engram_planes_are_stored_once_and_bounds_checked(tmp_path):
             assert package.read(span.nbytes) == expected
     with pytest.raises(ValueError, match='stored once on rank zero'):
         combine(tmp_path / 'duplicated', [ranks[0], ranks[0]], [])
+    _, rank_start = read_index(ranks[0])
     with ranks[0].open('r+b') as package:
-        package.truncate(start + 8192 + 5)
-    with pytest.raises(ValueError, match='resource exceeds model package'):
+        package.truncate(rank_start + 8192 + 5)
+    with pytest.raises(ValueError, match='safetensors data length'):
         read_index(ranks[0])

@@ -11,7 +11,7 @@ vectors, host spans, fences, and confirmed resource drain.
 
 The server consumes the transport manifest in [manifest.md](manifest.md)
 and the Qwen4Exp semantics below. Ignition prepares graphs and persistent storage
-and exports a `.flaretensors` package. Helios loads that package into native
+and exports a `.safetensors` package. Helios loads that package into native
 resource owners before serving starts.
 Every tensor listed here is contiguous and remains allocated through confirmed
 drain of the model and completion-copy streams.

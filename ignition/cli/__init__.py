@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     running = command("run", serve.run, "cache a runtime package and launch Flare")
     exporting = command("export", serve.export, "prepare a native model package")
     exporting.add_argument("--output", type=Path, required=True, metavar="FILE",
-                           help="destination .flaretensors file; must not already exist")
+                           help="destination .safetensors file; must not already exist")
     for preparing in (running, exporting):
         _preparation_arguments(preparing)
     running.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")

@@ -75,7 +75,7 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
             owner.prepare_graphs(&archive, &package, &phase).unwrap();
         }
         let failed_source = std::env::temp_dir().join(format!(
-            "helios-engram-truncated-{}.flaretensors",
+            "helios-engram-truncated-{}.safetensors",
             std::process::id()
         ));
         if fail_read {

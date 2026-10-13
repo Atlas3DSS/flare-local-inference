@@ -103,8 +103,8 @@ def run(args) -> int:
 
 
 def export(args) -> int:
-    if args.output.suffix != ".flaretensors":
-        args.output = args.output.with_name(args.output.name + ".flaretensors")
+    if args.output.suffix != ".safetensors":
+        args.output = args.output.with_name(args.output.name + ".safetensors")
     if args.output.exists():
         raise UsageError(f"export destination already exists: {args.output}")
     return _prepare(args, export_path=args.output)

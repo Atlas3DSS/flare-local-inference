@@ -34,7 +34,7 @@ impl Plane {
     }
 }
 
-/// One rank's checkpoint storage: the row plane and the page planes in package order.
+/// One rank's checkpoint storage: the row plane and the page planes in name order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheGeometry {
     pub page_tokens: u64,

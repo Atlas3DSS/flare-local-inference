@@ -233,7 +233,7 @@ impl State {
                     "─".repeat(start) + "━━━" + &"─".repeat(7 - start)
                 }
             }
-            Status::Running => "  LOADING ".to_owned(),
+            Status::Running => " PENDING  ".to_owned(),
         };
         let label = format!("] {}.", self.label);
         let detail = if self.detail.is_empty() {

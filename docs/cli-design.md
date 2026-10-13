@@ -60,7 +60,7 @@ Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to one `.flaretensors` file
+allocation contents, graph descriptions, and frontend assets to one `.safetensors` file
 that must not exist, then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
@@ -289,7 +289,7 @@ Native startup and runtime failures exit 1.
 ### 5.2 `ignition export`
 
 Resolve the model and preparation settings as for `run`, then prepare and write
-a runtime package to `--output FILE`, appending `.flaretensors` if needed.
+a runtime package to `--output FILE`, appending `.safetensors` if needed.
 The destination must not exist. Export
 closes the prepared model and exits without starting a listener.
 

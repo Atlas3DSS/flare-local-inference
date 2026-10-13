@@ -1,4 +1,4 @@
-//! Small protobuf indexes and bounded reads from a single model file.
+//! Bounded protobuf indexes and resource reads inside a safetensors container.
 
 use super::{
     format::{Package, invalid},
@@ -6,6 +6,7 @@ use super::{
 };
 use crate::Result;
 use prost::Message;
+use serde::Deserialize;
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom, Take},
@@ -13,9 +14,43 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAGIC: &[u8; 8] = b"FLAREPKG";
+const MAX_HEADER: usize = 64 << 10;
 const MAX_INDEX: usize = 16 << 20;
 const MAX_RECORD: usize = 1 << 20;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Header {
+    #[serde(rename = "__metadata__")]
+    format: Format,
+    #[serde(rename = "flare.payload")]
+    payload: ByteTensor,
+    #[serde(rename = "flare.metadata")]
+    index: ByteTensor,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Format {
+    format: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ByteTensor {
+    dtype: String,
+    shape: [u64; 1],
+    data_offsets: [u64; 2],
+}
+impl ByteTensor {
+    fn size(&self) -> Result<u64> {
+        let [begin, end] = self.data_offsets;
+        if self.dtype != "U8" || end.checked_sub(begin) != Some(self.shape[0]) {
+            return Err(invalid("invalid package byte tensor"));
+        }
+        Ok(self.shape[0])
+    }
+}
 
 pub(super) struct Archive {
     pub path: PathBuf,
@@ -25,29 +60,49 @@ pub(super) struct Archive {
 impl Archive {
     pub fn open(path: &Path) -> Result<(Self, wire::ModelIndex)> {
         let file = File::open(path).map_err(|e| e.to_string())?;
-        let mut prefix = [0u8; 16];
+        let mut prefix = [0u8; 8];
         file.read_exact_at(&mut prefix, 0)
             .map_err(|e| e.to_string())?;
-        if &prefix[..8] != MAGIC {
-            return Err(invalid("not a Flare model package"));
+        let header_size = u64::from_le_bytes(prefix);
+        if header_size == 0 || header_size > MAX_HEADER as u64 {
+            return Err(invalid("invalid safetensors header size"));
         }
-        let size = u64::from_le_bytes(prefix[8..].try_into().unwrap());
+        let start = 8 + header_size;
+        let mut header = vec![0; header_size as usize];
+        file.read_exact_at(&mut header, 8)
+            .map_err(|e| e.to_string())?;
+        if header[0] != b'{' || start % 4096 != 0 {
+            return Err(invalid("invalid or unaligned safetensors header"));
+        }
+        let header: Header = serde_json::from_slice(&header)
+            .map_err(|e| invalid(format!("invalid safetensors header: {e}")))?;
+        if header.format.format != "flare" {
+            return Err(invalid("not a Flare safetensors package"));
+        }
+        let payload = header.payload.size()?;
+        let size = header.index.size()?;
         if size == 0 || size > MAX_INDEX as u64 {
             return Err(invalid("invalid model index size"));
         }
-        let start = (16 + size).div_ceil(4096) * 4096;
+        if header.payload.data_offsets[0] != 0 || header.index.data_offsets[0] != payload {
+            return Err(invalid(
+                "package tensors must cover the data buffer without gaps or overlap",
+            ));
+        }
+        let length = file.metadata().map_err(|e| e.to_string())?.len();
+        if length.checked_sub(start) != Some(header.index.data_offsets[1]) {
+            return Err(invalid(
+                "safetensors data length differs from model package",
+            ));
+        }
         let mut bytes = vec![0; size as usize];
-        file.read_exact_at(&mut bytes, 16)
+        file.read_exact_at(&mut bytes, start + payload)
             .map_err(|e| e.to_string())?;
         let index = wire::ModelIndex::decode(bytes.as_slice())
             .map_err(|e| invalid(format!("invalid model index: {e}")))?;
         if index.version != 1 || ![1, 2, 4].contains(&index.ranks.len()) {
             return Err(invalid("unsupported model index"));
         }
-        let length = file.metadata().map_err(|e| e.to_string())?.len();
-        let payload = length
-            .checked_sub(start)
-            .ok_or_else(|| invalid("truncated model package"))?;
         for span in index
             .ranks
             .iter()
@@ -242,6 +297,15 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new(index: &wire::ModelIndex, payload: &[u8]) -> Self {
+            let bytes = index.encode_to_vec();
+            let header = serde_json::json!({
+                "__metadata__": {"format": "flare"},
+                "flare.payload": {"dtype": "U8", "shape": [payload.len()], "data_offsets": [0, payload.len()]},
+                "flare.metadata": {"dtype": "U8", "shape": [bytes.len()], "data_offsets": [payload.len(), payload.len() + bytes.len()]},
+            });
+            Self::with_header(&header, &bytes, payload)
+        }
+        fn with_header(header: &serde_json::Value, index: &[u8], payload: &[u8]) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "flare-package-{}-{}",
                 std::process::id(),
@@ -250,19 +314,88 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-            let bytes = index.encode_to_vec();
+            let mut bytes = serde_json::to_vec(header).unwrap();
+            bytes.resize((8 + bytes.len()).div_ceil(4096) * 4096 - 8, b' ');
             let mut file = File::create(&path).unwrap();
-            file.write_all(MAGIC).unwrap();
             file.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
             file.write_all(&bytes).unwrap();
-            file.seek(SeekFrom::Start(
-                (16 + bytes.len() as u64).div_ceil(4096) * 4096,
-            ))
-            .unwrap();
             file.write_all(payload).unwrap();
+            file.write_all(index).unwrap();
             Self(path)
         }
     }
+    #[test]
+    fn safetensors_header_checks_types_extents_and_metadata_bounds() {
+        let index = wire::ModelIndex {
+            version: 1,
+            ranks: vec![wire::BundleIndex::default()],
+            ..Default::default()
+        };
+        let bytes = index.encode_to_vec();
+        let header = serde_json::json!({
+            "__metadata__": {"format": "flare"},
+            "flare.payload": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]},
+            "flare.metadata": {"dtype": "U8", "shape": [bytes.len()], "data_offsets": [4, 4 + bytes.len()]},
+        });
+        let fixture = Fixture::with_header(&header, &bytes, b"data");
+        let (archive, decoded) = Archive::open(&fixture.0).unwrap();
+        assert_eq!(archive.start, 4096);
+        assert_eq!(decoded, index);
+        for (path, value) in [
+            ("/__metadata__/format", serde_json::json!("pt")),
+            ("/flare.payload/dtype", serde_json::json!("F32")),
+            ("/flare.payload/shape", serde_json::json!([2, 2])),
+            ("/flare.payload/data_offsets", serde_json::json!([1, 5])),
+            ("/flare.metadata/data_offsets/0", serde_json::json!(3)),
+            (
+                "/flare.metadata/data_offsets/1",
+                serde_json::json!(u64::MAX),
+            ),
+            ("/flare.metadata/shape/0", serde_json::json!(MAX_INDEX + 1)),
+        ] {
+            let mut invalid = header.clone();
+            *invalid.pointer_mut(path).unwrap() = value;
+            let fixture = Fixture::with_header(&invalid, &bytes, b"data");
+            assert!(Archive::open(&fixture.0).is_err(), "{path}");
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fixture.0)
+            .unwrap();
+        file.set_len(4096 + 4 + bytes.len() as u64 - 1).unwrap();
+        assert!(Archive::open(&fixture.0).is_err());
+        file.write_all_at(&((MAX_HEADER + 1) as u64).to_le_bytes(), 0)
+            .unwrap();
+        assert!(Archive::open(&fixture.0).is_err());
+    }
+
+    #[test]
+    fn resources_cannot_address_the_protobuf_tensor() {
+        let index = wire::ModelIndex {
+            version: 1,
+            ranks: vec![wire::BundleIndex {
+                resources: [(
+                    "outside".into(),
+                    wire::Span {
+                        offset: 4,
+                        nbytes: 1,
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let fixture = Fixture::new(&index, b"data");
+        assert!(
+            Archive::open(&fixture.0)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("resource exceeds")
+        );
+    }
+
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);

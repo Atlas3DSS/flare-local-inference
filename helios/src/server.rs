@@ -358,12 +358,15 @@ impl<M: ModelContract> Server<M> {
         }
         Ok(dashboard.is_some())
     }
-    pub fn close(&self) -> Shutdown {
-        let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn stop_dashboard(&self) {
         self.dashboard
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
+    }
+    pub fn close(&self) -> Shutdown {
+        let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        self.stop_dashboard();
         if let Some(shutdown) = self
             .shutdown
             .lock()
