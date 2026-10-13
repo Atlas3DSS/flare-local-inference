@@ -246,9 +246,17 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         page_bytes = (layer_types.count("indexed_attention") + int(config.mtp)) * (4 * 64 * 528 + 64 * 132)
         max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
         context_ranks = shard.world_size if config.context_parallel and group is not None else 1
+        # Compiled forwards bind the page pools' shapes. Give in-process pools a package's
+        # full virtual extent, backed by measured pages only after compilation. Context
+        # ranks share their latent caches through CUDA IPC allocations instead.
+        virtual_pages = None
+        if package_storage is None and context_ranks == 1:
+            from ignition.preparation.virtual_storage import VirtualStorage
+
+            virtual_pages = VirtualStorage(device)
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
             state_rows + 1, pages, device, mtp=config.mtp, storage=package_storage,
-            maximum_pages=max_cache_pages, context_ranks=context_ranks)
+            maximum_pages=max_cache_pages, context_ranks=context_ranks, virtual=virtual_pages)
         requests = DeviceRequestState.allocate(device, vocab_size=154880, capacity=slots)
         inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=154880, capacity=slots)
@@ -410,9 +418,14 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     if integrated and config.compile_decoder:
         # Restored compiled forwards stay in this process's memory, which KV pages share.
         free -= sum(signature.kind in _COMPILED_KINDS for signature in signatures.values()) * COMPILED_FORWARD_BYTES
+    if virtual_pages is not None:
+        # The preparation pages stay backed and become the first of the grown pools' pages;
+        # growing rounds each pool up to the allocation granularity.
+        free += virtual_pages.nbytes - len(virtual_pages.dynamic_regions) * virtual_pages.granularity
     available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
     pages = available // page_bytes if config.pages is None else config.pages
-    if integrated and config.pages is None and pages > 0:
+    binds_pages = package_storage is None and virtual_pages is None
+    if integrated and binds_pages and config.pages is None and pages > 0:
         # Shared system memory varies between launches; a coarser page count keeps compiled
         # forwards, which bind the page pool's shape, reusable across them.
         step = 1 << max(0, (pages // 8).bit_length() - 1)
@@ -426,7 +439,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             if hasattr(forward, "rebind_pages"):
                 forward.rebind_pages(pages)
 
-    if config.compile_decoder and package_storage is None:
+    if config.compile_decoder and binds_pages:
         from b12x._lib.compile_plan import compile_only_launches
 
         with compile_only_launches():
@@ -442,6 +455,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 package_storage.grow("KV_PAGES", pages)
                 if context_ranks > 1:
                     pool.share_pages(package_storage, group)
+            elif virtual_pages is not None:
+                virtual_pages.grow("KV_PAGES", pages)
             else:
                 from ignition.components.shared_pages import SharedPages
 
@@ -506,6 +521,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         max_active=config.max_active, resources=resources, session=session,
         export_zero_ranges=disposable_ranges((decoder_storage, prefill_storage), arena, forwards),
         close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
+                         *(() if virtual_pages is None else (virtual_pages,)),
                          *(runtime for runtime in (prefill_collective, vocabulary_collective, collective)
                            if runtime is not None)),
         server_config=server_config, memory_report=memory)
