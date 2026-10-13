@@ -42,7 +42,7 @@ flashinfer-python = { path = "../flashinfer", editable = true }
 flare-heliopause = { path = "heliopause" }
 
 [tool.ignition.source-revisions]
-flashinfer = "425fb6b4095d0259228e12432b2635ae833b4a43"
+flashinfer = "64916e85d62eedfb1e8c436f8cbe103396e94559"
 
 [tool.setuptools.packages.find]
 include = ["ignition*"]
