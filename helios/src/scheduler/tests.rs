@@ -1105,6 +1105,29 @@ fn measured_acceptance_selects_the_width_with_most_tokens_per_round_time() {
 }
 
 #[test]
+fn a_width_with_one_slow_first_round_is_measured_again() {
+    use super::speculation::WidthController;
+    let widths = [1, 2, 3, 4];
+    // Width three is fastest per token once measured, but its first round took 40 ms.
+    let cost = |w: usize, first: bool| match w {
+        3 if first => 40_000_000,
+        _ => [8_000_000, 10_000_000, 12_000_000, 15_000_000][w - 1],
+    };
+    let mut c = WidthController::default();
+    // Two drafts are almost always accepted; the third keeps its even prior.
+    for _ in 0..128 {
+        c.observe_acceptance(&[(2, 2)]);
+    }
+    let mut first = [true; 4];
+    for _ in 0..69 {
+        let w = c.choose(&widths, 1, 100, 8).unwrap();
+        c.observe(1, 100, w, cost(w, first[w - 1]), 1).unwrap();
+        first[w - 1] = false;
+    }
+    assert_eq!(c.choose(&widths, 1, 100, 8), Some(3));
+}
+
+#[test]
 fn draft_boundary_page_remains_private_across_published_prefix_branches() {
     let mut scheduler = scheduler(2, 16, 4);
     scheduler.enable_speculation(&[1, 2, 4, 8]).unwrap();
