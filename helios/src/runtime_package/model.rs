@@ -158,6 +158,10 @@ pub fn rank_ranges(package: &AuthorizedPackage, rank: usize) -> Result<Vec<(u64,
     package.archive.rank_ranges(&package.index, rank)
 }
 
+/// Turns the continuation rows and KV pages this process can back into those it allocates. Ranks on
+/// separate hosts agree on the smallest any of them can back; it must not exceed what it is given.
+pub type CacheAgreement<'a> = &'a mut dyn FnMut((u64, u64)) -> Result<(u64, u64)>;
+
 impl NativeModel {
     /// # Safety
     /// All rank bundles must be trusted and obey the CUDA execution contract.
@@ -166,6 +170,20 @@ impl NativeModel {
         devices: &[i32],
         options: &LoadOptions,
         progress: &StartupProgress,
+    ) -> Result<Self> {
+        unsafe { Self::load_agreeing(authorized, devices, options, progress, &mut Ok) }
+    }
+
+    /// Load as [`NativeModel::load`] does, sizing caches through `agree`.
+    ///
+    /// # Safety
+    /// All rank bundles must be trusted and obey the CUDA execution contract.
+    pub unsafe fn load_agreeing(
+        authorized: AuthorizedPackage,
+        devices: &[i32],
+        options: &LoadOptions,
+        progress: &StartupProgress,
+        agree: CacheAgreement<'_>,
     ) -> Result<Self> {
         let device_labels = options.device_labels.as_deref().unwrap_or(devices);
         if device_labels.len() != devices.len() {
@@ -532,7 +550,7 @@ impl NativeModel {
                 });
             }
             archive.release_page_cache();
-            model.allocate_caches(&mut packages, progress, active)?;
+            model.allocate_caches(&mut packages, progress, active, agree)?;
             model.grant_peer_access(&descriptor.peer_memory)?;
             model.prepare_offload(root, options, progress)?;
         }
