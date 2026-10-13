@@ -184,7 +184,7 @@ def test_context_parallel_pages_hold_every_rank_share_unless_disabled():
                                   speculation=None)
 
 
-def test_context_parallelism_follows_the_flag_and_never_spans_hosts():
+def test_context_parallelism_follows_the_flag():
     from types import SimpleNamespace
 
     from ignition.cli.preparation import context_parallel
@@ -195,9 +195,8 @@ def test_context_parallelism_follows_the_flag_and_never_spans_hosts():
     default = SimpleNamespace(no_context_parallel=False)
     model = SimpleNamespace(recipe=sharded, checkpoint=sharded.checkpoints[0])
     assert context_parallel(default, model) and not context_parallel(flag, model)
-    assert not context_parallel(default, model, spans_hosts=True)
     whole = SimpleNamespace(recipe=PAIR, checkpoint=PAIR.checkpoints[0])
-    assert context_parallel(default, whole) and not context_parallel(default, whole, spans_hosts=True)
+    assert context_parallel(default, whole)
     with pytest.raises(UsageError, match="does not shard attention context"):
         context_parallel(flag, whole)
 

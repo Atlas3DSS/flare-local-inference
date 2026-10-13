@@ -172,7 +172,7 @@ def _export_hosts(args, *, export_path) -> int:
     plan = planning.plan(model.recipe, model.checkpoint, gpus, selected=tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                         context_parallel=context_parallel(args, model, spans_hosts=True))
+                         context_parallel=context_parallel(args, model))
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
@@ -353,7 +353,7 @@ def serve(args) -> int:
                          selected=None if args.ranks == 1 and args.gpus is None else tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                         context_parallel=context_parallel(args, model, spans_hosts=rendezvous is not None),
+                         context_parallel=context_parallel(args, model),
                          cache_states=args.prefix_cache_states)
     if rendezvous is None:
         local = plan.gpus

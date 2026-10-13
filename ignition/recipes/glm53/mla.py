@@ -53,6 +53,10 @@ class MLAScratch:
     # Ranks on separate hosts stage the head shards each peer combines, and every rank's packs.
     exchange_send: torch.Tensor
     exchange_received: torch.Tensor
+    # Prefill across hosts gathers one window of every rank's latent records at a time, [world, window * 528]
+    # bytes, with each rank's byte count in the window.
+    records: torch.Tensor
+    record_counts: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1, remote=False):
@@ -76,12 +80,17 @@ class MLAScratch:
         from ignition.components.head_exchange import pack_width
 
         width = pack_width(context_ranks, heads * context_ranks, 512) if remote and exchange else 0
+        from .dcp import WINDOW_RECORDS
+
+        window = min(WINDOW_RECORDS, blocks * 256) if remote and prefill else 0
         return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:2048], buffer(512),
             buffer(heads, 256), zeros(absorbed, heads, 512), zeros(absorbed, heads, 512), buffer(heads, 256),
             buffer(4096), zeros(tokens, dtype=torch.int32), index,
             zeros(exchange, heads * context_ranks, 512), zeros(exchange, heads * context_ranks, 512),
             zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8),
-            zeros(exchange if width else 0, width), zeros(exchange if width else 0, width * context_ranks))
+            zeros(exchange if width else 0, width), zeros(exchange if width else 0, width * context_ranks),
+            zeros(context_ranks if window else 0, window * 528, dtype=torch.uint8),
+            zeros(context_ranks if window else 0, dtype=torch.int64))
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
@@ -91,7 +100,7 @@ class MLAScratch:
             self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
             self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode),
             self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab,
-            self.exchange_send[:tokens], self.exchange_received[:tokens])
+            self.exchange_send[:tokens], self.exchange_received[:tokens], self.records, self.record_counts)
 
 
 _CHAINS = weakref.WeakValueDictionary()
@@ -270,6 +279,17 @@ class PreparedGlmMLA:
                 model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528, mode="extend")
             if scratch.slab.shape[0] != metadata.block_table.shape[1] * context.shards.page_tokens:
                 raise ValueError("GLM prefill slab must hold every position of the prepared context")
+            self.windows = ()
+            if context.remote:
+                # Ranks on separate hosts gather their records window by window instead of reading peers'
+                # caches through CUDA IPC; windows past the context's end carry no bytes.
+                from ignition.components.collectives import PreparedVarlenGather
+
+                window = scratch.records.shape[1] // 528
+                self.windows = tuple((first, PreparedVarlenGather(scratch.records, scratch.record_counts,
+                    runtime=context.heads, session=session, coordinator=context.coordinator,
+                    name=f"{name}.gather_records{first}"))
+                    for first in range(0, scratch.slab.shape[0] // context.shards.world, window))
             self.slices = []
             for start in range(0, rows, step):
                 end = min(start + step, rows)
@@ -321,9 +341,21 @@ class PreparedGlmMLA:
         from .dcp import pull_context
 
         s, m = self.scratch, self.metadata
-        # The indexer's candidate gather orders this layer's peer cache writes before these reads.
-        pull_context(self.state.peers, m.block_table[0], (m.positions.max() + 1).reshape(1),
-                     s.slab.view(torch.int32), self.context.shards)
+        end = (m.positions.max() + 1).reshape(1)
+        shards = self.context.shards
+        if self.windows:
+            from .dcp import pack_records, scatter_records, window_counts
+
+            cache = self.state.cache.view(torch.int32).view(-1, 132)
+            window = s.records.shape[1] // 528
+            for first, gather in self.windows:
+                pack_records(cache, m.block_table[0], end, s.records, shards, first)
+                s.record_counts.copy_(window_counts(end, shards.world, first, window))
+                gather()
+                scatter_records(s.records, end, s.slab.view(torch.int32), shards, first)
+        else:
+            # The indexer's candidate gather orders this layer's peer cache writes before these reads.
+            pull_context(self.state.peers, m.block_table[0], end, s.slab.view(torch.int32), shards)
         # Selected indices are global positions, which index the slab directly.
         s.visible.copy_(m.positions + 1)
         for start, end, absorb, attention, expand in self.slices:

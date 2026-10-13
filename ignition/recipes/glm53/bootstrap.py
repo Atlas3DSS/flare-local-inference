@@ -290,9 +290,15 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 gather_bytes = max(gather_bytes, exchange * (64 // shard.world_size) * 512 * 2,
                                    exchange * pack_width(shard.world_size, 64, 512) * 2,
                                    min(config.token_capacity, SLICE_ROWS) * 2048 * 2)
+            varlen_bytes = 0
+            if config.context_parallel:
+                from .dcp import WINDOW_RECORDS
+
+                # Prefill gathers each rank's latent records one window at a time.
+                varlen_bytes = min(WINDOW_RECORDS, blocks * 256) * 528
             collective = prefill_collective = vocabulary_collective = create_roce_runtime(
                 group, device, max_tokens=decode_tokens, pipe_tokens=config.token_capacity, hidden_size=4096,
-                gather_bytes=gather_bytes, package_storage=package_storage)
+                gather_bytes=gather_bytes, package_storage=package_storage, varlen_bytes=varlen_bytes)
         elif group is not None:
             collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity,
                                                    hidden_size=4096, ipc=ipc)

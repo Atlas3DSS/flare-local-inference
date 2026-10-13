@@ -215,6 +215,52 @@ class PreparedAllGather:
         return self.output
 
 
+@torch.library.custom_op("flare::roce_all_gather_varlen", mutates_args=("output",))
+def _all_gather_varlen(counts: torch.Tensor, output: torch.Tensor, handle: int) -> None:
+    owner = _OWNERS[handle]
+    owner.runtime.all_gather_varlen(owner.source, counts, out=output, plan=owner.plan)
+
+
+@_all_gather_varlen.register_fake
+def _fake_all_gather_varlen(counts, output, handle):
+    pass
+
+
+class PreparedVarlenGather:
+    """Gather byte prefixes of every rank's row of `output` [world, capacity] to every rank over RoCEnante.
+
+    Each rank writes its contribution into its own row in place; `counts` is a [world] int64 device
+    tensor of each rank's bytes, a multiple of 16, holding the same values on every rank and free to
+    change between replays. Row r then holds rank r's first counts[r] bytes on every rank; bytes
+    past them keep their values. Operations sharing the runtime must execute serially on every rank.
+    """
+
+    def __init__(self, output, counts, *, runtime, session, coordinator, name):
+        import torch.distributed as dist
+
+        if not _roce(runtime):
+            raise ValueError("variable-length gathers run over RoCEnante")
+        ranks = tuple(dist.get_process_group_ranks(runtime._group))
+        if (output.shape[0] != len(ranks) or not output.is_contiguous() or counts.shape != (len(ranks),)
+                or counts.dtype != torch.int64 or output[0].numel() * output.element_size() % 16):
+            raise ValueError("variable-length gathers require one contiguous 16-byte-multiple row per rank")
+        self.runtime, self.output, self.counts = runtime, output, counts
+        # A rank's own row is its source, so the gather leaves it in place.
+        self.source = output[ranks.index(dist.get_rank())]
+        self.plan = _roce_plan(runtime, coordinator, "AllReduce.all_gather_varlen")
+        declare(session, (self.plan.request(name=name,
+            prepare_call=lambda state: PreparedCall(
+                run=lambda: runtime._run_prepared_all_gather_varlen(self.source, counts, prepared=state, out=output),
+                output=output, owners=(runtime, self.source, counts, output)),
+            collective=CollectiveRequirement(key=name, ranks=ranks)),), coordinator=coordinator)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
+
+    def __call__(self):
+        _all_gather_varlen(self.counts, self.output, self.handle)
+        return self.output
+
+
 @torch.library.custom_op("flare::pcie_lse_reduce_scatter", mutates_args=("output",))
 def _lse_reduce_scatter(partial: torch.Tensor, lse: torch.Tensor, output: torch.Tensor, handle: int) -> None:
     owner = _OWNERS[handle]

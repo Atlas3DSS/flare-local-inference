@@ -217,6 +217,41 @@ def _pull_context(Addresses, Table, End, Slab, columns, WORLD: tl.constexpr, TOK
                 tl.store(Slab + token * WORDS + word, values, mask=word < WORDS)
 
 
+@triton.jit
+def _pack_records(Cache, Table, End, Records, Rank, columns, first, row_words, WORLD: tl.constexpr,
+                  TOKENS: tl.constexpr, WORDS: tl.constexpr, WORD_BLOCK: tl.constexpr):
+    # Copy this rank's records of local positions from `first`, below End's share, into its row.
+    rank = tl.load(Rank).to(tl.int64)
+    end = tl.load(End).to(tl.int64)
+    span = 4 * WORLD
+    count = (end // span) * 4 + tl.minimum(tl.maximum(end % span - rank * 4, 0), 4)
+    start = tl.program_id(0) * TOKENS
+    if first + start < count:
+        word = tl.arange(0, WORD_BLOCK)
+        for offset in tl.range(0, TOKENS):
+            local = first + start + offset
+            if local < count:
+                page = tl.load(Table + tl.minimum(local // 256, columns - 1)).to(tl.int64)
+                values = tl.load(Cache + (page * 256 + local % 256) * WORDS + word, mask=word < WORDS)
+                tl.store(Records + rank * row_words + (start + offset) * WORDS + word, values, mask=word < WORDS)
+
+
+@triton.jit
+def _scatter_records(Records, End, Slab, first, row_words, WORLD: tl.constexpr, TOKENS: tl.constexpr,
+                     WORDS: tl.constexpr, WORD_BLOCK: tl.constexpr):
+    # Place every rank's records of local positions from `first` at their global positions below End.
+    owner = tl.program_id(1).to(tl.int64)
+    start = tl.program_id(0) * TOKENS
+    end = tl.load(End).to(tl.int64)
+    word = tl.arange(0, WORD_BLOCK)
+    for offset in tl.range(0, TOKENS):
+        local = first + start + offset
+        token = (local // 4) * 4 * WORLD + owner * 4 + local % 4
+        if token < end:
+            values = tl.load(Records + owner * row_words + (start + offset) * WORDS + word, mask=word < WORDS)
+            tl.store(Slab + token * WORDS + word, values, mask=word < WORDS)
+
+
 def _launch(kernel, grid, args, **meta):
     from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
@@ -263,6 +298,40 @@ def pull_context(addresses, table, end, slab, shards):
     rows = slab.shape[0]
     _launch(_pull_context, (triton.cdiv(rows, _PULL_TOKENS),), (addresses, table, end, slab, table.shape[0]),
             WORLD=shards.world, TOKENS=_PULL_TOKENS, WORDS=132, WORD_BLOCK=256, num_warps=4)
+
+
+# Latent records each rank contributes per gather window when ranks on separate hosts gather prefill
+# context: its pinned RoCE rows and staging scale with the window rather than the context.
+WINDOW_RECORDS = 65536
+
+
+def window_counts(end, world, first, window):
+    """Bytes of records each rank owns among local positions [first, first + window) before `end`, [world] int64."""
+    span = 4 * world
+    ranks = torch.arange(world, device=end.device)
+    owned = (end // span) * 4 + (end % span - ranks * 4).clamp(0, 4)
+    return (owned - first).clamp(0, window) * 528
+
+
+def pack_records(cache, table, end, records, shards, first):
+    """Copy this rank's records of local positions from `first` into its row of `records` [world, window * 528].
+
+    `cache` is this rank's latent cache as [records, 132] int32 words. Rows hold whole records in local order,
+    whatever their element type.
+    """
+    words = records.view(torch.uint8).view(torch.int32)
+    window = words.shape[1] // 132
+    _launch(_pack_records, (triton.cdiv(window, _PULL_TOKENS),), (cache, table, end, words, shards.index,
+            table.shape[0], first, words.stride(0)), WORLD=shards.world, TOKENS=_PULL_TOKENS, WORDS=132,
+            WORD_BLOCK=256, num_warps=4)
+
+
+def scatter_records(records, end, slab, shards, first):
+    """Place every rank's gathered records of local positions from `first` into the slab [positions, 132] int32."""
+    words = records.view(torch.uint8).view(torch.int32)
+    window = words.shape[1] // 132
+    _launch(_scatter_records, (triton.cdiv(window, _PULL_TOKENS), shards.world), (words, end, slab, first,
+            words.stride(0)), WORLD=shards.world, TOKENS=_PULL_TOKENS, WORDS=132, WORD_BLOCK=256, num_warps=4)
 
 
 # Rows per collective slice: bounds exchange staging and gathered-head scratch for chunked prefill.

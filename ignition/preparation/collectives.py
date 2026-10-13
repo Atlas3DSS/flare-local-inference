@@ -12,7 +12,8 @@ def host_identity():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, gather_bytes, package_storage=None):
+def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, gather_bytes, package_storage=None,
+                        varlen_bytes=0):
     """Allocate RoCEnante for ranks on separate DGX Sparks: BF16 hidden reductions and logit gathers.
 
     One runtime serves every reduction and gather in rank-serial order. Reductions of up
@@ -23,6 +24,7 @@ def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, 
 
     With `package_storage`, the pinned region is package host storage at a recorded address and
     the runtime is registered for export, so a native rank can rebuild the transport over it.
+    `varlen_bytes` sizes each rank's contribution to variable-length gathers; zero prepares none.
     """
     from b12x.comm import roce
 
@@ -37,8 +39,11 @@ def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, 
 
     region = None if package_storage is None else (
         lambda size: package_storage.host_allocate("roce", (size,), torch.uint8).host_view)
+    if type(varlen_bytes) is not int or varlen_bytes < 0 or varlen_bytes % 16:
+        raise ValueError("variable-length gather capacity must be a nonnegative multiple of 16 bytes")
     runtime = roce.AllReduce(exchange_group=group, device=device, max_size=nbytes, max_gather_bytes=gather_bytes,
-                             pipe_bytes=pipe_bytes, region_allocator=region)
+                             pipe_bytes=pipe_bytes, region_allocator=region,
+                             **({"max_varlen_bytes": varlen_bytes} if varlen_bytes else {}))
     if package_storage is not None:
         package_storage.transports.append(runtime)
     return runtime
