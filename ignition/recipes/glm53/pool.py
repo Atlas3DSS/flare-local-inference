@@ -13,8 +13,8 @@ from .state import DecoderState
 
 
 def continuation_layout(layer_types, world_size, *, mtp=False):
-    if world_size not in (2, 4):
-        raise ValueError("GLM continuation storage requires TP2 or TP4")
+    if world_size not in (1, 2, 4):
+        raise ValueError("GLM continuation storage requires one, two or four ranks")
     layer_types = tuple(layer_types)
     if not layer_types:
         raise ValueError("GLM continuation storage requires attention layers")

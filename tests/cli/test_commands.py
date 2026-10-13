@@ -57,7 +57,7 @@ def test_run_uses_the_configured_model(host, tmp_path, capsys):
     (["run", "qwen3.8-flash", "--gpus", "x"], 2, "--gpus expects indices"),
     (["run", "qwen3.8-flash", "--gpus", "9"], 2, "does not have"),
     (["run", "qwen3.8-flash", "--max-concurrency", "65"], 2, "1 through 64"),
-    (["run", "glm-5.3-flash", "--gpus", "0"], 4, "needs 2 or 4 GPUs; 1 selected; use --gpus 0-1"),
+    (["run", "glm-5.3-flash", "--gpus", "0-2"], 4, "needs 1 or 2 or 4 GPUs; 3 selected; use --gpus 0-3"),
 ])
 def test_failures_use_the_documented_exit_codes(host, capsys, arguments, code, message):
     assert (run(*arguments[1:]) if arguments[0] == "run" else main(arguments)) == code

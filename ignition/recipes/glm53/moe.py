@@ -20,8 +20,8 @@ class MoeScratch:
 
     @classmethod
     def allocate(cls, tokens, world_size, device):
-        if world_size not in (2, 4):
-            raise ValueError("GLM experts require TP2 or TP4")
+        if world_size not in (1, 2, 4):
+            raise ValueError("GLM experts require one, two or four ranks")
         return cls(torch.zeros((tokens, 288), dtype=torch.float32, device=device),
                    RouterScratch.allocate(tokens, device, experts=288, top_k=8),
                    MLPScratch.allocate(tokens, 4096, 2048 // world_size, device),

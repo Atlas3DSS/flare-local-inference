@@ -80,10 +80,10 @@ class PreparationConfig:
             raise ValueError("fixed speculative width must belong to the configured widths")
         if type(self.compile_decoder) is not bool:
             raise TypeError("compile_decoder must be a boolean")
-        if (not isinstance(self.devices, tuple) or len(self.devices) not in (2, 4)
+        if (not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
                 or len(set(self.devices)) != len(self.devices)
                 or any(type(d) is not int or d < 0 for d in self.devices)):
-            raise ValueError("GLM requires two or four distinct process-local CUDA devices")
+            raise ValueError("GLM requires one, two or four distinct process-local CUDA devices")
         for name in ("context", "prefill_chunk_size", "max_active", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an integer")
@@ -162,6 +162,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     snapshot = Path(snapshot).resolve()
     shard = TensorParallelShard(rank, len(config.devices))
+    if (shard.world_size > 1) != (group is not None):
+        raise ValueError("a GLM rank group exists exactly when more than one rank prepares")
     device = torch.device("cuda", config.devices[rank])
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
@@ -187,7 +189,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         state_rows = snapshots + slots * (max(config.speculative_widths) if config.mtp else 1)
         page_bytes = (layer_types.count("indexed_attention") + int(config.mtp)) * (4 * 64 * 528 + 64 * 132)
         max_cache_pages = minimum_across_ranks(torch.cuda.mem_get_info(device)[1] // page_bytes, group)
-        context_ranks = shard.world_size if config.context_parallel else 1
+        context_ranks = shard.world_size if config.context_parallel and group is not None else 1
         pool = ContinuationPool.allocate(layer_types, shard.world_size,
             state_rows + 1, pages, device, mtp=config.mtp, storage=package_storage,
             maximum_pages=max_cache_pages, context_ranks=context_ranks)
@@ -198,14 +200,18 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
         records = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
-        coordinator = CollectivePreparation(group)
+        # One rank holds whole sums and vocabularies: it prepares no collectives.
+        coordinator = CollectivePreparation(group) if group is not None else None
         ipc = None if package_storage is None else package_storage.peer_storage
-        collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=4096, ipc=ipc)
-        prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
-                                                           hidden_size=4096, ipc=ipc)
+        collective = prefill_collective = vocabulary_collective = None
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
-        vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=sample_rows, columns=154880, ipc=ipc)
+        if group is not None:
+            collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity,
+                                                   hidden_size=4096, ipc=ipc)
+            prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
+                                                               hidden_size=4096, ipc=ipc)
+            vocabulary_collective = create_all_gather_runtime(group, device,
+                max_rows=sample_rows, columns=154880, ipc=ipc)
         identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "glm5next.graph-inputs.v2"}, sort_keys=True).encode()).hexdigest()
@@ -224,7 +230,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             submission_sequence=sequence, completion_records=records)
         forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
         context = None
-        if config.context_parallel:
+        if config.context_parallel and group is not None:
             from .dcp import SLICE_ROWS, ContextParallel, ContextShards
 
             # Only decode exchanges heads; prefill gathers context blocks instead.

@@ -41,12 +41,17 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
+        # SM103 runs routed experts through trtllm-gen with NVFP4 activations at every size.
+        expert_activation="a4" if any(gpu.capability == (10, 3) for gpu in plan.gpus) else "a16",
         mtp=speculation is not None, **drafting)
+    if plan.world_size == 1:
+        return prepare_rank(snapshot, config, rank=0, group=None, progress=progress, package_storage=package_storage)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 
 
 def usage(prepared):
-    return tuple(RankUsage(rank["pages"], rank["free_device_bytes"]) for rank in prepared.memory_report["ranks"])
+    report = prepared.memory_report
+    return tuple(RankUsage(rank["pages"], rank["free_device_bytes"]) for rank in report.get("ranks", (report,)))
 
 
 RECIPE = Recipe(
@@ -62,10 +67,13 @@ RECIPE = Recipe(
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=5), max_draft_tokens=7,
     ranks=MappingProxyType({
+        # One rank holds every head: twice TP2's recurrent rows less the replicated part.
+        1: _costs(161_123_584, _GRAPH_BYTES, ranks=1, speculating=True),
         2: _costs(81_464_576, _GRAPH_BYTES, ranks=2, speculating=True),
         4: _costs(41_635_072, _GRAPH_BYTES, ranks=4, speculating=True),
     }),
     plain_ranks=MappingProxyType({
+        1: _costs(149_230_592, _GRAPH_BYTES, ranks=1, speculating=False),
         2: _costs(75_420_672, _GRAPH_BYTES, ranks=2, speculating=False),
         4: _costs(38_515_712, _GRAPH_BYTES, ranks=4, speculating=False),
     }),

@@ -101,6 +101,10 @@ class TrtllmNvfp4Experts(Sm103Experts):
     output1_gate_scale: torch.Tensor
     output2_scale: torch.Tensor
     gate_alpha: torch.Tensor
+    # Clamped SwiGLU (min(gate, limit) and up within +-limit) per expert, in raw FC1 accumulator units
+    # as trtllm-gen applies it, or None for plain SwiGLU.
+    gate_beta: torch.Tensor | None = None
+    clamp_limit: torch.Tensor | None = None
     kind = "trtllm_nvfp4"
 
 
@@ -120,6 +124,8 @@ class CuteW4A16Experts(Sm103Experts):
     w2_scale: torch.Tensor
     w2_alpha: torch.Tensor
     scale_storage: tuple[torch.Tensor, torch.Tensor]
+    # SwiGLU clamp: min(gate, limit) and up within +-limit; None for plain SwiGLU.
+    swiglu_limit: float | None = None
     kind = "cute_w4a16"
 
 
@@ -162,13 +168,15 @@ def _interleaved_scales(scales, permutation):
     return output
 
 
-def prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors) -> TrtllmNvfp4Experts:
+def prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors, *, swiglu_limit=None) -> TrtllmNvfp4Experts:
     """Re-lay out packed NVFP4 experts for trtllm-gen; ``w13`` and ``w2`` change in place.
 
     ``s13``/``s2`` are expanded row-major E4M3 scales. ``scale_vectors`` holds
     the FC1 and FC2 weight global scales followed by the FC1 and FC2
     activation global scales (reciprocal checkpoint input scales). FC1 inputs
-    are quantized once, so every expert must share one FC1 input scale.
+    are quantized once for every route, with the largest checkpoint input scale
+    when experts differ (as vLLM's trtllm-gen path does); each expert's FC1
+    dequantization uses that shared scale.
     """
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
@@ -184,8 +192,8 @@ def prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors) -> TrtllmNvfp4
         _vector(v, experts, w13.device, name) for v, name in zip(scale_vectors, (
             "FC1 weight global scales", "FC2 weight global scales",
             "FC1 activation global scales", "FC2 activation global scales"), strict=True))
-    if not bool((a1 == a1[0]).all()):
-        raise ValueError("SM103 NVFP4 experts require one FC1 input scale shared by all experts")
+    # The smallest activation global scale is the largest input scale: no expert's inputs clip.
+    a1 = a1.min().expand_as(a1)
     cache = {}
     w13_rows = _maybe_get_cached_w3_w1_permute_indices(cache, w13[0], 128, is_gated_act_gemm=True)
     s13_rows = _maybe_get_cached_w3_w1_permute_indices(
@@ -207,10 +215,13 @@ def prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors) -> TrtllmNvfp4
         output1_gate_scale=as_device(gate),
         output2_scale=as_device(w2_global / a2),
         gate_alpha=torch.ones(experts, dtype=torch.float32, device=device),
+        gate_beta=None if swiglu_limit is None else torch.zeros(experts, dtype=torch.float32, device=device),
+        # trtllm-gen clamps raw FC1 accumulators, before the gate dequantization scale.
+        clamp_limit=None if swiglu_limit is None else as_device(float(swiglu_limit) / gate),
     )
 
 
-def prepare_cute_w4a16_experts(w13, s13, w2, s2, w13_global, w2_global) -> CuteW4A16Experts:
+def prepare_cute_w4a16_experts(w13, s13, w2, s2, w13_global, w2_global, *, swiglu_limit=None) -> CuteW4A16Experts:
     """Re-lay out packed NVFP4 experts for BF16-activation CuTe-DSL GEMMs, in place."""
     from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
 
@@ -232,7 +243,8 @@ def prepare_cute_w4a16_experts(w13, s13, w2, s2, w13_global, w2_global) -> CuteW
         w13_alpha=alphas[0], w2=w2,
         w2_scale=convert_sf_to_mma_layout(
             storage2.view(-1), m=hidden, k=intermediate, num_groups=experts, sf_vec_size=16),
-        w2_alpha=alphas[1], scale_storage=(storage13, storage2))
+        w2_alpha=alphas[1], scale_storage=(storage13, storage2),
+        swiglu_limit=None if swiglu_limit is None else float(swiglu_limit))
 
 
 @dataclass(frozen=True)
@@ -383,7 +395,7 @@ class _TrtllmNvfp4State:
         scales = scales[:tokens * hidden // 16].view(torch.float8_e4m3fn).view(tokens, hidden // 16)
         routing, method, activation = self.enums
         return self.moe(routing, None, topk_ids, topk_weights, None, values, scales,
-                        e.w13, e.w13_scale, None, None, e.gate_alpha, None, None,
+                        e.w13, e.w13_scale, None, None, e.gate_alpha, e.gate_beta, e.clamp_limit,
                         e.w2, e.w2_scale, None, e.output1_scale, e.output1_gate_scale, e.output2_scale,
                         None, q.num_experts, q.top_k, 0, None, None, q.intermediate_size, 0,
                         q.num_experts, None, method, finalize, True, activation, output, self.tactic,
@@ -434,9 +446,10 @@ class _CuteW4A16State:
 
     def run(self, a, topk_ids, topk_weights, output, scratch):
         e, q = self.experts, self.query
+        clamp = {} if e.swiglu_limit is None else {"swiglu_limit": e.swiglu_limit}
         self.launch(a, topk_ids, topk_weights, e.w13, e.w13_scale, e.w13_alpha,
                     e.w2, e.w2_scale, e.w2_alpha, q.num_experts, q.num_experts, 0, output,
-                    use_fused_finalize=False, enable_pdl=True, tactic=self.tactic)
+                    use_fused_finalize=False, enable_pdl=True, tactic=self.tactic, **clamp)
 
 
 def _state_type(experts):

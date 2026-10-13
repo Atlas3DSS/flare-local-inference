@@ -21,7 +21,8 @@ class PreparedMaintenance:
         else:
             raise ValueError("GLM init and restore require request admission buffers")
         self.state = StateMaintenance(mode, requests, transfer, slots, epochs, count, records, frame, sequence,
-            world_size=runtime.world_size, capacity=capacity, admission_buffers=admission_buffers)
+            world_size=1 if runtime is None else runtime.world_size, capacity=capacity,
+            admission_buffers=admission_buffers)
         self.state.prepare()
         self.validation = PreparedAllReduce(self.state.validation_input, self.state.validation_sum,
             runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.validation")

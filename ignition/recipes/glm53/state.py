@@ -16,8 +16,8 @@ class DecoderState:
 
     @classmethod
     def allocate(cls, layer_types, world_size, slots, pages, device):
-        if world_size not in (2, 4):
-            raise ValueError("GLM state requires TP2 or TP4")
+        if world_size not in (1, 2, 4):
+            raise ValueError("GLM state requires one, two or four ranks")
         heads = 64 // world_size
         layers = []
         for kind in layer_types:

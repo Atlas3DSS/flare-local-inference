@@ -528,12 +528,12 @@ def _sm103_fp4_experts(w13, s13, w2, s2, scale_vectors, *, format, activation_mo
     """Prepare packed NVFP4 experts with row-major scales for FlashInfer's SM103 MoE kernels."""
     from .moe_sm103 import prepare_cute_w4a16_experts, prepare_trtllm_nvfp4_experts
 
-    if format != "nvfp4" or swiglu_limit is not None:
-        raise ValueError("SM103 routed experts support NVFP4 storage with plain SwiGLU")
+    if format != "nvfp4":
+        raise ValueError("SM103 routed experts support NVFP4 storage")
     if activation_mode == "a4":
-        return prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors)
+        return prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors, swiglu_limit=swiglu_limit)
     if activation_mode == "a16":
-        return prepare_cute_w4a16_experts(w13, s13, w2, s2, *scale_vectors[:2])
+        return prepare_cute_w4a16_experts(w13, s13, w2, s2, *scale_vectors[:2], swiglu_limit=swiglu_limit)
     raise ValueError(f"SM103 routed experts do not support activation mode {activation_mode!r}")
 
 

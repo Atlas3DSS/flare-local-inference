@@ -25,8 +25,8 @@ class LayerScratch:
 
     @classmethod
     def allocate(cls, tokens, world_size, device, *, sparse, block_type, mode, blocks=0):
-        if world_size not in (2, 4):
-            raise ValueError("GLM layers require TP2 or TP4")
+        if world_size not in (1, 2, 4):
+            raise ValueError("GLM layers require one, two or four ranks")
         def buffer(width):
             return torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
         if block_type == "linear_attention":

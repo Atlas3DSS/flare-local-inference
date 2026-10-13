@@ -1,4 +1,8 @@
-"""Prepared b12x PCIe reductions embedded in compiled CUDA graphs."""
+"""Prepared b12x PCIe reductions embedded in compiled CUDA graphs.
+
+A component given no runtime serves one rank: the reduction or gather is the
+rank's own values, copied into the output its consumers read.
+"""
 
 import itertools
 import weakref
@@ -37,6 +41,10 @@ class PreparedAllReduce:
         from b12x.comm import pcie
 
         self.runtime, self.output = runtime, output
+        if runtime is None:
+            if source.shape != output.shape or source.dtype != output.dtype:
+                raise ValueError("a single-rank reduction copies its source into a matching output")
+            return
         if isinstance(runtime, pcie.DmaAllReduce):
             # Copy-engine ring for prefill-sized activations.
             from b12x.comm.pcie._dma_preparation import query_from_metadata
@@ -68,6 +76,9 @@ class PreparedAllReduce:
         _OWNERS[self.handle] = self
 
     def __call__(self, source):
+        if self.runtime is None:
+            self.output.copy_(source)
+            return self.output
         _all_reduce(source, self.output, self.handle)
         return self.output
 
@@ -104,6 +115,11 @@ class PreparedAllGather:
         import torch.distributed as dist
         from b12x.comm import pcie
 
+        self.runtime, self.output = runtime, output
+        if runtime is None:
+            if source.shape != output.shape or source.dtype != output.dtype:
+                raise ValueError("a single-rank gather copies its source into a matching output")
+            return
         if (runtime.world_size not in (2, 4) or source.ndim != 2
                 or source.dtype != torch.bfloat16 or output.dtype != source.dtype
                 or source.device != runtime.device or output.device != source.device
@@ -126,11 +142,17 @@ class PreparedAllGather:
         _OWNERS[self.handle] = self
 
     def __call__(self, source):
+        if self.runtime is None:
+            self.output.copy_(source)
+            return self.output
         _all_gather(source, self.output, self.handle)
         return self.output
 
     def run_eager(self, source):
         """Gather on the current stream from inside another eager operation."""
+        if self.runtime is None:
+            self.output.copy_(source)
+            return self.output
         _gather_columns(source, self.output, self.handle)
         return self.output
 
