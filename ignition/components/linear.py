@@ -29,6 +29,19 @@ class UnquantizedProjection:
     ) -> None:
         if any(t.dtype not in (torch.bfloat16, torch.float32) for t in (source, weight, output)):
             raise TypeError("unquantized projections require BF16 or FP32 operands")
+        self.dense = (sm103_projection.is_sm103(source.device) and bias is None
+                      and source.dtype == weight.dtype == torch.bfloat16)
+        if self.dense:
+            # b12x's GEMV reaches about 1.7 TB/s on GB300; FlashInfer's tuned GEMMs approach its bandwidth.
+            self.weight, self.bias, self.output = weight, None, output
+            self.plan = sm103_projection.dense_plan(sm103_projection.DenseProjectionQuery(
+                source.numel() // source.shape[-1], source.shape[-1], output.shape[-1],
+                str(output.dtype).removeprefix("torch.")), source.device)
+            declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
+                run=lambda: state.run(source, weight, out=output)),
+                benchmark_call=partial(bf16_fixtures.benchmark_call, source=source, weight=weight, output=output,
+                                       bias=None)),))
+            return
         query = bf16_gemv.query_from_call(source, weight, out=output, bias=bias)
         self.plan = bf16_gemv.plan(query)
         self.weight = weight
@@ -42,6 +55,9 @@ class UnquantizedProjection:
         ),))
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
+        if self.dense:
+            torch.ops.flare.sm103_dense_out(source, self.weight, self.output, self.plan.handle)
+            return self.output
         return bf16_gemv.mm(source, self.weight, out=self.output, plan=self.plan, bias=self.bias)
 
 

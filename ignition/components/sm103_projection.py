@@ -34,6 +34,8 @@ from b12x.preparation import MemoryRequirements, PersistentMemory, Plan
 from b12x.preparation.tuning import BackendConfig, Knob, TuningContract
 from b12x.preparation.types import plan_from_handle, require_prepared
 
+from .sm103 import native_contract, native_plan
+
 CAPABILITY = (10, 3)
 COMPONENT = "flare.sm103.packed_projection"
 _QUANTIZED_BACKENDS = ("cute-dsl", "cutlass")
@@ -540,3 +542,54 @@ def packed_out_workspace(source, values, scales, global_scale, activation_scale,
 
     _out_workspace(source, values, scales, global_scale, activation_scale, out, workspace,
                    global_scale_kind, stream, plan_handle, required_mode)
+
+
+# BF16 projections on SM103 run FlashInfer's GEMMs: on GB300 b12x's GEMV reaches about 1.7 TB/s
+# (734 us for a 154880x4096 vocabulary at one row, against 227 us) and its prefill rows run as GEMVs.
+DENSE_COMPONENT = "flare.sm103.dense_projection"
+_DENSE_BACKENDS = ("cublaslt", "cutlass", "cudnn")
+
+
+@dataclass(frozen=True)
+class DenseProjectionQuery:
+    rows: int
+    in_features: int
+    out_features: int
+    out_dtype: str
+
+
+class PreparedDenseProjection:
+    """One FlashInfer BF16 GEMM backend, writing BF16 or FP32 into caller-owned output."""
+
+    def __init__(self, backend):
+        self.backend = backend
+
+    def run(self, source, weight, out, bias=None):
+        from flashinfer.gemm import mm_bf16
+
+        if bias is not None:
+            raise ValueError("SM103 dense projections take no bias")
+        rows = source.numel() // source.shape[-1]
+        if rows:
+            mm_bf16(source.view(rows, -1), weight.T, out=out.view(rows, -1), out_dtype=out.dtype,
+                    backend=self.backend)
+        return out
+
+
+DENSE_TUNING = native_contract(component_id=DENSE_COMPONENT, query_type=DenseProjectionQuery,
+                               tactics=lambda query: _DENSE_BACKENDS)
+
+
+def dense_plan(query: DenseProjectionQuery, device) -> Plan:
+    return native_plan(contract=DENSE_TUNING, query=query, device=device, scratch_bytes=lambda tactic: 0,
+                       materialize=PreparedDenseProjection)
+
+
+@torch.library.custom_op("flare::sm103_dense_out", mutates_args=("out",))
+def _dense_out(source: torch.Tensor, weight: torch.Tensor, out: torch.Tensor, plan_handle: int) -> None:
+    require_prepared(plan_from_handle(plan_handle), DENSE_COMPONENT, source.device).run(source, weight, out=out)
+
+
+@_dense_out.register_fake
+def _fake_dense_out(source, weight, out, plan_handle):
+    pass
