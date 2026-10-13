@@ -57,11 +57,12 @@ pub struct Run {
     #[arg(long, value_name = "N", help_heading = "Serving options")]
     pub max_concurrency: Option<NonZeroUsize>,
 
-    /// Storage for auxiliary embedding tables (PLE/Engram).
-    #[arg(long, value_name = "MODE", default_value = "disk", help_heading = "Serving options",
+    /// Storage for auxiliary embedding tables (PLE/Engram) [default: RAM on a discrete GPU
+    /// when the tables take at most half of available memory, otherwise disk].
+    #[arg(long, value_name = "MODE", help_heading = "Serving options",
         value_parser = PossibleValuesParser::new(["disk", "ram"])
             .map(|value| if value == "disk" { Storage::Disk } else { Storage::Ram }))]
-    pub embedding_table_storage: Storage,
+    pub embedding_table_storage: Option<Storage>,
 
     /// Maximum drafts per round; 0 disables speculation [default: package setting].
     #[arg(long, value_name = "N", help_heading = "Speculation options")]
@@ -141,7 +142,7 @@ mod tests {
         assert_eq!(args.bind.to_string(), "127.0.0.1:8000");
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
-        assert_eq!(options.embedding_table_storage, Storage::Disk);
+        assert_eq!(options.embedding_table_storage, None);
         assert_eq!(options.max_concurrency, None);
         assert_eq!(options.mtp_draft_tokens, None);
         assert_eq!(options.adaptive_verification, None);
@@ -179,7 +180,7 @@ mod tests {
         assert_eq!(args.api_key_file, Some(PathBuf::from("key.txt")));
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![2, 0]));
-        assert_eq!(options.embedding_table_storage, Storage::Ram);
+        assert_eq!(options.embedding_table_storage, Some(Storage::Ram));
         assert_eq!(options.max_concurrency, Some(3));
         assert_eq!(options.mtp_draft_tokens, Some(0));
         assert_eq!(

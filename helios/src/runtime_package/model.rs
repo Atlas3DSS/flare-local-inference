@@ -298,6 +298,19 @@ impl NativeModel {
                     .map(|g| (g.batch_capacity * g.token_capacity) as usize)
                     .max()
                     .unwrap();
+                let storage = options.embedding_table_storage.unwrap_or_else(|| {
+                    let table_bytes = index
+                        .tables
+                        .iter()
+                        .flat_map(|table| &table.planes)
+                        .map(|plane| plane.nbytes as u64)
+                        .sum();
+                    crate::engram::Storage::choose(
+                        model.ranks.iter().any(|rank| rank.integrated),
+                        table_bytes,
+                        crate::engram::Storage::available_host_bytes(),
+                    )
+                });
                 model.engram = Some(crate::engram::Shared::new(
                     index,
                     root,
@@ -305,9 +318,9 @@ impl NativeModel {
                     tokens,
                     model.ranks[0].context as usize,
                     devices[0],
-                    options.embedding_table_storage,
+                    storage,
                 )?);
-                phase.finish(match options.embedding_table_storage {
+                phase.finish(match storage {
                     crate::engram::Storage::Disk => "disk",
                     crate::engram::Storage::Ram => "RAM",
                 });
