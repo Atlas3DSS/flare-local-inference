@@ -50,9 +50,12 @@ class MLAScratch:
     partial: torch.Tensor
     lse: torch.Tensor
     slab: torch.Tensor
+    # Ranks on separate hosts stage the head shards each peer combines, and every rank's packs.
+    exchange_send: torch.Tensor
+    exchange_received: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1):
+    def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1, remote=False):
         if heads not in (16, 32, 64):
             raise ValueError("GLM MLA scratch requires TP1, TP2 or TP4 head partitions")
         from .dcp import PREFILL_SLICE_ROWS, SLICE_ROWS
@@ -70,11 +73,15 @@ class MLAScratch:
         absorbed = exchange or (min(tokens, PREFILL_SLICE_ROWS) if prefill else tokens)
         # One 528-byte record per global position: `blocks` pages of 256 records on every rank.
         positions = blocks * 256 * context_ranks if prefill else 0
+        from ignition.components.head_exchange import pack_width
+
+        width = pack_width(context_ranks, heads * context_ranks, 512) if remote and exchange else 0
         return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:2048], buffer(512),
             buffer(heads, 256), zeros(absorbed, heads, 512), zeros(absorbed, heads, 512), buffer(heads, 256),
             buffer(4096), zeros(tokens, dtype=torch.int32), index,
             zeros(exchange, heads * context_ranks, 512), zeros(exchange, heads * context_ranks, 512),
-            zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8))
+            zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8),
+            zeros(exchange if width else 0, width), zeros(exchange if width else 0, width * context_ranks))
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
@@ -83,7 +90,8 @@ class MLAScratch:
             self.query_residual[:tokens], self.latent_input[:tokens],
             self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
             self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode),
-            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab)
+            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab,
+            self.exchange_send[:tokens], self.exchange_received[:tokens])
 
 
 _CHAINS = weakref.WeakValueDictionary()
@@ -297,8 +305,10 @@ class PreparedGlmMLA:
             attention = PreparedSparseMLA(gathered, state.cache, scratch.index.physical[start:end],
                 scratch.visible[start:end], scratch.index.selected_lengths[start:end], partial, caps=caps,
                 session=session, name=f"{name}.attention{start}", workspace=workspace, lse=lse)
+            remote = {} if not context.remote else {"rank": context.shards.index,
+                "staging": (scratch.exchange_send[:count], scratch.exchange_received[:count])}
             combine = PreparedLseReduceScatter(partial, lse, attended, runtime=context.heads,
-                session=session, coordinator=context.coordinator, name=f"{name}.combine{start}")
+                session=session, coordinator=context.coordinator, name=f"{name}.combine{start}", **remote)
             self.slices.append((start, end, absorb, gather, attention, combine, expand))
         if len(self.slices) == 1:
             start, end, absorb, gather = self.slices[0][:4]

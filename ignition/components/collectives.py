@@ -231,14 +231,36 @@ class PreparedLseReduceScatter:
 
     Partial outputs are [rows, heads, dim] over all heads with FP32 [rows, heads] LSE;
     the output holds this rank's contiguous head shard. Operations sharing the
-    channel must execute serially on every rank.
+    channel must execute serially on every rank. Over RoCEnante, ranks all-gather
+    the shards each peer keeps through `staging` (send [rows, width] and received
+    [rows, W * width] BF16, from head_exchange.pack_width) and merge locally;
+    `rank` is this rank as a one-element device tensor.
     """
 
-    def __init__(self, partial, lse, output, *, runtime, session, coordinator, name):
+    def __init__(self, partial, lse, output, *, runtime, session, coordinator, name, staging=None, rank=None):
         import torch.distributed as dist
         from b12x.comm import pcie
 
         rows = partial.shape[0]
+        self.roce = _roce(runtime)
+        if self.roce:
+            from .head_exchange import pack_width
+
+            heads, dim = partial.shape[1:]
+            world = runtime.world_size
+            width = pack_width(world, heads, dim)
+            send, received = (None, None) if staging is None else staging
+            if (rank is None or send is None or heads % world or partial.dtype != torch.bfloat16
+                    or lse.shape != (rows, heads) or lse.dtype != torch.float32
+                    or output.shape != (rows, heads // world, dim) or output.dtype != torch.bfloat16
+                    or send.shape[1:] != (width,) or received.shape[1:] != (world * width,)
+                    or min(send.shape[0], received.shape[0]) < rows):
+                raise ValueError("RoCE head combination requires BF16 partials, FP32 LSE, staging and the rank")
+            self.output, self.rank, self.world = output, rank, world
+            self.send, self.received = send[:rows], received[:rows]
+            self.gather = PreparedAllGather(self.send, self.received, runtime=runtime, session=session,
+                                            coordinator=coordinator, name=f"{name}.gather")
+            return
         if (partial.shape != (rows, runtime.total_heads, runtime.query_head_dim) or partial.dtype != torch.bfloat16
                 or lse.shape != (rows, runtime.total_heads) or lse.dtype != torch.float32
                 or output.shape != (rows, runtime.heads_per_rank, runtime.query_head_dim)
@@ -257,5 +279,12 @@ class PreparedLseReduceScatter:
         _OWNERS[self.handle] = self
 
     def __call__(self, partial, lse):
+        if self.roce:
+            from .head_exchange import merge, pack
+
+            pack(partial, lse, self.send, self.rank, self.world)
+            self.gather(self.send)
+            merge(self.received, partial, lse, self.output, self.rank, self.world)
+            return self.output
         _lse_reduce_scatter(partial, lse, self.output, self.handle)
         return self.output

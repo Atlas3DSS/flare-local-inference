@@ -280,6 +280,8 @@ class ContextParallel:
     heads: object
     candidates: object
     coordinator: object
+    # Ranks on separate hosts exchange through one RoCEnante runtime instead of CUDA IPC.
+    remote: bool = False
 
     def slices(self, rows):
         return [(start, min(start + SLICE_ROWS, rows)) for start in range(0, rows, SLICE_ROWS)]
