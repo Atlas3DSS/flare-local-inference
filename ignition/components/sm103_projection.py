@@ -580,8 +580,15 @@ class PreparedDenseProjection:
         return out
 
 
+def _dense_backends(query):
+    # CUTLASS's and cuDNN's TMA GEMMs need 16-byte rows; cuBLASLt serves any shape (a one-wide shared-expert gate).
+    output_bytes = 4 if query.out_dtype == "float32" else 2
+    aligned = query.out_features * output_bytes % 16 == 0 and query.in_features % 8 == 0
+    return _DENSE_BACKENDS if aligned else _DENSE_BACKENDS[:1]
+
+
 DENSE_TUNING = native_contract(component_id=DENSE_COMPONENT, query_type=DenseProjectionQuery,
-                               tactics=lambda query: _DENSE_BACKENDS)
+                               tactics=_dense_backends)
 
 
 def dense_plan(query: DenseProjectionQuery, device) -> Plan:
