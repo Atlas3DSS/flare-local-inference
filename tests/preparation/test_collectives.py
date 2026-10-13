@@ -134,3 +134,22 @@ def test_reports_ranks_on_this_host_and_whether_the_group_spans_hosts(monkeypatc
                         lambda states, value, *, group: states.__setitem__(slice(None), [value, "another-boot"]))
     owner = CollectivePreparation(object())
     assert owner.local_ranks == 1 and owner.spans_hosts
+
+
+def test_peers_adopt_rank_zero_selections_and_disagreement_fails(monkeypatch):
+    owner = coordinator(monkeypatch)
+    cache = SimpleNamespace(records={"key": "peer"})
+    monkeypatch.setattr(dist, "get_rank", lambda: 7)
+    monkeypatch.setattr(dist, "broadcast_object_list",
+                        lambda values, *, src, group: values.__setitem__(0, {"key": "zero"}))
+    owner.share_selections(cache)
+    assert cache.records == {"key": "zero"}
+
+    def selection(config):
+        return [{"name": "layer0.mlp", "component": "gemm", "config": config}]
+
+    monkeypatch.setattr(dist, "all_gather_object", lambda states, value, *, group: states.__setitem__(
+        slice(None), [{"layer0.mlp": ("gemm", '{"tile": 64}')}, value]))
+    owner.agree_selections(selection({"tile": 64}))
+    with pytest.raises(RuntimeError, match="1 kernel selections differ"):
+        owner.agree_selections(selection({"tile": 128}))

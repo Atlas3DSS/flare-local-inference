@@ -1,5 +1,6 @@
 """Bootstrap coordination of b12x collectives over an established Gloo group."""
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -100,6 +101,31 @@ class CollectivePreparation:
     @property
     def spans_hosts(self):
         return len(set(self.hosts)) > 1
+
+    def share_selections(self, cache):
+        """Adopt rank zero's cached kernel selections on every rank.
+
+        Ranks on other hosts keep their own tuning caches, and independent races choose
+        different kernels for about a quarter of GLM's requests. Compiled forwards bind rank
+        zero's scratch layouts, so every rank must run the same selections.
+        """
+        records = [cache.records if dist.get_rank() == self.ranks[0] else None]
+        dist.broadcast_object_list(records, src=self.ranks[0], group=self.group)
+        if dist.get_rank() != self.ranks[0]:
+            cache.records = dict(records[0])
+
+    def agree_selections(self, selections):
+        """Fail before compilation when ranks selected different kernels for the same request."""
+        local = {item["name"]: (item["component"], json.dumps(item["config"], sort_keys=True))
+                 for item in selections}
+        gathered = [None] * len(self.ranks)
+        dist.all_gather_object(gathered, local, group=self.group)
+        root = gathered[0]
+        differing = sorted(name for other in gathered[1:] for name, value in other.items()
+                           if name in root and root[name] != value)
+        if differing:
+            raise RuntimeError(f"{len(differing)} kernel selections differ from rank zero's, such as "
+                               f"{differing[:3]}; preparing again adopts rank zero's tuning decisions")
 
     def __call__(self, progress):
         if progress.ready_cache is not None or progress.ready_tuning:

@@ -359,9 +359,18 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     trials, _ = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
         compile_decoder=False, progress=progress, label="Measure graph memory")
-    free = torch.cuda.mem_get_info(device)[0]
+    from ignition.preparation.host_memory import device_memory_info
+
+    # An integrated GPU's allocatable memory includes the reclaimable RAM CUDA's free memory excludes.
+    integrated = torch.cuda.get_device_properties(device).is_integrated
+    free = device_memory_info(device)[0]
     available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
     pages = available // page_bytes if config.pages is None else config.pages
+    if integrated and config.pages is None and pages > 0:
+        # Shared system memory varies between launches; a coarser page count keeps compiled
+        # forwards, which bind the page pool's shape, reusable across them.
+        step = 1 << max(0, (pages // 8).bit_length() - 1)
+        pages = pages // step * step
     memory(f"after graph measurement (KV may use {max(0, available) >> 20} MiB on every rank, {max(0, pages)} pages)")
     if pages < (config.minimum_pages or config.preparation_pages) or pages * page_bytes > available:
         raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")

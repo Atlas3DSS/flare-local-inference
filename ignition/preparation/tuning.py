@@ -228,6 +228,8 @@ class RecordedPreparationSession(PreparationSession):
             if self._stop.is_set():
                 raise RuntimeError("full serving preparation requires enabled, uncancelled b12x tuning")
             requests = tuple(self._recorded_requests.values())
+            if self._coordinator is not None and self._coordinator.spans_hosts:
+                self._coordinator.share_selections(self._selection_cache())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
             # Compiler pools share the memory and CPUs of ranks on this host only.
@@ -265,6 +267,8 @@ class RecordedPreparationSession(PreparationSession):
                     "source": selection.source,
                     "config": request.plan.contract.config_payload(selection.config).to_dict(),
                     "coverage": dict(coverage.get(request.name, {}))})
+            if self._coordinator is not None and self._coordinator.spans_hosts:
+                self._coordinator.agree_selections(selections)
             self._tune_status = "finalizing"
             if self._scratch_arena is not None:
                 if self._scratch_arena.nbytes != scratch_arena["candidate_reserved_bytes"]:
