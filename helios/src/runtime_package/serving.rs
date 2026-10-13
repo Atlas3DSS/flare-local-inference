@@ -69,6 +69,7 @@ impl NativeResources {
             })
             .collect::<Result<Vec<_>>>()?;
         let manifest = ExecutionManifest {
+            collectives: None,
             engram: None,
             cache: self.cache.clone(),
             offload: None,

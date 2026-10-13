@@ -191,6 +191,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
         });
     }
     Ok(ExecutionManifest {
+        collectives: None,
         engram: None,
         cache: None,
         offload: None,

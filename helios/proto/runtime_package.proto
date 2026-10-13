@@ -9,6 +9,14 @@ message ModelIndex {
   google.protobuf.Struct server = 4;
   repeated Asset assets = 5;
   Engram engram = 6;
+  // Present when this file holds one rank of a model whose ranks run on separate hosts.
+  Cluster cluster = 7;
+}
+message Cluster {
+  uint32 world = 1;
+  uint32 rank = 2;
+  // Names the export every rank's file came from; ranks of different exports refuse to join.
+  string export_id = 3;
 }
 message Engram {
   // Raw token ID to normalized vocabulary ID; normalization runs only during preparation.
@@ -58,7 +66,31 @@ message BundleIndex {
   Context context = 8;
   map<string, Span> resources = 9;
   repeated string events = 10;
+  RoceTransport roce = 11;
 }
+// A RoCEnante (b12x.comm.roce) transport whose kernels the rank's graphs launch. Its pinned region
+// and device counters are allocations restored at their recorded addresses and zeroed; the native
+// runtime registers the region with the HCAs, reconnects every peer and runs the posting proxy.
+message RoceTransport {
+  uint32 proxy_abi = 1;
+  uint32 world = 2;
+  uint32 rank = 3;
+  uint64 region_address = 4;
+  uint64 region_bytes = 5;
+  uint64 counters_address = 6;
+  uint64 counters_bytes = 7;
+  uint64 slot_bytes = 8;
+  uint64 pipe_bytes = 9;
+  uint64 ctrl_offset = 10;
+  repeated string hcas = 11;
+  uint32 gid_index = 12;
+  uint32 traffic_class = 13;
+  uint32 rails = 14;
+  // One entry per rank, empty for this rank: the (local, remote) HCA indexes of each rail.
+  repeated RoceRoute routes = 15;
+}
+message RoceRoute { repeated RoceLink links = 1; }
+message RoceLink { uint32 local = 1; uint32 remote = 2; }
 message GraphIndex {
   string name = 1;
   uint64 flags = 2;

@@ -17,6 +17,8 @@ frontend = ["dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:ser
 images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
 server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm"]
+# RoCEnante's RDMA proxy for ranks on separate hosts; links libibverbs.
+roce = ["dep:cc", "runtime-package"]
 
 [dependencies]
 thiserror = "2.0"
@@ -46,6 +48,7 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64
 
 [build-dependencies]
 prost-build = { version = "0.14", optional = true }
+cc = { version = "1.6", optional = true }
 
 [[bin]]
 name = "test_fixed_runtime_package"

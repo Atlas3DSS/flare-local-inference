@@ -476,6 +476,12 @@ impl GraphExecutor {
             }
             Ok(true) => {}
         }
+        if let Some(health) = &self.manifest.collectives {
+            if let Err(error) = (health.0)() {
+                self.poison = Some(error.clone());
+                return Err(error);
+            }
+        }
         let pending = frame.pending.take().unwrap();
         if crate::engram::consumes(self.manifest.graphs[pending.graph_index].kind) {
             if let Some(engram) = &resources.engram {

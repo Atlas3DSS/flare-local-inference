@@ -49,6 +49,12 @@ pub struct Run {
         help_heading = "Serving options")]
     pub gpus: Vec<i32>,
 
+    /// Rank zero's address for a package whose ranks run on separate hosts: rank zero listens
+    /// there and every other host's rank joins it. Run each host's own rank file with the same
+    /// serving options.
+    #[arg(long, value_name = "HOST:PORT", help_heading = "Serving options")]
+    pub rendezvous: Option<String>,
+
     /// File containing the serving API key; omit to disable authentication.
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
     pub api_key_file: Option<PathBuf>,

@@ -16,6 +16,123 @@ pub struct NativeModel {
     pub(super) server_config: serde_json::Value,
     engram: Option<std::sync::Arc<crate::engram::Shared>>,
     offload: Option<std::sync::Arc<crate::offload::Shared>>,
+    cluster: Option<ClusterRank>,
+    roce: Vec<Option<RoceSpec>>,
+}
+
+/// This file's place in a model whose ranks run on separate hosts, one rank per file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClusterRank {
+    pub world: usize,
+    pub rank: usize,
+    /// Every rank's file of one export carries the same identifier.
+    pub export_id: String,
+}
+
+/// A RoCEnante transport a rank's graphs launch: the pinned region and device counters (restored
+/// at these addresses and zeroed), the transport geometry the kernels were compiled for, and the
+/// HCAs and per-peer rails preparation verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoceSpec {
+    pub proxy_abi: u32,
+    pub world: usize,
+    pub rank: usize,
+    pub region_address: u64,
+    pub region_bytes: u64,
+    pub counters_address: u64,
+    pub counters_bytes: u64,
+    pub slot_bytes: u64,
+    pub pipe_bytes: u64,
+    pub ctrl_offset: u64,
+    pub hcas: Vec<String>,
+    pub gid_index: u32,
+    pub traffic_class: u32,
+    pub rails: usize,
+    /// One entry per rank, empty for this rank: the (local, remote) HCA indexes of each rail.
+    pub routes: Vec<Vec<(u32, u32)>>,
+}
+
+fn roce_spec(
+    wire: protobuf::wire::RoceTransport,
+    package: &super::format::Package,
+) -> Result<RoceSpec> {
+    let spec = RoceSpec {
+        proxy_abi: wire.proxy_abi,
+        world: wire.world as usize,
+        rank: wire.rank as usize,
+        region_address: wire.region_address,
+        region_bytes: wire.region_bytes,
+        counters_address: wire.counters_address,
+        counters_bytes: wire.counters_bytes,
+        slot_bytes: wire.slot_bytes,
+        pipe_bytes: wire.pipe_bytes,
+        ctrl_offset: wire.ctrl_offset,
+        hcas: wire.hcas,
+        gid_index: wire.gid_index,
+        traffic_class: wire.traffic_class,
+        rails: wire.rails as usize,
+        routes: wire
+            .routes
+            .into_iter()
+            .map(|route| {
+                route
+                    .links
+                    .into_iter()
+                    .map(|l| (l.local, l.remote))
+                    .collect()
+            })
+            .collect(),
+    };
+    let within = |address: u64, nbytes: u64, memory: super::format::Memory| {
+        package.allocations.iter().any(|a| {
+            std::mem::discriminant(&a.memory) == std::mem::discriminant(&memory)
+                && a.address.is_some_and(|base| {
+                    base <= address
+                        && address
+                            .checked_add(nbytes)
+                            .is_some_and(|end| end <= base + a.nbytes as u64)
+                })
+        })
+    };
+    if !(2..=16).contains(&spec.world)
+        || spec.rank >= spec.world
+        || spec.routes.len() != spec.world
+        || !(1..=2).contains(&spec.rails)
+        || spec.hcas.is_empty()
+        || spec.routes.iter().enumerate().any(|(peer, links)| {
+            if peer == spec.rank {
+                !links.is_empty()
+            } else {
+                links.len() != spec.rails
+                    || links
+                        .iter()
+                        .any(|(local, _)| *local as usize >= spec.hcas.len())
+            }
+        })
+    {
+        return Err(invalid("RoCE transport geometry is inconsistent"));
+    }
+    if spec.region_bytes == 0
+        || spec
+            .ctrl_offset
+            .checked_add(4096)
+            .is_none_or(|end| end > spec.region_bytes)
+        || !within(
+            spec.region_address,
+            spec.region_bytes,
+            super::format::Memory::MappedHost,
+        )
+        || !within(
+            spec.counters_address,
+            spec.counters_bytes,
+            super::format::Memory::Device,
+        )
+    {
+        return Err(invalid(
+            "RoCE transport memory must lie in the rank's mapped host and device allocations",
+        ));
+    }
+    Ok(spec)
 }
 
 impl NativeModel {
@@ -33,6 +150,27 @@ impl NativeModel {
         }
         let phase = progress.phase("Prepare model", None);
         let (archive, mut descriptor) = Archive::open(root)?;
+        let cluster = descriptor.cluster.take().map(|c| ClusterRank {
+            world: c.world as usize,
+            rank: c.rank as usize,
+            export_id: c.export_id,
+        });
+        if let Some(cluster) = &cluster {
+            if !(2..=16).contains(&cluster.world)
+                || cluster.rank >= cluster.world
+                || descriptor.ranks.len() != 1
+                || cluster.export_id.is_empty()
+            {
+                return Err(invalid(
+                    "a multi-host package file holds exactly one rank of its cluster",
+                ));
+            }
+        }
+        let transports: Vec<_> = descriptor
+            .ranks
+            .iter_mut()
+            .map(|bundle| bundle.roce.take())
+            .collect();
         if devices.len() != descriptor.ranks.len()
             || devices.iter().collect::<HashSet<_>>().len() != devices.len()
         {
@@ -48,6 +186,20 @@ impl NativeModel {
         for package in &packages {
             package.validate()?;
             archive.validate(package)?;
+        }
+        let roce = transports
+            .into_iter()
+            .zip(&packages)
+            .map(|(wire, package)| wire.map(|w| roce_spec(w, package)).transpose())
+            .collect::<Result<Vec<_>>>()?;
+        if roce.iter().flatten().any(|spec| {
+            cluster
+                .as_ref()
+                .is_none_or(|c| (c.world, c.rank) != (spec.world, spec.rank))
+        }) {
+            return Err(invalid(
+                "a RoCE transport requires its rank's cluster identity",
+            ));
         }
         let mut server_config = protobuf::json(prost_types::Value {
             kind: Some(prost_types::value::Kind::StructValue(
@@ -208,6 +360,8 @@ impl NativeModel {
             server_config,
             engram: None,
             offload: None,
+            cluster,
+            roce,
         };
         unsafe {
             let phase = progress.phase(
@@ -475,6 +629,16 @@ impl NativeModel {
     pub fn server_config(&self) -> &serde_json::Value {
         &self.server_config
     }
+
+    /// This file's rank of a multi-host model, or None when every rank is local.
+    pub fn cluster(&self) -> Option<&ClusterRank> {
+        self.cluster.as_ref()
+    }
+
+    /// The RoCE transport local rank `rank` launches, if any.
+    pub fn roce(&self, rank: usize) -> Option<&RoceSpec> {
+        self.roce.get(rank).and_then(Option::as_ref)
+    }
 }
 
 impl Drop for NativeModel {
@@ -577,6 +741,8 @@ mod tests {
             server_config: serde_json::Value::Null,
             engram: None,
             offload: None,
+            cluster: None,
+            roce: Vec::new(),
         };
         for prefix_cache in [
             crate::offload::PrefixCacheOffload::default(),

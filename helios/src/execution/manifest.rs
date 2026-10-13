@@ -141,9 +141,22 @@ pub struct GraphDescriptor {
     pub input_bindings: Vec<InputBinding>,
 }
 
+/// A check every completed frame passes before its results are published: a transport for
+/// collectives between hosts that failed leaves the frame's results untrustworthy.
+#[derive(Clone)]
+pub struct CollectiveHealth(pub std::sync::Arc<dyn Fn() -> crate::Result<()> + Send + Sync>);
+
+impl std::fmt::Debug for CollectiveHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CollectiveHealth")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionManifest {
     pub engram: Option<crate::engram::Binding>,
+    /// Present when this rank's graphs launch collectives over a transport between hosts.
+    pub collectives: Option<CollectiveHealth>,
     /// This rank's prefix checkpoint storage, present after cache allocation.
     pub cache: Option<crate::offload::CacheGeometry>,
     /// Host prefix store resources shared by every rank, present when configured.

@@ -1,6 +1,7 @@
 //! Serve a prepared model package without a Python interpreter.
 
 mod cli;
+mod cluster;
 mod environment;
 
 use std::{
@@ -57,6 +58,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let progress = StartupProgress::stderr();
     // SAFETY: The trusted package owners remain live until every rank drains.
     let owner = unsafe { NativeModel::load(&root, &local_devices, &options, &progress)? };
+    let cluster = match (owner.cluster().cloned(), args.rendezvous) {
+        (Some(cluster), Some(address)) => Some((cluster, address)),
+        (Some(_), None) => {
+            return Err("a multi-host package requires --rendezvous HOST:PORT".into());
+        }
+        (None, Some(_)) => {
+            return Err("--rendezvous applies only to a multi-host package".into());
+        }
+        (None, None) => None,
+    };
+    if let Some((cluster, address)) = &cluster {
+        if cluster.rank != 0 {
+            return serve_peer(owner, cluster, address, progress);
+        }
+    }
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
     config["bind"] = args.bind.to_string().into();
@@ -64,18 +80,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     phase.finish(config["model_id"].as_str().unwrap_or_default());
     match config["model_contract"]["schema"].as_str() {
         Some(flare_helios::model::qwen4exp::INPUT_SCHEMA) => {
-            serve::<Qwen4Exp>(owner, config, progress)
+            serve::<Qwen4Exp>(owner, config, progress, cluster)
         }
         Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
-            serve::<Glm5Next>(owner, config, progress)
+            serve::<Glm5Next>(owner, config, progress, cluster)
         }
         Some(flare_helios::model::deepseek4::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress)
+            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress, cluster)
         }
         Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress)
+            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress, cluster)
         }
         _ => Err("unsupported model contract".into()),
+    }
+}
+
+/// Run a peer rank of a multi-host package: join rank zero and replay its coordinated steps until
+/// rank zero drains every rank.
+fn serve_peer(
+    owner: NativeModel,
+    cluster: &flare_helios::runtime_package::ClusterRank,
+    address: &str,
+    mut progress: StartupProgress,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut manifest = owner.manifests()?.remove(0);
+    let joined = cluster::peer(&owner, cluster, address, &progress)?;
+    manifest.collectives = Some(cluster::health(&joined.transport));
+    progress.finish_animation();
+    eprintln!(
+        "Serving rank {} of {} for rank zero at {address}",
+        cluster.rank, cluster.world
+    );
+    // SAFETY: The package owner and the transport stay live until rank zero confirms drain, and
+    // are intentionally retained when it does not.
+    let shutdown = unsafe {
+        flare_helios::execution::serve_rank(manifest, joined.streams, cluster.rank, cluster.world)
+    };
+    if !shutdown.drained {
+        std::mem::forget(joined.transport);
+        std::mem::forget(owner);
+        return Err("native replay did not drain".into());
+    }
+    // The proxy stops before the package releases the region it posts from.
+    drop(joined.transport);
+    drop(owner);
+    match shutdown.error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
     }
 }
 
@@ -83,14 +134,26 @@ fn serve<M: ModelContract>(
     owner: NativeModel,
     config: serde_json::Value,
     mut progress: StartupProgress,
+    cluster: Option<(flare_helios::runtime_package::ClusterRank, String)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
     let phase = progress.phase("Load tokenizer", None);
     let mut manifests = owner.manifests()?;
-    let manifest = manifests.remove(0);
-    let peers =
-        (!manifests.is_empty()).then_some(flare_helios::execution::RankPeers::Threads(manifests));
+    let mut manifest = manifests.remove(0);
+    let mut transport = None;
+    let peers = match &cluster {
+        Some((cluster, address)) => {
+            let joined = cluster::rank_zero(&owner, cluster, address, &progress)?;
+            manifest.collectives = Some(cluster::health(&joined.transport));
+            transport = Some(joined.transport);
+            Some(flare_helios::execution::RankPeers::Processes(
+                joined.streams,
+            ))
+        }
+        None => (!manifests.is_empty())
+            .then_some(flare_helios::execution::RankPeers::Threads(manifests)),
+    };
     let bootstrap = Bootstrap::load::<M>(&config.to_string(), &manifest)?;
     phase.finish(format!(
         "{} token vocabulary",
@@ -110,6 +173,7 @@ fn serve<M: ModelContract>(
         Ok(server) => server,
         Err(error) => {
             if !error.drained {
+                std::mem::forget(transport);
                 std::mem::forget(owner);
             }
             return Err(error.message.into());
@@ -131,6 +195,7 @@ fn serve<M: ModelContract>(
     let phase = progress.phase("Shut down server", None);
     let shutdown = server.close();
     if !shutdown.drained {
+        std::mem::forget(transport);
         std::mem::forget(owner);
         return Err("native replay did not drain".into());
     }
@@ -141,6 +206,8 @@ fn serve<M: ModelContract>(
         return Err("native server stopped unexpectedly".into());
     }
     drop(server);
+    // The proxy stops before the package releases the region it posts from.
+    drop(transport);
     drop(owner);
     phase.finish("");
     Ok(())

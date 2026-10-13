@@ -163,6 +163,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
     }
     ExecutionManifest {
         engram: None,
+        collectives: None,
         cache: None,
         offload: None,
         abi_version: if config.speculative_widths.is_empty() {

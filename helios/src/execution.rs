@@ -4,6 +4,9 @@ mod manifest;
 mod parallel;
 mod rank_stream;
 mod ranks;
+pub mod rendezvous;
+#[cfg(feature = "roce")]
+pub mod roce;
 mod threaded;
 pub use rank_stream::RankStream;
 pub use ranks::RankPeers;
@@ -20,7 +23,7 @@ pub use worker::{ExecutionWorker, OwnedUpload};
 mod tests;
 
 pub use manifest::{
-    ABI_VERSION, BATCH_CAPACITIES, BufferDescriptor, Dtype, ExecutionManifest, GraphDescriptor,
-    GraphKind, InputBinding, MAX_OUTPUT_TOKENS, RECORD_FIELDS, REQUEST_LANES,
+    ABI_VERSION, BATCH_CAPACITIES, BufferDescriptor, CollectiveHealth, Dtype, ExecutionManifest,
+    GraphDescriptor, GraphKind, InputBinding, MAX_OUTPUT_TOKENS, RECORD_FIELDS, REQUEST_LANES,
     SPECULATIVE_ABI_VERSION, SamplingMode, VECTOR_RECORD_FIELDS,
 };

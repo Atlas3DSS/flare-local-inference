@@ -123,6 +123,7 @@ pub(super) fn manifest() -> ExecutionManifest {
     };
     ExecutionManifest {
         engram: None,
+        collectives: None,
         cache: None,
         offload: None,
         abi_version: ABI_VERSION,

@@ -671,6 +671,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "blake2",
+ "cc",
  "crossterm",
  "io-uring",
  "libc",
