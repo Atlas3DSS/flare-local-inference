@@ -1,5 +1,6 @@
 """Publish a model package containing one native resource bundle per rank."""
 
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -45,28 +46,37 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
 
 def export_cluster_package(prepared, images, storage, path, *, peer_files, options, export_id, world,
                            progress=None):
-    """Export rank zero, pull every peer's exported rank, and write one package holding every rank.
+    """Export rank zero, append every peer's exported rank, and publish one package holding every rank.
 
-    `peer_files` yields (host, path) for ranks 1 onward, in order, once each peer exported its
-    rank. Every file is copied here with rsync over ssh and removed from its host. The package
-    names its cluster and export id; `flare run --hosts` serves each rank on its own host.
+    `peer_files` yields (host, path) for ranks 1 onward, in order, once each peer exported its rank.
+    Each file streams over ssh straight into the package and is then removed from its host, so this
+    disk holds the package once. The package names its cluster and export id; `flare run --hosts`
+    serves each rank on its own host.
     """
     import subprocess
 
+    from .package_file import extend_cluster
+
     path = Path(path)
+    if path.exists():
+        raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=path.parent))
+    partial = path.with_name(f".{path.name}.partial")
+    partial.unlink(missing_ok=True)
+
+    def streams():
+        for host, source in peer_files:
+            ssh = ["ssh", "-o", "BatchMode=yes", host]
+            with subprocess.Popen([*ssh, "cat", source], stdout=subprocess.PIPE) as reader:
+                yield reader.stdout
+                reader.stdout.close()
+                if reader.wait() != 0:
+                    raise RuntimeError(f"reading {host}:{source} failed")
+            subprocess.run([*ssh, "rm", "-rf", str(Path(source).parent)], check=True)
+
     try:
-        files = [stage / "rank-0.safetensors"]
-        export_model(prepared, images, storage, files[0], options=options, progress=progress)
-        for rank, (host, source) in enumerate(peer_files, 1):
-            files.append(stage / f"rank-{rank}.safetensors")
-            subprocess.run(["rsync", "-a", "-e", "ssh -o BatchMode=yes", f"{host}:{source}", str(files[-1])],
-                           check=True)
-            subprocess.run(["ssh", "-o", "BatchMode=yes", host, "rm", "-rf", str(Path(source).parent)], check=True)
-        if len(files) != world:
-            raise RuntimeError(f"{len(files)} of {world} ranks exported")
-        combine(path, files, [], cluster=(world, export_id))
+        export_model(prepared, images, storage, partial, options=options, progress=progress)
+        extend_cluster(partial, streams(), (world, export_id))
+        os.link(partial, path)
     finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+        partial.unlink(missing_ok=True)

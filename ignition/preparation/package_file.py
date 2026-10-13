@@ -135,17 +135,9 @@ def publish(path, index, payload):
         Path(temporary).unlink(missing_ok=True)
 
 
-def combine(path, ranks, peer_memory, *, cluster=None):
-    """Place every rank's tensor storage before execution resources and the index.
-
-    `cluster` (world, export id) marks a package whose ranks run on separate hosts; it holds every
-    rank, and each host loads the one it serves.
-    """
+def combine(path, ranks, peer_memory):
+    """Place every rank's tensor storage before execution resources and the index."""
     result = proto.ModelIndex(version=1, peer_memory=peer_memory)
-    if cluster is not None:
-        if len(ranks) != cluster[0]:
-            raise ValueError("a multi-host package holds every rank of its cluster")
-        result.cluster.world, result.cluster.export_id = cluster
     storage, execution = [], []
     for rank, source in enumerate(ranks):
         index, start = read_index(source)
@@ -176,3 +168,73 @@ def combine(path, ranks, peer_memory, *, cluster=None):
         payload.append((cursor, source, offset, span.nbytes))
         cursor += span.nbytes
     publish(path, result, payload)
+
+
+def _copy(source, output, nbytes):
+    while nbytes:
+        block = source.read(min(nbytes, 16 << 20))
+        if not block:
+            raise ValueError("truncated rank export")
+        output.write(block)
+        nbytes -= len(block)
+
+
+def extend_cluster(path, peers, cluster):
+    """Append ranks 1 onward to rank zero's exported file at `path`, making it a multi-host package.
+
+    `peers` yields binary streams, each a complete exported rank file of one bundle, in rank order;
+    each is read once, front to back. Every rank's payload stays contiguous, rank zero's where its
+    export wrote it, so a host reads one region and this disk never holds a second copy of any
+    rank. `cluster` is (world, export id): the package holds every rank, and each host loads the
+    one it serves.
+    """
+    index, start = read_index(path)
+    if len(index.ranks) != 1:
+        raise ValueError("rank export must contain one resource bundle")
+    with Path(path).open("rb") as source:
+        source.seek(8)
+        header = json.loads(source.read(start - 8), object_pairs_hook=_unique_fields)
+    cursor = _byte_tensor(header["flare.payload"])[1]
+    result = proto.ModelIndex()
+    result.CopyFrom(index)
+    with Path(path).open("r+b") as output:
+        for stream in peers:
+            size = struct.unpack("<Q", stream.read(8))[0]
+            if not 0 < size <= MAX_HEADER_BYTES or (8 + size) % ALIGNMENT:
+                raise ValueError("invalid rank export header")
+            peer = json.loads(stream.read(size), object_pairs_hook=_unique_fields)
+            length = _byte_tensor(peer["flare.payload"])[1]
+            index_start, end = _byte_tensor(peer["flare.metadata"])
+            base = align(cursor)
+            output.seek(start + base)
+            _copy(stream, output, length)
+            peer_index = proto.ModelIndex.FromString(stream.read(end - index_start))
+            if len(peer_index.ranks) != 1 or peer_index.HasField("engram") or peer_index.assets:
+                raise ValueError("a peer rank export must hold one bundle and no shared tables or assets")
+            bundle = result.ranks.add()
+            bundle.CopyFrom(peer_index.ranks[0])
+            for span in bundle.resources.values():
+                span.offset += base
+            cursor = base + length
+        if len(result.ranks) != cluster[0]:
+            raise ValueError("a multi-host package holds every rank of its cluster")
+        result.cluster.world, result.cluster.export_id = cluster
+        _validate_spans(result, cursor)
+        encoded = result.SerializeToString(deterministic=True)
+        if not 0 < len(encoded) <= MAX_INDEX_BYTES:
+            raise ValueError("model index exceeds its metadata limit")
+        header = json.dumps({
+            "__metadata__": {"format": "flare"},
+            "flare.payload": {"dtype": "U8", "shape": [cursor], "data_offsets": [0, cursor]},
+            "flare.metadata": {"dtype": "U8", "shape": [len(encoded)],
+                               "data_offsets": [cursor, cursor + len(encoded)]},
+        }, separators=(",", ":")).encode()
+        if 8 + len(header) > start:
+            raise ValueError("package header outgrew rank zero's reserved space")
+        output.seek(start + cursor)
+        output.write(encoded)
+        output.truncate()
+        output.seek(0)
+        output.write(struct.pack("<Q", start - 8) + header.ljust(start - 8, b" "))
+        output.flush()
+        os.fsync(output.fileno())

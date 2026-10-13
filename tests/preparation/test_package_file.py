@@ -187,15 +187,18 @@ def test_publication_failure_and_overwrite_leave_files_untouched(tmp_path):
     assert output.read_bytes() == saved
 
 
-def test_multi_host_package_holds_every_rank_with_its_cluster_and_transport(tmp_path):
+def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path):
+    from ignition.preparation.package_file import extend_cluster
     from ignition.preparation.runtime_package import _roce_transport
 
-    files = []
-    for rank in range(2):
+    files, contents = [], [b"weights-zero" * 1000, b"weights-one" + bytes(5000)]
+    for rank, data in enumerate(contents):
         source = tmp_path / f"source-{rank}"
-        source.write_bytes(b"weights")
+        source.write_bytes(data)
         description = index()
-        description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=7))
+        description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=len(data)))
+        if rank == 0:
+            description.server.update({"model_id": "glm"})
         _roce_transport(description.ranks[0].roce, {
             "proxy_abi": 6, "world_size": 2, "rank": rank,
             "region": {"address": 0x100000000000, "nbytes": 1 << 20},
@@ -204,14 +207,20 @@ def test_multi_host_package_holds_every_rank_with_its_cluster_and_transport(tmp_
             "hca_names": ["rocep1s0f0", "roceP2p1s0f0"], "gid_index": 3, "traffic_class": 0, "rails": 2,
             "routes": [[], [[0, 0], [1, 1]]] if rank == 0 else [[[0, 0], [1, 1]], []]})
         files.append(tmp_path / f"rank-{rank}.safetensors")
-        publish(files[-1], description, [(0, source, 0, 7)])
-    output = tmp_path / "model.safetensors"
-    combine(output, files, [], cluster=(2, "export-a"))
-    result, _ = read_index(output)
+        publish(files[-1], description, [(0, source, 0, len(data))])
+    with files[1].open("rb") as peer:
+        extend_cluster(files[0], [peer], (2, "export-a"))
+    result, start = read_index(files[0])
     assert (result.cluster.world, result.cluster.export_id) == (2, "export-a")
+    assert result.server["model_id"] == "glm"
     assert [bundle.roce.rank for bundle in result.ranks] == [0, 1]
-    transport = result.ranks[1].roce
-    assert (transport.world, transport.rails, list(transport.hcas)) == (2, 2, ["rocep1s0f0", "roceP2p1s0f0"])
-    assert [[(l.local, l.remote) for l in route.links] for route in transport.routes] == [[(0, 0), (1, 1)], []]
+    assert [[(l.local, l.remote) for l in route.links] for route in result.ranks[1].roce.routes] == [
+        [(0, 0), (1, 1)], []]
+    with files[0].open("rb") as package:
+        for bundle, expected in zip(result.ranks, contents, strict=True):
+            span = bundle.resources["storage.bin"]
+            assert span.offset % ALIGNMENT == 0
+            package.seek(start + span.offset)
+            assert package.read(span.nbytes) == expected
     with pytest.raises(ValueError, match="every rank"):
-        combine(tmp_path / "one.safetensors", files[:1], [], cluster=(2, "export-a"))
+        extend_cluster(files[1], [], (2, "export-a"))
