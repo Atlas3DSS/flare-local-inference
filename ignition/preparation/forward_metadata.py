@@ -25,7 +25,11 @@ class _Unavailable:
         raise RuntimeError(f'forward tracing called process-local resource {self.description}')
 
     def __getattr__(self, name):
-        raise RuntimeError(f'forward tracing accessed process-local resource {self.description}.{name}')
+        # Unpickling probes special methods such as __setstate__ before restoring the description.
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
+        description = self.__dict__.get('description', 'unknown')
+        raise RuntimeError(f'forward tracing accessed process-local resource {description}.{name}')
 
 
 def _storage(nbytes):

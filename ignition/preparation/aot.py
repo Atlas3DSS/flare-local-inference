@@ -482,6 +482,9 @@ class ForwardCache:
                             selected[name] = self._load(forward, Path(path), required=True)
                         stage.update(advance=1)
         except Exception as failure:
+            import traceback
+
+            traceback.print_exc(limit=-40)
             error = f"{type(failure).__name__}: {failure}"
         errors = [None] * len(coordinator.ranks)
         dist.all_gather_object(errors, error, group=group)
