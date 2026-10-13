@@ -148,6 +148,46 @@ class PreparationConfig:
         return min(self.page_capacity, 2 * self.request_capacity)
 
 
+def _tensor_bytes(*owners):
+    """Bytes of the distinct CUDA storages that owners and their nested fields reference."""
+    storages, visited, pending = {}, set(), list(owners)
+    while pending:
+        item = pending.pop()
+        if id(item) in visited:
+            continue
+        visited.add(id(item))
+        if isinstance(item, torch.Tensor):
+            if item.device.type == "cuda":
+                storage = item.untyped_storage()
+                storages[storage.data_ptr()] = storage.nbytes()
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif hasattr(item, "__dataclass_fields__"):
+            pending.extend(vars(item).values())
+    return sum(storages.values())
+
+
+def _memory_breakdown(device, *, weights, continuation, kv, operator_scratch, decoder_scratch, collective, headroom,
+                      compiled_reservation):
+    """Where one rank's memory goes once serving graphs are captured."""
+    import resource
+
+    from ignition.preparation.host_memory import device_memory_info
+
+    allocated, reserved = torch.cuda.memory_allocated(device), torch.cuda.memory_reserved(device)
+    region = getattr(collective, "_region", None)
+    named = weights + continuation + kv + operator_scratch + decoder_scratch
+    return {"weights": weights, "continuation": continuation, "kv": kv, "operator_scratch": operator_scratch,
+            "decoder_scratch": decoder_scratch, "other_allocated": allocated - named,
+            "cached_unallocated": reserved - allocated,
+            "collective_pinned_host": 0 if region is None else region.numel() * region.element_size(),
+            "compiled_forward_reservation": compiled_reservation, "headroom": headroom,
+            "peak_rss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss << 10,
+            "available": device_memory_info(device)[0], "cuda_free": torch.cuda.mem_get_info(device)[0]}
+
+
 @torch.no_grad()
 def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, progress=None, package_storage=None) -> PreparedModel:
     """Load, tune and capture all text variants on one supervised TP rank.
@@ -164,8 +204,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     def memory(stage):
         free = torch.cuda.mem_get_info(device)[0]
+        with open("/proc/self/statm") as statm:
+            rss = int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
         report(f"{stage}: free={free >> 20} MiB, allocated={torch.cuda.memory_allocated(device) >> 20} MiB, "
-               f"reserved={torch.cuda.memory_reserved(device) >> 20} MiB")
+               f"reserved={torch.cuda.memory_reserved(device) >> 20} MiB, rss={rss >> 20} MiB")
 
     snapshot = Path(snapshot).resolve()
     shard = TensorParallelShard(rank, len(config.devices))
@@ -411,6 +453,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             for graph in trials.values():
                 graph.reset()
             trials.clear()
+        memory("after KV allocation")
 
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
@@ -421,6 +464,12 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         import resource
 
         memory(f"after capture (process peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss >> 10} MiB)")
+    breakdown = _memory_breakdown(device, weights=weights.allocated_bytes, continuation=pool.backing.nbytes,
+        kv=kv_bytes, operator_scratch=arena.nbytes, decoder_scratch=_tensor_bytes(prefill_storage, decoder_storage),
+        collective=collective, headroom=config.headroom_bytes,
+        compiled_reservation=(sum(signature.kind in _COMPILED_KINDS for signature in signatures.values())
+                              * COMPILED_FORWARD_BYTES if integrated and config.compile_decoder else 0))
+    report("memory breakdown (MiB): " + ", ".join(f"{key}={value >> 20}" for key, value in breakdown.items()))
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
@@ -432,7 +481,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
         "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes, "page_tokens": config.page_tokens,
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
-        "tuning": tuning, "compiled_decoder": config.compile_decoder}
+        "tuning": tuning, "compiled_decoder": config.compile_decoder, "breakdown": breakdown,
+        "state_row_bytes": pool.backing.nbytes // max(1, state_rows + 1)}
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
         for role, filename in (("tokenizer", "tokenizer.json"), ("tokenizer_config", "tokenizer_config.json"),
                                ("chat_template", "chat_template.jinja"), ("generation_config", "generation_config.json"))}
