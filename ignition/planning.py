@@ -27,7 +27,8 @@ CACHE_STATES_PER_REQUEST = 8
 # live state, so KV pages for active requests keep the larger share.
 CACHE_SHARE = 4
 CACHE_FLOOR = 8
-SUPPORTED_CAPABILITIES = ((12, 0), (12, 1))
+SUPPORTED_CAPABILITIES = ((10, 3), (12, 0), (12, 1))
+SUPPORTED_ARCHITECTURES = "SM103, SM120, or SM121"
 _GIB = 1 << 30
 
 
@@ -325,9 +326,9 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
             raise CapacityError(f"{checkpoint.alias} needs {sizes} GPUs; {len(chosen)} selected; use --gpus {example}")
         for gpu in chosen:
             if not gpu.supported:
-                raise CapacityError(f"GPU {gpu.index} ({gpu.name}) is not an SM120 or SM121 device")
+                raise CapacityError(f"GPU {gpu.index} ({gpu.name}) is not an {SUPPORTED_ARCHITECTURES} device")
     elif len(supported) < recipe.tensor_parallel[0]:
-        raise CapacityError(f"{checkpoint.alias} needs {sizes} SM120 or SM121 GPUs; this host has {len(supported)}")
+        raise CapacityError(f"{checkpoint.alias} needs {sizes} {SUPPORTED_ARCHITECTURES} GPUs; this host has {len(supported)}")
 
     def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes, speculation=speculation):
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,

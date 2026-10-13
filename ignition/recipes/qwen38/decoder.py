@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from ignition.components.parallel import TensorParallelShard
+from ignition.planning import SUPPORTED_ARCHITECTURES, SUPPORTED_CAPABILITIES
 from ignition.preparation.checkpoint import CheckpointManifest
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.qwen38 import TEXT_PREFIX
@@ -52,8 +53,8 @@ class ModelWeights:
         if device.type != "cuda":
             raise ValueError("model weights require a CUDA device")
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
-        if torch.cuda.get_device_capability(device) not in ((12, 0), (12, 1)):
-            raise ValueError("the Qwen recipe requires SM120 or SM121")
+        if torch.cuda.get_device_capability(device) not in SUPPORTED_CAPABILITIES:
+            raise ValueError(f"the Qwen recipe requires {SUPPORTED_ARCHITECTURES}")
         free_bytes, _ = device_memory_info(device)
         stored = sum(tensor.nbytes for tensor in manifest.tensors.values()
                      if tensor.component not in ("mtp", "ple_tables"))

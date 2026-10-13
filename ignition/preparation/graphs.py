@@ -7,6 +7,8 @@ from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from ignition.planning import SUPPORTED_ARCHITECTURES, SUPPORTED_CAPABILITIES
+
 if TYPE_CHECKING:
     import torch
 
@@ -119,8 +121,9 @@ class PreparedGraphBundle:
 
         with torch.cuda.device(self._device):
             capability = torch.cuda.get_device_capability(self._device)
-            if capability not in ((12, 0), (12, 1)):
-                raise ValueError(f"CUDA device {self._device} is SM{capability[0]}{capability[1]}; SM120 or SM121 is required")
+            if capability not in SUPPORTED_CAPABILITIES:
+                raise ValueError(f"CUDA device {self._device} is SM{capability[0]}{capability[1]};"
+                                 f" {SUPPORTED_ARCHITECTURES} is required")
             handles = []
             for name, graph in self._graphs.items():
                 if not isinstance(graph, torch.cuda.CUDAGraph):

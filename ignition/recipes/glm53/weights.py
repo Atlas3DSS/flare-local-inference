@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ignition.components.parallel import TensorParallelShard
+from ignition.planning import SUPPORTED_ARCHITECTURES, SUPPORTED_CAPABILITIES
 from ignition.components.weights import DirectWeightLoader, MLPWeights
 from ignition.preparation.checkpoint import IndexedCheckpoint
 
@@ -69,8 +70,8 @@ class ModelWeights:
         if device.type != "cuda":
             raise ValueError("GLM model weights require a CUDA device")
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
-        if torch.cuda.get_device_capability(device) not in ((12, 0), (12, 1)):
-            raise ValueError("GLM prepared execution requires SM120 or SM121")
+        if torch.cuda.get_device_capability(device) not in SUPPORTED_CAPABILITIES:
+            raise ValueError(f"GLM prepared execution requires {SUPPORTED_ARCHITECTURES}")
         tree = create_model_tree(manifest.snapshot)
         before = torch.cuda.memory_allocated(device)
         layers = []

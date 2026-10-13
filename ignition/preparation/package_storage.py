@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 import json
+import mmap
 
 from .runtime_package import _Cuda
 
@@ -120,7 +121,8 @@ class PackageStorage:
 
     def host_allocate(self, name, shape, dtype):
         size = math.prod(shape) * dtype.itemsize
-        extent = (size + 4095) // 4096 * 4096
+        # Host mappings are whole host pages; Grace kernels may use 64 KiB pages.
+        extent = -(-size // mmap.PAGESIZE) * mmap.PAGESIZE
         if self._host_cursor + extent > self.HOST_BASE + self.RESERVATION_BYTES:
             raise MemoryError("native package host-address range exhausted")
         region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype, self.device)

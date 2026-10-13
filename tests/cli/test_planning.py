@@ -187,9 +187,9 @@ def test_explicit_gpus_set_the_tensor_parallel_size():
         derive(gpus=gpus, selected=(0, 1, 2))
     with pytest.raises(UsageError, match="names a GPU this host does not have"):
         derive(gpus=gpus, selected=(4,))
-    with pytest.raises(CapacityError, match="not an SM120 or SM121 device"):
+    with pytest.raises(CapacityError, match="not an SM103, SM120, or SM121 device"):
         derive(gpus=(gpu(0, 95, (9, 0)),), selected=(0,))
-    with pytest.raises(CapacityError, match="pair needs 2 or 4 SM120 or SM121 GPUs; this host has 1"):
+    with pytest.raises(CapacityError, match="pair needs 2 or 4 SM103, SM120, or SM121 GPUs; this host has 1"):
         derive(PAIR, (gpu(0, 95),))
 
 
