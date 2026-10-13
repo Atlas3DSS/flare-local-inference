@@ -30,9 +30,11 @@ class UnquantizedProjection:
         if any(t.dtype not in (torch.bfloat16, torch.float32) for t in (source, weight, output)):
             raise TypeError("unquantized projections require BF16 or FP32 operands")
         # FlashInfer's GEMMs read and write contiguous rows; column slices of wider rows keep b12x's GEMV.
+        rows = source.numel() // source.shape[-1]
         self.dense = (sm103_projection.is_sm103(source.device) and bias is None
                       and source.dtype == weight.dtype == torch.bfloat16
-                      and source.is_contiguous() and output.is_contiguous())
+                      and source.is_contiguous() and output.is_contiguous()
+                      and sm103_projection.dense_serves(rows, output.shape[-1]))
         if self.dense:
             # b12x's GEMV reaches about 1.7 TB/s on GB300; FlashInfer's tuned GEMMs approach its bandwidth.
             self.weight, self.bias, self.output = weight, None, output

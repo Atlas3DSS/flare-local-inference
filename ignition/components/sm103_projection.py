@@ -548,8 +548,19 @@ def packed_out_workspace(source, values, scales, global_scale, activation_scale,
                    global_scale_kind, stream, plan_handle, required_mode)
 
 
-# BF16 projections on SM103 run FlashInfer's GEMMs: on GB300 b12x's GEMV reaches about 1.7 TB/s
-# (734 us for a 154880x4096 vocabulary at one row, against 227 us) and its prefill rows run as GEMVs.
+# BF16 projections on SM103 run FlashInfer's GEMMs for prefill rows and wide outputs: on GB300 b12x's GEMV
+# reaches about 1.7 TB/s (734 us for a 154880x4096 vocabulary at one row, against 227 us) and runs prefill rows
+# as GEMVs (173 us for GLM's 288-expert router at 4096 rows, against 8 us). Narrow decode projections keep b12x's
+# single-launch GEMV: cuBLASLt often splits K into a GEMM and a reduction, which in a dependent decode chain cost
+# Qwen 0.37 ms per round although each call alone is as fast.
+GEMV_ROWS = 32
+GEMV_OUT_FEATURES = 4096
+
+
+def dense_serves(rows: int, out_features: int) -> bool:
+    return rows > GEMV_ROWS or out_features >= GEMV_OUT_FEATURES
+
+
 DENSE_COMPONENT = "flare.sm103.dense_projection"
 _DENSE_BACKENDS = ("cublaslt", "cutlass", "cudnn")
 
