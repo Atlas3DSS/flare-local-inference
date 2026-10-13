@@ -359,11 +359,14 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     trials, _ = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
         compile_decoder=False, progress=progress, label="Measure graph memory")
-    from ignition.preparation.host_memory import device_memory_info
+    from ignition.preparation.host_memory import COMPILED_FORWARD_BYTES, device_memory_info
 
     # An integrated GPU's allocatable memory includes the reclaimable RAM CUDA's free memory excludes.
     integrated = torch.cuda.get_device_properties(device).is_integrated
     free = device_memory_info(device)[0]
+    if integrated and config.compile_decoder:
+        # Restored compiled forwards stay in this process's memory, which KV pages share.
+        free -= sum(signature.kind in _COMPILED_KINDS for signature in signatures.values()) * COMPILED_FORWARD_BYTES
     available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
     pages = available // page_bytes if config.pages is None else config.pages
     if integrated and config.pages is None and pages > 0:
@@ -413,6 +416,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
         retain_graphs=config.retain_graphs, materialize=materialize_cache)
     kv_bytes = pages * page_bytes
+    if integrated:
+        import resource
+
+        memory(f"after capture (process peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss >> 10} MiB)")
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)

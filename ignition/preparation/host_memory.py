@@ -9,6 +9,9 @@ _WORKER_BYTES = 2 << 30
 _HEADROOM_BYTES = 8 << 30
 # Kernel modules and temporary compiler objects retained by each tuning rank.
 _TUNING_GROWTH_BYTES = 1 << 30
+# Host memory a preparing process holds for each compiled forward it restores to warm and capture:
+# its generated module and kernel launchers. GLM's TP4 ranks peak at 9.3 GB with 65 restored forwards.
+COMPILED_FORWARD_BYTES = 128 << 20
 
 
 def release_unused():
