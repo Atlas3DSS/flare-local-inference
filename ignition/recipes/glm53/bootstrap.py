@@ -236,7 +236,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     with phase(progress, "Allocate model state and collectives") as stage:
         layer_types = weights.tree.config.text_config.layer_types
         layout = continuation_layout(layer_types, shard.world_size, mtp=config.mtp)
-        snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
+        # Native loading sizes a package's continuation rows and KV pages from the serving host's
+        # memory, within their virtual extents. A package backs only what its tuning and capture use.
+        snapshots = 1 if package_storage is not None else layout.snapshot_capacity(config.snapshot_budget_bytes)
         if snapshots < 1:
             raise ValueError("GLM snapshot budget must hold at least one continuation row")
         pages, blocks = config.preparation_pages, config.context // config.page_tokens
@@ -414,25 +416,30 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     # An integrated GPU's allocatable memory includes the reclaimable RAM CUDA's free memory excludes.
     integrated = torch.cuda.get_device_properties(device).is_integrated
-    free = device_memory_info(device)[0]
-    if integrated and config.compile_decoder:
-        # Restored compiled forwards stay in this process's memory, which KV pages share.
-        free -= sum(signature.kind in _COMPILED_KINDS for signature in signatures.values()) * COMPILED_FORWARD_BYTES
-    if virtual_pages is not None:
-        # The preparation pages stay backed and become the first of the grown pools' pages;
-        # growing rounds each pool up to the allocation granularity.
-        free += virtual_pages.nbytes - len(virtual_pages.dynamic_regions) * virtual_pages.granularity
-    available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
-    pages = available // page_bytes if config.pages is None else config.pages
     binds_pages = package_storage is None and virtual_pages is None
-    if integrated and binds_pages and config.pages is None and pages > 0:
-        # Shared system memory varies between launches; a coarser page count keeps compiled
-        # forwards, which bind the page pool's shape, reusable across them.
-        step = 1 << max(0, (pages // 8).bit_length() - 1)
-        pages = pages // step * step
-    memory(f"after graph measurement (KV may use {max(0, available) >> 20} MiB on every rank, {max(0, pages)} pages)")
-    if pages < (config.minimum_pages or config.preparation_pages) or pages * page_bytes > available:
-        raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
+    if package_storage is not None:
+        # Native loading checks the minimum KV capacity against the serving host's memory.
+        pages = config.preparation_pages
+        memory(f"after graph measurement (the package backs {pages} preparation KV pages)")
+    else:
+        free = device_memory_info(device)[0]
+        if integrated and config.compile_decoder:
+            # Restored compiled forwards stay in this process's memory, which KV pages share.
+            free -= sum(signature.kind in _COMPILED_KINDS for signature in signatures.values()) * COMPILED_FORWARD_BYTES
+        if virtual_pages is not None:
+            # The preparation pages stay backed and become the first of the grown pools' pages;
+            # growing rounds each pool up to the allocation granularity.
+            free += virtual_pages.nbytes - len(virtual_pages.dynamic_regions) * virtual_pages.granularity
+        available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
+        pages = available // page_bytes if config.pages is None else config.pages
+        if integrated and binds_pages and config.pages is None and pages > 0:
+            # Shared system memory varies between launches; a coarser page count keeps compiled
+            # forwards, which bind the page pool's shape, reusable across them.
+            step = 1 << max(0, (pages // 8).bit_length() - 1)
+            pages = pages // step * step
+        memory(f"after graph measurement (KV may use {max(0, available) >> 20} MiB on every rank, {max(0, pages)} pages)")
+        if pages < (config.minimum_pages or config.preparation_pages) or pages * page_bytes > available:
+            raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
 
     def rebind_pages():
         for forward in forwards.values():
@@ -483,7 +490,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         kv=kv_bytes, operator_scratch=arena.nbytes, decoder_scratch=_tensor_bytes(prefill_storage, decoder_storage),
         collective=collective, headroom=config.headroom_bytes,
         compiled_reservation=(sum(signature.kind in _COMPILED_KINDS for signature in signatures.values())
-                              * COMPILED_FORWARD_BYTES if integrated and config.compile_decoder else 0))
+                              * COMPILED_FORWARD_BYTES if integrated and config.compile_decoder and package_storage is None else 0))
     report("memory breakdown (MiB): " + ", ".join(f"{key}={value >> 20}" for key, value in breakdown.items()))
     session.freeze()
     pool.clear_for_preparation()
