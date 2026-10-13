@@ -14,11 +14,13 @@ new[j] = post[j] x + sum_i comb[i, j] residual[i].
 
 from __future__ import annotations
 
+import itertools
+import weakref
+
 import torch
 import triton
 import triton.language as tl
 
-from ignition.preparation.triton import launch_triton
 
 SPLITS = 4
 _BLOCK_T = 128
@@ -28,6 +30,21 @@ _CONFIG = triton.Config({}, num_warps=8, num_stages=3)
 MIN_ROWS = 256
 _SCRATCH: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 _SPLIT_WEIGHTS: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+_OWNERS = weakref.WeakValueDictionary()
+_HANDLES = itertools.count()
+
+
+# FlashInfer's mHC launches build on first use, so compiled forwards see the composition as one operator
+# that reads its inputs and writes the residual, mixes and normalized input.
+@torch.library.custom_op("flare::sm103_composed_mhc", mutates_args=("residual", "post", "comb", "normalized"))
+def _composed(inputs: list[torch.Tensor], residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor,
+              normalized: torch.Tensor, handle: int) -> None:
+    _OWNERS[handle].run(*inputs)
+
+
+@_composed.register_fake
+def _fake_composed(inputs, residual, post, comb, normalized, handle) -> None:
+    pass
 
 
 @triton.autotune(configs=[_CONFIG], key=[])
@@ -96,8 +113,15 @@ class ComposedMHC:
         self.grid = (triton.cdiv(rows, _BLOCK_T), SPLITS, 1)
         self.compiled = _project.fn.warmup(*self.args, grid=self.grid, num_warps=_CONFIG.num_warps,
                                            num_stages=_CONFIG.num_stages, **self.options)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
 
     def __call__(self, *inputs):
+        s = self.scratch
+        _composed(list(inputs), s.residual, s.post, s.comb, s.normalized, self.handle)
+        return s.normalized
+
+    def run(self, *inputs):
         s, w = self.scratch, self.weights
         rms_eps, hc_eps, iterations, norm_eps = self.eps
         if self.operation == "post_pre":
@@ -105,9 +129,8 @@ class ComposedMHC:
             self.mix(s.residual, source, residual, post, comb)
         else:
             s.residual.copy_(inputs[0])
-        launch_triton(_project, self.compiled, self.args, self.grid, **self.options)
+        self.compiled[self.grid](*self.args)
         self.fuse(s.post, s.comb, self.collapsed, self.dot, self.squares, s.residual, w.scale, w.base,
                                s.residual.shape[1] * s.residual.shape[2], rms_eps, hc_eps, hc_eps, 2.0, iterations,
                                SPLITS, 0)
         self.norm(self.collapsed, w.norm, norm_eps, out=s.normalized)
-        return s.normalized
