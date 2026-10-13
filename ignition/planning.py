@@ -323,8 +323,6 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     if chunk % 64 or not 64 <= chunk <= recipe.context:
         raise UsageError(f"--prefill-chunk-size for {checkpoint.alias} must be a multiple of 64"
                          f" from 64 through {recipe.context:,}")
-    if not context_parallel and not any(costs.page_tokens for costs in recipe.ranks.values()):
-        raise UsageError(f"--no-context-parallel: {checkpoint.alias} does not shard attention context")
     sizes = " or ".join(map(str, recipe.tensor_parallel))
     supported = [gpu for gpu in gpus if gpu.supported]
     chosen = None

@@ -48,6 +48,17 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
         prefill_chunk=prefill_chunk, context_parallel=context_parallel)
 
 
+def context_parallel(args, model: ResolvedModel, *, spans_hosts: bool = False) -> bool:
+    """Whether a plan may shard attention context across its ranks, which ranks on separate hosts never do.
+
+    Planning shards only recipes that declare context-parallel page costs, and
+    --no-context-parallel applies only to those.
+    """
+    if args.no_context_parallel and not any(costs.page_tokens for costs in model.recipe.ranks.values()):
+        raise UsageError(f"--no-context-parallel: {model.checkpoint.alias} does not shard attention context")
+    return not args.no_context_parallel and not spans_hosts
+
+
 def speculation(args, model: ResolvedModel) -> Speculation | None:
     """Apply the command line's speculation overrides to the recipe's settings; None disables speculation."""
     recipe, alias = model.recipe, model.checkpoint.alias

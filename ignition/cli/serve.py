@@ -12,7 +12,7 @@ from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
 
 from . import display, environment
-from .preparation import Host, derive, fetch, resolve_model, speculation
+from .preparation import Host, context_parallel, derive, fetch, resolve_model, speculation
 from .config import Configuration
 
 # Request bytes allowed per context token: JSON-escaped text (a \uXXXX escape takes six bytes per
@@ -79,7 +79,7 @@ def run(args) -> int:
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
                   speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                  context_parallel=not args.no_context_parallel)
+                  context_parallel=context_parallel(args, model))
     runtime = binary()
     bind = _address(configuration.get("server.host", args.host).value,
                     configuration.get("server.port", args.port).value)
@@ -147,7 +147,7 @@ def _export_hosts(args, *, export_path) -> int:
     plan = planning.plan(model.recipe, model.checkpoint, gpus, selected=tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                         context_parallel=False)
+                         context_parallel=context_parallel(args, model, spans_hosts=True))
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
@@ -205,7 +205,7 @@ def _prepare(args, *, export_path) -> int:
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                      context_parallel=not args.no_context_parallel)
+                      context_parallel=context_parallel(args, model))
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -326,7 +326,7 @@ def serve(args) -> int:
                          selected=None if args.ranks == 1 and args.gpus is None else tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                         context_parallel=not args.no_context_parallel and rendezvous is None,
+                         context_parallel=context_parallel(args, model, spans_hosts=rendezvous is not None),
                          cache_states=args.prefix_cache_states)
     if rendezvous is None:
         local = plan.gpus

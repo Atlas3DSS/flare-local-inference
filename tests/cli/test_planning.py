@@ -178,9 +178,29 @@ def test_context_parallel_pages_hold_every_rank_share_unless_disabled():
     assert (whole.context_parallel, whole.page_tokens) == (False, 64)
     assert shared.pages == whole.pages and shared.tokens == 2 * whole.tokens
     assert derive().context_parallel is False
+    # Recipes that keep each page whole plan the same either way.
+    plain = planning.plan(PAIR, PAIR.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                          speculation=None, context_parallel=False)
+    assert plain == planning.plan(PAIR, PAIR.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                                  speculation=None)
+
+
+def test_context_parallelism_follows_the_flag_and_never_spans_hosts():
+    from types import SimpleNamespace
+
+    from ignition.cli.preparation import context_parallel
+
+    sharded = replace(PAIR, ranks=MappingProxyType({size: replace(costs, page_tokens=64 * size)
+                                                    for size, costs in PAIR.ranks.items()}))
+    flag = SimpleNamespace(no_context_parallel=True)
+    default = SimpleNamespace(no_context_parallel=False)
+    model = SimpleNamespace(recipe=sharded, checkpoint=sharded.checkpoints[0])
+    assert context_parallel(default, model) and not context_parallel(flag, model)
+    assert not context_parallel(default, model, spans_hosts=True)
+    whole = SimpleNamespace(recipe=PAIR, checkpoint=PAIR.checkpoints[0])
+    assert context_parallel(default, whole) and not context_parallel(default, whole, spans_hosts=True)
     with pytest.raises(UsageError, match="does not shard attention context"):
-        planning.plan(PAIR, PAIR.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
-                      speculation=None, context_parallel=False)
+        context_parallel(flag, whole)
 
 
 def test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size():
