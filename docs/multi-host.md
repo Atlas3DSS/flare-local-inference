@@ -99,9 +99,17 @@ peer the checkpoint files the peer lacks, all peers at once; the first
 preparation on a new peer copies the whole checkpoint, and later ones copy
 nothing. All ranks prepare together. Rank zero compiles forwards and sends peers
 those they lack. Each peer then exports its rank and streams it over its
-connection to rank zero, which appends it to the package as it arrives. The
-package exists only on rank zero; it holds every rank and records the cluster's
-size and an export id.
+connection to rank zero, which appends it to a staging file as it arrives. Rank
+zero then publishes the signed package, encrypting executables, and removes the
+staging. The package exists only on rank zero; it holds every rank and records
+the cluster's size and an export id.
+
+GLM-5.3 Flash shards each page's attention context across the ranks (decode
+context parallelism), so N ranks hold about N times the KV of unsharded pages.
+Each sparse-attention layer then exchanges query heads, index candidates and
+partial attention outputs per decode step, and prefill gathers the request's
+context from every rank, all through RoCEnante. Export with
+`--no-context-parallel` to keep whole pages on every rank instead.
 
 ## Serve
 
