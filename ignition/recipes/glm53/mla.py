@@ -51,8 +51,8 @@ class MLAScratch:
 
     @classmethod
     def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1):
-        if heads not in (16, 32):
-            raise ValueError("GLM MLA scratch requires TP2 or TP4 head partitions")
+        if heads not in (16, 32, 64):
+            raise ValueError("GLM MLA scratch requires TP1, TP2 or TP4 head partitions")
         from .dcp import PREFILL_SLICE_ROWS, SLICE_ROWS
 
         index = IndexScratch.allocate(tokens, blocks, mode, device, context_ranks=context_ranks)
@@ -180,8 +180,8 @@ class PreparedGlmMLA:
         if (module.num_heads, module.q_lora_rank, module.kv_lora_rank, module.qk_nope_head_dim,
                 module.qk_rope_head_dim, module.v_head_dim) != (64, 1536, 512, 256, 0, 256):
             raise ValueError("canonical MLA geometry differs from GLM 5.3 Flash")
-        if module.indexer is None or module.skip_topk or heads not in (16, 32):
-            raise ValueError("GLM MLA requires a full indexer and TP2 or TP4 head partitions")
+        if module.indexer is None or module.skip_topk or heads not in (16, 32, 64):
+            raise ValueError("GLM MLA requires a full indexer and TP1, TP2 or TP4 head partitions")
         if (state.cache.shape != (state.index.cache.shape[0] * 4, 64, 528)
                 or weights["q_b_proj"].out_features != heads * 256
                 or weights["kv_b_proj"].out_features != heads * 512):

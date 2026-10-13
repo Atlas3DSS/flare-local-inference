@@ -126,12 +126,34 @@ class QuantizedProjection:
                               workspace=self.workspace)
 
 
+_EXPANDED_BMM_WEIGHTS = {}
+
+
+def _expanded_bmm_weight(weight):
+    """BF16 copy of one packed E4M3 matrix stack with per-32 E8M0 scales along its last axis.
+
+    E4M3 values times power-of-two scales are exact in BF16. Layers that slice the
+    same weights share one copy.
+    """
+    values, scales = weight
+    key = (values.data_ptr(), tuple(values.shape), tuple(values.stride()))
+    expanded = _EXPANDED_BMM_WEIGHTS.get(key)
+    if expanded is None:
+        exponents = scales.view(torch.uint8).to(torch.float32) - 127
+        factors = torch.exp2(exponents).repeat_interleave(32, dim=-1)[..., :values.shape[-1]]
+        expanded = (values.to(torch.float32) * factors).to(torch.bfloat16)
+        _EXPANDED_BMM_WEIGHTS[key] = expanded
+    return expanded
+
+
 class BatchedQuantizedProjection:
     """Prepared BF16-by-rowwise-MXFP8 BMM over caller-owned strided tensors.
 
     The RHS remains packed E4M3 values and per-32 E8M0 scales. The native b12x
     kernel has a fixed configuration and requires no scratch. The major axis
-    describes the RHS layout and the axis compressed by its scales.
+    describes the RHS layout and the axis compressed by its scales. On SM103,
+    where b12x's kernel does not run, the RHS expands once to BF16 and cuBLAS
+    multiplies it.
     """
 
     def __init__(self, source, weight, output, *, major, session, name):
@@ -141,6 +163,16 @@ class BatchedQuantizedProjection:
         if source.ndim != 3 or output.ndim != 3 or source.shape[:2] != output.shape[:2]:
             raise ValueError("batched projections require matching batch and row dimensions")
         self.weight, self.output, self.major = weight, output, major
+        self.expanded = None
+        if sm103_projection.is_sm103(source.device):
+            if major not in ("n", "k"):
+                raise ValueError("batched projections take an n-major or k-major RHS")
+            expanded = _expanded_bmm_weight(weight)
+            # n-major stacks are [in, out]; k-major stacks are [out, in].
+            self.expanded = expanded if major == "n" else expanded.transpose(1, 2)
+            if self.expanded.shape != (source.shape[0], source.shape[2], output.shape[2]):
+                raise ValueError("batched projection weights must match the source and output widths")
+            return
         self.plan = gemm.plan_bmm(BmmQuery(batch=source.shape[0], max_rows=source.shape[1],
             in_features=source.shape[2], out_features=output.shape[2], b_major=major, sf_axis=major))
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
@@ -149,6 +181,9 @@ class BatchedQuantizedProjection:
     def __call__(self, source):
         from b12x import gemm
 
+        if self.expanded is not None:
+            self.output.copy_(torch.bmm(source, self.expanded))
+            return self.output
         return gemm.bmm(source, self.weight, self.output, plan=self.plan,
             a_dtype="bfloat16", b_dtype="float8_e4m3fn", sf_dtype="float8_e8m0fnu",
             c_dtype="bfloat16", sf_vec_size=32, b_major=self.major, sf_axis=self.major)

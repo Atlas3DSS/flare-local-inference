@@ -31,8 +31,8 @@ class KDAScratch:
 
     @classmethod
     def allocate(cls, tokens, heads, device):
-        if type(tokens) is not int or tokens <= 0 or heads not in (16, 32):
-            raise ValueError("GLM KDA scratch requires positive capacity and TP2/TP4 head counts")
+        if type(tokens) is not int or tokens <= 0 or heads not in (16, 32, 64):
+            raise ValueError("GLM KDA scratch requires positive capacity and TP1/TP2/TP4 head counts")
         width = heads * 128
         def buffer(channels):
             return torch.zeros((tokens, channels), dtype=torch.bfloat16, device=device)
@@ -77,9 +77,9 @@ class PreparedGlmKDA:
         self.sequences = metadata.query_start_loc.numel() - 1
         self.columns = metadata.state_indices.shape[1]
         self.drafts = state.convolution.shape[-1] - 3
-        if (self.heads not in (16, 32) or state.recurrent.shape[2:] != (128, 128)
+        if (self.heads not in (16, 32, 64) or state.recurrent.shape[2:] != (128, 128)
                 or state.convolution.shape[:2] != (state.recurrent.shape[0], 3 * self.width)):
-            raise ValueError("GLM KDA state must match one TP2/TP4 head partition")
+            raise ValueError("GLM KDA state must match one TP1/TP2/TP4 head partition")
         if metadata.num_tokens.item() or metadata.num_seqs.item():
             raise ValueError("KDA preparation requires zero live counts")
         if mode == "decode" and (self.tokens > self.sequences * self.columns or self.columns > self.drafts + 1):
