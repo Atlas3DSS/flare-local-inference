@@ -22,6 +22,19 @@ pub struct Cli {
 pub enum Command {
     /// Serve an exported .safetensors package without Python.
     Run(Run),
+    /// Accept rank zero's packages and executables and run its peer ranks on this host.
+    Agent(AgentArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentArgs {
+    /// Address and port to listen on.
+    #[arg(long, value_name = "IP:PORT", default_value = "0.0.0.0:29900")]
+    pub listen: String,
+
+    /// The cluster's shared token, readable only by its owner [default: ~/.config/flare/agent.token].
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -49,9 +62,9 @@ pub struct Run {
         help_heading = "Serving options")]
     pub gpus: Vec<i32>,
 
-    /// Peer hosts of a multi-host package, ranks 1 onward. Flare copies the package and itself into
-    /// each host's ~/.cache/flare, starts their ranks over ssh with these serving options, and
-    /// serves as rank zero.
+    /// Peer hosts of a multi-host package, ranks 1 onward, each running `flare agent`. Flare sends
+    /// the package and itself to hosts that lack them, starts their ranks with these serving
+    /// options, and serves as rank zero.
     #[arg(
         long,
         value_name = "HOST[,HOST...]",
@@ -59,6 +72,10 @@ pub struct Run {
         help_heading = "Multi-host options"
     )]
     pub hosts: Vec<String>,
+
+    /// The cluster's shared agent token [default: ~/.config/flare/agent.token].
+    #[arg(long, value_name = "PATH", help_heading = "Multi-host options")]
+    pub agent_token_file: Option<PathBuf>,
 
     /// Rank zero's rendezvous address: with --hosts, where rank zero listens [default:
     /// 0.0.0.0:29800]; on a peer, where it joins rank zero.
@@ -183,8 +200,10 @@ mod tests {
     use super::*;
 
     fn run(arguments: &[&str]) -> Run {
-        let Command::Run(args) = Cli::try_parse_from(arguments).unwrap().command;
-        args
+        match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Run(args) => args,
+            Command::Agent(_) => panic!("expected flare run"),
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ import os
 import pickle
 import secrets
 import select
+import shutil
 import socket
 import struct
 import threading
@@ -337,6 +338,25 @@ class HostRendezvous:
             raise RuntimeError(f"tensor-parallel peers did not exit cleanly: {failures}")
 
 
+class _Received:
+    """Exactly `nbytes` of a socket, read like a file; reads past them return nothing."""
+
+    def __init__(self, sock, nbytes):
+        self.sock, self.remaining = sock, nbytes
+
+    def read(self, size):
+        size = min(size, self.remaining)
+        parts = []
+        while size:
+            part = self.sock.recv(min(size, 16 << 20))
+            if not part:
+                raise ConnectionError("peer closed its connection during an export transfer")
+            parts.append(part)
+            size -= len(part)
+            self.remaining -= len(part)
+        return b"".join(parts)
+
+
 class HostRankGroup:
     """Root model and its remote peers through native coordinated shutdown."""
 
@@ -359,8 +379,8 @@ class HostRankGroup:
     def export(self, path, *, options, export_id, images, storage, progress=None):
         """Write one package holding every rank at `path` here; `flare run --hosts` serves it.
 
-        Each peer exports its rank on its own host; rank zero pulls those files over ssh, which
-        must reach every peer without a password, and combines them.
+        Each peer exports its rank on its own host and sends the file over its control connection,
+        which this rank appends to the package as it arrives.
         """
         from .model_package import export_cluster_package
 
@@ -368,14 +388,16 @@ class HostRankGroup:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         for control in self.controls:
             send_object(control, ("export", options))
-        sources = {rank: self.rendezvous.peers[rank].control.getpeername()[0] for rank in range(1, self.rendezvous.world)}
 
         def peer_files():
             for rank, control in enumerate(self.controls, 1):
                 reply = receive_object(control)
                 if "exported" not in reply:
                     raise RuntimeError(f"rank {rank} export failed: {reply}")
-                yield sources[rank], reply["exported"]
+                stream = _Received(control, reply["exported"])
+                yield stream
+                if stream.remaining:
+                    raise RuntimeError(f"rank {rank} sent {stream.remaining} bytes more than its export used")
 
         export_cluster_package(self.model, images, storage, path, peer_files=peer_files(), options=options,
                                export_id=export_id, world=self.rendezvous.world, progress=progress)
@@ -495,12 +517,18 @@ def serve_peer(control, executor, rank, world, *, resolve_snapshot, progress=Non
             from .runtime_package import export_model
 
             _, options = command
-            # Rank zero pulls this file and removes it once its package is written.
-            path = Path(tempfile.mkdtemp(prefix="flare-rank-")) / f"rank-{rank}.safetensors"
-            if progress is not None:
-                progress(f"exporting rank {rank} to {path}")
-            export_model(model, recorder, storage, path, options=options)
-            send_object(control, {"exported": str(path)})
+            directory = Path(tempfile.mkdtemp(prefix="flare-rank-"))
+            try:
+                path = directory / f"rank-{rank}.safetensors"
+                if progress is not None:
+                    progress(f"exporting rank {rank}")
+                export_model(model, recorder, storage, path, options=options)
+                # Rank zero appends this file to its package as it arrives.
+                send_object(control, {"exported": path.stat().st_size})
+                with path.open("rb") as source:
+                    control.sendfile(source)
+            finally:
+                shutil.rmtree(directory, ignore_errors=True)
             command = receive_object(control)
         if command == "serve":
             if progress is not None:

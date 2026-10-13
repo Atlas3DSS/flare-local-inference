@@ -661,6 +661,7 @@ dependencies = [
  "flare-helios",
  "libc",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

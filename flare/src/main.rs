@@ -1,5 +1,6 @@
 //! Serve a prepared model package without a Python interpreter.
 
+mod agent;
 mod cli;
 mod cluster;
 mod environment;
@@ -24,7 +25,19 @@ extern "C" fn stop(_: libc::c_int) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli::Command::Run(args) = cli::Cli::parse().command;
+    let args = match cli::Cli::parse().command {
+        cli::Command::Run(args) => args,
+        cli::Command::Agent(agent_args) => {
+            let token = agent::read_token(
+                &agent_args
+                    .token_file
+                    .unwrap_or_else(agent::default_token_path),
+            )
+            .map_err(|e| e.to_string())?;
+            return agent::serve(&agent_args.listen, token, agent::default_cache())
+                .map_err(|e| e.to_string().into());
+        }
+    };
     let root = args
         .package
         .canonicalize()
@@ -81,6 +94,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(_, port)| port)
             .ok_or("--rendezvous needs HOST:PORT")?;
         let address = launch::address_toward(&args.hosts[0]).map_err(|e| e.to_string())?;
+        let token = agent::read_token(
+            args.agent_token_file
+                .as_deref()
+                .unwrap_or(&agent::default_token_path()),
+        )
+        .map_err(|e| e.to_string())?;
         let phase = progress.phase("Start peer ranks", None);
         let peers = launch::start(
             &args.hosts,
@@ -88,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &export_id,
             &format!("{address}:{port}"),
             &rank_options,
+            &token,
         )
         .map_err(|e| e.to_string())?;
         phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));

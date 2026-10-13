@@ -96,3 +96,34 @@ def test_finds_the_interface_holding_an_address():
     assert host_ranks.interface_of("127.0.0.1") == "lo"
     with pytest.raises(RuntimeError):
         host_ranks.interface_of("203.0.113.7")
+
+
+def test_peer_rank_file_streams_over_its_control_connection_into_the_package(tmp_path):
+    import socket
+    import threading
+
+    from ignition.preparation import runtime_package_pb2 as proto
+    from ignition.preparation.host_ranks import _Received
+    from ignition.preparation.package_file import extend_cluster, publish, read_index
+
+    files = []
+    for rank, data in enumerate((b"rank-zero" * 300, b"rank-one" * 700)):
+        source = tmp_path / f"source-{rank}"
+        source.write_bytes(data)
+        description = proto.ModelIndex(version=1, ranks=[proto.BundleIndex()])
+        description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=len(data)))
+        files.append(tmp_path / f"rank-{rank}.safetensors")
+        publish(files[-1], description, [(0, source, 0, len(data))])
+    receiver, sender = socket.socketpair()
+    size = files[1].stat().st_size
+    thread = threading.Thread(target=lambda: sender.sendfile(files[1].open("rb")))
+    thread.start()
+    stream = _Received(receiver, size)
+    extend_cluster(files[0], [stream], (2, "export-b"))
+    thread.join()
+    assert stream.remaining == 0 and stream.read(8) == b""
+    index, start = read_index(files[0])
+    span = index.ranks[1].resources["storage.bin"]
+    with files[0].open("rb") as package:
+        package.seek(start + span.offset)
+        assert package.read(span.nbytes) == b"rank-one" * 700

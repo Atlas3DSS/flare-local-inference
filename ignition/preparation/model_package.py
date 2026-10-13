@@ -48,13 +48,10 @@ def export_cluster_package(prepared, images, storage, path, *, peer_files, optio
                            progress=None):
     """Export rank zero, append every peer's exported rank, and publish one package holding every rank.
 
-    `peer_files` yields (host, path) for ranks 1 onward, in order, once each peer exported its rank.
-    Each file streams over ssh straight into the package and is then removed from its host, so this
-    disk holds the package once. The package names its cluster and export id; `flare run --hosts`
-    serves each rank on its own host.
+    `peer_files` yields a readable stream of each peer's exported rank file, ranks 1 onward, in
+    order; each is appended to the package as it arrives, so this disk holds the package once. The
+    package names its cluster and export id; `flare run --hosts` serves each rank on its own host.
     """
-    import subprocess
-
     from .package_file import extend_cluster
 
     path = Path(path)
@@ -64,19 +61,9 @@ def export_cluster_package(prepared, images, storage, path, *, peer_files, optio
     partial = path.with_name(f".{path.name}.partial")
     partial.unlink(missing_ok=True)
 
-    def streams():
-        for host, source in peer_files:
-            ssh = ["ssh", "-o", "BatchMode=yes", host]
-            with subprocess.Popen([*ssh, "cat", source], stdout=subprocess.PIPE) as reader:
-                yield reader.stdout
-                reader.stdout.close()
-                if reader.wait() != 0:
-                    raise RuntimeError(f"reading {host}:{source} failed")
-            subprocess.run([*ssh, "rm", "-rf", str(Path(source).parent)], check=True)
-
     try:
         export_model(prepared, images, storage, partial, options=options, progress=progress)
-        extend_cluster(partial, streams(), (world, export_id))
+        extend_cluster(partial, peer_files, (world, export_id))
         os.link(partial, path)
     finally:
         partial.unlink(missing_ok=True)
