@@ -70,6 +70,9 @@ class PreparedAllReduce:
         from b12x.comm import pcie
 
         self.runtime, self.output = runtime, output
+        # Traced forwards test this flag, never the runtime: compile workers see a runtime that
+        # owns RDMA or IPC resources only as a placeholder.
+        self.single = runtime is None
         if runtime is None:
             if source.shape != output.shape or source.dtype != output.dtype:
                 raise ValueError("a single-rank reduction copies its source into a matching output")
@@ -128,7 +131,7 @@ class PreparedAllReduce:
         _OWNERS[self.handle] = self
 
     def __call__(self, source):
-        if self.runtime is None:
+        if self.single:
             self.output.copy_(source)
             return self.output
         (_nccl_all_reduce if self.nccl else _all_reduce)(source, self.output, self.handle)
@@ -171,6 +174,9 @@ class PreparedAllGather:
         from b12x.comm import pcie
 
         self.runtime, self.output = runtime, output
+        # Traced forwards test this flag, never the runtime: compile workers see a runtime that
+        # owns RDMA or IPC resources only as a placeholder.
+        self.single = runtime is None
         if runtime is None:
             if source.shape != output.shape or source.dtype != output.dtype:
                 raise ValueError("a single-rank gather copies its source into a matching output")
@@ -215,7 +221,7 @@ class PreparedAllGather:
         _OWNERS[self.handle] = self
 
     def __call__(self, source):
-        if self.runtime is None:
+        if self.single:
             self.output.copy_(source)
             return self.output
         _all_gather(source, self.output, self.handle)
@@ -223,7 +229,7 @@ class PreparedAllGather:
 
     def run_eager(self, source):
         """Gather on the current stream from inside another eager operation."""
-        if self.runtime is None:
+        if self.single:
             self.output.copy_(source)
             return self.output
         _gather_columns(source, self.output, self.handle)
