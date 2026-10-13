@@ -288,17 +288,49 @@ impl RequestScheduler {
         }
     }
 
-    /// The service gap scaled to the hardware: never below a small multiple of the cheapest step that
-    /// advances one decoding request. The configured gap suits fast decode steps; on slower hardware or
-    /// larger models (a GLM round on two DGX Sparks takes 45-90 ms) every round would be late and the
-    /// lateness filter would leave only the shortest round, switching speculation off.
-    pub(super) fn service_gap(&self) -> u64 {
-        let step = std::iter::once(self.costs.reference_duration(GraphKind::Decode, 1, 1))
-            .chain(
-                self.speculative_catalog[0]
-                    .iter()
-                    .map(|w| self.costs.reference_duration(GraphKind::Speculative, 1, *w)),
-            )
+    /// The service gap scaled to the hardware and, with speculation, the batch being served: never
+    /// below a small multiple of the cheapest way to advance each of `decoding` requests by one step,
+    /// one batched step or that many single steps. The configured gap suits fast decode steps; on slower hardware
+    /// or larger models (a GLM round on four DGX Sparks takes 30 ms for one request and 53 ms for
+    /// eight, before drafts) every speculative round would be late, and the lateness filter would
+    /// leave only the shortest round, switching speculation off. Scaling by one request's step is
+    /// not enough: a batch's rounds cost several times as much, so batched speculation would still
+    /// lose to single-token steps that deliver far fewer tokens.
+    pub(super) fn service_gap(&self, decoding: usize) -> u64 {
+        let cheapest = |batch: usize| {
+            let widths = self
+                .speculative_catalog
+                .get(batch.trailing_zeros() as usize)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            std::iter::once(self.costs.reference_duration(GraphKind::Decode, batch, 1))
+                .chain(widths.iter().map(|w| {
+                    self.costs
+                        .reference_duration(GraphKind::Speculative, batch, *w)
+                }))
+                .flatten()
+                .min()
+        };
+        let single = cheapest(1);
+        // Without speculation every step is one token per request; only wider rounds need room.
+        let decoding = if self.speculative_widths.is_empty() {
+            1
+        } else {
+            decoding.max(1)
+        };
+        // The largest prepared batch that holds every decoding request, or the largest prepared.
+        let mut batch = decoding.next_power_of_two();
+        let batched = loop {
+            if batch == 1 {
+                break None;
+            }
+            if let Some(step) = cheapest(batch) {
+                break Some(step);
+            }
+            batch /= 2;
+        };
+        let step = [batched, single.map(|s| s.saturating_mul(decoding as u64))]
+            .into_iter()
             .flatten()
             .min()
             .unwrap_or(0);
@@ -614,12 +646,21 @@ impl RequestScheduler {
             let slot = c.mask.trailing_zeros() as usize;
             minimum[slot] = minimum[slot].min(c.duration_ns);
         }
-        let service_gap = self.service_gap();
         // A step that serves every runnable request keeps nobody waiting, so like a request's only
         // step it may exceed the latency budgets once the submission queue is empty.
         let runnable = (0..REQUEST_LANES)
             .filter(|slot| minimum[*slot] != u64::MAX)
             .fold(0u64, |mask, slot| mask | 1 << slot);
+        let decoding = bits(runnable)
+            .filter(|slot| {
+                let r = self.slots[*slot].request.as_ref().unwrap();
+                matches!(
+                    self.request_kind(r),
+                    Some(GraphKind::Decode | GraphKind::Speculative)
+                )
+            })
+            .count();
+        let service_gap = self.service_gap(decoding);
         candidates.retain(|c| {
             let unavoidable = c.mask.count_ones() == 1
                 && c.duration_ns == minimum[c.mask.trailing_zeros() as usize];

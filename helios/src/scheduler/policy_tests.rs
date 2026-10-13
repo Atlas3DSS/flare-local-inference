@@ -414,7 +414,7 @@ fn large_cohort_search_covers_high_slots_without_growing_scratch() {
         r.scheduled_consumed = 1;
         r.generated_tokens = 1;
     }
-    s.advance_to(2 * s.policy.service_gap_ns).unwrap();
+    s.advance_to(2 * s.service_gap(64)).unwrap();
     for h in &handles[..63] {
         s.published_output(*h).unwrap();
     }
@@ -986,8 +986,50 @@ fn slow_rounds_keep_speculating_when_every_round_exceeds_the_service_gap() {
         r.acceptance.observe(7, 7, false, 0);
     }
     r.accounting.last_output_ns = Some(now);
-    assert!(s.service_gap() >= 3 * 45 * MS);
+    assert!(s.service_gap(1) >= 3 * 45 * MS);
     let plan = s.plan().unwrap();
     assert_eq!(plan.kind, GraphKind::Speculative);
     assert!(plan.token_capacity > 1, "width {}", plan.token_capacity);
+}
+
+#[test]
+fn batched_slow_rounds_keep_speculating_when_their_rounds_exceed_one_requests_gap() {
+    let mut s = engine(8, true);
+    let handles: Vec<_> = (0..8).map(|i| add(&mut s, i + 1, 1, 256)).collect();
+    ready(&mut s, &handles);
+    let mut graphs = super::tests::duration_graphs(8);
+    for g in &mut graphs {
+        g.estimated_duration_ns = match g.kind {
+            // Four-Spark GLM rounds: 30 ms for one request's token, 53 ms for eight, and each
+            // draft adds 5 ms per request; a width-3 round for eight costs about three of one's gaps.
+            GraphKind::Speculative | GraphKind::Decode => {
+                let base = if g.batch_capacity >= 8 { 53 } else { 30 };
+                (base + (g.token_capacity as u64 - 1) * 2 * g.batch_capacity as u64) * MS
+            }
+            _ => MS,
+        };
+    }
+    s.costs = super::tests::measured_costs(&graphs);
+    let now = s.now_ns;
+    for h in &handles {
+        let r = s.request_mut(*h).unwrap();
+        for _ in 0..128 {
+            r.acceptance.observe(7, 7, false, 0);
+        }
+        r.accounting.last_output_ns = Some(now);
+    }
+    assert!(s.service_gap(8) >= 3 * 53 * MS);
+    assert!(s.service_gap(1) < s.service_gap(8));
+    let mut widths = Vec::new();
+    for _ in 0..24 {
+        let plan = step(&mut s, 3);
+        if plan.kind == GraphKind::Speculative {
+            widths.push((plan.lanes.len(), plan.token_capacity));
+        }
+    }
+    let wide = widths
+        .iter()
+        .filter(|(lanes, width)| *lanes == 8 && *width > 1)
+        .count();
+    assert!(wide * 4 >= widths.len() * 3, "batched widths {widths:?}");
 }
