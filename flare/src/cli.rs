@@ -1,0 +1,214 @@
+use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
+
+use clap::{Args, Parser, Subcommand, builder::PossibleValuesParser, builder::TypedValueParser};
+use flare_helios::{
+    engram::Storage,
+    offload::{PrefixCacheOffload, Transport, parse_size},
+    runtime_package::LoadOptions,
+};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "flare",
+    version,
+    about = "Serve prepared models on NVIDIA GPUs"
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Serve an exported .flaretensors package without Python.
+    Run(Run),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    args_override_self = true,
+    after_help = "Examples:\n  flare run model.flaretensors --gpus 0 --bind 127.0.0.1:8000\n  flare run model.flaretensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
+)]
+pub struct Run {
+    /// Path to the prepared .flaretensors package.
+    #[arg(value_name = "PACKAGE")]
+    pub package: PathBuf,
+
+    /// Address and port for the HTTP server.
+    #[arg(
+        long,
+        value_name = "IP:PORT",
+        default_value = "127.0.0.1:8000",
+        help_heading = "Serving options"
+    )]
+    pub bind: SocketAddr,
+
+    /// GPUs in rank order, relative to CUDA_VISIBLE_DEVICES when set.
+    #[arg(long, value_name = "N[,N...]", value_delimiter = ',', action = clap::ArgAction::Set,
+        default_value = "0", value_parser = clap::value_parser!(i32).range(0..),
+        help_heading = "Serving options")]
+    pub gpus: Vec<i32>,
+
+    /// File containing the serving API key; omit to disable authentication.
+    #[arg(long, value_name = "PATH", help_heading = "Serving options")]
+    pub api_key_file: Option<PathBuf>,
+
+    /// Maximum simultaneous requests [default: package setting].
+    #[arg(long, value_name = "N", help_heading = "Serving options")]
+    pub max_concurrency: Option<NonZeroUsize>,
+
+    /// Storage for auxiliary embedding tables (PLE/Engram).
+    #[arg(long, value_name = "MODE", default_value = "disk", help_heading = "Serving options",
+        value_parser = PossibleValuesParser::new(["disk", "ram"])
+            .map(|value| if value == "disk" { Storage::Disk } else { Storage::Ram }))]
+    pub embedding_table_storage: Storage,
+
+    /// Maximum drafts per round; 0 disables speculation [default: package setting].
+    #[arg(long, value_name = "N", help_heading = "Speculation options")]
+    pub mtp_draft_tokens: Option<usize>,
+
+    /// Adapt verification width to acceptance and round cost [default: package setting].
+    #[arg(
+        long,
+        overrides_with = "no_mtp_adaptive_verification",
+        help_heading = "Speculation options"
+    )]
+    pub mtp_adaptive_verification: bool,
+
+    /// Use a fixed verification width [default: package setting].
+    #[arg(
+        long,
+        overrides_with = "mtp_adaptive_verification",
+        help_heading = "Speculation options"
+    )]
+    pub no_mtp_adaptive_verification: bool,
+
+    /// Host memory for prefix checkpoints, e.g. 16G; 0 disables [default: disabled].
+    #[arg(long, value_name = "SIZE", value_parser = parse_size, help_heading = "Prefix cache options")]
+    pub prefix_cache_memory: Option<u64>,
+
+    /// Directory for prefix checkpoints on disk [default: disabled].
+    #[arg(long, value_name = "DIR", help_heading = "Prefix cache options")]
+    pub prefix_cache_disk: Option<PathBuf>,
+
+    /// Disk retention limit, e.g. 100G; 0 disables [default: 10% of free space].
+    #[arg(long, value_name = "SIZE", value_parser = parse_size, help_heading = "Prefix cache options")]
+    pub prefix_cache_disk_limit: Option<u64>,
+
+    /// Transfer disk checkpoints through host staging or GPUDirect Storage [default: staged].
+    #[arg(long, value_name = "MODE", help_heading = "Prefix cache options",
+        value_parser = PossibleValuesParser::new(["staged", "direct"])
+            .map(|value| if value == "staged" { Transport::Staged } else { Transport::Direct }))]
+    pub prefix_cache_disk_transport: Option<Transport>,
+}
+
+impl Run {
+    pub fn load_options(&self) -> LoadOptions {
+        LoadOptions {
+            embedding_table_storage: self.embedding_table_storage,
+            max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
+            mtp_draft_tokens: self.mtp_draft_tokens,
+            adaptive_verification: if self.mtp_adaptive_verification {
+                Some(true)
+            } else if self.no_mtp_adaptive_verification {
+                Some(false)
+            } else {
+                None
+            },
+            device_labels: Some(self.gpus.clone()),
+            prefix_cache: PrefixCacheOffload {
+                memory_bytes: self.prefix_cache_memory,
+                disk: self.prefix_cache_disk.clone(),
+                disk_limit: self.prefix_cache_disk_limit,
+                transport: self.prefix_cache_disk_transport,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(arguments: &[&str]) -> Run {
+        let Command::Run(args) = Cli::try_parse_from(arguments).unwrap().command;
+        args
+    }
+
+    #[test]
+    fn omitted_limits_preserve_package_defaults() {
+        let args = run(&["flare", "run", "model.flaretensors"]);
+        assert_eq!(args.bind.to_string(), "127.0.0.1:8000");
+        let options = args.load_options();
+        assert_eq!(options.device_labels, Some(vec![0]));
+        assert_eq!(options.embedding_table_storage, Storage::Disk);
+        assert_eq!(options.max_concurrency, None);
+        assert_eq!(options.mtp_draft_tokens, None);
+        assert_eq!(options.adaptive_verification, None);
+        assert_eq!(options.prefix_cache, PrefixCacheOffload::default());
+    }
+
+    #[test]
+    fn explicit_options_reach_the_loader() {
+        let args = run(&[
+            "flare",
+            "run",
+            "--gpus=1",
+            "--gpus=2,0",
+            "--bind",
+            "[::1]:8001",
+            "model.flaretensors",
+            "--api-key-file",
+            "key.txt",
+            "--max-concurrency",
+            "3",
+            "--mtp-draft-tokens=0",
+            "--embedding-table-storage",
+            "ram",
+            "--prefix-cache-memory",
+            "1.5GiB",
+            "--prefix-cache-disk",
+            "prefixes",
+            "--prefix-cache-disk-limit",
+            "0",
+            "--prefix-cache-disk-transport",
+            "direct",
+        ]);
+        assert_eq!(args.package, PathBuf::from("model.flaretensors"));
+        assert_eq!(args.bind.to_string(), "[::1]:8001");
+        assert_eq!(args.api_key_file, Some(PathBuf::from("key.txt")));
+        let options = args.load_options();
+        assert_eq!(options.device_labels, Some(vec![2, 0]));
+        assert_eq!(options.embedding_table_storage, Storage::Ram);
+        assert_eq!(options.max_concurrency, Some(3));
+        assert_eq!(options.mtp_draft_tokens, Some(0));
+        assert_eq!(
+            options.prefix_cache,
+            PrefixCacheOffload {
+                memory_bytes: Some(3 << 29),
+                disk: Some(PathBuf::from("prefixes")),
+                disk_limit: Some(0),
+                transport: Some(Transport::Direct),
+            }
+        );
+    }
+
+    #[test]
+    fn last_verification_flag_wins() {
+        let enable = "--mtp-adaptive-verification";
+        let disable = "--no-mtp-adaptive-verification";
+        for (flags, expected) in [
+            (vec![enable], true),
+            (vec![disable], false),
+            (vec![enable, disable], false),
+            (vec![disable, enable], true),
+        ] {
+            let mut arguments = vec!["flare", "run", "model.flaretensors"];
+            arguments.extend(flags);
+            assert_eq!(
+                run(&arguments).load_options().adaptive_verification,
+                Some(expected)
+            );
+        }
+    }
+}

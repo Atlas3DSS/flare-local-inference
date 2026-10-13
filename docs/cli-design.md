@@ -127,7 +127,12 @@ Both Ignition commands accept `--config`.
 ### 3.2 Native serving flags
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
-reader. Its options are:
+reader. `flare --help` lists commands; `flare run --help`, `flare run -h`, and
+`flare help run` describe every serving option, its defaults, and accepted values.
+Help also works after the package path and other options, without opening the
+package or initializing CUDA. Options may precede or follow `PACKAGE`;
+value-taking options accept both `--option VALUE` and `--option=VALUE`.
+Help exits with status 0; usage errors go to stderr with status 2. Its options are:
 
 | Flag | Meaning | Default |
 |---|---|---|

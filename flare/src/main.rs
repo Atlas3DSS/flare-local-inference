@@ -1,16 +1,17 @@
 //! Serve a prepared model package without a Python interpreter.
 
+mod cli;
 mod environment;
 
 use std::{
-    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
+use clap::Parser;
 use flare_helios::{
     model::{ModelContract, glm5next::Glm5Next, qwen4exp::Qwen4Exp},
-    runtime_package::{LoadOptions, NativeModel},
+    runtime_package::NativeModel,
     server::{Bootstrap, Server},
     startup::StartupProgress,
 };
@@ -21,77 +22,22 @@ extern "C" fn stop(_: libc::c_int) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut arguments = std::env::args().skip(1);
-    let Some(command) = arguments.next() else {
-        return Err(
-            "usage: flare run PACKAGE [--bind IP:PORT] [--gpus N[,N...]] [--api-key-file PATH] [--max-concurrency N] [--mtp-draft-tokens N] [--mtp-adaptive-verification|--no-mtp-adaptive-verification] [--embedding-table-storage disk|ram] [--prefix-cache-memory SIZE] [--prefix-cache-disk DIR] [--prefix-cache-disk-limit SIZE] [--prefix-cache-disk-transport staged|direct]\n\n--embedding-table-storage  Storage for auxiliary embedding tables (PLE/Engram); default: disk.\n--prefix-cache-memory      Host memory retaining prefix checkpoints; 0 disables the memory tier.\n--prefix-cache-disk        Directory retaining prefix checkpoint records on disk.\n--prefix-cache-disk-limit  Bytes of records kept on disk; default: one tenth of the free space; 0 disables the disk tier.\n--prefix-cache-disk-transport  How records move between disk and the GPU; default: staged."
-                .into(),
-        );
-    };
-    if command != "run" {
-        return Err("expected flare run PACKAGE".into());
-    }
-    let root = PathBuf::from(arguments.next().ok_or("package file is required")?).canonicalize()?;
-    let (mut bind, mut key, mut devices) = ("127.0.0.1:8000".to_owned(), None, vec![0]);
-    let mut options = LoadOptions::default();
-    while let Some(flag) = arguments.next() {
-        match flag.as_str() {
-            "--mtp-adaptive-verification" => {
-                options.adaptive_verification = Some(true);
-                continue;
-            }
-            "--no-mtp-adaptive-verification" => {
-                options.adaptive_verification = Some(false);
-                continue;
-            }
-            _ => {}
-        }
-        let value = arguments
-            .next()
-            .ok_or_else(|| format!("missing value for {flag}"))?;
-        match flag.as_str() {
-            "--embedding-table-storage" => {
-                options.embedding_table_storage = match value.as_str() {
-                    "disk" => flare_helios::engram::Storage::Disk,
-                    "ram" => flare_helios::engram::Storage::Ram,
-                    _ => return Err("--embedding-table-storage must be disk or ram".into()),
-                }
-            }
-            "--prefix-cache-memory" => {
-                options.prefix_cache.memory_bytes = Some(
-                    flare_helios::offload::parse_size(&value)
-                        .map_err(|error| format!("--prefix-cache-memory: {error}"))?,
-                )
-            }
-            "--prefix-cache-disk" => options.prefix_cache.disk = Some(PathBuf::from(value)),
-            "--prefix-cache-disk-limit" => {
-                options.prefix_cache.disk_limit = Some(
-                    flare_helios::offload::parse_size(&value)
-                        .map_err(|error| format!("--prefix-cache-disk-limit: {error}"))?,
-                )
-            }
-            "--prefix-cache-disk-transport" => {
-                options.prefix_cache.transport = Some(match value.as_str() {
-                    "staged" => flare_helios::offload::Transport::Staged,
-                    "direct" => flare_helios::offload::Transport::Direct,
-                    _ => {
-                        return Err("--prefix-cache-disk-transport must be staged or direct".into());
-                    }
-                })
-            }
-            "--max-concurrency" => options.max_concurrency = Some(value.parse()?),
-            "--mtp-draft-tokens" => options.mtp_draft_tokens = Some(value.parse()?),
-            "--bind" => bind = value,
-            "--gpus" => {
-                devices = value
-                    .split(',')
-                    .map(str::parse)
-                    .collect::<Result<Vec<i32>, _>>()?
-            }
-            "--api-key-file" => key = Some(std::fs::read_to_string(value)?.trim().to_owned()),
-            _ => return Err(format!("unknown option {flag}").into()),
-        }
-    }
+    let cli::Command::Run(args) = cli::Cli::parse().command;
+    let root = args
+        .package
+        .canonicalize()
+        .map_err(|error| format!("cannot access package {}: {error}", args.package.display()))?;
+    let key = args
+        .api_key_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map(|value| value.trim().to_owned())
+                .map_err(|error| format!("cannot read API key file {}: {error}", path.display()))
+        })
+        .transpose()?;
+    let options = args.load_options();
+    let devices = args.gpus;
     let inherited =
         std::env::var("CUDA_VISIBLE_DEVICES")
             .map(Some)
@@ -101,7 +47,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     let visibility = environment::visibility(&devices, inherited.as_deref())?;
     let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
-    options.device_labels = Some(devices);
     // SAFETY: Startup is single-threaded here, before Helios starts workers or
     // loads CUDA. Packages contain compiled cubins and require no driver JIT.
     unsafe {
@@ -114,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner = unsafe { NativeModel::load(&root, &local_devices, &options, &progress)? };
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
-    config["bind"] = bind.into();
+    config["bind"] = args.bind.to_string().into();
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
     match config["model_contract"]["schema"].as_str() {
