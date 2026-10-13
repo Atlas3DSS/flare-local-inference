@@ -274,7 +274,9 @@ def _serve_prepared(prepared, bind, options):
     import signal
 
     with prepared:
-        print(json.dumps({"memory": prepared.memory_report}, default=str), file=sys.stderr, flush=True)
+        ranks = [{key: value for key, value in rank.items() if key != "tuning"}
+                 for rank in prepared.memory_report.get("ranks", (prepared.memory_report,))]
+        print(json.dumps({"memory": ranks}, default=str), file=sys.stderr, flush=True)
         server = prepared.start_server(bind=bind, options=options)
         print(f"Listening on {server.address}", flush=True)
 
