@@ -266,6 +266,14 @@ fn prepare_inner<M: ModelContract>(
         tokens.len(),
         config.limits.max_sequence_tokens,
     )?;
+    let ignore_eos = match object.get("ignore_eos") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("ignore_eos must be a boolean".into()),
+    };
+    if ignore_eos && grammar.is_some() {
+        return Err("structured output cannot ignore end-of-sequence tokens".into());
+    }
     Ok(PreparedRequest {
         prompt: Prompt {
             tokens,
@@ -278,6 +286,7 @@ fn prepare_inner<M: ModelContract>(
             stop_sequences,
             stop_strings,
             grammar,
+            ignore_eos,
         },
         stream,
         output,

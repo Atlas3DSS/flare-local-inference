@@ -30,6 +30,8 @@ pub struct Prompt<M: ModelContract> {
     pub stop_sequences: Vec<Vec<u32>>,
     pub stop_strings: Vec<String>,
     pub grammar: Option<crate::grammar::RequestGrammar>,
+    /// Generate through end-of-sequence tokens until the output limit, as vLLM's `ignore_eos`.
+    pub ignore_eos: bool,
 }
 
 impl<M: ModelContract> Prompt<M> {
@@ -729,7 +731,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 self.config,
                 handle,
                 &incoming.prompt,
-                incoming.qualification,
+                incoming.qualification || incoming.prompt.ignore_eos,
             )?);
             self.active[slot] = Some(Active {
                 request: handle,
@@ -1581,6 +1583,7 @@ mod tests {
                 max_new_tokens: 10,
                 stop_sequences: vec![],
                 stop_strings: vec![],
+                ignore_eos: false,
                 grammar: None,
             },
             events,

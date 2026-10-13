@@ -214,6 +214,7 @@ mod tests {
                 max_new_tokens: 64,
                 stop_sequences: vec![],
                 stop_strings: vec![],
+                ignore_eos: false,
                 grammar: None,
             },
             stream: false,

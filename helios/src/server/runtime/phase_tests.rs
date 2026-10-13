@@ -131,6 +131,7 @@ impl Fixture {
                     max_new_tokens: limit,
                     stop_sequences: vec![],
                     stop_strings: vec![],
+                    ignore_eos: false,
                     grammar: None,
                 },
                 events,
