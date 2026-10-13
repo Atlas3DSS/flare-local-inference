@@ -717,6 +717,12 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
                      f"serving context {current.value}")
         if memory.value != 2 or context.value != current.value:
             raise ValueError(f"external allocation {address:#x}+{nbytes} is not device memory in the serving context")
+    # A serving process's own CUDA context occupies these addresses on an integrated GPU, so it could
+    # not restore an allocation there.
+    if low := storage.low_allocations(dict(outside)):
+        raise RuntimeError("external device allocations lie below "
+                           f"{storage.EXTERNAL_FLOOR:#x}, where a serving context's storage lies: "
+                           + ", ".join(f"{address:#x}+{size}" for address, size in low))
     allocations = [Allocation(f"device-{index}", mapping.address, mapping.nbytes,
                              alignment=storage.granularity, preserve_address=True)
                    for index, mapping in enumerate(sorted(mappings.values(), key=lambda m: m.address))]

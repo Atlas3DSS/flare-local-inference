@@ -30,6 +30,8 @@ class PackageStorage:
     RESERVATION_BYTES = 1 << 40
     # Lowest address of device storage that libraries allocate outside the package on a unified-memory GPU.
     EXTERNAL_FLOOR = 0x400000000
+    # Where sealing below the floor starts; a context's own storage lies above it.
+    LOW_SCAN_START = 1 << 32
 
     def __init__(self, *, rank=0, world=1, device=0):
         import torch
@@ -54,7 +56,10 @@ class PackageStorage:
         if self.library.flare_package_initialize(rank, world, device):
             raise self.error or RuntimeError("cannot initialize native package allocator")
         self.granularity = self._snapshot()["granularity"]
-        self.low_window = self._reserve_low_window() if self.integrated else None
+        # Reserved spans below EXTERNAL_FLOOR, so external allocations land above it.
+        self.low_reservations = []
+        if self.integrated:
+            self._reserve_low_window()
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
         self._allocator = allocator
@@ -76,25 +81,66 @@ class PackageStorage:
         A unified-memory GPU such as GB10 places a context's own storage at low device addresses,
         and ordinary allocations such as cuBLAS's directly after it. That storage's extent differs
         between processes, so a serving process could not reserve the addresses those allocations
-        had here. Reserving the window up to EXTERNAL_FLOOR moves them above it.
+        had here. Reserving every free span below EXTERNAL_FLOOR moves them above it.
         """
+        self.seal_low_window()
         probe = C.c_uint64()
-        self.cuda.call("cuMemAlloc_v2", C.byref(probe), C.c_size_t(self.granularity))
-        first = probe.value
-        self.cuda.call("cuMemFree_v2", probe)
-        if first >= self.EXTERNAL_FLOOR:
-            return None
-        window = C.c_uint64()
-        size = self.EXTERNAL_FLOOR - first
-        self.cuda.call("cuMemAddressReserve", C.byref(window), C.c_size_t(size), C.c_size_t(self.granularity),
-                       C.c_uint64(first), C.c_uint64(0))
         self.cuda.call("cuMemAlloc_v2", C.byref(probe), C.c_size_t(self.granularity))
         above = probe.value
         self.cuda.call("cuMemFree_v2", probe)
         if above < self.EXTERNAL_FLOOR:
-            self.cuda.call("cuMemAddressFree", C.c_uint64(window.value), C.c_size_t(size))
             raise RuntimeError(f"device allocations still start at {above:#x} below {self.EXTERNAL_FLOOR:#x}")
-        return window.value, size
+
+    def _reserve_at(self, address, size):
+        """Reserve exactly [address, address + size), or nothing when any of it is taken."""
+        window = C.c_uint64()
+        try:
+            self.cuda.call("cuMemAddressReserve", C.byref(window), C.c_size_t(size), C.c_size_t(self.granularity),
+                           C.c_uint64(address), C.c_uint64(0))
+        except RuntimeError:
+            return False
+        if window.value != address:
+            self.cuda.call("cuMemAddressFree", C.c_uint64(window.value), C.c_size_t(size))
+            return False
+        self.low_reservations.append((address, size))
+        return True
+
+    def _release_last(self):
+        address, size = self.low_reservations.pop()
+        self.cuda.call("cuMemAddressFree", C.c_uint64(address), C.c_size_t(size))
+
+    def seal_low_window(self):
+        """Reserve every span below EXTERNAL_FLOOR that is free now, including spans frees reopened.
+
+        Storage occupied when the window was first reserved and freed later would otherwise let
+        an external allocation land below the floor, where a serving context's own storage lies.
+        """
+        if not self.integrated:
+            return
+        granule = self.granularity
+        address = -(-self.LOW_SCAN_START // granule) * granule
+        while address < self.EXTERNAL_FLOOR:
+            held = next((start + length for start, length in self.low_reservations
+                         if start <= address < start + length), None)
+            if held is not None:
+                address = held
+                continue
+            # A taken granule costs one probe; a free one starts the longest free run found by halving.
+            if not self._reserve_at(address, granule):
+                address += granule
+                continue
+            self._release_last()
+            size = self.EXTERNAL_FLOOR - address
+            while not self._reserve_at(address, size) and size > granule:
+                size = max(granule, size // 2 // granule * granule)
+            # A granule taken since the probe is skipped.
+            address += size
+
+    def low_allocations(self, allocations):
+        """Device allocations among `allocations`, {address: size}, that lie below EXTERNAL_FLOOR."""
+        if not self.integrated:
+            return []
+        return sorted((address, size) for address, size in allocations.items() if address < self.EXTERNAL_FLOOR)
 
     def _snapshot(self):
         pointer = self.library.flare_package_snapshot()
@@ -135,6 +181,8 @@ class PackageStorage:
             torch.cuda.synchronize(self.device)
             del pool
             torch.cuda.empty_cache()
+            # Returned segments may reopen low addresses that later library allocations would take.
+            self.seal_low_window()
 
     def unused_ranges(self):
         """Exclude free blocks and allocator padding from retained preparation pools."""
