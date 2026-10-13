@@ -9,6 +9,8 @@ _WORKER_BYTES = 2 << 30
 _HEADROOM_BYTES = 8 << 30
 # Kernel modules and temporary compiler objects retained by each tuning rank.
 _TUNING_GROWTH_BYTES = 1 << 30
+# One Inductor compile subprocess inside a forward compiler.
+_COMPILE_THREAD_BYTES = 512 << 20
 # Host memory a preparing process holds for each compiled forward it restores to warm and capture:
 # its generated module and kernel launchers. GLM's TP4 ranks peak at 9.3 GB with 65 restored forwards.
 COMPILED_FORWARD_BYTES = 128 << 20
@@ -52,6 +54,18 @@ def worker_limit(limit, *, pools=1, available=None, device_bytes=0, headroom_byt
         raise MemoryError(f"preparation requires at least {(headroom + pools * worker_bytes) >> 20} MiB "
                           f"available host memory; found {available >> 20} MiB")
     return min(limit, capacity)
+
+
+def compile_threads(limit, *, workers, available, device_bytes=0, headroom_bytes=0):
+    """Bound each forward compiler's Inductor subprocesses by the RAM its workers leave.
+
+    On GB10 a worker compiling a GLM forward holds about 2.8 GB, and each of its
+    Inductor compile subprocesses about 0.4 GB; sixteen threads in one worker exhaust
+    the memory a TP2 rank has left.
+    """
+    headroom = max(_HEADROOM_BYTES, headroom_bytes)
+    spare = available - headroom - workers * (_WORKER_BYTES + device_bytes)
+    return max(1, min(limit, spare // (workers * _COMPILE_THREAD_BYTES)))
 
 
 def tuning_limits(device, workers, *, pools=1, headroom_bytes=0, race_budget=None):

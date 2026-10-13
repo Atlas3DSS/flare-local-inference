@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from .compilation import _OPTIONS, _defer_full_collection
-from .host_memory import device_memory_info, worker_limit
+from .host_memory import compile_threads, device_memory_info, worker_limit
 
 # Device memory one compiler worker can hold: its CUDA context plus Inductor's constant folding.
 _WORKER_DEVICE_BYTES = 2 << 30
@@ -51,7 +51,12 @@ class CompilePool:
         self.workers = worker_limit(min(8, budget, capacity), available=free if shared else None,
                                    device_bytes=_WORKER_DEVICE_BYTES if shared else 0,
                                    headroom_bytes=headroom_bytes if shared else 0)
-        self.options = dict(_OPTIONS, compile_threads=max(1, budget // self.workers))
+        threads = max(1, budget // self.workers)
+        if shared:
+            # Each compile thread is an Inductor subprocess in the worker's shared memory.
+            threads = min(threads, compile_threads(threads, workers=self.workers, available=free,
+                                                   device_bytes=_WORKER_DEVICE_BYTES, headroom_bytes=headroom_bytes))
+        self.options = dict(_OPTIONS, compile_threads=threads)
 
     def submit(self, forward, path):
         from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool

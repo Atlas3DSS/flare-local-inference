@@ -9,8 +9,8 @@ from torch._subclasses import FakeTensor
 from ignition.preparation.forward_metadata import dumps, loads
 
 
-@pytest.mark.parametrize("integrated,expected", [(False, 8), (True, 4)])
-def test_compiler_concurrency_accounts_for_shared_device_ram(monkeypatch, integrated, expected):
+@pytest.mark.parametrize("integrated,expected,threads", [(False, 8, 2), (True, 4, 1)])
+def test_compiler_concurrency_accounts_for_shared_device_ram(monkeypatch, integrated, expected, threads):
     from ignition.preparation import compile_pool, host_memory
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: ((2 if integrated else 40) << 30, 121 << 30))
@@ -19,7 +19,8 @@ def test_compiler_concurrency_accounts_for_shared_device_ram(monkeypatch, integr
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
     pool = compile_pool.CompilePool("cuda:0")
     assert pool.workers == expected
-    assert pool.options["compile_threads"] * pool.workers == 16
+    # Four integrated workers leave no RAM for additional Inductor subprocesses.
+    assert pool.options["compile_threads"] == threads
 
 
 def test_metadata_preserves_tensor_aliases_and_offsets():
@@ -91,6 +92,13 @@ def test_attention_layout_restores_before_forwarding_attribute_lookups():
 
 
 
+@pytest.mark.parametrize(("available_gib", "threads"), [(12, 1), (16, 8), (64, 16)])
+def test_integrated_compile_threads_fit_the_ram_workers_leave(available_gib, threads):
+    from ignition.preparation.host_memory import compile_threads
+
+    assert compile_threads(16, workers=1, available=available_gib << 30, device_bytes=2 << 30) == threads
+
+
 @pytest.mark.parametrize(("free_gib", "workers", "threads"), [(95, 8, 2), (3, 1, 16)])
 def test_compile_pool_sizes_workers_from_free_device_memory(monkeypatch, free_gib, workers, threads):
     from ignition.preparation import compile_pool
@@ -103,8 +111,8 @@ def test_compile_pool_sizes_workers_from_free_device_memory(monkeypatch, free_gi
     assert (pool.workers, pool.options["compile_threads"]) == (workers, threads)
 
 
-@pytest.mark.parametrize("integrated,workers", [(False, 8), (True, 4)])
-def test_compiler_reuses_its_budgeted_worker_pool(monkeypatch, tmp_path, integrated, workers):
+@pytest.mark.parametrize("integrated,workers,threads", [(False, 8, 2), (True, 4, 1)])
+def test_compiler_reuses_its_budgeted_worker_pool(monkeypatch, tmp_path, integrated, workers, threads):
     from concurrent.futures import Future
     from torch._inductor.compile_worker import subproc_pool
     from ignition.preparation import compile_pool, host_memory
@@ -136,7 +144,7 @@ def test_compiler_reuses_its_budgeted_worker_pool(monkeypatch, tmp_path, integra
         pool.submit(SimpleNamespace(), tmp_path / "second.bin")
     (executor,) = executors
     assert [call[3] for call in executor.calls] == [str(tmp_path / "first.bin"), str(tmp_path / "second.bin")]
-    assert all(call[2]["compile_threads"] == 16 // workers for call in executor.calls)
+    assert all(call[2]["compile_threads"] == threads for call in executor.calls)
     assert executor.closed and compile_pool._OPTIONS["compile_threads"] == 16
 
 
