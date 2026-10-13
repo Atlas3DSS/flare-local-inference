@@ -12,11 +12,16 @@ pytestmark = pytest.mark.skipif(
     reason="requires FLARE_RUN_CUDA_TESTS=1 and an explicitly assigned CUDA_VISIBLE_DEVICES",
 )
 
-EPS = dict(rms_eps=1e-6, hc_eps=1e-6, sinkhorn_iters=20, norm_eps=1e-5)
+# GLM-5.3 and DeepSeek V4 both mix four 4096-wide streams; V4 normalizes with eps 1e-20.
+MODELS = {
+    "glm53": (4096, dict(rms_eps=1e-6, hc_eps=1e-6, sinkhorn_iters=20, norm_eps=1e-5)),
+    "deepseek4": (4096, dict(rms_eps=1e-20, hc_eps=1e-6, sinkhorn_iters=20, norm_eps=1e-20)),
+}
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("operation", ["pre", "post_pre"])
-def test_composed_mhc_matches_reference(operation):
+def test_composed_mhc_matches_reference(operation, model):
     from b12x.preparation import PreparationSession
     from b12x.testing.mhc import post_reference, pre_reference
 
@@ -28,7 +33,7 @@ def test_composed_mhc_matches_reference(operation):
     if torch.cuda.get_device_capability(0) != (10, 3):
         pytest.skip("composed mHC serves SM103")
     torch.manual_seed(0)
-    rows, hidden = 1024, 4096
+    rows, (hidden, eps) = 1024, MODELS[model]
     weights = MHCWeights(torch.randn(24, 4 * hidden, device="cuda") * 0.02, torch.rand(3, device="cuda") * 0.5,
                          torch.randn(24, device="cuda") * 0.3,
                          (torch.rand(hidden, device="cuda") + 0.5).to(torch.bfloat16))
@@ -42,7 +47,7 @@ def test_composed_mhc_matches_reference(operation):
     scratch = MHCScratch.allocate(rows, hidden, "cuda")
     arena = ScratchArena("cuda:0")
     with PreparationSession(device=torch.device("cuda"), autotune=True, compile_workers=0) as session:
-        operator = PreparedMHC(inputs, weights, scratch, session=session, name=operation, workspace=arena, **EPS)
+        operator = PreparedMHC(inputs, weights, scratch, session=session, name=operation, workspace=arena, **eps)
         session.freeze()
     assert operator.composed is not None
     graph = torch.cuda.CUDAGraph()
@@ -55,9 +60,9 @@ def test_composed_mhc_matches_reference(operation):
 
     mixed = residual if operation == "pre" else post_reference(*inputs)
     collapsed, post_mix, comb_mix = pre_reference(mixed, weights.fn, weights.scale, weights.base,
-        rms_eps=EPS["rms_eps"], hc_eps=EPS["hc_eps"], sinkhorn_iters=EPS["sinkhorn_iters"])
+        rms_eps=eps["rms_eps"], hc_eps=eps["hc_eps"], sinkhorn_iters=eps["sinkhorn_iters"])
     wide = collapsed.float()
-    normalized = (wide * torch.rsqrt(wide.square().mean(-1, keepdim=True) + EPS["norm_eps"])
+    normalized = (wide * torch.rsqrt(wide.square().mean(-1, keepdim=True) + eps["norm_eps"])
                   * weights.norm.float()).bfloat16()
 
     def relative(actual, expected):
