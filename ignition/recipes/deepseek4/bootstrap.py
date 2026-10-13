@@ -184,6 +184,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             workload_schema="deepseek4-vision",
             numerical_policy="default",
             coordinator=coordinator,
+            headroom_bytes=config.headroom_bytes,
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)

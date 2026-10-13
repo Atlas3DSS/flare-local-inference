@@ -45,3 +45,23 @@ def test_discrete_device_budget_is_independent_of_host_ram(monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
     monkeypatch.setattr(host_memory, "available_bytes", lambda: pytest.fail("discrete VRAM must not use host capacity"))
     assert host_memory.device_memory_info("cuda:0") == (24 << 30, 32 << 30)
+
+
+@pytest.mark.parametrize("pools", [1, 2, 4])
+@pytest.mark.parametrize("headroom", [0, 16 << 30])
+@pytest.mark.parametrize("race_budget", [None, 1 << 20, 64 << 30])
+def test_tuning_races_and_compilers_share_one_ram_budget(monkeypatch, pools, headroom, race_budget):
+    import torch
+
+    available = 40 << 30
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1 << 30, 121 << 30))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: available)
+    workers, race = host_memory.tuning_limits("cuda:0", 8, pools=pools,
+        headroom_bytes=headroom, race_budget=race_budget)
+    assert workers > 0 and race > 0
+    assert pools * (workers * (2 << 30) + race + (1 << 30)) + max(8 << 30, headroom) <= available
+    if race_budget is not None:
+        assert race <= race_budget
+    if race_budget == 1 << 20:
+        assert race == race_budget

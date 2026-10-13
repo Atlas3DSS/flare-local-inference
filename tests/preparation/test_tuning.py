@@ -104,6 +104,7 @@ def backend(monkeypatch):
         self._published_owners.clear()
 
     monkeypatch.setattr(PreparationSession, "close", close_session)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
     monkeypatch.setattr(torch.cuda, "device", lambda device: nullcontext())
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append(("empty_cache",)))
     return events, controls
@@ -1061,36 +1062,39 @@ GIB = 1 << 30
 
 
 @pytest.mark.parametrize(("free_gib", "race_bytes", "workers"), [
-    (16, 9 * GIB // 4, 6), (9.4, int(2.4 * GIB) // 4, 1), (6.5, 1, 0)])
-def test_unified_memory_tuning_keeps_the_protected_memory_free(backend, monkeypatch, free_gib, race_bytes, workers):
+    (16, 7 * GIB // 4, 2), (12, 3 * GIB // 4, 1), (10, GIB // 4, 0)])
+def test_integrated_tuning_automatically_budgets_shared_ram(backend, monkeypatch, free_gib, race_bytes, workers):
     events, _ = backend
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (int(free_gib * GIB), 121 * GIB))
-    session = make_session(device=0, checkpoint="revision", protected_bytes=6 * GIB)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (GIB, 121 * GIB))
+    monkeypatch.setattr("ignition.preparation.host_memory.available_bytes", lambda: free_gib * GIB)
+    session = make_session(device=0, checkpoint="revision", headroom_bytes=6 * GIB)
     declare(session, (declaration("projection"),))
     report = session.tune()
-    # Above the protected 6 GiB, 1 GiB allows for this process's growth; a quarter of the rest
-    # bounds the candidate race and compilers share what remains.
     assert session.race_budget == report["race_budget_bytes"] == race_bytes
-    assert session.compile_workers == report["compile_workers"] == min(8, workers)
-    assert report["protected_bytes"] == 6 * GIB
-    assert [event for event in events if event[0] == "workers"] == [("workers", None)] + (
-        [] if workers >= 8 else [("workers", workers)])
+    assert session.compile_workers == report["compile_workers"] == workers
+    assert report["headroom_bytes"] == 6 * GIB
+    assert [event for event in events if event[0] == "workers"] == [("workers", None), ("workers", workers)]
 
 
-def test_unified_memory_tuning_fails_before_using_protected_memory(backend, monkeypatch):
+def test_integrated_tuning_fails_before_using_headroom(backend, monkeypatch):
     events, _ = backend
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (5 * GIB, 121 * GIB))
-    session = make_session(device=0, checkpoint="revision", protected_bytes=6 * GIB)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (GIB, 121 * GIB))
+    monkeypatch.setattr("ignition.preparation.host_memory.available_bytes", lambda: 12 * GIB)
+    session = make_session(device=0, checkpoint="revision", headroom_bytes=12 * GIB)
     declare(session, (declaration("projection"),))
-    with pytest.raises(MemoryError, match="6.0 GiB of headroom and \\[memory\\] reserve.*5.0 GiB is free"):
+    with pytest.raises(MemoryError, match="available shared memory"):
         session.tune()
     assert not [event for event in events if event[0] == "prepare"]
 
 
-def test_discrete_gpu_tuning_keeps_b12x_defaults(backend):
+@pytest.mark.parametrize("race_budget", [None, GIB])
+def test_discrete_gpu_tuning_keeps_b12x_race_budget(backend, monkeypatch, race_budget):
     events, _ = backend
-    session = make_session(device=0, checkpoint="revision")
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: pytest.fail("VRAM sizing belongs to b12x"))
+    session = make_session(device=0, checkpoint="revision", headroom_bytes=6 * GIB, race_budget=race_budget)
     declare(session, (declaration("projection"),))
     report = session.tune()
-    assert session.race_budget is None and report["protected_bytes"] is None
+    assert session.race_budget == report["race_budget_bytes"] == race_budget
     assert [event for event in events if event[0] == "workers"] == [("workers", None)]

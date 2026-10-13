@@ -56,8 +56,6 @@ class PreparationConfig:
     prefill_chunk_size: int = 4096
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
-    # The GPUs allocate from system memory: transient preparation work keeps the headroom free too.
-    unified_memory: bool = False
     pages: int | None = None
     kernel_cache: Path | None = None
     mtp: bool = False
@@ -195,7 +193,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
-        protected_bytes=config.headroom_bytes if config.unified_memory else None)
+        headroom_bytes=config.headroom_bytes)
     session.__enter__()
     graphs = {}
     try:

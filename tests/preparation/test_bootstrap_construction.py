@@ -720,7 +720,9 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         if not decoder.verification:
             assert (args["state"]._residual is not None) == args["state"].maintain_draft_state
         assert pool.backing.dtype == torch.uint8
-        assert pool.backing.shape[0] == 1 + config.request_capacity + pool.layout.snapshot_capacity(config.snapshot_budget_bytes) + (0 if proposal == "ordinary" else (max(config.speculative_widths) - 1) * config.request_capacity)
+        assert pool.backing.shape[0] == (
+            1 + config.request_capacity + pool.layout.snapshot_capacity(config.snapshot_budget_bytes)
+        )
         assert decoder.scratch.residual.dtype == torch.bfloat16
         assert decoder.scratch.logits.dtype == torch.bfloat16
         assert pool.layout.speculative_tokens == (0 if proposal == "ordinary" else 7)

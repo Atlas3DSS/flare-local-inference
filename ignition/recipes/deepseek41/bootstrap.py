@@ -144,7 +144,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(device=device, checkpoint=identity,
-            workload_schema="deepseek41-text", numerical_policy="default", coordinator=coordinator)
+            workload_schema="deepseek41-text", numerical_policy="default", coordinator=coordinator,
+            headroom_bytes=config.headroom_bytes)
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
         arena = ScratchArena(device)

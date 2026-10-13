@@ -11,7 +11,6 @@ def test_catalog_publication_waits_for_all_bindings(tmp_path, monkeypatch):
     published, release, attempted, second_entered = (Event() for _ in range(4))
     first, second = object.__new__(ForwardCache), object.__new__(ForwardCache)
     first.root = second.root = tmp_path
-    first.unified_memory = second.unified_memory = False
     artifact = tmp_path / 'forward.bin'
 
     def prepare(cache, functions, signatures, **kwargs):
@@ -47,7 +46,6 @@ def test_peer_binding_does_not_wait_for_its_root_publication_lock(tmp_path, monk
 
     cache = object.__new__(ForwardCache)
     cache.root = tmp_path
-    cache.unified_memory = False
     monkeypatch.setattr(dist, 'get_rank', lambda: 1)
     monkeypatch.setattr(ForwardCache, '_prepare_many', lambda *args, **kwargs: 'bound')
     with cache._publication_lock():

@@ -97,22 +97,28 @@ def test_compile_pool_sizes_workers_from_free_device_memory(monkeypatch, free_gi
 
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free_gib << 30, 96 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr("ignition.preparation.host_memory.available_bytes", lambda: 128 << 30)
     pool = compile_pool.CompilePool("cuda:0")
-    assert not pool.unified_memory and (pool.workers, pool.options["compile_threads"]) == (workers, threads)
+    assert (pool.workers, pool.options["compile_threads"]) == (workers, threads)
 
 
-def test_unified_memory_compiles_each_forward_in_a_fresh_process(monkeypatch, tmp_path):
+@pytest.mark.parametrize("integrated,workers", [(False, 8), (True, 4)])
+def test_compiler_reuses_its_budgeted_worker_pool(monkeypatch, tmp_path, integrated, workers):
     from concurrent.futures import Future
-
-    from ignition.preparation import compile_pool
+    from torch._inductor.compile_worker import subproc_pool
+    from ignition.preparation import compile_pool, host_memory
 
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: pytest.fail("sizing reads no free memory"))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (40 << 30, 121 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=integrated))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
     executors = []
 
     class Executor:
-        def __init__(self, **options):
-            self.options, self.calls, self.closed = options, [], False
+        def __init__(self, count, *, kind):
+            self.calls, self.closed = [], False
+            assert count == workers and kind == subproc_pool.SubprocKind.SPAWN
             executors.append(self)
 
         def submit(self, function, *arguments):
@@ -124,27 +130,24 @@ def test_unified_memory_compiles_each_forward_in_a_fresh_process(monkeypatch, tm
         def shutdown(self):
             self.closed = True
 
-    monkeypatch.setattr(compile_pool, "ProcessPoolExecutor", Executor)
-    with compile_pool.CompilePool("cuda:0", unified_memory=True) as pool:
-        assert (pool.workers, pool.options["compile_threads"]) == (1, 1)
+    monkeypatch.setattr(subproc_pool, "SubprocPool", Executor)
+    with compile_pool.CompilePool("cuda:0") as pool:
         pool.submit(SimpleNamespace(), tmp_path / "first.bin")
         pool.submit(SimpleNamespace(), tmp_path / "second.bin")
     (executor,) = executors
-    # One compiler at a time, replaced after every forward, generating code in its own process.
-    assert executor.options["max_workers"] == 1 and executor.options["max_tasks_per_child"] == 1
-    assert executor.options["mp_context"].get_start_method() == "spawn"
     assert [call[3] for call in executor.calls] == [str(tmp_path / "first.bin"), str(tmp_path / "second.bin")]
-    assert all(call[2]["compile_threads"] == 1 for call in executor.calls) and executor.closed
-    assert compile_pool._OPTIONS["compile_threads"] == 16
+    assert all(call[2]["compile_threads"] == 16 // workers for call in executor.calls)
+    assert executor.closed and compile_pool._OPTIONS["compile_threads"] == 16
 
 
-def test_single_process_compilation_restores_the_shared_options(monkeypatch):
-    from torch._inductor import config
-
-    from ignition.preparation import compile_pool
+@pytest.mark.parametrize("integrated,workers", [(False, 8), (True, 2)])
+def test_compilation_preserves_configured_headroom(monkeypatch, integrated, workers):
+    from ignition.preparation import compile_pool, host_memory
 
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
-    with compile_pool.single_process_compilation():
-        assert config.compile_threads == 1
-        compile_pool._OPTIONS.update(compile_threads=1)
-    assert compile_pool._OPTIONS["compile_threads"] == 16
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (40 << 30, 121 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=integrated))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
+    assert compile_pool.CompilePool("cuda:0", headroom_bytes=16 << 30).workers == workers
+    with pytest.raises(MemoryError, match="headroom"):
+        compile_pool.CompilePool("cuda:0", headroom_bytes=39 << 30)

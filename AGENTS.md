@@ -426,6 +426,11 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   set after compiler workers exit and before warmup and capture. Validate compiled
   guards against those tensors. Helios sizes the serving cache independently;
   temporary compiler contexts must not reduce its budget.
+- **Derive preparation memory policy from hardware.** Shared preparation code
+  detects integrated GPUs and budgets compiler workers and tuning races against
+  available system RAM. Recipes pass byte headroom, not hardware flags. Forward
+  compilation uses memory-bounded parallel workers on both integrated and discrete
+  GPUs; artifact binding starts no additional compiler pool.
 - **Compile tensor-parallel forwards on rank zero.** Pass the preparation
   coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
   tensors and native handles, and participate in ordered warmup and local capture.

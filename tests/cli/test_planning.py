@@ -52,8 +52,7 @@ def gpu(index, free_gib, capability=(12, 0)):
 
 
 def spark(index, free_gib):
-    return planning.Gpu(index, "NVIDIA GB10", f"GPU-{index:04d}", 121 * GIB, int(free_gib * GIB), (12, 1),
-                        unified=True)
+    return planning.Gpu(index, "NVIDIA GB10", f"GPU-{index:04d}", 121 * GIB, int(free_gib * GIB), (12, 1))
 
 
 DEFAULT = object()

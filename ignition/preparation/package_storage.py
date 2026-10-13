@@ -35,7 +35,7 @@ class PackageStorage:
         import torch
 
         self.rank, self.world, self.device = rank, world, device
-        self.unified_memory = torch.cuda.get_device_properties(device).is_integrated
+        self.integrated = torch.cuda.get_device_properties(device).is_integrated
         self.DEVICE_BASE += rank * self.RESERVATION_BYTES
         self.HOST_BASE += rank * self.RESERVATION_BYTES
         self.cuda = _Cuda()
@@ -54,7 +54,7 @@ class PackageStorage:
         if self.library.flare_package_initialize(rank, world, device):
             raise self.error or RuntimeError("cannot initialize native package allocator")
         self.granularity = self._snapshot()["granularity"]
-        self.low_window = self._reserve_low_window() if self.unified_memory else None
+        self.low_window = self._reserve_low_window() if self.integrated else None
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
         self._allocator = allocator
@@ -156,7 +156,7 @@ class PackageStorage:
         if self._host_cursor + extent > self.HOST_BASE + self.RESERVATION_BYTES:
             raise MemoryError("native package host-address range exhausted")
         region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype, self.device,
-                            lock=self.unified_memory)
+                            lock=self.integrated)
         self._host_cursor += extent
         self.host_regions.append(region)
         return region
