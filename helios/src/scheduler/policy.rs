@@ -288,6 +288,23 @@ impl RequestScheduler {
         }
     }
 
+    /// The service gap scaled to the hardware: never below a small multiple of the cheapest step that
+    /// advances one decoding request. The configured gap suits fast decode steps; on slower hardware or
+    /// larger models (a GLM round on two DGX Sparks takes 45-90 ms) every round would be late and the
+    /// lateness filter would leave only the shortest round, switching speculation off.
+    pub(super) fn service_gap(&self) -> u64 {
+        let step = std::iter::once(self.costs.reference_duration(GraphKind::Decode, 1, 1))
+            .chain(
+                self.speculative_catalog[0]
+                    .iter()
+                    .map(|w| self.costs.reference_duration(GraphKind::Speculative, 1, *w)),
+            )
+            .flatten()
+            .min()
+            .unwrap_or(0);
+        self.policy.service_gap_ns.max(3 * step)
+    }
+
     pub fn submission_window_available(&self, duration_ns: u64) -> bool {
         self.submissions.len() < 2
             && self.window_remaining().is_some_and(|remaining| {
@@ -597,14 +614,21 @@ impl RequestScheduler {
             let slot = c.mask.trailing_zeros() as usize;
             minimum[slot] = minimum[slot].min(c.duration_ns);
         }
+        let service_gap = self.service_gap();
+        // A step that serves every runnable request keeps nobody waiting, so like a request's only
+        // step it may exceed the latency budgets once the submission queue is empty.
+        let runnable = (0..REQUEST_LANES)
+            .filter(|slot| minimum[*slot] != u64::MAX)
+            .fold(0u64, |mask, slot| mask | 1 << slot);
         candidates.retain(|c| {
             let unavoidable = c.mask.count_ones() == 1
                 && c.duration_ns == minimum[c.mask.trailing_zeros() as usize];
+            let exempt =
+                self.submissions.is_empty() && (unavoidable || c.mask & runnable == runnable);
             (!c.feedback || self.submissions.is_empty())
-                && (c.duration_ns <= self.policy.max_slice_ns
-                    || (self.submissions.is_empty() && unavoidable))
+                && (c.duration_ns <= self.policy.max_slice_ns || exempt)
                 && (window.saturating_add(c.duration_ns) <= self.policy.submission_window_ns
-                    || (self.submissions.is_empty() && unavoidable))
+                    || exempt)
         });
         if candidates.is_empty() {
             return None;
@@ -634,7 +658,7 @@ impl RequestScheduler {
         let overdue = order[..count].first().copied().filter(|slot| {
             self.now_ns
                 .saturating_sub(self.service_clock(self.slots[*slot].request.as_ref().unwrap()))
-                >= self.policy.service_gap_ns
+                >= service_gap
         });
         if let Some(slot) = overdue {
             candidates.retain(|c| c.mask & (1 << slot) != 0);
@@ -666,6 +690,10 @@ impl RequestScheduler {
             for slot in &order[..count] {
                 let r = self.slots[*slot].request.as_ref().unwrap();
                 let included = c.mask & (1 << slot) != 0;
+                // A prefill chunk is progress for its own request, not a delay of its output.
+                if included && c.kind == GraphKind::Prefill {
+                    continue;
+                }
                 let completion = if included && following[*slot] == 0 {
                     end
                 } else {
@@ -674,10 +702,9 @@ impl RequestScheduler {
                         .saturating_add(if included { 0 } else { minimum[*slot] });
                     rescue_end
                 };
-                lateness += completion.saturating_sub(
-                    self.service_clock(r)
-                        .saturating_add(self.policy.service_gap_ns),
-                ) as f64;
+                lateness += completion
+                    .saturating_sub(self.service_clock(r).saturating_add(service_gap))
+                    as f64;
             }
             c.lateness = lateness;
             c.score = bits(c.mask)

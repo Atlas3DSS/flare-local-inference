@@ -569,8 +569,9 @@ fn oversized_atomic_work_requires_an_empty_submission_queue() {
     .unwrap();
     add(&mut s, 1, 1, 32);
     add(&mut s, 2, 1, 32);
+    // A step that serves every runnable request keeps nobody waiting, so it may run over the slice alone.
     let plan = s.plan().unwrap();
-    assert_eq!(plan.lanes.len(), 1);
+    assert_eq!(plan.lanes.len(), 2);
     assert!(plan.estimated_duration_ns() > s.policy.max_slice_ns);
     s.commit(&plan, Fence(1)).unwrap();
     assert!(s.plan().is_none());
@@ -946,4 +947,47 @@ fn repeated_observations_keep_the_winner_fresh_while_neglected_shapes_expire() {
     assert!(!retried.contains(&8));
     assert_eq!(s.request(h).unwrap().accounting.decode_credit_ns, rate);
     assert!(s.request(h).unwrap().accounting.committed_credit_ns > 0.0);
+}
+
+#[test]
+fn an_uncontended_prefill_takes_its_whole_chunk_over_the_slice() {
+    let mut s = engine(1, false);
+    add(&mut s, 1, 2048, 32);
+    let plan = loop {
+        let plan = s.plan().unwrap();
+        if plan.kind == GraphKind::Prefill {
+            break plan;
+        }
+        step(&mut s, 0);
+    };
+    assert_eq!(plan.token_capacity, 512);
+    assert!(plan.estimated_duration_ns() > s.policy.max_slice_ns);
+}
+
+#[test]
+fn slow_rounds_keep_speculating_when_every_round_exceeds_the_service_gap() {
+    let mut s = engine(1, true);
+    let h = add(&mut s, 1, 1, 64);
+    ready(&mut s, &[h]);
+    let mut graphs = super::tests::duration_graphs(1);
+    for g in &mut graphs {
+        g.estimated_duration_ns = match g.kind {
+            // Two-Spark GLM rounds: 45 ms for one token, 5 ms more per draft.
+            GraphKind::Speculative | GraphKind::Decode => {
+                45 * MS + (g.token_capacity as u64 - 1) * 5 * MS
+            }
+            _ => MS,
+        };
+    }
+    s.costs = super::tests::measured_costs(&graphs);
+    let now = s.now_ns;
+    let r = s.request_mut(h).unwrap();
+    for _ in 0..128 {
+        r.acceptance.observe(7, 7, false, 0);
+    }
+    r.accounting.last_output_ns = Some(now);
+    assert!(s.service_gap() >= 3 * 45 * MS);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Speculative);
+    assert!(plan.token_capacity > 1, "width {}", plan.token_capacity);
 }
