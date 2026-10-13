@@ -29,6 +29,34 @@ terminal dashboard reads native metrics without contacting the GPU.
 `flare run` starts it after loading when stderr is a usable terminal; redirected
 output remains plain startup logs.
 
+Left/right arrows or Tab switch between the throughput overview and scheduler
+details. The scheduler pane groups graph completions over two seconds by graph
+kind, captured batch capacity (`b`), prefill/token capacity (`t`), or speculative
+draft depth (`d`, verification width minus one). It shows call counts, mean and
+maximum GPU duration, and each shape's share of observed graph time. Wider
+terminals also show actual requests per call, which can be below the captured
+batch capacity. GPU duration is the maximum participating rank's CUDA event
+interval; these shares are not device utilization. Missing timings are counted
+as untimed and excluded from duration averages.
+
+Request rows identify the native slot and generation, keeping reused slots
+separate. Their ten-second history marks completion observations, not GPU start
+or end timestamps. Each cell shows the latest model-work completion; setup is
+shown only when the cell contains no model work. Up/down arrows scroll requests.
+Wide terminals show consumed prompt tokens, generated tokens, time since model
+progress (`Gap ms`), time since visible output (`Out ms`), and useful-progress
+deficit (`Debt ms`). Retired requests remain visible while their history remains.
+Gaps and deficits refer to the request-state sample, whose age is displayed.
+The last submitted graph displays its frozen estimate; `?` means indeterminate.
+
+Dashboard telemetry is enabled only while the dashboard runs. The execution
+thread writes to a preallocated 1024-completion buffer with a nonblocking lock;
+the dashboard retains at most 16384 completions and 128 request rows. Overflow or
+lock contention increments the displayed dropped-update count. The display
+marks history truncated by its retention limit. Request state is sampled on
+demand every 500 ms, and its age is displayed. Terminal input preserves signal
+handling, so Ctrl-C follows normal server shutdown.
+
 Prefill throughput counts consumed prompt tokens, excluding padding and prefix
 reuse. Generation throughput counts committed output tokens, including EOS and
 tokens withheld by text stops. Drafter steps count batched learned-proposal

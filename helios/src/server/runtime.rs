@@ -219,6 +219,7 @@ impl<M: ModelContract> ModelRuntime<M> {
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_finished = finished.clone();
         let metrics = Arc::new(super::metrics::Metrics::default());
+        metrics.scheduler_trace.configure(&manifest.graphs);
         let worker_metrics = metrics.clone();
         let thread = thread::Builder::new()
             .name("flare-model".into())
@@ -611,6 +612,28 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     .pending
                     .store(self.pending.len() as u64, Ordering::Relaxed);
             }
+            self.metrics.scheduler_trace.details(|| {
+                use super::metrics::scheduler::{RequestDetail, SchedulerDetail};
+                SchedulerDetail {
+                    at_ns: super::observation::monotonic_ns(),
+                    outstanding: executor.outstanding(),
+                    requests: std::array::from_fn(|slot| {
+                        let active = self.active.get(slot)?.as_ref()?;
+                        let live = self.scheduler.request(active.request).ok()?;
+                        let accounting = live.accounting();
+                        Some(RequestDetail {
+                            handle: live.handle,
+                            phase: live.phase,
+                            consumed: live.consumed_tokens,
+                            prompt: live.prompt_tokens,
+                            generated: live.generated_tokens,
+                            last_progress_ns: accounting.last_progress_ns,
+                            last_output_ns: accounting.last_output_ns,
+                            deficit_ns: accounting.deficit_ns,
+                        })
+                    }),
+                }
+            });
             if !progress {
                 if executor.outstanding() > 0 {
                     std::hint::spin_loop();
@@ -835,6 +858,12 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         }
         self.scheduler
             .observe_execution(&measured_step, completion.timing);
+        self.metrics.scheduler_trace.completed(
+            super::observation::monotonic_ns(),
+            completion.graph_index,
+            &measured_step,
+            completion.timing,
+        );
         if let Some(nanos) = completion.timing.gpu_ns[0].filter(|_| kind == GraphKind::Speculative)
         {
             let step = &measured_step;
@@ -1159,6 +1188,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             return Err("executor refused a reserved scheduler submission".into());
         }
         observe_submission(self.metrics, &self.scheduler, step, executor.outstanding())?;
+        self.metrics
+            .scheduler_trace
+            .submitted(super::observation::monotonic_ns(), graph, step);
         Ok(true)
     }
 

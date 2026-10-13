@@ -3,6 +3,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+pub(super) mod scheduler;
+
 use crate::{
     execution::{CompletionRecord, GraphKind},
     offload::StoreStats,
@@ -44,6 +46,7 @@ pub(super) struct Snapshot {
 
 #[derive(Default)]
 pub(super) struct Metrics {
+    pub scheduler_trace: scheduler::SchedulerMetrics,
     prefill_tokens: AtomicU64,
     generated_tokens: AtomicU64,
     accepted_drafts: AtomicU64,

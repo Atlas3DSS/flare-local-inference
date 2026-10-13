@@ -1,4 +1,6 @@
-//! Terminal rendering samples counters without contacting the execution worker.
+//! Terminal rendering consumes bounded telemetry independently of execution.
+
+mod scheduler;
 
 use std::{
     collections::VecDeque,
@@ -14,6 +16,7 @@ use std::{
 
 use crossterm::{
     cursor::{Hide, Show},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -82,15 +85,51 @@ impl Dashboard {
                 let _visible = Visible;
                 let result = (|| -> io::Result<()> {
                     let _screen = Screen;
+                    let input = InputMode::open()?;
                     execute!(io::stderr(), EnterAlternateScreen, Hide)?;
                     let mut terminal = Terminal::new(CrosstermBackend::new(io::stderr()))?;
                     terminal.clear()?;
                     let start = Instant::now();
                     let mut history = History::new(start, metrics.snapshot(learned_drafter));
+                    let mut scheduler = scheduler::SchedulerView::default();
+                    let mut pane = Pane::Overview;
+                    let _telemetry = Telemetry(&metrics);
+                    metrics.scheduler_trace.start();
+                    let mut sampled = start - REFRESH;
+                    let mut redraw = true;
                     loop {
-                        history.sample(Instant::now(), metrics.snapshot(learned_drafter));
-                        terminal.draw(|frame| render(frame, &title, &history))?;
-                        match receiver.recv_timeout(REFRESH) {
+                        let now = Instant::now();
+                        if now.duration_since(sampled) >= REFRESH {
+                            history.sample(now, metrics.snapshot(learned_drafter));
+                            scheduler.sample(
+                                &metrics.scheduler_trace,
+                                super::observation::monotonic_ns(),
+                            );
+                            sampled = now;
+                            redraw = true;
+                        }
+                        if input.is_some() {
+                            // Limit input processing so a held key cannot postpone shutdown or samples.
+                            for _ in 0..32 {
+                                if !event::poll(Duration::ZERO)? {
+                                    break;
+                                }
+                                match event::read()? {
+                                    Event::Key(key) => {
+                                        redraw |= navigate(&mut pane, &mut scheduler, key)
+                                    }
+                                    Event::Resize(..) => redraw = true,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if redraw {
+                            terminal.draw(|frame| {
+                                render_pane(frame, &title, &history, &scheduler, &metrics, pane)
+                            })?;
+                            redraw = false;
+                        }
+                        match receiver.recv_timeout(Duration::from_millis(50)) {
                             Err(RecvTimeoutError::Timeout) => {}
                             Ok(()) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
                         }
@@ -133,6 +172,131 @@ struct Screen;
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = execute!(io::stderr(), Show, LeaveAlternateScreen);
+    }
+}
+
+struct Telemetry<'a>(&'a Metrics);
+impl Drop for Telemetry<'_> {
+    fn drop(&mut self) {
+        self.0.scheduler_trace.stop();
+    }
+}
+
+struct InputMode {
+    fd: libc::c_int,
+    original: libc::termios,
+}
+
+impl InputMode {
+    fn open() -> io::Result<Option<Self>> {
+        io::stdin()
+            .is_terminal()
+            .then(|| Self::for_fd(libc::STDIN_FILENO))
+            .transpose()
+    }
+
+    fn for_fd(fd: libc::c_int) -> io::Result<Self> {
+        // Keep ISIG enabled so Ctrl-C follows the server's normal shutdown path.
+        unsafe {
+            let mut original = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut original) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut mode = original;
+            mode.c_lflag &= !(libc::ICANON | libc::ECHO);
+            mode.c_cc[libc::VMIN] = 1;
+            mode.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(fd, libc::TCSANOW, &mode) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { fd, original })
+        }
+    }
+}
+
+impl Drop for InputMode {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pane {
+    Overview,
+    Scheduler,
+}
+
+fn navigate(pane: &mut Pane, scheduler: &mut scheduler::SchedulerView, key: KeyEvent) -> bool {
+    if key.kind == KeyEventKind::Release {
+        return false;
+    }
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+            *pane = match pane {
+                Pane::Overview => Pane::Scheduler,
+                Pane::Scheduler => Pane::Overview,
+            };
+            true
+        }
+        KeyCode::Up if *pane == Pane::Scheduler => {
+            scheduler.scroll(-1);
+            true
+        }
+        KeyCode::Down if *pane == Pane::Scheduler => {
+            scheduler.scroll(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn render_pane(
+    frame: &mut Frame,
+    title: &str,
+    history: &History,
+    scheduler: &scheduler::SchedulerView,
+    metrics: &Metrics,
+    pane: Pane,
+) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
+        area,
+    );
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let tab = |name, active| {
+        Span::styled(
+            name,
+            if active {
+                Style::default()
+                    .fg(BACKGROUND)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            },
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ← → ", Style::default().fg(MUTED)),
+            tab(" Overview ", pane == Pane::Overview),
+            Span::raw(" "),
+            tab(" Scheduler ", pane == Pane::Scheduler),
+        ])),
+        rows[0],
+    );
+    match pane {
+        Pane::Overview => render_overview(frame, title, history, rows[1]),
+        Pane::Scheduler => scheduler.render(
+            frame,
+            rows[1],
+            title,
+            history.snapshot,
+            &metrics.scheduler_trace,
+        ),
     }
 }
 
@@ -222,8 +386,7 @@ fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-fn render(frame: &mut Frame, title: &str, history: &History) {
-    let area = frame.area();
+fn render_overview(frame: &mut Frame, title: &str, history: &History, area: Rect) {
     frame.render_widget(
         Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
         area,
@@ -416,6 +579,52 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn arrows_switch_panes_without_treating_key_release_as_another_press() {
+        let mut pane = Pane::Overview;
+        let mut scheduler = scheduler::SchedulerView::default();
+        let mut key = KeyEvent::new(KeyCode::Right, event::KeyModifiers::NONE);
+        assert!(navigate(&mut pane, &mut scheduler, key));
+        assert_eq!(pane, Pane::Scheduler);
+        key.kind = KeyEventKind::Release;
+        assert!(!navigate(&mut pane, &mut scheduler, key));
+        assert_eq!(pane, Pane::Scheduler);
+        key = KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE);
+        assert!(navigate(&mut pane, &mut scheduler, key));
+        assert_eq!(pane, Pane::Overview);
+    }
+
+    #[test]
+    fn terminal_input_retains_signals_and_restores_the_original_mode() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        unsafe {
+            let (mut master, mut slave) = (-1, -1);
+            assert_eq!(
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null()
+                ),
+                0
+            );
+            let _master = OwnedFd::from_raw_fd(master);
+            let slave = OwnedFd::from_raw_fd(slave);
+            let mut original: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut original), 0);
+            let mode = InputMode::for_fd(slave.as_raw_fd()).unwrap();
+            let mut active: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut active), 0);
+            assert_eq!(active.c_lflag & (libc::ICANON | libc::ECHO), 0);
+            assert_eq!(active.c_lflag & libc::ISIG, original.c_lflag & libc::ISIG);
+            drop(mode);
+            assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut active), 0);
+            assert_eq!(active.c_lflag, original.c_lflag);
+            assert_eq!(active.c_cc, original.c_cc);
+        }
+    }
+
+    #[test]
     fn rates_use_elapsed_time_and_weight_acceptance_by_request_rounds() {
         let start = Instant::now();
         let mut history = History::new(start, Snapshot::default());
@@ -487,7 +696,9 @@ mod tests {
         for (width, height) in [(120, 35), (80, 24), (40, 12), (1, 1), (0, 0)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| render(frame, "Qwen · 127.0.0.1:8000", &history))
+                .draw(|frame| {
+                    render_overview(frame, "Qwen · 127.0.0.1:8000", &history, frame.area())
+                })
                 .unwrap();
             let content: String = terminal
                 .backend()
