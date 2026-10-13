@@ -1,436 +1,315 @@
-# Native interactive scheduling
+# Prepared-graph scheduling in Helios
 
-## Design status and objective
+Helios selects prepared physical graphs by expected useful value per execution
+time. Request-level token and delivery prices provide fairness. A decode-age
+continuation term prices the delay caused by a nonpreemptible graph. The
+implementation is in `helios/src/scheduler/{policy,service,utility,cost}.rs`;
+[`scheduling-utility.md`](scheduling-utility.md) defines the utility and price
+flow. Python experiments are in `scripts/scheduling_sim/`.
 
-The native scheduler in `helios/src/scheduler.rs` uses request-level
-useful-progress deficits, joint cohort/chunk/width selection, a single-visit
-latency check, and a duration-bounded submission window. Its policy and
-accounting live in `helios/src/scheduler/policy.rs`; deterministic native traces
-are in `helios/src/scheduler/policy_tests.rs`. The worker supplies monotonic
-arrival, completion, and output-publication observations.
+The native catalog supports separate prefill, decode, speculative verification,
+state-management, and mixed prefill/decode graphs. Mixed shape selection, native
+uploads, completion accounting, package selection, and rank-layout validation
+are implemented. Ignition recipes do not yet capture mixed model forwards;
+existing runtime packages therefore expose separate inference graphs.
 
-Each captured graph carries one `estimated_duration_ns` value; zero denotes an
-indeterminate cost. Ignition leaves the field at zero. Native completions learn
-each cost and refine it with an expiring EMA. All graph
-kinds report GPU intervals, including each participating tensor-parallel rank.
-The executor reports host elapsed time separately.
+## Useful service and selection
 
-The Python simulator in [`scripts/scheduling_sim`](../scripts/scheduling_sim/)
-explores mixed execution and policy alternatives with synthetic cost models.
-Its definitions and results are in [the scheduling theory](scheduling-theory.md).
-It does not model native prerequisites, output buffering, or multiple outstanding
-submissions. Native mixed captures, residency rotation, and independent submission
-past feedback barriers remain unimplemented; their required contracts appear below.
+Prompt progress counts consumed uncached prompt tokens. Output progress counts
+committed target tokens, including accepted speculative tokens and a replacement
+or bonus token. Padding, rejected proposals, inactive rows, restored prompt
+history, and state copies contribute no committed token service. A visible
+speculative burst supplies one delivery regardless of its token count.
 
-The scheduling entity is one request, with equal weight across requests. The
-engine should provide prompt first service, regular streaming output, and
-sustained useful progress. It optimizes execution efficiency subject to those
-preferences. Prompt length and explicit output limits are known; EOS and future
-speculative acceptance are unknown.
+For a request with token rate `x` and delivery rate `z`, the utility gradient
+prices are
 
-The policy is useful-progress deficit scheduling with an anticipatory
-latency filter. Token-delivery slowdown is a measurement, not the primary
-dispatch objective. There is no universal preferred prefill size, verification
-depth, or cohort size.
+```text
+prefill token: 1 + f/x
+output token: beta + f/x
+output delivery: g/z
+```
 
-## Ownership and interfaces
+Only decoding requests have a delivery coordinate or output-age cost. Normalized
+service prices follow the entropy-dual update in `scheduling-utility.md`. Actual
+service updates history; expected acceptance scores choices. Conditional
+acceptance is request-local and respects available proposals, grammar and stop
+restrictions, output limits, and remaining context.
 
-One native scheduler owns live requests, resource reservations,
-the prepared action catalog, and dispatch decisions. The executor launches the
-selected operation and reports its completion. It does not independently choose
-speculative width, change batch membership, or initiate opportunistic GPU work.
-Model contracts describe packing, state transitions, and legal shapes; recipes
-prepare those implementations with Ignition.
+Let `T` be the graph duration in milliseconds and `A_i` the age of a decoding
+request's last visible output. The reference interval `sigma_i` uses the fastest
+batch-feasible delivery rate. For `K` delivery-bearing streams and a family of
+`k` streams, choose the measured graph minimizing `T/min(batch_capacity,k)`;
+then `sigma_i = K*T/min(batch_capacity,k)`. This corresponds to independent
+uniform cohorts within each family and wall-time shares proportional to family
+size. Prefill-only requests do not enlarge `K`. Multistage blocked streams use
+an individual future-delivery reference.
+For a ready inference graph, selection maximizes
 
-The residency controller must separate logical request identity, continuation
-residency, and execution batch rows:
+```text
+(sum of expected priced token and delivery service
+ + sum over served decoders of c_i*sigma_i*(A_i+T)) / T
+ - T/2 * sum over active decoders of c_i.
+```
 
-- A logical request retains its identity, arrival time, accounting, output cursor,
-  sampling state, grammar state, and cancellation state throughout its lifetime.
-- A resident continuation owns cache pages and persistent model state. More
-  continuations may reside on the GPU than fit into one execution batch.
-- A batch row temporarily refers to a continuation through explicit indices.
-  Excluding a request from a batch does not park it or copy its state.
+All values in one decision share a positive scaling factor to keep large prices
+representable. `ScheduledPlan::selection_value_rate()` exposes the scaled score;
+`selection_log_scale()` exposes the logarithm of that factor. An unknown duration
+has an optimistic work score instead of a division by zero.
 
-All identities use generations to reject stale completions. Residency changes
-do not create another request or reset its accounting.
+Every loaded physical batch capacity and selected verification width competes.
+For a fixed graph, duration and excluded-stream waiting cost do not depend on
+cohort membership, so the best cohort contains its highest additive lane values.
+Selection uses a fixed 64-entry array. It includes larger padded physical batches
+when those measurements are faster. It does not enumerate exponentially many
+request subsets or restrict selection to heuristic acceptance groupings.
 
-The native planning interface is:
+Each prefill capacity competes using the actual tokens it can consume. Atomic
+image spans, system boundaries, and prompt length restrict logical work. A
+4096-token graph processing a 64-token tail earns 64 prompt units and at most one
+output token. There is no smallest-fitting-shape filter, duration ceiling,
+forced oldest-request filter, or per-chunk prefill lateness cost.
+
+With no active decoder, the age term vanishes. Fully occupied large prefill
+graphs win when their useful value rate is highest. With decoding streams, a
+smaller prefill can win near a throughput knee because it imposes less waiting.
+Increasing a stream's output age raises its delivery value; it does not make
+inefficient operations mandatory at a fixed deadline.
+
+## Prerequisites and completion
+
+Initialization, restore, vision execution, and intermediate snapshots enable
+subsequent useful work. When a prerequisite immediately enables inference,
+compare every pair of prepared prerequisite and following inference shapes.
+Both cohorts are selected jointly. The first graph can also finish terminal
+requests; the following graph can include already ready requests.
+
+For fixed graph durations and capacities, lane values are additive. Enumerate
+the number `k` of newly ready rows served by the following graph. Choose the
+`k` largest such contributions, fill its remaining capacity with the largest
+already ready contributions, and fill the prerequisite's remaining capacity with
+the largest terminal-completion contributions. Sorted prefix sums give the best
+choice over all `k` without enumerating request subsets. This solves the cohort
+choice exactly for those two fixed shapes. At least one newly ready row must
+participate in the following graph.
+
+Score the sequence using total duration `T+F` and expected useful service,
+with output ages resetting at the following graph's completion. Terminal
+requests completed in the first graph stop accumulating age at time `T`.
+Compare the productive first-stage prefix as well as the complete sequence.
+Unused prerequisite capacity can advance additional rows at no extra physical
+cost; equal value rates prefer advancing more requests.
+
+The submitted plan retains the prerequisite's physical duration `T`; lookahead
+time must not enter execution timing or cost learning. Only the first graph
+executes before replanning. Setup never earns committed tokens.
+
+For chains with more prerequisite stages before token production, an individual
+continuation supplies value `V` in a further `F` milliseconds. Its cohort-ranking
+contribution is `V*T/(T+F)`. Sum these contributions, divide by `T`, and apply
+the cost of delaying active decoders. The continuation includes remaining image
+operations. Unknown durations compare optimistically by useful value.
+
+This is bounded lookahead, not an optimal schedule over all future execution
+sequences. The fixed-pair cohort calculation is exact; longer multistage chains
+use the individual continuation index. The stationary rate-utility result does
+not establish optimality for those multistage decisions.
+
+A terminal snapshot enables the visible response completion and frees the
+request's execution resources. It contributes a delivery with zero output
+tokens. Its delivery-rate reference comes from applicable snapshot graphs.
+The completion event's price can grow while other requests run. Error and
+cancellation paths preserve fenced resource ownership regardless of utility.
+
+## Duration estimates
+
+Each prepared graph descriptor has one `estimated_duration_ns` field. Native
+estimates start at zero, including descriptors supplied with a nonzero value.
+Zero means indeterminate. Physical graph kind, batch capacity, and token capacity
+identify a cost entry; active row count does not change its identity.
+
+The first positive device observation sets the estimate. Further valid samples
+before expiry use an EMA with weight 1/8. An entry expires after 30 seconds without
+a valid observation. Its next measurement replaces the expired estimate directly.
+This lets an initially slow or noisy graph compete again.
+
+The observation is the maximum positive rank-local CUDA replay interval. Host
+queueing, input staging, polling, and publication delays do not replace GPU time.
+Missing or zero intervals neither change a cost nor refresh its expiry. Expired
+costs are also excluded from service-rate normalization.
+
+An indeterminate candidate wins over a determinate candidate, then competes by
+expected useful value. Equal values prefer shorter known time, less recently
+used requests, and smaller physical padding. Unknown graphs require an empty
+submission queue and completion feedback. A lone cold request consequently tries
+its largest useful prefill or speculation extent without a solo-request rule.
+
+## Service accounting and publication
+
+`commit` records resident runnable handles and generations, with token and
+delivery normalizers from the applicable measured catalog. Requests admitted
+after dispatch and requests waiting for external restoration are outside that
+interval's participant set. A cancelled handle cannot charge a later request
+reusing its slot.
+
+`complete` validates every lane before updating graph costs, acceptance, service
+prices, or committed state. Useful service comes from differences against
+committed counters, never counters saved before earlier queued work completed.
+Each successful frame contributes one measured device interval to service
+history. Unselected participants receive zero service over that interval.
+Accounting changes do not invalidate unrelated immutable plans.
+
+Completion initially records zero deliveries. The first successful visible
+publication for the same fence replaces that interval's delivery update with one
+served delivery; subsequent tokens in the burst do not change the count. Stop
+buffering and output parsing can postpone visible output. A publication must be
+reported before processing another completion, so the correction never rewinds
+through later service observations. Output age uses the actual host publication
+time independently of device service accounting.
+
+A first published burst initializes a missing delivery history to one delivery
+over its measured frame duration. Token and delivery prices are stored in
+physical service units. Phase transitions, acceptance updates, and timing
+normalizer changes preserve those prices until actual service changes them.
+
+## Planning and the execution queue
 
 ```rust
 fn advance_to(&mut self, now_ns: u64) -> Result<()>;
 fn plan(&self) -> Option<ScheduledPlan>;
 fn commit(&mut self, plan: &ScheduledPlan, fence: Fence) -> Result<()>;
-fn complete(&mut self, fence: Fence, records: &[CompletionRecord])
-    -> Result<Vec<GeneratedToken>>;
-fn published_output(&mut self, request: RequestHandle) -> Result<()>;
+fn complete(&mut self, fence: Fence, records: &[CompletionRecord],
+            timing: ExecutionTiming) -> Result<Vec<GeneratedToken>>;
+fn published_output(&mut self, request: RequestHandle, fence: Fence) -> Result<()>;
 ```
 
-The worker advances the clock before lifecycle transitions and dispatch. `plan`
-returns `None` while dependencies or the submission window prevent execution.
-A plan freezes graph shape, lane work, request epochs, estimated duration, and
-projected recovery lateness. Planning uses scratch reserved from the loaded
-catalog and does not mutate committed token positions. Commit validates epochs,
-resource availability, and the remaining submission window, reserves resources,
-and records the fence without rerunning the selection policy.
+A plan freezes physical shape, logical lane work, request epochs, estimated
+execution duration, and selection score. Commit checks ownership, epochs,
+resource availability, and feedback dependencies without rerunning selection.
+Cancellation stops further selection immediately; pages and state slots remain
+owned through their last submitted fence.
 
-Per-request planned positions and in-flight work are separate from committed
-positions. Completion is the only operation that earns useful-work credit,
-updates acceptance, and advances committed model state. Cancellation stops
-further selection immediately; resources remain owned through their last fence.
+The transport has two frame slots. Known nonterminal prefill and ordinary decode
+can use both. Speculation, unknown timings, grammar, host stops, and operations
+that change the request phase require completion feedback. A finishing prefill
+therefore exposes its decoder and checkpoint operation before another decision
+is committed.
 
-## Prepared action contract
+There is no millisecond cap on either a frame or the sum of queued frames.
+Expected finish times provide the planning start time of an appended frame. An
+overrun suspends further queueing until completion supplies feedback; it does
+not make that graph ineligible in later decisions.
 
-A candidate names a prepared operation and explicit work for each participating
-request. Inference lanes contain a prefill segment or a decode round with a
-chosen draft limit. Preparation, restore, vision, snapshot, and release
-operations have explicit prerequisites and costs as well.
+Selection projects queued service into copies of request prices and projects
+visible output ages through the queued interval. It does not credit committed
+history speculatively. The completion measurement and validated counters remain
+the only inputs to actual service history.
 
-Ignition must prepare mixed execution. The mixed shape family contains
-one prefill segment and a decode cohort. Its catalog key includes:
+## Policy preferences
 
-```text
-prefill token capacity
-decode lane capacity
-verification width capacity
-proposal/state-maintenance mode
-```
-
-Zero prefill and zero decode lanes describe the corresponding pure operations
-where the prepared implementation supports them. Each descriptor declares its
-physical padding, legal active lane counts, valid token extents, state indices,
-scratch requirements, and completion layout. Unsupported combinations are not
-candidates. Mixed graph capture includes proposal generation, target execution,
-acceptance, state commit, output projection, collectives, and sampling.
-
-Every selected decode lane has an explicit draft limit. A rectangular capture
-may still pay the maximum width across its lane capacity. Smaller per-request
-limits do not imply cheaper execution. Ragged execution earns its lower cost
-only when the captured graph actually avoids the work. Width-one execution
-retains any draft state needed to resume wider execution and uses the ordinary
-decode attention/cache path.
-
-The prefill catalog should expose a range of small and large capacities through
-the configured maximum. Candidate active lengths respect atomic attention spans,
-cache boundaries, and model-specific alignment. A 64-token logical segment in
-a 128-token capture pays the measured cost of that physical execution. Choosing
-64, 256, or 1024 tokens is a dispatch decision over measured shapes.
-
-The capture catalog is finite and prepared before serving. A useful starting
-catalog includes pure decode at supported batch/width combinations, pure
-prefill capacities, and mixed variants around measured throughput knees and
-latency limits. The capture-memory and preparation-time cost of a full Cartesian
-product must be measured before selecting the mixed catalog. This design does
-not require runtime graph capture, compilation, Python callbacks, or GPU
-allocation during serving.
-
-## Cost and completion observations
-
-Each graph descriptor has one `estimated_duration_ns` field. Zero means
-indeterminate, including the Protobuf default. Ignition exports zero and does
-not collect replay timings during preparation. The native scheduler initializes
-every graph to zero, including descriptors supplied with a nonzero field.
-Physical batch and token capacities identify separate graphs; context length
-and active lane count do not create separate estimates.
-
-The first valid completion measurement sets a graph's estimate directly. Further
-observations before expiry update it with weight 1/8:
-
-```text
-estimate_ns <- estimate_ns + (observed_graph_ns - estimate_ns) / 8
-```
-
-Each graph's estimate expires after `estimate_ttl_ns` without a valid observation,
-returning zero to dispatch. The observation following expiry starts a fresh EMA;
-it does not blend with the expired estimate. The default expiry is 30 seconds.
-
-The observation is the maximum reported rank-local GPU replay interval. CUDA
-events bracket graph execution, excluding device queue wait, input upload, and
-completion readback. Missing or zero measurements neither change the estimate nor
-refresh its observation time. Host dispatch and publication intervals remain
-separate diagnostics.
-
-Indeterminate candidates take precedence over determinate candidates within the
-set retained by the service-age, projected-lateness, and deficit guards. They
-compete by expected useful work rather than a duration ratio. A lone request
-therefore chooses its largest useful prefill chunk or speculative depth when
-all applicable costs are indeterminate. The same efficiency score favors more
-useful work when known costs are equal. There is no single-request override.
-Logical output limits, cache boundaries, and physical padding still constrain
-useful work.
-
-An indeterminate candidate uses zero in the optimistic latency projection but
-requires an empty submission queue and completion feedback before another
-submission. It cannot be appended as free work. First observation establishes
-its execution cost, so genuinely slow shapes lose the comparison until expiry
-permits another attempt. Shape applicability and request-service guards still
-restrict selection; expiry is not a guarantee that every graph will run.
-
-Request credit rates retain their normalization units independently of
-prediction freshness. Expiry changes dispatch costs without erasing earned
-credit or resetting deficits.
-
-Completion reports, per request:
-
-- Actual consumed prefill tokens and committed output positions.
-- Accepted draft prefix, explicitly observed rejection if any, and censored
-  termination at EOS, an output limit, or a host stop.
-- The actual proposal source at each evaluated depth when sources are combined.
-- Completion status and the fence protecting state and scratch ownership.
-
-An offered-but-unaccepted position is not automatically a rejection: it may
-never have been evaluated. Acceptance estimates belong to each request and
-proposal source, with bounded conditional statistics by depth. A shared prior
-can initialize a request; observations from unrelated requests do not replace
-its own acceptance profile.
-
-## Accounting and clocks
-
-Reference rates freeze at admission when runtime measurements are available.
-Output credit prefers the smallest observed batch and ordinary decode, followed
-by the narrowest observed selected speculative width. Its per-row cost supplies
-the reference unit. With only batched or speculative observations, this is an
-observed normalization unit rather than an isolated ordinary-decode measurement.
-Prefill credit uses the largest observed selected chunk repeatedly, then the
-smallest observed capture covering the tail. Dividing that reference traversal
-by uncached prompt length gives a fixed per-token rate. Atomic spans and system
-boundaries constrain actual execution without changing the normalization.
-
-If a reference rate is unknown at admission, it remains unset until an applicable
-measurement arrives. Committed token counts accumulate in the meantime. Setting
-the rate credits that accumulated progress exactly once, and the rate then stays
-fixed for the request. Selection uses unit token progress for an unset rate,
-allowing cold requests to compete without assigning them a fabricated graph
-duration. Cache hits earn no credit for reused tokens; initialization, restore,
-vision, and snapshots earn no committed credit.
-
-For a GPU-runnable resident request, maintain a reflected deficit:
-
-```text
-L_i <- max(0, L_i + elapsed_occupied_time / runnable_count - committed_credit_i).
-```
-
-`advance_to` integrates time while any submission is outstanding, once across
-overlapping frames. This is the host-observed occupied interval from commit to
-completion consumption, including host delay while work is outstanding. It is
-not the sum of GPU event intervals. The worker advances accounting before arrivals,
-cancellation, completion, and host-store readiness change the runnable set.
-Requests excluded from the selected batch remain entitled. Inbound dependencies,
-finished requests, and terminal cleanup do not accrue entitlement. Actual
-completion subtracts only committed prefill/output credit; failed work earns none.
-
-Each request retains arrival time, latest useful model progress, and latest
-published output. Prefill uses the progress clock; decode uses the publication
-clock, or arrival before the first publication. Setup and snapshot operations do
-not reset either clock. A prerequisite inherits the urgency of the progress it
-enables. Stop-prefix buffering can delay publication after committed tokens have
-already earned credit.
-
-Publication means a token or protocol chunk successfully entered the native
-streaming queue. Observation-only events and failed sends do not reset the clock.
-Network delivery and client consumption occur later. A full output queue fails
-and cancels the request through the existing bounded-output contract.
-
-For a determinate cost, the native efficiency score is:
-
-```text
-sum_i (1 + max(0, L_i - pending_credit_i) / deficit_scale_ns)
-      * expected_useful_credit_i / estimated_duration_ns.
-```
-
-Expected useful credit includes committed prefill/output credit and one extra
-output-credit unit for a first output from prefill or resume. That bonus affects
-selection only. Prerequisites score the useful progress they enable; terminal
-snapshots score one eighth of an output-credit unit to release resources.
-Already submitted progress reduces selection pressure but earns no actual credit
-until completion. Explicit output limits cap speculative yield and pipelined
-decode; EOS is not predicted.
-
-The Python simulator uses a different first-output bonus: one deficit-scale unit
-per completed prefill. Comparison of these first-output preferences, including
-exact prefix hits, requires an ablation with equivalent action catalogs.
-
-## Dispatch algorithm
-
-At each dispatch opportunity:
-
-1. Enumerate loaded legal graph shapes. Prefill considers every capture that
-   can advance the request while respecting system boundaries and atomic spans.
-   Cohorts of up to five eligible requests enumerate every subset. Larger groups
-   include every singleton, the full group, and power-of-two prefixes ordered by
-   service age, deficit, acceptance in both directions, and context position.
-   Every cohort considers every selected verification width.
-2. Filter by graph slice duration, submission-window duration, and feedback
-   dependencies. If a request's cheapest atomic singleton exceeds a duration
-   budget, allow it with an empty queue so a valid request can still progress.
-3. Require the oldest overdue eligible request with no pending submission.
-   Its next prerequisite qualifies as service for selection, but does not reset
-   its useful-progress or publication clock.
-4. Project the candidate followed by singleton rescues in service-deadline order.
-   Include outstanding queued duration and mandatory stages through the next
-   useful progress. Keep zero-lateness candidates when possible; otherwise keep
-   candidates with minimum summed positive lateness. The plan exposes this sum
-   as `recovery_lateness_ns`.
-5. Within that set, require the largest deficit at or above `deficit_scale_ns`
-   when possible. Prefer indeterminate candidates by expected useful work;
-   otherwise maximize the efficiency score. Break ties by shorter duration,
-   less recent service, smaller token capacity, and physical request-slot order.
-6. Commit and enqueue the immutable selection. Completion updates committed
-   progress, request-local acceptance, and the graph's duration estimate.
-
-Conditional acceptance at each draft depth gives expected speculative output:
-
-```text
-E[output(k)] = 1 + sum_{j=1..k} product_{l=1..j} p_l.
-```
-
-High-acceptance cohorts compete with broad shallow cohorts using their actual
-prepared graph costs. A high-yield pair can win when its efficiency is better,
-and lose when excluding other requests would make their rescue late. There is
-no independent width controller. Estimate expiry supplies opportunities to
-rediscover neglected shapes through ordinary work selection.
-
-## Committed execution window and latency
-
-`PolicyConfig` supplies positive nanosecond values before admission:
+`PolicyConfig` can be supplied before admission through `configure_policy`.
+Defaults specify these preferences:
 
 | Field | Default | Meaning |
-| --- | ---: | --- |
-| `max_slice_ns` | 20 ms | Maximum selected graph duration, except unavoidable singleton work |
-| `submission_window_ns` | 20 ms | Maximum estimated outstanding execution |
-| `service_gap_ns` | 40 ms | Target interval between prefill progress or published output |
-| `deficit_scale_ns` | 20 ms | Deficit weight scale and forced-service threshold |
-| `estimate_ttl_ns` | 30 s | Time without a valid observation before a graph cost becomes indeterminate |
+|---|---:|---|
+| `output_token_value` | 64 | Prompt-value units per output token |
+| `token_fairness` | 16 | Token-rate log-utility coefficient, value/ms |
+| `delivery_fairness` | 4 | Delivery-rate log-utility coefficient, value/ms |
+| `decode_age_price` | 0.1 | Linear output-age cost coefficient, value/ms² |
+| `adaptation_ms` | 100 | Service-price adaptation time |
+| `estimate_ttl_ns` | 30,000,000,000 | Cost expiry interval |
 
-These defaults are policy settings, not measurements. The worker uses the default
-configuration. The Rust interface permits explicit settings before admission;
-CLI/configuration-file overrides are not wired.
+These weights express a throughput/cadence tradeoff. They are not graph timing
+measurements or latency guarantees. Setting fairness or age coefficients to zero
+removes the corresponding preference; intrinsic throughput alone does not ensure
+starvation freedom. The native CLI uses these defaults.
 
-The scheduler tracks expected finish times of at most two submitted frames.
-A second frame must fit behind the remaining estimated work. An uncompleted
-oldest frame past its expected finish stops further submission until completion
-is consumed. A selected plan retains its duration through cost updates, and
-commit rechecks the window when reserving execution.
+## Mixed execution contract
 
-Ordinary unconstrained decode can pipeline within the window. Speculation,
-grammar, and host-stop work use the executor's global feedback barrier: they
-start with an empty queue and prevent further submission until completion.
-Allowing independent requests past those barriers requires finer executor
-readiness tracking. Prefill and mandatory state operations require each selected
-request to have no pending work.
+A mixed graph declares `batch_capacity` total physical request rows,
+`token_capacity` decode verification positions per row, and `prefill_capacity`
+prompt tokens. The batch capacity is a power of two from 2 through 64; decode
+width is 1 through 8; prompt capacity is positive and aligned to 64. Other graph
+families set `prefill_capacity` to zero. Package selection retains the explicit
+`speculation_enabled` variant matching the loaded decode mode, including width
+one with draft-state maintenance enabled. Fixed-width limits apply to mixed and
+separate speculative graphs alike.
 
-The deadline check is a single future visit with serial singleton rescue work.
-It does not prove recurring feasibility and can reject a candidate that a batched
-rescue could save. Batched rescue construction and a second visit are required
-extensions for evaluating costly residency changes. Neither estimated graph
-costs nor this finite search establish a hard latency bound. First-token latency
-also includes the request's own remaining prompt work.
+At most one active row performs prefill. `prefill_row`, an `int32[1]` input,
+identifies its index in the dense active lane list; -1 means no prompt row.
+`ScheduledStep::mixed` carries that role and the selected decode mode. Every row
+has a logical query length. Packed token offsets are prefix sums of those
+lengths, independent of physical slot IDs. Prompt tokens, positions, and image
+metadata are uploaded at the prompt row's packed offset; decoder pending tokens
+and proposals follow the model's captured input contract. Inactive rows and
+unused token capacity must perform no state mutation. The maximum packed extent
+is `prefill_capacity + (batch_capacity - 1) * token_capacity`; prompt capacity
+is at least decode width, so a decode-only population also fits.
 
-## Residency contract requiring implementation
+For each shape, selection compares the best decode-only cohort with the best
+prompt row plus the highest-value decoders fitting the remaining row capacity.
+A prompt-only population is legal. Every comparison uses the same useful value
+per full graph duration; padding earns no value. Duration estimates are keyed
+by graph kind, physical batch, decode width, and prompt capacity. Mixed shapes
+also participate in service-rate references and prerequisite lookahead. For a
+prerequisite followed by mixed inference, the prompt can be absent, already
+ready, or enabled by the prerequisite. Each case leaves an exact two-stage
+capacity problem for the decode and terminal rows.
 
-Acceptance into the bounded logical queue is distinct from acquiring resident
-resources. All accepted requests retain arrival age. A new request competes for
-available continuation storage at dispatch boundaries even when every execution
-batch row was occupied in the previous action. Idle batch rows are not required
-for admission when separate resident continuation storage is available.
+Completion validates and updates each row by its phase. A prompt row commits
+its full scheduled prompt extent and can publish one first output token; a
+speculative row commits the accepted prefix. Prompt checkpoints, acceptance
+learning, publication prices, cancellation generations, and fenced page
+retirement retain their ordinary contracts. Mixed submissions require completion
+feedback before another graph is queued. State-row reservation covers the
+maximum verification width across separate and mixed catalogs.
 
-On genuine memory pressure, evict unpinned reusable prefix-cache entries first.
-If that cannot make room, residency rotation must be available. Select the
-oldest overdue residency waiter. Park only requests at committed boundaries,
-with no pending use or copy, and with at least one useful service opportunity
-since their last activation. Prefer victims with the smallest useful-work
-deficit; among comparable victims prefer cheaper save/restore cost. A request
-that has just become resident cannot be parked repeatedly without progress.
-Reconsider victim choice against upcoming output deadlines and the complete
-transfer cost. Conflicting overdue obligations enter the same explicit recovery
-mode as conflicting compute deadlines.
+A captured mixed forward must share the packed target execution across phases
+and include proposals, accepted-state commit, output projection, collectives,
+and sampling. Width one uses decode attention and direct updates while retaining
+the draft context required by its selected mode. Recurrent-state rollback and
+prompt absorption belong in the prepared model implementation. Helios executes
+only supplied captures; it does not synthesize a mixed graph from serial prefills
+and decodes. Recipe capture, scratch sizing, numerical validation, and GPU replay
+of this contract remain required before mixed serving is available.
 
-A parked request preserves KV, recurrent state, draft context, pending target
-input, RNG state, committed token positions, output delivery cursor, and grammar
-state. Host-resident grammar and output state stay attached to the logical
-request. Checkpoint backing and bounded transfer buffers must be reserved before
-parking begins. Live state cannot be discarded as a substitute for making room.
-Admission must respect both GPU resource capacity and available checkpoint
-backing; each supported request must fit when given an isolated residency turn.
+## Verification
 
-Retain full remaining-output page reservations for resident requests. This preserves an explicit progress invariant
-while dispatch and residency ownership change. Parking returns its GPU
-reservation after fenced save; restoring reacquires the remaining reservation.
-Incremental KV growth would require a separate liveness argument and is not
-necessary to implement the proposed dispatch policy.
+`helios/src/scheduler/policy_tests.rs` exercises the production selector with
+measured synthetic catalogs: one, two, and sixteen long prefills; fitting and
+padded tails; high- and low-acceptance speculation; heterogeneous cohorts;
+padded batch capacities; long decode pairs; prefill/decode contention; graph
+expiry and recovery; and output gaps. Mixed tests compare every legal cohort
+against exhaustive useful-work/time enumeration, exercise fitting prompt tails,
+ordinary and speculative decode rows, malformed completions, independent shape
+expiry, and concurrent prompt/decode workloads. Native input tests check packed
+prompt offsets, one query-length upload, row sampling masks, and role validation. Scheduler lifecycle tests separately
+exercise prescribed cache and resource transitions without assuming those
+operations always outrank another runnable request.
 
-The residency controller is an implementation requirement for fairness when the
-active working set cannot remain on the GPU. Its transfer and admission policy
-needs simulation with real state sizes and costs. A guarantee restricted to
-resident requests cannot be presented as a bound for the accepted request queue.
+Five- and sixteen-request startup traces cover zero, three, and seven accepted
+drafts, with both untrained and preseeded acceptance histories. On the measured
+synthetic catalog, each 64-token prompt must deliver its first output within
+100 ms, subsequent gaps stay below 150 ms, and another hundred rounds give every
+stream progress with a spread of at most one eight-token burst. A separate test
+varies snapshot cost to check that enabling a shared decode batch wins only
+when the complete sequence has sufficient value per time.
 
-## Background interference requiring integration
+The runtime phase tests cover actual worker completion, publication, stop
+buffering, and input packing. `tests/server/test_scheduler.py` exercises an idle
+native HTTP service with four request slots and a 4096-token prefill capacity.
+It checks complete responses for concurrent long prompts, two and four decode
+streams, a long prompt arriving during decode, short/long prompt contention,
+and cancellation followed by slot reuse. Run it for ordinary, fixed-width, and
+adaptive speculative execution:
 
-Initialization, resume, restore, and vision operations inherit the urgency of
-the next useful progress or output they enable. Completion-time cleanup that
-releases resources for an overdue request also has a named beneficiary. Account
-for their time in the execution window and projected continuation.
+```sh
+FLARE_RUN_CUDA_TESTS=1 FLARE_SCHEDULER_TEST_URL=http://127.0.0.1:18131 \
+  .venv/bin/python -m pytest -q -s tests/server/test_scheduler.py
+```
 
-Optional prefix-cache publication and background transfers run only with
-available latency and bandwidth slack. Running them on another CUDA stream does
-not make their interference free. Mandatory publication needed to preserve
-state ownership is distinguished from optional cache retention. There is no
-unconditional phase-priority ladder that can indefinitely postpone runnable
-prefill or decode work.
-
-## Rust and Ignition integration
-
-The native integration points are:
-
-- `helios/src/scheduler.rs`: logical request state, residency/resource ownership,
-  plan/commit/complete, and request lifecycle.
-- `helios/src/scheduler/policy.rs`: accounting, candidate generation, latency
-  prediction, joint selection, and the submission window.
-- `helios/src/scheduler/speculation.rs`: per-request/source acceptance models and
-  expected-yield calculation used by joint action selection.
-- `helios/src/execution/manifest.rs`: mixed graph descriptors, physical capacity
-  semantics, legal lane operations, and state-indirection requirements.
-- `helios/src/execution/transport.rs` and rank executors: timing for every action,
-  committed-window observations, and explicit evaluated/censored draft outcomes.
-- `helios/src/server/runtime.rs`: monotonic arrival and output clocks, bounded
-  logical queue, completion publication, and passing measured state to planning.
-- Ignition recipes and reusable preparation components: complete mixed forwards,
-  bounded workspaces and capture catalog in the runtime package. Prepared package limits continue to bound native execution.
-
-Native selection uses prepared pure graphs. Pure execution is also a useful measured candidate after mixed
-graphs exist. No synthetic mixed cost is substituted for a missing native graph.
-
-## Verification and remaining decisions
-
-Native deterministic traces exercise the actual request scheduler and worker
-publication path. A shared serialized trace format for Python/Rust differential
-testing remains to be implemented. The tests
-must include arrivals during execution, state-changing completion, cancellation
-between plan and commit, EOS censoring, resource exhaustion, phase transitions,
-and a losing latency continuation. Randomized workloads must preserve accounting
-and fenced ownership, not merely finish without errors.
-
-Extend simulation for the committed window, mandatory stages, separate output
-and prefill clocks, residency rotation, and prediction error. Add ablations for
-first-output treatment of prefix hits and batched rescue work. Those extensions
-are required before attributing the simulator's resident-policy results to the
-complete native design.
-
-Validate mixed captures against equivalent separate execution for logits,
-accepted tokens, rollback, recurrent state, inactive rows, cache-boundary
-crossings, width-one transitions, and alternating graph variants. Repeated
-native replay must preserve allocation stability and scratch/input lifetimes.
-
-Through the actual service, measure queue delay, TTFT by prompt size, burst-gap
-tails, first-token-correct delivery slowdown, useful-work deficits, target misses,
-uncertified decisions, GPU step time, host dispatch time, transfer interference,
-and aggregate output rate. Compare pure/mixed execution and shallow/deep
-speculation at equivalent workload and resource settings. Synthetic results
-cannot select numerical production budgets.
-
-The dispatch ordering, accounting quantity, joint action selection, and ownership
-contract are concrete implementation choices. Numerical latency budgets, capture
-catalog density, prediction margins, and residency-rotation tuning require
-measurements from prepared models. Hard recurring latency guarantees remain
-unproved; neither a successful finite workload nor a two-visit rescue prediction
-establishes them.
+The HTTP tests print actual prompt/output token counts, client SSE arrival
+gaps, and server graph-counter deltas. SSE arrival gaps are not GPU execution
+times or per-token latencies. Mixed capture correctness requires packages that
+contain mixed model forwards. Synthetic scheduler traces do not establish GPU
+throughput.

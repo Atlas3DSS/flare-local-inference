@@ -415,7 +415,7 @@ impl Transfers {
 pub(crate) fn consumes(kind: GraphKind) -> bool {
     matches!(
         kind,
-        GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative
+        GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative | GraphKind::Mixed
     )
 }
 

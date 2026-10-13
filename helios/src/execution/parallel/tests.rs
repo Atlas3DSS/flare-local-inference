@@ -21,6 +21,9 @@ fn logical_layout_excludes_process_addresses_and_detects_contract_changes() {
     peer = manifest.clone();
     peer.graphs[0].token_capacity += 1;
     assert_ne!(expected, layout(&peer));
+    peer = manifest.clone();
+    peer.graphs[0].prefill_capacity = 64;
+    assert_ne!(expected, layout(&peer));
     peer = manifest;
     peer.graphs[0].input_bindings[2].host_offset += 8;
     assert_ne!(expected, layout(&peer));

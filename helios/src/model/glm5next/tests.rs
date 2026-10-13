@@ -144,6 +144,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 handle: graphs.len() + 1,
                 batch_capacity: batch,
                 token_capacity: tokens,
+                prefill_capacity: 0,
                 estimated_duration_ns: if kind == GraphKind::Snapshot {
                     1
                 } else {
@@ -355,6 +356,7 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
             step.kind,
             step.batch_capacity,
             step.token_capacity,
+            step.prefill_capacity(),
             SamplingMode::General,
         )
         .unwrap();
@@ -413,7 +415,9 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
             status: 1,
             ..Default::default()
         };
-        scheduler.complete(Fence(fence), &records).unwrap();
+        scheduler
+            .complete(Fence(fence), &records, Default::default())
+            .unwrap();
         if step.kind == GraphKind::Decode {
             break;
         }
@@ -466,7 +470,9 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         status: 1,
         ..Default::default()
     };
-    scheduler.complete(Fence(fence), &records).unwrap();
+    scheduler
+        .complete(Fence(fence), &records, Default::default())
+        .unwrap();
     let step = scheduler.plan().unwrap();
     assert_eq!(step.kind, GraphKind::Resume);
     fence += 1;

@@ -407,6 +407,7 @@ fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
                 && a.sampling_mode == b.sampling_mode
                 && a.batch_capacity == b.batch_capacity
                 && a.token_capacity == b.token_capacity
+                && a.prefill_capacity == b.prefill_capacity
                 && a.input_bindings.len() == b.input_bindings.len()
                 && a.input_bindings
                     .iter()
@@ -442,6 +443,9 @@ mod tests {
         assert!(!same_layout(&root, &peer));
         peer = root.clone();
         peer.graphs[0].token_capacity += 1;
+        assert!(!same_layout(&root, &peer));
+        peer = root.clone();
+        peer.graphs[0].prefill_capacity = 64;
         assert!(!same_layout(&root, &peer));
         let geometry = crate::offload::geometry::tests::geometry(64, &[("k", 8192)], 4096);
         peer = root.clone();

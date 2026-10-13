@@ -102,6 +102,7 @@ pub(super) fn manifest() -> ExecutionManifest {
         handle: 0x5000,
         batch_capacity: 4,
         token_capacity: 1,
+        prefill_capacity: 0,
         estimated_duration_ns: 1_000_000,
         input_bindings: vec![
             InputBinding {
@@ -675,4 +676,49 @@ fn fragmented_upload_descriptors_reuse_their_highwater_capacity() {
         assert_eq!(storage.as_ptr(), pointer);
         assert_eq!(storage.capacity(), capacity);
     }
+}
+
+#[test]
+fn mixed_manifest_requires_independent_prompt_capacity_and_a_role_input() {
+    let mut m = manifest();
+    m.abi_version = SPECULATIVE_ABI_VERSION;
+    m.buffers[2].shape = vec![2, 4, 24];
+    m.buffers[2].strides = vec![96, 24, 1];
+    m.buffers[2].nbytes = 1536;
+    m.graphs[0].kind = GraphKind::Mixed;
+    m.graphs[0].prefill_capacity = 512;
+    m.graphs[0].token_capacity = 8;
+    assert!(m.validate().is_err());
+    m.buffers.push(BufferDescriptor {
+        name: "prefill_row".into(),
+        address: 0x6000,
+        nbytes: 4,
+        dtype: Dtype::Int32,
+        shape: vec![1],
+        strides: vec![1],
+    });
+    let offset = m.input_frame_bytes;
+    m.input_frame_bytes += 8;
+    m.graphs[0].input_bindings.push(InputBinding {
+        buffer_name: "prefill_row".into(),
+        host_offset: offset,
+        nbytes: 4,
+    });
+    m.validate().unwrap();
+    assert_eq!(m.graphs[0].packed_tokens(), 536);
+    for (batch, width, prefill) in [
+        (1, 8, 512),
+        (4, 9, 512),
+        (4, 8, 0),
+        (4, 8, 65),
+        (4, 8, 1usize << 31),
+    ] {
+        let mut bad = m.clone();
+        bad.graphs[0].batch_capacity = batch;
+        bad.graphs[0].token_capacity = width;
+        bad.graphs[0].prefill_capacity = prefill;
+        assert!(bad.validate().is_err());
+    }
+    m.graphs[0].kind = GraphKind::Speculative;
+    assert!(m.validate().is_err());
 }

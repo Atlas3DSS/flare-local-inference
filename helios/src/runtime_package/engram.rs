@@ -119,8 +119,13 @@ pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> R
             let tokens = execution
                 .graphs
                 .iter()
-                .filter(|g| matches!(g.kind.as_str(), "prefill" | "decode" | "speculative"))
-                .map(|g| g.batch_capacity * g.token_capacity)
+                .filter(|g| {
+                    matches!(
+                        g.kind.as_str(),
+                        "prefill" | "decode" | "speculative" | "mixed"
+                    )
+                })
+                .map(|g| g.packed_tokens())
                 .max()
                 .ok_or_else(|| invalid("Engram catalog lacks consumers"))?;
             for (name, dtype, columns) in [
@@ -174,16 +179,16 @@ pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> R
                     return Err(invalid("invalid mapped n-gram mailbox"));
                 }
             }
-            for graph in execution
-                .graphs
-                .iter()
-                .filter(|g| matches!(g.kind.as_str(), "prefill" | "decode" | "speculative"))
-            {
+            for graph in execution.graphs.iter().filter(|g| {
+                matches!(
+                    g.kind.as_str(),
+                    "prefill" | "decode" | "speculative" | "mixed"
+                )
+            }) {
                 if !gpu
                     && !graph.input_bindings.iter().any(|b| {
                         b.buffer_name == table.hash_buffer
-                            && b.nbytes
-                                >= graph.batch_capacity * graph.token_capacity * heads as u64 * 8
+                            && b.nbytes >= graph.packed_tokens() * heads as u64 * 8
                     })
                 {
                     return Err(invalid("Engram graph lacks hash input binding"));

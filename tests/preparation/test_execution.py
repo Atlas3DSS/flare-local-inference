@@ -110,3 +110,45 @@ def test_signature_references_must_cover_exact_bundle():
 def test_invalid_graph_durations_fail_before_cuda(durations):
     with pytest.raises(ValueError, match="duration estimates"):
         _execution(estimated_durations_ns=durations)
+
+
+@pytest.mark.parametrize("prefill,width,enabled", [(64, 1, False), (64, 1, True), (512, 8, True)])
+def test_mixed_manifest_preserves_both_capacities_and_decode_mode(monkeypatch, prefill, width, enabled):
+    signature = GraphSignature("mixed", 4, width, ("prefill_row",),
+                               speculation_enabled=enabled, prefill_capacity=prefill)
+    execution = _execution()
+    buffers = dict(execution.buffers)
+    buffers["completion_records"] = _tensor("int64", (2, 4, 24))
+    buffers["prefill_row"] = _tensor("int32", (1,))
+    execution = _execution(graphs={"mixed": object()}, signatures={"mixed": signature}, buffers=buffers)
+    spans = [(4096, 4), (8192, 8), (12288, 1536), (16384, 128), (20480, 1), (24576, 4)]
+    monkeypatch.setattr(execution, "_validate_resources", lambda: (9, [11], spans))
+    manifest = execution.manifest(all_variants=True)
+    assert manifest["abi_version"] == 3
+    graph, = manifest["graphs"]
+    from ignition.preparation.runtime_package_pb2 import ExecutionGraph
+    encoded = ExecutionGraph(**{k: v for k, v in graph.items() if k != "handle"})
+    decoded = ExecutionGraph.FromString(encoded.SerializeToString())
+    assert (decoded.batch_capacity, decoded.token_capacity, decoded.prefill_capacity) == (4, width, prefill)
+    assert decoded.speculation_enabled == enabled
+    assert "prefill_row" in [b.buffer_name for b in decoded.input_bindings]
+
+
+@pytest.mark.parametrize("changes", [
+    {"batch_capacity": 1}, {"batch_capacity": 3}, {"prefill_capacity": 0},
+    {"prefill_capacity": 65}, {"prefill_capacity": 1 << 31}, {"prefill_capacity": True}, {"token_capacity": 9},
+    {"speculation_enabled": None}, {"speculation_enabled": False, "token_capacity": 2},
+    {"inputs": ()}, {"kind": "prefill"},
+])
+def test_mixed_signature_rejects_ambiguous_or_invalid_row_contracts(changes):
+    args = dict(kind="mixed", batch_capacity=4, token_capacity=1, inputs=("prefill_row",),
+                speculation_enabled=True, prefill_capacity=64)
+    with pytest.raises((ValueError, TypeError)):
+        GraphSignature(**(args | changes))
+
+
+def test_mixed_execution_requires_vector_completions():
+    with pytest.raises(ValueError, match="ABI3"):
+        _execution(signatures={"decode": GraphSignature("mixed", 2, 1, ("prefill_row",),
+                    speculation_enabled=False, prefill_capacity=64),
+                    "prefill": GraphSignature("prefill", 1, 16)})

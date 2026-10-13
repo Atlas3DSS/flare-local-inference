@@ -273,6 +273,17 @@ impl<M: ModelContract> ModelRuntime<M> {
                         scheduler.fixed_speculative_width(worker_config.speculative_fixed_width)
                     })
                     .and_then(|()| {
+                        scheduler.mixed_graphs(
+                            &executor
+                                .manifest()
+                                .graphs
+                                .iter()
+                                .filter(|g| g.kind == GraphKind::Mixed)
+                                .map(|g| (g.batch_capacity, g.token_capacity, g.prefill_capacity))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .and_then(|()| {
                         scheduler.prefill_graphs(
                             &executor
                                 .manifest()
@@ -629,7 +640,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                             generated: live.generated_tokens,
                             last_progress_ns: accounting.last_progress_ns,
                             last_output_ns: accounting.last_output_ns,
-                            deficit_ns: accounting.deficit_ns,
+                            published_deliveries: accounting.published_deliveries,
                         })
                     }),
                 }
@@ -813,17 +824,26 @@ impl<'a, M: ModelContract> Worker<'a, M> {
     ) -> Result<()> {
         self.scheduler
             .advance_to(super::observation::monotonic_ns())?;
-        for record in completion.records.iter() {
+        let measured_step = self.scheduler.submitted_step(completion.fence)?.clone();
+        if measured_step.kind != kind {
+            return Err("completion graph kind differs from submitted step".into());
+        }
+        for (row, lane) in measured_step.lanes.iter().enumerate() {
+            let record = &completion.records[lane.request.slot as usize];
             if record.status != 0 {
-                M::validate_completion(self.config, kind, record)?;
+                M::validate_completion(self.config, measured_step.lane_kind(row), record)?;
             }
         }
         let mut prefill = 0;
         let mut accepted = 0;
         let mut draft_rounds = 0;
-        if matches!(kind, GraphKind::Prefill | GraphKind::Speculative) {
+        if matches!(
+            kind,
+            GraphKind::Prefill | GraphKind::Speculative | GraphKind::Mixed
+        ) {
             let step = self.scheduler.submitted_step(completion.fence)?;
-            for lane in &step.lanes {
+            for (row, lane) in step.lanes.iter().enumerate() {
+                let kind = step.lane_kind(row);
                 let Ok(live) = self.scheduler.request(lane.request) else {
                     continue;
                 };
@@ -847,17 +867,14 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 }
             }
         }
-        let measured_step = self.scheduler.submitted_step(completion.fence)?.clone();
-        let generated = self
-            .scheduler
-            .complete(completion.fence, &completion.records)?;
+        let generated =
+            self.scheduler
+                .complete(completion.fence, &completion.records, completion.timing)?;
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
-        if kind == GraphKind::Prefill && self.store.is_some() {
+        if prefill > 0 && self.store.is_some() {
             self.observe_prefill_rate(completion.fence, prefill);
         }
-        self.scheduler
-            .observe_execution(&measured_step, completion.timing);
         self.metrics.scheduler_trace.completed(
             super::observation::monotonic_ns(),
             completion.graph_index,
@@ -888,7 +905,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                     if request.incoming.publications.get() != before {
                         self.scheduler
                             .advance_to(super::observation::monotonic_ns())?;
-                        self.scheduler.published_output(token.request)?;
+                        self.scheduler
+                            .published_output(token.request, completion.fence)?;
                     }
                     continue;
                 }
@@ -921,7 +939,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 if request.incoming.publications.get() != before {
                     self.scheduler
                         .advance_to(super::observation::monotonic_ns())?;
-                    self.scheduler.published_output(token.request)?;
+                    self.scheduler
+                        .published_output(token.request, completion.fence)?;
                 }
                 if stop {
                     self.metrics.completed.fetch_add(1, Ordering::Relaxed);
@@ -1161,18 +1180,30 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             step.kind,
             step.batch_capacity,
             step.token_capacity,
+            step.prefill_capacity(),
             SamplingMode::General,
         )?;
         let fence = executor.next_fence()?;
         self.reserve_and_pack(step, fence)?;
-        if step.kind == GraphKind::Prefill && self.store.is_some() {
+        if step
+            .lanes
+            .iter()
+            .enumerate()
+            .any(|(row, _)| step.lane_kind(row) == GraphKind::Prefill)
+            && self.store.is_some()
+        {
             if self.prefill_started.len() >= 8 {
                 self.prefill_started.pop_front();
             }
             self.prefill_started.push_back((
                 fence,
                 std::time::Instant::now(),
-                step.lanes.iter().map(|lane| lane.tokens as u64).sum(),
+                step.lanes
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| step.lane_kind(*row) == GraphKind::Prefill)
+                    .map(|(_, lane)| lane.tokens as u64)
+                    .sum(),
             ));
         }
         if executor.submit(
@@ -1456,6 +1487,7 @@ mod tests {
                 kind,
                 batch_capacity: 4,
                 token_capacity: 1,
+                mixed: None,
                 lanes: vec![lane(3), lane(1)],
                 requires_feedback: true,
             };
@@ -1477,6 +1509,7 @@ mod tests {
             kind: GraphKind::Decode,
             batch_capacity: 1,
             token_capacity: 1,
+            mixed: None,
             lanes: vec![lane(0)],
             requires_feedback: false,
         };
@@ -1517,8 +1550,9 @@ mod tests {
             metrics: &super::super::metrics::Metrics,
             sequence: u64,
             outstanding: usize,
+            kind: GraphKind,
         ) -> ScheduledPlan {
-            let step = scheduler.plan().unwrap();
+            let step = scheduler.phase_plan(kind, None);
             let fence = Fence(sequence * 2);
             scheduler.commit(&step, fence).unwrap();
             observe_submission(metrics, scheduler, &step, outstanding).unwrap();
@@ -1536,9 +1570,11 @@ mod tests {
                     ..CompletionRecord::default()
                 };
             }
-            scheduler.complete(fence, &records).unwrap();
+            scheduler
+                .complete(fence, &records, Default::default())
+                .unwrap();
             if step.kind == GraphKind::Prefill {
-                let capture = scheduler.plan().unwrap();
+                let capture = scheduler.phase_plan(GraphKind::Snapshot, None);
                 assert_eq!(capture.kind, GraphKind::Snapshot);
                 let copy_fence = Fence(fence.0 + 1);
                 scheduler.commit(&capture, copy_fence).unwrap();
@@ -1555,7 +1591,9 @@ mod tests {
                         ..Default::default()
                     };
                 }
-                scheduler.complete(copy_fence, &copies).unwrap();
+                scheduler
+                    .complete(copy_fence, &copies, Default::default())
+                    .unwrap();
             }
             step
         }
@@ -1599,12 +1637,15 @@ mod tests {
             host_stops: false,
         };
         let constrained = scheduler.admit(spec(7, true)).unwrap();
-        assert_eq!(submit(&mut scheduler, &metrics, 1, 1).kind, GraphKind::Init);
         assert_eq!(
-            submit(&mut scheduler, &metrics, 2, 1).kind,
+            submit(&mut scheduler, &metrics, 1, 1, GraphKind::Init).kind,
+            GraphKind::Init
+        );
+        assert_eq!(
+            submit(&mut scheduler, &metrics, 2, 1, GraphKind::Prefill).kind,
             GraphKind::Prefill
         );
-        let only_constrained = submit(&mut scheduler, &metrics, 3, 1);
+        let only_constrained = submit(&mut scheduler, &metrics, 3, 1, GraphKind::Decode);
         assert_eq!(only_constrained.kind, GraphKind::Decode);
         assert_eq!(only_constrained.lanes.len(), 1);
         assert!(
@@ -1616,16 +1657,19 @@ mod tests {
         for token in [8, 9] {
             scheduler.admit(spec(token, false)).unwrap();
         }
-        assert_eq!(submit(&mut scheduler, &metrics, 4, 1).kind, GraphKind::Init);
         assert_eq!(
-            submit(&mut scheduler, &metrics, 5, 1).kind,
+            submit(&mut scheduler, &metrics, 4, 1, GraphKind::Init).kind,
+            GraphKind::Init
+        );
+        assert_eq!(
+            submit(&mut scheduler, &metrics, 5, 1, GraphKind::Prefill).kind,
             GraphKind::Prefill
         );
         assert_eq!(
-            submit(&mut scheduler, &metrics, 6, 1).kind,
+            submit(&mut scheduler, &metrics, 6, 1, GraphKind::Prefill).kind,
             GraphKind::Prefill
         );
-        let mixed = submit(&mut scheduler, &metrics, 7, 1);
+        let mixed = submit(&mut scheduler, &metrics, 7, 1, GraphKind::Decode);
         assert_eq!(mixed.kind, GraphKind::Decode);
         assert_eq!(mixed.lanes.len(), 3);
         assert!(
@@ -1634,7 +1678,7 @@ mod tests {
                 .contains("flare_mixed_grammar_decode_steps_total 1\n")
         );
         scheduler.cancel(constrained).unwrap();
-        let unconstrained = submit(&mut scheduler, &metrics, 8, 2);
+        let unconstrained = submit(&mut scheduler, &metrics, 8, 2, GraphKind::Decode);
         assert_eq!(unconstrained.kind, GraphKind::Decode);
         assert_eq!(unconstrained.lanes.len(), 2);
         assert!(!unconstrained.requires_feedback);
@@ -1803,7 +1847,9 @@ mod tests {
                 status: 1,
                 ..Default::default()
             };
-            scheduler.complete(Fence(sequence), &records).unwrap();
+            scheduler
+                .complete(Fence(sequence), &records, Default::default())
+                .unwrap();
         }
         let (count, grammar_masks) = grammar.copy_masks(&[1, 2, 3]).unwrap();
         assert_eq!(count, 3);
@@ -1849,7 +1895,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let generated = scheduler.complete(Fence(4), &records).unwrap();
+        let generated = scheduler
+            .complete(Fence(4), &records, Default::default())
+            .unwrap();
         assert_eq!(
             generated
                 .iter()
@@ -1987,7 +2035,12 @@ mod tests {
             status: 1,
             ..Default::default()
         };
-        assert!(scheduler.complete(Fence(1), &records).unwrap().is_empty());
+        assert!(
+            scheduler
+                .complete(Fence(1), &records, Default::default())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(scheduler.stats().retiring_slots, 0);
         assert_eq!(scheduler.free_page_count(), 4);
         assert_eq!(scheduler.free_snapshot_count(), 40);

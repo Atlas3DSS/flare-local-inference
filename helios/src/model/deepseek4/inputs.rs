@@ -20,8 +20,15 @@ impl Inputs {
     pub fn pack(&mut self, frame: &InputStep<'_, DeepSeek4>) -> Result<()> {
         self.staging.clear();
         self.text.pack(frame)?;
-        if frame.step.kind == GraphKind::Prefill {
-            let lane = &frame.step.lanes[0];
+        if let Some(row) =
+            (0..frame.step.lanes.len()).find(|&row| frame.step.lane_kind(row) == GraphKind::Prefill)
+        {
+            let lane = &frame.step.lanes[row];
+            let offset = frame.step.lanes[..row]
+                .iter()
+                .map(|lane| lane.tokens)
+                .sum::<usize>()
+                * 4;
             let data: &PromptData = &frame.admissions[lane.request.slot as usize]
                 .as_ref()
                 .unwrap()
@@ -30,7 +37,7 @@ impl Inputs {
             let end = start + lane.tokens;
             self.staging.i32(
                 "vision_token_indices",
-                0,
+                offset,
                 data.vision_token_indices[start..end].iter().copied(),
             );
             let mut left = vec![0; lane.tokens];
@@ -48,8 +55,8 @@ impl Inputs {
                     right[position - start] = (span.end - position - 1) as i32;
                 }
             }
-            self.staging.i32("vision_left", 0, left);
-            self.staging.i32("vision_right", 0, right);
+            self.staging.i32("vision_left", offset, left);
+            self.staging.i32("vision_right", offset, right);
         }
         Ok(())
     }

@@ -1,23 +1,28 @@
-//! Request-level useful-progress accounting and selection over prepared graphs.
+//! Expected useful value per time over prepared physical execution shapes.
 
-use super::*;
+use super::{
+    utility::{LaneValue, ServicePrice, ValueRate, best_cohort, best_two_stage_cohort},
+    *,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PolicyConfig {
-    pub max_slice_ns: u64,
-    pub submission_window_ns: u64,
-    pub service_gap_ns: u64,
-    pub deficit_scale_ns: u64,
+    pub output_token_value: f64,
+    pub token_fairness: f64,
+    pub delivery_fairness: f64,
+    pub decode_age_price: f64,
+    pub adaptation_ms: f64,
     pub estimate_ttl_ns: u64,
 }
 
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
-            max_slice_ns: 20_000_000,
-            submission_window_ns: 20_000_000,
-            service_gap_ns: 40_000_000,
-            deficit_scale_ns: 20_000_000,
+            output_token_value: 64.0,
+            token_fairness: 16.0,
+            delivery_fairness: 4.0,
+            decode_age_price: 0.1,
+            adaptation_ms: 100.0,
             estimate_ttl_ns: 30_000_000_000,
         }
     }
@@ -28,40 +33,21 @@ pub struct RequestAccounting {
     pub arrival_ns: u64,
     pub last_progress_ns: u64,
     pub last_output_ns: Option<u64>,
-    pub deficit_ns: f64,
-    pub entitlement_ns: f64,
-    pub committed_credit_ns: f64,
-    pub prefill_credit_ns: f64,
-    pub decode_credit_ns: f64,
-    committed_prefill_tokens: u64,
-    committed_output_tokens: u64,
+    pub last_output_fence: Option<Fence>,
+    pub published_deliveries: u64,
+    pub committed_prefill_tokens: u64,
+    pub committed_output_tokens: u64,
+    pub(super) pending_publication_fence: Option<Fence>,
+    pub(super) service: service::ServiceAccounting,
 }
 
 impl RequestAccounting {
     pub(super) fn credit(&mut self, prefill: u64, output: u32, now: u64) {
         self.committed_prefill_tokens += prefill;
         self.committed_output_tokens += u64::from(output);
-        let credit =
-            prefill as f64 * self.prefill_credit_ns + output as f64 * self.decode_credit_ns;
-        self.committed_credit_ns += credit;
-        self.deficit_ns = (self.deficit_ns - credit).max(0.0);
         if prefill != 0 || output != 0 {
             self.last_progress_ns = now;
         }
-    }
-
-    fn initialize_rates(&mut self, prefill: f64, decode: f64) {
-        let mut credit = 0.0;
-        if self.prefill_credit_ns == 0.0 && prefill > 0.0 {
-            self.prefill_credit_ns = prefill;
-            credit += self.committed_prefill_tokens as f64 * prefill;
-        }
-        if self.decode_credit_ns == 0.0 && decode > 0.0 {
-            self.decode_credit_ns = decode;
-            credit += self.committed_output_tokens as f64 * decode;
-        }
-        self.committed_credit_ns += credit;
-        self.deficit_ns = (self.deficit_ns - credit).max(0.0);
     }
 }
 
@@ -69,12 +55,14 @@ impl RequestAccounting {
 pub(super) struct Candidate {
     kind: GraphKind,
     mask: u64,
+    batch: usize,
     capacity: usize,
+    prefill_capacity: usize,
+    prefill_slot: Option<usize>,
     work: usize,
     duration_ns: u64,
+    rate: ValueRate,
     feedback: bool,
-    lateness: f64,
-    score: f64,
 }
 
 impl RequestScheduler {
@@ -82,48 +70,32 @@ impl RequestScheduler {
         if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
             return Err("scheduling policy must be configured before admission".into());
         }
-        if policy.max_slice_ns == 0
-            || policy.submission_window_ns == 0
-            || policy.service_gap_ns == 0
-            || policy.deficit_scale_ns == 0
+        if !policy.output_token_value.is_finite()
+            || policy.output_token_value <= 0.0
+            || !policy.adaptation_ms.is_finite()
+            || policy.adaptation_ms <= 0.0
             || policy.estimate_ttl_ns == 0
+            || [
+                policy.token_fairness,
+                policy.delivery_fairness,
+                policy.decode_age_price,
+            ]
+            .into_iter()
+            .any(|v| !v.is_finite() || v < 0.0)
         {
-            return Err("scheduling time budgets must be positive".into());
+            return Err("invalid scheduler utility coefficients or estimation intervals".into());
         }
         self.policy = policy;
         self.costs.advance_to(self.now_ns, policy.estimate_ttl_ns);
         Ok(())
     }
 
-    /// Integrates occupied execution time once, before changing the runnable set.
     pub fn advance_to(&mut self, now_ns: u64) -> Result<()> {
         if now_ns < self.now_ns {
             return Err("scheduler clock must be monotonic".into());
         }
-        let elapsed = now_ns - self.now_ns;
         self.now_ns = now_ns;
         self.costs.advance_to(now_ns, self.policy.estimate_ttl_ns);
-        if elapsed == 0 || self.submissions.is_empty() {
-            return Ok(());
-        }
-        let count = self
-            .slots
-            .iter()
-            .filter_map(|s| s.request.as_ref())
-            .filter(|r| gpu_runnable(r))
-            .count();
-        if count != 0 {
-            let share = elapsed as f64 / count as f64;
-            for request in self
-                .slots
-                .iter_mut()
-                .filter_map(|s| s.request.as_mut())
-                .filter(|r| gpu_runnable(r))
-            {
-                request.accounting.entitlement_ns += share;
-                request.accounting.deficit_ns += share;
-            }
-        }
         Ok(())
     }
 
@@ -138,94 +110,36 @@ impl RequestScheduler {
         Ok(())
     }
 
-    pub fn published_output(&mut self, handle: RequestHandle) -> Result<()> {
-        self.request(handle)?;
-        self.slots[handle.slot as usize]
+    pub fn published_output(&mut self, handle: RequestHandle, fence: Fence) -> Result<()> {
+        if fence != self.completed {
+            return Err("output publication must be reported before the next completion".into());
+        }
+        if self.request(handle)?.accounting.pending_publication_fence != Some(fence) {
+            return Err(
+                "output publication must name the request's latest output completion".into(),
+            );
+        }
+        let accounting = &mut self.slots[handle.slot as usize]
             .request
             .as_mut()
             .unwrap()
-            .accounting
-            .last_output_ns = Some(self.now_ns);
+            .accounting;
+        if accounting.last_output_fence != Some(fence) {
+            accounting.published_deliveries += 1;
+            accounting.last_output_fence = Some(fence);
+            accounting.service.publish(fence, self.policy.adaptation_ms);
+        }
+        accounting.last_output_ns = Some(self.now_ns);
         Ok(())
     }
 
-    pub(super) fn accounting(&self, remaining_prefill: usize) -> RequestAccounting {
-        let (prefill_credit_ns, decode_credit_ns) = self.reference_rates(remaining_prefill);
+    pub(super) fn accounting(&self) -> RequestAccounting {
         RequestAccounting {
             arrival_ns: self.now_ns,
             last_progress_ns: self.now_ns,
-            prefill_credit_ns,
-            decode_credit_ns,
             ..Default::default()
         }
     }
-
-    fn reference_rates(&self, remaining_prefill: usize) -> (f64, f64) {
-        let decode = crate::execution::BATCH_CAPACITIES
-            .into_iter()
-            .find_map(|batch| {
-                self.costs
-                    .reference_duration(GraphKind::Decode, batch, 1)
-                    .or_else(|| {
-                        self.speculative_catalog[batch.ilog2() as usize]
-                            .iter()
-                            .find_map(|width| {
-                                self.costs
-                                    .reference_duration(GraphKind::Speculative, batch, *width)
-                            })
-                    })
-                    .map(|n| n as f64 / batch as f64)
-            })
-            .unwrap_or(0.0);
-        let prefill = if remaining_prefill == 0 {
-            0.0
-        } else {
-            self.prefill_catalog
-                .iter()
-                .rev()
-                .find_map(|capacity| {
-                    let cost = self
-                        .costs
-                        .reference_duration(GraphKind::Prefill, 1, *capacity)?;
-                    let full = remaining_prefill / capacity;
-                    let tail = remaining_prefill % capacity;
-                    let tail_cost = if tail == 0 {
-                        0
-                    } else {
-                        self.prefill_catalog
-                            .iter()
-                            .filter(|n| **n >= tail)
-                            .find_map(|n| self.costs.reference_duration(GraphKind::Prefill, 1, *n))
-                            .unwrap_or(cost)
-                    };
-                    Some((full as f64 * cost as f64 + tail_cost as f64) / remaining_prefill as f64)
-                })
-                .unwrap_or(0.0)
-        };
-        (prefill, decode)
-    }
-
-    pub(super) fn initialize_credit_rates(&mut self) {
-        for slot in 0..self.slots.len() {
-            let Some(request) = self.slots[slot].request.as_ref() else {
-                continue;
-            };
-            if request.accounting.prefill_credit_ns != 0.0
-                && request.accounting.decode_credit_ns != 0.0
-            {
-                continue;
-            }
-            let remaining = request.prompt_tokens - request.admission_reused_tokens as usize;
-            let (prefill, decode) = self.reference_rates(remaining);
-            self.slots[slot]
-                .request
-                .as_mut()
-                .unwrap()
-                .accounting
-                .initialize_rates(prefill, decode);
-        }
-    }
-
     fn request_kind(&self, request: &LiveRequest) -> Option<GraphKind> {
         Some(match request.phase {
             RequestPhase::Initialize => GraphKind::Init,
@@ -262,7 +176,7 @@ impl RequestScheduler {
         }
     }
 
-    fn prefill_work(&self, request: &LiveRequest, capacity: usize) -> usize {
+    pub(super) fn prefill_work(&self, request: &LiveRequest, capacity: usize) -> usize {
         let start = request.consumed_tokens as usize;
         let mut end = request
             .system_boundary
@@ -279,73 +193,11 @@ impl RequestScheduler {
         end - start
     }
 
-    fn service_clock(&self, request: &LiveRequest) -> u64 {
-        let accounting = &request.accounting;
-        if request.consumed_tokens < request.prompt_tokens as u64 || terminal_cleanup(request) {
-            accounting.last_progress_ns
-        } else {
-            accounting.last_output_ns.unwrap_or(accounting.arrival_ns)
-        }
-    }
-
-    /// The service gap scaled to the hardware and, with speculation, the batch being served: never
-    /// below a small multiple of the cheapest way to advance each of `decoding` requests by one step,
-    /// one batched step or that many single steps. The configured gap suits fast decode steps; on slower hardware
-    /// or larger models (a GLM round on four DGX Sparks takes 30 ms for one request and 53 ms for
-    /// eight, before drafts) every speculative round would be late, and the lateness filter would
-    /// leave only the shortest round, switching speculation off. Scaling by one request's step is
-    /// not enough: a batch's rounds cost several times as much, so batched speculation would still
-    /// lose to single-token steps that deliver far fewer tokens.
-    pub(super) fn service_gap(&self, decoding: usize) -> u64 {
-        let cheapest = |batch: usize| {
-            let widths = self
-                .speculative_catalog
-                .get(batch.trailing_zeros() as usize)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            std::iter::once(self.costs.reference_duration(GraphKind::Decode, batch, 1))
-                .chain(widths.iter().map(|w| {
-                    self.costs
-                        .reference_duration(GraphKind::Speculative, batch, *w)
-                }))
-                .flatten()
-                .min()
-        };
-        let single = cheapest(1);
-        // Without speculation every step is one token per request; only wider rounds need room.
-        let decoding = if self.speculative_widths.is_empty() {
-            1
-        } else {
-            decoding.max(1)
-        };
-        // The largest prepared batch that holds every decoding request, or the largest prepared.
-        let mut batch = decoding.next_power_of_two();
-        let batched = loop {
-            if batch == 1 {
-                break None;
-            }
-            if let Some(step) = cheapest(batch) {
-                break Some(step);
-            }
-            batch /= 2;
-        };
-        let step = [batched, single.map(|s| s.saturating_mul(decoding as u64))]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(0);
-        self.policy.service_gap_ns.max(3 * step)
-    }
-
     pub fn submission_window_available(&self, duration_ns: u64) -> bool {
         self.submissions.len() < 2
-            && self.window_remaining().is_some_and(|remaining| {
-                self.submissions.is_empty()
-                    || (duration_ns != 0
-                        && duration_ns <= self.policy.max_slice_ns
-                        && remaining.saturating_add(duration_ns)
-                            <= self.policy.submission_window_ns)
-            })
+            && !self.submissions.values().any(|s| s.requires_feedback)
+            && (self.submissions.is_empty() || duration_ns > 0)
+            && self.window_remaining().is_some()
     }
 
     pub(super) fn window_remaining(&self) -> Option<u64> {
@@ -365,75 +217,542 @@ impl RequestScheduler {
         )
     }
 
+    fn lane_values(&self, window_ns: u64) -> ([LaneValue; REQUEST_LANES], f64, f64) {
+        let mut values = [LaneValue::default(); REQUEST_LANES];
+        let count = self
+            .slots
+            .iter()
+            .filter_map(|s| s.request.as_ref())
+            .filter(|r| self.request_kind(r).is_some())
+            .count()
+            .max(1);
+        let mut token_log = [f64::NEG_INFINITY; REQUEST_LANES];
+        let mut delivery_log = token_log;
+        let rates: [_; REQUEST_LANES] = std::array::from_fn(|slot| {
+            self.slots
+                .get(slot)
+                .and_then(|s| s.request.as_ref())
+                .filter(|r| self.request_kind(r).is_some())
+                .map(|r| self.service_rates(r))
+                .unwrap_or_default()
+        });
+        let references = self.delivery_reference_intervals(&rates.map(|(_, d)| d));
+        let mut scale = 0.0f64
+            .max(self.policy.output_token_value.ln())
+            .max(self.policy.decode_age_price.ln());
+        for (slot, entry) in self.slots.iter().enumerate() {
+            let Some(r) = entry
+                .request
+                .as_ref()
+                .filter(|r| self.request_kind(r).is_some())
+            else {
+                continue;
+            };
+            let (tokens, deliveries) = rates[slot];
+            let service = self.projected_service(r);
+            if let Some(rate) = tokens {
+                token_log[slot] = service
+                    .tokens
+                    .unwrap_or_else(|| ServicePrice::initial(rate / count as f64))
+                    .log_price(self.policy.token_fairness);
+            }
+            if let Some(reference) = references[slot].filter(|_| deliveries.is_some()) {
+                delivery_log[slot] = service
+                    .deliveries
+                    .unwrap_or_else(|| ServicePrice::initial(1.0 / reference))
+                    .log_price(self.policy.delivery_fairness);
+                values[slot].reference_delivery_ms = reference;
+                values[slot].age_price = self.policy.decode_age_price;
+                let pending_delivery = self.submissions.values().any(|s| {
+                    matches!(
+                        s.kind,
+                        GraphKind::Decode | GraphKind::Speculative | GraphKind::Resume
+                    ) && s.lanes.iter().any(|l| l.request == r.handle)
+                });
+                values[slot].age_ms = if pending_delivery {
+                    0.0
+                } else {
+                    self.now_ns.saturating_add(window_ns).saturating_sub(
+                        r.accounting
+                            .last_output_ns
+                            .unwrap_or(r.accounting.last_progress_ns),
+                    ) as f64
+                        / 1e6
+                };
+            }
+            scale = scale.max(token_log[slot]).max(delivery_log[slot]);
+        }
+        let unit = (-scale).exp();
+        let mut age_price = 0.0;
+        for (slot, value) in values.iter_mut().enumerate() {
+            value.prefill_token = unit + (token_log[slot] - scale).exp();
+            value.output_token =
+                self.policy.output_token_value * unit + (token_log[slot] - scale).exp();
+            value.delivery = (delivery_log[slot] - scale).exp();
+            value.age_price *= unit;
+            age_price += value.age_price;
+        }
+        (values, age_price, scale)
+    }
+
+    fn next_progress(&self, r: &LiveRequest, value: LaneValue) -> Option<(u64, f64)> {
+        let mut best: Option<(ValueRate, f64)> = None;
+        let mut consider = |ns, work| {
+            let rate = ValueRate::new(ns, work, 0.0);
+            if best.is_none_or(|(old, _)| rate.compare(old).is_gt()) {
+                best = Some((rate, work));
+            }
+        };
+        if r.consumed_tokens < r.prompt_tokens as u64 {
+            for &capacity in &self.prefill_catalog {
+                let work = self.prefill_work(r, capacity);
+                if work == 0 {
+                    continue;
+                }
+                if let Some(ns) = self.costs.duration(GraphKind::Prefill, 1, capacity) {
+                    consider(
+                        ns,
+                        value.prefill(
+                            work,
+                            r.consumed_tokens + work as u64 == r.prompt_tokens as u64,
+                        ),
+                    );
+                }
+            }
+        } else {
+            for batch in crate::execution::BATCH_CAPACITIES
+                .into_iter()
+                .take_while(|b| *b <= self.limits.max_active.next_power_of_two())
+            {
+                if r.generated_tokens == 0 || self.speculative_widths.is_empty() {
+                    let kind = if r.generated_tokens == 0 {
+                        GraphKind::Resume
+                    } else {
+                        GraphKind::Decode
+                    };
+                    if let Some(ns) = self.costs.duration(kind, batch, 1) {
+                        consider(ns, value.decode(1.0, ns as f64 / 1e6));
+                    }
+                } else {
+                    for &width in &self.speculative_catalog[batch.ilog2() as usize] {
+                        if let Some(ns) = self.costs.duration(GraphKind::Speculative, batch, width)
+                        {
+                            let expected = r.acceptance.expected_tokens(
+                                self.proposal_source,
+                                self.speculative_tokens(r, width),
+                            );
+                            consider(ns, value.decode(expected, ns as f64 / 1e6));
+                        }
+                    }
+                }
+            }
+        }
+        for &(batch, width, prefill) in &self.mixed_catalog {
+            let Some(ns) = self
+                .costs
+                .shape_duration(GraphKind::Mixed, batch, width, prefill)
+            else {
+                continue;
+            };
+            if r.consumed_tokens < r.prompt_tokens as u64 {
+                let work = self.prefill_work(r, prefill);
+                if work > 0 {
+                    consider(
+                        ns,
+                        value.prefill(
+                            work,
+                            r.consumed_tokens + work as u64 == r.prompt_tokens as u64,
+                        ),
+                    );
+                }
+            } else if r.generated_tokens > 0 {
+                let tokens = self.speculative_tokens(r, width);
+                consider(
+                    ns,
+                    value.decode(
+                        r.acceptance.expected_tokens(self.proposal_source, tokens),
+                        ns as f64 / 1e6,
+                    ),
+                );
+            }
+        }
+        best.map(|(rate, value)| (rate.duration_ns, value))
+    }
+
+    fn prerequisite_value(
+        &self,
+        r: &LiveRequest,
+        kind: GraphKind,
+        duration_ns: u64,
+        value: LaneValue,
+    ) -> f64 {
+        if terminal_cleanup(r) {
+            return value.decode(0.0, duration_ns as f64 / 1e6);
+        }
+        let Some((mut following, work)) = self.next_progress(r, value) else {
+            return 0.0;
+        };
+        if duration_ns == 0 || following == 0 {
+            return work;
+        }
+        for patches in r
+            .vision_patches
+            .iter()
+            .skip(usize::from(kind == GraphKind::Vision))
+        {
+            let cost = self
+                .capabilities
+                .vision
+                .patch_capacities
+                .iter()
+                .filter(|n| *n >= patches)
+                .filter_map(|n| self.costs.duration(GraphKind::Vision, 1, *n))
+                .min()
+                .unwrap_or(0);
+            if cost == 0 {
+                return work;
+            }
+            following = following.saturating_add(cost);
+        }
+        work * duration_ns as f64 / duration_ns.saturating_add(following) as f64
+    }
+
+    fn following_kind(&self, r: &LiveRequest, kind: GraphKind) -> Option<GraphKind> {
+        let phase = match kind {
+            GraphKind::Snapshot => r.boundary_capture?.resume,
+            GraphKind::Init | GraphKind::Restore | GraphKind::Vision => {
+                if r.vision_patches.len() > usize::from(kind == GraphKind::Vision) {
+                    return None;
+                }
+                if r.consumed_tokens == r.prompt_tokens as u64 {
+                    RequestPhase::Resume
+                } else {
+                    RequestPhase::Prefill
+                }
+            }
+            _ => return None,
+        };
+        match phase {
+            RequestPhase::Prefill => Some(GraphKind::Prefill),
+            RequestPhase::Resume => Some(GraphKind::Resume),
+            RequestPhase::Decode if self.speculative_widths.is_empty() => Some(GraphKind::Decode),
+            RequestPhase::Decode => Some(GraphKind::Speculative),
+            _ => None,
+        }
+    }
+
+    fn continuation_candidate(
+        &self,
+        kind: GraphKind,
+        capacity: usize,
+        duration_ns: u64,
+        first_offers: &[(usize, f64)],
+        values: &[LaneValue; REQUEST_LANES],
+        age_price: f64,
+    ) -> Option<(u64, ValueRate)> {
+        if !matches!(
+            kind,
+            GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot | GraphKind::Vision
+        ) {
+            return None;
+        }
+        let mask = first_offers
+            .iter()
+            .fold(0, |mask, (slot, _)| mask | (1 << slot));
+        let fill = |selected: u64| {
+            let count = selected.count_ones() as usize;
+            if count == capacity {
+                return selected;
+            }
+            let mut remaining = [(0, 0.0); REQUEST_LANES];
+            let mut n = 0;
+            for &offer in first_offers {
+                if selected & (1 << offer.0) == 0 {
+                    remaining[n] = offer;
+                    n += 1;
+                }
+            }
+            selected | best_cohort::<REQUEST_LANES>(&remaining[..n], capacity - count)
+        };
+        let mut best: Option<(u64, ValueRate)> = None;
+        let mut consider = |following, batch, width, prefill| {
+            let Some(ns) = self.costs.shape_duration(following, batch, width, prefill) else {
+                return;
+            };
+            let horizon = if ns == 0 || duration_ns == 0 {
+                0
+            } else {
+                ns.saturating_add(duration_ns)
+            };
+            let total_ms = horizon as f64 / 1e6;
+            let first_ms = duration_ns as f64 / 1e6;
+            let mut preparing = [(0, 0.0); REQUEST_LANES];
+            let mut ready = preparing;
+            let mut finishing = preparing;
+            let mut prompts: [Option<(usize, f64)>; 2] = [None, None];
+            let (mut p, mut r, mut f) = (0, 0, 0);
+            let mixed = following == GraphKind::Mixed;
+            let decode = if self.speculative_widths.is_empty() {
+                GraphKind::Decode
+            } else {
+                GraphKind::Speculative
+            };
+            for (slot, entry) in self.slots.iter().enumerate() {
+                let Some(request) = entry.request.as_ref() else {
+                    continue;
+                };
+                let offered = mask & (1 << slot) != 0;
+                if offered && terminal_cleanup(request) {
+                    finishing[f] = (slot, values[slot].finish(first_ms, total_ms));
+                    f += 1;
+                    continue;
+                }
+                let promoted_kind = offered
+                    .then(|| self.following_kind(request, kind))
+                    .flatten();
+                let ready_kind = self
+                    .eligible(request)
+                    .then(|| self.request_kind(request))
+                    .flatten();
+                let accepts = |k: GraphKind| {
+                    if mixed {
+                        k == GraphKind::Prefill || k == decode
+                    } else {
+                        k == following
+                    }
+                };
+                let (role, promoted) = if let Some(k) = promoted_kind.filter(|k| accepts(*k)) {
+                    (k, true)
+                } else if let Some(k) = ready_kind.filter(|k| accepts(*k)) {
+                    (k, false)
+                } else {
+                    continue;
+                };
+                let extent = if mixed && role == GraphKind::Prefill {
+                    prefill
+                } else {
+                    width
+                };
+                if role == GraphKind::Prefill && self.prefill_work(request, extent) == 0 {
+                    continue;
+                }
+                let offer = (
+                    slot,
+                    self.lane_value(request, role, extent, horizon, values[slot]),
+                );
+                if mixed && role == GraphKind::Prefill {
+                    let best = &mut prompts[usize::from(promoted)];
+                    if best.is_none_or(|(_, value)| offer.1 > value) {
+                        *best = Some(offer);
+                    }
+                    continue;
+                }
+                if promoted {
+                    preparing[p] = offer;
+                    p += 1;
+                } else {
+                    ready[r] = offer;
+                    r += 1;
+                }
+            }
+            for prompt in std::iter::once(None).chain(prompts.into_iter().enumerate().filter_map(
+                |(promoted, offer)| offer.map(|(slot, value)| Some((slot, value, promoted == 1))),
+            )) {
+                let preparing_prompt = usize::from(prompt.is_some_and(|(_, _, promoted)| promoted));
+                let Some((selected, _, mut value)) = best_two_stage_cohort::<REQUEST_LANES>(
+                    &preparing[..p],
+                    &ready[..r],
+                    &finishing[..f],
+                    capacity - preparing_prompt,
+                    batch - usize::from(prompt.is_some()),
+                    1 - preparing_prompt,
+                ) else {
+                    continue;
+                };
+                let mut selected = selected;
+                if let Some((slot, work, promoted)) = prompt {
+                    value += work;
+                    if promoted {
+                        selected |= 1 << slot;
+                    }
+                }
+                let rate = ValueRate::new(horizon, value, age_price);
+                if best.is_none_or(|(_, old)| rate.compare(old).is_gt()) {
+                    best = Some((fill(selected), rate));
+                }
+            }
+        };
+        for &width in &self.prefill_catalog {
+            consider(GraphKind::Prefill, 1, width, 0);
+        }
+        for batch in crate::execution::BATCH_CAPACITIES
+            .into_iter()
+            .take_while(|b| *b <= self.limits.max_active.next_power_of_two())
+        {
+            consider(GraphKind::Resume, batch, 1, 0);
+            if self.speculative_widths.is_empty() {
+                consider(GraphKind::Decode, batch, 1, 0);
+            } else {
+                for &width in &self.speculative_catalog[batch.ilog2() as usize] {
+                    consider(GraphKind::Speculative, batch, width, 0);
+                }
+            }
+        }
+        for &(batch, width, prefill) in &self.mixed_catalog {
+            consider(GraphKind::Mixed, batch, width, prefill);
+        }
+        let mut terminal = [(0, 0.0); REQUEST_LANES];
+        let mut count = 0;
+        for slot in
+            bits(mask).filter(|s| terminal_cleanup(self.slots[*s].request.as_ref().unwrap()))
+        {
+            terminal[count] = (slot, values[slot].decode(0.0, duration_ns as f64 / 1e6));
+            count += 1;
+        }
+        if count > 0 {
+            let selected = best_cohort::<REQUEST_LANES>(&terminal[..count], capacity);
+            let immediate = terminal[..count]
+                .iter()
+                .filter(|(s, _)| selected & (1 << s) != 0)
+                .map(|(_, v)| v)
+                .sum();
+            let rate = ValueRate::new(duration_ns, immediate, age_price);
+            if best.is_none_or(|(_, old)| rate.compare(old).is_gt()) {
+                best = Some((fill(selected), rate));
+            }
+        }
+        best
+    }
+
+    fn lane_tokens(&self, r: &LiveRequest, kind: GraphKind, capacity: usize) -> usize {
+        match kind {
+            GraphKind::Prefill => self.prefill_work(r, capacity),
+            GraphKind::Decode => 1,
+            GraphKind::Speculative => self.speculative_tokens(r, capacity),
+            _ => 0,
+        }
+    }
+
+    fn lane_value(
+        &self,
+        r: &LiveRequest,
+        kind: GraphKind,
+        capacity: usize,
+        duration_ns: u64,
+        value: LaneValue,
+    ) -> f64 {
+        let tokens = self.lane_tokens(r, kind, capacity);
+        match kind {
+            GraphKind::Prefill => value.prefill(
+                tokens,
+                r.consumed_tokens + tokens as u64 == r.prompt_tokens as u64,
+            ),
+            GraphKind::Decode | GraphKind::Speculative => value.decode(
+                r.acceptance.expected_tokens(self.proposal_source, tokens),
+                duration_ns as f64 / 1e6,
+            ),
+            GraphKind::Resume => value.decode(1.0, duration_ns as f64 / 1e6),
+            _ => self.prerequisite_value(r, kind, duration_ns, value),
+        }
+    }
+
     fn add_candidate(
         &self,
         output: &mut Vec<Candidate>,
         kind: GraphKind,
-        mask: u64,
+        batch: usize,
         capacity: usize,
-        eligible: u64,
+        mask: u64,
+        values: &[LaneValue; REQUEST_LANES],
+        age_price: f64,
     ) {
-        if mask == 0 {
-            return;
-        }
-        let batch = (mask.count_ones() as usize).next_power_of_two();
-        let Some(mut duration_ns) = self.costs.duration(kind, batch, capacity) else {
+        let Some(duration_ns) = self.costs.duration(kind, batch, capacity) else {
             return;
         };
-        if duration_ns == 0 && mask != eligible {
-            // Running a graph is how its duration is learned, and an unmeasured step wins. Learning
-            // a smaller graph from part of a cohort delays the rest and leaves requests that advanced
-            // together at different positions, so a subset costs what the whole cohort, which it
-            // cannot outlast, costs at the same width until it runs on its merits.
-            let whole = (eligible.count_ones() as usize).next_power_of_two();
-            duration_ns = self.costs.duration(kind, whole, capacity).unwrap_or(0);
+        let mut offers = [(0usize, 0.0); REQUEST_LANES];
+        let mut count = 0;
+        for slot in bits(mask) {
+            let r = self.slots[slot].request.as_ref().unwrap();
+            if kind == GraphKind::Prefill && self.prefill_work(r, capacity) == 0 {
+                continue;
+            }
+            if kind == GraphKind::Vision && capacity < r.vision_patches[0] {
+                continue;
+            }
+            offers[count] = (
+                slot,
+                self.lane_value(r, kind, capacity, duration_ns, values[slot]),
+            );
+            count += 1;
         }
-        let first = self.slots[mask.trailing_zeros() as usize]
-            .request
-            .as_ref()
-            .unwrap();
-        let work = if kind == GraphKind::Prefill {
-            self.prefill_work(first, capacity)
-        } else {
-            0
-        };
-        if kind == GraphKind::Prefill
-            && (work == 0
-                || self.prefill_catalog.iter().copied().find(|n| *n >= work) != Some(capacity))
-        {
+        if count == 0 {
             return;
         }
+        let selected = best_cohort::<REQUEST_LANES>(&offers[..count], batch);
+        let expected = offers[..count]
+            .iter()
+            .filter(|(s, _)| selected & (1 << s) != 0)
+            .map(|(_, v)| v)
+            .sum();
         let feedback = duration_ns == 0
-            || kind == GraphKind::Speculative
-            || bits(mask).any(|slot| {
+            || !matches!(kind, GraphKind::Decode | GraphKind::Prefill)
+            || bits(selected).any(|slot| {
                 let r = self.slots[slot].request.as_ref().unwrap();
-                r.grammar_constrained || r.host_stops
+                r.grammar_constrained
+                    || r.host_stops
+                    || (kind == GraphKind::Prefill
+                        && (r.consumed_tokens + self.prefill_work(r, capacity) as u64
+                            == r.prompt_tokens as u64
+                            || r.system_boundary
+                                == Some(
+                                    r.consumed_tokens as usize + self.prefill_work(r, capacity),
+                                )))
             });
+        if feedback && !self.submissions.is_empty() {
+            return;
+        }
+        let (selected, rate) = self
+            .continuation_candidate(
+                kind,
+                batch,
+                duration_ns,
+                &offers[..count],
+                values,
+                age_price,
+            )
+            .unwrap_or_else(|| (selected, ValueRate::new(duration_ns, expected, age_price)));
         output.push(Candidate {
             kind,
-            mask,
+            mask: selected,
+            batch,
             capacity,
-            work,
+            prefill_capacity: 0,
+            prefill_slot: None,
+            work: if kind == GraphKind::Prefill {
+                self.prefill_work(
+                    self.slots[selected.trailing_zeros() as usize]
+                        .request
+                        .as_ref()
+                        .unwrap(),
+                    capacity,
+                )
+            } else {
+                0
+            },
             duration_ns,
+            rate,
             feedback,
-            lateness: 0.0,
-            score: 0.0,
         });
     }
 
-    fn add_cohort(&self, output: &mut Vec<Candidate>, kind: GraphKind, mask: u64, eligible: u64) {
-        if kind == GraphKind::Speculative {
-            let batch = (mask.count_ones() as usize).next_power_of_two();
-            for width in &self.speculative_catalog[batch.ilog2() as usize] {
-                self.add_candidate(output, kind, mask, *width, eligible);
-            }
-        } else {
-            self.add_candidate(output, kind, mask, 1, eligible);
-        }
-    }
-
-    fn candidates(&self, output: &mut Vec<Candidate>) {
+    fn candidates(
+        &self,
+        output: &mut Vec<Candidate>,
+        values: &[LaneValue; REQUEST_LANES],
+        age_price: f64,
+    ) {
         output.clear();
+        self.mixed_candidates(output, values, age_price);
         for kind in [
             GraphKind::Prefill,
             GraphKind::Vision,
@@ -460,186 +779,113 @@ impl RequestScheduler {
                 continue;
             }
             if kind == GraphKind::Prefill {
-                for slot in bits(mask) {
-                    for capacity in &self.prefill_catalog {
-                        self.add_candidate(output, kind, 1 << slot, *capacity, 1 << slot);
-                    }
+                for &capacity in &self.prefill_catalog {
+                    self.add_candidate(output, kind, 1, capacity, mask, values, age_price);
                 }
-                continue;
-            }
-            if kind == GraphKind::Vision {
-                for slot in bits(mask) {
-                    let patches = self.slots[slot].request.as_ref().unwrap().vision_patches[0];
-                    if let Some(capacity) = self
-                        .capabilities
-                        .vision
-                        .patch_capacities
-                        .iter()
-                        .find(|n| **n >= patches)
-                    {
-                        self.add_candidate(output, kind, 1 << slot, *capacity, 1 << slot);
-                    }
-                }
-                continue;
-            }
-            let count = mask.count_ones() as usize;
-            if count <= 5 {
-                let mut subset = mask;
-                while subset != 0 {
-                    self.add_cohort(output, kind, subset, mask);
-                    subset = subset.wrapping_sub(1) & mask;
+            } else if kind == GraphKind::Vision {
+                for &capacity in &self.capabilities.vision.patch_capacities {
+                    self.add_candidate(output, kind, 1, capacity, mask, values, age_price);
                 }
             } else {
-                for slot in bits(mask) {
-                    self.add_cohort(output, kind, 1 << slot, mask);
-                }
-                self.add_cohort(output, kind, mask, mask);
-                let mut order = [0usize; REQUEST_LANES];
-                for (i, slot) in bits(mask).enumerate() {
-                    order[i] = slot;
-                }
-                for ordering in 0..5 {
-                    order[..count].sort_unstable_by(|a, b| {
-                        let a = self.slots[*a].request.as_ref().unwrap();
-                        let b = self.slots[*b].request.as_ref().unwrap();
-                        let acceptance = |r: &LiveRequest| {
-                            r.acceptance.expected_tokens(
-                                self.proposal_source,
-                                self.speculative_tokens(r, 8),
-                            )
-                        };
-                        match ordering {
-                            0 => self.service_clock(a).cmp(&self.service_clock(b)),
-                            1 => b.accounting.deficit_ns.total_cmp(&a.accounting.deficit_ns),
-                            2 => acceptance(b).total_cmp(&acceptance(a)),
-                            3 => acceptance(a).total_cmp(&acceptance(b)),
-                            _ => a.scheduled_consumed.cmp(&b.scheduled_consumed),
+                for batch in crate::execution::BATCH_CAPACITIES
+                    .into_iter()
+                    .take_while(|b| *b <= self.limits.max_active.next_power_of_two())
+                {
+                    if kind == GraphKind::Speculative {
+                        for &capacity in &self.speculative_catalog[batch.ilog2() as usize] {
+                            self.add_candidate(
+                                output, kind, batch, capacity, mask, values, age_price,
+                            );
                         }
-                        .then(a.last_use.cmp(&b.last_use))
-                        .then(a.handle.slot.cmp(&b.handle.slot))
-                    });
-                    let mut subset = 0;
-                    for (i, slot) in order[..count].iter().enumerate() {
-                        subset |= 1 << slot;
-                        if i > 0 && (i + 1).is_power_of_two() && i + 1 < count {
-                            self.add_cohort(output, kind, subset, mask);
-                        }
+                    } else {
+                        self.add_candidate(output, kind, batch, 1, mask, values, age_price);
                     }
                 }
             }
         }
     }
 
-    fn next_credit(&self, request: &LiveRequest) -> f64 {
-        let remaining = request
-            .prompt_tokens
-            .saturating_sub(request.consumed_tokens as usize);
-        if remaining > 0 {
-            request.accounting.prefill_credit_ns.max(1.0)
-                * remaining.min(self.limits.prefill_chunk_size) as f64
-        } else {
-            request.accounting.decode_credit_ns.max(1.0)
-        }
-    }
-
-    fn useful_credit(
+    fn mixed_candidates(
         &self,
-        request: &LiveRequest,
-        kind: GraphKind,
-        tokens: usize,
-        score: bool,
-    ) -> f64 {
-        let prefill_credit = request.accounting.prefill_credit_ns.max(f64::from(score));
-        let decode_credit = request.accounting.decode_credit_ns.max(f64::from(score));
-        match kind {
-            GraphKind::Prefill => {
-                prefill_credit * tokens as f64
-                    + if request.consumed_tokens + tokens as u64 == request.prompt_tokens as u64 {
-                        decode_credit
-                            * if score && request.generated_tokens == 0 {
-                                2.0
-                            } else {
-                                1.0
-                            }
-                    } else {
-                        0.0
-                    }
-            }
-            GraphKind::Decode | GraphKind::Speculative => {
-                decode_credit
-                    * request
-                        .acceptance
-                        .expected_tokens(self.proposal_source, tokens)
-            }
-            GraphKind::Resume => {
-                decode_credit
-                    * if score && request.generated_tokens == 0 {
-                        2.0
-                    } else {
-                        1.0
-                    }
-            }
-            _ if !score => 0.0,
-            _ if terminal_cleanup(request) => decode_credit / 8.0,
-            _ => self.next_credit(request),
+        output: &mut Vec<Candidate>,
+        values: &[LaneValue; REQUEST_LANES],
+        age_price: f64,
+    ) {
+        if !self.submissions.is_empty() {
+            return;
         }
-    }
-
-    fn lane_tokens(&self, request: &LiveRequest, candidate: &Candidate) -> usize {
-        match candidate.kind {
-            GraphKind::Prefill => candidate.work,
-            GraphKind::Decode => 1,
-            GraphKind::Speculative => self.speculative_tokens(request, candidate.capacity),
-            _ => 0,
-        }
-    }
-
-    fn following_rescue(&self, request: &LiveRequest, kind: GraphKind) -> u64 {
-        if matches!(
-            kind,
-            GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative | GraphKind::Resume
-        ) || terminal_cleanup(request)
-        {
-            return 0;
-        }
-        let mut total: u64 = 0;
-        let skip = usize::from(kind == GraphKind::Vision);
-        for patches in request.vision_patches.iter().skip(skip) {
-            if let Some(capacity) = self
-                .capabilities
-                .vision
-                .patch_capacities
-                .iter()
-                .find(|n| *n >= patches)
-            {
-                total = total.saturating_add(
-                    self.costs
-                        .duration(GraphKind::Vision, 1, *capacity)
-                        .unwrap_or(0),
-                );
-            }
-        }
-        if request.consumed_tokens < request.prompt_tokens as u64 {
-            let minimum = self
-                .prefill_catalog
-                .iter()
-                .filter(|n| self.prefill_work(request, **n) > 0)
-                .filter_map(|n| self.costs.duration(GraphKind::Prefill, 1, *n))
-                .min()
-                .unwrap_or(0);
-            total.saturating_add(minimum)
-        } else if request.generated_tokens == 0 {
-            total.saturating_add(self.costs.duration(GraphKind::Resume, 1, 1).unwrap_or(0))
+        let decode = if self.speculative_widths.is_empty() {
+            GraphKind::Decode
         } else {
-            let minimum = if self.speculative_widths.is_empty() {
-                self.costs.duration(GraphKind::Decode, 1, 1)
-            } else {
-                self.speculative_catalog[0]
-                    .iter()
-                    .filter_map(|w| self.costs.duration(GraphKind::Speculative, 1, *w))
-                    .min()
+            GraphKind::Speculative
+        };
+        for &(batch, width, prefill) in &self.mixed_catalog {
+            let Some(duration_ns) =
+                self.costs
+                    .shape_duration(GraphKind::Mixed, batch, width, prefill)
+            else {
+                continue;
             };
-            total.saturating_add(minimum.unwrap_or(0))
+            let mut decoders = [(0usize, 0.0); REQUEST_LANES];
+            let mut count = 0;
+            let mut prompt: Option<(usize, f64)> = None;
+            for (slot, entry) in self.slots.iter().enumerate() {
+                let Some(r) = entry.request.as_ref().filter(|r| self.eligible(r)) else {
+                    continue;
+                };
+                match self.request_kind(r) {
+                    Some(GraphKind::Prefill) if self.prefill_work(r, prefill) > 0 => {
+                        let value = self.lane_value(
+                            r,
+                            GraphKind::Prefill,
+                            prefill,
+                            duration_ns,
+                            values[slot],
+                        );
+                        if prompt.is_none_or(|(_, best)| value > best) {
+                            prompt = Some((slot, value));
+                        }
+                    }
+                    Some(kind) if kind == decode => {
+                        decoders[count] = (
+                            slot,
+                            self.lane_value(r, decode, width, duration_ns, values[slot]),
+                        );
+                        count += 1;
+                    }
+                    _ => {}
+                }
+            }
+            for prompt in std::iter::once(None).chain(prompt.map(Some)) {
+                let mut mask = best_cohort::<REQUEST_LANES>(
+                    &decoders[..count],
+                    batch - usize::from(prompt.is_some()),
+                );
+                let mut expected = decoders[..count]
+                    .iter()
+                    .filter(|(s, _)| mask & (1 << s) != 0)
+                    .map(|(_, v)| v)
+                    .sum::<f64>();
+                if let Some((slot, value)) = prompt {
+                    mask |= 1 << slot;
+                    expected += value;
+                }
+                if mask == 0 {
+                    continue;
+                }
+                output.push(Candidate {
+                    kind: GraphKind::Mixed,
+                    mask,
+                    batch,
+                    capacity: width,
+                    prefill_capacity: prefill,
+                    prefill_slot: prompt.map(|(s, _)| s),
+                    work: 0,
+                    duration_ns,
+                    rate: ValueRate::new(duration_ns, expected, age_price),
+                    feedback: true,
+                });
+            }
         }
     }
 
@@ -648,216 +894,129 @@ impl RequestScheduler {
             return None;
         }
         let window = self.window_remaining()?;
+        let (values, age_price, log_scale) = self.lane_values(window);
         let mut candidates = self.candidates.borrow_mut();
-        self.candidates(&mut candidates);
-        let mut minimum = [u64::MAX; REQUEST_LANES];
-        for c in candidates.iter().filter(|c| c.mask.count_ones() == 1) {
-            let slot = c.mask.trailing_zeros() as usize;
-            minimum[slot] = minimum[slot].min(c.duration_ns);
-        }
-        // A step that serves every runnable request keeps nobody waiting, so like a request's only
-        // step it may exceed the latency budgets once the submission queue is empty.
-        let runnable = (0..REQUEST_LANES)
-            .filter(|slot| minimum[*slot] != u64::MAX)
-            .fold(0u64, |mask, slot| mask | 1 << slot);
-        let decoding = bits(runnable)
-            .filter(|slot| {
-                let r = self.slots[*slot].request.as_ref().unwrap();
-                matches!(
-                    self.request_kind(r),
-                    Some(GraphKind::Decode | GraphKind::Speculative)
-                )
-            })
-            .count();
-        let service_gap = self.service_gap(decoding);
-        candidates.retain(|c| {
-            let unavoidable = c.mask.count_ones() == 1
-                && c.duration_ns == minimum[c.mask.trailing_zeros() as usize];
-            let exempt =
-                self.submissions.is_empty() && (unavoidable || c.mask & runnable == runnable);
-            (!c.feedback || self.submissions.is_empty())
-                && (c.duration_ns <= self.policy.max_slice_ns || exempt)
-                && (window.saturating_add(c.duration_ns) <= self.policy.submission_window_ns
-                    || exempt)
-        });
-        if candidates.is_empty() {
-            return None;
-        }
-        let mut order = [0usize; REQUEST_LANES];
-        let mut count = 0;
-        for (slot, entry) in self.slots.iter().enumerate() {
-            if entry
-                .request
-                .as_ref()
-                .is_some_and(|r| self.eligible(r) && r.pending == 0)
-                && minimum[slot] != u64::MAX
-            {
-                order[count] = slot;
-                count += 1;
-            }
-        }
-        order[..count].sort_unstable_by_key(|slot| {
-            let r = self.slots[*slot].request.as_ref().unwrap();
-            (
-                self.service_clock(r),
-                r.last_use,
-                r.accounting.arrival_ns,
-                *slot,
-            )
-        });
-        let overdue = order[..count].first().copied().filter(|slot| {
-            self.now_ns
-                .saturating_sub(self.service_clock(self.slots[*slot].request.as_ref().unwrap()))
-                >= service_gap
-        });
-        if let Some(slot) = overdue {
-            candidates.retain(|c| c.mask & (1 << slot) != 0);
-        }
-        if candidates.is_empty() {
-            return None;
-        }
-        let mut pending_credit = [0.0f64; REQUEST_LANES];
-        let mut following = [0u64; REQUEST_LANES];
-        for slot in &order[..count] {
-            let r = self.slots[*slot].request.as_ref().unwrap();
-            following[*slot] = self.following_rescue(r, self.request_kind(r).unwrap());
-        }
-        for submission in self.submissions.values() {
-            for lane in &submission.lanes {
-                if let Ok(r) = self.request(lane.request) {
-                    pending_credit[lane.request.slot as usize] +=
-                        self.useful_credit(r, submission.kind, lane.tokens, false);
-                }
-            }
-        }
-        for c in candidates.iter_mut() {
-            let end = self
-                .now_ns
-                .saturating_add(window)
-                .saturating_add(c.duration_ns);
-            let mut rescue_end = end;
-            let mut lateness = 0.0;
-            for slot in &order[..count] {
-                let r = self.slots[*slot].request.as_ref().unwrap();
-                let included = c.mask & (1 << slot) != 0;
-                // A prefill chunk is progress for its own request, not a delay of its output.
-                if included && c.kind == GraphKind::Prefill {
-                    continue;
-                }
-                let completion = if included && following[*slot] == 0 {
-                    end
-                } else {
-                    rescue_end = rescue_end
-                        .saturating_add(following[*slot])
-                        .saturating_add(if included { 0 } else { minimum[*slot] });
-                    rescue_end
-                };
-                lateness += completion
-                    .saturating_sub(self.service_clock(r).saturating_add(service_gap))
-                    as f64;
-            }
-            c.lateness = lateness;
-            c.score = bits(c.mask)
-                .map(|slot| {
-                    let r = self.slots[slot].request.as_ref().unwrap();
-                    let weight = 1.0
-                        + (r.accounting.deficit_ns - pending_credit[slot]).max(0.0)
-                            / self.policy.deficit_scale_ns as f64;
-                    weight * self.useful_credit(r, c.kind, self.lane_tokens(r, c), true)
-                })
-                .sum::<f64>()
-                / c.duration_ns.max(1) as f64;
-        }
-        let best_lateness = candidates
-            .iter()
-            .map(|c| c.lateness)
-            .min_by(f64::total_cmp)?;
-        candidates.retain(|c| c.lateness <= best_lateness);
-        if overdue.is_none() {
-            if let Some(slot) = order[..count]
-                .iter()
-                .copied()
-                .max_by(|a, b| {
-                    self.slots[*a]
-                        .request
-                        .as_ref()
-                        .unwrap()
-                        .accounting
-                        .deficit_ns
-                        .total_cmp(
-                            &self.slots[*b]
-                                .request
-                                .as_ref()
-                                .unwrap()
-                                .accounting
-                                .deficit_ns,
-                        )
-                        .then(b.cmp(a))
-                })
-                .filter(|slot| {
-                    self.slots[*slot]
-                        .request
-                        .as_ref()
-                        .unwrap()
-                        .accounting
-                        .deficit_ns
-                        >= self.policy.deficit_scale_ns as f64
-                })
-            {
-                if candidates.iter().any(|c| c.mask & (1 << slot) != 0) {
-                    candidates.retain(|c| c.mask & (1 << slot) != 0);
-                }
-            }
-        }
+        self.candidates(&mut candidates, &values, age_price);
         let candidate = *candidates.iter().max_by(|a, b| {
             let last = |c: &Candidate| {
                 bits(c.mask)
                     .map(|s| self.slots[s].request.as_ref().unwrap().last_use.0 as u128)
                     .sum::<u128>()
             };
-            (a.duration_ns == 0)
-                .cmp(&(b.duration_ns == 0))
-                .then(a.score.total_cmp(&b.score))
-                .then(b.duration_ns.cmp(&a.duration_ns))
+            a.rate
+                .compare(b.rate)
+                .then(a.mask.count_ones().cmp(&b.mask.count_ones()))
                 .then(last(b).cmp(&last(a)))
+                .then(b.batch.cmp(&a.batch))
                 .then(b.capacity.cmp(&a.capacity))
+                .then(b.prefill_capacity.cmp(&a.prefill_capacity))
                 .then(b.mask.cmp(&a.mask))
         })?;
+        Some(self.materialize(candidate, log_scale))
+    }
+
+    fn materialize(&self, candidate: Candidate, log_scale: f64) -> ScheduledPlan {
         let mut lanes = Vec::with_capacity(candidate.mask.count_ones() as usize);
         let mut epochs = Vec::with_capacity(lanes.capacity());
         for slot in bits(candidate.mask) {
             let r = self.slots[slot].request.as_ref().unwrap();
+            let kind = if candidate.kind != GraphKind::Mixed {
+                candidate.kind
+            } else if candidate.prefill_slot == Some(slot) {
+                GraphKind::Prefill
+            } else if self.speculative_widths.is_empty() {
+                GraphKind::Decode
+            } else {
+                GraphKind::Speculative
+            };
             epochs.push(r.epoch);
             lanes.push(ScheduledLane {
                 request: r.handle,
                 start_position: r.scheduled_consumed,
-                tokens: self.lane_tokens(r, &candidate),
+                tokens: if kind == GraphKind::Prefill {
+                    if candidate.kind == GraphKind::Mixed {
+                        self.prefill_work(r, candidate.prefill_capacity)
+                    } else {
+                        candidate.work
+                    }
+                } else {
+                    self.lane_tokens(r, kind, candidate.capacity)
+                },
             });
         }
-        Some(ScheduledPlan {
+        ScheduledPlan {
             owner: self.plan_owner.clone(),
             epochs,
             estimated_duration_ns: candidate.duration_ns,
-            recovery_lateness_ns: candidate.lateness,
+            selection_value_rate: candidate.rate.score,
+            selection_log_scale: log_scale,
             step: ScheduledStep {
                 kind: candidate.kind,
-                batch_capacity: lanes.len().next_power_of_two(),
+                batch_capacity: candidate.batch,
                 token_capacity: candidate.capacity,
+                mixed: (candidate.kind == GraphKind::Mixed).then(|| MixedStep {
+                    prefill_capacity: candidate.prefill_capacity,
+                    prefill_row: candidate
+                        .prefill_slot
+                        .map(|s| (candidate.mask & ((1u64 << s) - 1)).count_ones() as usize),
+                    speculative: !self.speculative_widths.is_empty(),
+                }),
                 lanes,
                 requires_feedback: candidate.feedback,
             },
-        })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phase_plan(
+        &self,
+        kind: GraphKind,
+        request: Option<RequestHandle>,
+    ) -> ScheduledPlan {
+        let (values, age_price, scale) = self.lane_values(0);
+        let mask = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| {
+                entry
+                    .request
+                    .as_ref()
+                    .filter(|r| {
+                        self.eligible(r)
+                            && self.request_kind(r) == Some(kind)
+                            && request.is_none_or(|h| h == r.handle)
+                    })
+                    .map(|_| 1u64 << slot)
+            })
+            .fold(0, |a, b| a | b);
+        let mut candidates = Vec::new();
+        if kind == GraphKind::Prefill {
+            for &capacity in &self.prefill_catalog {
+                self.add_candidate(&mut candidates, kind, 1, capacity, mask, &values, age_price);
+            }
+        } else {
+            for batch in crate::execution::BATCH_CAPACITIES
+                .into_iter()
+                .take_while(|b| *b <= self.limits.max_active.next_power_of_two())
+            {
+                self.add_candidate(&mut candidates, kind, batch, 1, mask, &values, age_price);
+            }
+        }
+        let candidate = *candidates
+            .iter()
+            .max_by(|a, b| {
+                a.rate
+                    .compare(b.rate)
+                    .then(a.mask.count_ones().cmp(&b.mask.count_ones()))
+                    .then(b.batch.cmp(&a.batch))
+            })
+            .expect("requested lifecycle operation must be feasible");
+        self.materialize(candidate, scale)
     }
 }
 
-fn gpu_runnable(request: &LiveRequest) -> bool {
-    !matches!(
-        request.phase,
-        RequestPhase::Inbound | RequestPhase::Finishing
-    ) && !terminal_cleanup(request)
-}
-
-fn terminal_cleanup(request: &LiveRequest) -> bool {
+pub(super) fn terminal_cleanup(request: &LiveRequest) -> bool {
     request.phase == RequestPhase::Snapshot
         && request.boundary_capture.is_none_or(|capture| {
             matches!(

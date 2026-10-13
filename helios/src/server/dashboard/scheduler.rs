@@ -347,7 +347,7 @@ impl SchedulerView {
         let header = if wide {
             format!(
                 " {:<14} {:<10} {:>11} {:>6} {:>7} {:>7} {:>7} ",
-                "Request", "Phase", "Prompt", "Output", "Gap ms", "Out ms", "Debt ms"
+                "Request", "Phase", "Prompt", "Output", "Gap ms", "Out ms", "Bursts"
             )
         } else {
             format!(" {:<14} {:<10} {:>6} ", "Request", "Phase", "Gap ms")
@@ -378,10 +378,10 @@ impl SchedulerView {
                             |at| format!("{:.0}", ms(self.detail.at_ns.saturating_sub(at))),
                         );
                         format!(
-                            " {label:<14} {phase:<10} {:>11} {:>6} {gap:>7.0} {output_gap:>7} {:>7.1} ",
+                            " {label:<14} {phase:<10} {:>11} {:>6} {gap:>7.0} {output_gap:>7} {:>7} ",
                             format!("{}/{}", r.consumed.min(r.prompt as u64), r.prompt),
                             r.generated,
-                            r.deficit_ns / 1e6
+                            r.published_deliveries
                         )
                     } else {
                         format!(" {label:<14} {phase:<10} {gap:>6.0} ")
@@ -416,13 +416,19 @@ fn shape(graph: &GraphLabel) -> String {
         GraphKind::Prefill => "prefill",
         GraphKind::Decode => "decode",
         GraphKind::Speculative => "speculative",
+        GraphKind::Mixed => "mixed",
         GraphKind::Init => "init",
         GraphKind::Restore => "restore",
         GraphKind::Resume => "resume",
         GraphKind::Snapshot => "snapshot",
         GraphKind::Vision => "vision",
     };
-    if graph.kind == GraphKind::Speculative {
+    if graph.kind == GraphKind::Mixed {
+        format!(
+            "{name} b{} p{} w{}",
+            graph.batch, graph.prefill, graph.tokens
+        )
+    } else if graph.kind == GraphKind::Speculative {
         format!(
             "{name} b{} d{}",
             graph.batch,
@@ -438,6 +444,7 @@ fn kind_style(kind: GraphKind) -> (&'static str, Color) {
         GraphKind::Prefill => ("P", CYAN),
         GraphKind::Decode => ("D", GREEN),
         GraphKind::Speculative => ("S", PURPLE),
+        GraphKind::Mixed => ("M", CYAN),
         GraphKind::Init => ("I", MUTED),
         GraphKind::Restore => ("R", GOLD),
         GraphKind::Resume => ("U", GOLD),
@@ -472,18 +479,21 @@ mod tests {
                 kind: GraphKind::Prefill,
                 batch: 1,
                 tokens: 1024,
+                prefill: 0,
             },
             GraphLabel {
                 name: "speculative_4_6".into(),
                 kind: GraphKind::Speculative,
                 batch: 4,
                 tokens: 6,
+                prefill: 0,
             },
             GraphLabel {
                 name: "snapshot_1".into(),
                 kind: GraphKind::Snapshot,
                 batch: 1,
                 tokens: 1,
+                prefill: 0,
             },
         ]
     }
@@ -526,7 +536,7 @@ mod tests {
             generated: 3,
             last_progress_ns: 9_990_000_000,
             last_output_ns: Some(9_985_000_000),
-            deficit_ns: 200_000.0,
+            published_deliveries: 2,
         });
         view.dispatch = Some(Dispatch {
             at_ns: view.now_ns,
@@ -622,7 +632,7 @@ mod tests {
             }
             if width >= 150 {
                 assert!(text.contains("64.5%"));
-                assert!(text.contains("Debt ms"));
+                assert!(text.contains("Bursts"));
             }
         }
     }

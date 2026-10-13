@@ -1,721 +1,443 @@
-# Interactive inference scheduling
+# Request scheduling by useful work and service value
 
-The [native scheduler design](scheduling-runtime-design.md) proposes the Rust
-execution contract, mixed graph captures, timing, admission, and residency
-machinery that apply these scheduling principles to the serving runtime.
+## Execution model
 
-## Objective and execution model
+An interactive inference scheduler chooses a prepared graph and the requests
+that occupy its lanes. A graph is a nonpreemptible service quantum. Its prefill
+capacity, decode row capacity, verification width, and duration are properties
+of the prepared execution. The scheduler chooses among these quanta; it cannot
+choose an arbitrary time slice independently of the work.
 
-An interactive inference engine should bound interference between requests,
-give small requests prompt access, and preserve sustained progress for large
-requests. Throughput is optimized within those requirements. The fairness
-entity is an individual request. No accounting is shared between requests
-from the same user or agent.
+The fairness entity is one request. Requests have known remaining prompt work,
+observable generated output, an explicit output limit, and unknown EOS.
+Speculative acceptance is stochastic. A tensor-parallel GPU group is one
+execution resource when its ranks execute a model step together.
 
-The Python simulator in [`scripts/scheduling_sim`](../scripts/scheduling_sim/)
-models one execution resource. A tensor-parallel GPU group can be treated as
-one such resource when a model step occupies the group together. An action is
-a nonempty collection of request work:
+The Python implementation in [`scripts/scheduling_sim`](../scripts/scheduling_sim/)
+contains a fixed-value dispatch baseline, a discrete-event simulator, and small
+mathematical references. The [ongoing-service experiment](scheduling-utility.md)
+adds proportional-fair rate histories and a decode-age continuation value.
+The [completion-episode oracle](scheduling-oracle.md)
+also compares exact conditional schedules with a continuation-value prototype.
+The models use positive, known graph durations and supplied
+conditional acceptance probabilities. Actual output lengths are hidden from
+the dispatcher. It has one graph in flight and publishes output at completion.
+It does not model cache capacity, admission, restore, host prerequisites,
+submission pipelining, timing discovery, or runtime estimation error. Its graph
+timing table is synthetic unless supplied with `--catalog`.
 
-- A prefill segment of a known remaining prompt.
-- An ordinary decode step.
-- A speculative round with a chosen number of draft tokens.
-- One prefill segment combined with decode or speculative rows.
+The [native scheduler design](scheduling-runtime-design.md) applies the ongoing
+service utility to Rust execution, including prerequisite operations, timing
+discovery, and queued submissions. Python simulation results do not establish
+native behavior or GPU performance.
 
-Actions have duration `T(a, x)`, conditional on execution state `x`. They are
-nonpreemptive. Arrivals become visible during execution but can affect the next
-dispatch only. One action is in flight; no future actions are queued ahead.
-Every resident request has at least one legal action producing positive
-committed progress. Its minimum action must fit the configured maximum duration
-`Q`. The simulator fails explicitly if this condition is false.
+## Connection to CPU scheduling
 
-Prompt length is visible to the scheduler. Output length and future acceptance
-outcomes are hidden. Cost prediction is exact within the synthetic model.
-Real execution would require an error allowance or a conservative duration
-estimate for latency claims.
+CPU fair scheduling distinguishes a request's entitlement from the granularity
+at which it executes. CFS models an ideal processor shared among runnable tasks
+and accounts for actual service with virtual runtime. EEVDF uses service lag
+to determine eligibility and virtual deadlines to order eligible tasks. These
+are useful foundations for accounting, rather than reasons to assign a real-time
+deadline to each prefill chunk. See the Linux documentation for
+[CFS](https://docs.kernel.org/scheduler/sched-design-CFS.html) and
+[EEVDF](https://docs.kernel.org/scheduler/sched-eevdf.html).
 
-Three distinct properties require different analyses:
+For inference, the analogy has three qualifications:
 
-1. **Dispatch responsiveness:** how soon a scheduler can reconsider its choice.
-2. **Service regularity:** how long a resident request can go without progress.
-3. **Progress fairness:** how much useful work a request receives over time.
+- A decode stream remains runnable after producing output. Unlike an interactive
+  CPU task blocked on input, the stream need not sleep between useful responses.
+- Service cost is nonadditive. If two singleton decodes cost 15 ms each and their
+  batch costs 17 ms, dividing those 17 ms between requests is an accounting
+  convention, not a measured physical quantity.
+- The quantum changes efficiency and yield. A wider speculative graph can take
+  longer and produce disproportionately more output. A larger prefill can
+  amortize graph overhead and use the hardware more efficiently.
 
-A small graph duration establishes only the first property. Emitting a large
-burst of tokens can improve average output rate without improving the second.
+A fair-service reference must therefore include the feasible batch rate vectors.
+After defining that reference, a runtime policy can track deviation from it.
+Copying CPU virtual-runtime arithmetic before defining service units leaves the
+central allocation question unanswered.
 
-## Useful work and resource accounting
+Prefill has no externally visible per-chunk cadence. Its visible milestones are
+first output and eventual completion. Decode has both useful token throughput
+and a delivery cadence. Equal mean rates do not imply equal output gaps.
 
-GPU time is shared nonadditively. If each of eight decodes takes 10 ms alone
-and their batch takes 15 ms, there is no unique per-request physical charge.
-Equal division, standalone-cost proportional division, and marginal cost are
-different allocation conventions. Marginal costs need not sum to batch cost.
+## One metric for graph selection
 
-Useful-progress accounting avoids requiring that split. Associate request
-`i` with a fixed monotone reference-work function `W_i(z)`, in milliseconds,
-where `z` describes committed progress. An action earns
-
-```text
-g_i(a) = W_i(z_i after a) - W_i(z_i before a).
-```
-
-Reference work is a normalization, not a measurement of physical occupancy.
-It is independent of the scheduler's choice of action boundaries. Rejected
-drafts add execution cost and earn no useful-work credit. A completed prefill
-includes its first output token; that token receives no second decode credit.
-Accounting continues across the prefill/decode transition.
-
-The simulator freezes two coefficients before dispatch:
-
-- Prefill credit per token is the total cost of an isolated, cost-efficient
-  greedy traversal of the prepared chunk catalog, divided by prompt length.
-  The traversal respects `Q` and evolving prompt context. It is a specified
-  reference algorithm, not a claim of globally optimal chunking.
-- Ordinary decode credit is a singleton, zero-draft round at the initial decode
-  context. The optional speculative reference is the smallest singleton
-  `T(k) / E[tokens(k)]` across configured depths at that context.
-
-Both coefficients stay fixed. Chunking into smaller segments cannot inflate
-credit. Later context growth is reflected in action costs but does not reprice
-the reference. Consequently `reference_slowdown` is completion time divided by
-this reference demand; it is not a measured counterfactual isolated runtime.
-
-The ordinary reference requires no acceptance oracle. The speculative reference
-uses the workload's true acceptance profile to isolate the effects of that
-fairness definition. It is an oracle experiment even when the scheduling policy
-learns acceptance online. An implementation with measured isolated rates would
-need to specify how those rates are estimated and when they may change.
-
-An efficient request can earn more reference work than elapsed wall time through
-batching. That is a benefit, not an accounting violation. Surplus progress is
-not banked indefinitely to justify future stalls.
-
-## Token-delivery fairness
-
-Completion slowdown cannot distinguish steady output from a long stall followed
-by a large speculative burst. Let `F_i` be the frozen first-token reference:
-total prefill credit for a request with a prompt, or one decode credit for a
-request already in decode. Let `d_i` be its frozen decode credit. Define
+Let an action `a` take expected time `T(a) > 0`. For request `i`, let `P_i(a)`
+be the actual prompt tokens consumed and `D_i(a)` the expected output tokens
+emitted. A fixed-value baseline chooses the largest
 
 ```text
-R_i(k) = F_i + (k - 1) d_i,              k >= 1
-S_i = max_k (delivery_time_i(k) - arrival_i) / R_i(k).
+score(a) = sum_i w_i * (P_i(a) + beta * D_i(a)) / T(a).
 ```
 
-`max_delivery_slowdown` measures `S_i`. Queue time is included. No latency floor
-or clamp to one is applied. A ratio below one represents delivery ahead of the
-specified reference, rather than an invalid observation. `R_i` is a reference
-curve, not a replay of the request running alone. In particular, a speculative
-decode reference expresses expected work per token, not isolated burst timing.
+`w_i` is a request weight, equal to one in the supplied workloads. One prefill
+token has value one; `beta > 0` specifies the intrinsic value of an output token.
+The CLI requires this value explicitly. The simulator does not infer a user
+preference from hardware cost or select a production default.
 
-If an action emits positions `k` through `k+m-1` together at time `t`, the
-largest ratio in that burst is `(t-arrival_i)/R_i(k)`. The denominator belongs
-to the **first** token of the burst. Using its last token would let speculation
-erase delay that the receiver already experienced. For example, with a 10 ms
-first-token reference and 10 ms per following token, token one at 10 ms and
-tokens two through seven at 110 ms give a worst delivery slowdown of `110/20 =
-5.5`, despite completion slowdown of `110/70 = 1.57`. Later output cannot reduce
-the historical maximum. The trace records each burst's first output position
-and slowdown; a test expands bursts into individual tokens to check the metric.
+All pure prefill, pure decode, and available mixed graphs compete on this score.
+No duration ceiling, prefill size preference, or breadth-before-depth rule
+precedes it. A graph consuming 64 useful prompt tokens earns 64 prefill units
+whether its capacity is 64 or 4096. Inactive rows and rejected drafts earn zero.
+Completing prefill emits one first token, counted once in `D_i`.
 
-Delivery slowdown and absolute output gaps remain separate objectives. At a
-late output position, an added delay `delta` changes the normalized ratio by
-only `delta/R_i(k)`. Long streams can therefore accumulate substantial stalls
-with little effect on their lifetime ratio. An interactive engine needs an
-absolute service-gap control as well as normalized progress and delivery metrics.
-
-## Stationary capacity and fair allocation
-
-Freeze contexts, acceptance distributions, and the backlogged request set. For
-each legal action define its expected reference-progress rate vector:
+If conditional acceptance at draft position `j` is `q_ij`, a verification width
+`k` has expected output, before EOS truncation,
 
 ```text
-r_i(a) = E[g_i(a)] / T(a).
+D_i(k) = 1 + sum_{j=1}^{k-1} product_{m=1}^{j} q_im.
 ```
 
-If `alpha_a` is the fraction of wall time devoted to action `a`, attainable
-long-run mean rates are in the convex hull of these vectors:
+The pending target token provides the first output; a draft contributes only
+when the accepted prefix reaches it. The explicit remaining output budget caps
+this expectation. A length-distribution model could additionally price hidden
+EOS, but the fixed-value baseline does not have one.
+
+For a fixed graph duration, fixed weights, and additive lane rewards, its best
+decode cohort consists of the highest-valued rows up to capacity. Consequently,
+ranking per-request contributions is exact for this baseline. A nonadditive
+reward, context-dependent cohort timing, or an objective involving excluded
+requests can invalidate that reduction.
+
+This score gives the desired elementary behavior under appropriate timings:
+
+- Fully occupied 4096-token prefills win when they have the highest useful
+  prefill rate. Two long prefills do not need smaller chunks merely to alternate.
+- For a 64-token tail, all sufficiently large graphs earn the same prefill work
+  and first-token benefit. The fastest eligible graph wins.
+- A wide speculative round wins when its additional expected accepted output
+  outweighs its additional time. A 30 ms round is not excluded merely because
+  a 17.3 ms alternative exists.
+- A mixed graph with a smaller prefill can win on combined useful work per time.
+  There is no universal crossover at 64, 256, 512, or 1024 tokens.
+
+The invariants concern useful work and measured efficiency. They do not require
+4096 tokens when a smaller graph has demonstrably better effective efficiency.
+Likewise, a padded larger graph remains eligible if it is actually faster.
+
+## What immediate value does not establish
+
+Maximizing one action's expected value per time is not a proof of globally
+optimal completion time, fairness, or interactivity.
+
+Three executable counterexamples are in
+[`tests/test_scheduling_sim.py`](../tests/test_scheduling_sim.py):
+
+1. With prefill capacities 64, 128, and 256 costing 2, 3, and 4 ms, a 129-token
+   prompt and `beta=1` select 128 tokens first. The remaining token needs another
+   graph, taking 5 ms total. The padded 256 graph would finish in 4 ms.
+2. A continuously backlogged decode with sufficiently high constant token value
+   prevents a prefill from receiving any service over the tested horizon.
+3. Five identical low-acceptance streams using batch four receive
+   `[10, 10, 10, 5, 5]` tokens over ten rounds under oldest-service tie-breaking.
+   Rotating which request was served most recently does not track accumulated
+   entitlement.
+
+A fixed set of completed requests earns a fixed total token reward. Maximizing
+that reward divided by the time to finish all requests minimizes makespan;
+request completion order and output cadence remain unspecified. Mean time to
+first token and mean completion time are separate objectives.
+
+For example, alternating full chunks between two equal long prefills and
+finishing one before starting the other can have the same total prefill time.
+Finishing one first improves mean time to first token if subsequent decode does
+not alter the schedule. Alternation gives more even prompt progress. Choosing
+between them requires a completion or fairness objective, not a different
+hardware-throughput formula.
+
+## A fair-allocation reference
+
+For a frozen active set and unchanged execution conditions, express action `a`
+as a vector of useful per-request rates:
 
 ```text
-r_i = sum_a alpha_a r_i(a),    alpha_a >= 0,    sum_a alpha_a = 1.
+y_i(a) = E[useful tokens for request i in a] / T(a).
+x_i = sum_a theta_a * y_i(a),   theta_a >= 0,   sum_a theta_a = 1.
 ```
 
-These are time fractions, not fractions of dispatches. If an action takes twice
-as long, assigning it half the rounds gives it two thirds of execution time.
-The convex-hull description assumes no switching cost beyond `T`, no state
-change, and no response to acceptance that changes the action distribution.
+`theta_a` is a fraction of wall time, not a fraction of graph launches. These
+mixtures form the feasible rate region. The reference assumes indefinitely
+backlogged requests with a fixed phase; finite prompt tails and phase changes
+require a dynamic model.
 
-Possible objectives include max-min normalized progress, proportional fairness
-(`sum_i log r_i`), and maximum aggregate progress subject to per-request floors.
-They are different policies. Equal accepted token rates are also a different
-policy: a request with a much better isolated speculative rate would receive a
-smaller fraction of its isolated performance under equal token rates.
-
-The intended interactive policy uses useful-work deficits and service regularity
-to constrain an efficiency preference. It does not claim to solve the stationary
-max-min problem. The exact two-request solver in
-[`frontier.py`](../scripts/scheduling_sim/frontier.py) supplies a separate
-reference: it enumerates every absent/present/depth assignment, constructs rate
-vectors, and finds the best minimum rate among vertices and intersections of
-pairwise segments with `r_1 = r_2`. In two dimensions an optimum occurs on the
-upper boundary of the convex hull, so those candidates suffice. A throughput
-frontier does not determine a low-jitter order for executing its mixture.
-
-A requested floor must lie in the downward closure of the achievable rate
-region. Equal time sharing supports the `1/n` reference floor if every resident
-has a legal isolated policy with reference rate at least one. Frozen credit at
-the initial context need not retain that property as context grows. An infeasible
-floor cannot be repaired by a better priority rule.
-
-Stationary efficiency also differs from finite-workload completion. A greedy
-ratio can spend extra time accelerating easy requests, finish them early, and
-leave a poorly batched tail of difficult requests. In a deterministic synthetic
-case with four always-accepting and four always-rejecting equal-length decodes,
-greedy speculative progress per round improves while workload makespan worsens
-relative to ordinary decode. A test encodes this counterexample. An acceptance
-oracle alone does not supply the hidden remaining output lengths needed to
-reason perfectly about that tail.
-
-## Speculation as optional work
-
-Let `k` be the number of drafts, and let `p_j` be the conditional probability of
-accepting draft `j` given that all earlier drafts were accepted. Before output
-termination, a linear speculative round produces `1 + A` tokens, where `A` is
-the accepted prefix length. The tail-sum identity gives
+A concrete family of allocation objectives is
 
 ```text
-E[tokens(k)] = 1 + sum_{j=1..k} product_{l=1..j} p_l.
+maximize F(x) = sum_i [v_i * x_i + f_i * log(x_i / x_ref_i)].
 ```
 
-This does not require independence of acceptance positions: the probabilities
-are conditional. A single average acceptance probability loses information.
-For example, profiles `(1, 0)` and `(0, 1)` have the same average but expected
-outputs of two and one tokens, respectively.
+Here `v_i >= 0` is intrinsic token value, `f_i > 0` is a fairness coefficient,
+and `x_ref_i > 0` fixes the units of the logarithm. All coefficients are supplied
+explicitly to the reference. With `v_i=0`, this is weighted proportional
+fairness. Concave rate utility and proportional fairness have established
+foundations in [Kelly, Maulloo, and Tan's rate-control formulation](https://www.statslab.cam.ac.uk/~frank/rate.pdf).
 
-The marginal expected output from one more draft is its prefix-survival
-probability. Compare its benefit with the added full-action duration, including
-draft generation, target verification, and commit work. Also compare against
-adding another request, servicing a prefill, or ending the action sooner.
-
-For `n` equal requests rotated in cohorts of size `b`, a fixed action taking
-`T(b,k)` gives each request approximately
+The graph selector associated with the objective's gradient has the same
+work-over-time structure:
 
 ```text
-E[tokens(k)] / (ceil(n/b) * T(b,k))
+q_i = dF/dx_i = v_i + f_i / x_i
+best action = argmax_a sum_i q_i * E[useful tokens_i(a)] / T(a).
 ```
 
-tokens per unit time when cohorts and requests are otherwise identical. The
-ceiling expression assumes a cycle of equally costly cohorts, including any
-padding in the final cohort. Comparing only one selected cohort ignores the
-delay paid by excluded requests.
+This is a supporting-direction calculation for the allocation problem. It is
+not yet an online algorithm: deciding how to estimate `x_i`, initialize arriving
+requests, or retain service history changes transient behavior.
 
-Grouping similar acceptance profiles can reduce wasted verification when a
-batch requires uniform or padded depths. It can also repeat weight reads,
-shrink batches, and lengthen revisit intervals. With efficient ragged execution,
-different depths in one batch may be better. Grouping is justified by the
-complete cycle's progress and duration, not by acceptance similarity alone.
+The reference has several useful properties:
 
-The learned controller estimates conditional acceptance separately by depth.
-It updates only observed successes and the first observed rejection. Deeper
-positions after rejection and positions after EOS are censored. Each observed
-depth decays its previous success/failure counts by `0.95`, then adds its
-observation; both counts begin at one. A periodic deep probe is permitted only
-when there is no forced request and it fits before the oldest request's urgency
-threshold. This does not guarantee every request receives enough exploration.
+- On a CPU-like resource that runs one request at a time at rate `r_i`, pure
+  proportional fairness gives time share `theta_i=f_i/sum_j f_j`, independent
+  of `r_i`. It recovers weighted processor sharing without equating token rates.
+- Batch economies appear directly in `y(a)`. They require no invented division
+  of a graph's physical time between its rows.
+- Positive fairness coefficients keep every feasible request's reference rate
+  positive. They establish no finite output-gap bound.
+- The objective is increasing in every request's rate. A feasible allocation
+  that is worse for every request cannot be optimal. This excludes wasted
+  efficiency without requiring the largest physical graph on every dispatch.
+- The intrinsic value term and fairness term have distinct meanings. Replacing
+  `log(x_i)` with `log(beta_i*x_i)` adds a constant and cannot make decode more
+  valuable. A unit conversion inside the logarithm is not a phase preference.
 
-### Expected speed is not a deterministic progress guarantee
+[`analysis.py`](../scripts/scheduling_sim/analysis.py) implements `fair_allocation`
+with pairwise conditional gradients and scalar line search. It returns time
+shares, rates, utility, and a concavity gap that bounds utility suboptimality.
+It fails explicitly if it cannot meet its requested numerical tolerance. This
+is an offline reference over caller-supplied action vectors, not the dispatcher.
 
-Suppose the first draft is accepted with probability `p < 1`. A sequence of `m`
-first-draft rejections has positive probability `(1-p)^m` under independent
-rounds. Every such round produces one token, regardless of a much higher
-expected output. Therefore a bound on useful-progress lag relative to expected
-speculative speed cannot hold on every sample path with a fixed constant.
+For five equal streams, suppose a four-row graph takes 21 ms and a graph holding
+all five takes 29 ms. Uniformly rotating the five possible four-row cohorts
+achieves `4/(5*21)` tokens/ms per request, versus `1/29` for the larger graph:
+38.10 versus 34.48 tokens/s each. The reference selects the efficient smaller
+batch and equal shares. It does not require sacrificing either fairness or
+mean rate in this case. A delivery-gap objective could still distinguish these
+allocations.
 
-Probability bounds require assumptions about dependence, drift, and estimation.
-A deterministic guarantee can instead refer to actual execution service or a
-worst-case progress rate. The prototype guarantees regular opportunities for
-positive progress under its execution assumptions; its useful-progress fairness
-is a heuristic to measure, not a proved bounded-lag property.
+A runtime lag can eventually be defined as reference progress minus delivered
+progress, integrated over the intervals when a request is runnable. Defining
+how that reference changes on arrivals, departures, phase transitions, and
+cost revisions is necessary before turning it into a dispatch weight.
 
-## Nonpreemption and service-gap bounds
+## Stream age and nonpreemptible execution
 
-With one action in flight and `T <= Q`, an arrival waits at most `Q` before its
-presence can affect a dispatch. This does not guarantee admission or first
-output within `Q`. A large prompt still requires its own prefill work.
+An intrinsic token value rewards useful volume. Ending an output stall is an
+additional benefit associated with a delivery event. Producing eight tokens at
+one instant does not end eight distinct waiting intervals.
 
-For arrivals independent of a stationary busy renewal process, expected residual
-action time is `E[T^2] / (2 E[T])`. Thus a policy with rare long actions can have
-worse arrival delay than another policy with the same mean duration. The formula
-does not apply unchanged to correlated arrivals or arbitrary nonstationary runs.
-
-Both `interactive` and `delivery` apply an oldest-service guard:
-
-1. Each resident request records completion time of its most recent service;
-   admission initializes this time.
-2. At a dispatch boundary, if the oldest service age is at least `D`, every
-   eligible candidate must include that oldest request.
-3. Each selected action finishes within `Q` and produces positive progress for
-   every included request.
-
-**Proposition.** With at most `N` resident requests, every resident request's
-service gap is at most `D + (N + 1) Q`.
-
-**Proof.** A request becomes due `D` after its previous service. The first
-dispatch boundary after that instant is at most `Q` later. There are at most
-`N - 1` requests with older service timestamps. While the request remains due,
-the guard must service one of those older requests or the request itself. Each
-older request receives a timestamp later than the waiting request's and cannot
-overtake it again. Newly admitted requests also cannot overtake it. At most `N`
-further actions, each bounded by `Q`, finish service for the request. Adding the
-threshold and the initial residual gives the bound.
-
-This bound is conservative. `D` is an urgency trigger, not a promised maximum
-gap. For decode, service produces at least one output token or termination.
-For prefill, service may produce no visible output until the prompt completes.
-Queued requests outside the resident set are not covered. Prediction overruns,
-multiple queued actions, nonprogressing actions, or eviction invalidate the
-stated proof and require a revised model.
-
-### Checking a service-gap target before dispatch
-
-`service_gap_target_ms = G` enables a separate lookahead filter for the two
-protected policies. At a boundary, request `i` has a next-service deadline
-`last_service_i + G`. For every candidate action:
-
-1. Predict completion of the included requests at `now + T`.
-2. Schedule one minimum-duration singleton action for each excluded resident,
-   ordered by deadline.
-3. Compute the maximum lateness across those completions, including the first
-   candidate's participants.
-
-All singleton rescue jobs are ready at the candidate's completion. Their costs
-are fixed while other requests run in this model. Earliest-deadline ordering
-minimizes maximum lateness for these jobs: swapping an inverted adjacent pair
-cannot increase the maximum of their latenesses, and leaves all other completion
-times unchanged. The implementation checks this property against all orders of
-a small job set. This result concerns fixed singleton jobs, not optimal LLM
-batching, admission, or speculative-width selection.
-
-A nonpositive maximum lateness certifies a concrete continuation that serves
-every resident's pending visit on time. Only certified candidates remain when
-any exist. Otherwise the filter retains candidates with the smallest sum of
-positive projected latenesses and increments `uncertified_decisions`. The requested target
-stays unchanged. `service_gap_violations` counts actual completed service
-intervals exceeding `G`; `max_service_gap_excess_ms` measures their largest
-overrun. Targets are also measured for baseline policies without enforcing the
-filter. `latency_guard_enabled` distinguishes enforcement from measurement.
-
-The recovery score differs from the feasibility score. Once a deadline is
-already missed, serving only its request may reduce the worst lateness by a
-fraction of a millisecond while delaying every other request by a full action.
-Repeated minimization of that maximum can keep the engine in small batches.
-Minimizing total positive lateness favors recovering the overdue group; it can
-increase the single largest gap. A deterministic test compares these scores
-for three overdue decodes. The continuation order still minimizes maximum
-lateness; it does not optimize total tardiness over all possible rescue orders.
-
-The certificate is sufficient, not necessary. Eight requests served two at a
-time by 3 ms actions can meet a 12 ms gap. A candidate plus six serial singleton
-rescues takes 21 ms and cannot certify that schedule. A test checks that this
-case has uncertified decisions and no actual gap violations. Batching the
-rescues would strengthen the check at additional search cost.
-
-The certificate covers one pending visit per resident. It does not cover new
-arrivals, subsequent visits, or cost growth after progress, and does not prove
-recursive feasibility. The filter recomputes at each dispatch; the
-`D + (N + 1) Q` bound remains the unconditional resident bound under the stated
-model assumptions. Harder guarantees need admission against a feasible recurring
-schedule, duration bounds over evolving context, and reserved execution slack.
-The target currently controls prefill progress opportunities and decode output
-opportunities. It does not promise first output before a long prompt finishes.
-
-## Useful-progress deficits and batch choice
-
-For resident request `i`, maintain a reflected deficit `L_i >= 0`. During an
-action of duration `T` with `n` residents, update
+Let `A_i(t)` be time since the last published output for a decoding request.
+A family of explicit interactivity costs is
 
 ```text
-L_i <- max(0, L_i + T/n - g_i).
+integral sum_{i in decode} c_i(A_i(t)) dt,
 ```
 
-Requests not included in the action have `g_i = 0`. Reflection prevents surplus
-batching gains from buying arbitrarily long future exclusion. The entitlement
-clock begins at admission and does not include time before arrival or queued
-time without resident resources. Queue delay is reported separately.
-
-The implemented `interactive` selection rule is:
-
-1. Enforce the oldest-service guard when due.
-2. Apply the optional service-gap continuation filter.
-3. Otherwise, force the largest-deficit request if its deficit reaches the
-   configured `lag_scale_ms` and a remaining candidate includes it.
-4. Otherwise, permit a periodic deep probe within service-age slack.
-5. Among remaining candidates maximize
+where `c_i` is increasing. A linear age cost accumulates during a graph as
 
 ```text
-[sum_i (1 + L_i/lag_scale_ms) E[g_i]
- + lag_scale_ms * number_of_prefills_completed] / T.
+integral_0^T (A_i + u) du = A_i*T + T*T/2.
 ```
 
-The first-output bonus favors completing a known prefill stage. There is no
-decode-completion bonus because remaining output length is hidden. The lag
-scale controls a preference and forced-service trigger; it is not a hard bound
-on lag or borrowing. Fairness and regularity can conflict, and the oldest-service
-guard takes precedence. No general stability or bounded-deficit theorem is
-claimed for this candidate-restricted heuristic.
+This applies to selected and unselected streams: both wait until graph
+completion. At completion, the age of a served stream resets once, regardless
+of burst size. Requests that arrive during execution also accumulate waiting
+from their arrival. Prefill requires a first-token waiting cost if such a cost
+is part of the objective; its internal chunk completions do not reset a stream
+age clock.
 
-All requests retain singleton candidates. Decode subsets are exhaustively
-enumerated through five decode requests. Larger sets use prefixes ordered by
-age, deficit, acceptance in both directions, and context, plus every singleton.
-Each cohort tries every homogeneous depth. Ragged mode also tries per-request
-singleton-optimal depths together. Mixed candidates include the shortest,
-oldest, and largest-deficit prefills. This bounds search while retaining a legal
-action for the guard; it is not exhaustive joint optimization.
+The identity is tested by `output_age_area`. The fixed-value simulator records
+output gaps and integrated linear decode age without optimizing this cost.
+The completion-episode oracle optimizes explicit time and waiting prices.
+An increasing token weight based solely on time since last service is a
+possible approximation, not a derivation of
+this objective. In particular, multiplying the entire speculative burst by a
+stall-clearing bonus can overvalue deep speculation for a neglected stream.
 
-### Delivery-pressure policy
+Average rate, accumulated service lag, and output age are separate state
+variables. A burst can repay useful-progress lag while still leaving a poor
+history of pauses. An age-only rule can repeatedly favor an inefficient stream
+without a specified throughput tradeoff. Both effects belong in an explicit
+objective before selecting a formula.
 
-The `delivery` policy compares a different priority rule using exactly the same
-engine, action catalog, reference curves, acceptance estimator, oldest-service
-guard, and optional gap filter. It observes committed output count, but not
-remaining output length. Its pressure for a request with unfinished prefill is
+## Remaining work and completion value
+
+The prefill token count is known, but its minimum remaining execution time
+need not equal remaining tokens divided by one rate. The reference
+`prefill_completion_ms` solves the isolated constant-cost case exactly:
 
 ```text
-P_i = (elapsed_since_arrival + remaining_prefill * prefill_credit_i) / F_i.
+H(0) = 0
+H(p) = min_{prefill graph g} [T(g) + H(max(0, p - capacity(g)))].
 ```
 
-For a decoding request with `z` committed tokens it is
+It ignores decode competition and assumes prefill timing is independent of
+context. Its purpose is to expose greedy chunking errors, not to price an
+entire mixed workload as isolated work.
+
+For generated output `g` and a length prior `L`, expected remaining length is
 
 ```text
-P_i = (elapsed_since_arrival + ordinary_singleton_cost_i) / R_i(z + 1).
+E[L - g | L > g].
 ```
 
-After mandatory guard filtering, the policy requires progress on a request
-with the highest pressure at the dispatch boundary when a remaining candidate
-can include it. It then projects every resident's pressure after each candidate
-and minimizes the descending vector lexicographically. Expected useful work
-per time breaks ties. Periodic deep probes obey the same age slack and gap
-filter, and retain the pressure anchor.
-
-For speculative work, the projected pressure averages over every possible
-accepted-prefix length using the conditional acceptance model. The ordinary
-singleton continuation is costed at the corresponding post-action context.
-Computing pressure at the mean emitted count is not equivalent to this
-expectation. Even with a constant continuation cost, it underestimates pressure
-because the reciprocal reference denominator is convex.
-EOS is unknown, so projections assume another token remains. Prefill completion
-projects to the second output token; partial prefill retains the first-token
-reference. The frozen remaining-prefill credit approximates remaining work and
-need not equal an actual continuation's cost.
-
-The pressure anchor is necessary to prevent an unrelated short action from
-repeatedly winning a local ratio comparison. With two equally delayed prefills,
-servicing either one still leaves the other as the worst projected ratio. An
-unrelated, slightly shorter decode can then improve that maximum solely by
-advancing less wall time. Repeating this choice postpones both prefills. Requiring
-service of a pressure bottleneck excludes that choice; it is not a proof of
-optimal delivery fairness.
-
-Projected next-token pressure is a forward priority heuristic. The measured
-`S_i` is a historical maximum over actual delivered tokens. The two quantities
-differ, and already incurred delay cannot be undone. Neither this policy nor
-the deficit policy solves finite-horizon minimax token-delivery slowdown.
-
-## Mixed prefill and decode
-
-For identical committed prefill work `P` and decode/verification work `B`,
+`conditional_remaining` evaluates this expression for an explicit discrete
+prior. A known fixed length gives decreasing remaining work. A geometric prior
+has a memoryless residual. A heavy-tailed prior can predict more remaining
+work after observing a longer prefix. For a continuous Pareto survival law
+with exponent `alpha > 1`, above its minimum length,
 
 ```text
-T_mixed(P,B) < T_prefill(P) + T_decode(B)
+E[L - g | L > g] = g / (alpha - 1).
 ```
 
-is an execution-efficiency opportunity. It does not establish a latency win:
-the first decode result may arrive later than under decode-first ordering.
-The engine should choose among prefill capacities in time units, accounting
-for included and excluded requests, rather than enforce a universal token size.
+Thus an estimate of twice the attained output corresponds to one particular
+Pareto exponent, `alpha=1.5`. It is not a distribution-free consequence of
+observing that a request is still decoding. Explicit output limits truncate
+any applicable prior. Learning a prior must also handle unfinished requests
+as censored observations rather than completed short outputs.
 
-The synthetic model is
+Remaining length matters when the objective rewards completion or the future
+capacity released by completion. It is not needed to evaluate the immediate
+acceptance yield of a graph. Accurate graph timing does not remove this
+uncertainty about the request's total duration.
+
+## Dynamic objective and lookahead
+
+Variable-duration decisions with stochastic next states fit a semi-Markov
+control model. State includes remaining prompt work, attained output and any
+length belief, acceptance information, service accounting, and stream ages.
+Actions are complete graph executions. Expected transition reward can include
+useful work and integrated waiting costs. This modeling framework and its
+average-reward equations are described by
+[Baykal-Gursoy](https://gursoy.rutgers.edu/papers/eorms0757-final11.pdf).
+
+Under the conditions for an average-reward optimality equation, a continuing
+workload has a relative value `h` and optimal reward rate `rho` satisfying
 
 ```text
-T = launch + max(weight_cost, target_token_cost * padded_target_rows)
-    + attention_coefficient * sum_i q_i * (context_i + q_i/2) / 1024
-    + draft_step_cost * max_draft_depth
-    + draft_token_cost * draft_rows
-    + mixed_penalty_if_applicable.
+h(s) = max_a { r(s,a) - rho*T(s,a) + E[h(s')] }.
 ```
 
-Prefill projection rows round up to a multiple of 64. Rectangular decode
-projection and draft rows use the next power-of-two cohort capacity and maximum
-depth. Ragged mode uses active row counts. Attention uses active query lengths.
-Mixed execution shares the target weight term; an explicit mixed penalty can
-reverse its benefit. The full formulas and default coefficients are in
-[`model.py`](../scripts/scheduling_sim/model.py).
+Equivalently, optimal actions maximize
 
-These coefficients are synthetic. The model does not simulate MoE routing,
-offloaded tables, kernel selection discontinuities beyond padding, physical KV
-allocation, restore/eviction, rank skew, CPU overhead, or changing GPU clocks.
-Resident slots model admission interference only. They do not model a KV-byte
-budget. No simulation rate is a claim about Flare or a particular GPU.
+```text
+[r(s,a) + E[h(s') - h(s)]] / T(s,a).
+```
 
-## Experiments and interpretation
+Dropping the future-state term produces the immediate value baseline. The
+remaining term accounts for such effects as unlocking decode after a prompt
+tail, ending a stall, completing a request, and changing future batch options.
+A practical approximation needs tests against small solvable instances of a
+chosen objective. The equation alone supplies neither its utility parameters
+nor a latency guarantee. Average reward on an infinite horizon is also
+uninformative for a finite batch followed by permanent idleness; finite-horizon
+or completion-cost objectives apply to that experiment.
 
-The simulator is standard-library Python and does not import Ignition or CUDA.
-Run from the repository root using Python 3.12 or later:
+The [completion-episode oracle](scheduling-oracle.md) supplies those small
+instances. It evaluates hidden-length beliefs, all legal cohorts, and acceptance
+outcomes through completion. Its policy-improvement prototype keeps expected
+net work plus continuation-value change over graph time as the dispatch score.
+Normalizing negative net episode rewards by episode duration can reward wasted
+execution time; that objective has an explicit counterexample. A fixed positive
+time price supplies a separate reference for completion and waiting tradeoffs.
+
+For a stationary sequence of actions with fixed rewards, a cycle's value rate
+is a duration-weighted average of its action rates:
+
+```text
+(sum_j reward_j) / (sum_j time_j)
+    = sum_j [time_j / sum_k time_k] * [reward_j / time_j].
+```
+
+It cannot exceed its best component. Looking ahead is useful because state,
+future value, or fairness changes, not because averaging unchanged rates fixes
+a starvation-prone linear objective.
+
+## Comparison with the cycle-based simulator
+
+The separate worktree `.claude/worktrees/scheduling-sim/` contains
+`scripts/schedsim/policies.py::LeximinPolicy`. It projects in-flight work,
+enumerates prefill, decode, and mixed choices, and compares short action cycles
+through phase completion. Its primary ordering is projected request slowdown;
+throughput breaks ties after feasibility filters that include a stream-gap
+limit.
+
+Its useful contributions are explicit future phase transitions, conditional
+speculative yield, and comparisons extending beyond each graph's own completion
+instant. Its lexicographic slowdown objective and stream-gap filter do not
+implement the value-rate objective specified here. Copying those filters would
+reintroduce a priority stronger than measured efficiency.
+
+Cycle projection and an isolated-completion reference can test dynamic value
+approximations. Neither establishes a universal breadth-before-depth rule,
+a preferred prefill capacity, or a fixed graph-duration ceiling.
+
+## Running the experiments
+
+From the repository root:
 
 ```sh
-python -m scripts.scheduling_sim --seeds 0,1,2 --output /tmp/scheduling-baselines
-python -m pytest -q tests/test_scheduling_sim.py
+python -m pytest tests/test_scheduling_sim.py -q
+python -m scripts.scheduling_sim --decode-values 1,16,64,256 \
+  --output /tmp/flare-value-separate
+python -m scripts.scheduling_sim --decode-values 1,16,64,256 --mixed \
+  --output /tmp/flare-value-mixed
+python -m scripts.scheduling_sim --workload prefill_five_decodes \
+  --decode-values 64 --catalog /path/to/graph-times.json
 ```
 
-The compared policies are FIFO request completion, strict decode-first,
-oldest-service round-robin with zero drafts, greedy normalized useful-work
-throughput, the interactive deficit policy, and the delivery-pressure policy.
-All use the same duration cap, legal
-cost model, and candidate catalog before their policy-specific filtering.
-The throughput baseline optimizes reference work per time, not a sum of raw
-input and output token counts.
-
-Built-in workloads cover large-prefill interference, eight concurrent decodes,
-heterogeneous acceptance, short arrivals during long decodes, heterogeneous
-contexts, and resident-slot exhaustion. The slot-pressure workload defaults
-to two residents. Explicit CLI or configuration values override that default.
-
-Explore batch size, speculation, and padding:
-
-```sh
-python -m scripts.scheduling_sim --workload acceptance_groups \
-  --policies interactive,throughput --batch-sizes 2,8 --draft-depths 0,2,5 \
-  --shapes rectangular,ragged --acceptance oracle --seeds 0,1,2 \
-  --output /tmp/scheduling-speculation
-```
-
-Explore prefill capacity and duration constraints by changing the available
-catalog. A small cap can be infeasible at long contexts; infeasibility is an
-error, not permission to silently enlarge the cap:
-
-```sh
-python -m scripts.scheduling_sim --workload prefill_burst \
-  --policies interactive,throughput --quantums 8,12,20 \
-  --chunks 64,128,256,512,1024 --seeds 0,1,2 \
-  --output /tmp/scheduling-prefill --trace
-```
-
-Use `--no-mixing` for a matched mixing ablation. `--config PATH` accepts a JSON
-object containing `config` and `model` field overrides. `--workload-file PATH`
-accepts a JSON list of request objects, for example:
+A catalog is a JSON array. Durations are milliseconds for complete graph
+execution. Unused capacities remain part of its measured cost:
 
 ```json
 [
-  {"name": "large", "arrival_ms": 0, "prompt_tokens": 8192, "output_tokens": 128},
-  {"name": "small", "arrival_ms": 10, "prompt_tokens": 64, "output_tokens": 8,
-   "acceptance": [0.95, 0.9, 0.8, 0.6, 0.4]}
+  {"name": "prefill-64", "duration_ms": 3, "prefill_capacity": 64},
+  {"name": "prefill-4096", "duration_ms": 66, "prefill_capacity": 4096},
+  {"name": "decode-b1-w8", "duration_ms": 30, "decode_capacity": 1, "width": 8}
 ]
 ```
 
-Compare deficit and delivery priorities with matched service-gap controls:
+The output directory contains aggregate measurements in `summary.csv`, individual
+request measurements in `requests.csv`, selected actions and their scores in
+`trace.jsonl`, and the timing input in `catalog.json`. The decode value and
+random seed accompany each case. A graph started before the requested horizon
+finishes in full; elapsed time can exceed that horizon by one graph.
 
-```sh
-python -m scripts.scheduling_sim --policies interactive,delivery \
-  --gap-targets none,8,12,20,40 --seeds 0,1,2 \
-  --output /tmp/scheduling-delivery
-```
+The sixteen workloads cover solo and concurrent prefills, prompt tails,
+low/high/heterogeneous acceptance, up to sixteen requests, mixed phases, delayed
+arrivals, and different output lengths. Tests include exhaustive cohort scoring,
+conditional acceptance sampling, padding, explicit output limits, uniform time
+scaling, starvation counterexamples, exact prefill completion, and analytic
+fair-allocation cases. Metrics include incomplete requests, integrated linear
+decode age in milliseconds squared, and open output stalls at the measurement
+boundary. A request already decoding at arrival has zero initial age; its wait
+until the first simulated delivery counts. Prefill contributes no decode-age
+cost until its first output. Busy time means execution-resource use,
+not GPU occupancy or hardware efficiency.
 
-`none` disables the lookahead filter. A numeric target overrides
-`service_gap_target_ms` in the configuration file. `urgent_after_ms` continues
-to control the oldest-service guard independently. No gap target is enabled by
-default; choosing a deployable target requires measured action costs and an
-admission contract.
+## Runtime policy choices
 
-`summary.csv` records parameters and aggregate metrics. `requests.csv` records
-per-request parameters and latencies. Optional `trace.jsonl` records action
-timing, participants, draft depths, acceptance observations, and emitted counts.
-It also records the selected action's rescue lateness when the filter is enabled.
-The maximum resident service gap includes admission-to-first-service. Output
-gaps are intervals between nonempty emission bursts; simultaneous tokens do not
-insert artificial zero gaps. TTFT includes admission waiting. Percentiles are
-linearly interpolated empirical quantiles within each finite workload.
-`p95_delivery_slowdown` is the percentile of per-request worst token-delivery
-ratios. It is not a percentile across tokens. The reference coefficients and
-worst token position are recorded per request. Gap-violation counts are zero
-when no target is configured, and have meaning only with a numeric target.
-Changing the reference catalog or quantum can change the prefill normalization;
-reference-lag values should be compared only under the same normalization.
+The ongoing policy uses separate intrinsic output value, token fairness,
+delivery fairness, and decode-age coefficients. Their concrete defaults and
+units are specified in the [native design](scheduling-runtime-design.md).
+First-token waiting has no independent age penalty: prompt work competes by
+its useful progress and token-service price. A burst earns its accepted token
+volume and one delivery. The delivery reference accounts for feasible batching;
+changing a rate normalizer preserves marginal service prices across phases.
 
-Plot individual seeds on the throughput/latency plane with the optional
-Matplotlib utility:
+The runtime uses no EOS-length prior. Exact conditional completion schedules
+remain an offline reference. Native prerequisite selection uses bounded
+lookahead to include a following shared inference graph, with individual
+continuation values for longer chains. The stationary allocation results do not
+prove that approximation optimal. The runtime also projects two queued frames
+into service history and pauses dispatch at feedback dependencies.
 
-```sh
-uv run --no-project --with matplotlib python -m scripts.scheduling_sim.plot \
-  /tmp/scheduling-baselines/summary.csv --workload prefill_burst \
-  --output /tmp/scheduling-prefill.svg
-```
-
-Random acceptance draws are indexed by seed, input request index, committed
-output position, and draft depth. Reordering other requests' execution does not
-advance a shared random stream. Different policies can still encounter different
-positions and depths because their accepted prefixes differ. The scheduler
-never receives those draws or remaining output length.
-Draws are allocated through each request's full supplied acceptance profile, so
-changing the configured draft-depth limit also preserves the draw at each
-shared output position and depth.
-
-The stationary two-request calculation is independent of the online heuristic:
-
-```sh
-python -m scripts.scheduling_sim.frontier --acceptance 0.97,0.1
-python -m scripts.scheduling_sim.frontier --acceptance 0.97,0.1 --shape ragged
-python -m scripts.scheduling_sim.frontier --acceptance 0.97,0.1 --reference speculative
-```
-
-It reports exact max-min normalized rate and action time fractions for fixed
-contexts and acceptance. Comparing ordinary and speculative normalization
-demonstrates how the fairness definition itself changes the preferred schedule.
-
-Tests cover the acceptance identity, Monte Carlo agreement, censoring at EOS,
-arrival boundaries, prefill completion, admission queues, fragmentation-invariant
-credit, impossible quanta, mixed-mode counterexamples, padding, oldest-service
-protection, randomized finite-workload service bounds, and the exact two-request
-frontier against a brute-force mixture grid. They also encode a counterexample
-to a deterministic useful-progress guarantee based on expected speculation.
-Delivery tests cover burst boundaries, retained historical maxima, queue delay,
-and speculative expectations. Latency tests cover anticipatory filtering,
-reported misses, conservative certificate failures for feasible batch schedules,
-and recovery from overdue service without singleton lock-in.
-
-Experiments should compare latency and throughput together, retain per-request
-outliers, and compare identical workload seeds and cost coefficients. Finite
-workloads can reveal unfairness; finishing them is not a proof against starvation
-under unbounded arrivals. Useful-progress stability, prediction-error robustness,
-and memory preemption require additional models or proofs.
-
-### Synthetic workload results
-
-With the default cost coefficients, `Q = 20 ms`, `D = 40 ms`, batch capacity
-eight, at most five drafts, learned acceptance, and seeds `0,1,2`, the
-`prefill_burst` workload gives the following means of per-seed metrics. Its
-small requests contain 64 prompt tokens and 16 output tokens; one competing
-request contains an 8192-token prompt and 64 output tokens.
-
-| Policy | Output tokens/s, higher is better | P95 small-request TTFT, ms, lower is better | Maximum resident service gap, ms, lower is better |
-| --- | ---: | ---: | ---: |
-| Round-robin, zero drafts | 310.9 | 20.6 | 18.4 |
-| Greedy useful-work throughput | 392.6 | 111.7 | 116.4 |
-| Interactive | 386.0 | 7.9 | 17.4 |
-
-The interactive policy exchanges about 1.7% of aggregate throughput for much
-shorter small-request TTFT and service gaps in this model. It does not dominate
-the other policies across workloads. On `acceptance_groups`, ordinary
-round-robin delivers 2538.1 tokens/s while interactive delivers 2213.4 tokens/s.
-On `long_context`, round-robin also has lower P95 TTFT than interactive
-(52.0 versus 122.2 ms), while interactive has higher throughput
-(1519.2 versus 1431.8 tokens/s). The interactive policy's mean per-seed maximum
-service gap is 69.3 ms there, above the 40 ms urgency trigger but below the
-proved bound.
-
-For `prefill_burst`, disabling mixing with other parameters fixed reduces
-interactive throughput from 386.0 to 337.5 tokens/s and increases its mean
-maximum service gap from 17.4 to 49.5 ms. In seed zero, the interactive mixed
-actions use seven 64-token chunks and twenty 128-token chunks at each tested
-quantum of 8, 12, and 20 ms. The cost model's projection knee is near
-`weight_ms / target_token_ms = 136` rows. This result reflects those coefficients
-and the candidate scoring rule; it does not establish 128 as a hardware default.
-
-With oracle acceptance on `acceptance_groups`, rectangular batches of two with
-up to five drafts deliver 975.3 tokens/s under interactive scheduling, versus
-2303.7 tokens/s for batches of eight with up to two drafts. Eight-request
-ordinary decode delivers 2538.1 tokens/s. These are adaptive depth limits, not
-fixed-depth executions. The three configurations differ in both throughput and
-service frequency, illustrating why speculative width cannot be selected in
-isolation from cohort size and finite-workload tails.
-
-### Delivery priorities and service-gap controls
-
-With the same default cost model, learned acceptance, and seeds `0,1,2`, the
-following values are means of per-seed metrics. `G` is the optional resident
-service-gap target. A missing target leaves the oldest-service guard enabled.
-Lower gap and slowdown values are better; higher output throughput is better.
-
-| Workload | Policy | G, ms | Output tokens/s | Maximum service gap, ms | Worst token-delivery slowdown |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Long contexts | Interactive | Disabled | 1519.2 | 69.33 | 6.42 |
-| Long contexts | Interactive | 40 | 1796.5 | 39.99 | 4.07 |
-| Long contexts | Delivery | 40 | 1561.5 | 39.16 | 17.57 |
-| Short arrivals | Interactive | 40 | 1815.7 | 9.55 | 3.00 |
-| Short arrivals | Delivery | 40 | 1319.5 | 24.91 | 5.97 |
-| Acceptance groups | Interactive | 40 | 2213.3 | 5.91 | 1.44 |
-| Acceptance groups | Delivery | 40 | 2393.0 | 18.91 | 1.17 |
-| Acceptance groups | Round-robin | 40, measured only | 2538.1 | 3.15 | 1.00 |
-
-The 40 ms target produces no service-gap violations or uncertified decisions
-for either protected policy across all six built-in workloads and these seeds.
-On long contexts, the interactive filter improves throughput by 18.3% while
-reducing maximum service gaps by 42.3%. Its P95 TTFT falls from 122.2 to 76.8 ms.
-The other five interactive workloads retain their schedules at that target.
-These observations do not establish a hard 40 ms guarantee.
-
-Resident guarantees also exclude admission queues. In the slot-pressure workload
-at seed zero, the interactive policy has no 40 ms gap violations, yet one
-queued request waits 307.3 ms for admission and 310.5 ms for its first token.
-Its worst delivery slowdown is 98.31. Admission delay remains visible in the
-delivery metric even when every resident service interval satisfies the target.
-
-The short-arrival workload contains three long requests with 128-token prompts
-and 200 output tokens, followed by ten requests with 64-token prompts and four
-output tokens. At `G = 40`, the interactive policy has P95 TTFT of 9.1 ms versus
-17.1 ms for delivery pressure. Delivery pressure improves worst delivery
-slowdown for heterogeneous acceptance, but gives up absolute service regularity.
-With oracle acceptance on that workload, it selects ordinary batched decode
-and matches round-robin's 2538.1 tokens/s. The interactive policy instead
-achieves 2194.1 tokens/s with a worst delivery slowdown of 1.87. Speculative
-useful-work efficiency alone does not resolve finite-workload tails or first
-delivery delay.
-
-Tighter targets can be impossible at admission. In `long_context`, all six
-requests arrive with unfinished prompts. The catalog serves at most one
-prefill request per action. Their minimum first-service costs are 11.350,
-11.350, and four times 3.286 ms, totaling 35.844 ms. No policy over that catalog
-can give all six an initial service opportunity within 20 ms. With a 20 ms
-target, both protected policies record four gap violations and twelve
-uncertified decisions per seed, with a maximum service gap of 49.09 ms. At an
-8 ms target, they record 27 violations and reach 64.89 ms. Reducing an
-infeasible target need not reduce observed gaps; recovery optimizes total
-overdue time after the feasibility filter fails.
-
-The deficit rule with a feasible gap target is the preferred prototype for
-interactive mixed workloads in these experiments. Delivery pressure remains a
-comparison policy. A production design needs admission that accounts for
-first-service demand, a recurring service plan rather than a single-visit
-certificate, and measured costs for the prepared action catalog.
-
-The comparison matrix can be run with:
-
-```sh
-python -m scripts.scheduling_sim \
-  --policies round_robin,throughput,interactive,delivery \
-  --gap-targets none,40 --seeds 0,1,2 --output /tmp/scheduling-controls
-python -m scripts.scheduling_sim --policies interactive,delivery \
-  --gap-targets 8,12,20 --seeds 0,1,2 --output /tmp/scheduling-gap-targets
-python -m scripts.scheduling_sim --policies interactive,delivery \
-  --gap-targets none,40 --acceptance oracle --seeds 0,1,2 \
-  --output /tmp/scheduling-delivery-oracle
-```
-
-## Related scheduling theory
-
-- [EEVDF](https://docs.kernel.org/scheduler/sched-eevdf.html) separates service
-  eligibility from virtual deadlines. Its CPU accounting and preemption model
-  cannot be transferred unchanged to nonadditive batch execution.
-- [Fair Service Curve scheduling](https://www.cs.cmu.edu/~hzhang/papers/SIGCOM97.pdf)
-  separates delay and sustained allocation and exposes conflicts between them.
-- [Fair Sojourn Protocol](https://www1.ece.neu.edu/~ningfang/SimPaper/p229-friedman.pdf)
-  improves completion order against a processor-sharing reference under known
-  job sizes. Unknown output lengths and batched service change those assumptions.
-- [Proportional fairness](https://www.statslab.cam.ac.uk/~fpk1/rate.html) supplies
-  a utility-based allocation objective over heterogeneous achievable rates.
-- [VTC](https://www.usenix.org/conference/osdi24/presentation/sheng) establishes
-  LLM fairness under a weighted input/output token service definition. The
-  useful-work normalization here defines a different service quantity.
-- [SmartSpec](https://arxiv.org/abs/2406.14066) connects speculation depth, batch
-  size, and accepted progress per execution time.
-- [Sarathi-Serve](https://www.usenix.org/conference/osdi24/presentation/agrawal)
-  demonstrates chunked prefill and decode co-scheduling under latency constraints.
-- [FastServe](https://www.usenix.org/conference/nsdi26/presentation/wu-bingyang)
-  applies feedback queues to partially known request sizes.
+Unknown duration cannot be divided into reward as a numerical zero. The native
+contract uses zero to mean indeterminate, requiring an explicit exploration
+choice. Expiration makes a stale estimate eligible for rediscovery; it does not
+prove efficient or fair behavior during exploration. Those effects require
+tests beyond known-cost allocation. Native tests cover zero-cost startup,
+expiry, recovery, and phase transitions; real-device execution is still required
+to measure their throughput and latency cost.

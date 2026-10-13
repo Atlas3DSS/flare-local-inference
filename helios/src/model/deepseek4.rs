@@ -95,7 +95,9 @@ impl ModelContract for DeepSeek4 {
     }
     fn required_inputs(_: &ModelConfig, kind: GraphKind) -> impl Iterator<Item = &'static str> {
         let extra: &[&str] = match kind {
-            GraphKind::Prefill => &["vision_token_indices", "vision_left", "vision_right"],
+            GraphKind::Prefill | GraphKind::Mixed => {
+                &["vision_token_indices", "vision_left", "vision_right"]
+            }
             GraphKind::Vision => &[
                 "vision_pixel_values",
                 "vision_position_ids",

@@ -186,6 +186,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
             handle: field!(graph, "handle", usize),
             batch_capacity: field!(graph, "batch_capacity", usize),
             token_capacity: field!(graph, "token_capacity", usize),
+            prefill_capacity: field!(graph, "prefill_capacity", usize),
             estimated_duration_ns: field!(graph, "estimated_duration_ns", u64),
             input_bindings,
         });

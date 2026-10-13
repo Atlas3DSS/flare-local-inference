@@ -7,6 +7,20 @@ pub(super) mod wire {
     include!(concat!(env!("OUT_DIR"), "/flare.runtime.rs"));
 }
 
+impl wire::ExecutionGraph {
+    pub(super) fn packed_tokens(&self) -> u64 {
+        if self.kind == "mixed" {
+            self.prefill_capacity.saturating_add(
+                self.batch_capacity
+                    .saturating_sub(1)
+                    .saturating_mul(self.token_capacity),
+            )
+        } else {
+            self.batch_capacity.saturating_mul(self.token_capacity)
+        }
+    }
+}
+
 pub(super) fn size(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid("resource size exceeds host address space"))
 }

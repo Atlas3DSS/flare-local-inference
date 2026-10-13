@@ -203,6 +203,7 @@ message ExecutionGraph {
   // Absent for shared operations; otherwise selects the complete serving mode.
   optional bool speculation_enabled = 10;
   uint64 estimated_duration_ns = 11; // Zero denotes an indeterminate duration.
+  uint64 prefill_capacity = 12; // Prompt capacity of a mixed graph; zero otherwise.
 }
 enum DraftSource { NO_DRAFT = 0; MTP = 1; COPY_DRAFT = 2; }
 message InputBinding { string buffer_name = 1; uint64 host_offset = 2; uint64 nbytes = 3; }

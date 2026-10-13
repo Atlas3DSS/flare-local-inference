@@ -73,7 +73,24 @@ fn validate_inner<M: ModelContract>(
     } else if manifest.abi_version != SPECULATIVE_ABI_VERSION {
         return Err("speculative catalog requires ABI3".into());
     }
-    for (name, dtype, shape) in M::required_buffers(config) {
+    let packed = manifest
+        .graphs
+        .iter()
+        .filter(|g| g.kind == GraphKind::Mixed)
+        .map(|g| g.packed_tokens())
+        .max()
+        .unwrap_or(0);
+    for (name, dtype, mut shape) in M::required_buffers(config) {
+        if matches!(
+            name,
+            "token_ids"
+                | "prefill_positions"
+                | "vision_token_indices"
+                | "vision_left"
+                | "vision_right"
+        ) {
+            shape[0] = shape[0].max(packed);
+        }
         let buffer = manifest.buffer(name)?;
         if buffer.dtype != dtype || buffer.shape != shape {
             return Err(
@@ -88,6 +105,7 @@ fn validate_inner<M: ModelContract>(
             graph.kind,
             graph.batch_capacity,
             graph.token_capacity,
+            graph.prefill_capacity,
             graph.sampling_mode,
         )?;
     }
@@ -102,7 +120,7 @@ fn validate_inner<M: ModelContract>(
             continue;
         }
         for batch in batches(config) {
-            select::<M>(config, manifest, kind, batch, 1, SamplingMode::General)?;
+            select::<M>(config, manifest, kind, batch, 1, 0, SamplingMode::General)?;
         }
     }
     select::<M>(
@@ -111,6 +129,7 @@ fn validate_inner<M: ModelContract>(
         GraphKind::Prefill,
         1,
         config.limits.prefill_chunk_size,
+        0,
         SamplingMode::General,
     )?;
     for &tokens in &config.contract.vision.patch_capacities {
@@ -120,6 +139,7 @@ fn validate_inner<M: ModelContract>(
             GraphKind::Vision,
             1,
             tokens,
+            0,
             SamplingMode::General,
         )?;
     }
@@ -159,10 +179,22 @@ pub fn select<M: ModelContract>(
     kind: GraphKind,
     batch: usize,
     tokens: usize,
+    prefill: usize,
     mode: SamplingMode,
 ) -> Result<usize> {
     let declared = batches(config).any(|capacity| capacity == batch)
         && match kind {
+            GraphKind::Mixed => {
+                batch >= 2
+                    && prefill > 0
+                    && prefill.is_multiple_of(64)
+                    && prefill <= config.limits.prefill_chunk_size
+                    && if config.speculative_widths.is_empty() {
+                        tokens == 1
+                    } else {
+                        speculative_shape(config, batch, tokens)
+                    }
+            }
             GraphKind::Prefill => {
                 batch == 1
                     && tokens > 0
@@ -175,7 +207,7 @@ pub fn select<M: ModelContract>(
             GraphKind::Speculative => speculative_shape(config, batch, tokens),
             _ => tokens == 1,
         };
-    if !declared {
+    if !declared || (kind != GraphKind::Mixed && prefill != 0) {
         return Err(format!(
             "undeclared prepared graph kind or capacity: {kind:?}, batch {batch}, tokens {tokens}"
         )
@@ -185,6 +217,7 @@ pub fn select<M: ModelContract>(
         graph.kind == kind
             && graph.batch_capacity == batch
             && graph.token_capacity == tokens
+            && graph.prefill_capacity == prefill
             && graph.sampling_mode == mode
     });
     let (index, graph) = matches.next().ok_or_else(|| {

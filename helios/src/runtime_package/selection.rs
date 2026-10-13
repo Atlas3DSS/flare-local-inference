@@ -128,7 +128,26 @@ impl LoadOptions {
             for graph in &execution.graphs {
                 let kind = crate::execution::GraphKind::try_from(graph.kind.as_str())?;
                 crate::execution::SamplingMode::try_from(graph.sampling_mode.as_str())?;
+                let speculative = kind == crate::execution::GraphKind::Speculative
+                    || (kind == crate::execution::GraphKind::Mixed
+                        && graph.speculation_enabled == Some(true));
                 let valid = match kind {
+                    crate::execution::GraphKind::Mixed => {
+                        BATCH_CAPACITIES.contains(&(graph.batch_capacity as usize))
+                            && graph.batch_capacity >= 2
+                            && graph.batch_capacity <= prepared.next_power_of_two() as u64
+                            && graph.prefill_capacity >= 64
+                            && graph.prefill_capacity.is_multiple_of(64)
+                            && graph.packed_tokens() <= i32::MAX as u64
+                            && graph.prefill_capacity
+                                <= config["prefill_chunk_size"].as_u64().unwrap_or(0)
+                            && graph.speculation_enabled.is_some()
+                            && if speculative {
+                                (1..=8).contains(&graph.token_capacity)
+                            } else {
+                                graph.token_capacity == 1
+                            }
+                    }
                     crate::execution::GraphKind::Prefill | crate::execution::GraphKind::Vision => {
                         graph.batch_capacity == 1 && graph.token_capacity > 0
                     }
@@ -143,11 +162,12 @@ impl LoadOptions {
                     }
                 };
                 if !valid
+                    || (kind != crate::execution::GraphKind::Mixed && graph.prefill_capacity != 0)
                     || (kind == crate::execution::GraphKind::Speculative
                         && graph.speculation_enabled == Some(false))
                     || (kind == crate::execution::GraphKind::Decode
                         && graph.speculation_enabled == Some(true))
-                    || if kind == crate::execution::GraphKind::Speculative {
+                    || if speculative {
                         graph.verify_tokens != Some(graph.token_capacity as u32)
                             || graph
                                 .draft_tokens
@@ -163,6 +183,7 @@ impl LoadOptions {
                         graph.sampling_mode.clone(),
                         graph.batch_capacity,
                         graph.token_capacity,
+                        graph.prefill_capacity,
                         graph.draft_tokens,
                         graph.draft_source,
                         graph.speculation_enabled,
@@ -190,7 +211,7 @@ impl LoadOptions {
                         .speculation_enabled
                         .is_none_or(|value| value == enabled)
                     && (graph.kind != "decode" || !enabled)
-                    && (graph.kind != "speculative"
+                    && (!(graph.kind == "speculative" || (graph.kind == "mixed" && enabled))
                         || (graph.draft_source == source
                             && graph.draft_tokens.is_some_and(|n| n as usize <= drafts)
                             && widths.contains(&(graph.verify_tokens.unwrap() as usize))
@@ -200,8 +221,10 @@ impl LoadOptions {
             for graph in &execution.graphs {
                 if let Some(drafts) = graph.draft_tokens {
                     let key = (
+                        graph.kind.clone(),
                         graph.batch_capacity,
                         graph.token_capacity,
+                        graph.prefill_capacity,
                         graph.sampling_mode.clone(),
                     );
                     let count = draft_counts.entry(key).or_insert(drafts);
@@ -210,8 +233,13 @@ impl LoadOptions {
             }
             execution.graphs.retain(|g| {
                 g.draft_tokens.is_none_or(|drafts| {
-                    draft_counts[&(g.batch_capacity, g.token_capacity, g.sampling_mode.clone())]
-                        == drafts
+                    draft_counts[&(
+                        g.kind.clone(),
+                        g.batch_capacity,
+                        g.token_capacity,
+                        g.prefill_capacity,
+                        g.sampling_mode.clone(),
+                    )] == drafts
                 })
             });
             let mut selected_variants = HashSet::new();
@@ -221,6 +249,7 @@ impl LoadOptions {
                     graph.sampling_mode.as_str(),
                     graph.batch_capacity,
                     graph.token_capacity,
+                    graph.prefill_capacity,
                 )) {
                     return Err(invalid(
                         "ambiguous graph variants for the selected speculation mode",
@@ -263,6 +292,7 @@ impl LoadOptions {
                         g.sampling_mode.clone(),
                         g.batch_capacity,
                         g.token_capacity,
+                        g.prefill_capacity,
                         g.draft_tokens,
                         g.verify_tokens,
                         g.draft_source,
@@ -874,6 +904,124 @@ mod tests {
                 .collect();
             assert_eq!(selected.len(), 1);
             assert_eq!(selected[0].speculation_enabled, Some(drafts > 0));
+        }
+    }
+    fn mixed_package() -> Package {
+        let mut p = package();
+        for enabled in [false, true] {
+            for prefill in [64, 512] {
+                for width in if enabled { vec![1, 3, 6] } else { vec![1] } {
+                    let name = format!("mixed-4-{prefill}-{width}-{enabled}");
+                    p.execution
+                        .as_mut()
+                        .unwrap()
+                        .graphs
+                        .push(wire::ExecutionGraph {
+                            name: name.clone(),
+                            kind: "mixed".into(),
+                            sampling_mode: "general".into(),
+                            batch_capacity: 4,
+                            token_capacity: width,
+                            prefill_capacity: prefill,
+                            speculation_enabled: Some(enabled),
+                            draft_tokens: enabled.then_some(width as u32 - 1),
+                            verify_tokens: enabled.then_some(width as u32),
+                            draft_source: if enabled { 1 } else { 0 },
+                            ..Default::default()
+                        });
+                    p.graphs.push(Graph {
+                        name,
+                        resource: "mixed".into(),
+                        node_count: 1,
+                        edge_count: 0,
+                        flags: 0,
+                        functions: vec![0],
+                    });
+                }
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn mixed_selection_preserves_prompt_variants_and_applies_decode_limits() {
+        for (drafts, adaptive, widths) in [
+            (0, true, vec![1]),
+            (2, true, vec![1, 3]),
+            (2, false, vec![3]),
+        ] {
+            let mut p = mixed_package();
+            let mut c = config();
+            c["prefill_chunk_size"] = 512.into();
+            LoadOptions {
+                mtp_draft_tokens: Some(drafts),
+                adaptive_verification: Some(adaptive),
+                ..Default::default()
+            }
+            .select(std::slice::from_mut(&mut p), &mut c)
+            .unwrap();
+            let mixed: Vec<_> = p
+                .execution
+                .as_ref()
+                .unwrap()
+                .graphs
+                .iter()
+                .filter(|g| g.kind == "mixed")
+                .collect();
+            assert_eq!(mixed.len(), 2 * widths.len());
+            for prefill in [64, 512] {
+                for &width in &widths {
+                    let graph = mixed
+                        .iter()
+                        .find(|g| g.prefill_capacity == prefill && g.token_capacity == width)
+                        .unwrap();
+                    assert_eq!(graph.speculation_enabled, Some(drafts > 0));
+                    assert_eq!(graph.packed_tokens(), prefill + 3 * width);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_selection_rejects_rank_shape_mismatch_and_invalid_mode() {
+        let mut ranks = [mixed_package(), mixed_package()];
+        let mut c = config();
+        c["prefill_chunk_size"] = 512.into();
+        ranks[1]
+            .execution
+            .as_mut()
+            .unwrap()
+            .graphs
+            .iter_mut()
+            .find(|g| g.kind == "mixed" && g.speculation_enabled == Some(true))
+            .unwrap()
+            .prefill_capacity = 128;
+        assert!(
+            LoadOptions::default()
+                .select(&mut ranks, &mut c)
+                .unwrap_err()
+                .to_string()
+                .contains("catalogs differ")
+        );
+        for mutation in 0..4 {
+            let mut p = mixed_package();
+            let g = p
+                .execution
+                .as_mut()
+                .unwrap()
+                .graphs
+                .iter_mut()
+                .find(|g| g.kind == "mixed")
+                .unwrap();
+            match mutation {
+                0 => g.speculation_enabled = None,
+                1 => g.token_capacity = 3,
+                2 => g.prefill_capacity = 65,
+                _ => g.prefill_capacity = 1024,
+            }
+            let mut c = config();
+            c["prefill_chunk_size"] = 512.into();
+            assert!(LoadOptions::default().select(&mut [p], &mut c).is_err());
         }
     }
 }

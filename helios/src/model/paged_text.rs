@@ -119,7 +119,38 @@ impl Inputs {
                 }
             }
         }
-        if step.kind == GraphKind::Prefill {
+        if let Some(mixed) = &step.mixed {
+            self.staging.i32(
+                "prefill_row",
+                0,
+                [mixed.prefill_row.map_or(-1, |row| row as i32)],
+            );
+            let mut offset = 0;
+            for (row, lane) in step.lanes.iter().enumerate() {
+                if step.lane_kind(row) == GraphKind::Prefill {
+                    let admission = admissions[lane.request.slot as usize].as_ref().unwrap();
+                    let start = usize::try_from(lane.start_position)
+                        .map_err(|_| "prefill offset exceeds host range")?;
+                    let end = start
+                        .checked_add(lane.tokens)
+                        .ok_or("prefill extent overflow")?;
+                    let tokens = admission
+                        .prompt
+                        .get(start..end)
+                        .ok_or("mixed prefill exceeds prompt")?;
+                    self.staging
+                        .i64("token_ids", offset * 8, tokens.iter().map(|t| *t as i64));
+                } else {
+                    let live = scheduler.request(lane.request)?;
+                    let pending = live
+                        .tokens()
+                        .get(live.consumed_tokens as usize)
+                        .ok_or("mixed decode has no pending token")?;
+                    self.staging.i64("token_ids", offset * 8, [*pending as i64]);
+                }
+                offset += lane.tokens;
+            }
+        } else if step.kind == GraphKind::Prefill {
             let lane = &step.lanes[0];
             if step.lanes.len() != 1
                 || lane.tokens == 0
@@ -332,6 +363,18 @@ pub(crate) fn required_inputs(kind: GraphKind) -> &'static [&'static str] {
             "state_destination_slots",
             "state_operation",
             "state_num_ops",
+        ],
+        GraphKind::Mixed => &[
+            "prefill_row",
+            "request_state_rows",
+            "row_slot_ids",
+            "row_generations",
+            "live_rows",
+            "query_lengths",
+            "token_ids",
+            "page_tables",
+            "sample_enabled",
+            "sampling_grammar_mask",
         ],
         GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative => &[
             "request_state_rows",

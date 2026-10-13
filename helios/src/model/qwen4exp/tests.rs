@@ -137,6 +137,7 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                     handle: graphs.len() + 1,
                     batch_capacity: batch,
                     token_capacity: tokens,
+                    prefill_capacity: 0,
                     estimated_duration_ns: if kind == GraphKind::Snapshot {
                         1
                     } else {
@@ -196,6 +197,7 @@ fn general_sampler_graphs_are_required_and_duplicate_variants_reject() {
                 kind,
                 removed.batch_capacity,
                 removed.token_capacity,
+                0,
                 mode,
             )
             .unwrap();
@@ -309,6 +311,7 @@ fn speculative_catalog_requires_each_batch_and_shifted_page_binding() {
             GraphKind::Speculative,
             1,
             4,
+            0,
             SamplingMode::General
         )
         .is_err()
@@ -499,7 +502,9 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
             status: 1,
             ..Default::default()
         };
-        scheduler.complete(Fence(fence), &records).unwrap();
+        scheduler
+            .complete(Fence(fence), &records, Default::default())
+            .unwrap();
     }
     retain_prompt(&mut scheduler, 3);
     for fence in [4, 5] {
@@ -576,7 +581,9 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
             vector: Some(vector),
             ..Default::default()
         };
-        scheduler.complete(Fence(fence), &records).unwrap();
+        scheduler
+            .complete(Fence(fence), &records, Default::default())
+            .unwrap();
     }
 }
 
@@ -812,7 +819,9 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         token_id: -1,
         ..Default::default()
     };
-    scheduler.complete(Fence(1), &initialized).unwrap();
+    scheduler
+        .complete(Fence(1), &initialized, Default::default())
+        .unwrap();
     let step = scheduler.plan().unwrap();
     scheduler.commit(&step, Fence(2)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
@@ -838,7 +847,9 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         status: 1,
         ..Default::default()
     };
-    scheduler.complete(Fence(2), &records).unwrap();
+    scheduler
+        .complete(Fence(2), &records, Default::default())
+        .unwrap();
     retain_prompt(&mut scheduler, 3);
     let step = scheduler.plan().unwrap();
     scheduler.commit(&step, Fence(4)).unwrap();
@@ -906,7 +917,9 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         token_id: -1,
         ..Default::default()
     };
-    scheduler.complete(Fence(1), &records).unwrap();
+    scheduler
+        .complete(Fence(1), &records, Default::default())
+        .unwrap();
     let mut inputs = Inputs::new();
     for (sequence, start, count, capacity) in [(2, 0, 4096, 4096), (3, 4096, 17, 128)] {
         let step = scheduler.plan().unwrap();
@@ -949,7 +962,9 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
             status: 1,
             ..Default::default()
         };
-        scheduler.complete(Fence(sequence), &records).unwrap();
+        scheduler
+            .complete(Fence(sequence), &records, Default::default())
+            .unwrap();
     }
 }
 
@@ -1077,7 +1092,9 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
             ..Default::default()
         };
     }
-    scheduler.complete(Fence(1), &completed).unwrap();
+    scheduler
+        .complete(Fence(1), &completed, Default::default())
+        .unwrap();
     for h in &handles[..2] {
         scheduler.cancel(*h).unwrap();
     }
@@ -1118,7 +1135,9 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         status: 1,
         ..Default::default()
     };
-    scheduler.complete(Fence(2), &completed).unwrap();
+    scheduler
+        .complete(Fence(2), &completed, Default::default())
+        .unwrap();
     retain_prompt(&mut scheduler, 3);
     let masks = [vec![1; words], vec![2; words], vec![4; words]].concat();
     scheduler
@@ -1187,7 +1206,9 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         }),
         ..Default::default()
     };
-    scheduler.complete(Fence(4), &completed).unwrap();
+    scheduler
+        .complete(Fence(4), &completed, Default::default())
+        .unwrap();
     scheduler
         .set_copy_proposal(
             handle,
@@ -1456,7 +1477,9 @@ fn state_transfer_and_resume_upload_fixture() {
                 status,
                 ..Default::default()
             };
-            scheduler.complete(fence, &records).unwrap();
+            scheduler
+                .complete(fence, &records, Default::default())
+                .unwrap();
         }
         scheduler.finish(handle).unwrap();
     }
@@ -1558,7 +1581,8 @@ fn retain_prompt(s: &mut RequestScheduler, fence: u64) {
             ..Default::default()
         };
     }
-    s.complete(Fence(fence), &records).unwrap();
+    s.complete(Fence(fence), &records, Default::default())
+        .unwrap();
 }
 
 #[test]
@@ -1619,14 +1643,16 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
                     status: if kind == GraphKind::Prefill { 2 } else { 1 },
                     ..Default::default()
                 };
-                scheduler.complete(Fence(fence), &records).unwrap();
+                scheduler
+                    .complete(Fence(fence), &records, Default::default())
+                    .unwrap();
             }
             let checkpoint = scheduler.finish(seed).unwrap().unwrap();
             let blocked = scheduler.admit(spec(9)).unwrap();
             let restored = scheduler.admit(spec(7)).unwrap();
             assert_eq!(restored.slot, 1);
             fence += 1;
-            let init = scheduler.plan().unwrap();
+            let init = scheduler.phase_plan(GraphKind::Init, Some(blocked));
             assert_eq!(init.kind, GraphKind::Init);
             scheduler.commit(&init, Fence(fence)).unwrap();
             let mut records = [CompletionRecord::default(); 4];
@@ -1637,9 +1663,11 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
                 status: 1,
                 ..Default::default()
             };
-            scheduler.complete(Fence(fence), &records).unwrap();
+            scheduler
+                .complete(Fence(fence), &records, Default::default())
+                .unwrap();
             fence += 1;
-            let step = scheduler.plan().unwrap();
+            let step = scheduler.phase_plan(GraphKind::Restore, Some(restored));
             assert_eq!(step.kind, GraphKind::Restore);
             scheduler.commit(&step, Fence(fence)).unwrap();
             let mut admissions: [_; 4] = std::array::from_fn(|_| None);
@@ -1788,4 +1816,244 @@ fn reduced_concurrency_preserves_captured_buffer_strides() {
     assert_eq!(captured.buffer("page_tables").unwrap().shape[0], 4);
     config.limits.request_slots = 1;
     assert!(validate::<Qwen4Exp>(&config, &captured).is_err());
+}
+
+fn mixed_manifest(config: &ModelConfig, width: usize) -> ExecutionManifest {
+    let mut m = manifest(config);
+    m.abi_version = crate::execution::SPECULATIVE_ABI_VERSION;
+    let completion = m
+        .buffers
+        .iter_mut()
+        .find(|b| b.name == "completion_records")
+        .unwrap();
+    completion.shape = vec![2, 4, 24];
+    completion.strides = vec![96, 24, 1];
+    completion.nbytes = 1536;
+    let address = m
+        .buffers
+        .iter()
+        .map(|b| b.address + b.nbytes)
+        .max()
+        .unwrap()
+        .next_multiple_of(8);
+    m.buffers.push(BufferDescriptor {
+        name: "prefill_row".into(),
+        address,
+        nbytes: 4,
+        dtype: Dtype::Int32,
+        shape: vec![1],
+        strides: vec![1],
+    });
+    let mut bindings = m.graphs[0].input_bindings.clone();
+    bindings.push(InputBinding {
+        buffer_name: "prefill_row".into(),
+        host_offset: m.input_frame_bytes,
+        nbytes: 4,
+    });
+    m.input_frame_bytes += 8;
+    for prefill_capacity in [64, 128] {
+        m.graphs.push(GraphDescriptor {
+            name: format!("mixed-{prefill_capacity}"),
+            kind: GraphKind::Mixed,
+            sampling_mode: SamplingMode::General,
+            handle: m.graphs.len() + 1,
+            batch_capacity: 2,
+            token_capacity: width,
+            prefill_capacity,
+            estimated_duration_ns: if prefill_capacity == 64 {
+                1
+            } else {
+                10_000_000
+            },
+            input_bindings: bindings.clone(),
+        });
+    }
+    m
+}
+
+#[test]
+fn mixed_catalog_selects_both_capacities_and_rejects_missing_role_bindings() {
+    let config = config();
+    let m = mixed_manifest(&config, 1);
+    validate::<Qwen4Exp>(&config, &m).unwrap();
+    for p in [64, 128] {
+        let index = select::<Qwen4Exp>(
+            &config,
+            &m,
+            GraphKind::Mixed,
+            2,
+            1,
+            p,
+            SamplingMode::General,
+        )
+        .unwrap();
+        assert_eq!(m.graphs[index].prefill_capacity, p);
+    }
+    assert!(
+        select::<Qwen4Exp>(
+            &config,
+            &m,
+            GraphKind::Mixed,
+            2,
+            1,
+            512,
+            SamplingMode::General
+        )
+        .is_err()
+    );
+    let mut broken = m;
+    broken
+        .graphs
+        .last_mut()
+        .unwrap()
+        .input_bindings
+        .retain(|b| b.buffer_name != "prefill_row");
+    assert!(validate::<Qwen4Exp>(&config, &broken).is_err());
+}
+
+#[test]
+fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_eligible_rows() {
+    for width in [1, 3] {
+        let mut config = config();
+        if width > 1 {
+            config.speculative_widths = vec![1, 3];
+        }
+        let m = mixed_manifest(&config, width);
+        validate::<Qwen4Exp>(&config, &m).unwrap();
+        let mut scheduler = RequestScheduler::new(
+            config.identity,
+            config.limits,
+            Qwen4Exp::scheduler_capabilities(&config),
+        )
+        .unwrap();
+        scheduler
+            .enable_speculation(&config.speculative_widths)
+            .unwrap();
+        scheduler
+            .mixed_graphs(&[(2, width, 64), (2, width, 128)])
+            .unwrap();
+        scheduler.measured_graph_durations(&m.graphs).unwrap();
+        let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
+        let mut admit = |scheduler: &mut RequestScheduler, count: usize, token: u32| {
+            let prompt = vec![token; count];
+            let h = scheduler
+                .admit(RequestSpec {
+                    prompt: prompt.clone(),
+                    system_boundary: None,
+                    conditioning: vec![],
+                    max_new_tokens: 16,
+                    grammar_constrained: false,
+                    host_stops: false,
+                })
+                .unwrap();
+            admissions[h.slot as usize] = Some(Admission {
+                handle: h,
+                sampling: SamplingParameters::default(),
+                max_new_tokens: 16,
+                prompt,
+                data: PromptData {
+                    positions: (0..count).map(|p| [p as i64; 3]).collect(),
+                    vision_token_indices: vec![-1; count],
+                },
+                grammar_mask: None,
+                ignore_eos: false,
+            });
+            h
+        };
+        let d = admit(&mut scheduler, 65, 7);
+        for (fence, kind, consumed, generated, token) in [
+            (1, GraphKind::Init, 0, 0, -1),
+            (2, GraphKind::Prefill, 65, 1, 7),
+        ] {
+            let plan = scheduler.phase_plan(kind, Some(d));
+            scheduler.commit(&plan, Fence(fence)).unwrap();
+            let mut records = [CompletionRecord::default(); 4];
+            records[d.slot as usize] = CompletionRecord {
+                generation: d.generation as i64,
+                submission_sequence: fence as i64,
+                consumed_tokens: consumed,
+                generated_tokens: generated,
+                token_id: token,
+                status: 1,
+                ..Default::default()
+            };
+            scheduler
+                .complete(Fence(fence), &records, Default::default())
+                .unwrap();
+        }
+        retain_prompt(&mut scheduler, 3);
+        let p = admit(&mut scheduler, 129, 11);
+        let init = scheduler.phase_plan(GraphKind::Init, Some(p));
+        scheduler.commit(&init, Fence(4)).unwrap();
+        let mut records = [CompletionRecord::default(); 4];
+        records[p.slot as usize] = CompletionRecord {
+            generation: p.generation as i64,
+            submission_sequence: 4,
+            token_id: -1,
+            status: 1,
+            ..Default::default()
+        };
+        scheduler
+            .complete(Fence(4), &records, Default::default())
+            .unwrap();
+        let plan = scheduler.plan().unwrap();
+        assert_eq!(plan.kind, GraphKind::Mixed);
+        assert_eq!(plan.mixed.as_ref().unwrap().prefill_row, Some(1));
+        scheduler.commit(&plan, Fence(5)).unwrap();
+        let mut inputs = Inputs::new();
+        crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &plan, &admissions)
+            .unwrap();
+        let uploads = inputs.uploads();
+        let integers = |name: &str| {
+            uploads
+                .iter()
+                .find(|u| u.buffer == name)
+                .unwrap()
+                .bytes
+                .chunks_exact(4)
+                .map(|v| i32::from_le_bytes(v.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(integers("prefill_row"), [1]);
+        assert_eq!(integers("query_lengths"), [width as i32, 64, 0, 0]);
+        assert_eq!(integers("sample_enabled"), [1, 0, 0, 0]);
+        assert_eq!(
+            uploads
+                .iter()
+                .filter(|u| u.buffer == "query_lengths")
+                .count(),
+            1
+        );
+        for (name, bytes_per_token) in [
+            ("token_ids", 8),
+            ("prefill_positions", 24),
+            ("vision_token_indices", 4),
+        ] {
+            let upload = uploads.iter().find(|u| u.buffer == name).unwrap();
+            assert_eq!(upload.offset, width * bytes_per_token);
+            assert_eq!(upload.bytes.len(), 64 * bytes_per_token);
+        }
+        let tokens = uploads.iter().find(|u| u.buffer == "token_ids").unwrap();
+        assert!(
+            tokens
+                .bytes
+                .chunks_exact(8)
+                .all(|v| i64::from_le_bytes(v.try_into().unwrap()) == 11)
+        );
+        if width > 1 {
+            assert_eq!(integers("copy_token_count")[1], 0);
+        }
+        let mut wrong = (*plan).clone();
+        wrong.mixed.as_mut().unwrap().prefill_row = Some(0);
+        assert!(
+            crate::model::pack_inputs::<Qwen4Exp>(
+                &mut inputs,
+                &config,
+                &scheduler,
+                &wrong,
+                &admissions
+            )
+            .is_err()
+        );
+    }
 }

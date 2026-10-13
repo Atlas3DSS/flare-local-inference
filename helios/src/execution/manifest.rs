@@ -59,6 +59,7 @@ pub enum GraphKind {
     Prefill,
     Decode,
     Speculative,
+    Mixed,
     Resume,
     Vision,
 }
@@ -67,7 +68,7 @@ impl GraphKind {
     pub fn samples(self) -> bool {
         matches!(
             self,
-            Self::Prefill | Self::Decode | Self::Speculative | Self::Resume
+            Self::Prefill | Self::Decode | Self::Speculative | Self::Mixed | Self::Resume
         )
     }
 }
@@ -101,6 +102,7 @@ impl TryFrom<&str> for GraphKind {
             "prefill" => Ok(Self::Prefill),
             "decode" => Ok(Self::Decode),
             "speculative" => Ok(Self::Speculative),
+            "mixed" => Ok(Self::Mixed),
             "resume" => Ok(Self::Resume),
             "vision" => Ok(Self::Vision),
             _ => Err(Error::execution(
@@ -136,9 +138,25 @@ pub struct GraphDescriptor {
     pub handle: usize,
     pub batch_capacity: usize,
     pub token_capacity: usize,
+    /// Prompt capacity for a mixed graph; zero for every other operation.
+    pub prefill_capacity: usize,
     /// Zero denotes an indeterminate duration.
     pub estimated_duration_ns: u64,
     pub input_bindings: Vec<InputBinding>,
+}
+
+impl GraphDescriptor {
+    pub fn packed_tokens(&self) -> usize {
+        if self.kind == GraphKind::Mixed {
+            self.prefill_capacity.saturating_add(
+                self.batch_capacity
+                    .saturating_sub(1)
+                    .saturating_mul(self.token_capacity),
+            )
+        } else {
+            self.batch_capacity.saturating_mul(self.token_capacity)
+        }
+    }
 }
 
 /// A check every completed frame passes before its results are published: a transport for
@@ -311,6 +329,19 @@ impl ExecutionManifest {
                 ));
             }
             let valid = match graph.kind {
+                GraphKind::Mixed => {
+                    self.abi_version == SPECULATIVE_ABI_VERSION
+                        && BATCH_CAPACITIES.contains(&graph.batch_capacity)
+                        && (2..=self.request_capacity()).contains(&graph.batch_capacity)
+                        && (1..=8).contains(&graph.token_capacity)
+                        && graph.prefill_capacity >= 64
+                        && graph.prefill_capacity.is_multiple_of(64)
+                        && graph.packed_tokens() <= i32::MAX as usize
+                        && graph
+                            .prefill_capacity
+                            .checked_add((graph.batch_capacity - 1) * graph.token_capacity)
+                            .is_some()
+                }
                 GraphKind::Speculative => {
                     self.abi_version == SPECULATIVE_ABI_VERSION
                         && BATCH_CAPACITIES.contains(&graph.batch_capacity)
@@ -330,7 +361,7 @@ impl ExecutionManifest {
                         && graph.token_capacity == 1
                 }
             };
-            if !valid {
+            if !valid || (graph.kind != GraphKind::Mixed && graph.prefill_capacity != 0) {
                 return Err(Error::execution(
                     ExecutionError::Manifest,
                     format!("unsupported graph capacities: {}", graph.name),
@@ -377,6 +408,15 @@ impl ExecutionManifest {
                     ExecutionError::Manifest,
                     format!("graph {} lacks reserved input bindings", graph.name),
                 ));
+            }
+            if graph.kind == GraphKind::Mixed {
+                let row = self.buffer("prefill_row")?;
+                if row.dtype != Dtype::Int32 || row.shape != [1] || !bound.contains("prefill_row") {
+                    return Err(Error::execution(
+                        ExecutionError::Manifest,
+                        "mixed graphs require an int32[1] prefill_row input",
+                    ));
+                }
             }
         }
         let mut spans: Vec<_> = host_spans.values().copied().collect();

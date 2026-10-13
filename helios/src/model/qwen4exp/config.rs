@@ -103,11 +103,17 @@ pub(super) fn required_inputs(
 ) -> impl Iterator<Item = &'static str> {
     let transfer = matches!(kind, GraphKind::Restore | GraphKind::Snapshot);
     let draft = config.has_learned_drafts() && (transfer || kind.samples());
-    let copy = kind == GraphKind::Speculative && !config.has_learned_drafts();
+    let speculative = matches!(kind, GraphKind::Speculative | GraphKind::Mixed)
+        && !config.speculative_widths.is_empty();
+    let copy = speculative && !config.has_learned_drafts();
     base_inputs(kind).iter().copied().chain(
         [
             transfer.then_some("page_tables"),
             draft.then_some("draft_page_tables"),
+            (kind == GraphKind::Mixed && speculative).then_some("copy_token_ids"),
+            (kind == GraphKind::Mixed && speculative).then_some("copy_token_count"),
+            (kind == GraphKind::Mixed && speculative).then_some("copy_expected_consumed"),
+            (kind == GraphKind::Mixed && speculative).then_some("copy_generation"),
             copy.then_some("copy_grammar_mask"),
             copy.then_some("copy_grammar_mask_count"),
         ]
@@ -154,6 +160,20 @@ fn base_inputs(kind: GraphKind) -> &'static [&'static str] {
             "row_slot_ids",
             "row_generations",
             "live_rows",
+        ],
+        GraphKind::Mixed => &[
+            "prefill_row",
+            "request_state_rows",
+            "row_slot_ids",
+            "row_generations",
+            "live_rows",
+            "query_lengths",
+            "token_ids",
+            "prefill_positions",
+            "vision_token_indices",
+            "page_tables",
+            "sample_enabled",
+            "sampling_grammar_mask",
         ],
         GraphKind::Prefill => &[
             "request_state_rows",

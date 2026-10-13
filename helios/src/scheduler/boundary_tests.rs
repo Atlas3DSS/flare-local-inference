@@ -96,7 +96,7 @@ fn run_step(s: &mut RequestScheduler) -> ScheduledPlan {
         }
         records[lane.request.slot as usize] = record;
     }
-    s.complete(fence, &records).unwrap();
+    s.complete(fence, &records, Default::default()).unwrap();
     step
 }
 fn stop_at_capture(s: &mut RequestScheduler, handle: RequestHandle, endpoint: u64) {
@@ -248,7 +248,7 @@ fn required_boundary_reservations_fail_transactionally_and_cancel_behind_fence()
         status: 1,
         ..Default::default()
     };
-    s.complete(fence, &record).unwrap();
+    s.complete(fence, &record, Default::default()).unwrap();
     assert_eq!(s.free_snapshot_count(), 3);
     assert_eq!(s.free_page_count(), 256);
     assert_eq!(s.cache.stats().published_checkpoints, 0);
@@ -290,7 +290,7 @@ fn failed_boundary_copy_is_not_published_and_all_reservations_retire() {
         error_code: 9,
         ..Default::default()
     };
-    s.complete(fence, &records).unwrap();
+    s.complete(fence, &records, Default::default()).unwrap();
     assert_eq!(s.finish(h).unwrap(), None);
     assert_eq!(s.free_snapshot_count(), 3);
     assert_eq!(s.free_page_count(), 256);

@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Require a design acknowledgment matching the staged review checklist."""
+
+import hashlib
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+REVIEW_DOCUMENT = "docs/design-review.md"
+TRAILER = "Design-Signed-Off-By"
+
+
+def reject(reason):
+    print(f"Design review: {reason}", file=sys.stderr)
+    print(
+        f"Read {REVIEW_DOCUMENT}, follow its commit self-review instructions, "
+        "and review the staged diff before retrying.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def main():
+    if len(sys.argv) != 2:
+        return reject("commit-msg requires a commit message file.")
+
+    try:
+        document = subprocess.check_output(
+            ["git", "show", f":{REVIEW_DOCUMENT}"], stderr=subprocess.PIPE
+        )
+    except subprocess.CalledProcessError:
+        return reject(f"cannot read the staged {REVIEW_DOCUMENT}; stage it before committing.")
+    except OSError:
+        return reject("cannot run Git to read the staged checklist.")
+
+    try:
+        trailers = subprocess.check_output(
+            ["git", "interpret-trailers", "--parse"],
+            input=Path(sys.argv[1]).read_bytes(),
+            stderr=subprocess.PIPE,
+        ).decode("utf-8", errors="replace")
+    except (OSError, subprocess.CalledProcessError):
+        return reject("cannot read or parse the commit message.")
+
+    acknowledgments = []
+    for line in trailers.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key == TRAILER:
+            acknowledgments.append(value.strip())
+
+    if len(acknowledgments) != 1:
+        return reject("missing or duplicate design acknowledgment in the final trailer block.")
+
+    match = re.fullmatch(r"([^;\r\n]+); design-review=([0-9a-f]{4})", acknowledgments[0])
+    if match is None or not match[1].strip():
+        return reject("malformed design acknowledgment.")
+    if match[2] != hashlib.sha256(document).hexdigest()[:4]:
+        return reject("design acknowledgment does not match the staged checklist.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

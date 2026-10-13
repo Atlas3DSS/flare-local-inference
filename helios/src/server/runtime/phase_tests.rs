@@ -121,6 +121,7 @@ impl Fixture {
                         } else {
                             width
                         },
+                        prefill_capacity: 0,
                         estimated_duration_ns: 1000,
                         input_bindings: vec![],
                     });
@@ -303,7 +304,7 @@ fn worker_observes_prefill_decode_and_prerequisite_timings() {
 }
 
 #[test]
-fn worker_discovers_indeterminate_costs_and_initializes_useful_progress_credits() {
+fn worker_discovers_indeterminate_costs_and_records_actual_progress() {
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
@@ -347,8 +348,8 @@ fn worker_discovers_indeterminate_costs_and_initializes_useful_progress_credits(
         assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(200));
     }
     let accounting = worker.scheduler.request(h).unwrap().accounting();
-    assert_eq!(accounting.decode_credit_ns, 200.0);
-    assert_eq!(accounting.committed_credit_ns, 600.0);
+    assert_eq!(accounting.committed_prefill_tokens, 13);
+    assert_eq!(accounting.committed_output_tokens, 2);
 }
 
 #[test]
@@ -368,6 +369,15 @@ fn output_clock_advances_only_after_stop_buffering_releases_tokens() {
     );
     advance(&mut worker, GraphKind::Init, 1, None);
     advance(&mut worker, GraphKind::Prefill, 2, Some(1));
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .published_deliveries,
+        0
+    );
     assert_eq!(
         worker
             .scheduler
@@ -400,6 +410,24 @@ fn output_clock_advances_only_after_stop_buffering_releases_tokens() {
         .accounting()
         .last_output_ns;
     assert!(published.is_some());
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .published_deliveries,
+        1
+    );
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .last_output_fence,
+        Some(Fence(4))
+    );
     assert!(matches!(
         generation.events.try_recv(),
         Ok(GenerationEvent::ObservedToken { token: 3, .. })
@@ -413,6 +441,15 @@ fn output_clock_advances_only_after_stop_buffering_releases_tokens() {
         Ok(GenerationEvent::Token(3))
     ));
     advance(&mut worker, GraphKind::Decode, 5, Some(1));
+    assert_eq!(
+        worker
+            .scheduler
+            .request(h)
+            .unwrap()
+            .accounting()
+            .published_deliveries,
+        1
+    );
     assert_eq!(
         worker
             .scheduler

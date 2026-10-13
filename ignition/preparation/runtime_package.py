@@ -807,7 +807,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None, bun
         buffer["reference"] = package._reference(buffer.pop("address"), buffer["nbytes"])
     for graph in execution["graphs"]:
         graph.pop("handle")
-        if graph["kind"] == "speculative":
+        if graph["kind"] == "speculative" or (graph["kind"] == "mixed" and graph["speculation_enabled"]):
             graph["draft_tokens"] = graph["token_capacity"] - 1
             graph["verify_tokens"] = graph["token_capacity"]
             graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"

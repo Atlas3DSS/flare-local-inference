@@ -6,11 +6,21 @@ use crate::{
     execution::{ExecutionTiming, GraphDescriptor, GraphKind},
 };
 
+pub(super) fn observed_duration_ns(timing: ExecutionTiming) -> Option<u64> {
+    timing
+        .gpu_ns
+        .into_iter()
+        .flatten()
+        .max()
+        .filter(|ns| *ns > 0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Key {
     kind: GraphKind,
     batch: usize,
     tokens: usize,
+    prefill: usize,
 }
 
 struct Estimate {
@@ -32,6 +42,19 @@ pub(super) struct ActionCosts {
 }
 
 impl ActionCosts {
+    #[cfg(test)]
+    pub fn set_measured(&mut self, step: &ScheduledStep, nanos: u64) {
+        let key = Key {
+            kind: step.kind,
+            batch: step.batch_capacity,
+            tokens: step.token_capacity,
+            prefill: step.prefill_capacity(),
+        };
+        let estimate = &mut self.entries.iter_mut().find(|(k, _)| *k == key).unwrap().1;
+        estimate.nanos = nanos;
+        estimate.observed_at_ns = self.now_ns;
+    }
+
     pub fn prepared(graphs: &[GraphDescriptor]) -> Result<Self> {
         let mut entries = Vec::with_capacity(graphs.len());
         for graph in graphs {
@@ -39,6 +62,7 @@ impl ActionCosts {
                 kind: graph.kind,
                 batch: graph.batch_capacity,
                 tokens: graph.token_capacity,
+                prefill: graph.prefill_capacity,
             };
             if entries.iter().any(|(k, _)| *k == key) {
                 return Err("prepared graphs require unique shapes".into());
@@ -64,7 +88,23 @@ impl ActionCosts {
     }
 
     pub fn duration(&self, kind: GraphKind, batch: usize, tokens: usize) -> Option<u64> {
-        self.entry(kind, batch, tokens).map(|estimate| {
+        self.shape_duration(kind, batch, tokens, 0)
+    }
+
+    pub fn shape_duration(
+        &self,
+        kind: GraphKind,
+        batch: usize,
+        tokens: usize,
+        prefill: usize,
+    ) -> Option<u64> {
+        self.entry(Key {
+            kind,
+            batch,
+            tokens,
+            prefill,
+        })
+        .map(|estimate| {
             if estimate.fresh(self.now_ns, self.ttl_ns) {
                 estimate.nanos
             } else {
@@ -73,19 +113,7 @@ impl ActionCosts {
         })
     }
 
-    // Normalization units retain their last estimate independently of prediction expiry.
-    pub fn reference_duration(&self, kind: GraphKind, batch: usize, tokens: usize) -> Option<u64> {
-        self.entry(kind, batch, tokens)
-            .map(|estimate| estimate.nanos)
-            .filter(|n| *n != 0)
-    }
-
-    fn entry(&self, kind: GraphKind, batch: usize, tokens: usize) -> Option<&Estimate> {
-        let key = Key {
-            kind,
-            batch,
-            tokens,
-        };
+    fn entry(&self, key: Key) -> Option<&Estimate> {
         self.entries
             .iter()
             .find(|(k, _)| *k == key)
@@ -93,23 +121,23 @@ impl ActionCosts {
     }
 
     pub fn get(&self, step: &ScheduledStep) -> Option<u64> {
-        self.duration(step.kind, step.batch_capacity, step.token_capacity)
+        self.shape_duration(
+            step.kind,
+            step.batch_capacity,
+            step.token_capacity,
+            step.prefill_capacity(),
+        )
     }
 
     pub fn observe(&mut self, step: &ScheduledStep, timing: ExecutionTiming) {
-        let Some(sample) = timing
-            .gpu_ns
-            .into_iter()
-            .flatten()
-            .max()
-            .filter(|ns| *ns > 0)
-        else {
+        let Some(sample) = observed_duration_ns(timing) else {
             return;
         };
         let key = Key {
             kind: step.kind,
             batch: step.batch_capacity,
             tokens: step.token_capacity,
+            prefill: step.prefill_capacity(),
         };
         if let Some((_, estimate)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
             estimate.nanos = if estimate.fresh(self.now_ns, self.ttl_ns) {

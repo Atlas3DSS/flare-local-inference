@@ -18,6 +18,7 @@ pub(in crate::server) struct GraphLabel {
     pub kind: GraphKind,
     pub batch: usize,
     pub tokens: usize,
+    pub prefill: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -46,7 +47,7 @@ pub(in crate::server) struct RequestDetail {
     pub generated: u32,
     pub last_progress_ns: u64,
     pub last_output_ns: Option<u64>,
-    pub deficit_ns: f64,
+    pub published_deliveries: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +92,7 @@ impl SchedulerMetrics {
                     kind: g.kind,
                     batch: g.batch_capacity,
                     tokens: g.token_capacity,
+                    prefill: g.prefill_capacity,
                 })
                 .collect(),
         );
@@ -205,6 +207,7 @@ mod tests {
             kind: GraphKind::Decode,
             batch_capacity: 1,
             token_capacity: 1,
+            mixed: None,
             requires_feedback: false,
             lanes: vec![crate::scheduler::ScheduledLane {
                 request: RequestHandle {

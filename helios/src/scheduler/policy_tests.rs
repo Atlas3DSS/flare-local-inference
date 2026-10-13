@@ -1,5 +1,5 @@
 use super::*;
-use crate::execution::{ExecutionTiming, TokenVector};
+use crate::execution::{ExecutionTiming, SamplingMode, TokenVector};
 
 const MS: u64 = 1_000_000;
 
@@ -38,14 +38,6 @@ fn engine(active: usize, speculative: bool) -> RequestScheduler {
     if speculative {
         s.enable_speculation(&[1, 2, 4, 8]).unwrap();
     }
-    s.configure_policy(PolicyConfig {
-        max_slice_ns: 6 * MS,
-        submission_window_ns: 6 * MS,
-        service_gap_ns: 12 * MS,
-        deficit_scale_ns: 4 * MS,
-        ..PolicyConfig::default()
-    })
-    .unwrap();
     s
 }
 
@@ -68,12 +60,22 @@ fn complete(
     accepted: usize,
     publish: bool,
 ) {
+    complete_timed(s, plan, fence, accepted, publish, Default::default());
+}
+
+fn completion_records(
+    s: &RequestScheduler,
+    plan: &ScheduledPlan,
+    fence: Fence,
+    accepted: usize,
+) -> Vec<CompletionRecord> {
     let mut records = vec![CompletionRecord::default(); s.limits.request_capacity()];
-    for lane in &plan.lanes {
+    for (row, lane) in plan.lanes.iter().enumerate() {
+        let kind = plan.lane_kind(row);
         let Ok(r) = s.request(lane.request) else {
             continue;
         };
-        let count = match plan.kind {
+        let count = match kind {
             GraphKind::Prefill => {
                 usize::from(r.consumed_tokens + lane.tokens as u64 == r.prompt_tokens as u64)
             }
@@ -81,7 +83,7 @@ fn complete(
             GraphKind::Speculative => lane.tokens.min(accepted + 1),
             _ => 0,
         };
-        let consumed = if plan.kind == GraphKind::Speculative {
+        let consumed = if kind == GraphKind::Speculative {
             r.consumed_tokens + count as u64
         } else {
             lane.start_position + lane.tokens as u64
@@ -100,7 +102,7 @@ fn complete(
             },
             ..Default::default()
         };
-        if plan.kind == GraphKind::Speculative {
+        if kind == GraphKind::Speculative {
             let mut tokens = [-1; 8];
             tokens[..count].fill(99);
             record.vector = Some(TokenVector {
@@ -115,10 +117,22 @@ fn complete(
         }
         records[lane.request.slot as usize] = record;
     }
-    let output = s.complete(fence, &records).unwrap();
+    records
+}
+
+fn complete_timed(
+    s: &mut RequestScheduler,
+    plan: &ScheduledPlan,
+    fence: Fence,
+    accepted: usize,
+    publish: bool,
+    timing: ExecutionTiming,
+) {
+    let records = completion_records(s, plan, fence, accepted);
+    let output = s.complete(fence, &records, timing).unwrap();
     if publish {
         for token in output {
-            s.published_output(token.request).unwrap();
+            s.published_output(token.request, fence).unwrap();
         }
     }
     let finished: Vec<_> = s
@@ -139,7 +153,14 @@ fn step(s: &mut RequestScheduler, accepted: usize) -> ScheduledPlan {
     s.commit(&plan, fence).unwrap();
     s.advance_to(s.now_ns + plan.estimated_duration_ns())
         .unwrap();
-    complete(s, &plan, fence, accepted, true);
+    complete_timed(
+        s,
+        &plan,
+        fence,
+        accepted,
+        true,
+        gpu_time(plan.estimated_duration_ns()),
+    );
     plan
 }
 
@@ -157,250 +178,41 @@ fn ready(s: &mut RequestScheduler, handles: &[RequestHandle]) {
 }
 
 #[test]
-fn entitlement_integrates_arrival_cancellation_and_overlapping_frames_once() {
-    let mut s = engine(2, false);
-    let first = add(&mut s, 1, 65, 32);
-    let a = s.plan().unwrap();
-    s.commit(&a, Fence(1)).unwrap();
-    s.advance_to(40_000).unwrap();
-    let second = add(&mut s, 2, 65, 32);
-    s.advance_to(80_000).unwrap();
-    let b = s.plan().unwrap();
-    assert_eq!(b.lanes[0].request, second);
-    s.commit(&b, Fence(2)).unwrap();
-    s.advance_to(140_000).unwrap();
-    assert_eq!(
-        s.request(first).unwrap().accounting.entitlement_ns,
-        90_000.0
-    );
-    assert_eq!(
-        s.request(second).unwrap().accounting.entitlement_ns,
-        50_000.0
-    );
-    complete(&mut s, &a, Fence(1), 0, false);
-    s.advance_to(160_000).unwrap();
-    assert_eq!(
-        s.request(second).unwrap().accounting.entitlement_ns,
-        60_000.0
-    );
-    s.cancel(second).unwrap();
-    s.advance_to(200_000).unwrap();
-    assert_eq!(
-        s.request(first).unwrap().accounting.entitlement_ns,
-        140_000.0
-    );
-    assert_eq!(
-        s.request(first).unwrap().accounting.committed_credit_ns,
-        0.0
-    );
-    assert!(s.advance_to(199_999).is_err());
-    complete(&mut s, &b, Fence(2), 0, false);
-    s.advance_to(MS).unwrap();
-    assert_eq!(
-        s.request(first).unwrap().accounting.entitlement_ns,
-        140_000.0
-    );
-}
-
-#[test]
-fn external_dependencies_pause_entitlement_and_preserve_deficit() {
-    let mut s = engine(2, false);
-    let first = add(&mut s, 1, 65, 32);
-    let second = add(&mut s, 2, 65, 32);
-    s.request_mut(second).unwrap().phase = RequestPhase::Inbound;
-    let plan = s.plan().unwrap();
-    s.commit(&plan, Fence(1)).unwrap();
-    s.advance_to(20_000).unwrap();
-    assert_eq!(
-        s.request(first).unwrap().accounting.entitlement_ns,
-        20_000.0
-    );
-    assert_eq!(s.request(second).unwrap().accounting.entitlement_ns, 0.0);
-    s.request_mut(second).unwrap().phase = RequestPhase::Restore;
-    s.advance_to(40_000).unwrap();
-    assert_eq!(
-        s.request(first).unwrap().accounting.entitlement_ns,
-        30_000.0
-    );
-    assert_eq!(s.request(second).unwrap().accounting.deficit_ns, 10_000.0);
-}
-
-#[test]
-fn committed_output_earns_credit_and_publication_has_its_own_clock() {
+fn a_speculative_burst_counts_one_published_delivery() {
     let mut s = engine(1, true);
-    s.fixed_speculative_width(Some(4)).unwrap();
-    let h = add(&mut s, 1, 65, 32);
+    s.fixed_speculative_width(Some(8)).unwrap();
+    let h = add(&mut s, 1, 65, 64);
     ready(&mut s, &[h]);
+    let deliveries = s.request(h).unwrap().accounting.published_deliveries;
+    let output = s.request(h).unwrap().generated_tokens;
+    step(&mut s, 7);
+    let request = s.request(h).unwrap();
+    assert_eq!(request.generated_tokens, output + 8);
+    assert_eq!(request.accounting.published_deliveries, deliveries + 1);
+    assert_eq!(request.accounting.last_output_fence, Some(s.completed));
+}
+
+#[test]
+fn publication_requires_a_matching_output_completion() {
+    let mut s = engine(1, true);
+    let h = add(&mut s, 1, 65, 64);
+    assert!(s.published_output(h, Fence(0)).is_err());
+    step(&mut s, 0);
+    assert!(s.published_output(h, s.completed).is_err());
+    ready(&mut s, &[h]);
+    let earlier = s.request(h).unwrap().accounting.last_output_fence.unwrap();
+    step(&mut s, 1);
     let before = *s.request(h).unwrap().accounting();
-    let plan = s.plan().unwrap();
-    let fence = Fence(s.submitted.0 + 1);
-    s.commit(&plan, fence).unwrap();
-    s.advance_to(s.now_ns + plan.estimated_duration_ns())
-        .unwrap();
-    complete(&mut s, &plan, fence, 1, false);
-    let after = *s.request(h).unwrap().accounting();
-    assert_eq!(
-        after.committed_credit_ns - before.committed_credit_ns,
-        2.0 * before.decode_credit_ns
-    );
-    assert_eq!(after.last_output_ns, before.last_output_ns);
-    assert_eq!(after.last_progress_ns, s.now_ns);
-    s.observe_execution(
-        &plan,
-        ExecutionTiming {
-            gpu_ns: [
-                Some(100 * MS),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ],
-            ..Default::default()
-        },
-    );
-    assert_eq!(
-        s.request(h).unwrap().accounting.decode_credit_ns,
-        before.decode_credit_ns
-    );
-    s.advance_to(s.now_ns + MS).unwrap();
-    s.published_output(h).unwrap();
+    assert!(s.published_output(h, earlier).is_err());
+    assert!(s.published_output(h, Fence(s.submitted.0 + 1)).is_err());
     assert_eq!(
         s.request(h).unwrap().accounting.last_output_ns,
-        Some(s.now_ns)
+        before.last_output_ns
     );
-}
-
-#[test]
-fn short_arrival_gets_output_while_long_prefill_keeps_progressing() {
-    let mut s = engine(2, false);
-    let long = add(&mut s, 1, 4096, 32);
-    step(&mut s, 0);
-    step(&mut s, 0);
-    let previous = s.request(long).unwrap().consumed_tokens;
-    let arrival = s.now_ns;
-    let short = add(&mut s, 2, 65, 32);
-    let mut first_output = None;
-    for _ in 0..30 {
-        let plan = step(&mut s, 0);
-        assert!(plan.estimated_duration_ns() <= s.policy.max_slice_ns);
-        if first_output.is_none() {
-            first_output = s
-                .request(short)
-                .ok()
-                .and_then(|r| r.accounting.last_output_ns);
-        }
-    }
-    assert!(first_output.unwrap() - arrival <= 2 * s.policy.service_gap_ns);
-    assert!(s.request(long).unwrap().consumed_tokens > previous);
-}
-
-#[test]
-fn speculative_cohorts_follow_acceptance_until_a_deficit_requires_other_requests() {
-    let mut s = engine(4, true);
-    let handles: Vec<_> = (1..=4).map(|id| add(&mut s, id, 1, 64)).collect();
-    ready(&mut s, &handles);
-    let mut graphs = super::tests::duration_graphs(4);
-    for g in &mut graphs {
-        g.estimated_duration_ns = match (g.kind, g.batch_capacity, g.token_capacity) {
-            (GraphKind::Speculative, 2, 4) => 2 * MS,
-            (GraphKind::Speculative, _, 1) => 2 * MS,
-            (GraphKind::Speculative, _, _) => 10 * MS,
-            _ => MS,
-        };
-    }
-    s.costs = super::tests::measured_costs(&graphs);
-    let now = s.now_ns;
-    for (index, h) in handles.iter().enumerate() {
-        let r = s.request_mut(*h).unwrap();
-        for _ in 0..128 {
-            r.acceptance
-                .observe(7, if index < 2 { 7 } else { 0 }, index >= 2, 0);
-        }
-        r.accounting.deficit_ns = 0.0;
-        r.accounting.last_output_ns = Some(now);
-    }
-    let plan = s.plan().unwrap();
-    assert_eq!((plan.batch_capacity, plan.token_capacity), (2, 4));
     assert_eq!(
-        plan.lanes.iter().map(|l| l.request).collect::<Vec<_>>(),
-        handles[..2]
+        s.request(h).unwrap().accounting.published_deliveries,
+        before.published_deliveries
     );
-    for graph in &mut graphs {
-        if graph.kind == GraphKind::Speculative && graph.batch_capacity == 1 {
-            graph.estimated_duration_ns = 10 * MS;
-        }
-    }
-    s.costs = super::tests::measured_costs(&graphs);
-    let protected = s.plan().unwrap();
-    assert_eq!((protected.batch_capacity, protected.token_capacity), (4, 1));
-    for graph in &mut graphs {
-        if graph.kind == GraphKind::Speculative && graph.token_capacity == 1 {
-            graph.estimated_duration_ns = 2 * MS;
-        }
-    }
-    s.costs = super::tests::measured_costs(&graphs);
-    s.request_mut(handles[2]).unwrap().accounting.deficit_ns = 5.0 * MS as f64;
-    assert!(
-        s.plan()
-            .unwrap()
-            .lanes
-            .iter()
-            .any(|l| l.request == handles[2])
-    );
-}
-
-#[test]
-fn an_overdue_feedback_request_drains_the_queue_before_another_pipeline_step() {
-    let mut s = engine(2, false);
-    let first = add(&mut s, 1, 1, 64);
-    ready(&mut s, &[first]);
-    s.advance_to(2 * s.policy.service_gap_ns).unwrap();
-    s.published_output(first).unwrap();
-    let plan = s.plan().unwrap();
-    assert!(!plan.requires_feedback);
-    let fence = Fence(s.submitted.0 + 1);
-    s.commit(&plan, fence).unwrap();
-    let overdue = add(&mut s, 2, 1, 64);
-    s.request_mut(overdue).unwrap().grammar_constrained = true;
-    s.set_arrival(overdue, 0).unwrap();
-    assert!(s.plan().is_none());
-    s.advance_to(s.now_ns + plan.estimated_duration_ns())
-        .unwrap();
-    complete(&mut s, &plan, fence, 0, true);
-    let rescue = s.plan().unwrap();
-    assert_eq!(rescue.kind, GraphKind::Init);
-    assert_eq!(rescue.lanes[0].request, overdue);
-}
-
-#[test]
-fn overdue_initialization_keeps_urgency_until_useful_progress() {
-    let mut s = engine(2, false);
-    let h = add(&mut s, 1, 1, 64);
-    ready(&mut s, &[h]);
-    let delayed = add(&mut s, 2, 1, 64);
-    s.set_arrival(delayed, 0).unwrap();
-    s.advance_to(2 * s.policy.service_gap_ns).unwrap();
-    s.published_output(h).unwrap();
-    let plan = step(&mut s, 0);
-    assert_eq!(plan.kind, GraphKind::Init);
-    assert_eq!(plan.lanes[0].request, delayed);
-    assert!(plan.recovery_lateness_ns() > 0.0);
-    assert_eq!(s.request(delayed).unwrap().accounting.last_progress_ns, 0);
-    assert_eq!(s.request(delayed).unwrap().accounting.last_output_ns, None);
-    let plan = step(&mut s, 0);
-    assert_eq!(plan.kind, GraphKind::Prefill);
-    assert_eq!(plan.lanes[0].request, delayed);
 }
 
 #[test]
@@ -414,79 +226,16 @@ fn large_cohort_search_covers_high_slots_without_growing_scratch() {
         r.scheduled_consumed = 1;
         r.generated_tokens = 1;
     }
-    s.advance_to(2 * s.service_gap(64)).unwrap();
+    s.advance_to(100 * MS).unwrap();
     for h in &handles[..63] {
-        s.published_output(*h).unwrap();
+        s.request_mut(*h).unwrap().accounting.last_output_ns = Some(s.now_ns);
     }
     let capacity = s.candidates.borrow().capacity();
     let plan = s.plan().unwrap();
     assert!(plan.lanes.iter().any(|l| l.request == handles[63]));
-    assert!(plan.recovery_lateness_ns() > 0.0);
+    assert!(plan.selection_value_rate().is_finite());
     assert_eq!(s.candidates.borrow().capacity(), capacity);
     assert!(plan.lanes.iter().all(|l| l.tokens <= plan.token_capacity));
-}
-
-#[test]
-fn unmeasured_subsets_do_not_split_a_measured_cohort() {
-    for active in [4, 8] {
-        let mut s = engine(active, true);
-        let handles: Vec<_> = (1..=active as u32)
-            .map(|id| add(&mut s, id, 1, 64))
-            .collect();
-        ready(&mut s, &handles);
-        // The complete cohort's shapes are measured; smaller batches never ran or expired.
-        let mut graphs = super::tests::duration_graphs(active);
-        for g in &mut graphs {
-            g.estimated_duration_ns = match (g.kind, g.batch_capacity) {
-                (GraphKind::Speculative, b) if b < active => 0,
-                (GraphKind::Speculative, _) => MS + g.token_capacity as u64 * MS / 4,
-                _ => MS,
-            };
-        }
-        s.costs = super::tests::measured_costs(&graphs);
-        for _ in 0..16 {
-            let plan = step(&mut s, 1);
-            assert_eq!(plan.kind, GraphKind::Speculative);
-            assert_eq!(plan.lanes.len(), active);
-            let positions: std::collections::HashSet<_> =
-                plan.lanes.iter().map(|l| l.start_position).collect();
-            assert_eq!(positions.len(), 1, "cohort members advance together");
-        }
-    }
-}
-
-#[test]
-fn overdue_requests_are_not_rescued_one_at_a_time_through_unmeasured_graphs() {
-    let mut s = engine(16, true);
-    let decoding: Vec<_> = (1..=8).map(|id| add(&mut s, id, 1, 256)).collect();
-    ready(&mut s, &decoding);
-    // Another request is still prefilling, so no speculative cohort serves every runnable request.
-    add(&mut s, 9, 4096, 64);
-    let mut graphs = super::tests::duration_graphs(16);
-    for g in &mut graphs {
-        g.estimated_duration_ns = match (g.kind, g.batch_capacity, g.token_capacity) {
-            (GraphKind::Speculative, 8, w) => 2 * MS + w as u64 * MS,
-            (GraphKind::Speculative, 1, 1) => 3 * MS / 2,
-            (GraphKind::Speculative, _, _) => 0,
-            (GraphKind::Prefill, _, n) => (n as u64 / 64 + 1) * MS,
-            _ => MS / 10,
-        };
-    }
-    s.costs = super::tests::measured_costs(&graphs);
-    let mut lanes = 0;
-    let mut rounds = 0;
-    for _ in 0..64 {
-        let plan = step(&mut s, 1);
-        if plan.kind == GraphKind::Speculative {
-            lanes += plan.lanes.len();
-            rounds += 1;
-        }
-    }
-    assert!(rounds > 0);
-    assert!(
-        lanes >= 6 * rounds,
-        "{lanes} lanes over {rounds} speculative rounds"
-    );
 }
 
 #[test]
@@ -498,17 +247,14 @@ fn prefix_restore_earns_no_credit_for_reused_prompt_tokens() {
     }
     let h = add(&mut s, 1, 65, 32);
     assert_eq!(s.request(h).unwrap().reused_prompt_tokens(), 65);
-    assert_eq!(s.request(h).unwrap().accounting.prefill_credit_ns, 0.0);
+    assert_eq!(s.request(h).unwrap().accounting.committed_prefill_tokens, 0);
     let restore = step(&mut s, 0);
     assert_eq!(restore.kind, GraphKind::Restore);
-    assert_eq!(s.request(h).unwrap().accounting.committed_credit_ns, 0.0);
+    assert_eq!(s.request(h).unwrap().accounting.committed_output_tokens, 0);
     let resume = step(&mut s, 0);
     assert_eq!(resume.kind, GraphKind::Resume);
     let r = s.request(h).unwrap();
-    assert_eq!(
-        r.accounting.committed_credit_ns,
-        r.accounting.decode_credit_ns
-    );
+    assert_eq!(r.accounting.committed_output_tokens, 1);
 }
 
 #[test]
@@ -548,67 +294,8 @@ fn a_plan_keeps_its_duration_when_the_graph_estimate_changes() {
 }
 
 #[test]
-fn a_finished_prompt_waiting_for_snapshot_earns_no_further_entitlement() {
-    let mut s = engine(2, false);
-    let finished = add(&mut s, 1, 1, 1);
-    step(&mut s, 0);
-    step(&mut s, 0);
-    assert_eq!(s.request(finished).unwrap().phase, RequestPhase::Snapshot);
-    let before = s.request(finished).unwrap().accounting.entitlement_ns;
-    let live = add(&mut s, 2, 1, 32);
-    let plan = s.plan().unwrap();
-    s.commit(&plan, Fence(s.submitted.0 + 1)).unwrap();
-    s.advance_to(s.now_ns + MS).unwrap();
-    assert_eq!(
-        s.request(finished).unwrap().accounting.entitlement_ns,
-        before
-    );
-    assert_eq!(
-        s.request(live).unwrap().accounting.entitlement_ns,
-        MS as f64
-    );
-}
-
-#[test]
-fn submission_window_uses_remaining_time_and_waits_on_an_overrun() {
-    let mut s = engine(2, false);
-    let handles: Vec<_> = (1..=2).map(|id| add(&mut s, id, 1, 64)).collect();
-    ready(&mut s, &handles);
-    let mut graphs = super::tests::duration_graphs(2);
-    for g in &mut graphs {
-        g.estimated_duration_ns = if g.batch_capacity == 1 {
-            4 * MS
-        } else {
-            20 * MS
-        };
-    }
-    s.costs = super::tests::measured_costs(&graphs);
-    let start = s.now_ns;
-    let a = s.plan().unwrap();
-    let fa = Fence(s.submitted.0 + 1);
-    s.commit(&a, fa).unwrap();
-    assert!(s.plan().is_none());
-    s.advance_to(start + 2 * MS).unwrap();
-    let b = s.plan().unwrap();
-    assert_ne!(a.lanes[0].request, b.lanes[0].request);
-    s.commit(&b, Fence(fa.0 + 1)).unwrap();
-    assert!(s.plan().is_none());
-    s.advance_to(start + 5 * MS).unwrap();
-    assert_eq!(s.window_remaining(), None);
-    assert!(!s.submission_window_available(MS));
-    complete(&mut s, &a, fa, 0, true);
-    assert_eq!(s.window_remaining(), Some(3 * MS));
-}
-
-#[test]
-fn atomic_prefill_can_make_progress_when_its_minimum_graph_exceeds_the_slice() {
+fn atomic_prefill_respects_spans_without_a_duration_cap() {
     let mut s = engine(1, false);
-    s.configure_policy(PolicyConfig {
-        max_slice_ns: MS,
-        submission_window_ns: MS,
-        ..s.policy
-    })
-    .unwrap();
     let h = add(&mut s, 1, 256, 32);
     s.set_prefill_spans(h, &[0..256]).unwrap();
     step(&mut s, 0);
@@ -617,74 +304,8 @@ fn atomic_prefill_can_make_progress_when_its_minimum_graph_exceeds_the_slice() {
         (plan.kind, plan.token_capacity, plan.lanes[0].tokens),
         (GraphKind::Prefill, 256, 256)
     );
-    assert!(plan.estimated_duration_ns() > s.policy.max_slice_ns);
     step(&mut s, 0);
     assert_eq!(s.request(h).unwrap().consumed_tokens, 256);
-}
-
-#[test]
-fn oversized_atomic_work_requires_an_empty_submission_queue() {
-    let mut s = engine(2, false);
-    s.configure_policy(PolicyConfig {
-        max_slice_ns: MS / 20,
-        ..s.policy
-    })
-    .unwrap();
-    add(&mut s, 1, 1, 32);
-    add(&mut s, 2, 1, 32);
-    // A step that serves every runnable request keeps nobody waiting, so it may run over the slice alone.
-    let plan = s.plan().unwrap();
-    assert_eq!(plan.lanes.len(), 2);
-    assert!(plan.estimated_duration_ns() > s.policy.max_slice_ns);
-    s.commit(&plan, Fence(1)).unwrap();
-    assert!(s.plan().is_none());
-    assert!(!s.submission_window_available(plan.estimated_duration_ns()));
-    assert!(
-        s.commit(&plan, Fence(2))
-            .unwrap_err()
-            .to_string()
-            .contains("execution-time window")
-    );
-}
-
-fn cold_engine(active: usize, speculative: bool) -> RequestScheduler {
-    let mut s = engine(active, speculative);
-    s.graph_durations(&super::tests::duration_graphs(active))
-        .unwrap();
-    s
-}
-
-fn measured_step(s: &mut RequestScheduler, duration_ns: u64, accepted: usize) -> ScheduledPlan {
-    let plan = s.plan().expect("runnable request must make progress");
-    let fence = Fence(s.submitted.0 + 1);
-    s.commit(&plan, fence).unwrap();
-    s.advance_to(s.now_ns + duration_ns).unwrap();
-    complete(s, &plan, fence, accepted, true);
-    s.observe_execution(
-        &plan,
-        ExecutionTiming {
-            gpu_ns: [
-                Some(duration_ns),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ],
-            ..Default::default()
-        },
-    );
-    plan
 }
 
 #[test]
@@ -704,11 +325,8 @@ fn indeterminate_and_equal_costs_naturally_choose_full_useful_prefill() {
         assert_eq!(plan.kind, GraphKind::Prefill);
         assert_eq!((plan.token_capacity, plan.lanes[0].tokens), (512, 512));
         let credit = s.request(h).unwrap().accounting();
-        assert!(credit.prefill_credit_ns > 0.0);
-        if !known {
-            assert_eq!(credit.committed_credit_ns, 5.0 * MS as f64);
-            assert_eq!(credit.deficit_ns, (MS / 10) as f64);
-        }
+        assert_eq!(credit.committed_prefill_tokens, 512);
+        assert_eq!(credit.committed_output_tokens, 0);
     }
 }
 
@@ -995,7 +613,6 @@ fn repeated_observations_keep_the_winner_fresh_while_neglected_shapes_expire() {
         widths.push(measured_step(&mut s, MS, 7).token_capacity);
     }
     assert_eq!(widths, [8, 4, 2, 1]);
-    let rate = s.request(h).unwrap().accounting.decode_credit_ns;
     for _ in 0..15 {
         assert_eq!(measured_step(&mut s, MS, 7).token_capacity, 8);
     }
@@ -1008,91 +625,1434 @@ fn repeated_observations_keep_the_winner_fresh_while_neglected_shapes_expire() {
     }
     assert!(retried.contains(&4) && retried.contains(&2) && retried.contains(&1));
     assert!(!retried.contains(&8));
-    assert_eq!(s.request(h).unwrap().accounting.decode_credit_ns, rate);
-    assert!(s.request(h).unwrap().accounting.committed_credit_ns > 0.0);
+    assert!(s.request(h).unwrap().accounting.committed_output_tokens > 0);
+}
+
+fn gpu_time(ns: u64) -> ExecutionTiming {
+    let mut gpu_ns = [None; 16];
+    gpu_ns[0] = Some(ns);
+    ExecutionTiming {
+        gpu_ns,
+        ..Default::default()
+    }
+}
+
+fn price_close(actual: utility::ServicePrice, expected: utility::ServicePrice) {
+    assert!((actual.log_price(1.0) - expected.log_price(1.0)).abs() < 1e-12);
 }
 
 #[test]
-fn an_uncontended_prefill_takes_its_whole_chunk_over_the_slice() {
+fn service_uses_validated_progress_and_slowest_rank_time_once() {
     let mut s = engine(1, false);
-    add(&mut s, 1, 2048, 32);
-    let plan = loop {
-        let plan = s.plan().unwrap();
-        if plan.kind == GraphKind::Prefill {
-            break plan;
-        }
-        step(&mut s, 0);
-    };
-    assert_eq!(plan.token_capacity, 512);
-    assert!(plan.estimated_duration_ns() > s.policy.max_slice_ns);
-}
-
-#[test]
-fn slow_rounds_keep_speculating_when_every_round_exceeds_the_service_gap() {
-    let mut s = engine(1, true);
-    let h = add(&mut s, 1, 1, 64);
-    ready(&mut s, &[h]);
-    let mut graphs = super::tests::duration_graphs(1);
-    for g in &mut graphs {
-        g.estimated_duration_ns = match g.kind {
-            // Two-Spark GLM rounds: 45 ms for one token, 5 ms more per draft.
-            GraphKind::Speculative | GraphKind::Decode => {
-                45 * MS + (g.token_capacity as u64 - 1) * 5 * MS
-            }
-            _ => MS,
-        };
-    }
-    s.costs = super::tests::measured_costs(&graphs);
-    let now = s.now_ns;
-    let r = s.request_mut(h).unwrap();
-    for _ in 0..128 {
-        r.acceptance.observe(7, 7, false, 0);
-    }
-    r.accounting.last_output_ns = Some(now);
-    assert!(s.service_gap(1) >= 3 * 45 * MS);
+    let h = add(&mut s, 1, 4096, 32);
+    step(&mut s, 0);
     let plan = s.plan().unwrap();
-    assert_eq!(plan.kind, GraphKind::Speculative);
-    assert!(plan.token_capacity > 1, "width {}", plan.token_capacity);
+    assert_eq!(plan.kind, GraphKind::Prefill);
+    let rate = s.service_rates(s.request(h).unwrap()).0.unwrap();
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let mut expected = s.request(h).unwrap().accounting.service.tokens.unwrap();
+    expected.observe(
+        3.0,
+        plan.lanes[0].tokens as f64,
+        rate,
+        s.policy.adaptation_ms,
+    );
+    let mut timing = gpu_time(2 * MS);
+    timing.gpu_ns[1] = Some(3 * MS);
+    timing.wall_ns = 500 * MS;
+    s.advance_to(s.now_ns + timing.wall_ns).unwrap();
+    complete_timed(&mut s, &plan, fence, 0, true, timing);
+    price_close(
+        s.request(h).unwrap().accounting.service.tokens.unwrap(),
+        expected,
+    );
+    s.advance_to(s.now_ns + 100 * MS).unwrap();
+    price_close(
+        s.request(h).unwrap().accounting.service.tokens.unwrap(),
+        expected,
+    );
 }
 
 #[test]
-fn batched_slow_rounds_keep_speculating_when_their_rounds_exceed_one_requests_gap() {
-    let mut s = engine(8, true);
-    let handles: Vec<_> = (0..8).map(|i| add(&mut s, i + 1, 1, 256)).collect();
-    ready(&mut s, &handles);
-    let mut graphs = super::tests::duration_graphs(8);
+fn pipelined_frames_use_ordered_completion_deltas_and_one_delivery_per_frame() {
+    let mut s = engine(1, false);
+    let h = add(&mut s, 1, 65, 32);
+    ready(&mut s, &[h]);
+    let (token_rate, delivery_rate) = s.service_rates(s.request(h).unwrap());
+    let first = s.plan().unwrap();
+    let a = Fence(s.submitted.0 + 1);
+    s.commit(&first, a).unwrap();
+    let second = s.plan().unwrap();
+    let b = Fence(a.0 + 1);
+    s.commit(&second, b).unwrap();
+    let before = s.request(h).unwrap().accounting;
+    let mut tokens = before.service.tokens.unwrap();
+    let mut deliveries = before.service.deliveries.unwrap();
+    for (plan, fence, ms) in [(&first, a, 2), (&second, b, 3)] {
+        tokens.observe(ms as f64, 1.0, token_rate.unwrap(), s.policy.adaptation_ms);
+        deliveries.observe(
+            ms as f64,
+            1.0,
+            delivery_rate.unwrap(),
+            s.policy.adaptation_ms,
+        );
+        complete_timed(&mut s, plan, fence, 0, true, gpu_time(ms * MS));
+        let after = s.request(h).unwrap().accounting;
+        price_close(after.service.tokens.unwrap(), tokens);
+        price_close(after.service.deliveries.unwrap(), deliveries);
+    }
+    assert_eq!(
+        s.request(h).unwrap().accounting.published_deliveries,
+        before.published_deliveries + 2
+    );
+}
+
+#[test]
+fn speculative_token_volume_and_visible_burst_service_have_separate_prices() {
+    let mut s = engine(1, true);
+    s.fixed_speculative_width(Some(8)).unwrap();
+    let h = add(&mut s, 1, 65, 64);
+    ready(&mut s, &[h]);
+    let (token_rate, delivery_rate) = s.service_rates(s.request(h).unwrap());
+    let plan = s.plan().unwrap();
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let before = s.request(h).unwrap().accounting.service;
+    let mut token_price = before.tokens.unwrap();
+    token_price.observe(30.0, 8.0, token_rate.unwrap(), s.policy.adaptation_ms);
+    let mut hidden_price = before.deliveries.unwrap();
+    hidden_price.observe(30.0, 0.0, delivery_rate.unwrap(), s.policy.adaptation_ms);
+    complete_timed(&mut s, &plan, fence, 7, false, gpu_time(30 * MS));
+    price_close(
+        s.request(h).unwrap().accounting.service.tokens.unwrap(),
+        token_price,
+    );
+    price_close(
+        s.request(h).unwrap().accounting.service.deliveries.unwrap(),
+        hidden_price,
+    );
+    let mut published_price = before.deliveries.unwrap();
+    published_price.observe(30.0, 1.0, delivery_rate.unwrap(), s.policy.adaptation_ms);
+    for _ in 0..8 {
+        s.published_output(h, fence).unwrap();
+        price_close(
+            s.request(h).unwrap().accounting.service.deliveries.unwrap(),
+            published_price,
+        );
+    }
+}
+
+#[test]
+fn invalid_completion_changes_neither_prices_nor_cost_estimates() {
+    let mut s = engine(1, false);
+    let h = add(&mut s, 1, 65, 32);
+    ready(&mut s, &[h]);
+    let plan = s.plan().unwrap();
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let before = s.request(h).unwrap().accounting.service;
+    let cost = s.estimated_duration_ns(&plan);
+    let mut records = completion_records(&s, &plan, fence, 0);
+    records[h.slot as usize].generation += 1;
+    assert!(s.complete(fence, &records, gpu_time(100 * MS)).is_err());
+    price_close(
+        s.request(h).unwrap().accounting.service.tokens.unwrap(),
+        before.tokens.unwrap(),
+    );
+    price_close(
+        s.request(h).unwrap().accounting.service.deliveries.unwrap(),
+        before.deliveries.unwrap(),
+    );
+    assert_eq!(s.estimated_duration_ns(&plan), cost);
+    assert_eq!(s.submitted_step(fence).unwrap(), &plan.step);
+}
+
+#[test]
+fn missing_device_timing_does_not_substitute_host_or_estimated_time() {
+    for gpu_ns in [None, Some(0)] {
+        let mut s = engine(1, false);
+        let h = add(&mut s, 1, 65, 32);
+        ready(&mut s, &[h]);
+        let plan = s.plan().unwrap();
+        let fence = Fence(s.submitted.0 + 1);
+        s.commit(&plan, fence).unwrap();
+        let before = s.request(h).unwrap().accounting.service;
+        let mut timing = gpu_time(0);
+        timing.gpu_ns[0] = gpu_ns;
+        timing.wall_ns = 500 * MS;
+        complete_timed(&mut s, &plan, fence, 0, true, timing);
+        price_close(
+            s.request(h).unwrap().accounting.service.tokens.unwrap(),
+            before.tokens.unwrap(),
+        );
+        price_close(
+            s.request(h).unwrap().accounting.service.deliveries.unwrap(),
+            before.deliveries.unwrap(),
+        );
+    }
+}
+
+#[test]
+fn an_arrival_during_a_graph_is_not_charged_for_unavailable_service() {
+    let mut s = engine(2, false);
+    let first = add(&mut s, 1, 65, 32);
+    ready(&mut s, &[first]);
+    let plan = s.plan().unwrap();
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let arrival = add(&mut s, 2, 65, 32);
+    complete_timed(&mut s, &plan, fence, 0, true, gpu_time(10 * MS));
+    assert!(
+        s.request(arrival)
+            .unwrap()
+            .accounting
+            .service
+            .tokens
+            .is_none()
+    );
+}
+
+#[test]
+fn service_snapshot_does_not_update_a_reused_request_slot() {
+    let mut s = engine(2, false);
+    let first = add(&mut s, 1, 65, 32);
+    ready(&mut s, &[first]);
+    let plan = s.plan().unwrap();
+    let cancelled = add(&mut s, 2, 65, 32);
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    assert!(
+        s.request(cancelled)
+            .unwrap()
+            .accounting
+            .service
+            .tokens
+            .is_some()
+    );
+    s.cancel(cancelled).unwrap();
+    let replacement = add(&mut s, 3, 65, 32);
+    assert_eq!(replacement.slot, cancelled.slot);
+    assert_ne!(replacement.generation, cancelled.generation);
+    complete_timed(&mut s, &plan, fence, 0, true, gpu_time(10 * MS));
+    assert!(
+        s.request(replacement)
+            .unwrap()
+            .accounting
+            .service
+            .tokens
+            .is_none()
+    );
+}
+
+#[test]
+fn expired_costs_are_not_retained_as_service_normalizers() {
+    let mut s = engine(1, true);
+    let h = add(&mut s, 1, 65, 32);
+    ready(&mut s, &[h]);
+    assert!(s.service_rates(s.request(h).unwrap()).0.is_some());
+    s.advance_to(s.now_ns + s.policy.estimate_ttl_ns).unwrap();
+    assert_eq!(s.service_rates(s.request(h).unwrap()), (None, None));
+}
+
+#[test]
+fn unserved_prices_grow_with_device_time_and_inbound_waiters_are_excluded() {
+    let mut s = engine(3, false);
+    let first = add(&mut s, 1, 65, 64);
+    ready(&mut s, &[first]);
+    let plan = s.plan().unwrap();
+    let waiting = add(&mut s, 2, 4096, 64);
+    let inbound = add(&mut s, 3, 4096, 64);
+    s.request_mut(inbound).unwrap().phase = RequestPhase::Inbound;
+    let rate = s.service_rates(s.request(waiting).unwrap()).0.unwrap();
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let mut expected = s
+        .request(waiting)
+        .unwrap()
+        .accounting
+        .service
+        .tokens
+        .unwrap();
+    expected.observe(50.0, 0.0, rate, s.policy.adaptation_ms);
+    complete_timed(&mut s, &plan, fence, 0, true, gpu_time(50 * MS));
+    price_close(
+        s.request(waiting)
+            .unwrap()
+            .accounting
+            .service
+            .tokens
+            .unwrap(),
+        expected,
+    );
+    assert!(
+        s.request(inbound)
+            .unwrap()
+            .accounting
+            .service
+            .tokens
+            .is_none()
+    );
+    assert!(
+        s.request(inbound)
+            .unwrap()
+            .accounting
+            .service
+            .deliveries
+            .is_none()
+    );
+}
+
+#[test]
+fn price_updates_preserve_an_unrelated_immutable_plan() {
+    let mut s = engine(2, false);
+    let first = add(&mut s, 1, 65, 64);
+    ready(&mut s, &[first]);
+    let plan = s.plan().unwrap();
+    let second = add(&mut s, 2, 4096, 64);
+    s.request_mut(second).unwrap().phase = RequestPhase::Prefill;
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let other = s.phase_plan(GraphKind::Prefill, Some(second));
+    assert_eq!(other.lanes.len(), 1);
+    assert_eq!(other.lanes[0].request, second);
+    complete_timed(&mut s, &plan, fence, 0, true, gpu_time(MS));
+    s.commit(&other, Fence(fence.0 + 1)).unwrap();
+}
+
+#[test]
+fn late_publication_cannot_rewind_prices_past_another_completion() {
+    let mut s = engine(1, false);
+    let h = add(&mut s, 1, 65, 64);
+    ready(&mut s, &[h]);
+    let first = s.plan().unwrap();
+    let a = Fence(s.submitted.0 + 1);
+    s.commit(&first, a).unwrap();
+    complete_timed(&mut s, &first, a, 0, false, gpu_time(MS));
+    let second = s.plan().unwrap();
+    let b = Fence(a.0 + 1);
+    s.commit(&second, b).unwrap();
+    complete_timed(&mut s, &second, b, 0, false, gpu_time(MS));
+    let before = s.request(h).unwrap().accounting.service.deliveries.unwrap();
+    assert!(s.published_output(h, a).is_err());
+    price_close(
+        s.request(h).unwrap().accounting.service.deliveries.unwrap(),
+        before,
+    );
+    s.published_output(h, b).unwrap();
+}
+
+#[test]
+fn first_published_output_initializes_delivery_history_and_preserves_token_price() {
+    let mut s = engine(1, false);
+    let h = add(&mut s, 1, 65, 64);
+    step(&mut s, 0);
+    let prefill = s.plan().unwrap();
+    let a = Fence(s.submitted.0 + 1);
+    s.commit(&prefill, a).unwrap();
+    let mut tokens = s.request(h).unwrap().accounting.service.tokens.unwrap();
+    let rate = s.service_rates(s.request(h).unwrap()).0.unwrap();
+    tokens.observe(3.0, 66.0, rate, s.policy.adaptation_ms);
+    complete_timed(&mut s, &prefill, a, 0, true, gpu_time(3 * MS));
+    let service = s.request(h).unwrap().accounting.service;
+    price_close(service.tokens.unwrap(), tokens);
+    let deliveries = utility::ServicePrice::initial(1.0 / 3.0);
+    price_close(service.deliveries.unwrap(), deliveries);
+    let snapshot = s.plan().unwrap();
+    assert_eq!(snapshot.kind, GraphKind::Snapshot);
+    s.commit(&snapshot, Fence(a.0 + 1)).unwrap();
+    let service = s.request(h).unwrap().accounting.service;
+    price_close(service.tokens.unwrap(), tokens);
+    price_close(service.deliveries.unwrap(), deliveries);
+}
+
+fn cold_engine(active: usize, speculative: bool) -> RequestScheduler {
+    let mut s = engine(active, speculative);
+    s.graph_durations(&super::tests::duration_graphs(active))
+        .unwrap();
+    s
+}
+
+fn measured_step(s: &mut RequestScheduler, duration_ns: u64, accepted: usize) -> ScheduledPlan {
+    let plan = s.plan().expect("runnable request must make progress");
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    s.advance_to(s.now_ns + duration_ns).unwrap();
+    complete_timed(s, &plan, fence, accepted, true, gpu_time(duration_ns));
+    plan
+}
+
+fn interactive_engine(active: usize, speculative: bool) -> RequestScheduler {
+    let mut s = RequestScheduler::new(
+        [17; 32],
+        SchedulerLimits {
+            max_active: active,
+            request_slots: active.next_power_of_two(),
+            max_sequence_tokens: 65536,
+            prefill_chunk_size: 4096,
+            pages: 32768,
+            snapshots: 256,
+        },
+        SchedulerCapabilities {
+            vocabulary: 1024,
+            page_tokens: 64,
+            vision: crate::model::VisionCapabilities::disabled(),
+            draft_pages_per_request: 0,
+            state_rows_per_request: None,
+        },
+    )
+    .unwrap();
+    s.prefill_graphs(&[64, 128, 256, 512, 1024, 2048, 4096])
+        .unwrap();
+    if speculative {
+        s.enable_speculation(&[1, 3, 8]).unwrap();
+    }
+    let mut graphs = super::tests::duration_graphs(active);
     for g in &mut graphs {
         g.estimated_duration_ns = match g.kind {
-            // Four-Spark GLM rounds: 30 ms for one request's token, 53 ms for eight, and each
-            // draft adds 5 ms per request; a width-3 round for eight costs about three of one's gaps.
-            GraphKind::Speculative | GraphKind::Decode => {
-                let base = if g.batch_capacity >= 8 { 53 } else { 30 };
-                (base + (g.token_capacity as u64 - 1) * 2 * g.batch_capacity as u64) * MS
+            GraphKind::Prefill => 2 * MS + g.token_capacity as u64 * MS / 64,
+            GraphKind::Decode => (15 + 2 * (g.batch_capacity as u64 - 1)) * MS,
+            GraphKind::Speculative => {
+                let solo = match g.token_capacity {
+                    1 => 15 * MS,
+                    3 => 17_300_000,
+                    8 => 30 * MS,
+                    n => (15 + 2 * n as u64) * MS,
+                };
+                solo + 2 * (g.batch_capacity as u64 - 1) * MS
             }
-            _ => MS,
+            _ => MS / 10,
         };
     }
-    s.costs = super::tests::measured_costs(&graphs);
-    let now = s.now_ns;
-    for h in &handles {
+    s.measured_graph_durations(&graphs).unwrap();
+    s
+}
+
+fn set_cost(s: &mut RequestScheduler, kind: GraphKind, batch: usize, capacity: usize, nanos: u64) {
+    let step = ScheduledStep {
+        kind,
+        batch_capacity: batch,
+        token_capacity: capacity,
+        mixed: None,
+        lanes: Vec::new(),
+        requires_feedback: false,
+    };
+    s.costs.set_measured(&step, nanos);
+}
+
+#[test]
+fn one_two_and_sixteen_long_prefills_use_full_efficient_chunks() {
+    for count in [1, 2, 16] {
+        let mut s = interactive_engine(count, true);
+        let handles: Vec<_> = (1..=count as u32)
+            .map(|id| add(&mut s, id, 32768, 128))
+            .collect();
+        let mut chunks = 0;
+        while chunks < count * 3 {
+            let plan = step(&mut s, 0);
+            if plan.kind == GraphKind::Prefill {
+                assert_eq!((plan.token_capacity, plan.lanes[0].tokens), (4096, 4096));
+                chunks += 1;
+            }
+            assert!(
+                handles
+                    .iter()
+                    .all(|h| s.request(*h).unwrap().generated_tokens == 0)
+            );
+        }
+        assert!(
+            handles
+                .iter()
+                .all(|h| s.request(*h).unwrap().consumed_tokens > 0)
+        );
+    }
+}
+
+#[test]
+fn small_prefill_tails_choose_the_best_effective_value_rate() {
+    for (prompt, capacity) in [(64, 64), (511, 512), (4095, 4096)] {
+        let mut s = interactive_engine(1, false);
+        add(&mut s, 1, prompt, 128);
+        assert_eq!(step(&mut s, 0).kind, GraphKind::Init);
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.kind, GraphKind::Prefill);
+        assert_eq!(
+            (plan.token_capacity, plan.lanes[0].tokens),
+            (capacity, prompt)
+        );
+    }
+}
+
+#[test]
+fn fully_padded_larger_prefill_can_win_when_its_measured_execution_is_faster() {
+    let mut s = interactive_engine(1, false);
+    set_cost(&mut s, GraphKind::Prefill, 1, 4096, MS);
+    add(&mut s, 1, 64, 128);
+    step(&mut s, 0);
+    let plan = s.plan().unwrap();
+    assert_eq!((plan.token_capacity, plan.lanes[0].tokens), (4096, 64));
+}
+
+#[test]
+fn efficient_thirty_millisecond_speculation_beats_seventeen_millisecond_rounds() {
+    let mut s = interactive_engine(1, true);
+    let h = add(&mut s, 1, 64, 2048);
+    ready(&mut s, &[h]);
+    for _ in 0..128 {
+        s.request_mut(h).unwrap().acceptance.observe(7, 7, true, 0);
+    }
+    let plan = s.plan().unwrap();
+    assert_eq!(
+        (plan.kind, plan.token_capacity, plan.estimated_duration_ns()),
+        (GraphKind::Speculative, 8, 30 * MS)
+    );
+    for _ in 0..256 {
+        s.request_mut(h).unwrap().acceptance.observe(7, 0, true, 0);
+    }
+    assert!(s.plan().unwrap().token_capacity < 8);
+}
+
+#[test]
+fn physical_decode_batch_padding_is_compared_by_measured_cost() {
+    let mut s = interactive_engine(4, false);
+    let h = add(&mut s, 1, 64, 1024);
+    ready(&mut s, &[h]);
+    set_cost(&mut s, GraphKind::Decode, 4, 1, 10 * MS);
+    let plan = s.plan().unwrap();
+    assert_eq!((plan.batch_capacity, plan.lanes.len()), (4, 1));
+    assert_eq!(plan.lanes[0].request, h);
+}
+
+#[test]
+fn speculative_cohorts_are_selected_by_expected_lane_value() {
+    let mut s = interactive_engine(8, true);
+    let handles: Vec<_> = (1..=8).map(|id| add(&mut s, id, 64, 2048)).collect();
+    for (index, h) in handles.iter().enumerate() {
         let r = s.request_mut(*h).unwrap();
+        r.phase = RequestPhase::Decode;
+        r.consumed_tokens = 64;
+        r.scheduled_consumed = 64;
+        r.generated_tokens = 1;
         for _ in 0..128 {
-            r.acceptance.observe(7, 7, false, 0);
+            r.acceptance
+                .observe(7, if index >= 6 { 7 } else { 0 }, true, 0);
         }
+    }
+    for batch in [1, 2, 4, 8] {
+        for width in [1, 3, 8] {
+            set_cost(&mut s, GraphKind::Speculative, batch, width, 200 * MS);
+        }
+    }
+    set_cost(&mut s, GraphKind::Speculative, 2, 8, 30 * MS);
+    let plan = s.plan().unwrap();
+    assert_eq!((plan.batch_capacity, plan.token_capacity), (2, 8));
+    assert_eq!(
+        plan.lanes.iter().map(|l| l.request).collect::<Vec<_>>(),
+        handles[6..]
+    );
+}
+
+#[test]
+fn two_long_decodes_keep_both_streams_flowing() {
+    for accepted in [0, 7] {
+        let mut s = interactive_engine(2, true);
+        let handles = [add(&mut s, 1, 64, 2048), add(&mut s, 2, 64, 2048)];
+        let mut last = [None; 2];
+        let mut gaps = [0; 2];
+        for _ in 0..200 {
+            let plan = step(&mut s, accepted);
+            if plan.kind == GraphKind::Speculative {
+                for lane in &plan.lanes {
+                    let i = handles.iter().position(|h| *h == lane.request).unwrap();
+                    if let Some(t) = last[i] {
+                        gaps[i] = gaps[i].max(s.now_ns - t);
+                    }
+                    last[i] = Some(s.now_ns);
+                }
+            }
+        }
+        assert!(
+            handles
+                .iter()
+                .all(|h| s.request(*h).unwrap().generated_tokens > 100)
+        );
+        assert!(gaps.iter().all(|g| *g <= 2 * 32 * MS), "gaps={gaps:?}");
+    }
+}
+
+#[test]
+fn long_prefill_and_low_acceptance_decode_both_make_progress() {
+    let mut s = interactive_engine(2, true);
+    let decode = add(&mut s, 1, 64, 4096);
+    ready(&mut s, &[decode]);
+    for _ in 0..128 {
+        s.request_mut(decode)
+            .unwrap()
+            .acceptance
+            .observe(7, 0, true, 0);
+    }
+    let prefill = add(&mut s, 2, 32768, 128);
+    let mut last = s.now_ns;
+    let mut gap = 0;
+    let mut prefill_chunks = 0;
+    for _ in 0..400 {
+        let plan = step(&mut s, 0);
+        if plan.lanes.iter().any(|l| l.request == decode) && plan.kind == GraphKind::Speculative {
+            gap = gap.max(s.now_ns - last);
+            last = s.now_ns;
+        }
+        if plan.kind == GraphKind::Prefill {
+            prefill_chunks += 1;
+        }
+        if s.request(prefill).is_ok_and(|r| r.consumed_tokens >= 32768) {
+            break;
+        }
+    }
+    assert!(s.request(prefill).unwrap().consumed_tokens >= 32768);
+    assert!(s.request(decode).unwrap().generated_tokens > 1);
+    gap = gap.max(s.now_ns - last);
+    assert!(prefill_chunks >= 8);
+    assert!(gap < 300 * MS, "output gap={} ms", gap / MS);
+}
+
+#[test]
+fn two_prefill_frames_can_exceed_twenty_milliseconds_without_a_time_window_cap() {
+    let mut s = interactive_engine(2, false);
+    add(&mut s, 1, 32768, 128);
+    add(&mut s, 2, 32768, 128);
+    step(&mut s, 0);
+    let first = s.plan().unwrap();
+    assert_eq!(
+        (first.kind, first.token_capacity),
+        (GraphKind::Prefill, 4096)
+    );
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&first, fence).unwrap();
+    let second = s.plan().unwrap();
+    assert_eq!(
+        (second.kind, second.token_capacity),
+        (GraphKind::Prefill, 4096)
+    );
+    assert_ne!(first.lanes[0].request, second.lanes[0].request);
+    s.commit(&second, Fence(fence.0 + 1)).unwrap();
+    assert!(s.plan().is_none());
+    assert!(first.estimated_duration_ns() + second.estimated_duration_ns() > 20 * MS);
+}
+
+#[test]
+fn decode_waiting_selects_a_smaller_prefill_at_the_efficiency_knee() {
+    let mut s = interactive_engine(5, true);
+    s.prefill_graphs(&[64, 512, 4096]).unwrap();
+    s.configure_policy(PolicyConfig {
+        output_token_value: 16.0,
+        token_fairness: 0.0,
+        delivery_fairness: 0.0,
+        decode_age_price: 0.04,
+        ..s.policy
+    })
+    .unwrap();
+    set_cost(&mut s, GraphKind::Prefill, 1, 512, 8 * MS);
+    set_cost(&mut s, GraphKind::Prefill, 1, 4096, 62 * MS);
+    let prefill = add(&mut s, 1, 32768, 128);
+    step(&mut s, 0);
+    let decodes: Vec<_> = (2..=5).map(|id| add(&mut s, id, 64, 2048)).collect();
+    for h in &decodes {
+        let now = s.now_ns;
+        let r = s.request_mut(*h).unwrap();
+        r.phase = RequestPhase::Decode;
+        r.consumed_tokens = 64;
+        r.scheduled_consumed = 64;
+        r.generated_tokens = 1;
         r.accounting.last_output_ns = Some(now);
-    }
-    assert!(s.service_gap(8) >= 3 * 53 * MS);
-    assert!(s.service_gap(1) < s.service_gap(8));
-    let mut widths = Vec::new();
-    for _ in 0..24 {
-        let plan = step(&mut s, 3);
-        if plan.kind == GraphKind::Speculative {
-            widths.push((plan.lanes.len(), plan.token_capacity));
+        for _ in 0..128 {
+            r.acceptance.observe(7, 7, true, 0);
         }
     }
-    let wide = widths
-        .iter()
-        .filter(|(lanes, width)| *lanes == 8 && *width > 1)
-        .count();
-    assert!(wide * 4 >= widths.len() * 3, "batched widths {widths:?}");
+    let smaller = s.plan().unwrap();
+    assert_eq!(
+        (smaller.kind, smaller.token_capacity),
+        (GraphKind::Prefill, 512)
+    );
+    assert_eq!(smaller.lanes[0].request, prefill);
+    s.advance_to(s.now_ns + 1000 * MS).unwrap();
+    assert_eq!(s.plan().unwrap().kind, GraphKind::Speculative);
+    for h in decodes {
+        s.cancel(h).unwrap();
+    }
+    let larger = s.plan().unwrap();
+    assert_eq!(
+        (larger.kind, larger.token_capacity),
+        (GraphKind::Prefill, 4096)
+    );
+}
+
+#[test]
+fn terminal_snapshot_completes_while_another_long_prompt_is_still_prefilling() {
+    let mut s = interactive_engine(2, false);
+    let short = add(&mut s, 1, 64, 1);
+    step(&mut s, 0);
+    step(&mut s, 0);
+    assert_eq!(s.request(short).unwrap().phase, RequestPhase::Snapshot);
+    let long = add(&mut s, 2, 32768, 128);
+    let start = s.now_ns;
+    while s.request(short).is_ok() && s.now_ns - start < 1000 * MS {
+        step(&mut s, 0);
+    }
+    assert!(s.request(short).is_err());
+    assert!(s.request(long).unwrap().consumed_tokens < 32768);
+}
+
+#[test]
+fn five_and_sixteen_streams_receive_repeated_output_service() {
+    for (count, accepted, known_acceptance) in [5, 16].into_iter().flat_map(|n| {
+        [0, 3, 7]
+            .into_iter()
+            .flat_map(move |a| [false, true].map(|k| (n, a, k)))
+    }) {
+        let mut s = interactive_engine(count, true);
+        let handles: Vec<_> = (1..=count as u32)
+            .map(|id| add(&mut s, id, 64, 4096))
+            .collect();
+        if known_acceptance {
+            for &h in &handles {
+                for _ in 0..128 {
+                    s.request_mut(h)
+                        .unwrap()
+                        .acceptance
+                        .observe(7, accepted, true, 0);
+                }
+            }
+        }
+        let mut first = vec![None; count];
+        let mut last = vec![None; count];
+        let mut gap = vec![0; count];
+        for _ in 0..150 {
+            let plan = step(&mut s, accepted);
+            if matches!(plan.kind, GraphKind::Prefill | GraphKind::Speculative) {
+                for lane in &plan.lanes {
+                    let i = handles.iter().position(|h| *h == lane.request).unwrap();
+                    first[i].get_or_insert(s.now_ns);
+                    if let Some(at) = last[i] {
+                        gap[i] = gap[i].max(s.now_ns - at);
+                    }
+                    last[i] = Some(s.now_ns);
+                }
+            }
+        }
+        for (i, at) in last.iter().enumerate() {
+            gap[i] = gap[i].max(s.now_ns - at.unwrap_or(0));
+        }
+        assert!(
+            first.iter().all(|t| t.is_some_and(|t| t < 100 * MS)),
+            "count={count} accepted={accepted} known={known_acceptance} first={first:?}"
+        );
+        assert!(
+            gap.iter().all(|g| *g < 150 * MS),
+            "count={count} accepted={accepted} known={known_acceptance} gaps={gap:?}"
+        );
+        let before: Vec<_> = handles
+            .iter()
+            .map(|h| s.request(*h).unwrap().generated_tokens)
+            .collect();
+        for _ in 0..100 {
+            step(&mut s, accepted);
+        }
+        let progress: Vec<_> = handles
+            .iter()
+            .enumerate()
+            .map(|(i, h)| s.request(*h).unwrap().generated_tokens - before[i])
+            .collect();
+        assert!(
+            *progress.iter().min().unwrap() >= 50,
+            "progress={progress:?}"
+        );
+        assert!(
+            progress.iter().max().unwrap() - progress.iter().min().unwrap() <= 8,
+            "count={count} accepted={accepted} known={known_acceptance} progress={progress:?}"
+        );
+    }
+}
+
+#[test]
+fn delivery_reference_uses_batch_throughput_and_excludes_prefill_only_requests() {
+    let mut s = interactive_engine(16, true);
+    let handles: Vec<_> = (1..=2).map(|id| add(&mut s, id, 64, 4096)).collect();
+    ready(&mut s, &handles);
+    let references = |s: &RequestScheduler| {
+        let rates = std::array::from_fn(|slot| {
+            s.slots
+                .get(slot)
+                .and_then(|s| s.request.as_ref())
+                .and_then(|r| s.service_rates(r).1)
+        });
+        s.delivery_reference_intervals(&rates)
+    };
+    assert_eq!(references(&s)[handles[0].slot as usize], Some(17.0));
+    for id in 3..=16 {
+        add(&mut s, id, 32768, 128);
+    }
+    assert_eq!(references(&s)[handles[0].slot as usize], Some(17.0));
+    set_cost(&mut s, GraphKind::Speculative, 16, 1, MS);
+    assert_eq!(references(&s)[handles[0].slot as usize], Some(1.0));
+    s.advance_to(s.now_ns + s.policy.estimate_ttl_ns).unwrap();
+    assert!(references(&s).iter().all(Option::is_none));
+}
+
+#[test]
+fn snapshot_enabling_a_shared_decode_batch_competes_by_the_complete_sequence_cost() {
+    let mut s = interactive_engine(16, true);
+    let handles: Vec<_> = (1..=16).map(|id| add(&mut s, id, 64, 4096)).collect();
+    for &h in &handles {
+        for _ in 0..128 {
+            s.request_mut(h).unwrap().acceptance.observe(7, 7, true, 0);
+        }
+    }
+    for _ in 0..200 {
+        let decoding = handles
+            .iter()
+            .filter(|h| s.request(**h).unwrap().phase == RequestPhase::Decode)
+            .count();
+        let copying = handles
+            .iter()
+            .filter(|h| s.request(**h).unwrap().phase == RequestPhase::Snapshot)
+            .count();
+        if decoding == 15 && copying == 1 {
+            break;
+        }
+        step(&mut s, 7);
+    }
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Snapshot);
+    assert_eq!(plan.lanes.len(), 1);
+    assert_eq!(plan.estimated_duration_ns(), MS / 10);
+    let handle = plan.lanes[0].request;
+    let tokens = s.request(handle).unwrap().generated_tokens;
+    for batch in crate::execution::BATCH_CAPACITIES
+        .into_iter()
+        .take_while(|b| *b <= 16)
+    {
+        set_cost(&mut s, GraphKind::Snapshot, batch, 1, 1000 * MS);
+    }
+    assert_eq!(s.plan().unwrap().kind, GraphKind::Speculative);
+    for batch in crate::execution::BATCH_CAPACITIES
+        .into_iter()
+        .take_while(|b| *b <= 16)
+    {
+        set_cost(&mut s, GraphKind::Snapshot, batch, 1, MS / 10);
+    }
+    assert_eq!(step(&mut s, 7).kind, GraphKind::Snapshot);
+    assert_eq!(s.request(handle).unwrap().generated_tokens, tokens);
+    let batch = s.plan().unwrap();
+    assert_eq!(batch.kind, GraphKind::Speculative);
+    assert_eq!(batch.lanes.len(), 16);
+}
+
+#[test]
+fn equally_costly_snapshot_can_finish_one_request_and_enable_another() {
+    let mut s = interactive_engine(2, true);
+    let terminal = add(&mut s, 1, 64, 1);
+    let continuing = add(&mut s, 2, 64, 4096);
+    step(&mut s, 7);
+    for handle in [terminal, continuing] {
+        let plan = s.phase_plan(GraphKind::Prefill, Some(handle));
+        let fence = Fence(s.submitted.0 + 1);
+        s.commit(&plan, fence).unwrap();
+        s.advance_to(s.now_ns + plan.estimated_duration_ns())
+            .unwrap();
+        complete_timed(
+            &mut s,
+            &plan,
+            fence,
+            7,
+            true,
+            gpu_time(plan.estimated_duration_ns()),
+        );
+    }
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Snapshot);
+    assert_eq!(plan.lanes.len(), 2);
+    step(&mut s, 7);
+    assert!(s.request(terminal).is_err());
+    assert_eq!(s.request(continuing).unwrap().phase, RequestPhase::Decode);
+    assert_eq!(s.request(continuing).unwrap().generated_tokens, 1);
+}
+
+#[test]
+fn prerequisite_cohort_accounts_for_ready_batch_mates() {
+    let mut s = interactive_engine(16, true);
+    s.configure_policy(PolicyConfig {
+        token_fairness: 0.0,
+        delivery_fairness: 0.0,
+        decode_age_price: 0.0,
+        ..Default::default()
+    })
+    .unwrap();
+    let execute = |s: &mut RequestScheduler, kind, handle| {
+        let plan = s.phase_plan(kind, Some(handle));
+        let fence = Fence(s.submitted.0 + 1);
+        s.commit(&plan, fence).unwrap();
+        s.advance_to(s.now_ns + plan.estimated_duration_ns())
+            .unwrap();
+        complete_timed(
+            s,
+            &plan,
+            fence,
+            7,
+            true,
+            gpu_time(plan.estimated_duration_ns()),
+        );
+    };
+    let ready_handles: Vec<_> = (1..=14).map(|id| add(&mut s, id, 64, 4096)).collect();
+    for &handle in &ready_handles {
+        for kind in [GraphKind::Init, GraphKind::Prefill, GraphKind::Snapshot] {
+            execute(&mut s, kind, handle);
+        }
+    }
+    for &handle in &ready_handles {
+        for _ in 0..128 {
+            s.request_mut(handle)
+                .unwrap()
+                .acceptance
+                .observe(7, 7, true, 0);
+        }
+    }
+    let decode = add(&mut s, 15, 64, 4096);
+    let prefill = s
+        .admit(RequestSpec {
+            prompt: vec![16; 32768],
+            system_boundary: Some(512),
+            conditioning: vec![],
+            max_new_tokens: 128,
+            grammar_constrained: false,
+            host_stops: false,
+        })
+        .unwrap();
+    for handle in [decode, prefill] {
+        for kind in [GraphKind::Init, GraphKind::Prefill] {
+            execute(&mut s, kind, handle);
+        }
+    }
+    for batch in [2, 4, 8, 16] {
+        set_cost(&mut s, GraphKind::Snapshot, batch, 1, 1000 * MS);
+    }
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Snapshot);
+    assert_eq!(plan.batch_capacity, 1);
+    assert_eq!(plan.lanes[0].request, decode);
+}
+
+#[test]
+fn invalid_utility_configuration_is_rejected_before_admission() {
+    for policy in [
+        PolicyConfig {
+            output_token_value: f64::INFINITY,
+            ..Default::default()
+        },
+        PolicyConfig {
+            token_fairness: -1.0,
+            ..Default::default()
+        },
+        PolicyConfig {
+            delivery_fairness: f64::NAN,
+            ..Default::default()
+        },
+        PolicyConfig {
+            decode_age_price: -1.0,
+            ..Default::default()
+        },
+        PolicyConfig {
+            adaptation_ms: 0.0,
+            ..Default::default()
+        },
+        PolicyConfig {
+            estimate_ttl_ns: 0,
+            ..Default::default()
+        },
+    ] {
+        assert!(engine(1, false).configure_policy(policy).is_err());
+    }
+}
+
+fn mixed_engine(
+    active: usize,
+    speculative: bool,
+    shapes: &[(usize, usize, usize, u64)],
+) -> RequestScheduler {
+    let mut s = interactive_engine(active, speculative);
+    let mut graphs = super::tests::duration_graphs(active);
+    for g in &mut graphs {
+        g.estimated_duration_ns = s
+            .costs
+            .duration(g.kind, g.batch_capacity, g.token_capacity)
+            .unwrap();
+    }
+    for &(batch, width, prefill, nanos) in shapes {
+        graphs.push(crate::execution::GraphDescriptor {
+            name: format!("mixed-{batch}-{prefill}-{width}"),
+            kind: GraphKind::Mixed,
+            sampling_mode: SamplingMode::General,
+            handle: graphs.len() + 1,
+            batch_capacity: batch,
+            token_capacity: width,
+            prefill_capacity: prefill,
+            estimated_duration_ns: nanos,
+            input_bindings: vec![],
+        });
+    }
+    s.measured_graph_durations(&graphs).unwrap();
+    s.mixed_graphs(
+        &shapes
+            .iter()
+            .map(|&(b, w, p, _)| (b, w, p))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    s
+}
+
+fn throughput_only(s: &mut RequestScheduler) {
+    s.configure_policy(PolicyConfig {
+        token_fairness: 0.0,
+        delivery_fairness: 0.0,
+        decode_age_price: 0.0,
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+fn initialize(s: &mut RequestScheduler, handle: RequestHandle) {
+    let plan = s.phase_plan(GraphKind::Init, Some(handle));
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    complete(s, &plan, fence, 0, true);
+}
+
+#[test]
+fn mixed_value_selects_an_efficiency_knee_and_a_fitting_prompt_tail() {
+    for prompt_tokens in [64, 8192] {
+        let mut s = mixed_engine(
+            2,
+            false,
+            &[
+                (2, 1, 64, 2 * MS),
+                (2, 1, 512, 8 * MS),
+                (2, 1, 4096, 80 * MS),
+            ],
+        );
+        throughput_only(&mut s);
+        let d = add(&mut s, 1, 64, 1024);
+        ready(&mut s, &[d]);
+        let p = add(&mut s, 2, prompt_tokens, 128);
+        initialize(&mut s, p);
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.kind, GraphKind::Mixed);
+        assert_eq!(
+            plan.prefill_capacity(),
+            if prompt_tokens == 64 { 64 } else { 512 }
+        );
+        assert_eq!(plan.mixed.as_ref().unwrap().prefill_row, Some(1));
+        assert_eq!(plan.lanes[0].request, d);
+        assert_eq!(plan.lanes[0].tokens, 1);
+        assert_eq!(plan.lanes[1].request, p);
+        assert_eq!(plan.lanes[1].tokens, plan.prefill_capacity());
+        let expected =
+            (plan.lanes[1].tokens as f64 + 64.0 + if prompt_tokens == 64 { 64.0 } else { 0.0 })
+                / (plan.estimated_duration_ns() as f64 / 1e6);
+        assert!(
+            (plan.selection_value_rate() * plan.selection_log_scale().exp() - expected).abs()
+                < 1e-10
+        );
+    }
+}
+
+#[test]
+fn mixed_shapes_can_win_with_either_phase_unoccupied() {
+    let mut s = mixed_engine(2, false, &[(2, 1, 4096, MS)]);
+    throughput_only(&mut s);
+    let p = add(&mut s, 1, 8192, 1024);
+    initialize(&mut s, p);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    assert_eq!(plan.lanes.len(), 1);
+    assert_eq!(plan.lanes[0].tokens, 4096);
+    assert_eq!(plan.mixed.as_ref().unwrap().prefill_row, Some(0));
+    ready(&mut s, &[p]);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    assert_eq!(plan.lanes.len(), 1);
+    assert_eq!(plan.mixed.as_ref().unwrap().prefill_row, None);
+    assert_eq!(plan.lane_kind(0), GraphKind::Decode);
+}
+
+#[test]
+fn mixed_prefill_and_verification_commit_distinct_progress_and_reject_bad_records_atomically() {
+    let mut s = mixed_engine(2, true, &[(2, 8, 512, MS)]);
+    let d = add(&mut s, 1, 64, 1024);
+    ready(&mut s, &[d]);
+    let p = add(&mut s, 2, 8192, 128);
+    initialize(&mut s, p);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    assert_eq!(plan.token_capacity, 8);
+    let consumed = s.request(d).unwrap().consumed_tokens;
+    let output = s.request(d).unwrap().generated_tokens;
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    assert!(s.plan().is_none());
+    let records = completion_records(&s, &plan, fence, 0);
+    let mut broken = records.clone();
+    broken[p.slot as usize].consumed_tokens -= 1;
+    assert!(s.complete(fence, &broken, gpu_time(200 * MS)).is_err());
+    assert_eq!(s.request(d).unwrap().consumed_tokens, consumed);
+    assert_eq!(s.request(p).unwrap().consumed_tokens, 0);
+    assert_eq!(s.estimated_duration_ns(&plan), Some(MS));
+    broken = records;
+    broken[d.slot as usize]
+        .vector
+        .as_mut()
+        .unwrap()
+        .verification_width = 1;
+    assert!(s.complete(fence, &broken, gpu_time(200 * MS)).is_err());
+    complete_timed(&mut s, &plan, fence, 0, true, gpu_time(2 * MS));
+    assert_eq!(s.request(p).unwrap().consumed_tokens, 512);
+    assert_eq!(
+        s.request(p).unwrap().accounting.committed_prefill_tokens,
+        512
+    );
+    assert_eq!(s.request(p).unwrap().generated_tokens, 0);
+    assert_eq!(s.request(d).unwrap().consumed_tokens, consumed + 1);
+    assert_eq!(s.request(d).unwrap().generated_tokens, output + 1);
+    assert_eq!(
+        s.request(d).unwrap().accounting.committed_prefill_tokens,
+        64
+    );
+    assert_eq!(s.request(d).unwrap().pending, 0);
+}
+
+#[test]
+fn mixed_prompt_tail_publishes_first_output_and_preserves_its_snapshot_boundary() {
+    let mut s = mixed_engine(2, true, &[(2, 8, 64, MS)]);
+    let d = add(&mut s, 1, 64, 1024);
+    ready(&mut s, &[d]);
+    let p = add(&mut s, 2, 64, 128);
+    initialize(&mut s, p);
+    let output = s.request(d).unwrap().generated_tokens;
+    let plan = step(&mut s, 3);
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    let request = s.request(p).unwrap();
+    assert_eq!(request.generated_tokens, 1);
+    assert_eq!(request.accounting.published_deliveries, 1);
+    assert_eq!(request.phase, RequestPhase::Snapshot);
+    assert_eq!(
+        request.boundary_capture.unwrap().resume,
+        RequestPhase::Decode
+    );
+    assert_eq!(s.request(d).unwrap().generated_tokens, output + 4);
+    ready(&mut s, &[p, d]);
+    assert!(s.plan().unwrap().lanes.iter().all(|l| l.tokens <= 8));
+}
+
+#[test]
+fn mixed_cost_observations_and_expiry_are_specific_to_both_token_capacities() {
+    let mut s = mixed_engine(
+        2,
+        true,
+        &[(2, 1, 64, MS), (2, 8, 64, 2 * MS), (2, 8, 512, 3 * MS)],
+    );
+    let make = |width, prefill| ScheduledStep {
+        kind: GraphKind::Mixed,
+        batch_capacity: 2,
+        token_capacity: width,
+        mixed: Some(MixedStep {
+            prefill_capacity: prefill,
+            prefill_row: None,
+            speculative: true,
+        }),
+        lanes: vec![],
+        requires_feedback: true,
+    };
+    s.advance_to(10 * MS).unwrap();
+    s.observe_execution(&make(8, 64), gpu_time(10 * MS));
+    assert_eq!(s.estimated_duration_ns(&make(1, 64)), Some(MS));
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(3 * MS));
+    assert_eq!(s.estimated_duration_ns(&make(8, 512)), Some(3 * MS));
+    s.advance_to(s.policy.estimate_ttl_ns).unwrap();
+    assert_eq!(s.estimated_duration_ns(&make(8, 512)), Some(0));
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(3 * MS));
+    s.advance_to(s.policy.estimate_ttl_ns + 10 * MS).unwrap();
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(0));
+    s.observe_execution(&make(8, 64), gpu_time(MS));
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(MS));
+}
+
+#[test]
+fn mixed_and_separate_selection_matches_exhaustive_useful_work_per_time() {
+    for seed in 0..16usize {
+        let shapes: Vec<_> = [2, 4, 8]
+            .into_iter()
+            .flat_map(|batch| {
+                [64, 512, 4096].into_iter().map(move |p| {
+                    (
+                        batch,
+                        1,
+                        p,
+                        (3 + (seed * 7 + batch * 3 + p / 64) % 79) as u64 * MS,
+                    )
+                })
+            })
+            .collect();
+        let mut s = mixed_engine(6, false, &shapes);
+        throughput_only(&mut s);
+        for slot in 0..6 {
+            let prompt = if slot < 2 {
+                [64, 129, 320, 900][(seed + slot) % 4]
+            } else {
+                64
+            };
+            let h = add(&mut s, slot as u32 + 1, prompt, 1024);
+            let r = s.request_mut(h).unwrap();
+            if slot < 2 {
+                r.phase = RequestPhase::Prefill;
+            } else {
+                r.phase = RequestPhase::Decode;
+                r.consumed_tokens = 64;
+                r.scheduled_consumed = 64;
+                r.generated_tokens = 1;
+            }
+        }
+        let mut expected = 0.0f64;
+        let mut consider = |batch: usize, pcap: usize, ns: u64, allow_p: bool, allow_d: bool| {
+            for mask in 1u64..64 {
+                let ps = (mask & 3).count_ones() as usize;
+                let ds = (mask & !3).count_ones() as usize;
+                if ps > 1 || ps + ds > batch || (!allow_p && ps > 0) || (!allow_d && ds > 0) {
+                    continue;
+                }
+                let mut value = 64.0 * ds as f64;
+                for slot in 0..2 {
+                    if mask & (1 << slot) == 0 {
+                        continue;
+                    }
+                    let prompt = s.slots[slot].request.as_ref().unwrap().prompt_tokens;
+                    value += prompt.min(pcap) as f64 + if prompt <= pcap { 64.0 } else { 0.0 };
+                }
+                expected = expected.max(value * 1e6 / ns as f64);
+            }
+        };
+        for &p in &s.prefill_catalog {
+            consider(
+                1,
+                p,
+                s.costs.duration(GraphKind::Prefill, 1, p).unwrap(),
+                true,
+                false,
+            );
+        }
+        for b in [1, 2, 4, 8] {
+            consider(
+                b,
+                0,
+                s.costs.duration(GraphKind::Decode, b, 1).unwrap(),
+                false,
+                true,
+            );
+        }
+        for &(b, _, p, t) in &shapes {
+            consider(b, p, t, true, true);
+        }
+        let plan = s.plan().unwrap();
+        let actual = plan.selection_value_rate() * plan.selection_log_scale().exp();
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "seed {seed}: {actual} != {expected}; {plan:?}"
+        );
+        assert_eq!(
+            plan.lanes
+                .iter()
+                .enumerate()
+                .filter(|(row, _)| plan.lane_kind(*row) == GraphKind::Prefill)
+                .count(),
+            usize::from(
+                plan.kind == GraphKind::Prefill
+                    || plan.mixed.as_ref().is_some_and(|m| m.prefill_row.is_some())
+            )
+        );
+    }
+}
+
+#[test]
+fn mixed_catalog_completes_common_concurrent_workloads_without_decode_starvation() {
+    for (prefills, decoders, accepted) in [
+        (2, 0, 0),
+        (1, 1, 0),
+        (1, 1, 7),
+        (1, 4, 3),
+        (1, 5, 3),
+        (0, 2, 0),
+        (0, 2, 7),
+        (0, 16, 3),
+    ] {
+        let active: usize = prefills + decoders;
+        let mut shapes = Vec::new();
+        for b in crate::execution::BATCH_CAPACITIES
+            .into_iter()
+            .filter(|b| *b >= 2 && *b <= active.next_power_of_two())
+        {
+            for p in [64, 512, 4096] {
+                for w in [1, 3, 8] {
+                    let decode = match w {
+                        1 => 15 * MS,
+                        3 => 17_300_000,
+                        _ => 30 * MS,
+                    } + 2 * (b as u64 - 2) * MS;
+                    shapes.push((b, w, p, (2 * MS + p as u64 * MS / 64 + decode) * 4 / 5));
+                }
+            }
+        }
+        let mut s = mixed_engine(active, true, &shapes);
+        let handles: Vec<_> = (0..active)
+            .map(|i| {
+                add(
+                    &mut s,
+                    i as u32 + 1,
+                    if i < prefills { 32768 } else { 64 },
+                    128,
+                )
+            })
+            .collect();
+        let mut maximum_gap = 0;
+        let mut launches = 0;
+        while s.slots.iter().any(|slot| slot.request.is_some()) && launches < 20_000 {
+            step(&mut s, accepted);
+            launches += 1;
+            for &h in &handles {
+                if let Ok(r) = s.request(h) {
+                    if r.generated_tokens < r.max_new_tokens {
+                        if let Some(last) = r.accounting.last_output_ns {
+                            maximum_gap = maximum_gap.max(s.now_ns - last);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            s.slots.iter().filter(|slot| slot.request.is_some()).count(),
+            0,
+            "prefills={prefills}, decoders={decoders}, accepted={accepted}"
+        );
+        assert!(
+            maximum_gap < 1000 * MS,
+            "prefills={prefills}, decoders={decoders}, accepted={accepted}, gap={maximum_gap}"
+        );
+    }
+}
+
+#[test]
+fn mixed_prerequisite_values_a_new_prompt_with_ready_decoders() {
+    let mut s = mixed_engine(2, false, &[(2, 1, 512, MS)]);
+    throughput_only(&mut s);
+    let d = add(&mut s, 1, 64, 1024);
+    ready(&mut s, &[d]);
+    let p = add(&mut s, 2, 8192, 128);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Init);
+    assert_eq!(plan.lanes[0].request, p);
+    let expected = (512.0 + 64.0) / 1.1;
+    assert!(
+        (plan.selection_value_rate() * plan.selection_log_scale().exp() - expected).abs() < 1e-9
+    );
+    assert_eq!(plan.estimated_duration_ns(), MS / 10);
+    step(&mut s, 0);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    assert_eq!(plan.lanes.len(), 2);
+}
+
+#[test]
+fn mixed_verification_width_reserves_state_even_when_separate_graphs_are_narrower() {
+    let mut s = interactive_engine(2, true);
+    s.speculative_graphs(&[(1, 1), (2, 1)]).unwrap();
+    assert_eq!(s.execution_width(), 1);
+    s.mixed_graphs(&[(2, 8, 512)]).unwrap();
+    assert_eq!(s.execution_width(), 8);
+    assert_eq!(s.execution_rows(), 8);
+    assert!(s.fixed_speculative_width(Some(1)).is_err());
+    assert!(s.enable_speculation(&[]).is_err());
+    let first = add(&mut s, 1, 65, 128);
+    let second = add(&mut s, 2, 65, 128);
+    assert_eq!(
+        s.request(second).unwrap().state_slot.0 - s.request(first).unwrap().state_slot.0,
+        8
+    );
+}
+
+#[test]
+fn expired_mixed_catalog_fills_useful_work_and_explores_full_verification() {
+    let mut s = mixed_engine(
+        4,
+        true,
+        &[(4, 1, 64, MS), (4, 3, 512, MS), (4, 8, 4096, MS)],
+    );
+    let decoders: Vec<_> = (1..=3).map(|id| add(&mut s, id, 64, 1024)).collect();
+    ready(&mut s, &decoders);
+    let p = add(&mut s, 4, 8192, 128);
+    initialize(&mut s, p);
+    s.advance_to(s.now_ns + s.policy.estimate_ttl_ns).unwrap();
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    assert_eq!(
+        (
+            plan.batch_capacity,
+            plan.prefill_capacity(),
+            plan.token_capacity
+        ),
+        (4, 4096, 8)
+    );
+    assert_eq!(plan.estimated_duration_ns(), 0);
+    assert_eq!(plan.lanes.len(), 4);
+    assert_eq!(plan.lanes.last().unwrap().tokens, 4096);
+}
+
+#[test]
+fn mixed_cancellation_keeps_other_rows_live_and_retires_pages_only_after_completion() {
+    let mut s = mixed_engine(2, true, &[(2, 8, 512, MS)]);
+    let d = add(&mut s, 1, 64, 1024);
+    ready(&mut s, &[d]);
+    let p = add(&mut s, 2, 8192, 128);
+    initialize(&mut s, p);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.kind, GraphKind::Mixed);
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&plan, fence).unwrap();
+    let records = completion_records(&s, &plan, fence, 3);
+    let free = s.free_pages.len();
+    let output = s.request(d).unwrap().generated_tokens;
+    s.cancel(p).unwrap();
+    assert_eq!(s.free_pages.len(), free);
+    assert!(
+        s.admit(RequestSpec {
+            prompt: vec![3; 64],
+            system_boundary: None,
+            conditioning: vec![],
+            max_new_tokens: 128,
+            grammar_constrained: false,
+            host_stops: false
+        })
+        .is_err()
+    );
+    let generated = s.complete(fence, &records, gpu_time(MS)).unwrap();
+    assert_eq!(generated.len(), 4);
+    assert!(generated.iter().all(|t| t.request == d));
+    assert_eq!(s.request(d).unwrap().generated_tokens, output + 4);
+    assert!(s.free_pages.len() > free);
+    let replacement = add(&mut s, 3, 64, 128);
+    assert_eq!(replacement.slot, p.slot);
+    assert_ne!(replacement.generation, p.generation);
+    assert_eq!(
+        s.request(replacement)
+            .unwrap()
+            .accounting
+            .committed_prefill_tokens,
+        0
+    );
 }

@@ -26,6 +26,14 @@ pub fn pack_inputs<M: ModelContract>(
     step: &ScheduledStep,
     admissions: &[Option<Admission<M>>],
 ) -> Result<()> {
+    step.validate_mixed()?;
+    if let Some(mixed) = &step.mixed {
+        if mixed.speculative != !config.speculative_widths.is_empty()
+            || mixed.prefill_capacity > config.limits.prefill_chunk_size
+        {
+            return Err("mixed graph mode exceeds the loaded model configuration".into());
+        }
+    }
     if step.lanes.is_empty()
         || step.lanes.len() > step.batch_capacity
         || step.batch_capacity > config.limits.request_capacity()
@@ -56,12 +64,22 @@ pub fn pack_inputs<M: ModelContract>(
             .filter(|admission| admission.handle == lane.request)
             .ok_or("missing or stale native request admission")?;
         let live = scheduler.request(lane.request)?;
+        if step.kind == GraphKind::Mixed
+            && live.phase
+                != if step.lane_kind(row) == GraphKind::Prefill {
+                    crate::scheduler::RequestPhase::Prefill
+                } else {
+                    crate::scheduler::RequestPhase::Decode
+                }
+        {
+            return Err("mixed row phase does not match its request".into());
+        }
         frame.slots[row] = slot as i32;
         frame.generations[row] = lane.request.generation as i64;
         frame.lengths[row] =
             i32::try_from(lane.tokens).map_err(|_| "model row exceeds token capacity")?;
         frame.samples[row] = i32::from(
-            step.kind != GraphKind::Prefill
+            step.lane_kind(row) != GraphKind::Prefill
                 || lane.start_position.checked_add(lane.tokens as u64)
                     == Some(live.prompt_tokens as u64),
         );

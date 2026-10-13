@@ -2,8 +2,12 @@
 
 mod cost;
 mod policy;
+mod service;
+mod utility;
 pub use policy::{PolicyConfig, RequestAccounting};
 pub mod speculation;
+#[cfg(test)]
+mod valuation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
@@ -236,13 +240,67 @@ pub struct ScheduledLane {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MixedStep {
+    pub prefill_capacity: usize,
+    /// Index in the active lane list; absent when only decode rows are populated.
+    pub prefill_row: Option<usize>,
+    pub speculative: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduledStep {
     pub kind: GraphKind,
     pub batch_capacity: usize,
     pub token_capacity: usize,
+    pub mixed: Option<MixedStep>,
     pub lanes: Vec<ScheduledLane>,
     /// Completion feedback must be processed before another action is submitted.
     pub requires_feedback: bool,
+}
+
+impl ScheduledStep {
+    pub fn validate_mixed(&self) -> Result<()> {
+        match &self.mixed {
+            None if self.kind != GraphKind::Mixed => Ok(()),
+            Some(m)
+                if self.kind == GraphKind::Mixed
+                    && self.batch_capacity >= 2
+                    && crate::execution::BATCH_CAPACITIES.contains(&self.batch_capacity)
+                    && !self.lanes.is_empty()
+                    && self.lanes.len() <= self.batch_capacity
+                    && m.prefill_capacity >= 64
+                    && m.prefill_capacity.is_multiple_of(64)
+                    && m.prefill_row.is_none_or(|row| row < self.lanes.len())
+                    && (1..=8).contains(&self.token_capacity)
+                    && (m.speculative || self.token_capacity == 1)
+                    && self.lanes.iter().enumerate().all(|(row, lane)| {
+                        lane.tokens > 0
+                            && lane.tokens
+                                <= if m.prefill_row == Some(row) {
+                                    m.prefill_capacity
+                                } else {
+                                    self.token_capacity
+                                }
+                    }) =>
+            {
+                Ok(())
+            }
+            _ => Err("mixed step roles do not match its graph or lane capacities".into()),
+        }
+    }
+
+    pub fn prefill_capacity(&self) -> usize {
+        self.mixed.as_ref().map_or(0, |m| m.prefill_capacity)
+    }
+
+    pub fn lane_kind(&self, row: usize) -> GraphKind {
+        match &self.mixed {
+            Some(m) if m.prefill_row == Some(row) => GraphKind::Prefill,
+            Some(m) if m.speculative => GraphKind::Speculative,
+            Some(_) => GraphKind::Decode,
+            None => self.kind,
+        }
+    }
 }
 
 /// An immutable selection tied to the participating requests' execution state.
@@ -253,21 +311,27 @@ pub struct ScheduledPlan {
     step: ScheduledStep,
     epochs: Vec<u64>,
     estimated_duration_ns: u64,
-    recovery_lateness_ns: f64,
+    selection_value_rate: f64,
+    selection_log_scale: f64,
 }
 
 impl ScheduledPlan {
     pub fn estimated_duration_ns(&self) -> u64 {
         self.estimated_duration_ns
     }
-    pub fn recovery_lateness_ns(&self) -> f64 {
-        self.recovery_lateness_ns
+    pub fn selection_value_rate(&self) -> f64 {
+        self.selection_value_rate
+    }
+    pub fn selection_log_scale(&self) -> f64 {
+        self.selection_log_scale
     }
 }
 
 struct Submission {
     step: ScheduledStep,
     expected_finish_ns: u64,
+    estimated_duration_ns: u64,
+    participants: [Option<service::ServiceParticipant>; REQUEST_LANES],
 }
 impl std::ops::Deref for Submission {
     type Target = ScheduledStep;
@@ -370,6 +434,7 @@ pub struct RequestScheduler {
     speculative_fixed_width: Option<usize>,
     speculative_catalog: [Vec<usize>; 7],
     prefill_catalog: Vec<usize>,
+    mixed_catalog: Vec<(usize, usize, usize)>,
     proposal_source: speculation::ProposalSource,
     costs: cost::ActionCosts,
     tickets: HashMap<PrefixKey, Ticket>,
@@ -435,6 +500,7 @@ impl RequestScheduler {
             speculative_fixed_width: None,
             speculative_catalog: Default::default(),
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
+            mixed_catalog: Vec::new(),
             proposal_source: speculation::ProposalSource::Mtp,
             costs: cost::ActionCosts::default(),
             tickets: HashMap::new(),
@@ -448,6 +514,7 @@ impl RequestScheduler {
             .iter()
             .flatten()
             .copied()
+            .chain(self.mixed_catalog.iter().map(|(_, width, _)| *width))
             .max()
             .unwrap_or(1)
     }
@@ -481,10 +548,44 @@ impl RequestScheduler {
         StateSlotId((1 + self.limits.max_active * self.execution_rows()) as u32 + snapshot.0)
     }
 
+    /// Each shape supplies (physical rows, decode width, prompt capacity).
+    pub fn mixed_graphs(&mut self, shapes: &[(usize, usize, usize)]) -> Result<()> {
+        if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
+            return Err("mixed graphs must be selected before admission".into());
+        }
+        let mut catalog = shapes.to_vec();
+        catalog.sort_unstable();
+        if catalog.windows(2).any(|s| s[0] == s[1])
+            || catalog.iter().any(|&(batch, width, prefill)| {
+                batch < 2
+                    || !crate::execution::BATCH_CAPACITIES.contains(&batch)
+                    || batch > self.limits.max_active.next_power_of_two()
+                    || prefill == 0
+                    || !prefill.is_multiple_of(64)
+                    || prefill > self.limits.prefill_chunk_size
+                    || prefill.saturating_add(batch.saturating_sub(1).saturating_mul(width))
+                        > i32::MAX as usize
+                    || if self.speculative_widths.is_empty() {
+                        width != 1
+                    } else {
+                        !self.speculative_widths.contains(&width)
+                            || self.speculative_fixed_width.is_some_and(|w| w != width)
+                    }
+            })
+        {
+            return Err("mixed graph shape is duplicated or outside runtime limits".into());
+        }
+        self.mixed_catalog = catalog;
+        Ok(())
+    }
+
     pub fn enable_speculation(&mut self, widths: &[usize]) -> Result<()> {
         speculation::validate_widths(widths)?;
-        if self.slots.iter().any(|s| s.request.is_some()) || self.submitted != Fence(0) {
-            return Err("speculation must be configured before admission".into());
+        if self.slots.iter().any(|s| s.request.is_some())
+            || self.submitted != Fence(0)
+            || !self.mixed_catalog.is_empty()
+        {
+            return Err("speculation must be configured before mixed graphs and admission".into());
         }
         self.speculative_widths = widths.to_vec();
         self.refresh_speculative_catalog();
@@ -492,6 +593,7 @@ impl RequestScheduler {
     }
     pub fn fixed_speculative_width(&mut self, width: Option<usize>) -> Result<()> {
         if self.submitted != Fence(0)
+            || !self.mixed_catalog.is_empty()
             || self.slots.iter().any(|s| s.request.is_some())
             || width.is_some_and(|w| !self.speculative_widths.contains(&w))
         {
@@ -605,7 +707,6 @@ impl RequestScheduler {
         timing: crate::execution::ExecutionTiming,
     ) {
         self.costs.observe(step, timing);
-        self.initialize_credit_rates();
     }
     pub fn submitted_step(&self, fence: Fence) -> Result<&ScheduledStep> {
         self.submissions
@@ -914,7 +1015,7 @@ impl RequestScheduler {
         self.slots[slot].request = Some(LiveRequest {
             epoch: 0,
             acceptance: speculation::AcceptanceProfile::default(),
-            accounting: self.accounting(spec.prompt.len() - consumed as usize),
+            accounting: self.accounting(),
             handle,
             state_slot: StateSlotId((1 + slot * execution_rows) as u32),
             terminal_snapshot,
@@ -1180,6 +1281,7 @@ impl RequestScheduler {
             return Err("execution plan belongs to another scheduler".into());
         }
         let step = &plan.step;
+        step.validate_mixed()?;
         if fence <= self.submitted || fence.0 > i64::MAX as u64 {
             return Err("submission fences must increase within int64 range".into());
         }
@@ -1189,16 +1291,8 @@ impl RequestScheduler {
         {
             return Err("submission window or feedback barrier is full".into());
         }
-        let remaining = self
-            .window_remaining()
-            .ok_or("in-flight execution exceeded its duration estimate")?;
-        if !self.submissions.is_empty()
-            && (plan.estimated_duration_ns == 0
-                || plan.estimated_duration_ns > self.policy.max_slice_ns
-                || remaining.saturating_add(plan.estimated_duration_ns)
-                    > self.policy.submission_window_ns)
-        {
-            return Err("submission exceeds the execution-time window".into());
+        if !self.submission_window_available(plan.estimated_duration_ns) {
+            return Err("in-flight execution requires completion feedback".into());
         }
         for (lane, epoch) in step.lanes.iter().zip(&plan.epochs) {
             if self.request(lane.request)?.epoch != *epoch {
@@ -1232,6 +1326,7 @@ impl RequestScheduler {
             }
             needed.push((lane.request, pages, through));
         }
+        let participants = self.service_participants();
         for (handle, pages, through) in needed {
             let request = self.request_mut(handle)?;
             let allocated: Vec<_> = (0..pages)
@@ -1255,6 +1350,8 @@ impl RequestScheduler {
             Submission {
                 step: step.clone(),
                 expected_finish_ns,
+                estimated_duration_ns: plan.estimated_duration_ns,
+                participants,
             },
         );
         Ok(())
@@ -1264,6 +1361,7 @@ impl RequestScheduler {
         &mut self,
         fence: Fence,
         records: &[CompletionRecord],
+        timing: crate::execution::ExecutionTiming,
     ) -> Result<Vec<GeneratedToken>> {
         if records.len() < self.limits.request_capacity() || records.len() > REQUEST_LANES {
             return Err("completion does not cover the prepared request capacity".into());
@@ -1284,13 +1382,14 @@ impl RequestScheduler {
             );
         }
         // Validate every live lane before committing any completion state.
-        for lane in &step.lanes {
+        for (row, lane) in step.lanes.iter().enumerate() {
+            let kind = step.lane_kind(row);
             records[lane.request.slot as usize].validate_vector()?;
             let Ok(request) = self.request(lane.request) else {
                 continue;
             };
             if matches!(
-                step.kind,
+                kind,
                 GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot | GraphKind::Vision
             ) {
                 let record = records[lane.request.slot as usize];
@@ -1311,20 +1410,20 @@ impl RequestScheduler {
             }
             let record = records[lane.request.slot as usize];
             let emitted = record.generated_tokens - request.generated_tokens as i64;
-            let width = if step.kind == GraphKind::Speculative {
+            let width = if kind == GraphKind::Speculative {
                 step.token_capacity as i64
             } else {
                 1
             };
             if let Some(vector) = record.vector {
                 if vector.emitted_count != emitted
-                    || (step.kind == GraphKind::Speculative
+                    || (kind == GraphKind::Speculative
                         && (vector.verification_width != width
                             || record.consumed_tokens - request.consumed_tokens as i64 != emitted))
                 {
                     return Err("token vector does not match committed request progress".into());
                 }
-            } else if step.kind == GraphKind::Speculative {
+            } else if kind == GraphKind::Speculative {
                 return Err("speculative completion requires ABI3 token vector".into());
             }
             if record.generation != lane.request.generation as i64
@@ -1336,11 +1435,11 @@ impl RequestScheduler {
                 || record.generated_tokens > request.generated_tokens as i64 + width
                 || record.generated_tokens > request.max_new_tokens as i64
                 || (record.status == 1
-                    && step.kind != GraphKind::Speculative
+                    && kind != GraphKind::Speculative
                     && record.consumed_tokens as u64 != lane.start_position + lane.tokens as u64)
                 || (record.status == 1
                     && matches!(
-                        step.kind,
+                        kind,
                         GraphKind::Decode | GraphKind::Speculative | GraphKind::Resume
                     )
                     && record.generated_tokens == request.generated_tokens as i64)
@@ -1357,17 +1456,21 @@ impl RequestScheduler {
                 );
             }
         }
-        let step = self.submissions.remove(&fence).unwrap().step;
+        let submission = self.submissions.remove(&fence).unwrap();
+        self.observe_execution(&submission.step, timing);
+        let step = submission.step;
         let now_ns = self.now_ns;
+        let mut useful_tokens = [0u64; REQUEST_LANES];
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
-        for lane in step.lanes {
+        for (row, lane) in step.lanes.iter().enumerate() {
+            let kind = step.lane_kind(row);
             let Ok(request) = self.request_mut(lane.request) else {
                 continue;
             };
             request.pending -= 1;
             if matches!(
-                step.kind,
+                kind,
                 GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot | GraphKind::Vision
             ) {
                 let record = records[lane.request.slot as usize];
@@ -1375,7 +1478,7 @@ impl RequestScheduler {
                     request.error_code = Some(record.error_code);
                     request.terminal_snapshot_ready = false;
                     request.phase = RequestPhase::Finishing;
-                } else if step.kind == GraphKind::Snapshot {
+                } else if kind == GraphKind::Snapshot {
                     if request.boundary_capture.is_some() {
                         boundaries.push(lane.request);
                     } else {
@@ -1383,7 +1486,7 @@ impl RequestScheduler {
                         request.phase = RequestPhase::Finishing;
                     }
                 } else {
-                    if step.kind == GraphKind::Vision {
+                    if kind == GraphKind::Vision {
                         request.vision_patches.pop_front();
                     }
                     request.phase = if !request.vision_patches.is_empty() {
@@ -1399,7 +1502,7 @@ impl RequestScheduler {
             let record = records[lane.request.slot as usize];
             let finished =
                 record.status >= 2 || record.generated_tokens == request.max_new_tokens as i64;
-            if step.kind == GraphKind::Speculative && record.status != 3 {
+            if kind == GraphKind::Speculative && record.status != 3 {
                 let vector = record.vector.unwrap();
                 // ABI3 may count padded proposals in the physical capture. Only
                 // the lane's logical draft extent supplies acceptance observations.
@@ -1414,7 +1517,7 @@ impl RequestScheduler {
             if record.status == 3 {
                 request.error_code = Some(record.error_code);
             }
-            let prefill = if step.kind == GraphKind::Prefill {
+            let prefill = if kind == GraphKind::Prefill {
                 record.consumed_tokens as u64 - request.consumed_tokens
             } else {
                 0
@@ -1422,9 +1525,11 @@ impl RequestScheduler {
             let output = (record.generated_tokens - request.generated_tokens as i64) as u32;
             if record.status != 3 {
                 request.accounting.credit(prefill, output, now_ns);
+                useful_tokens[lane.request.slot as usize] = prefill + u64::from(output);
             }
             request.consumed_tokens = record.consumed_tokens as u64;
             if record.generated_tokens > request.generated_tokens as i64 {
+                request.accounting.pending_publication_fence = Some(fence);
                 let count = (record.generated_tokens - request.generated_tokens as i64) as usize;
                 for index in 0..count {
                     let token = record.vector.map_or(record.token_id, |v| v.tokens[index]) as u32;
@@ -1451,7 +1556,7 @@ impl RequestScheduler {
             } else {
                 RequestPhase::Decode
             };
-            if step.kind == GraphKind::Prefill && request.error_code.is_none() {
+            if kind == GraphKind::Prefill && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
                 let capture = if request.system_boundary == Some(endpoint as usize) {
                     request
@@ -1484,6 +1589,7 @@ impl RequestScheduler {
         for handle in boundaries {
             self.publish_boundary(handle)?;
         }
+        self.observe_service(fence, &submission.participants, &useful_tokens, timing);
         Ok(generated)
     }
 

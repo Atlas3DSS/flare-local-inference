@@ -1,423 +1,318 @@
 from dataclasses import replace
-from math import prod
-from itertools import permutations
-from random import Random
-import csv
+from itertools import combinations
 import json
+from math import prod, sqrt
+from random import Random
 import subprocess
 import sys
 
 import pytest
 
-from scripts.scheduling_sim.model import (
-    Action, Config, CostModel, Request, View, Work, expected_tokens, token_outcomes,
-)
-from scripts.scheduling_sim.frontier import max_min_pair
-from scripts.scheduling_sim.latency import rescue_latenesses
-from scripts.scheduling_sim.scheduler import InfeasibleQuantum, Scheduler, candidates, delivery_pressures, POLICIES
-from scripts.scheduling_sim.simulator import reference_costs, run
+from scripts.scheduling_sim.analysis import conditional_remaining, fair_allocation, output_age_area, prefill_completion_ms
+from scripts.scheduling_sim.model import Graph, Request, Value, View, expected_output
+from scripts.scheduling_sim.scheduler import candidates, choose, rank
+from scripts.scheduling_sim.simulator import run
+from scripts.scheduling_sim.workloads import catalog, workloads
 
 
-def view(index=0, prefill=0, context=512, age=0, lag=0, probabilities=(0.8,) * 5):
-    return View(index, 0, prefill, context, age, lag, probabilities, 0.025, 3.2,
-                0, prefill * 0.025 if prefill else 3.2)
+def prefill(tokens, name="p", weight=1):
+    return View(name, tokens, 4096, (1.0,) * 7, weight)
 
 
-def test_survival_expectation_by_enumerating_every_outcome():
-    probabilities = (0.9, 0.6, 0.2, 0.8)
-    exact = sum((i + 1) * prod(probabilities[:i]) * (1 - probabilities[i])
-                for i in range(len(probabilities)))
-    exact += (len(probabilities) + 1) * prod(probabilities)
-    assert expected_tokens(probabilities, 4) == pytest.approx(exact)
-    assert expected_tokens((0.0,) * 5, 5) == 1
-    assert expected_tokens((1.0,) * 5, 5) == 6
+def decode(name="d", accepted=7, budget=4096, weight=1):
+    return View(name, 0, budget, tuple(float(i < accepted) for i in range(7)), weight)
 
 
-def test_monte_carlo_matches_conditional_survival():
-    rng = Random(41)
-    probabilities = (0.9, 0.6, 0.2)
-    total = 0
-    for _ in range(40_000):
-        emitted = 1
-        for probability in probabilities:
-            if rng.random() >= probability:
-                break
-            emitted += 1
-        total += emitted
-    assert total / 40_000 == pytest.approx(expected_tokens(probabilities, 3), abs=0.015)
+def test_expected_output_matches_exhaustive_prefix_outcomes():
+    probabilities = (0.9, 0.4, 0.7)
+    outcomes = sum((i + 1) * prod(probabilities[:i]) * (1 - p) for i, p in enumerate(probabilities))
+    outcomes += 4 * prod(probabilities)
+    assert expected_output(probabilities, 4) == pytest.approx(outcomes)
+    assert expected_output((1, 0), 3) == 2
+    assert expected_output((0, 1), 3) == 1
 
 
-def test_prefix_survival_cannot_be_replaced_by_average_acceptance():
-    assert expected_tokens((1.0, 0.0), 2) == 2
-    assert expected_tokens((0.0, 1.0), 2) == 1
+@pytest.mark.parametrize("count", [1, 2, 4, 5, 16])
+def test_full_prefills_choose_highest_efficiency_without_a_size_rule(count):
+    views = [prefill(32_768, f"p{i}") for i in range(count)]
+    action = choose(views, catalog(), Value(64))
+    assert action.graph.prefill_capacity == 4096
+    assert action.expected_work(Value(64)) == 4096
+    assert action.score(Value(64)) == pytest.approx(4096 / 66)
 
 
-def test_mixing_can_help_or_hurt_for_identical_work():
-    views = {0: view(0, prefill=256), 1: view(1)}
-    prefill = Action((Work(0, prefill=256),))
-    decode = Action((Work(1),))
-    mixed = Action(prefill.work + decode.work)
-    model = CostModel()
-    separate = model.duration(prefill, views) + model.duration(decode, views)
-    assert model.duration(mixed, views) < separate
-    assert replace(model, mixed_penalty_ms=10).duration(mixed, views) > separate
+@pytest.mark.parametrize("remaining", [1, 32, 64])
+def test_tail_uses_64_graph_by_effective_value(remaining):
+    actions = rank([prefill(remaining)], catalog(), Value(64))
+    assert actions[0].graph.prefill_capacity == 64
+    assert all(a.expected_work(Value(64)) == remaining + 64 for a in actions)
 
 
-def test_padding_and_heterogeneous_depth_costs():
-    views = {i: view(i) for i in range(3)}
-    action = Action((Work(0, drafts=5), Work(1), Work(2)))
-    rectangular = CostModel(target_token_ms=1)
-    ragged = replace(rectangular, shape="ragged")
-    assert rectangular.duration(action, views) > ragged.duration(action, views)
+def test_underfilled_larger_graph_can_lose_to_partial_completion():
+    action = choose([prefill(576)], catalog(), Value(64))
+    assert action.graph.prefill_capacity == 512
+    assert action.expected_work(Value(64)) == 512
 
 
-def test_context_changes_legal_prefill_chunk():
-    config, model = Config(), CostModel()
-    def largest(context):
-        options = candidates([view(prefill=1024, context=context)], config, model)
-        return max(a.work[0].prefill for a, _ in options)
-    assert largest(32768) < largest(512)
+def test_smaller_graph_can_win_for_full_prompt_if_its_measured_efficiency_is_better():
+    graphs = (Graph("small", 1, prefill_capacity=512), Graph("large", 100, prefill_capacity=4096))
+    assert choose([prefill(10_000)], graphs, Value(64)).graph.name == "small"
 
 
-def test_impossible_quantum_is_rejected():
-    with pytest.raises(InfeasibleQuantum, match="no action within"):
-        Scheduler("interactive", Config(quantum_ms=1), CostModel()).choose(0, [view()])
+def test_padding_is_not_banned_when_larger_graph_is_actually_faster():
+    graphs = (Graph("small", 5, prefill_capacity=64), Graph("large", 1, prefill_capacity=4096))
+    action = choose([prefill(64)], graphs, Value(64))
+    assert action.graph.name == "large"
+    assert action.expected_work(Value(64)) == 128
 
 
-def test_oldest_guard_overrides_high_expected_throughput():
-    config = Config(max_batch=1, urgent_after_ms=20)
-    views = [view(0, age=0, probabilities=(0.0,) * 5),
-             view(1, age=39, probabilities=(1.0,) * 5)]
-    action, _ = Scheduler("interactive", config, CostModel()).choose(40, views)
-    assert action.indices == {0}
+@pytest.mark.parametrize("accepted,width", [(0, 1), (2, 3), (7, 8)])
+@pytest.mark.parametrize("count", [1, 2, 4, 5, 16])
+def test_decode_depth_and_batch_compete_by_expected_output(accepted, width, count):
+    action = choose([decode(f"d{i}", accepted) for i in range(count)], catalog(), Value(64))
+    assert action.graph.width == width
+    expected_count = 4 if count == 5 and accepted < 7 else count
+    assert len(action.lanes) == expected_count
+    assert sum(l.expected_output for l in action.lanes) == expected_count * (accepted + 1)
 
 
-@pytest.mark.parametrize("policy", ("interactive", "delivery"))
-@pytest.mark.parametrize("seed", range(8))
-def test_bounded_service_gap_with_churn_and_random_acceptance(policy, seed):
-    rng = Random(seed)
-    requests = [Request(f"request-{i}", i * 3, rng.choice((0, 64, 256)),
-                        rng.randint(3, 24), (rng.random(),) * 5) for i in range(12)]
-    config = Config(resident_limit=4, max_batch=2, urgent_after_ms=8, quantum_ms=12)
-    result = run(requests, policy, config, seed=seed)
-    bound = config.urgent_after_ms + (config.resident_limit + 1) * config.quantum_ms
-    assert result.summary["max_service_gap_ms"] <= bound + 1e-8
-    assert result.summary["max_action_ms"] <= config.quantum_ms + 1e-8
-    assert [r["output_tokens"] for r in result.requests] == [r.output_tokens for r in requests]
+def test_inactive_batch_rows_and_rejected_drafts_earn_no_work():
+    graph = Graph("b8w8", 30, decode_capacity=8, width=8)
+    action = choose([decode("a", 0), decode("b", 7)], (graph,), Value(10))
+    assert action.expected_work(Value(10)) == 90
 
 
-def test_arrival_during_action_waits_until_boundary_and_is_not_in_batch():
-    requests = [Request("running", 0, 0, 8), Request("arrival", 0.001, 0, 2)]
-    result = run(requests, "interactive", keep_trace=True)
-    first = result.trace[0]
-    assert [w["request"] for w in first["work"]] == ["running"]
-    assert result.requests[1]["queue_ms"] == pytest.approx(first["end_ms"] - 0.001)
-
-
-def test_prefill_emits_first_token_and_single_token_request_completes():
-    result = run([Request("one-token", 0, 128, 1)], "interactive", keep_trace=True)
-    assert len(result.trace) == 1
-    assert result.requests[0]["ttft_ms"] == result.requests[0]["completion_ms"]
-    assert result.requests[0]["decode_rounds"] == 0
-
-
-def test_eos_censors_unobserved_drafts():
-    result = run([Request("short", 0, 0, 2, (1.0,) * 5)], "throughput",
-                 Config(acceptance_mode="oracle"), keep_trace=True)
-    assert result.trace[0]["work"][0]["drafts"] > 1
-    assert result.trace[0]["work"][0]["observations"] == [True]
-    assert result.requests[0]["output_tokens"] == 2
-
-
-def test_slot_queue_is_separate_from_resident_service_guarantee():
-    requests = [Request("resident", 0, 0, 20), Request("queued", 1, 0, 1)]
-    result = run(requests, "interactive", Config(resident_limit=1), keep_trace=True)
-    assert result.requests[1]["queue_ms"] == pytest.approx(result.requests[0]["completion_ms"] - 1)
-    assert result.requests[1]["queue_ms"] > result.requests[1]["max_service_gap_ms"]
-
-
-def test_cost_reference_does_not_depend_on_actual_fragmentation(monkeypatch):
-    request = Request("prompt", 0, 1024, 1)
-    whole = run([request], "interactive")
-    def small_chunks(self, now, views):
-        return min(candidates(views, self.config, self.model), key=lambda item: item[0].work[0].prefill)
-    monkeypatch.setattr(Scheduler, "choose", small_chunks)
-    fragmented = run([request], "interactive")
-    assert fragmented.summary["busy_ms"] > whole.summary["busy_ms"]
-    assert fragmented.requests[0]["credited_progress_ms"] == pytest.approx(
-        whole.requests[0]["credited_progress_ms"])
-
-
-def test_realized_progress_can_fall_below_speculative_reference():
-    probabilities = (0.99,) * 5
-    config = Config(reference="speculative")
-    model = CostModel()
-    _, per_token = reference_costs(Request("high-acceptance", 0, 0, 100, probabilities), config, model)
-    action_time = model.duration(Action((Work(0, drafts=5),)), {0: view()})
-    assert per_token < action_time
-    assert 1 - probabilities[0] > 0
-    # Repeated first-draft rejection has positive probability and yields one token per round.
-    rounds = 1000
-    assert rounds * action_time - rounds * per_token > 1000
-
-
-def test_request_views_do_not_disclose_remaining_decode():
+def test_explicit_output_budget_caps_expected_work_without_revealing_eos():
+    action = choose([decode(budget=2)], catalog(), Value(10))
+    assert action.graph.width == 3
+    assert action.lanes[0].width == 2
+    assert action.lanes[0].expected_output == 2
     assert "output_tokens" not in View.__dataclass_fields__
-    assert "remaining_output" not in View.__dataclass_fields__
 
 
-def test_reproducibility_includes_policy_decisions_and_output_events():
-    requests = [Request(f"r{i}", i * 2, 64, 16) for i in range(3)]
-    assert run(requests, "interactive", seed=7, keep_trace=True) == run(
-        requests, "interactive", seed=7, keep_trace=True)
+@pytest.mark.parametrize("scale", [0.001, 1, 1000])
+def test_uniform_time_scaling_does_not_change_selection(scale):
+    graphs = tuple(replace(g, duration_ms=g.duration_ms * scale) for g in catalog())
+    assert choose([decode()], graphs, Value(64)).graph.name == "decode-b1-w8"
+    assert choose([prefill(32_768)], graphs, Value(64)).graph.name == "prefill-4096"
 
 
-@pytest.mark.parametrize("policy", POLICIES)
-def test_policies_finish_prefill_and_decode_without_token_loss(policy):
-    requests = [Request("prefill", 0, 160, 5), Request("decode", 1, 0, 9, (0.0,) * 5)]
-    result = run(requests, policy, keep_trace=True)
-    assert [r["output_tokens"] for r in result.requests] == [5, 9]
-    assert sum(w["prefill"] for e in result.trace for w in e["work"]) == 160
+def test_breadth_and_depth_are_joint_candidates_not_fixed_priority():
+    graphs = (Graph("b2w8", 10, decode_capacity=2, width=8),
+              Graph("b8w1", 10, decode_capacity=8))
+    high = [decode(f"d{i}") for i in range(8)]
+    low = [decode(f"d{i}", 0) for i in range(8)]
+    assert choose(high, graphs, Value(1)).graph.name == "b2w8"
+    assert choose(low, graphs, Value(1)).graph.name == "b8w1"
 
 
-@pytest.mark.parametrize("kwargs", ({"quantum_ms": float("nan")}, {"max_batch": 0},
-                                    {"chunks": (128, 64)}, {"lag_scale_ms": -1},
-                                    {"service_gap_target_ms": 0}, {"service_gap_target_ms": float("inf")}))
-def test_invalid_configuration(kwargs):
-    with pytest.raises(ValueError):
-        Config(**kwargs)
+def test_cohort_ranking_matches_exhaustive_subsets():
+    rng = Random(17)
+    views = [View(f"d{i}", 0, 100, tuple(rng.random() for _ in range(7)), 1 + rng.random()) for i in range(6)]
+    value = Value(23)
+    for graph in catalog():
+        if not graph.decode_capacity:
+            continue
+        expected = max(
+            sum(v.weight * value.decode_value * expected_output(v.acceptance, graph.width) for v in subset)
+            / graph.duration_ms
+            for size in range(1, min(graph.decode_capacity, len(views)) + 1)
+            for subset in combinations(views, size)
+        )
+        assert choose(views, (graph,), value).score(value) == pytest.approx(expected)
 
 
-def test_exact_fair_frontier_beats_any_single_action():
-    rate, mixture = max_min_pair([(1.5, 0.5), (0.5, 1.5), (0.9, 0.9)])
-    assert rate == pytest.approx(1)
-    assert mixture == [(0, 0.5), (1, 0.5)]
+def test_age_tie_break_revisits_five_streams_but_does_not_equalize_service():
+    requests = [Request(f"d{i}", 0, 4096, acceptance=(0.0,) * 7) for i in range(5)]
+    result = run(requests, catalog(), Value(64), horizon_ms=210)
+    assert all(e["graph"] == "decode-b4-w1" for e in result.trace)
+    assert [r["output_tokens"] for r in result.requests] == [10, 10, 10, 5, 5]
+    assert result.summary["max_output_gap_ms"] == 42
 
 
-def test_fair_frontier_weights_are_time_fractions_not_round_fractions():
-    # Actions delivering (4, 0) in 2 ms and (0, 1) in 1 ms need a 1:2 time split.
-    rate, mixture = max_min_pair([(2, 0), (0, 1)])
-    assert rate == pytest.approx(2 / 3)
-    assert dict(mixture)[0] == pytest.approx(1 / 3)
+def test_decode_value_changes_phase_priority_but_not_prefill_shape_order():
+    views = [prefill(32_768), decode()]
+    assert choose(views, catalog(), Value(1)).graph.prefill_capacity == 4096
+    assert choose(views, catalog(), Value(1000)).graph.decode_capacity == 1
+    for value in (Value(1), Value(1000)):
+        prefills = [a for a in rank(views, catalog(), value) if a.graph.prefill_capacity]
+        assert prefills[0].graph.prefill_capacity == 4096
 
 
-def test_exact_frontier_dominates_dense_bruteforce_mixtures():
-    points = [(0.2, 2.5), (1.8, 0.4), (1.1, 1.2), (0.6, 1.7)]
-    optimum, _ = max_min_pair(points)
-    for first in range(21):
-        for second in range(21 - first):
-            for third in range(21 - first - second):
-                weights = [first, second, third, 20 - first - second - third]
-                rate = min(sum(w * p[k] / 20 for w, p in zip(weights, points)) for k in (0, 1))
-                assert optimum >= rate - 1e-10
+def test_mixed_capture_can_win_with_smaller_prefill_by_value_alone():
+    views = [prefill(32_768), *(decode(f"d{i}") for i in range(4))]
+    graphs = (Graph("prefill", 64, prefill_capacity=4096),
+              Graph("decode", 30, decode_capacity=4, width=8),
+              Graph("mixed-large", 96, prefill_capacity=4096, decode_capacity=4, width=8),
+              Graph("mixed-small", 35, prefill_capacity=512, decode_capacity=4, width=8))
+    action = choose(views, graphs, Value(64))
+    assert action.graph.name == "mixed-small"
+    assert action.expected_work(Value(64)) == 512 + 64 * 32
+    slower = tuple(replace(g, duration_ms=200) if g.name.startswith("mixed") else g for g in graphs)
+    assert choose(views, slower, Value(64)).graph.name == "decode"
 
 
-def test_greedy_expected_progress_can_worsen_finite_workload_makespan():
-    requests = [Request(f"r{i}", 0, 0, 32, (1.0 if i < 4 else 0.0,) * 5) for i in range(8)]
-    config = Config(acceptance_mode="oracle")
-    speculative = run(requests, "throughput", config, keep_trace=True)
-    ordinary = run(requests, "throughput", replace(config, max_drafts=0))
-    assert any(w["drafts"] for w in speculative.trace[0]["work"])
-    assert speculative.summary["makespan_ms"] > ordinary.summary["makespan_ms"]
+def test_cycle_value_is_time_weighted_not_average_of_graph_scores():
+    actions = candidates([prefill(32_768), decode()], catalog(), Value(64))
+    a = next(a for a in actions if a.graph.name == "prefill-4096")
+    b = next(a for a in actions if a.graph.name == "decode-b1-w8")
+    cycle = (a.expected_work(Value(64)) + b.expected_work(Value(64))) / (a.graph.duration_ms + b.graph.duration_ms)
+    assert min(a.score(Value(64)), b.score(Value(64))) <= cycle <= max(a.score(Value(64)), b.score(Value(64)))
 
 
-def test_cli_custom_workload_config_and_trace(tmp_path):
-    workload = tmp_path / "workload.json"
-    config = tmp_path / "config.json"
-    output = tmp_path / "results"
-    workload.write_text(json.dumps([
-        {"name": "first", "arrival_ms": 0, "prompt_tokens": 64, "output_tokens": 5},
-        {"name": "second", "arrival_ms": 0, "prompt_tokens": 0, "output_tokens": 2},
-    ]))
-    config.write_text(json.dumps({"config": {"resident_limit": 1, "max_drafts": 0,
-                                            "service_gap_target_ms": 20},
-                                  "model": {"weight_ms": 2}}))
-    subprocess.run([
-        sys.executable, "-m", "scripts.scheduling_sim", "--workload-file", str(workload),
-        "--config", str(config), "--policies", "interactive", "--resident-limit", "2",
-        "--gap-targets", "none,10",
-        "--output", str(output), "--trace",
-    ], check=True, capture_output=True, text=True)
-    with (output / "summary.csv").open() as handle:
-        rows = list(csv.DictReader(handle))
-        row = rows[0]
-    assert row["resident_limit"] == "2"
-    assert row["cost_weight_ms"] == "2"
-    assert row["max_drafts"] == "0"
-    assert [r["service_gap_target_ms"] for r in rows] == ["", "10.0"]
-    assert [r["latency_guard_enabled"] for r in rows] == ["False", "True"]
-    assert all(json.loads(line)["resident"] <= 2 for line in (output / "trace.jsonl").read_text().splitlines())
-    with (output / "requests.csv").open() as handle:
-        assert sum(int(r["output_tokens"]) for r in csv.DictReader(handle)) == 14
+@pytest.mark.parametrize("name", list(workloads()))
+@pytest.mark.parametrize("mixed", [False, True])
+def test_basic_workloads_execute_without_idle_or_illegal_progress(name, mixed):
+    requests = workloads()[name]
+    result = run(requests, catalog(mixed=mixed), Value(64), horizon_ms=5000)
+    assert result.trace
+    assert all(event["end_ms"] > event["start_ms"] for event in result.trace)
+    assert all(a["end_ms"] == b["start_ms"] for a, b in zip(result.trace, result.trace[1:]))
+    for row, request in zip(result.requests, requests):
+        assert 0 <= row["prefill_tokens"] <= request.prompt_tokens
+        assert 0 <= row["output_tokens"] <= min(request.output_tokens, request.max_new_tokens)
+        if row["output_tokens"]:
+            assert row["prefill_tokens"] == request.prompt_tokens
+    for event in result.trace:
+        actual_prefill = sum(l["prefill"] for l in event["lanes"])
+        assert actual_prefill <= event["prefill_capacity"]
+        assert len([l for l in event["lanes"] if not l["prefill"]]) <= event["decode_capacity"]
+        expected_work = sum(l["weight"] * (l["prefill"] + 64 * l["expected_output"]) for l in event["lanes"])
+        assert event["score"] == pytest.approx(expected_work / event["duration_ms"])
 
 
-def test_unobserved_depth_is_not_silently_assumed():
-    with pytest.raises(ValueError):
-        expected_tokens((0.9,), 2)
+def test_two_equal_prefills_take_full_chunks_without_starving_either():
+    result = run([Request("a", 32_768, 1), Request("b", 32_768, 1)], catalog(), Value(1))
+    events = result.trace
+    assert len(events) == 16
+    assert all(e["lanes"][0]["prefill"] == 4096 for e in events)
+    assert {e["lanes"][0]["request"] for e in events[:2]} == {"a", "b"}
+    assert result.summary["unfinished"] == 0
 
 
-def test_deficit_metric_is_measured_after_committed_progress():
-    result = run([Request("one", 0, 0, 4)], "round_robin", Config(max_drafts=0),
-                 CostModel(attention_ms_per_ktoken=0))
-    assert result.summary["max_lag_ms"] == pytest.approx(0, abs=1e-12)
+def test_staggered_arrival_waits_for_graph_boundary():
+    result = run(workloads()["short_arrival"], catalog(), Value(64))
+    assert result.trace[0]["end_ms"] == 66
+    assert {l["request"] for l in result.trace[0]["lanes"]} == {"long"}
+    assert result.requests[1]["ttft_ms"] >= 65
 
 
-def test_burst_delivery_slowdown_uses_first_token_and_preserves_historical_peak(monkeypatch):
-    model = CostModel(launch_ms=0, weight_ms=10, target_token_ms=0,
-                      attention_ms_per_ktoken=0, draft_step_ms=18, draft_token_ms=0)
-    depths = iter((0, 5, 0))
-    def prescribed(self, now, views):
-        action = Action((Work(0, drafts=next(depths)),))
-        return action, self.model.duration(action, {v.index: v for v in views})
-    monkeypatch.setattr(Scheduler, "choose", prescribed)
-    result = run([Request("burst", 0, 0, 8, (1.0,) * 5)], "interactive",
-                 Config(quantum_ms=100), model, keep_trace=True)
+def test_finishing_decode_removes_its_value_from_future_choices():
+    result = run([Request("p", 8192, 1), Request("d", 0, 1)], catalog(), Value(1000))
+    assert result.trace[0]["lanes"][0]["request"] == "d"
+    assert all(l["request"] != "d" for event in result.trace[1:] for l in event["lanes"])
+    assert result.summary["unfinished"] == 0
+
+
+def test_expected_acceptance_matches_realized_average_over_many_rounds():
+    probabilities = (0.8, 0.6, 0.4)
+    graph = Graph("verify", 1, decode_capacity=1, width=4)
+    result = run([Request("d", 0, 100_000, acceptance=probabilities, max_new_tokens=100_000)],
+                 (graph,), Value(1), horizon_ms=10_000, seed=3)
+    assert result.summary["output_tokens"] / result.summary["launches"] == pytest.approx(expected_output(probabilities, 4), abs=0.03)
+
+
+def test_constant_values_do_not_provide_a_fairness_guarantee():
+    result = run([Request("p", 32_768, 1), Request("d", 0, 4096)], catalog(), Value(1000), horizon_ms=1000)
+    assert result.requests[0]["prefill_tokens"] == 0
+    assert result.requests[0]["unfinished"]
+    assert result.requests[1]["output_tokens"] > 0
+
+
+def test_greedy_action_rate_is_not_a_prefill_completion_oracle():
+    graphs = (Graph("64", 2, prefill_capacity=64), Graph("128", 3, prefill_capacity=128), Graph("256", 4, prefill_capacity=256))
+    result = run([Request("p", 129, 1)], graphs, Value(1))
+    assert result.summary["busy_ms"] == 5
+    assert prefill_completion_ms(129, graphs) == 4
+
+
+def test_remaining_output_depends_on_the_conditioned_distribution():
+    assert conditional_remaining({100: 1}, 20) == 80
+    assert conditional_remaining({100: 1}, 80) == 20
+    assert conditional_remaining({1: 0.9, 100: 0.1}, 0) == pytest.approx(10.9)
+    assert conditional_remaining({1: 0.9, 100: 0.1}, 1) == 99
+    with pytest.raises(ValueError, match="zero probability"):
+        conditional_remaining({10: 1}, 10)
+
+
+def test_age_penalty_counts_waiting_through_execution_and_is_additive():
+    assert output_age_area(20, 30) == 20 * 30 + 30 * 30 / 2
+    assert output_age_area(20, 30) == output_age_area(20, 10) + output_age_area(30, 20)
+
+
+def test_decode_age_includes_initial_delay_and_open_stalls():
+    graphs = (Graph("prefill", 100, prefill_capacity=4096), Graph("decode", 10, decode_capacity=1))
+    result = run([Request("d", 0, 10), Request("p", 4096, 1)], graphs, Value(1), horizon_ms=105)
     row = result.requests[0]
-    assert row["max_delivery_slowdown"] == pytest.approx(110 / 20)
-    assert row["worst_delivery_token"] == 2
-    assert row["reference_slowdown"] == pytest.approx(120 / 80)
-    assert row["max_output_gap_ms"] == 100
-    assert [e["work"][0]["first_output_position"] for e in result.trace] == [1, 2, 8]
+    assert row["max_output_gap_ms"] == 110
+    assert row["decode_age_area_ms2"] == 110 * 110 / 2
+    stalled = run([Request("d", 0, 10), Request("p", 4096, 1)], graphs, Value(1), horizon_ms=50)
+    assert stalled.requests[0]["decode_age_area_ms2"] == 100 * 100 / 2
 
 
-def test_delivery_slowdown_matches_every_emitted_token_in_trace():
-    requests = [Request("prefill", 0, 320, 19), Request("decode", 2, 0, 23)]
-    result = run(requests, "delivery", keep_trace=True)
-    for row in result.requests:
-        ratios = []
-        count = 0
-        for event in result.trace:
-            for work in event["work"]:
-                if work["request"] != row["request"]:
-                    continue
-                for token in range(count + 1, count + work["emitted"] + 1):
-                    reference = row["first_token_reference_ms"] + (token - 1) * row["decode_reference_ms"]
-                    ratios.append((event["end_ms"] - row["arrival_ms"]) / reference)
-                count += work["emitted"]
-        assert row["max_delivery_slowdown"] == pytest.approx(max(ratios))
-        assert row["max_delivery_slowdown"] >= row["reference_slowdown"] - 1e-12
+def test_speculative_burst_clears_one_stall():
+    graph = Graph("decode", 30, decode_capacity=1, width=8)
+    result = run([Request("d", 0, 16)], (graph,), Value(1))
+    assert result.summary["output_tokens"] == 16
+    assert result.summary["decode_age_area_ms2"] == 2 * 30 * 30 / 2
 
 
-def test_delivery_reference_includes_prefill_once_and_queue_delay():
-    model = CostModel(launch_ms=0, weight_ms=10, target_token_ms=0,
-                      attention_ms_per_ktoken=0, draft_step_ms=0, draft_token_ms=0)
-    result = run([Request("resident", 0, 0, 3), Request("queued", 0, 64, 2)],
-                 "round_robin", Config(resident_limit=1, max_drafts=0), model)
-    row = result.requests[1]
-    assert row["first_token_reference_ms"] == 10
-    assert row["reference_demand_ms"] == 20
-    assert row["queue_ms"] == 30
-    assert row["max_delivery_slowdown"] == 4
-    assert row["reference_slowdown"] == 2.5
+def test_prefill_chunk_boundaries_are_not_output_events():
+    graph = Graph("prefill", 10, prefill_capacity=64)
+    result = run([Request("p", 128, 1)], (graph,), Value(1))
+    assert result.requests[0]["ttft_ms"] == 20
+    assert result.requests[0]["decode_age_area_ms2"] == 0
 
 
-def test_conditional_outcome_distribution_and_nonlinear_delivery_pressure():
-    profile = (0.5, 0.25)
-    outcomes = token_outcomes(profile, 2)
-    assert outcomes == ((1, 0.5), (2, 0.375), (3, 0.125))
-    assert sum(probability for _, probability in outcomes) == 1
-    assert sum(count * probability for count, probability in outcomes) == expected_tokens(profile, 2)
-    state = view(probabilities=profile)
-    action = Action((Work(0, drafts=2),))
-    model = CostModel(launch_ms=0, weight_ms=3.2, attention_ms_per_ktoken=0)
-    pressure = delivery_pressures(10, action, 5, [state], model)[state.index]
-    exact = sum(probability * 18.2 / ((count + 1) * 3.2) for count, probability in outcomes)
-    assert pressure == pytest.approx(exact)
-    assert pressure > 18.2 / ((expected_tokens(profile, 2) + 1) * 3.2)
+def test_proportional_fairness_recovers_weighted_cpu_time_shares():
+    result = fair_allocation(((100, 0), (0, 1)), (0, 0), (3, 1))
+    assert result.time_shares == pytest.approx((0.75, 0.25))
+    assert result.rates == pytest.approx((75, 0.25))
+    assert result.optimality_gap <= 1e-8
 
 
-def test_rescue_deadline_order_minimizes_next_visit_lateness():
-    views = [view(i, age=last) for i, last in enumerate((9, 1, 3, 7, 2))]
-    costs = {0: 8, 1: 2, 2: 5, 3: 1, 4: 3}
-    action, duration, now, target = Action((Work(0),)), 8, 10, 20
-    predicted = max(rescue_latenesses(now, action, duration, views, costs, target).values())
-    for order in permutations(views[1:]):
-        end = now + duration
-        worst = end - views[0].last_service_ms - target
-        for state in order:
-            end += costs[state.index]
-            worst = max(worst, end - state.last_service_ms - target)
-        assert predicted <= worst + 1e-12
+def test_token_value_and_fairness_have_independent_meanings():
+    result = fair_allocation(((10, 0), (0, 1)), (1, 1), (1, 1))
+    share = (7 + sqrt(85)) / 18
+    assert result.time_shares == pytest.approx((share, 1 - share))
+    assert all(rate > 0 for rate in result.rates)
 
 
-@pytest.mark.parametrize("policy", ("interactive", "delivery"))
-def test_latency_guard_anticipates_a_deadline_before_urgency_threshold(policy):
-    config = Config(service_gap_target_ms=40, explore_every=0)
-    views = [view(0, context=0, age=0), view(1, prefill=512, context=0, age=35)]
-    scheduler = Scheduler(policy, config, CostModel())
-    action, duration = scheduler.choose(35, views)
-    assert 0 in action.indices
-    assert duration <= 5
-    assert scheduler.last_rescue_lateness_ms <= 0
-    assert scheduler.uncertified_decisions == 0
+def test_fair_allocation_uses_batch_economy_without_splitting_physical_cost():
+    result = fair_allocation(((1, 0), (0, 1), (0.8, 0.8)), (0, 0), (1, 1))
+    assert result.time_shares == pytest.approx((0, 0, 1))
+    assert result.rates == pytest.approx((0.8, 0.8))
 
 
-@pytest.mark.parametrize("policy", ("interactive", "delivery"))
-def test_impossible_gap_target_is_reported_and_not_relaxed(policy):
-    result = run([Request("decode", 0, 0, 2)], policy, Config(service_gap_target_ms=1, max_drafts=0),
-                 CostModel(launch_ms=0, weight_ms=3, attention_ms_per_ktoken=0), keep_trace=True)
-    assert result.summary["uncertified_decisions"] == 2
-    assert result.summary["service_gap_violations"] == 2
-    assert result.summary["max_service_gap_excess_ms"] == 2
-    assert all(e["rescue_lateness_ms"] == 2 for e in result.trace)
+def test_five_decodes_can_share_efficient_batch_four_equally():
+    cohorts = tuple(tuple(0 if i == excluded else 1 / 21 for i in range(5)) for excluded in range(5))
+    result = fair_allocation((*cohorts, (1 / 29,) * 5), (0,) * 5, (1,) * 5)
+    assert result.time_shares[-1] == pytest.approx(0, abs=1e-8)
+    assert result.time_shares[:5] == pytest.approx((0.2,) * 5, abs=1e-8)
+    assert result.rates == pytest.approx((4 / (5 * 21),) * 5)
+    assert all(x > 1 / 29 for x in result.rates)
 
 
-@pytest.mark.parametrize("policy", ("interactive", "delivery"))
-@pytest.mark.parametrize("seed", range(3))
-def test_latency_guard_on_feasible_resident_churn(policy, seed):
-    rng = Random(seed)
-    requests = [Request(f"r{i}", i * 5, rng.choice((0, 64, 512)), 16,
-                        (rng.random(),) * 5) for i in range(12)]
-    result = run(requests, policy, Config(resident_limit=4, max_batch=4, service_gap_target_ms=20),
-                 seed=seed)
-    assert result.summary["uncertified_decisions"] == 0
-    assert result.summary["service_gap_violations"] == 0
+def test_rate_units_do_not_change_pure_proportional_fair_allocation():
+    rates = ((10, 0), (0, 2), (4, 1))
+    first = fair_allocation(rates, (0, 0), (1, 2))
+    scaled = fair_allocation(tuple((a * 100, b * 0.001) for a, b in rates), (0, 0), (1, 2))
+    assert first.time_shares == pytest.approx(scaled.time_shares)
 
 
-def test_draft_depth_limit_does_not_shift_random_outcomes(monkeypatch):
-    def one_draft(self, now, views):
-        action = Action((Work(views[0].index, drafts=1),))
-        return action, self.model.duration(action, {v.index: v for v in views})
-    monkeypatch.setattr(Scheduler, "choose", one_draft)
-    requests = [Request("decode", 0, 0, 40, (0.7,) * 5)]
-    shallow = run(requests, "interactive", Config(max_drafts=2), seed=3, keep_trace=True)
-    deep = run(requests, "interactive", Config(max_drafts=5), seed=3, keep_trace=True)
-    assert shallow == deep
+def test_fair_reference_rejects_unserviceable_requests():
+    with pytest.raises(ValueError, match="positive service rate"):
+        fair_allocation(((1, 0),), (1, 1), (1, 1))
 
 
-def test_delivery_policy_services_a_bottleneck_when_two_prefills_share_pressure():
-    config, model = Config(explore_every=0), CostModel()
-    decoding = replace(view(0, context=132, age=25), generated_tokens=4)
-    prefills = [replace(view(i, prefill=64, context=64, age=5), first_token_reference_ms=3.18)
-                for i in (1, 2)]
-    action, _ = Scheduler("delivery", config, model).choose(28, [decoding, *prefills])
-    assert any(w.prefill for w in action.work)
+def test_fair_reference_reports_failure_to_converge():
+    with pytest.raises(RuntimeError, match="did not converge"):
+        fair_allocation(((1, 0), (0, 1), (0.5, 0.7)), (1, 1), (1, 1), max_iterations=1)
 
 
-def test_uncertified_singleton_rescue_does_not_mean_batch_schedule_is_infeasible():
-    model = CostModel(launch_ms=0, weight_ms=3, target_token_ms=0,
-                      attention_ms_per_ktoken=0, draft_step_ms=0, draft_token_ms=0)
-    requests = [Request(f"r{i}", 0, 0, 3) for i in range(8)]
-    result = run(requests, "interactive", Config(max_batch=2, max_drafts=0, service_gap_target_ms=12),
-                 model)
-    assert result.summary["uncertified_decisions"] > 0
-    assert result.summary["service_gap_violations"] == 0
-    assert result.summary["max_service_gap_ms"] == 12
-
-
-def test_overdue_recovery_avoids_singleton_lock_in_from_worst_lateness():
-    views = [view(i, age=i * 10) for i in range(3)]
-    model = CostModel()
-    config = Config(service_gap_target_ms=8, max_drafts=0)
-    solo = Action((Work(0),))
-    batch = Action(tuple(Work(i) for i in range(3)))
-    by_id = {v.index: v for v in views}
-    costs = {v.index: model.duration(Action((Work(v.index),)), by_id) for v in views}
-    solo_delays = rescue_latenesses(40, solo, model.duration(solo, by_id), views, costs, 8)
-    batch_delays = rescue_latenesses(40, batch, model.duration(batch, by_id), views, costs, 8)
-    assert max(solo_delays.values()) < max(batch_delays.values())
-    assert sum(solo_delays.values()) > sum(batch_delays.values())
-    scheduler = Scheduler("interactive", config, model)
-    chosen, _ = scheduler.choose(40, views)
-    assert chosen.indices == {0, 1, 2}
-    assert scheduler.uncertified_decisions == 1
+def test_cli_writes_scores_and_request_metrics(tmp_path):
+    subprocess.run([sys.executable, "-m", "scripts.scheduling_sim", "--workload", "tail_64",
+                    "--decode-values", "1,64", "--output", str(tmp_path)], check=True, capture_output=True)
+    trace = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
+    assert trace[0]["graph"] == "prefill-64"
+    assert (tmp_path / "requests.csv").exists()

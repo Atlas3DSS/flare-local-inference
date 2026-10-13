@@ -55,8 +55,8 @@ pub(super) struct Metrics {
     pub completed: AtomicU64,
     pub cancelled: AtomicU64,
     pub failed: AtomicU64,
-    launches: [AtomicU64; 8],
-    sampling_launches: [AtomicU64; 4],
+    launches: [AtomicU64; 9],
+    sampling_launches: [AtomicU64; 5],
     speculative: [[RoundMetrics; 8]; 7],
     draft_sources: [[[AtomicU64; 2]; 2]; 7],
     mixed_grammar_decode_steps: AtomicU64,
@@ -156,6 +156,7 @@ impl Metrics {
             GraphKind::Vision => 5,
             GraphKind::Snapshot => 6,
             GraphKind::Speculative => 7,
+            GraphKind::Mixed => 8,
         };
         self.launches[index].fetch_add(1, Ordering::Relaxed);
         let sampling_index = match kind {
@@ -163,6 +164,7 @@ impl Metrics {
             GraphKind::Decode => 1,
             GraphKind::Resume => 2,
             GraphKind::Speculative => 3,
+            GraphKind::Mixed => 4,
             _ => return,
         };
         self.sampling_launches[sampling_index].fetch_add(1, Ordering::Relaxed);
@@ -276,7 +278,7 @@ impl Metrics {
     pub fn render(&self) -> String {
         let mut text = String::with_capacity(4096);
         text.push_str("# HELP flare_sampling_graph_launches_total Successful native submissions by captured sampler mode; includes consumption-only prefill.\n# TYPE flare_sampling_graph_launches_total counter\n");
-        for (kind, count) in ["prefill", "decode", "resume", "speculative"]
+        for (kind, count) in ["prefill", "decode", "resume", "speculative", "mixed"]
             .into_iter()
             .zip(&self.sampling_launches)
         {
@@ -502,6 +504,7 @@ impl Metrics {
             "vision",
             "snapshot",
             "speculative",
+            "mixed",
         ]
         .into_iter()
         .zip(&self.launches)
@@ -728,7 +731,7 @@ mod tests {
             text.lines()
                 .filter(|line| line.starts_with("flare_graph_launches_total{"))
                 .count(),
-            8
+            9
         );
     }
 }

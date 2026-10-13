@@ -471,8 +471,13 @@ impl NativeModel {
                     .unwrap()
                     .graphs
                     .iter()
-                    .filter(|g| matches!(g.kind.as_str(), "prefill" | "decode" | "speculative"))
-                    .map(|g| (g.batch_capacity * g.token_capacity) as usize)
+                    .filter(|g| {
+                        matches!(
+                            g.kind.as_str(),
+                            "prefill" | "decode" | "speculative" | "mixed"
+                        )
+                    })
+                    .map(|g| (g.packed_tokens()) as usize)
                     .max()
                     .unwrap();
                 let storage = options.embedding_table_storage.unwrap_or_else(|| {

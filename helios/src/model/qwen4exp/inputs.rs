@@ -76,6 +76,7 @@ impl Inputs {
             GraphKind::Prefill
                 | GraphKind::Decode
                 | GraphKind::Speculative
+                | GraphKind::Mixed
                 | GraphKind::Resume
                 | GraphKind::Restore
                 | GraphKind::Snapshot
@@ -118,15 +119,30 @@ impl Inputs {
                 }
             }
         }
-        if step.kind == GraphKind::Speculative {
+        if let Some(mixed) = &step.mixed {
+            self.staging.i32(
+                "prefill_row",
+                0,
+                [mixed.prefill_row.map_or(-1, |row| row as i32)],
+            );
             self.staging
                 .i32("query_lengths", 0, lengths.into_iter().take(capacity));
+        }
+        if step.kind == GraphKind::Speculative || step.mixed.as_ref().is_some_and(|m| m.speculative)
+        {
+            if step.kind == GraphKind::Speculative {
+                self.staging
+                    .i32("query_lengths", 0, lengths.into_iter().take(capacity));
+            }
             let mut ids = [-1i64; 7 * REQUEST_LANES];
             let mut counts = [0; REQUEST_LANES];
             let mut expected = [-1i64; REQUEST_LANES];
             let mut copy_generations = [0i64; REQUEST_LANES];
             let mut mask_counts = [0i32; REQUEST_LANES];
-            for lane in &step.lanes {
+            for (row, lane) in step.lanes.iter().enumerate() {
+                if step.lane_kind(row) != GraphKind::Speculative {
+                    continue;
+                }
                 let slot = lane.request.slot as usize;
                 let live = scheduler.request(lane.request)?;
                 if config.speculative_proposal_source
@@ -191,13 +207,28 @@ impl Inputs {
                 );
             }
         }
-        if step.kind == GraphKind::Prefill {
-            let lane = &step.lanes[0];
-            if step.lanes.len() != 1
+        if let Some(row) = step
+            .lanes
+            .iter()
+            .enumerate()
+            .position(|(row, _)| step.lane_kind(row) == GraphKind::Prefill)
+        {
+            let lane = &step.lanes[row];
+            let mixed = step.kind == GraphKind::Mixed;
+            let token_capacity = if mixed {
+                step.prefill_capacity()
+            } else {
+                step.token_capacity
+            };
+            let offset = step.lanes[..row]
+                .iter()
+                .map(|lane| lane.tokens)
+                .sum::<usize>();
+            if (!mixed && step.lanes.len() != 1)
                 || lane.tokens == 0
                 || lane.tokens > config.limits.prefill_chunk_size
-                || lane.tokens > step.token_capacity
-                || step.token_capacity > config.limits.prefill_chunk_size
+                || lane.tokens > token_capacity
+                || token_capacity > config.limits.prefill_chunk_size
             {
                 return Err(
                     "prefill requires one nonempty prompt chunk within its graph and configured capacities"
@@ -215,15 +246,23 @@ impl Inputs {
                 .positions
                 .get(range)
                 .ok_or("prefill exceeds positions")?;
-            self.staging
-                .i32("query_lengths", 0, lengths.into_iter().take(capacity));
-            self.staging
-                .i64("token_ids", 0, tokens.iter().map(|token| *token as i64));
-            self.staging
-                .i64("prefill_positions", 0, positions.iter().flatten().copied());
+            if !mixed {
+                self.staging
+                    .i32("query_lengths", 0, lengths.into_iter().take(capacity));
+            }
+            self.staging.i64(
+                "token_ids",
+                offset * 8,
+                tokens.iter().map(|token| *token as i64),
+            );
+            self.staging.i64(
+                "prefill_positions",
+                offset * 3 * 8,
+                positions.iter().flatten().copied(),
+            );
             self.staging.i32(
                 "vision_token_indices",
-                0,
+                offset * 4,
                 admission.data.vision_token_indices
                     [lane.start_position as usize..lane.start_position as usize + lane.tokens]
                     .iter()

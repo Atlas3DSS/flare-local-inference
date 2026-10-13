@@ -20,9 +20,10 @@ class GraphSignature:
     inputs: tuple[str, ...] = ()
     sampling_mode: str = "general"
     speculation_enabled: bool | None = None
+    prefill_capacity: int = 0
 
     def __post_init__(self):
-        if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative"):
+        if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative", "mixed"):
             raise ValueError("unknown prepared graph operation")
         if self.sampling_mode != "general":
             raise ValueError("graphs use the general stochastic sampling path")
@@ -37,6 +38,20 @@ class GraphSignature:
         if self.kind == "speculative" and (
                 self.batch_capacity not in BATCH_CAPACITIES or not 1 <= self.token_capacity <= 8):
             raise ValueError("speculative graphs require power-of-two batch capacities through 64 and width 1 through 8")
+        if type(self.prefill_capacity) is not int or self.prefill_capacity < 0:
+            raise ValueError("prefill capacity must be a nonnegative integer")
+        if self.kind == "mixed":
+            if (self.batch_capacity not in BATCH_CAPACITIES[1:]
+                    or not 1 <= self.token_capacity <= 8
+                    or self.prefill_capacity < 64 or self.prefill_capacity % 64
+                    or self.prefill_capacity + (self.batch_capacity - 1) * self.token_capacity >= 1 << 31
+                    or self.speculation_enabled is None
+                    or (not self.speculation_enabled and self.token_capacity != 1)):
+                raise ValueError("mixed graphs require a prompt capacity, at least two rows, and an explicit decode mode")
+            if "prefill_row" not in self.inputs:
+                raise ValueError("mixed graphs require the prefill_row input")
+        elif self.prefill_capacity:
+            raise ValueError("only mixed graphs declare a separate prefill capacity")
         object.__setattr__(self, "inputs", tuple(self.inputs))
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("graph input names must be unique")
@@ -64,6 +79,8 @@ class PreparedExecution(PreparedGraphBundle):
         required = {"frame_index", "submission_sequence", "completion_records"}
         if not required <= self.buffers.keys():
             raise ValueError("execution requires frame index, submission sequence, and completion buffers")
+        if any(s.kind == "mixed" for s in signatures.values()) and self.buffers["completion_records"].shape[-1] != 24:
+            raise ValueError("mixed graphs require ABI3 completion vectors")
         for signature in signatures.values():
             if not set(signature.inputs) <= self.buffers.keys():
                 raise ValueError("graph signature references an unregistered input buffer")
@@ -103,6 +120,7 @@ class PreparedExecution(PreparedGraphBundle):
             graphs.append({"name": name, "kind": signature.kind, "handle": handle,
                 "sampling_mode": signature.sampling_mode,
                 "batch_capacity": signature.batch_capacity, "token_capacity": signature.token_capacity,
+                "prefill_capacity": signature.prefill_capacity,
                 "estimated_duration_ns": self.estimated_durations_ns[name],
                 "input_bindings": [{"buffer_name": field, "host_offset": offsets[field][0],
                                     "nbytes": offsets[field][1]} for field in inputs]})
