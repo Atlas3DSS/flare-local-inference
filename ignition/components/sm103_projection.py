@@ -93,7 +93,8 @@ def _mxfp8_runner(backend, device):
 def _mxfp8_tactics(query, device):
     """FlashInfer's valid MXFP8 kernel tactics for one shape, encoded as config strings."""
     if device is None:
-        return tuple(f"{backend}:-1" for backend in _QUANTIZED_BACKENDS)
+        return tuple(f"{backend}:-1" for backend in _QUANTIZED_BACKENDS
+                     if backend != "cutlass" or query.out_features % 32 == 0)
     # The identity describes the architecture; enumerate on the process's current device of that architecture.
     target = torch.device("cuda", torch.cuda.current_device())
     rows, k, n = query.rows, query.padded_in_features, query.out_features
@@ -105,6 +106,9 @@ def _mxfp8_tactics(query, device):
     inputs = [a, b, sf, sf, torch.bfloat16, out, sf]
     candidates = []
     for backend in _QUANTIZED_BACKENDS:
+        # FlashInfer's CUTLASS MXFP8 GEMM requires 32-aligned output features (GLM's TP4 KDA input has 6288).
+        if backend == "cutlass" and n % 32:
+            continue
         candidates.append(f"{backend}:-1")
         for tactic in _mxfp8_runner(backend, target).get_valid_tactics(inputs, None):
             if backend == "cutlass" or _curated_cute_tactic(tactic, rows):
