@@ -56,7 +56,7 @@ class MTPScratch:
                 or not 0 < output_rows <= min(tokens, self.logits.shape[0])
                 or not tokens <= self.residual.shape[0]):
             raise ValueError("MTP view exceeds persistent token/output capacity")
-        qsa = QSAScratch(*(getattr(self.qsa, field)[:tokens] for field in self.qsa.__dataclass_fields__))
+        qsa = self.qsa.rows(tokens)
         return type(self)(self.embedding_ids[:tokens], self.embedding[:tokens], self.residual[:tokens],
             self.hidden[:tokens], self.selected_hidden[:output_rows], self.logits[:output_rows],
             self.hyperconnection.rows(tokens), qsa, self.moe.rows(tokens),

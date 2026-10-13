@@ -172,7 +172,7 @@ class DecoderScratch:
 
         return type(self)(self.embedding[:tokens], self.residual[:tokens], self.hidden[:tokens],
             self.sample_hidden[:sequences], self.logits[:sequences], self.hyperconnection.rows(tokens),
-            self.gdn.rows(tokens), rows(self.qsa), rows(self.ple), self.moe.rows(tokens),
+            self.gdn.rows(tokens), self.qsa.rows(tokens), rows(self.ple), self.moe.rows(tokens),
             None if self.local_logits is None else self.local_logits[:sequences])
 
 

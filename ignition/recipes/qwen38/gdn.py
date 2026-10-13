@@ -10,6 +10,7 @@ from b12x.gemm.blockscaled import Weight
 from b12x.preparation import PreparationSession
 from b12x.sequence import gdn_decode, gdn_prefill, short_conv
 
+from ignition.components.gated_norm import PreparedGatedRMSNorm
 from ignition.components.linear import QuantizedProjection
 from ignition.components.recurrent import (
     DeltaMetadata,
@@ -17,6 +18,9 @@ from ignition.components.recurrent import (
     prepare_sequence_binding,
 )
 from ignition.preparation.scratch import ScratchArena
+
+from ignition.components import sm103
+from ignition.components.gdn_prefill_sm103 import PreparedGdnPrefill, PrefillBuffers
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,12 @@ class GDNScratch:
     output: torch.Tensor
     projected_qkvz: torch.Tensor
     projected_ba: torch.Tensor
+    # Contiguous heads and gates for SM103's chunked prefill (see gdn_prefill_sm103.PrefillBuffers).
+    prefill_query: torch.Tensor
+    prefill_key: torch.Tensor
+    prefill_value: torch.Tensor
+    prefill_decay: torch.Tensor
+    prefill_beta: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> GDNScratch:
@@ -63,8 +73,10 @@ class GDNScratch:
         convolved, recurrence, gated, output = (
             torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
             for width in (10240 // world_size, 6144 // world_size, 6144 // world_size, 2560))
+        prefill = PrefillBuffers.allocate(tokens, device, key_heads=16 // world_size, value_heads=48 // world_size)
         return cls(qkvz[:, :10240 // world_size], convolved, qkvz[:, 10240 // world_size:], ba[:, 48 // world_size:], ba[:, :48 // world_size],
-                   recurrence, gated, output, qkvz, ba)
+                   recurrence, gated, output, qkvz, ba, prefill.query, prefill.key, prefill.value, prefill.decay,
+                   prefill.beta)
 
     def rows(self, tokens: int) -> GDNScratch:
         if type(tokens) is not int or not 0 < tokens <= self.projected_qkv.shape[0]:
@@ -155,7 +167,9 @@ class PreparedGDN:
                        enumerate((10240, 10240, 6144, 48, 48, 6144, 6144, 2560, 16384, 96)))
         strides = tuple(stride if index == 7 else stride // world_size for index, stride in
                         enumerate((16384, 10240, 16384, 96, 96, 6144, 6144, 2560, 16384, 96)))
-        for field, width, stride in zip(fields(scratch), widths, strides, strict=True):
+        # Projection operands; the chunked-prefill buffers are validated where they are used.
+        projected = [field for field in fields(scratch) if not field.name.startswith("prefill_")]
+        for field, width, stride in zip(projected, widths, strides, strict=True):
             tensor = getattr(scratch, field.name)
             if (
                 tensor.device != self.device
@@ -320,6 +334,15 @@ class PreparedGDN:
                 invocation=gdn_decode.invocation_from_tensors(caps, **args),
             )
             operation = gdn_decode
+        elif sm103.is_sm103(self.device) and not checkpoint_export:
+            # FlashInfer's chunked delta rule replaces b12x's token-sequential prefill on SM103.
+            self.chunked = PreparedGdnPrefill(
+                mixed_qkv=scratch.convolved_qkv, a=scratch.a, b=scratch.b, A_log=module.A_log,
+                dt_bias=module.dt_bias, state=state.recurrent, metadata=metadata,
+                output=scratch.recurrence.view(self.tokens, self.value_heads, 128),
+                key_heads=self.key_heads, value_heads=self.value_heads, session=session, name=f"{name}.prefill",
+                buffers=PrefillBuffers(scratch.prefill_query, scratch.prefill_key, scratch.prefill_value,
+                                       scratch.prefill_decay, scratch.prefill_beta))
         else:
             caps = gdn_prefill.Caps(
                 device=self.device,
@@ -385,13 +408,11 @@ class PreparedGDN:
             )
         else:
             scratch.recurrence.zero_()
-            gdn_prefill.run(self.recurrent_binding)
-            normalized = self.module.norm(
-                scratch.recurrence.view(self.tokens, self.value_heads, 128), scratch.z.view(self.tokens, self.value_heads, 128)
-            )
-            scratch.gated.copy_(normalized.view(self.tokens, 6144 // self.world_size))
-            torch.ge(self.row_ids, self.metadata.num_tokens, out=self.inactive_rows)
-            scratch.gated.masked_fill_(self.inactive_rows, 0)
+            if self.chunked is not None:
+                self.chunked()
+            else:
+                gdn_prefill.run(self.recurrent_binding)
+            self.output_norm()
         return self.projections["out_proj"](scratch.gated)
 
 
