@@ -69,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
             serve::<Glm5Next>(owner, config, progress)
         }
+        Some(flare_helios::model::deepseek4::INPUT_SCHEMA) => {
+            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress)
+        }
         Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
             serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress)
         }

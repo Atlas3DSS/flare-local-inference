@@ -266,7 +266,7 @@ def _fake_fill_output(out, value):
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
 def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr("ignition.preparation.compilation.DEFAULT_CACHE_ROOT", tmp_path / "compiled")
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))
 
     def prepare(value):
@@ -296,12 +296,14 @@ def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatc
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @pytest.mark.parametrize("native_kind", ["custom", "triton"])
 def test_compilation_cache_survives_process_restart(tmp_path, monkeypatch, native_kind):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     program = '''
 import sys
 from unittest.mock import patch
 import torch
 from ignition.preparation.compilation import compile_forward
+import ignition.preparation.compilation as compilation
+from pathlib import Path
+compilation.DEFAULT_CACHE_ROOT = Path(sys.argv[4])
 
 @torch.library.custom_op("flare_cache_test::fill", mutates_args=("out",))
 def fill(out: torch.Tensor, value: float) -> None:
@@ -344,7 +346,7 @@ with torch.no_grad():
 '''
     for mode in ("cold", "warm"):
         environment = dict(os.environ, TORCHINDUCTOR_CACHE_DIR=str(tmp_path / (mode + "-inductor")))
-        subprocess.run([sys.executable, "-c", program, mode, native_kind, os.path.dirname(__file__)],
+        subprocess.run([sys.executable, "-c", program, mode, native_kind, os.path.dirname(__file__), str(tmp_path / "compiled")],
                        env=environment, check=True)
 
 
@@ -434,3 +436,37 @@ def test_snapshots_of_reused_copy_destinations():
     graph.replay()
     for value, snapshot in enumerate(snapshots, 1):
         torch.testing.assert_close(snapshot, torch.full_like(snapshot, value), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("operation", ("unbind", "split"))
+@torch.no_grad()
+def test_list_views_preserve_offsets_and_mutations_under_capture(operation):
+    source = torch.arange(192, dtype=torch.float32, device="cuda").reshape(8, 3, 8)
+    storage = torch.empty_like(source)
+    output = torch.empty((8, 8), device="cuda")
+
+    def forward():
+        storage.copy_(source)
+        if operation == "unbind":
+            a, b, c = storage.unbind(1)
+        else:
+            a, b, c = (v.squeeze(1) for v in storage.split(1, dim=1))
+        b.mul_(3)
+        output.copy_(a + b + c)
+        a.add_(7)
+
+    compiled = compile_forward(forward)
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    for _ in range(3):
+        source.add_(1)
+        storage.fill_(float("nan"))
+        graph.replay()
+        expected = source.clone()
+        expected[:, 1].mul_(3)
+        torch.testing.assert_close(output, expected.sum(1))
+        expected[:, 0].add_(7)
+        torch.testing.assert_close(storage, expected)

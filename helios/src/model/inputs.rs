@@ -208,9 +208,10 @@ impl UploadBatch {
         );
         let mut histogram = vec![0i32; config.contract.vocabulary];
         for token in admission.prompt {
-            histogram[*token as usize] = histogram[*token as usize]
-                .checked_add(1)
-                .ok_or("prompt histogram overflow")?;
+            // Image sentinels are inputs outside the sampled vocabulary.
+            if let Some(count) = histogram.get_mut(*token as usize) {
+                *count = count.checked_add(1).ok_or("prompt histogram overflow")?;
+            }
         }
         self.i32(
             "admission_histogram",

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from ignition.recipes.deepseek41.batch import Metadata
+from ignition.components.paged_batch import Metadata
 from ignition.recipes.deepseek41.bootstrap import PreparationConfig
 from ignition.recipes.deepseek41.config import DSparkConfig
 from ignition.recipes.deepseek41.recipe import RECIPE
@@ -67,7 +67,7 @@ def test_single_token_verification_packs_page_tables_across_inactive_rows():
 
 def test_decode_page_tables_follow_packed_tokens_across_inactive_rows():
     from types import SimpleNamespace
-    from ignition.recipes.deepseek41.batch import BatchInputs, PreparedBatch
+    from ignition.components.paged_batch import BatchInputs, PreparedBatch
 
     inputs = BatchInputs.allocate(4, 8, "cpu", capacity=4)
     inputs.row_slot_ids.copy_(torch.tensor([3, 1, 0, 2]))

@@ -88,3 +88,10 @@ path = "tests/tools/test_generation_corpus.rs"
 required-features = ["server", "test-tools"]
 test = false
 bench = false
+
+[[bin]]
+name = "test_deepseek4_images"
+path = "tests/tools/test_deepseek4_images.rs"
+required-features = ["server", "test-tools"]
+test = false
+bench = false

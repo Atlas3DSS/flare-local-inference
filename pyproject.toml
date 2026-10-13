@@ -49,6 +49,7 @@ include = ["ignition*"]
 
 [tool.setuptools.package-data]
 "ignition.recipes.deepseek41" = ["assets/*"]
+"ignition.recipes.deepseek4" = ["assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

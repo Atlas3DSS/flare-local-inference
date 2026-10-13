@@ -2,6 +2,7 @@
 
 pub mod admission;
 pub mod catalog;
+pub mod deepseek4;
 pub mod deepseek41;
 pub mod glm5next;
 pub(crate) mod inputs;
@@ -206,6 +207,12 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         options: &serde_json::Map<String, serde_json::Value>,
         structured: bool,
     ) -> Result<Self::OutputConfig>;
+    fn input_vocabulary(config: &ModelConfig) -> usize {
+        config.contract.vocabulary
+    }
+    fn prefill_spans(_: &Self::PromptData) -> &[std::ops::Range<usize>] {
+        &[]
+    }
     fn validate_prompt_data(
         config: &ModelConfig,
         tokens: &[u32],

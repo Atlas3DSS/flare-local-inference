@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from ignition.components.weights import DirectWeightLoader, MLPWeights, _aligned_range
+from ignition.components.weights import MLPWeights
+from ignition.components.block_fp8_weights import BlockFP8WeightLoader
 
 from .config import ModelConfig
 
@@ -71,7 +72,7 @@ class ModelWeights:
                    torch.cuda.memory_allocated(device) - before)
 
 
-class DeepSeekWeightLoader(DirectWeightLoader):
+class DeepSeekWeightLoader(BlockFP8WeightLoader):
     def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=False):
         self.dspark = dspark
         super().__init__(manifest, device, progress=progress, prefixes=prefixes)
@@ -83,45 +84,6 @@ class DeepSeekWeightLoader(DirectWeightLoader):
                 if (name.startswith("layers.") or (self.dspark and name.startswith("mtp."))
                     or name in ("embed.weight", "norm.weight", "head.weight"))
                 and ".engram.embed." not in name}
-
-    def load_linear_group(self, prefixes, *, row_ranges=None, column_range=None):
-        """Expand block-32 row scales without changing FP8 values or their scale bytes."""
-        from b12x.gemm.blockscaled import pack_weight
-
-        self._require_open()
-        prefixes = tuple(prefixes)
-        ranges = (None,) * len(prefixes) if row_ranges is None else row_ranges
-        parts = [self._dense_blocks(prefix, rows=selected, columns=column_range)
-                 for prefix, selected in zip(prefixes, ranges, strict=True)]
-        self._session.flush()
-        values = torch.cat([p[0] for p in parts]) if len(parts) > 1 else parts[0][0]
-        scales = torch.cat([p[1].repeat_interleave(32, dim=0) for p in parts])
-        return pack_weight(values, scales, recipe="mxfp8")
-
-    def _dense_blocks(self, prefix, *, rows=None, columns=None):
-        self._require_open()
-        weight, scale = self._sources[f"{prefix}.weight"], self._sources[f"{prefix}.scale"]
-        if weight.dtype != torch.float8_e4m3fn or weight.ndim != 2:
-            raise ValueError(f"{prefix}: expected native FP8 dense weights")
-        n, k = weight.shape
-        if (scale.dtype != torch.float8_e8m0fnu or scale.shape != ((n + 31) // 32, (k + 31) // 32)):
-            raise ValueError(f"{prefix}: expected UE8M0 scales for 32-by-32 blocks")
-        r0, r1 = _aligned_range(rows, n, 32)
-        c0, c1 = _aligned_range(columns, k, 32)
-        values = torch.empty((r1 - r0, c1 - c0), dtype=weight.dtype, device=self.device)
-        scales = torch.empty(((r1 - r0) // 32, (c1 - c0) // 32), dtype=torch.uint8, device=self.device)
-        self._copy(values, weight[r0:r1, c0:c1])
-        self._copy(scales, scale[r0 // 32:r1 // 32, c0 // 32:c1 // 32].view(torch.uint8))
-        return values, scales
-
-    def load_attention_output(self, prefix, groups):
-        from b12x.gemm import wo_projection
-
-        a, sa = self._dense_blocks(prefix + ".wo_a", rows=groups)
-        b, sb = self._dense_blocks(prefix + ".wo_b", columns=groups)
-        self._session.flush()
-        return wo_projection.pack_weights(a, sa.view(torch.float8_e8m0fnu), b, sb.view(torch.float8_e8m0fnu),
-            groups=8 // self.shard.world_size, group_width=4096, rank=1024, hidden=5120, block_size=(32, 32))
 
     def load_layer(self, layer, *, draft=False):
         prefix = f"mtp.{layer}" if draft else f"layers.{layer}"

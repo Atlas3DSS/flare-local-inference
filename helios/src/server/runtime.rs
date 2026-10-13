@@ -711,6 +711,14 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             if !incoming.readmitted {
                 self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
             }
+            if let Err(error) = self
+                .scheduler
+                .set_prefill_spans(handle, M::prefill_spans(&incoming.prompt.data))
+            {
+                self.scheduler.cancel(handle)?;
+                incoming.fail(error);
+                continue;
+            }
             if let Some(images) = &incoming.prompt.images {
                 if let Err(error) = self.scheduler.set_vision_images(
                     handle,

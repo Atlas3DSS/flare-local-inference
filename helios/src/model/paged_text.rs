@@ -26,6 +26,10 @@ impl Default for Inputs {
 }
 
 impl Inputs {
+    pub fn clear(&mut self) {
+        self.staging.clear();
+    }
+
     pub fn uploads(&self) -> Vec<Upload<'_>> {
         self.staging.uploads()
     }

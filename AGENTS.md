@@ -110,6 +110,31 @@ The three preceding tokens live in continuation state, including reused prefixes
 DSpark proposals, target verification, and accepted-state commit use the shared
 native speculative contract; Helios contains no DSpark model implementation.
 
+DeepSeek V4 Flash uses `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`, including its
+vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
+alias prepares five draft tokens by default, with adaptive verification. It
+accepts up to four images per request and has no offloaded embedding tables.
+Use four available GPUs for preparation and serving:
+
+```sh
+.venv/bin/python -m ignition export deepseek-v4-flash --gpus 3,4,5,6 \
+  --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.flaretensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.flaretensors \
+  --gpus 3,4,5,6 --bind 127.0.0.1:8001
+```
+
+V4 uses 128-token logical pages containing 32 C4 latent records with a retrieval
+index, or one C128 latent record with dense history attention. Each latent page
+stores FP8/BF16 payloads followed by its own scale footer. Continuation rows
+preserve the complete 128-token compression interval, C4 overlap, sliding
+windows, partial pages, and DSpark context. Only accepted tokens update the
+continuation state. Bidirectional image spans stay within one prefill chunk;
+the scheduler shortens a preceding text chunk when necessary. Image preprocessing,
+feature delivery, text execution, and output parsing all run natively in Helios.
+
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
 `[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`

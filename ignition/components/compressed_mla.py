@@ -22,9 +22,10 @@ def _write_fake(kv, cache, slots, handle):
 
 
 class PreparedCompressedCacheWriter:
-    def __init__(self, values, cache, slots, *, page_size, kind, session, name):
+    def __init__(self, values, cache, slots, *, page_size, kind, session, name, cache_format="deepseek_v41"):
         self.plan = mla.plan_cache_writer(mla.CacheWriterQuery(max_rows=values.shape[0],
-            page_size=page_size, cache_kind=kind, slot_dtype=str(slots.dtype).removeprefix("torch.")),
+            page_size=page_size, cache_kind=kind, cache_format=cache_format,
+            slot_dtype=str(slots.dtype).removeprefix("torch.")),
             device=values.device)
         self.cache, self.slots = cache, slots
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
@@ -55,13 +56,14 @@ def _attend_fake(q, swa, indices, lengths, indexed, indexed_indices, indexed_len
 class PreparedCompressedMLA:
     def __init__(self, query, window, indices, lengths, sink, output, *, indexed=None,
                  indexed_indices=None, indexed_lengths=None, page_table=None,
-                 window_page_size=128, indexed_page_size=64, mode="decode", session, name, workspace):
+                 window_page_size=128, indexed_page_size=64, mode="decode", session, name, workspace,
+                 cache_format="deepseek_v41"):
         width = 0 if indexed_indices is None else indexed_indices.shape[1]
         caps = mla.Caps(device=query.device, num_q_heads=query.shape[1], max_q_rows=query.shape[0],
             max_width=indices.shape[1] + width, swa_width=indices.shape[1], indexed_width=width,
             max_page_table_width=1 if page_table is None else page_table.shape[1],
             swa_page_size=window_page_size, indexed_page_size=indexed_page_size,
-            cache_format="deepseek_v41", mode=mode)
+            cache_format=cache_format, mode=mode)
         self.plan = mla.plan(caps, invocation=mla.invocation_from_tensors(q=query,
             swa_k_cache=window, indexed_k_cache=indexed, attn_sink=sink, out=output))
         self.query, self.window, self.indexed, self.output = query, window, indexed, output
@@ -78,7 +80,8 @@ class PreparedCompressedMLA:
 
         declare(session, (self.plan.request(name=name, prepare_call=prepare,
             benchmark_call=partial(benchmark_call, query=query, window=window, indexed=indexed,
-                                   arguments=self.inputs, session=session, workspace=workspace)),))
+                arguments=self.inputs, session=session, workspace=workspace, cache_format=cache_format,
+                window_page_size=window_page_size, indexed_page_size=indexed_page_size)),))
         register_finalizer(session, self.rebind, workspace=workspace)
 
     def rebind(self):

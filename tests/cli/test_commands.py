@@ -180,3 +180,16 @@ def test_fetch_downloads_the_pinned_revision_into_the_hub_cache(host, tmp_path, 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fail)
     with pytest.raises(FetchError, match="cannot download.*network unreachable"):
         preparation.fetch(model, cache)
+
+
+def test_deepseek_v4_vision_uses_only_checkpoint_integrated_dspark():
+    from ignition.errors import UsageError
+
+    default = speculation(model="deepseek-v4-flash")
+    assert default.draft_tokens == 5 and default.adaptive
+    assert default.proposal_source == "mtp" and default.history_drafts is False
+    assert speculation("--mtp-draft-tokens", "0", model="deepseek-v4-flash").widths == (1,)
+    assert speculation("--no-mtp", model="deepseek-v4-flash") is None
+    for flags in (("--mtp-draft-tokens", "6"), ("--mtp-proposal-source", "copy"), ("--history-drafts",)):
+        with pytest.raises(UsageError):
+            speculation(*flags, model="deepseek-v4-flash")

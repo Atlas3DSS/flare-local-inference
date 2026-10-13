@@ -1,0 +1,1 @@
+{"image_processor_type": "DeepSeekV4ImageProcessor", "patch_size": 14, "merge_size": 3, "max_image_tokens": 384, "min_pixels": 147456, "max_width_height_ratio": 8}

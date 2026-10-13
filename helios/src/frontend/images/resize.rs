@@ -19,7 +19,7 @@ fn cubic(x: f64) -> f64 {
     }
 }
 
-fn axis(input: usize, output: usize) -> Axis {
+fn axis(input: usize, output: usize, pillow: bool) -> Axis {
     let scale = input as f64 / output as f64;
     let support = 2.0 * scale.max(1.0);
     let inverse_scale = if scale >= 1.0 { 1.0 / scale } else { 1.0 };
@@ -52,6 +52,9 @@ fn axis(input: usize, output: usize) -> Axis {
         }
         precision += 1;
     }
+    if pillow {
+        precision = 22;
+    }
     let multiplier = f64::from(1 << precision);
     let taps = floating
         .into_iter()
@@ -76,11 +79,19 @@ fn axis(input: usize, output: usize) -> Axis {
 }
 
 pub(super) fn resize(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
+    resample(input, width, height, false)
+}
+
+pub(super) fn pillow(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
+    resample(input, width, height, true)
+}
+
+fn resample(input: &RgbImage, width: usize, height: usize, pillow: bool) -> Vec<u8> {
     let source = &input.pixels;
     let horizontal = if width == input.width {
         None
     } else {
-        let axis = axis(input.width, width);
+        let axis = axis(input.width, width, pillow);
         let mut pixels = vec![0; input.height * width * 3];
         for y in 0..input.height {
             for (x, (start, weights)) in axis.taps.iter().enumerate() {
@@ -101,7 +112,7 @@ pub(super) fn resize(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
     if height == input.height {
         return source.clone();
     }
-    let axis = axis(input.height, height);
+    let axis = axis(input.height, height, pillow);
     let mut pixels = vec![0; height * width * 3];
     for (y, (start, weights)) in axis.taps.iter().enumerate() {
         for x in 0..width * 3 {

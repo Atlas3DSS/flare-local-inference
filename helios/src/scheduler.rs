@@ -167,6 +167,7 @@ pub struct LiveRequest {
     pending: usize,
     terminal_snapshot_ready: bool,
     vision_patches: VecDeque<usize>,
+    prefill_spans: Vec<std::ops::Range<usize>>,
     copy_proposal: Option<speculation::CopyProposal>,
 }
 
@@ -869,6 +870,7 @@ impl RequestScheduler {
             pending: 0,
             terminal_snapshot_ready: false,
             vision_patches: VecDeque::new(),
+            prefill_spans: Vec::new(),
         });
         Ok(Admitted { handle, ticket })
     }
@@ -1024,6 +1026,34 @@ impl RequestScheduler {
         self.stats.host_lookups += 1;
     }
 
+    /// Keep model-declared bidirectional spans inside one prefill submission.
+    pub fn set_prefill_spans(
+        &mut self,
+        handle: RequestHandle,
+        spans: &[std::ops::Range<usize>],
+    ) -> Result<()> {
+        let capacity = self.limits.prefill_chunk_size;
+        let request = self.request_mut(handle)?;
+        if request.last_use != Fence(0)
+            || !request.prefill_spans.is_empty()
+            || spans.windows(2).any(|p| p[0].end > p[1].start)
+            || spans.iter().any(|s| {
+                s.start >= s.end
+                    || s.end > request.prompt_tokens
+                    || s.end - s.start > capacity
+                    || (s.start < request.consumed_tokens as usize
+                        && (request.consumed_tokens as usize) < s.end)
+                    || request
+                        .system_boundary
+                        .is_some_and(|n| s.start < n && n < s.end)
+            })
+        {
+            return Err("invalid atomic prefill spans or prefix boundary".into());
+        }
+        request.prefill_spans.extend_from_slice(spans);
+        Ok(())
+    }
+
     pub fn set_vision_images(&mut self, handle: RequestHandle, patches: &[usize]) -> Result<()> {
         let vision = &self.capabilities.vision;
         let maximum = *vision
@@ -1138,12 +1168,22 @@ impl RequestScheduler {
                 request: request.handle,
                 start_position: request.scheduled_consumed,
                 tokens: match kind {
-                    GraphKind::Prefill => (request
-                        .system_boundary
-                        .filter(|n| *n as u64 > request.consumed_tokens)
-                        .unwrap_or(request.prompt_tokens)
-                        - request.consumed_tokens as usize)
-                        .min(self.limits.prefill_chunk_size),
+                    GraphKind::Prefill => {
+                        let start = request.consumed_tokens as usize;
+                        let mut end = request
+                            .system_boundary
+                            .filter(|n| *n > start)
+                            .unwrap_or(request.prompt_tokens)
+                            .min(start + self.limits.prefill_chunk_size);
+                        if let Some(span) = request
+                            .prefill_spans
+                            .iter()
+                            .find(|s| s.start < end && end < s.end)
+                        {
+                            end = span.start;
+                        }
+                        end - start
+                    }
                     GraphKind::Decode => 1,
                     GraphKind::Speculative => {
                         let remaining =

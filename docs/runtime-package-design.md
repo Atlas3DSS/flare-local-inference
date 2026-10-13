@@ -143,27 +143,27 @@ preparation memory.
 **Offloaded n-gram tables.** The model index declares token normalization or
 EOS-bounded history, per-head n-gram orders, XOR multipliers, modulus sizes,
 row offsets, quantization, and separate weight and scale payload spans.
-DeepSeek uses FP8/E8M0 rows; Qwen PLE uses group-16 NVFP4 rows with FP8 block
+DeepSeek V4.1 uses FP8/E8M0 rows; Qwen PLE uses group-16 NVFP4 rows with FP8 block
 scales and a global FP32 scale. Each table is stored once for all TP ranks.
 Indirect delivery is the sole n-gram execution mechanism. Graphs bind compact
 GPU row buffers and named external event waits at their lookup consumers.
 Table storage is selected when loading and does not change graph bindings.
 
-DeepSeek and Qwen hash tokens in their graphs, including GPU-produced proposals.
-DeepSeek retains the three preceding tokens in continuation state across prefill
+DeepSeek V4.1 and Qwen hash tokens in their graphs, including GPU-produced proposals.
+DeepSeek V4.1 retains the three preceding tokens in continuation state across prefill
 chunks and reused prefixes; Qwen preserves its EOS-bounded history.
 The graph copies row IDs to a mapped host mailbox and publishes its submission
 sequence with a system-scope release operation. The reader observes that
 sequence with an acquire operation before accessing the IDs. Both models publish
 after input-state preparation, before target layer 0. Qwen consumes rows at
-layer 1; DeepSeek consumes its two tables at layers 1 and 14.
+layer 1; DeepSeek V4.1 consumes its two tables at layers 1 and 14.
 
 A shared reader gathers each step's rows once. `--embedding-table-storage disk` uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
 registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
 resident memory and gathers the same rows. Both modes write bounded pinned
 staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
-512 KiB request mailbox per rank. The two DeepSeek tables need 49.5 MiB of
+512 KiB request mailbox per rank. The two DeepSeek V4.1 tables need 49.5 MiB of
 pinned row staging. Direct-I/O buffers add 8 MiB per table in disk mode.
 
 Before launching a graph, each rank queues a readiness-generation wait, row
@@ -256,7 +256,7 @@ package; set function attributes; add nodes, attributes, and edges; and
 instantiate each graph with its recorded flags. The execution manifest is
 then rebased onto the live addresses and validated, and the server starts
 from this reconstructed contract. `flare run PACKAGE` in
-`flare/src/main.rs` selects the Qwen, GLM, or DeepSeek contract.
+`flare/src/main.rs` selects the Qwen, GLM, DeepSeek V4, or DeepSeek V4.1 contract.
 
 Before any CUDA initialization or worker threads, Flare restricts
 `CUDA_VISIBLE_DEVICES` to `--gpus`, resolving indices within an inherited mask.

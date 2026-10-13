@@ -23,7 +23,7 @@ from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table
 from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, treespec_loads
 
 from .compilation import (DEFAULT_CACHE_ROOT, _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table,
-                          _byte_storage, _lower_storage)
+                          _byte_storage, _lower_storage, _compiler_recursion)
 from .device_binding import bind_device, relocate_inductor, restore_device, restore_prepared_device
 
 _GUARD_LOCK = RLock()
@@ -209,9 +209,10 @@ class StorageBackend(SerializableCallable):
         self.inputs = [bindings[node] for node in arguments]
         examples = [node.meta['val'] for node in arguments]
         module = torch.fx.GraphModule({}, graph)
-        self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
-            fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
-            aot=True, donate_graph_module=True)
+        with _compiler_recursion(module):
+            self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
+                fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
+                aot=True, donate_graph_module=True)
         self._bound = None
 
     def __call__(self, *args):

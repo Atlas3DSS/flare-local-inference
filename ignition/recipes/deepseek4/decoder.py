@@ -1,0 +1,414 @@
+"""Vision-aware routed experts and non-lagged manifold hyperconnections."""
+
+from dataclasses import dataclass, fields, is_dataclass
+
+import torch
+import torch.nn.functional as F
+
+from ignition.components.collectives import PreparedAllReduce
+from ignition.components.embedding import PreparedEmbedding
+from ignition.components.expert_overlap import ConcurrentSharedExpert
+from ignition.components.linear import UnquantizedProjection
+from ignition.components.mhc import (
+    MHCScratch,
+    MHCWeights,
+    PreparedMHC,
+    PreparedMHCHead,
+    PreparedMHCPost,
+)
+from ignition.components.mlp import MLPScratch, PreparedMLP
+from ignition.components.moe import PreparedRoutedExperts, PreparedRouter, RouterScratch
+from ignition.components.rms_norm import PreparedRMSNorm
+from ignition.components.rotary import CompressedRotary as Rotary
+from ignition.components.vocabulary import PreparedVocabularyProjection
+
+from .attention import AttentionScratch, PreparedAttention
+
+
+@dataclass(frozen=True)
+class Scratch:
+    embedding: torch.Tensor
+    residual: torch.Tensor
+    attention_hc: MHCScratch
+    ffn_hc: MHCScratch
+    attention: AttentionScratch
+    attention_output: torch.Tensor
+    shared: MLPScratch
+    router_logits: torch.Tensor
+    router: RouterScratch
+    routed: torch.Tensor
+    mlp_partial: torch.Tensor
+    mlp_output: torch.Tensor
+    head_residual: torch.Tensor
+    collapsed: torch.Tensor
+    hidden: torch.Tensor
+    local_logits: torch.Tensor
+    logits: torch.Tensor
+
+    def rows(self, tokens, samples):
+        def select(value, count):
+            if isinstance(value, torch.Tensor):
+                return value[:count]
+            if is_dataclass(value):
+                return type(value)(*(select(getattr(value, f.name), count) for f in fields(value)))
+            raise TypeError("decoder scratch must contain tensors and tensor dataclasses")
+
+        return type(self)(
+            *(
+                select(
+                    getattr(self, f.name),
+                    samples
+                    if f.name in ("head_residual", "collapsed", "hidden", "local_logits", "logits")
+                    else tokens,
+                )
+                for f in fields(self)
+            )
+        )
+
+    @classmethod
+    def allocate(cls, tokens, samples, world, device, *, blocks=8192, experts=256, top_k=6):
+        def zeros(*shape, dtype=torch.bfloat16):
+            return torch.zeros(shape, dtype=dtype, device=device)
+
+        return cls(
+            zeros(tokens, 4096),
+            zeros(tokens, 4, 4096),
+            MHCScratch.allocate(tokens, 4096, device),
+            MHCScratch.allocate(tokens, 4096, device),
+            AttentionScratch.allocate(tokens, world, device, blocks=blocks),
+            zeros(tokens, 4096),
+            MLPScratch.allocate(tokens, 4096, 2048 // world, device),
+            zeros(tokens, experts, dtype=torch.float32),
+            RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k),
+            zeros(tokens, 4096),
+            zeros(tokens, 4096),
+            zeros(tokens, 4096),
+            zeros(samples, 4, 4096),
+            zeros(samples, 4096),
+            zeros(samples, 4096),
+            zeros(samples, 129280 // world),
+            zeros(samples, 129280),
+        )
+
+
+class PreparedRouting:
+    def __init__(self, weights, scratch, metadata, *, mode, session, name):
+        self.weights, self.scratch, self.metadata = weights, scratch, metadata
+        self.text = (
+            None
+            if weights.token_experts is not None
+            else PreparedRouter(
+                scratch.router_logits,
+                scratch.router,
+                session=session,
+                name=name + ".text",
+                score_func="sqrtsoftplus",
+                renormalize=True,
+                routed_scaling_factor=1.5,
+                correction_bias=weights.correction,
+            )
+        )
+        self.vision, self.vision_scratch = None, None
+        if mode == "prefill":
+            self.vision_scratch = RouterScratch.allocate(
+                scratch.router_logits.shape[0], scratch.router_logits.device, experts=256, top_k=6
+            )
+            self.vision = PreparedRouter(
+                scratch.router_logits,
+                self.vision_scratch,
+                session=session,
+                name=name + ".vision",
+                score_func="sqrtsoftplus",
+                renormalize=True,
+                routed_scaling_factor=1.5,
+                correction_bias=weights.vision_correction,
+            )
+
+    def __call__(self, logits):
+        r = self.scratch.router
+        tokens = self.metadata.token_ids
+        if self.text is not None:
+            self.text(logits)
+        else:
+            r.ids.copy_(self.weights.token_experts[tokens.clamp(0, 129279)])
+            selected = F.softplus(logits).sqrt().gather(1, r.ids.long())
+            r.weights.copy_(selected / selected.sum(-1, keepdim=True) * 1.5)
+        if self.vision is not None:
+            self.vision(logits)
+            image = tokens[:, None] >= 129280
+            r.ids.copy_(torch.where(image, self.vision_scratch.ids, r.ids))
+            r.weights.copy_(torch.where(image, self.vision_scratch.weights, r.weights))
+
+
+class PreparedLayer:
+    def __init__(
+        self,
+        index,
+        weights,
+        scratch,
+        metadata,
+        pool,
+        rotary,
+        *,
+        shard,
+        mode,
+        runtime,
+        coordinator,
+        session,
+        name,
+        workspace,
+        carry,
+        defer_post,
+        visible=None,
+    ):
+        s, text = scratch, pool.config.text
+        self.scratch, self.carry = s, carry
+        options = {
+            "rms_eps": text["rms_norm_eps"],
+            "norm_eps": text["rms_norm_eps"],
+            "hc_eps": text["hc_eps"],
+            "sinkhorn_iters": text["hc_sinkhorn_iters"],
+        }
+
+        def mhc_weights(kind, norm):
+            r = weights.residual
+            return MHCWeights(
+                r[f"hc_{kind}_fn"], r[f"hc_{kind}_scale"], r[f"hc_{kind}_base"], r[norm + ".weight"]
+            )
+
+        incoming = (s.mlp_output, s.ffn_hc.residual, s.ffn_hc.post, s.ffn_hc.comb) if carry else (s.residual,)
+        self.attention_hc = PreparedMHC(
+            incoming,
+            mhc_weights("attn", "attn_norm"),
+            s.attention_hc,
+            session=session,
+            name=name + ".attn_hc",
+            workspace=workspace,
+            **options,
+        )
+        self.attention = PreparedAttention(
+            index,
+            weights.attention,
+            s.attention_hc.normalized,
+            s.attention,
+            metadata,
+            pool,
+            rotary,
+            mode=mode,
+            world=shard.world_size,
+            session=session,
+            name=name + ".attention",
+            workspace=workspace,
+            visible=visible,
+        )
+        self.attention_reduce = PreparedAllReduce(
+            s.attention.output,
+            s.attention_output,
+            runtime=runtime,
+            coordinator=coordinator,
+            session=session,
+            name=name + ".attention_reduce",
+        )
+        self.ffn_hc = PreparedMHC(
+            (s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb),
+            mhc_weights("ffn", "ffn_norm"),
+            s.ffn_hc,
+            session=session,
+            name=name + ".ffn_hc",
+            workspace=workspace,
+            **options,
+        )
+        self.router_projection = UnquantizedProjection(
+            s.ffn_hc.normalized,
+            weights.experts.router,
+            s.router_logits,
+            session=session,
+            name=name + ".router",
+        )
+        self.router = PreparedRouting(
+            weights.experts, s, metadata, mode=mode, session=session, name=name + ".route"
+        )
+        self.experts = PreparedRoutedExperts(
+            s.ffn_hc.normalized,
+            weights.experts.experts,
+            s.router.ids,
+            s.router.weights,
+            s.routed,
+            session=session,
+            name=name + ".experts",
+            workspace=workspace,
+        )
+        self.shared = PreparedMLP(
+            s.ffn_hc.normalized,
+            weights.experts.shared,
+            s.shared.gate_up,
+            s.shared.intermediate,
+            s.shared.output,
+            session=session,
+            name=name + ".shared",
+            workspace=workspace,
+            swiglu_limit=text["swiglu_limit"],
+            round_silu=False,
+            activation_mode="auto",
+        )
+        self.concurrent_shared = None
+        if mode == "decode" and s.ffn_hc.normalized.shape[0] == 1 and self.router.text is not None:
+            self.concurrent_shared = ConcurrentSharedExpert(
+                self.shared,
+                parallel_plans=(self.router_projection.plan, self.router.text.plan, self.experts.plan),
+                session=session,
+                workspace=workspace,
+                defer_launch=True,
+            )
+        self.mlp_reduce = PreparedAllReduce(
+            s.mlp_partial,
+            s.mlp_output,
+            runtime=runtime,
+            coordinator=coordinator,
+            session=session,
+            name=name + ".mlp_reduce",
+        )
+        self.post = (
+            None
+            if defer_post
+            else PreparedMHCPost(
+                s.mlp_output,
+                s.ffn_hc.residual,
+                s.ffn_hc.post,
+                s.ffn_hc.comb,
+                s.residual,
+                session=session,
+                name=name + ".post",
+            )
+        )
+
+    def __call__(self):
+        s = self.scratch
+        incoming = (
+            (s.mlp_output, s.ffn_hc.residual, s.ffn_hc.post, s.ffn_hc.comb) if self.carry else (s.residual,)
+        )
+        self.attention_hc(*incoming)
+        self.attention_reduce(self.attention(s.attention_hc.normalized))
+        self.ffn_hc(s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb)
+        if self.concurrent_shared is not None:
+            self.concurrent_shared.start(s.ffn_hc.normalized)
+        self.router(self.router_projection(s.ffn_hc.normalized))
+        self.experts()
+        if self.concurrent_shared is None:
+            self.shared(s.ffn_hc.normalized)
+        else:
+            self.concurrent_shared.finish(s.ffn_hc.normalized, s.routed)
+        s.mlp_partial.copy_(s.routed + s.shared.output)
+        self.mlp_reduce(s.mlp_partial)
+        if self.post is not None:
+            self.post(s.mlp_output, s.ffn_hc.residual, s.ffn_hc.post, s.ffn_hc.comb)
+
+
+class PreparedDecoder:
+    def __init__(
+        self,
+        weights,
+        vision,
+        scratch,
+        metadata,
+        pool,
+        *,
+        mode,
+        runtime,
+        vocabulary_runtime,
+        coordinator,
+        session,
+        name,
+        workspace,
+    ):
+        self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
+        self.mode, self.vision = mode, vision
+        self.aux_layers = () if weights.draft is None else weights.config.draft.target_layers
+        self.auxiliary = torch.zeros(
+            (metadata.token_ids.numel(), len(self.aux_layers) * 4096),
+            dtype=torch.bfloat16,
+            device=scratch.embedding.device,
+        )
+        self.safe_tokens = torch.zeros_like(metadata.token_ids)
+        self.embedding = PreparedEmbedding(
+            weights.embedding,
+            self.safe_tokens,
+            scratch.embedding,
+            num_rows=metadata.live_counts[:1],
+            session=session,
+            name=name + ".embedding",
+        )
+        self.rotary = Rotary(weights.config, scratch.embedding.device)
+        self.layers, carry = [], False
+        visible = None if vision is None or mode != "prefill" else vision.visible(metadata)
+        for index, layer in enumerate(weights.layers):
+            defer = index + 1 < len(weights.layers) and index not in self.aux_layers
+            self.layers.append(
+                PreparedLayer(
+                    index,
+                    layer,
+                    scratch,
+                    metadata,
+                    pool,
+                    self.rotary,
+                    shard=weights.shard,
+                    mode=mode,
+                    runtime=runtime,
+                    coordinator=coordinator,
+                    session=session,
+                    name=f"{name}.layer{index}",
+                    workspace=workspace,
+                    carry=carry,
+                    defer_post=defer,
+                    visible=visible,
+                )
+            )
+            carry = defer
+        self.collapse = PreparedMHCHead(
+            scratch.head_residual,
+            weights.head_mix,
+            scratch.collapsed,
+            rms_eps=weights.config.text["rms_norm_eps"],
+            hc_eps=weights.config.text["hc_eps"],
+            session=session,
+            name=name + ".collapse",
+        )
+        self.norm = PreparedRMSNorm(
+            scratch.collapsed,
+            weights.norm,
+            scratch.hidden,
+            eps=weights.config.text["rms_norm_eps"],
+            session=session,
+            name=name + ".norm",
+        )
+        self.head = PreparedVocabularyProjection(
+            scratch.hidden,
+            weights.head,
+            scratch.local_logits,
+            scratch.logits,
+            runtime=vocabulary_runtime,
+            coordinator=coordinator,
+            session=session,
+            name=name + ".head",
+        )
+
+    def __call__(self):
+        s, m = self.scratch, self.metadata
+        self.safe_tokens.copy_(m.token_ids.clamp(0, 129279))
+        self.embedding()
+        if self.vision is not None and self.mode == "prefill":
+            self.vision.inject(m, s.embedding)
+        s.residual.copy_(s.embedding[:, None, :])
+        for index, layer in enumerate(self.layers):
+            layer()
+            if index in self.aux_layers:
+                column = self.aux_layers.index(index)
+                self.auxiliary[:, column * 4096 : (column + 1) * 4096].copy_(s.residual.float().mean(1))
+        s.head_residual.copy_(s.residual[m.sample_indices])
+        self.norm(self.collapse(s.head_residual))
+        self.head(s.hidden)
+        return s.hidden
+
+    def commit(self, counts):
+        for layer in self.layers:
+            layer.attention.commit(counts)

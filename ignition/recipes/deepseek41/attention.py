@@ -1,7 +1,6 @@
 """Windowed MLA, source-shared compression, and two-level sparse selection."""
 
 from dataclasses import dataclass
-import math
 
 import torch
 import triton
@@ -17,41 +16,14 @@ from ignition.components.rms_norm import PreparedRMSNorm
 from ignition.components.state import gather_rows, save_hidden
 from ignition.preparation.tuning import declare, register_finalizer
 
+from ignition.components.rotary import CompressedRotary as Rotary
+
 from .pool import PAGE_TOKENS
 
 
 def normalize(source, weight, out, eps):
     value = source.float()
     out.copy_((value * torch.rsqrt(value.square().mean(-1, keepdim=True) + eps)) * weight.float())
-
-
-class Rotary:
-    def __init__(self, config, device):
-        text = config.text
-        scaling = text["rope_scaling"]
-        self.frequencies = {}
-        dims = torch.arange(32, device=device, dtype=torch.float32)
-        for compressed in (False, True):
-            base = text["compress_rope_theta"] if compressed else text["rope_theta"]
-            frequencies = 1 / base ** (dims / 32)
-            if compressed:
-                original = scaling["original_max_position_embeddings"]
-                def boundary(rotations):
-                    return 64 * math.log(original / (rotations * 2 * math.pi)) / (2 * math.log(base))
-                low = max(math.floor(boundary(scaling["beta_fast"])), 0)
-                high = min(math.ceil(boundary(scaling["beta_slow"])), 63)
-                smooth = 1 - ((dims - low) / max(high - low, 1e-3)).clamp(0, 1)
-                frequencies = frequencies / scaling["factor"] * (1 - smooth) + frequencies * smooth
-            self.frequencies[compressed] = frequencies
-
-    def apply(self, tensor, positions, *, compressed, inverse=False):
-        angles = positions.float()[:, None] * self.frequencies[compressed][None]
-        cos, sin = angles.cos(), angles.sin() * (-1 if inverse else 1)
-        tail = tensor[..., -64:].float().unflatten(-1, (32, 2))
-        if tensor.ndim == 3:
-            cos, sin = cos[:, None], sin[:, None]
-        a, b = tail[..., 0], tail[..., 1]
-        tensor[..., -64:].copy_(torch.stack((a * cos - b * sin, a * sin + b * cos), dim=-1).flatten(-2))
 
 
 @dataclass(frozen=True)

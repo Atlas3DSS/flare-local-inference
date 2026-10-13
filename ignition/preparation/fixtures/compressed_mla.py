@@ -2,14 +2,16 @@
 
 import torch
 from b12x.preparation import PreparedCall
-from b12x.attention._shared.mla.compressed_reference import pack_deepseek_v41_cache_reference
+from b12x.attention._shared.mla.compressed_reference import (
+    pack_compressed_sparse_mla_kv_cache_reference, pack_deepseek_v41_cache_reference,
+)
 
 from ignition.preparation.scratch import planned_scratch
 from ignition.preparation.tuning import benchmark_resource
 
 
 class Inputs:
-    def __init__(self, query, window, indexed, binding):
+    def __init__(self, query, window, indexed, binding, cache_format, window_page_size, indexed_page_size):
         device = query.device
         generator = torch.Generator(device=device).manual_seed(410528)
         self.binding = {name: None if value is None else torch.empty_like(value) for name, value in binding.items()}
@@ -18,20 +20,26 @@ class Inputs:
         self.query_seed = q.clone()
         self.out = torch.empty_like(q)
         self.sink = torch.zeros(q.shape[1], device=device)
-        page_size = window.shape[1] // 528
+        def pack(values, page_size, kind):
+            if cache_format == "deepseek_v4":
+                return pack_compressed_sparse_mla_kv_cache_reference(
+                    values[:, :448], values[:, 448:], page_size=page_size)
+            return pack_deepseek_v41_cache_reference(values, page_size=page_size, cache_kind=kind)
+
+        page_size = window_page_size
         self.window = torch.empty_strided((1, window.shape[1]), window.stride(), dtype=torch.uint8, device=device)
         values = torch.randn((page_size, 512), dtype=torch.bfloat16, device=device, generator=generator) * .2
-        self.window.copy_(pack_deepseek_v41_cache_reference(values, page_size=page_size, cache_kind="swa"))
+        self.window.copy_(pack(values, page_size, "swa"))
         width = binding["swa_indices"].shape[1]
         self.binding["swa_indices"].copy_(torch.arange(width, dtype=torch.int32, device=device)[None] % page_size)
         self.binding["swa_lengths"].fill_(width)
         self.indexed = None
         if indexed is not None:
-            page_size = indexed.shape[1] // 288
+            page_size = indexed_page_size
             width = binding["indexed_indices"].shape[1]
             pages = max(1, (width + page_size - 1) // page_size)
             values = torch.randn((pages * page_size, 512), dtype=torch.bfloat16, device=device, generator=generator) * .2
-            self.indexed = pack_deepseek_v41_cache_reference(values, page_size=page_size, cache_kind="indexed")
+            self.indexed = pack(values, page_size, "indexed")
             self.binding["indexed_indices"].copy_(torch.arange(width, dtype=torch.int32, device=device)[None])
             self.binding["indexed_lengths"].fill_(width)
             table = self.binding["indexed_page_table"]
@@ -49,11 +57,14 @@ class Inputs:
         self.binding["q"].copy_(self.query_seed)
 
 
-def benchmark_call(state, *, query, window, indexed, arguments, session, workspace):
-    key = (query.shape, query.device, window.shape[1:], window.stride(),
+def benchmark_call(state, *, query, window, indexed, arguments, session, workspace,
+                   cache_format, window_page_size, indexed_page_size):
+    key = (cache_format, window_page_size, indexed_page_size,
+           query.shape, query.device, window.shape[1:], window.stride(),
            None if indexed is None else indexed.shape[1:],
            tuple((name, None if value is None else (value.shape, value.stride())) for name, value in arguments.items()))
-    inputs = benchmark_resource(session, ("compressed_mla", key), lambda: Inputs(query, window, indexed, arguments))
+    inputs = benchmark_resource(session, ("compressed_mla", key), lambda: Inputs(
+        query, window, indexed, arguments, cache_format, window_page_size, indexed_page_size))
     scratch = planned_scratch(state.scratch_specs(), workspace)
     binding = state.bind_for_preparation(scratch=scratch, **inputs.binding)
     return PreparedCall(run=lambda: state.run(binding, swa_k_cache=inputs.window,

@@ -29,7 +29,7 @@ impl<M: ModelContract> Admission<M> {
             || self
                 .prompt
                 .iter()
-                .any(|token| *token as usize >= config.contract.vocabulary)
+                .any(|token| *token as usize >= M::input_vocabulary(config))
             || self
                 .grammar_mask
                 .as_ref()
@@ -113,7 +113,7 @@ pub fn validate_prompt<M: ModelContract>(
         || prompt
             .tokens
             .iter()
-            .any(|token| *token as usize >= config.contract.vocabulary)
+            .any(|token| *token as usize >= M::input_vocabulary(config))
         || prompt.sampling.top_k > config.contract.vocabulary as i32
         || prompt.max_new_tokens == 0
         || prompt.max_new_tokens > i32::MAX as u32

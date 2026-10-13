@@ -158,3 +158,23 @@ class PreparedMHCPost:
 
     def __call__(self, source, residual, post, comb):
         return mhc.run_post(source, residual, post, comb, out=self.output, plan=self.plan)
+
+
+class PreparedMHCHead:
+    """Learn a per-token reduction from hyperconnection streams to head features."""
+
+    def __init__(self, residual, weights, output, *, rms_eps, hc_eps, session, name):
+        from ignition.components.linear import UnquantizedProjection
+
+        self.weights, self.output = weights, output
+        self.rms_eps, self.hc_eps = rms_eps, hc_eps
+        self.mixes = torch.zeros(residual.shape[:2], dtype=torch.float32, device=residual.device)
+        self.projection = UnquantizedProjection(residual.flatten(1), weights["fn"], self.mixes,
+            session=session, name=name + ".projection")
+
+    def __call__(self, residual):
+        self.projection(residual.flatten(1))
+        inverse = torch.rsqrt(residual.float().flatten(1).square().mean(-1,keepdim=True) + self.rms_eps)
+        mixing = (self.mixes * inverse * self.weights["scale"] + self.weights["base"]).sigmoid() + self.hc_eps
+        self.output.copy_((residual.float() * mixing[:,:,None]).sum(1))
+        return self.output

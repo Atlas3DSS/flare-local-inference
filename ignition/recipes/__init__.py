@@ -16,11 +16,12 @@ from .declaration import Checkpoint, Recipe
 
 
 def recipes() -> tuple[Recipe, ...]:
+    from .deepseek4.recipe import RECIPE as deepseek4
     from .deepseek41.recipe import RECIPE as deepseek41
     from .glm53.recipe import RECIPE as glm53
     from .qwen38.recipe import RECIPE as qwen38
 
-    return qwen38, glm53, deepseek41
+    return qwen38, glm53, deepseek41, deepseek4
 
 
 @dataclass(frozen=True)

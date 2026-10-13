@@ -6,6 +6,7 @@ import math
 import operator
 import os
 import pickle
+import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -34,6 +35,17 @@ def _defer_full_collection():
         yield
     finally:
         gc.set_threshold(*thresholds)
+
+
+@contextmanager
+def _compiler_recursion(module):
+    # Inductor follows one recursive rename per aliased storage mutation.
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous, 2 * len(module.graph.nodes) + 1024))
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(previous)
 
 
 @dataclass
@@ -125,6 +137,8 @@ def _returned_alias(node, index):
     if not isinstance(node.target, torch._ops.OpOverload):
         return None
     schema = node.target._schema
+    if len(schema.returns) == 1 and isinstance(schema.returns[0].type, torch.ListType):
+        return None
     result = schema.returns[index]
     if result.alias_info is None:
         return None
@@ -194,8 +208,9 @@ def _compile_module(module, calls, owner, output_tree):
     else:
         token = _INVOCATIONS.set(calls)
         try:
-            artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
-                options={'config_patches': _OPTIONS}, aot=True, donate_graph_module=True)
+            with _compiler_recursion(module):
+                artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
+                    options={'config_patches': _OPTIONS}, aot=True, donate_graph_module=True)
             # Tune with caller-owned state rather than synthetic full-pool inputs.
             artifact(*inputs)
         finally:
@@ -290,6 +305,25 @@ def _lower_storage(module):
                 if alias is not None:
                     keys[node] = keys[alias]
                     node.meta['val'] = alias.meta['val']
+                elif (isinstance(source.target, torch._ops.OpOverload)
+                      and len(source.target._schema.returns) == 1
+                      and isinstance(source.target._schema.returns[0].type, torch.ListType)
+                      and source.target._schema.returns[0].alias_info is not None
+                      and not source.target._schema.is_mutable):
+                    # List-valued views retain each element's offset and stride.
+                    values = source.target(
+                        *torch.fx.map_arg(source.args, lambda arg: arg.meta['val']),
+                        **torch.fx.map_arg(source.kwargs, lambda arg: arg.meta['val']))
+                    view = values[index]
+                    leaves, _ = tree_flatten((source.args, source.kwargs))
+                    for argument in leaves:
+                        if (isinstance(argument, torch.fx.Node) and argument in keys
+                                and argument.meta['val'].untyped_storage()._cdata == view.untyped_storage()._cdata):
+                            keys[node] = keys[argument]
+                            node.meta['val'] = view
+                            break
+                    else:
+                        raise ValueError(f'cannot identify input storage for list view {source.target}')
         elif node.op == 'call_function' and isinstance(node.target, torch._ops.OpOverload):
             schema = node.target._schema
             if len(schema.returns) == 1 and schema.returns[0].alias_info is not None:

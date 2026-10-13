@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from ignition.components.state import StateLayout, StateStorage
+from ignition.components.state import StateLayout
+from ignition.components.paged_state import PagedStateStorage
 
 PAGE_TOKENS = 128
 SWA_RECORD_BYTES = 528
@@ -47,52 +48,17 @@ def continuation_layout(config, *, dspark=False):
 
 
 @dataclass(frozen=True)
-class ContinuationPool(StateStorage):
+class ContinuationPool(PagedStateStorage):
     config: object
-    pages: dict[str, torch.Tensor]
-    window_backing: torch.Tensor
 
     @classmethod
     def allocate(cls, config, slots, pages, device, *, storage=None, maximum_pages=None, maximum_rows=None, dspark=False):
-        if type(pages) is not int or pages <= 0:
-            raise ValueError("DeepSeek cache requires positive logical page capacity")
-        backing = StateStorage.allocate(continuation_layout(config, dspark=dspark), slots, device,
-            storage=storage, maximum_slots=maximum_rows)
-        maximum = pages if storage is None else maximum_pages
-        if maximum is None or maximum < pages:
-            raise ValueError("virtual cache extent must cover prepared physical pages")
-        regions = {}
-        for name, shape in page_specs(config):
-            regions[name] = (torch.zeros((pages, *shape), dtype=torch.uint8, device=device)
-                if storage is None else storage.device_allocate(name, (maximum, *shape), torch.uint8,
-                    group="KV_PAGES", maximum=maximum, units=pages))
-        backing.memory_capacity[1] = pages
-        window_backing = backing.backing
-        if storage is not None:
-            from b12x.sequence._shared.disk_table import _tensor_from_pointer
-
-            region = next(region for region in storage.dynamic_regions
-                          if region.address == backing.backing.data_ptr())
-            window_backing = _tensor_from_pointer(region.address,
-                shape=(region.maximum, backing.layout.row_bytes), dtype=torch.uint8,
-                device=backing.backing.device, nbytes=region.maximum * backing.layout.row_bytes)
-        return cls(backing.backing, backing.layout, backing.memory_capacity, config, regions, window_backing)
+        backing = PagedStateStorage.allocate(continuation_layout(config, dspark=dspark), page_specs(config),
+            slots, pages, device, storage=storage, maximum_pages=maximum_pages, maximum_rows=maximum_rows)
+        return cls(backing.backing, backing.layout, backing.memory_capacity,
+                   backing.pages, backing.reserved_backing, config)
 
     def window(self, layer, *, draft=False):
         """Expose the reserved row extent to cache writers; admission bounds physical rows."""
-        region = self.layout.region(f"{'draft' if draft else 'layer'}{layer}.window")
-        return self.window_backing[:, region.offset:region.offset + region.nbytes]
-
-    @property
-    def last_hidden(self):
-        return self.region("last_hidden")
-
-    def partial_pages(self):
-        return self.pages.items()
-
-    def clear_for_preparation(self):
-        self.backing.zero_()
-        count = int(self.memory_capacity[1].item())
-        for value in self.pages.values():
-            value[:count].zero_()
+        return self.reserved_region(f"{'draft' if draft else 'layer'}{layer}.window")
 

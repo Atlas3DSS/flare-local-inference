@@ -76,3 +76,5 @@ pub trait ModelOutput {
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>>;
     fn finish(&mut self, cause: Termination) -> Result<Vec<Event>>;
 }
+
+pub(crate) mod dsml;

@@ -25,13 +25,15 @@ from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.progress import phase
 
-from .batch import BatchInputs, Metadata, PreparedBatch
+from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
 from .decoder import PreparedDecoder, Scratch
+from ignition.components.dspark import PreparedContext, PreparedMarkov
+from .dspark import PreparedDraft
 from .engram import Tables
-from .generation import PreparedGeneration
-from .maintenance import PreparedMaintenance
+from ignition.components.paged_generation import PreparedGeneration
+from ignition.components.paged_maintenance import PreparedMaintenance
 from .pool import ContinuationPool, PAGE_TOKENS, continuation_layout, page_bytes
-from .resume import PreparedResume
+from ignition.components.paged_resume import PreparedResume
 from .weights import ModelWeights
 
 
@@ -157,13 +159,14 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         forwards, signatures, metadata, scratch = {}, {}, {}, {}
         speculation = None
         if config.dspark:
-            from .speculative import SpeculativePreparation
+            from ignition.components.dspark import DSparkForwards, SpeculativePreparation
 
             speculation = SpeculativePreparation(weights, tables, pool, requests, inputs, decoder_storage,
                 draft_tokens=config.draft_tokens, records=records, frame=frame, sequence=sequence,
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
-                markov_runtime=markov_collective, coordinator=coordinator)
+                markov_runtime=markov_collective, coordinator=coordinator,
+                forwards=DSparkForwards(PreparedDecoder,Scratch,PreparedContext,PreparedDraft,PreparedMarkov))
 
     del manifest
     modes = (True, False) if config.dspark else (False,)
@@ -193,10 +196,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         coordinator=coordinator, session=session, name=name, workspace=arena)
                     batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pool=pool)
                     forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
-                        coordinator=coordinator, session=session, name=name + ".generation", workspace=arena)
+                        coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=PreparedContext)
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
         if speculation is not None:
-            from .speculative import PreparedRound
+            from ignition.components.dspark import PreparedRound
 
             for batch, width in config.speculative_shapes:
                 name = f"speculative{batch}x{width}"

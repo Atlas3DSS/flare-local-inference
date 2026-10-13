@@ -14,7 +14,8 @@ from .compilation import _defer_full_collection
 @_defer_full_collection()
 def capture_forwards(functions, signatures, *, session, device, stream, pool,
                      collective=None, coordinator=None, compile_decoder=True, materialize=None,
-                     progress=None, label="Prepare serving graphs", cache_root=None, retain_graphs=False):
+                     progress=None, label="Prepare serving graphs", cache_root=None, retain_graphs=False,
+                     compile_kinds=("prefill", "decode", "resume", "speculative")):
     """Retain compiled callables and capture with an optional b12x IPC runtime.
 
     Persistent state and graph outputs must live in caller-owned storage.
@@ -25,7 +26,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     if compile_decoder:
         cache = ForwardCache(namespace=session.namespace.to_dict(), device=device, root=cache_root)
         forwards = {name: function for name, function in functions.items()
-                    if signatures[name].kind in ("prefill", "decode", "resume", "speculative")}
+                    if signatures[name].kind in compile_kinds}
         stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):
             compiled = cache.prepare_many(forwards, signatures, progress=progress,

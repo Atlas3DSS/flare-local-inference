@@ -353,3 +353,61 @@ fn runtime_concurrency_and_loaded_width_assign_fixed_execution_rows() {
         }
     }
 }
+
+#[test]
+fn atomic_prefill_spans_keep_bidirectional_inputs_together() {
+    let mut s = scheduler(24, false);
+    let h = s.admit(spec(None, 1537, 1)).unwrap();
+    s.set_prefill_spans(h, &[400..780, 810..1190]).unwrap();
+    let mut chunks = Vec::new();
+    while s.request(h).unwrap().phase != RequestPhase::Finishing {
+        let step = run_step(&mut s);
+        if step.kind == GraphKind::Prefill {
+            let lane = &step.lanes[0];
+            chunks.push((lane.start_position, lane.tokens));
+        }
+    }
+    assert_eq!(chunks, [(0, 400), (400, 410), (810, 512), (1322, 215)]);
+    s.finish(h).unwrap();
+    let reused = s.admit(spec(None, 1537, 1)).unwrap();
+    s.set_prefill_spans(reused, &[400..780, 810..1190]).unwrap();
+    assert!(s.request(reused).unwrap().reused_prompt_tokens() >= 1537);
+}
+
+#[test]
+fn atomic_prefill_spans_reject_invalid_geometry_before_execution() {
+    for spans in [
+        vec![10..10],
+        vec![20..19],
+        vec![0..513],
+        vec![900..1100],
+        vec![20..100, 90..110],
+        vec![200..300, 10..20],
+    ] {
+        let mut s = scheduler(8, false);
+        let h = s.admit(spec(None, 1024, 1)).unwrap();
+        assert!(s.set_prefill_spans(h, &spans).is_err());
+        assert_eq!(s.next_step().unwrap().kind, GraphKind::Init);
+    }
+    let mut s = scheduler(8, false);
+    let h = s.admit(spec(Some(512), 1024, 1)).unwrap();
+    assert!(s.set_prefill_spans(h, &[400..700]).is_err());
+    s.set_prefill_spans(h, &[512..700]).unwrap();
+    run_step(&mut s);
+    assert!(s.set_prefill_spans(h, &[800..900]).is_err());
+}
+
+#[test]
+fn empty_atomic_spans_preserve_text_chunking() {
+    let mut s = scheduler(16, false);
+    let h = s.admit(spec(None, 1100, 1)).unwrap();
+    s.set_prefill_spans(h, &[]).unwrap();
+    let mut chunks = Vec::new();
+    while s.request(h).unwrap().phase != RequestPhase::Finishing {
+        let step = run_step(&mut s);
+        if step.kind == GraphKind::Prefill {
+            chunks.push(step.lanes[0].tokens);
+        }
+    }
+    assert_eq!(chunks, [512, 512, 76]);
+}

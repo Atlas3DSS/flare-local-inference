@@ -13,7 +13,7 @@ from ignition.components.engram import EngramInputs, PreparedEngramRequests
 from ignition.components.compressed_mla import PreparedCompressedCacheWriter, PreparedCompressedMLA
 from ignition.preparation.compilation import compile_forward
 from ignition.recipes.deepseek41.attention import _commit_window, PreparedCompressor
-from ignition.recipes.deepseek41.batch import Metadata
+from ignition.components.paged_batch import Metadata
 from ignition.recipes.deepseek41.pool import ContinuationPool
 
 from .test_deepseek41_pool import config
