@@ -1659,6 +1659,7 @@ mod tests {
                 },
 
                 draft_pages_per_request: 1,
+                host_decode_tokens: false,
 
                 state_rows_per_request: None,
             },
@@ -1808,6 +1809,7 @@ mod tests {
                 vision: Qwen4Exp::metadata().vision,
 
                 draft_pages_per_request: 0,
+                host_decode_tokens: false,
 
                 state_rows_per_request: None,
             },
@@ -2313,6 +2315,7 @@ mod tests {
                 },
 
                 draft_pages_per_request: 1,
+                host_decode_tokens: false,
 
                 state_rows_per_request: None,
             },

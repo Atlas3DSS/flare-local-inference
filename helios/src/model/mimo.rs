@@ -117,6 +117,7 @@ impl ModelContract for MiMo {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }

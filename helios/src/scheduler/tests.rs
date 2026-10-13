@@ -124,6 +124,7 @@ pub(super) fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestSch
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )
@@ -470,6 +471,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
+                host_decode_tokens: false,
                 state_rows_per_request: None,
             },
         )
@@ -546,6 +548,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
+                host_decode_tokens: false,
                 state_rows_per_request: None,
             },
         );
@@ -906,6 +909,53 @@ fn branching_requests_own_distinct_tail_pages_and_terminal_snapshots() {
     assert_eq!(first.shared_pages, second.shared_pages);
     assert_ne!(first.private_pages, second.private_pages);
     assert!(first.terminal_snapshot.is_none() && second.terminal_snapshot.is_none());
+}
+
+#[test]
+fn host_uploaded_decode_waits_for_its_previous_sample() {
+    let mut scheduler = scheduler(1, 8, 2);
+    scheduler.capabilities.host_decode_tokens = true;
+    let handle = scheduler.admit(spec(63, 3)).unwrap();
+    init(&mut scheduler, 1);
+    let prefill = scheduler.plan().unwrap();
+    scheduler.commit(&prefill, Fence(2)).unwrap();
+    scheduler
+        .complete(
+            Fence(2),
+            &records(handle, 2, 63, 1, 88, 1),
+            Default::default(),
+        )
+        .unwrap();
+    retain_prompt(&mut scheduler, 3);
+
+    let first = scheduler.plan().unwrap();
+    assert_eq!(first.kind, GraphKind::Decode);
+    scheduler.commit(&first, Fence(4)).unwrap();
+    assert!(scheduler.plan().is_none());
+    assert_eq!(scheduler.request(handle).unwrap().tokens()[63], 88);
+
+    scheduler
+        .complete(
+            Fence(4),
+            &records(handle, 4, 64, 2, 89, 1),
+            Default::default(),
+        )
+        .unwrap();
+    let second = scheduler.plan().unwrap();
+    assert_eq!(second.kind, GraphKind::Decode);
+    assert_eq!(second.lanes[0].start_position, 64);
+    assert_eq!(scheduler.request(handle).unwrap().tokens()[64], 89);
+    scheduler.commit(&second, Fence(5)).unwrap();
+    assert!(scheduler.plan().is_none());
+    scheduler
+        .complete(
+            Fence(5),
+            &records(handle, 5, 65, 3, 90, 2),
+            Default::default(),
+        )
+        .unwrap();
+    freeze(&mut scheduler, handle, 6);
+    scheduler.finish(handle).unwrap();
 }
 
 #[test]
@@ -1829,6 +1879,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             patch_capacities: vec![8, 32],
         },
         draft_pages_per_request: 1,
+        host_decode_tokens: false,
         state_rows_per_request: None,
     };
     let limits = SchedulerLimits {
@@ -1891,6 +1942,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         },
         SchedulerCapabilities {
             draft_pages_per_request: 9,
+            host_decode_tokens: false,
             state_rows_per_request: None,
             ..capabilities
         },
