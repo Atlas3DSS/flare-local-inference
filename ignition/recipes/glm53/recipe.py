@@ -45,6 +45,9 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
         # SM103 runs routed experts through trtllm-gen with NVFP4 activations at every size.
         expert_activation="a4" if any(gpu.capability == (10, 3) for gpu in plan.gpus) else "a16",
+        # Expanded scales take 2 x 288 x 4096 x 2048 / 16 bytes per routed layer over the ranks: about
+        # 4.9 GB per rank at TP4, which GB10 holds beside its weights, but 9.7 GB at TP2, which it does not.
+        expand_expert_scales=plan.world_size >= 4,
         mtp=speculation is not None, **drafting)
     if plan.world_size == 1:
         return prepare_rank(snapshot, config, rank=0, group=None, progress=progress, package_storage=package_storage)

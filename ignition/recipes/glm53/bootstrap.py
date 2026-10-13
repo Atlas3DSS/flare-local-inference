@@ -70,6 +70,8 @@ class PreparationConfig:
     expert_activation: str = "a16"
     # Shard latent records and C4 pools across the tensor-parallel ranks (decode context parallelism).
     context_parallel: bool = False
+    # Expand routed experts' CSF block scales once at load instead of before every expert launch.
+    expand_expert_scales: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
 
@@ -182,7 +184,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     if package_storage is not None:
         transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp,
-                                expert_activation=config.expert_activation)
+                                expert_activation=config.expert_activation,
+                                expand_expert_scales=config.expand_expert_scales)
     if torch.cuda.get_device_properties(device).is_integrated:
         from ignition.preparation.host_memory import release_page_cache
 

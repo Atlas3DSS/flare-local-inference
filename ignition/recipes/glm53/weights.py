@@ -49,19 +49,21 @@ class ModelWeights:
     """One text rank's canonical modules and all packed decoder weights.
 
     Embeddings and normalization are replicated. Vocabulary weights partition
-    their output rows. Routed layers share one scale-expansion workspace and
-    execute serially. Vision weights are outside this text stack.
+    their output rows. Routed layers either share one scale-expansion workspace
+    and execute serially, or hold their CSF block scales expanded once at load.
+    Vision weights are outside this text stack.
     """
 
     tree: torch.nn.Module
     shard: TensorParallelShard
     layers: tuple[LayerWeights, ...]
-    expert_scale_scratch: tuple[torch.Tensor, torch.Tensor]
+    expert_scale_scratch: tuple[torch.Tensor, torch.Tensor] | None
     allocated_bytes: int
     mtp: MTPWeights | None = None
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None, mtp=False, expert_activation="a4"):
+    def load(cls, manifest, device, *, shard, progress=None, mtp=False, expert_activation="a4",
+             expand_expert_scales=False):
         import torch
 
         from .model import create_model_tree
@@ -86,7 +88,7 @@ class ModelWeights:
             tree.lm_head.weight = torch.nn.Parameter(loader.load_tensor("lm_head.weight",
                 extent=slice(*shard.partition(tree.lm_head.out_features, alignment=64))), requires_grad=False)
             tree.lm_head.out_features = tree.lm_head.weight.shape[0]
-            scales = loader.allocate_expert_scale_scratch()
+            scales = None if expand_expert_scales else loader.allocate_expert_scale_scratch()
             for index in range(len(tree.model.language_model.layers)):
                 layers.append(LayerWeights(loader.load_attention(index), loader.load_mlp(index, scale_scratch=scales),
                                            loader.load_residual(index)))
