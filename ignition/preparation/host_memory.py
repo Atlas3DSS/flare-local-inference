@@ -2,6 +2,7 @@
 
 import ctypes
 import gc
+import os
 from pathlib import Path
 
 _WORKER_BYTES = 2 << 30
@@ -66,3 +67,14 @@ def tuning_limits(device, workers, *, pools=1, headroom_bytes=0, race_budget=Non
     if race_budget is not None:
         race = min(race, race_budget)
     return min(workers, (usable - race) // _WORKER_BYTES), race
+
+
+def release_page_cache(paths) -> None:
+    """Drop files' clean pages from the page cache once their contents have been loaded.
+
+    An integrated GPU's free memory excludes reclaimable page cache, so checkpoint pages
+    read while loading weights would otherwise count against tuning, graphs and KV pages.
+    """
+    for path in paths:
+        with open(path, "rb") as file:
+            os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)

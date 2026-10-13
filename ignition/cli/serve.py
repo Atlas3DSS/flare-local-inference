@@ -1,6 +1,7 @@
 """Prepare one checkpoint for native serving or runtime-package export."""
 
 import ipaddress
+import json
 import os
 import socket
 import sys
@@ -199,3 +200,119 @@ def _prepare(args, *, export_path) -> int:
             return 0
     finally:
         signals.__exit__(None, None, None)
+
+
+def _serving_progress(verbose):
+    from ignition.progress import StartupProgress
+
+    class Progress(StartupProgress):
+        def __call__(self, message):
+            super().__call__(message)
+            if verbose:
+                self.console.print(f"  {message}", style="dim", highlight=False)
+
+    return Progress()
+
+
+def serve(args) -> int:
+    """Prepare in this process and serve over HTTP; with --ranks, one peer rank per other host joins.
+
+    Requires heliopause's qualification build, which embeds the HTTP server in Python.
+    """
+    from ignition.progress import phase
+
+    progress = _serving_progress(args.verbose)
+    configuration = Configuration.load(args.config)
+    hub_cache = configuration.directory("hub_cache")
+    model = resolve_model(configuration, args.model)
+    if not model.cached(hub_cache):
+        raise UsageError(f"{model.checkpoint.alias} is not cached; ignition export or run downloads it")
+    concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
+                                                args.max_concurrency)
+    host = Host.discover()
+    bind = _address(configuration.get("server.host", args.host).value,
+                    configuration.get("server.port", args.port).value)
+    rendezvous = None
+    if args.ranks == 1:
+        gpus = host.gpus if args.gpus is None else tuple(host.gpus[i] for i in planning.parse_gpus(args.gpus))
+        local = gpus
+    else:
+        from ignition.preparation.host_ranks import HostRendezvous, local_topology, source_identity, topology_gpu
+
+        if args.rendezvous is None:
+            raise UsageError("--ranks greater than one requires --rendezvous ADDRESS:PORT for the peer hosts")
+        selected = planning.parse_gpus(args.gpus or "0")
+        if len(selected) != 1 or selected[0] >= len(host.gpus):
+            raise UsageError("multi-host ranks each use one GPU; --gpus names this host's")
+        local = (host.gpus[selected[0]],)
+        rendezvous = HostRendezvous(args.rendezvous, args.ranks, identity=source_identity(),
+                                    topology=local_topology(local[0]))
+        with phase(progress, "Wait for tensor-parallel hosts") as stage:
+            topologies = rendezvous.accept(report=stage.update)
+        gpus = tuple(topology_gpu(topology, index) for index, topology in enumerate(topologies))
+    plan = planning.plan(model.recipe, model.checkpoint, gpus,
+                         selected=None if args.ranks == 1 and args.gpus is None else tuple(range(len(gpus))),
+                         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
+                         speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                         context_parallel=not args.no_context_parallel and rendezvous is None,
+                         cache_states=args.prefix_cache_states)
+    if rendezvous is None:
+        local = plan.gpus
+    environment.apply(configuration, local)
+    options = _server_options(configuration, model, plan)
+    print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
+    prepared = model.recipe.prepare(
+        model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
+        kernel_cache=configuration.directory("kernel_cache"), progress=progress,
+        **({} if rendezvous is None else {"ranks": rendezvous}))
+    import signal
+
+    with prepared:
+        print(json.dumps({"memory": prepared.memory_report}, default=str), file=sys.stderr, flush=True)
+        server = prepared.start_server(bind=bind, options=options)
+        print(f"Listening on {server.address}", flush=True)
+
+        def stop(signum, frame):
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGTERM, stop)
+        try:
+            while server.wait(1000):
+                pass
+            raise PreparationError("native HTTP server stopped unexpectedly")
+        except KeyboardInterrupt:
+            return 0
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def join(args) -> int:
+    """Run one peer rank on this host for rank zero's rendezvous on another host."""
+    import time
+
+    from ignition.preparation.host_ranks import knock, local_topology, serve_peer, source_identity
+    from ignition.recipes import resolve
+
+    started = time.monotonic()
+
+    def progress(message):
+        print(f"{time.monotonic() - started:8.1f}s rank {args.rank}: {message}", flush=True)
+
+    configuration = Configuration.load(args.config)
+    hub_cache = configuration.directory("hub_cache")
+    host = Host.discover()
+    if not 0 <= args.gpu < len(host.gpus):
+        raise UsageError(f"--gpu {args.gpu} names a GPU this host does not have")
+    gpu = host.gpus[args.gpu]
+    environment.apply(configuration, (gpu,))
+    control, executor = knock(args.rendezvous, args.rank, args.ranks, identity=source_identity(),
+                              topology=local_topology(gpu), report=progress)
+
+    def resolve_snapshot(checkpoint):
+        model = resolve(checkpoint.alias, hub_cache)
+        if model.checkpoint.revision != checkpoint.revision or not model.cached(hub_cache):
+            raise UsageError(f"{checkpoint.repository} at {checkpoint.revision[:8]} is not cached on this host")
+        return model.snapshot(hub_cache)
+
+    serve_peer(control, executor, args.rank, args.ranks, resolve_snapshot=resolve_snapshot, progress=progress)
+    return 0

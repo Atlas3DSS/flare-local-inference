@@ -324,7 +324,7 @@ def test_worker_budget_accounts_for_all_preparing_ranks(backend, monkeypatch):
         session.compile_workers = 8 if count is None else count
 
     monkeypatch.setattr(PreparationSession, "configure_compile_workers", configure)
-    coordinator = SimpleNamespace(ranks=(0, 1, 2, 3), barrier=lambda: None)
+    coordinator = SimpleNamespace(ranks=(0, 1, 2, 3), barrier=lambda: None, local_ranks=4, spans_hosts=False)
     session = make_session(device=0, checkpoint="revision", coordinator=coordinator)
     session.declare((declaration("op"),))
     report = session.tune()

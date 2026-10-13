@@ -75,12 +75,21 @@ def test_capacity_errors_exit_four_with_aligned_continuation_lines(host, tmp_pat
 
 def test_unknown_commands_flags_and_abbreviations_are_usage_errors(host, capsys):
     for arguments in (["run", "qwen3.8-flash", "--context", "4096"], ["run", "qwen3.8-flash", "--gpu", "0"],
-                      ["run", "qwen3.8-flash", "--max", "2"], ["serve"], ["plan", "qwen3.8-flash"],
+                      ["run", "qwen3.8-flash", "--max", "2"], ["join", "10.0.0.1:29600"],
+                      ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "3"], ["serve", "--ranks", "3"],
+                      ["plan", "qwen3.8-flash"],
                       ["prepare", "qwen3.8-flash"], ["models"], ["pull"], ["status"], ["bench"], ["config"], ["skill"]):
         with pytest.raises(SystemExit) as exit:
             main(arguments)
         assert exit.value.code == 2
     capsys.readouterr()
+
+
+def test_multi_host_ranks_parse_for_rank_zero_and_its_peers():
+    rank_zero = _parser().parse_args(["serve", "glm-5.3-flash", "--ranks", "4", "--rendezvous", "10.0.0.1:29600"])
+    assert (rank_zero.model, rank_zero.ranks, rank_zero.rendezvous) == ("glm-5.3-flash", 4, "10.0.0.1:29600")
+    peer = _parser().parse_args(["join", "10.0.0.1:29600", "--rank", "3", "--ranks", "4"])
+    assert (peer.rendezvous, peer.rank, peer.ranks, peer.gpu) == ("10.0.0.1:29600", 3, 4, 0)
 
 
 def speculation(*arguments, model="qwen3.8-flash"):

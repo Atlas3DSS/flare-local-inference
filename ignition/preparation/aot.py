@@ -327,6 +327,39 @@ def _completed(pending):
 _COMMAND_SOURCES = ('cli', 'errors.py', 'planning.py', 'progress.py')
 
 
+def _share_artifacts(paths, group, root, primary):
+    """Copy rank zero's compiled forwards to ranks on other hosts, which load them by the same path.
+
+    Each rank keeps its own cache directory; a peer receives only artifacts it lacks
+    or whose contents differ from rank zero's.
+    """
+    import torch.distributed as dist
+
+    digests = [None]
+    if primary:
+        digests[0] = {path: hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths}
+    dist.broadcast_object_list(digests, src=root, group=group)
+
+    def current(path):
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest() == digests[0][path]
+        except OSError:
+            return False
+
+    missing = [] if primary else [path for path in paths if not current(path)]
+    wanted = [None] * dist.get_world_size(group)
+    dist.all_gather_object(wanted, missing, group=group)
+    for path in sorted(set().union(*wanted)):
+        payload = [Path(path).read_bytes() if primary else None]
+        dist.broadcast_object_list(payload, src=root, group=group)
+        if path in missing:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".tmp", delete=False) as file:
+                file.write(payload[0])
+            os.replace(file.name, target)
+
+
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
@@ -470,6 +503,8 @@ class ForwardCache:
         paths, failure = publication[0]
         if failure is not None:
             raise RuntimeError(f"rank-zero forward compilation failed: {failure}")
+        if coordinator.spans_hosts:
+            _share_artifacts(sorted(set(paths.values())), group, root, primary)
         error = None
         try:
             if materialize is not None:

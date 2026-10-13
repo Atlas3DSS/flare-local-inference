@@ -1,7 +1,10 @@
-"""Prepared b12x PCIe reductions embedded in compiled CUDA graphs.
+"""Prepared b12x reductions and gathers embedded in compiled CUDA graphs.
 
-A component given no runtime serves one rank: the reduction or gather is the
-rank's own values, copied into the output its consumers read.
+Ranks on one host communicate through b12x PCIe runtimes; ranks on separate
+DGX Sparks through RoCEnante (b12x.comm.roce), whose one-shot all-reduce and
+all-gather are captured in the same graphs. A component given no runtime serves
+one rank: the reduction or gather is the rank's own values, copied into the
+output its consumers read.
 """
 
 import itertools
@@ -16,6 +19,22 @@ _OWNERS = weakref.WeakValueDictionary()
 _HANDLES = itertools.count()
 
 
+def _roce(runtime):
+    """True for a RoCEnante runtime joining ranks on separate hosts."""
+    from b12x.comm import roce
+
+    return isinstance(runtime, roce.AllReduce)
+
+
+def _roce_plan(runtime, coordinator, surface):
+    """One fixed RoCEnante plan; every operation's geometry is validated by the runtime at launch."""
+    from b12x.comm import roce
+
+    query = roce.query_from_runtime(runtime, surface=surface, call={"dtypes": ("bfloat16",)},
+                                    topology="roce_rdma", peer_hosts=coordinator.hosts)
+    return roce.plan(query, runtime=runtime)
+
+
 @torch.library.custom_op("flare::pcie_all_reduce", mutates_args=("output",))
 def _all_reduce(source: torch.Tensor, output: torch.Tensor, handle: int) -> None:
     owner = _OWNERS[handle]
@@ -24,6 +43,16 @@ def _all_reduce(source: torch.Tensor, output: torch.Tensor, handle: int) -> None
 
 @_all_reduce.register_fake
 def _fake_all_reduce(source, output, handle):
+    pass
+
+
+@torch.library.custom_op("flare::nccl_all_reduce", mutates_args=("output",))
+def _nccl_all_reduce(source: torch.Tensor, output: torch.Tensor, handle: int) -> None:
+    _OWNERS[handle].runtime.all_reduce(source, output)
+
+
+@_nccl_all_reduce.register_fake
+def _fake_nccl_all_reduce(source, output, handle):
     pass
 
 
@@ -45,7 +74,30 @@ class PreparedAllReduce:
             if source.shape != output.shape or source.dtype != output.dtype:
                 raise ValueError("a single-rank reduction copies its source into a matching output")
             return
-        if isinstance(runtime, pcie.DmaAllReduce):
+        from ignition.preparation.nccl import NcclCommunicator
+
+        if isinstance(runtime, NcclCommunicator):
+            # NCCL needs no kernel preparation; ranks enter it in the same captured order.
+            if (source.shape != output.shape or source.dtype != torch.bfloat16 or output.dtype != source.dtype
+                    or not source.is_contiguous() or not output.is_contiguous()):
+                raise ValueError("NCCL reductions require contiguous BF16 tensors of one shape")
+            self.nccl = True
+            self.handle = next(_HANDLES)
+            _OWNERS[self.handle] = self
+            return
+        self.nccl = False
+        if _roce(runtime):
+            if (source.shape != output.shape or source.dtype != torch.bfloat16 or output.dtype != source.dtype
+                    or not source.is_contiguous() or not output.is_contiguous()
+                    or not 0 < source.numel() * 2 <= runtime.max_size or source.numel() * 2 % 16):
+                raise ValueError("RoCE reductions require contiguous BF16 16-byte packs within the runtime's capacity")
+            self.plan = _roce_plan(runtime, coordinator, "AllReduce.all_reduce")
+            group = runtime._group
+
+            def prepare(state):
+                return PreparedCall(run=lambda: state.all_reduce(source, out=output), output=output,
+                                    owners=(runtime, source, output))
+        elif isinstance(runtime, pcie.DmaAllReduce):
             # Copy-engine ring for prefill-sized activations.
             from b12x.comm.pcie._dma_preparation import query_from_metadata
 
@@ -79,13 +131,16 @@ class PreparedAllReduce:
         if self.runtime is None:
             self.output.copy_(source)
             return self.output
-        _all_reduce(source, self.output, self.handle)
+        (_nccl_all_reduce if self.nccl else _all_reduce)(source, self.output, self.handle)
         return self.output
 
 
 def _gather_columns(source, output, handle):
     owner = _OWNERS[handle]
     runtime = owner.runtime
+    if owner.roce:
+        runtime.all_gather(source, dim=-1, out=output, plan=owner.plan)
+        return
     runtime.all_gather_heads(
         source.view(source.shape[0], runtime.heads_per_rank, runtime.query_head_dim),
         out=output.view(output.shape[0], runtime.total_heads, runtime.query_head_dim),
@@ -119,6 +174,24 @@ class PreparedAllGather:
         if runtime is None:
             if source.shape != output.shape or source.dtype != output.dtype:
                 raise ValueError("a single-rank gather copies its source into a matching output")
+            return
+        self.roce = _roce(runtime)
+        if self.roce:
+            if (source.ndim != 2 or source.dtype != torch.bfloat16 or output.dtype != source.dtype
+                    or not source.is_contiguous() or not output.is_contiguous()
+                    or output.shape != (source.shape[0], source.shape[1] * runtime.world_size)
+                    or source.shape[1] * 2 % 16 or not 0 < source.numel() * 2 <= runtime.max_gather_bytes):
+                raise ValueError("RoCE gathers require contiguous BF16 column partitions within the runtime's capacity")
+            self.plan = _roce_plan(runtime, coordinator, "AllReduce.all_gather")
+            ranks = tuple(dist.get_process_group_ranks(runtime._group))
+            # Priming runs before the plan is published, so it launches the materialized gather directly.
+            declare(session, (self.plan.request(name=name,
+                prepare_call=lambda state: PreparedCall(
+                    run=lambda: runtime._run_prepared_all_gather(source, prepared=state, dim=-1, out=output),
+                    output=output, owners=(runtime, source, output)),
+                collective=CollectiveRequirement(key=name, ranks=ranks)),), coordinator=coordinator)
+            self.handle = next(_HANDLES)
+            _OWNERS[self.handle] = self
             return
         if (runtime.world_size not in (2, 4) or source.ndim != 2
                 or source.dtype != torch.bfloat16 or output.dtype != source.dtype

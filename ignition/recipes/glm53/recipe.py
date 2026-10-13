@@ -23,9 +23,10 @@ def _costs(state_row_bytes, graph_bytes, *, ranks, speculating):
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,
-            package_storage=None):
+            package_storage=None, ranks=None):
     """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1.
 
+    With `ranks`, rank zero's multi-host rendezvous, each rank uses its own host's GPU 0.
     KV pages fill the free memory measured after graph capture, not the plan's estimate.
     """
     from ignition.preparation.rank_group import prepare_group
@@ -36,7 +37,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width}
     config = PreparationConfig(
-        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
+        devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
+        hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
         max_active=plan.concurrency, context_parallel=plan.context_parallel,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
@@ -46,7 +48,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         mtp=speculation is not None, **drafting)
     if plan.world_size == 1:
         return prepare_rank(snapshot, config, rank=0, group=None, progress=progress, package_storage=package_storage)
-    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
+    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage,
+                         ranks=ranks, checkpoint=plan.checkpoint)
 
 
 def usage(prepared):

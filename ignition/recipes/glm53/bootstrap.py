@@ -22,6 +22,7 @@ from ignition.preparation.collectives import (
     create_all_reduce_runtime,
     create_dma_all_reduce_runtime,
     create_head_exchange,
+    create_roce_runtime,
 )
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
@@ -51,6 +52,8 @@ _KV_ALLOCATION_MARGIN = 64 << 20
 @dataclass(frozen=True)
 class PreparationConfig:
     devices: tuple[int, ...] = (0, 1)
+    # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
+    hosts: tuple[str, ...] | None = None
     context: int = 262144
     prefill_chunk_size: int = 4096
     max_active: int = 4
@@ -80,10 +83,12 @@ class PreparationConfig:
             raise ValueError("fixed speculative width must belong to the configured widths")
         if type(self.compile_decoder) is not bool:
             raise TypeError("compile_decoder must be a boolean")
+        placements = tuple(zip(self.hosts or ("",) * len(self.devices), self.devices))
         if (not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
-                or len(set(self.devices)) != len(self.devices)
+                or len(set(placements)) != len(self.devices)
+                or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != len(self.devices))
                 or any(type(d) is not int or d < 0 for d in self.devices)):
-            raise ValueError("GLM requires one, two or four distinct process-local CUDA devices")
+            raise ValueError("GLM requires one, two or four distinct CUDA devices")
         for name in ("context", "prefill_chunk_size", "max_active", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an integer")
@@ -155,6 +160,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         if progress is not None:
             progress(message)
 
+    def memory(stage):
+        free = torch.cuda.mem_get_info(device)[0]
+        report(f"{stage}: free={free >> 20} MiB, allocated={torch.cuda.memory_allocated(device) >> 20} MiB, "
+               f"reserved={torch.cuda.memory_reserved(device) >> 20} MiB")
+
     snapshot = Path(snapshot).resolve()
     shard = TensorParallelShard(rank, len(config.devices))
     if (shard.world_size > 1) != (group is not None):
@@ -173,6 +183,11 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp,
                                 expert_activation=config.expert_activation)
+    if torch.cuda.get_device_properties(device).is_integrated:
+        from ignition.preparation.host_memory import release_page_cache
+
+        release_page_cache(manifest.shard_paths)
+    memory("after weights")
     with phase(progress, "Allocate model state and collectives") as stage:
         layer_types = weights.tree.config.text_config.layer_types
         layout = continuation_layout(layer_types, shard.world_size, mtp=config.mtp)
@@ -201,7 +216,18 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         ipc = None if package_storage is None else package_storage.peer_storage
         collective = prefill_collective = vocabulary_collective = None
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
-        if group is not None:
+        if coordinator is not None and coordinator.spans_hosts:
+            # Ranks on separate Sparks reduce and gather through one RoCEnante runtime.
+            if config.context_parallel:
+                raise ValueError("GLM decode context parallelism requires every rank on one host")
+            from ignition.preparation.nccl import NcclCommunicator
+
+            collective = vocabulary_collective = create_roce_runtime(
+                group, device, max_tokens=config.token_capacity, hidden_size=4096,
+                gather_bytes=sample_rows * (154880 // shard.world_size) * 2)
+            # Long prefill chunks reduce through NCCL's ring instead of one-shot RDMA to every peer.
+            prefill_collective = NcclCommunicator(group, device)
+        elif group is not None:
             collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity,
                                                    hidden_size=4096, ipc=ipc)
             prefill_collective = create_dma_all_reduce_runtime(group, device, max_tokens=config.prefill_chunk_size,
@@ -261,6 +287,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     serving_modes = (True, False) if config.mtp else (False,)
     graph_count = (len(serving_modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
                    + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0))
+    memory(f"after model state (continuation {pool.backing.nbytes >> 20} MiB, {state_rows} rows)")
     with phase(progress, "Construct graph catalog", total=graph_count) as stage:
         def add(name, function, kind, rows, tokens, fields, *, enabled=None):
             forwards[name] = function
@@ -319,6 +346,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                         page_tokens=config.page_tokens)
                     fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
                     add(name, operation, mode, capacity, 1, (*fields, "page_tables", *(("draft_page_tables",) if enabled else ()), *commands.buffers()), enabled=enabled)
+    memory(f"after graph catalog (operator scratch {arena.nbytes >> 20} MiB)")
     with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     report(f"selected kernels: {tuning['selection_counts']}")
@@ -334,6 +362,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     free = torch.cuda.mem_get_info(device)[0]
     available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
     pages = available // page_bytes if config.pages is None else config.pages
+    memory(f"after graph measurement (KV may use {max(0, available) >> 20} MiB on every rank, {max(0, pages)} pages)")
     if pages < (config.minimum_pages or config.preparation_pages) or pages * page_bytes > available:
         raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
 

@@ -27,8 +27,24 @@ def _parser() -> argparse.ArgumentParser:
                            help="destination .safetensors file; must not already exist")
     for preparing in (running, exporting):
         _preparation_arguments(preparing)
-    running.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
-    running.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
+    serving = command("serve", serve.serve, "prepare in this process and serve over HTTP, with peer ranks on other hosts")
+    for listening in (running, serving):
+        listening.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
+        listening.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
+    _preparation_arguments(serving)
+    hosts = serving.add_argument_group("multi-host tensor parallelism")
+    hosts.add_argument("--ranks", type=int, default=1, choices=(1, 2, 4), metavar="N",
+                       help="tensor-parallel ranks, one per host; this process is rank zero (default: 1)")
+    hosts.add_argument("--rendezvous", metavar="ADDR:PORT",
+                       help="IPv4 address and port on which rank zero admits its peers")
+    serving.add_argument("--prefix-cache-states", type=int, metavar="N",
+                         help="advanced: cached request states kept resident for prefix reuse; fewer leave more"
+                              " memory for KV pages (default: sized from free memory)")
+    joining = command("join", serve.join, "run a peer rank for rank zero's rendezvous on another host")
+    joining.add_argument("rendezvous", metavar="ADDR:PORT", help="rank zero's rendezvous address")
+    joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")
+    joining.add_argument("--ranks", type=int, required=True, choices=(2, 4), metavar="N", help="tensor-parallel ranks")
+    joining.add_argument("--gpu", type=int, default=0, metavar="INDEX", help="this host's GPU (default: 0)")
     return parser
 
 

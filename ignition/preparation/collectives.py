@@ -1,8 +1,30 @@
 """Bootstrap coordination of b12x collectives over an established Gloo group."""
 
 from datetime import timedelta
+from pathlib import Path
 
 import torch.distributed as dist
+
+
+def host_identity():
+    """This boot of this host; ranks sharing it can map each other's memory through CUDA IPC."""
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def create_roce_runtime(group, device, *, max_tokens, hidden_size, gather_bytes):
+    """Allocate RoCEnante for ranks on separate DGX Sparks: BF16 hidden reductions and logit gathers.
+
+    One runtime serves every reduction and gather in rank-serial order. Its pinned
+    region holds one slot per peer and transfer, sized for the largest operation.
+    """
+    from b12x.comm import roce
+
+    if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size, gather_bytes)):
+        raise ValueError("RoCE capacities must be positive integers")
+    nbytes = max_tokens * hidden_size * 2
+    if nbytes % 16 or gather_bytes % 16:
+        raise ValueError("RoCE capacities must occupy complete 16-byte packs")
+    return roce.AllReduce(exchange_group=group, device=device, max_size=nbytes, max_gather_bytes=gather_bytes)
 
 
 def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
@@ -69,6 +91,15 @@ class CollectivePreparation:
         self.group = group
         self.ranks = tuple(dist.get_process_group_ranks(group))
         self.timeout = timeout
+        hosts = [None] * len(self.ranks)
+        dist.all_gather_object(hosts, host_identity(), group=group)
+        # Each rank's host, in group order; ranks on one host share its CPUs and CUDA IPC.
+        self.hosts = tuple(hosts)
+        self.local_ranks = self.hosts.count(host_identity())
+
+    @property
+    def spans_hosts(self):
+        return len(set(self.hosts)) > 1
 
     def __call__(self, progress):
         if progress.ready_cache is not None or progress.ready_tuning:

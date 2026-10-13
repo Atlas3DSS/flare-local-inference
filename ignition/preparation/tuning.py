@@ -230,7 +230,8 @@ class RecordedPreparationSession(PreparationSession):
             requests = tuple(self._recorded_requests.values())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
-            pools = 1 if self._coordinator is None else len(self._coordinator.ranks)
+            # Compiler pools share the memory and CPUs of ranks on this host only.
+            pools = 1 if self._coordinator is None else self._coordinator.local_ranks
             bounded, self.race_budget = tuning_limits(self.device.ordinal, self.compile_workers,
                 pools=pools, headroom_bytes=self.headroom_bytes, race_budget=self.race_budget)
             if self._integrated and self.compile_workers:

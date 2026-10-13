@@ -140,13 +140,20 @@ class PreparedRankGroup:
         self.close()
 
 
-def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=None):
+def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=None, ranks=None, checkpoint=None):
     """Prepare every rank before returning a root-owned native handoff.
 
     This function owns the process's Gloo group and must run in the main thread.
     Peer failure or unconfirmed CUDA drain terminates this process and its peers.
+    `ranks` is rank zero's rendezvous when every rank runs on its own host; its
+    peers resolve `checkpoint` locally and prepare without package storage.
     """
     import flare_heliopause
+
+    if ranks is not None:
+        if package_storage is not None:
+            raise ValueError("multi-host ranks serve their prepared model without package storage")
+        return ranks.prepare(snapshot, config, prepare, checkpoint=checkpoint, progress=progress)
 
     if dist.is_initialized():
         raise RuntimeError("rank preparation requires exclusive ownership of the control group")

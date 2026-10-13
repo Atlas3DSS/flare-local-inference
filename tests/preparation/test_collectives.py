@@ -11,6 +11,8 @@ def coordinator(monkeypatch):
     group = object()
     monkeypatch.setattr(dist, "get_backend", lambda actual: "gloo")
     monkeypatch.setattr(dist, "get_process_group_ranks", lambda actual: [4, 7])
+    monkeypatch.setattr(dist, "all_gather_object",
+                        lambda states, value, *, group: states.__setitem__(slice(None), [value] * len(states)))
     return CollectivePreparation(group)
 
 
@@ -123,3 +125,12 @@ def test_local_preparation_failure_is_exchanged_before_cleanup(monkeypatch):
     assert isinstance(failure.value.__cause__, ValueError)
     assert exchanged == [(False, (), "ValueError: bad weight geometry")]
     assert closed == [True]
+
+
+def test_reports_ranks_on_this_host_and_whether_the_group_spans_hosts(monkeypatch):
+    owner = coordinator(monkeypatch)
+    assert owner.local_ranks == 2 and not owner.spans_hosts
+    monkeypatch.setattr(dist, "all_gather_object",
+                        lambda states, value, *, group: states.__setitem__(slice(None), [value, "another-boot"]))
+    owner = CollectivePreparation(object())
+    assert owner.local_ranks == 1 and owner.spans_hosts
