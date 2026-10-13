@@ -198,11 +198,23 @@ class BatchedQuantizedProjection:
         from b12x import gemm
 
         if self.expanded is not None:
-            self.output.copy_(torch.bmm(source, self.expanded))
+            torch.ops.flare.sm103_bmm_out(source, self.expanded, self.output)
             return self.output
         return gemm.bmm(source, self.weight, self.output, plan=self.plan,
             a_dtype="bfloat16", b_dtype="float8_e4m3fn", sf_dtype="float8_e8m0fnu",
             c_dtype="bfloat16", sf_vec_size=32, b_major=self.major, sf_axis=self.major)
+
+
+# cuBLAS writes strided-batched results straight into the caller's per-head views; traced copies would
+# instead stage a contiguous result (300 us per 4096-row GLM absorption on GB300).
+@torch.library.custom_op("flare::sm103_bmm_out", mutates_args=("out",))
+def _sm103_bmm_out(source: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> None:
+    torch.bmm(source, weight, out=out)
+
+
+@_sm103_bmm_out.register_fake
+def _fake_sm103_bmm_out(source, weight, out):
+    pass
 
 
 @torch.library.custom_op("flare::parallel_mx_projections", mutates_args=("outputs", "workspaces"))
