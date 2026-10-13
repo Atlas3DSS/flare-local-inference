@@ -265,6 +265,12 @@ def serve(args) -> int:
         model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
         kernel_cache=configuration.directory("kernel_cache"), progress=progress,
         **({} if rendezvous is None else {"ranks": rendezvous}))
+    code = _serve_prepared(prepared, bind, options)
+    print("Stopped; every rank drained and released its resources.", flush=True)
+    return code
+
+
+def _serve_prepared(prepared, bind, options):
     import signal
 
     with prepared:

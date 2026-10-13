@@ -449,7 +449,11 @@ def serve_peer(control, executor, rank, world, *, resolve_snapshot, progress=Non
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)
         if command == "serve":
+            if progress is not None:
+                progress("serving")
             model.serve_rank(executor, rank=rank, world=world)
+            if progress is not None:
+                progress("drained")
         elif command != "close":
             raise RuntimeError("invalid prepared rank handoff")
         executor.close()
