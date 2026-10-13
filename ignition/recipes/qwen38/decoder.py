@@ -63,7 +63,6 @@ class ModelWeights:
             raise MemoryError(f"model weight loading requires at least {stored // shard.world_size + (8 << 30)} free CUDA bytes; found {free_bytes}")
         tree = create_model_tree(manifest)
         before = torch.cuda.memory_allocated(device)
-        scale_scratch = allocate_expert_scale_scratch(device, shard=shard)
         layers = []
         with QwenWeightLoader(manifest, device, progress=progress, shard=shard) as loader:
             def parameters(paths, extents=None):

@@ -267,6 +267,17 @@ def _nvfp4_activation_unscaled(values, input_scale, *, scale_math="micro"):
         raise ValueError("activation and input_scale must be on the same device")
     global_scale = _positive_scalar(input_scale, "input_scale")
     _finite(values, "NVFP4 activations")
+    if scale_math == "flashinfer":
+        # FlashInfer's quantizer (SM103): FP32 products with a rounded 1/6, then the
+        # reciprocal of the dequantization scale, as its fast-math kernels evaluate them.
+        groups = values.float().reshape(*values.shape[:-1], -1, 16)
+        inverse_global = global_scale.float().reciprocal()
+        maximum = groups.abs().amax(-1, keepdim=True)
+        sixth = torch.tensor(1 / 6, dtype=torch.float32, device=values.device)
+        block_scale = (inverse_global * (maximum * sixth)).clamp(max=448).to(torch.float8_e4m3fn).float()
+        multiplier = torch.where(maximum == 0, torch.zeros_like(block_scale),
+                                 (block_scale * inverse_global.reciprocal()).reciprocal())
+        return (round_e2m1(groups * multiplier) * block_scale).reshape(values.shape)
     if scale_math != "micro":
         from b12x.moe._shared.kernels.reference import _quantize_vec_to_fp4_dequant
 
