@@ -59,6 +59,7 @@ class RecordedPreparationSession(PreparationSession):
         self._benchmark_restorers = {}
         self._preparation_thread = get_ident()
         self._tune_status = "collecting"
+        self._sharded = False
         self._workload_schema = workload_schema
         self._search_limits = dict(search_limits or {})
         self.tuning_report = None
@@ -125,7 +126,8 @@ class RecordedPreparationSession(PreparationSession):
         return tuple(tuple(job) for job in jobs if job)
 
     def _prepare_job(self, requests, *, progress, autotune):
-        if self._coordinator is None or not any(request.collective is not None for request in requests):
+        if self._coordinator is None or not self._sharded and not any(
+                request.collective is not None for request in requests):
             return super().prepare(requests, progress=progress, autotune=autotune)
         return self._coordinator.prepare(self, requests, progress=progress, autotune=autotune)
 
@@ -233,7 +235,17 @@ class RecordedPreparationSession(PreparationSession):
                 raise RuntimeError("full serving preparation requires enabled, uncancelled b12x tuning")
             requests = tuple(self._recorded_requests.values())
             if self._coordinator is not None and self._coordinator.spans_hosts:
-                self._coordinator.share_selections(self._selection_cache())
+                import torch.distributed as dist
+
+                # Ranks on identical GPUs split each race's candidates and adopt its fastest result,
+                # so no rank repeats another's measurements. Otherwise every rank tunes and adopts
+                # rank zero's cached selections.
+                self._sharded = self._coordinator.same_on_every_rank(
+                    torch.cuda.get_device_properties(self.device.ordinal).name)
+                if self._sharded:
+                    self.configure_tuning_shard(dist.get_rank(), self._coordinator.ranks)
+                else:
+                    self._coordinator.share_selections(self._selection_cache())
             scratch_arena = self._reserve_scratch(requests)
             self.configure_compile_workers(None)
             # Compiler pools share the memory and CPUs of ranks on this host only.

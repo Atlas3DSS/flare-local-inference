@@ -92,13 +92,29 @@ def create_head_exchange(group, device, *, max_rows, heads, head_dim, ipc=None):
         max_batch_size=max_rows, total_heads=heads, head_dim=head_dim, stream_affine=False, ipc=ipc)
 
 
+def _winners(contributions):
+    """Each sharded race's fastest complete contribution, ties going to the lower candidate index."""
+    races = {}
+    for item in contributions:
+        best = races.get(item.key)
+        if item.assignment is not None and (
+                best is None or (item.latency_us, item.candidate_index) < (best.latency_us, best.candidate_index)):
+            best = item
+        races[item.key] = best
+    if missing := [key for key, item in races.items() if item is None]:
+        raise RuntimeError(f"no rank completed a candidate of tuning race {missing[0]!r}")
+    return tuple(races[key] for key in sorted(races))
+
+
 class CollectivePreparation:
     """Authorize matching collective declarations and synchronize kernel entry.
 
     Local compilation may complete at different times on each rank. This
     coordinator releases a collective only after all group members report the
-    same declaration. It supports whole-group operations without distributed
-    candidate sharding and is unused after graph handoff.
+    same declaration. When the session shards tuning, it also relays b12x's
+    two exchanges: every rank's cached selections, which b12x reconciles in
+    rank order, and each race's fastest result among the ranks' disjoint
+    candidate shares. It is unused after graph handoff.
     """
 
     def __init__(self, group, *, timeout=timedelta(minutes=2)):
@@ -116,6 +132,11 @@ class CollectivePreparation:
     @property
     def spans_hosts(self):
         return len(set(self.hosts)) > 1
+
+    def same_on_every_rank(self, value):
+        values = [None] * len(self.ranks)
+        dist.all_gather_object(values, value, group=self.group)
+        return all(item == values[0] for item in values)
 
     def share_selections(self, cache):
         """Adopt rank zero's cached kernel selections on every rank.
@@ -170,23 +191,22 @@ class CollectivePreparation:
         job = None
         state = None
         error = None
-        key = None
+        authorization = {"collective_key": None}
         try:
             while True:
                 try:
                     if job is None:
                         job = session.begin(requests, autotune=autotune)
                     if state is None or not state.done:
-                        state = job.advance(collective_key=key)
+                        state = job.advance(**authorization)
                         if progress is not None:
                             progress(state)
-                    if state.ready_cache is not None or state.ready_tuning:
-                        raise ValueError("collective preparation does not shard tuning candidates")
                 except Exception as exc:  # noqa: BLE001 - Every rank must receive preparation failures.
                     error = exc
                 pending = () if state is None else tuple((item.key, item.ranks) for item in state.ready_collectives)
                 local = (state is not None and state.done, pending,
-                         None if error is None else f"{type(error).__name__}: {error}")
+                         None if error is None else f"{type(error).__name__}: {error}",
+                         None if state is None else state.ready_cache, () if state is None else tuple(state.ready_tuning))
                 states = [None] * len(self.ranks)
                 dist.all_gather_object(states, local, group=self.group)
                 failures = [(rank, item[2]) for rank, item in zip(self.ranks, states, strict=True) if item[2] is not None]
@@ -194,16 +214,28 @@ class CollectivePreparation:
                     raise RuntimeError(f"rank preparation failed: {failures}") from error
                 if all(item[0] for item in states):
                     return job.result()
-                if any(item[0] for item in states) and any(item[1] for item in states):
+                if any(item[0] for item in states) and any(item[1] or item[3] is not None or item[4] for item in states):
                     raise RuntimeError("a rank finished before its peer's collective declaration")
+                authorization = {"collective_key": None}
+                if all(item[3] is not None for item in states):
+                    # Each rank reconciles every rank's cached selections, rank zero's first.
+                    authorization = {"cache": tuple(item[3] for item in states)}
+                    continue
+                if all(item[4] for item in states):
+                    races = [sorted(contribution.key for contribution in item[4]) for item in states]
+                    if any(keys != races[0] for keys in races[1:]):
+                        raise RuntimeError(f"tuning races differ across ranks: {races}")
+                    winners = _winners(contribution for item in states for contribution in item[4])
+                    authorization = {"tuning": winners[0] if len(winners) == 1 else winners}
+                    continue
                 ready = [item[1] for item in states]
-                key = None
                 if all(ready):
                     if any(item != ready[0] for item in ready[1:]):
                         raise RuntimeError(f"collective preparation declarations differ across ranks: {ready}")
                     key, ranks = ready[0][0]
                     if tuple(ranks) != self.ranks:
                         raise ValueError("collective preparation requires the complete control group")
+                    authorization = {"collective_key": key}
         except BaseException as failure:
             try:
                 if job is not None:
