@@ -227,6 +227,7 @@ def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path
             "region": {"address": 0x100000000000, "nbytes": 1 << 20},
             "counters": {"address": 0x200000001000, "nbytes": 1024},
             "slot_bytes": 1 << 20, "pipe_bytes": 64 << 20, "ctrl_offset": 4 << 20,
+            # The preparing hosts' fabric is not recorded: each serving host discovers its own.
             "hca_names": ["rocep1s0f0", "roceP2p1s0f0"], "gid_index": 3, "traffic_class": 0, "rails": 2,
             "routes": [[], [[0, 0], [1, 1]]] if rank == 0 else [[[0, 0], [1, 1]], []]})
         files.append(tmp_path / f"rank-{rank}.safetensors")
@@ -237,8 +238,8 @@ def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path
     assert (result.cluster.world, result.cluster.export_id) == (2, "export-a")
     assert result.server["model_id"] == "glm"
     assert [bundle.roce.rank for bundle in result.ranks] == [0, 1]
-    assert [[(l.local, l.remote) for l in route.links] for route in result.ranks[1].roce.routes] == [
-        [(0, 0), (1, 1)], []]
+    assert all(field not in proto.RoceTransport.DESCRIPTOR.fields_by_name
+               for field in ("hcas", "gid_index", "traffic_class", "rails", "routes"))
     with files[0].open("rb") as package:
         for bundle, expected in zip(result.ranks, contents, strict=True):
             span = bundle.resources["storage.bin"]

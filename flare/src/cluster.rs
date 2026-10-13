@@ -40,14 +40,36 @@ pub fn health(transport: &Arc<RoceTransport>) -> CollectiveHealth {
     }
 }
 
+/// Open this rank's transport over the fabric every rank discovered, from their endpoint lists in
+/// rank order.
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-fn open(owner: &NativeModel) -> Result<RoceTransport, Failure> {
+fn open(
+    owner: &NativeModel,
+    fabric: &flare_helios::execution::roce_fabric::Fabric,
+    endpoints: &[Vec<u8>],
+) -> Result<RoceTransport, Failure> {
+    use flare_helios::execution::roce_fabric;
+
     let spec = owner
         .roce(0)
         .ok_or("multi-host package rank has no RoCE transport")?;
+    let endpoints = endpoints
+        .iter()
+        .map(|bytes| roce_fabric::decode(bytes))
+        .collect::<flare_helios::Result<Vec<_>>>()?;
+    let topology = fabric.topology(&endpoints, spec.rank)?;
     // SAFETY: The package restored the region at its recorded address; owner outlives the
     // transport, and no graph runs before every rank connected.
-    Ok(unsafe { RoceTransport::open(spec)? })
+    Ok(unsafe { RoceTransport::open(spec, &topology)? })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn connected(transport: &RoceTransport) -> String {
+    format!(
+        "{} rails per peer over {}",
+        transport.topology().rails,
+        transport.topology().hcas.join(",")
+    )
 }
 
 /// A rank's admitted connections to the rest of its cluster, made before it loads.
@@ -121,18 +143,18 @@ pub fn rank_zero(
 ) -> Result<Joined<Vec<RankStream>>, Failure> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        use flare_helios::execution::rendezvous;
+        use flare_helios::execution::{rendezvous, roce_fabric};
 
-        let mut transport = open(owner)?;
         let phase = progress.phase("Connect RoCE transport", None);
+        // Every rank learns every rank's devices, then plans the same routes from them.
+        let fabric = roce_fabric::discover()?;
+        let endpoints =
+            rendezvous::share_records(&mut streams, roce_fabric::encode(&fabric.endpoints))?;
+        let mut transport = open(owner, &fabric, &endpoints)?;
         let records = rendezvous::share_records(&mut streams, transport.local_record()?)?;
         transport.connect(&records)?;
         rendezvous::await_connected(&mut streams)?;
-        phase.finish(format!(
-            "{} rails per peer over {}",
-            transport.spec().rails,
-            transport.spec().hcas.join(",")
-        ));
+        phase.finish(connected(&transport));
         Ok(Joined {
             streams,
             transport: Arc::new(transport),
@@ -154,19 +176,21 @@ pub fn peer(
 ) -> Result<Joined<RankStream>, Failure> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        use flare_helios::execution::rendezvous;
+        use flare_helios::execution::{rendezvous, roce_fabric};
 
-        let mut transport = open(owner)?;
         let phase = progress.phase("Connect RoCE transport", None);
+        let fabric = roce_fabric::discover()?;
+        let endpoints = rendezvous::exchange_record(
+            &mut stream,
+            &roce_fabric::encode(&fabric.endpoints),
+            cluster.world,
+        )?;
+        let mut transport = open(owner, &fabric, &endpoints)?;
         let records =
             rendezvous::exchange_record(&mut stream, &transport.local_record()?, cluster.world)?;
         transport.connect(&records)?;
         rendezvous::report_connected(&mut stream)?;
-        phase.finish(format!(
-            "{} rails per peer over {}",
-            transport.spec().rails,
-            transport.spec().hcas.join(",")
-        ));
+        phase.finish(connected(&transport));
         Ok(Joined {
             streams: stream,
             transport: Arc::new(transport),

@@ -13,9 +13,11 @@ ranks, and serves HTTP.
 
 - Two or four DGX Sparks on one RoCE fabric (a switch, or point-to-point cables),
   with the same OS image and NVIDIA driver. Each host uses one GPU.
-- Each host's RoCE ports up, with an IPv4 RoCEv2 GID at index 3. RoCEnante uses
-  every active RDMA device, at most two rails per peer. On a DGX Spark these are
-  `rocep1s0f0` and `roceP2p1s0f0` for a cabled port 0.
+- Each host's RoCE ports up with IPv4 RoCEv2 GIDs. Each host finds its own
+  active RDMA devices when it serves, and the ranks plan which devices carry
+  each of at most two rails per peer, on a switch or with hosts cabled point to
+  point; the package records nothing about the fabric it was prepared on. On a
+  DGX Spark the devices are `rocep1s0f0` and `roceP2p1s0f0` for a cabled port 0.
 - The checkpoint in rank zero's `[paths] hub_cache`. Preparation sends each peer
   the files its own `hub_cache` lacks, checking each against its content hash,
   and the peer keeps them there; every rank prepares its own shard.
@@ -151,8 +153,9 @@ Without an agent, start each peer's rank yourself with identical serving options
 - `package RoCE kernels use proxy ABI ...`: the package was prepared with a
   different FlashInfer RoCEnante than this Flare executable vendors; rebuild
   Flare or re-export.
-- `RoCE transport setup failed` or `queue-pair connect failed`: an HCA the
-  package names is missing or down on a host, or its GID index differs.
+- `no active RDMA device has a RoCEv2 IPv4 GID`, `RoCE rails have a link`, `RoCE
+  transport setup failed` or `queue-pair connect failed`: a host's RoCE ports
+  are down, lack an IPv4 address, or no subnet joins two hosts.
 - A collective that times out on a peer poisons every rank's transport. The
   frame is not published, and the ranks shut down rather than serve wrong
   results.

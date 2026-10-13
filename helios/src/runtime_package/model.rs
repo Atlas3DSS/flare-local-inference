@@ -45,12 +45,6 @@ pub struct RoceSpec {
     pub slot_bytes: u64,
     pub pipe_bytes: u64,
     pub ctrl_offset: u64,
-    pub hcas: Vec<String>,
-    pub gid_index: u32,
-    pub traffic_class: u32,
-    pub rails: usize,
-    /// One entry per rank, empty for this rank: the (local, remote) HCA indexes of each rail.
-    pub routes: Vec<Vec<(u32, u32)>>,
 }
 
 fn roce_spec(
@@ -68,21 +62,6 @@ fn roce_spec(
         slot_bytes: wire.slot_bytes,
         pipe_bytes: wire.pipe_bytes,
         ctrl_offset: wire.ctrl_offset,
-        hcas: wire.hcas,
-        gid_index: wire.gid_index,
-        traffic_class: wire.traffic_class,
-        rails: wire.rails as usize,
-        routes: wire
-            .routes
-            .into_iter()
-            .map(|route| {
-                route
-                    .links
-                    .into_iter()
-                    .map(|l| (l.local, l.remote))
-                    .collect()
-            })
-            .collect(),
     };
     let within = |address: u64, nbytes: u64, memory: super::format::Memory| {
         package.allocations.iter().any(|a| {
@@ -95,22 +74,7 @@ fn roce_spec(
                 })
         })
     };
-    if !(2..=16).contains(&spec.world)
-        || spec.rank >= spec.world
-        || spec.routes.len() != spec.world
-        || !(1..=2).contains(&spec.rails)
-        || spec.hcas.is_empty()
-        || spec.routes.iter().enumerate().any(|(peer, links)| {
-            if peer == spec.rank {
-                !links.is_empty()
-            } else {
-                links.len() != spec.rails
-                    || links
-                        .iter()
-                        .any(|(local, _)| *local as usize >= spec.hcas.len())
-            }
-        })
-    {
+    if !(2..=16).contains(&spec.world) || spec.rank >= spec.world {
         return Err(invalid("RoCE transport geometry is inconsistent"));
     }
     if spec.region_bytes == 0

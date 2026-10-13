@@ -155,15 +155,10 @@ message RoceTransport {
   uint64 slot_bytes = 8;
   uint64 pipe_bytes = 9;
   uint64 ctrl_offset = 10;
-  repeated string hcas = 11;
-  uint32 gid_index = 12;
-  uint32 traffic_class = 13;
-  uint32 rails = 14;
-  // One entry per rank, empty for this rank: the (local, remote) HCA indexes of each rail.
-  repeated RoceRoute routes = 15;
+  // Formerly the preparing hosts' devices, GID index, traffic class, rails and routes. Each
+  // serving host discovers its own fabric instead.
+  reserved 11 to 15;
 }
-message RoceRoute { repeated RoceLink links = 1; }
-message RoceLink { uint32 local = 1; uint32 remote = 2; }
 message GraphIndex {
   string name = 1;
   uint64 flags = 2;

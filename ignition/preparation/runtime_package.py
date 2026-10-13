@@ -649,13 +649,6 @@ def _roce_transport(message, transport):
     message.counters_bytes = transport["counters"]["nbytes"]
     message.slot_bytes, message.pipe_bytes = transport["slot_bytes"], transport["pipe_bytes"]
     message.ctrl_offset = transport["ctrl_offset"]
-    message.hcas.extend(transport["hca_names"])
-    message.gid_index, message.traffic_class = transport["gid_index"], transport["traffic_class"]
-    message.rails = transport["rails"]
-    for links in transport["routes"]:
-        route = message.routes.add()
-        for local, remote in links:
-            route.links.add(local=local, remote=remote)
 
 
 def export_model(prepared, images, storage, path, *, options, progress=None, publisher=None, bundle_only=False):
