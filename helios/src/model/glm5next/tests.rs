@@ -144,6 +144,11 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 handle: graphs.len() + 1,
                 batch_capacity: batch,
                 token_capacity: tokens,
+                estimated_duration_ns: if kind == GraphKind::Snapshot {
+                    1
+                } else {
+                    1_000_000
+                },
                 input_bindings: bindings
                     .iter()
                     .filter(|b| {
@@ -325,15 +330,22 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         Glm5Next::scheduler_capabilities(&config),
     )
     .unwrap();
+    let mut graphs = manifest.graphs.clone();
+    for graph in &mut graphs {
+        if graph.kind == GraphKind::Resume {
+            graph.estimated_duration_ns = 1;
+        }
+    }
+    scheduler.measured_graph_durations(&graphs).unwrap();
     let mut admissions = std::array::from_fn(|_| None);
     let original = add(&mut scheduler, &mut admissions, vec![7; 535]);
     let mut inputs = Inputs::default();
     let mut fence = 0;
     let mut observed = Vec::new();
     loop {
-        let step = scheduler.next_step().unwrap();
+        let step = scheduler.plan().unwrap();
         fence += 1;
-        scheduler.record_submission(&step, Fence(fence)).unwrap();
+        scheduler.commit(&step, Fence(fence)).unwrap();
         crate::model::pack_inputs::<Glm5Next>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         let index = select::<Glm5Next>(
@@ -415,10 +427,10 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
     assert_eq!(live.reused_prompt_tokens(), 267);
     let source = scheduler.snapshot_slot(live.prefix_snapshot().unwrap()).0 as i64;
     let exact = add(&mut scheduler, &mut admissions, vec![7; 535]);
-    let step = scheduler.next_step().unwrap();
+    let step = scheduler.plan().unwrap();
     assert_eq!(step.kind, GraphKind::Restore);
     fence += 1;
-    scheduler.record_submission(&step, Fence(fence)).unwrap();
+    scheduler.commit(&step, Fence(fence)).unwrap();
     crate::model::pack_inputs::<Glm5Next>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert_eq!(values(&inputs, "state_source_slots")[0], source);
@@ -454,10 +466,10 @@ fn native_uploads_preserve_exact_checkpoints_and_broadcast_pending_tokens() {
         ..Default::default()
     };
     scheduler.complete(Fence(fence), &records).unwrap();
-    let step = scheduler.next_step().unwrap();
+    let step = scheduler.plan().unwrap();
     assert_eq!(step.kind, GraphKind::Resume);
     fence += 1;
-    scheduler.record_submission(&step, Fence(fence)).unwrap();
+    scheduler.commit(&step, Fence(fence)).unwrap();
     crate::model::pack_inputs::<Glm5Next>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert!(inputs.uploads().iter().all(|u| {

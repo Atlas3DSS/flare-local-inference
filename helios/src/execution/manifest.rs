@@ -136,6 +136,8 @@ pub struct GraphDescriptor {
     pub handle: usize,
     pub batch_capacity: usize,
     pub token_capacity: usize,
+    /// Zero denotes an indeterminate duration.
+    pub estimated_duration_ns: u64,
     pub input_bindings: Vec<InputBinding>,
 }
 

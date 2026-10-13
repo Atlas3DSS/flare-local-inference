@@ -137,6 +137,11 @@ fn manifest(config: &ModelConfig) -> ExecutionManifest {
                     handle: graphs.len() + 1,
                     batch_capacity: batch,
                     token_capacity: tokens,
+                    estimated_duration_ns: if kind == GraphKind::Snapshot {
+                        1
+                    } else {
+                        1_000_000
+                    },
                     input_bindings: bindings.clone(),
                 });
             }
@@ -434,6 +439,9 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
     )
     .unwrap();
     scheduler
+        .measured_graph_durations(&self::manifest(&config).graphs)
+        .unwrap();
+    scheduler
         .enable_speculation(&config.speculative_widths)
         .unwrap();
     scheduler.fixed_speculative_width(Some(8)).unwrap();
@@ -467,8 +475,8 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
     let mut inputs = Inputs::new();
     let mut records = [CompletionRecord::default(); 4];
     for (fence, consumed, generated, token) in [(1, 0, 0, -1), (2, 65, 1, 7)] {
-        let step = scheduler.next_step().unwrap();
-        scheduler.record_submission(&step, Fence(fence)).unwrap();
+        let step = scheduler.plan().unwrap();
+        scheduler.commit(&step, Fence(fence)).unwrap();
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         if fence == 2 {
@@ -495,9 +503,9 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
     retain_prompt(&mut scheduler, 3);
     for fence in [4, 5] {
         admissions[0].as_mut().unwrap().sampling.temperature = if fence == 4 { 0. } else { 1. };
-        let step = scheduler.next_step().unwrap();
+        let step = scheduler.plan().unwrap();
         assert_eq!(step.token_capacity, 8);
-        scheduler.record_submission(&step, Fence(fence)).unwrap();
+        scheduler.commit(&step, Fence(fence)).unwrap();
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         let uploads = inputs.uploads();
@@ -547,7 +555,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
                 .all(|b| *b == 0)
         );
         config.history_drafts = true;
-        assert!(scheduler.next_step().is_none());
+        assert!(scheduler.plan().is_none());
         let mut vector = crate::execution::TokenVector {
             emitted_count: 1,
             offered_drafts: 7,
@@ -720,6 +728,9 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         Qwen4Exp::scheduler_capabilities(&config),
     )
     .unwrap();
+    scheduler
+        .measured_graph_durations(&self::manifest(&config).graphs)
+        .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
             system_boundary: None,
@@ -749,8 +760,8 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     });
     admissions[0].as_ref().unwrap().validate(&config).unwrap();
     let mut inputs = Inputs::new();
-    let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(1)).unwrap();
+    let step = scheduler.plan().unwrap();
+    scheduler.commit(&step, Fence(1)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert_state_bindings(&inputs, &scheduler, &step);
@@ -801,8 +812,8 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         ..Default::default()
     };
     scheduler.complete(Fence(1), &initialized).unwrap();
-    let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(2)).unwrap();
+    let step = scheduler.plan().unwrap();
+    scheduler.commit(&step, Fence(2)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert_state_bindings(&inputs, &scheduler, &step);
@@ -828,8 +839,8 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     };
     scheduler.complete(Fence(2), &records).unwrap();
     retain_prompt(&mut scheduler, 3);
-    let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(4)).unwrap();
+    let step = scheduler.plan().unwrap();
+    scheduler.commit(&step, Fence(4)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert_state_bindings(&inputs, &scheduler, &step);
@@ -854,6 +865,9 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         Qwen4Exp::scheduler_capabilities(&config),
     )
     .unwrap();
+    scheduler
+        .measured_graph_durations(&self::manifest(&config).graphs)
+        .unwrap();
     let prompt: Vec<u32> = (0..4113).collect();
     let handle = scheduler
         .admit(RequestSpec {
@@ -881,8 +895,8 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         grammar_mask: None,
         ignore_eos: false,
     });
-    let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(1)).unwrap();
+    let step = scheduler.plan().unwrap();
+    scheduler.commit(&step, Fence(1)).unwrap();
     let mut records = [CompletionRecord::default(); 4];
     records[handle.slot as usize] = CompletionRecord {
         generation: handle.generation as i64,
@@ -894,12 +908,12 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
     scheduler.complete(Fence(1), &records).unwrap();
     let mut inputs = Inputs::new();
     for (sequence, start, count, capacity) in [(2, 0, 4096, 4096), (3, 4096, 17, 128)] {
-        let step = scheduler.next_step().unwrap();
+        let step = scheduler.plan().unwrap();
         assert_eq!(
             (step.lanes[0].tokens, step.token_capacity),
             (count, capacity)
         );
-        scheduler.record_submission(&step, Fence(sequence)).unwrap();
+        scheduler.commit(&step, Fence(sequence)).unwrap();
         crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
             .unwrap();
         assert_state_bindings(&inputs, &scheduler, &step);
@@ -1029,6 +1043,9 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
     )
     .unwrap();
     scheduler
+        .measured_graph_durations(&self::manifest(&config).graphs)
+        .unwrap();
+    scheduler
         .enable_speculation(&config.speculative_widths)
         .unwrap();
     scheduler.proposal_source(ProposalSource::Copy).unwrap();
@@ -1047,8 +1064,8 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
                 .unwrap()
         })
         .collect::<Vec<_>>();
-    let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(1)).unwrap();
+    let step = scheduler.plan().unwrap();
+    scheduler.commit(&step, Fence(1)).unwrap();
     let mut completed = [CompletionRecord::default(); 4];
     for h in &handles {
         completed[h.slot as usize] = CompletionRecord {
@@ -1080,8 +1097,8 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         ignore_eos: false,
     });
     let mut inputs = Inputs::new();
-    let step = scheduler.next_step().unwrap();
-    scheduler.record_submission(&step, Fence(2)).unwrap();
+    let step = scheduler.plan().unwrap();
+    scheduler.commit(&step, Fence(2)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     assert!(
@@ -1114,10 +1131,10 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
             },
         )
         .unwrap();
-    let step = scheduler.next_step().unwrap();
+    let step = scheduler.plan().unwrap();
     assert_eq!(step.token_capacity, 8);
     assert_eq!(step.lanes[0].tokens, 3);
-    scheduler.record_submission(&step, Fence(4)).unwrap();
+    scheduler.commit(&step, Fence(4)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     let uploads = inputs.uploads();
@@ -1181,10 +1198,10 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
             },
         )
         .unwrap();
-    let step = scheduler.next_step().unwrap();
+    let step = scheduler.plan().unwrap();
     assert_eq!(step.token_capacity, 8);
     assert_eq!(step.lanes[0].tokens, 1);
-    scheduler.record_submission(&step, Fence(5)).unwrap();
+    scheduler.commit(&step, Fence(5)).unwrap();
     crate::model::pack_inputs::<Qwen4Exp>(&mut inputs, &config, &scheduler, &step, &admissions)
         .unwrap();
     let uploads = inputs.uploads();
@@ -1341,6 +1358,9 @@ fn state_transfer_and_resume_upload_fixture() {
         Qwen4Exp::scheduler_capabilities(&config),
     )
     .unwrap();
+    scheduler
+        .measured_graph_durations(&self::manifest(&config).graphs)
+        .unwrap();
     let mut inputs = Inputs::new();
     for cycle in 0..2 {
         let prompt = vec![7; 64];
@@ -1384,9 +1404,9 @@ fn state_transfer_and_resume_upload_fixture() {
             ]
         } {
             let fence = Fence(cycle * 5 + offset);
-            let step = scheduler.next_step().unwrap();
+            let step = scheduler.plan().unwrap();
             assert_eq!(step.kind, kind);
-            scheduler.record_submission(&step, fence).unwrap();
+            scheduler.commit(&step, fence).unwrap();
             crate::model::pack_inputs::<Qwen4Exp>(
                 &mut inputs,
                 &config,
@@ -1521,9 +1541,9 @@ fn assert_state_bindings(
 }
 
 fn retain_prompt(s: &mut RequestScheduler, fence: u64) {
-    let step = s.next_step().unwrap();
+    let step = s.plan().unwrap();
     assert_eq!(step.kind, GraphKind::Snapshot);
-    s.record_submission(&step, Fence(fence)).unwrap();
+    s.commit(&step, Fence(fence)).unwrap();
     let mut records = [CompletionRecord::default(); 4];
     for lane in &step.lanes {
         let request = s.request(lane.request).unwrap();
@@ -1554,6 +1574,15 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
                 Qwen4Exp::scheduler_capabilities(&config),
             )
             .unwrap();
+            let mut graphs = self::manifest(&config).graphs;
+            for graph in &mut graphs {
+                match graph.kind {
+                    GraphKind::Init => graph.estimated_duration_ns = 1,
+                    GraphKind::Restore => graph.estimated_duration_ns = 10,
+                    _ => {}
+                }
+            }
+            scheduler.measured_graph_durations(&graphs).unwrap();
             if mtp {
                 scheduler
                     .enable_speculation(&config.speculative_widths)
@@ -1571,9 +1600,9 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
             let mut fence = 0;
             for kind in [GraphKind::Init, GraphKind::Prefill, GraphKind::Snapshot] {
                 fence += 1;
-                let step = scheduler.next_step().unwrap();
+                let step = scheduler.plan().unwrap();
                 assert_eq!(step.kind, kind);
-                scheduler.record_submission(&step, Fence(fence)).unwrap();
+                scheduler.commit(&step, Fence(fence)).unwrap();
                 let generated = i64::from(kind != GraphKind::Init);
                 let mut records = [CompletionRecord::default(); 4];
                 records[0] = CompletionRecord {
@@ -1596,9 +1625,9 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
             let restored = scheduler.admit(spec(7)).unwrap();
             assert_eq!(restored.slot, 1);
             fence += 1;
-            let init = scheduler.next_step().unwrap();
+            let init = scheduler.plan().unwrap();
             assert_eq!(init.kind, GraphKind::Init);
-            scheduler.record_submission(&init, Fence(fence)).unwrap();
+            scheduler.commit(&init, Fence(fence)).unwrap();
             let mut records = [CompletionRecord::default(); 4];
             records[blocked.slot as usize] = CompletionRecord {
                 generation: blocked.generation as i64,
@@ -1609,9 +1638,9 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
             };
             scheduler.complete(Fence(fence), &records).unwrap();
             fence += 1;
-            let step = scheduler.next_step().unwrap();
+            let step = scheduler.plan().unwrap();
             assert_eq!(step.kind, GraphKind::Restore);
-            scheduler.record_submission(&step, Fence(fence)).unwrap();
+            scheduler.commit(&step, Fence(fence)).unwrap();
             let mut admissions: [_; 4] = std::array::from_fn(|_| None);
             admissions[1] = Some(Admission {
                 handle: restored,

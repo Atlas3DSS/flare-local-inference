@@ -1,4 +1,4 @@
-//! Bounded width selection from completed graph costs and emitted progress.
+//! Request-local speculative acceptance and observed copy proposals.
 
 use crate::{Result, execution::BATCH_CAPACITIES};
 
@@ -60,19 +60,9 @@ pub fn validate_widths(widths: &[usize]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Default)]
-struct Cost {
-    rounds: u64,
-    nanos: f64,
-    emitted: f64,
-    /// Completed rounds when this width was last measured.
-    measured: u64,
-}
-
 /// Conditional acceptance of one draft depth given that every shallower draft was accepted.
-/// Starts from a 0.5 prior worth two observations and averages at most the last
-/// `DEPTH_MEMORY` row outcomes. Every row of a round contributes one, so a short memory
-/// would track only the last round or two of a large batch.
+/// Starts from a 0.5 prior worth two observations with bounded effective sample
+/// weight. After saturation, each outcome has weight `1 / DEPTH_MEMORY`.
 #[derive(Clone, Copy)]
 struct DepthAcceptance {
     probability: f64,
@@ -93,153 +83,55 @@ impl DepthAcceptance {
     }
 }
 const DEPTH_MEMORY: f64 = 128.0;
-/// Completed rounds observed before measured acceptance replaces whole-round sampling.
-const MODEL_ROUNDS: u64 = 8;
-/// Every this many completed rounds, the widest legal width refreshes deep acceptance.
-const MODEL_EXPLORATION: u64 = 16;
-/// Every this many completed rounds, the width measured least recently refreshes its round
-/// time. Refreshing every 16 rounds cost GB300 catid C4 3% in rounds at narrow widths.
-const MODEL_REFRESH: u64 = 128;
-
-#[derive(Default)]
-pub struct WidthController {
-    costs: [[[Cost; 8]; 3]; 7],
-    completed: u64,
-    depths: [DepthAcceptance; 7],
-    acceptance_rounds: u64,
+/// Conditional acceptance belongs to one logical request and proposal source.
+#[derive(Clone, Copy, Default)]
+pub struct AcceptanceProfile {
+    depths: [[DepthAcceptance; 7]; 2],
+    rounds: u64,
 }
-impl WidthController {
-    fn coordinates(batch: usize, context: u64) -> (usize, usize) {
-        (
-            batch.trailing_zeros() as usize,
-            if context <= 2048 {
-                0
-            } else if context <= 32768 {
-                1
-            } else {
-                2
-            },
-        )
+
+impl AcceptanceProfile {
+    /// Depth zero is the first draft after the pending target token.
+    pub fn probability(&self, source: ProposalSource, depth: usize) -> Option<f64> {
+        self.depths[source as usize]
+            .get(depth)
+            .map(|d| d.probability)
     }
-    pub fn choose(
-        &self,
-        widths: &[usize],
-        batch: usize,
-        context: u64,
-        maximum: usize,
-    ) -> Option<usize> {
-        if !BATCH_CAPACITIES.contains(&batch) {
-            return None;
-        }
-        let (b, c) = Self::coordinates(batch, context);
-        let legal = || widths.iter().copied().filter(|w| *w <= maximum);
-        if let Some(width) = legal().find(|w| self.costs[b][c][*w - 1].rounds == 0) {
-            return Some(width);
-        }
-        if self.acceptance_rounds >= MODEL_ROUNDS {
-            // Expected tokens per round follow from per-depth acceptance measured in every
-            // round; only round time comes from each width's own measurements.
-            if self.completed.is_multiple_of(MODEL_EXPLORATION) {
-                return legal().max();
-            }
-            // A width chosen only once, with a slow first round, would otherwise never be
-            // measured again: measure it a second time early, then refresh the width measured
-            // least recently every `MODEL_REFRESH` rounds.
-            if self.completed % MODEL_EXPLORATION == MODEL_EXPLORATION / 2 {
-                let cost = |width: usize| self.costs[b][c][width - 1];
-                if let Some(width) = legal().find(|w| cost(*w).rounds < 2) {
-                    return Some(width);
-                }
-                if self.completed % MODEL_REFRESH == MODEL_EXPLORATION / 2 {
-                    return legal().min_by_key(|w| (cost(*w).measured, *w));
-                }
-            }
-            return legal().max_by(|left, right| {
-                let score =
-                    |width: usize| self.expected_tokens(width) / self.costs[b][c][width - 1].nanos;
-                score(*left)
-                    .total_cmp(&score(*right))
-                    .then_with(|| right.cmp(left))
-            });
-        }
-        if self.completed > 0 && self.completed.is_multiple_of(64) {
-            let count = legal().count();
-            if count > 0 {
-                return legal().nth((self.completed as usize / 64) % count);
-            }
-        }
-        legal().max_by(|left, right| {
-            let score = |width: usize| {
-                let cost = self.costs[b][c][width - 1];
-                cost.emitted / cost.nanos
-            };
-            score(*left)
-                .total_cmp(&score(*right))
-                .then_with(|| right.cmp(left))
-        })
-    }
-    /// Expected tokens one row emits at `width`: the pending token plus each draft prefix
-    /// whose drafts are all accepted.
-    fn expected_tokens(&self, width: usize) -> f64 {
+
+    pub fn expected_tokens(&self, source: ProposalSource, width: usize) -> f64 {
         let mut chain = 1.0;
-        let mut total = 1.0;
-        for depth in &self.depths[..width.saturating_sub(1).min(7)] {
+        let mut total = f64::from(width != 0);
+        for depth in &self.depths[source as usize][..width.saturating_sub(1).min(7)] {
             chain *= depth.probability;
             total += chain;
         }
         total
     }
-    /// Records each row's chain outcome: drafts 1..=accepted were accepted and, when a draft
-    /// remained, the next one was rejected. Deeper drafts were not evaluated.
-    pub fn observe_acceptance(&mut self, rows: &[(usize, usize)]) {
-        let mut observed = false;
-        for &(offered, accepted) in rows {
-            let offered = offered.min(7);
-            if offered == 0 {
-                continue;
-            }
-            let accepted = accepted.min(offered);
-            for depth in 0..accepted {
-                self.depths[depth].observe(true);
-            }
-            if accepted < offered {
-                self.depths[accepted].observe(false);
-            }
-            observed = true;
-        }
-        if observed {
-            self.acceptance_rounds += 1;
-        }
+
+    pub fn rounds(&self) -> u64 {
+        self.rounds
     }
-    pub fn observe(
+
+    /// Only the accepted prefix and an explicitly observed rejection are samples.
+    /// `copy_mask` identifies the proposal source at each evaluated draft depth.
+    pub(super) fn observe(
         &mut self,
-        batch: usize,
-        context: u64,
-        width: usize,
-        nanos: u64,
-        emitted: usize,
-    ) -> Result<()> {
-        if !BATCH_CAPACITIES.contains(&batch)
-            || !WIDTHS.contains(&width)
-            || nanos == 0
-            || emitted > batch * width
-        {
-            return Err("invalid measured speculative round".into());
+        offered: usize,
+        accepted: usize,
+        rejected: bool,
+        copy_mask: u8,
+    ) {
+        debug_assert!(accepted <= offered && offered <= 7);
+        if offered == 0 {
+            return;
         }
-        if emitted == 0 {
-            return Ok(());
+        for depth in 0..accepted {
+            self.depths[usize::from(copy_mask & (1 << depth) != 0)][depth].observe(true);
         }
-        let (b, c) = Self::coordinates(batch, context);
-        let cost = &mut self.costs[b][c][width - 1];
-        // The second round replaces the first, which can carry a graph's first-replay costs
-        // (on GB10, first touches of lazily backed memory).
-        let alpha = if cost.rounds < 2 { 1.0 } else { 0.125 };
-        cost.nanos += alpha * (nanos as f64 - cost.nanos);
-        cost.emitted += alpha * (emitted as f64 - cost.emitted);
-        cost.rounds += 1;
-        self.completed += 1;
-        cost.measured = self.completed;
-        Ok(())
+        if rejected && accepted < offered {
+            self.depths[usize::from(copy_mask & (1 << accepted) != 0)][accepted].observe(false);
+        }
+        self.rounds = self.rounds.saturating_add(1);
     }
 }
 

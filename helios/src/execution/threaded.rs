@@ -70,6 +70,9 @@ pub(crate) struct ThreadedExecutor {
 }
 impl ThreadedExecutor {
     pub unsafe fn new(manifest: ExecutionManifest, ranks: Vec<ExecutionManifest>) -> Result<Self> {
+        if ranks.len() >= 16 {
+            return Err(invalid("tensor parallelism supports at most sixteen ranks"));
+        }
         if ![2, 4].contains(&(ranks.len() + 1)) {
             return Err(invalid("tensor parallelism requires two or four ranks"));
         }
@@ -180,6 +183,7 @@ impl ThreadedExecutor {
             return Ok(None);
         };
         let result = (|| {
+            let dispatched = Instant::now();
             let step = Arc::new(Step {
                 fence,
                 graph,
@@ -201,7 +205,7 @@ impl ThreadedExecutor {
                     return Err(invalid("rank did not validate the step"));
                 }
             }
-            self.pending = Some(Instant::now());
+            self.pending = Some(dispatched);
             for peer in &self.peers {
                 peer.send(Command::Commit)?;
             }
@@ -249,13 +253,17 @@ impl ThreadedExecutor {
         if self.completion.is_none() || self.peers.iter().any(|p| p.completion.is_none()) {
             return Ok(None);
         }
-        for peer in &mut self.peers {
+        for (index, peer) in self.peers.iter_mut().enumerate() {
             super::parallel::agree(
                 self.completion.as_ref().unwrap(),
                 peer.completion.as_ref().unwrap(),
             )?;
+            self.completion.as_mut().unwrap().timing.gpu_ns[index + 1] =
+                peer.completion.as_ref().unwrap().timing.gpu_ns[0];
             peer.completion = None;
         }
+        self.completion.as_mut().unwrap().timing.wall_ns =
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         self.pending = None;
         Ok(self.completion.take())
     }

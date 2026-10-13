@@ -54,7 +54,7 @@ class PreparedExecution(PreparedGraphBundle):
     """
 
     def __init__(self, *, signatures: Mapping[str, GraphSignature], max_active: int = 4,
-                 export_zero_ranges=(), export_events=None, **kwargs):
+                 estimated_durations_ns=None, export_zero_ranges=(), export_events=None, **kwargs):
         super().__init__(**kwargs)
         request_capacity(max_active)
         if signatures.keys() != self.graphs.keys():
@@ -68,6 +68,11 @@ class PreparedExecution(PreparedGraphBundle):
             if not set(signature.inputs) <= self.buffers.keys():
                 raise ValueError("graph signature references an unregistered input buffer")
         self.signatures = MappingProxyType(dict(signatures))
+        durations = dict.fromkeys(self.graphs, 0) if estimated_durations_ns is None else dict(estimated_durations_ns)
+        if durations.keys() != self.graphs.keys() or any(
+                type(value) is not int or not 0 <= value < 1 << 64 for value in durations.values()):
+            raise ValueError("graph duration estimates must cover the catalog with unsigned nanoseconds")
+        self.estimated_durations_ns = MappingProxyType(durations)
         self.max_active = max_active
         self.export_zero_ranges = tuple(export_zero_ranges)
         self.export_events = dict(export_events or {})
@@ -98,6 +103,7 @@ class PreparedExecution(PreparedGraphBundle):
             graphs.append({"name": name, "kind": signature.kind, "handle": handle,
                 "sampling_mode": signature.sampling_mode,
                 "batch_capacity": signature.batch_capacity, "token_capacity": signature.token_capacity,
+                "estimated_duration_ns": self.estimated_durations_ns[name],
                 "input_bindings": [{"buffer_name": field, "host_offset": offsets[field][0],
                                     "nbytes": offsets[field][1]} for field in inputs]})
             if signature.speculation_enabled is not None:

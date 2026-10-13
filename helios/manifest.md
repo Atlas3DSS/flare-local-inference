@@ -149,10 +149,23 @@ executor calls without an explicit grammar flag. Grammar-constrained work and
 host token stops also run with one submission in flight,
 so host token processing finishes before the next generation step.
 
-Speculative submissions use preallocated CUDA timing events around the entire
-captured graph. `FrameCompletion.elapsed_ns` excludes input uploads and the
-completion transfer. Events and frames remain occupied through the transfer
-fence. Other graph kinds return no timing measurement.
+Each graph descriptor carries `estimated_duration_ns`; zero denotes an
+indeterminate duration. Ignition leaves this field at zero. Helios starts every
+graph indeterminate and learns its cost from GPU completion intervals, including
+tensor-parallel execution and excluding host queue wait. A first measurement sets
+the estimate; fresh measurements update it with weight 1/8. Estimates expire after
+30 seconds without a valid observation and are learned afresh on the next replay.
+
+Every submission uses preallocated CUDA timing events around the entire
+captured graph. `FrameCompletion.timing.gpu_ns` retains each rank's local interval,
+excluding input uploads and the completion transfer. Events and frames remain
+occupied through the transfer fence. `timing.wall_ns` spans host dispatch through
+observation of all participating ranks' completions, including input staging,
+rank coordination, device queueing and completion delivery. A maximum of local
+GPU intervals is not the rank group's wall interval. `timing.queued` identifies
+single-rank frames dispatched with another frame outstanding; these host
+intervals must not be summed as GPU busy time or treated as isolated service cost.
+The Heliopause `ExecutionCompletion` exposes `gpu_ns`, `wall_ns` and `queued`.
 
 Submission sequences also identify the ordered completion fence. Resource
 retirement waits for the completed fence covering every operation that can

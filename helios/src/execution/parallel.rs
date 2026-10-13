@@ -34,6 +34,9 @@ impl TensorParallelExecutor {
     /// runtime and remains retained until coordinated shutdown confirms drain.
     pub unsafe fn new(manifest: ExecutionManifest, sockets: Vec<UnixStream>) -> Result<Self> {
         let world = sockets.len() + 1;
+        if world > 16 {
+            return Err(invalid("tensor parallelism supports at most sixteen ranks"));
+        }
         if ![2, 4].contains(&world) {
             return Err(invalid("tensor parallelism requires two or four ranks"));
         }
@@ -126,6 +129,7 @@ impl TensorParallelExecutor {
         grammar: bool,
         fence: Fence,
     ) -> Result<Fence> {
+        let dispatched = Instant::now();
         let mut payload = Vec::new();
         for value in [fence.0 as usize, graph, usize::from(grammar), uploads.len()] {
             number(&mut payload, value);
@@ -153,7 +157,7 @@ impl TensorParallelExecutor {
             }
         }
         // Every rank has validated the same inputs and reserved the same next fence.
-        self.pending = Some((fence, graph, Instant::now()));
+        self.pending = Some((fence, graph, dispatched));
         for peer in &mut self.peers {
             peer.channel.send(COMMIT, &[])?;
         }
@@ -204,13 +208,14 @@ impl TensorParallelExecutor {
                 if reader.number()? != fence.0 as usize || reader.number()? != graph {
                     return Err(invalid("rank completion fence or graph differs"));
                 }
+                let timing = wire::timing(&mut reader)?;
                 if reader.0.len() != self.local.manifest().completion_bytes() {
                     return Err(invalid("rank completion size differs from its ABI"));
                 }
                 peer.completion = Some(FrameCompletion {
                     fence,
                     graph_index: graph,
-                    elapsed_ns: None,
+                    timing,
                     records: super::transport::decode_records(
                         reader.0,
                         fence,
@@ -227,9 +232,13 @@ impl TensorParallelExecutor {
         for peer in &self.peers {
             agree(root, peer.completion.as_ref().unwrap())?;
         }
-        for peer in &mut self.peers {
+        for (index, peer) in self.peers.iter_mut().enumerate() {
+            self.completion.as_mut().unwrap().timing.gpu_ns[index + 1] =
+                peer.completion.as_ref().unwrap().timing.gpu_ns[0];
             peer.completion = None;
         }
+        self.completion.as_mut().unwrap().timing.wall_ns =
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         self.pending = None;
         Ok(self.completion.take())
     }

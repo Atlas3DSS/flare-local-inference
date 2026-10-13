@@ -104,7 +104,7 @@ fn completed(status: i64) -> FrameCompletion {
     FrameCompletion {
         fence: Fence(3),
         graph_index: 2,
-        elapsed_ns: None,
+        timing: Default::default(),
         records: [record; 4].into(),
     }
 }
@@ -129,15 +129,38 @@ fn peers_agree_on_request_consumption_without_sampling() {
 
 #[test]
 fn completion_wire_preserves_the_execution_abi() {
-    let root = completed(1);
+    let mut root = completed(1);
+    root.timing.gpu_ns[0] = Some(1250);
+    root.timing.wall_ns = 2345;
+    root.timing.queued = true;
     let bytes = completion(&root);
     let mut reader = Reader(&bytes);
     assert_eq!(reader.number().unwrap(), 3);
     assert_eq!(reader.number().unwrap(), 2);
+    assert_eq!(timing(&mut reader).unwrap(), root.timing);
     let records = super::super::transport::decode_records(reader.0, Fence(3), 4, 8).unwrap();
     for (expected, actual) in root.records.iter().zip(records.iter()) {
         assert_eq!(expected.fields(), actual.fields());
     }
+}
+
+#[test]
+fn rank_timing_rejects_truncation_and_preserves_zero_duration() {
+    for gpu in [None, Some(0), Some(731)] {
+        let mut root = completed(1);
+        root.timing.gpu_ns[0] = gpu;
+        root.timing.wall_ns = 1234;
+        let bytes = completion(&root);
+        for length in 0..32 {
+            assert!(timing(&mut Reader(&bytes[16..16 + length])).is_err());
+        }
+        assert_eq!(timing(&mut Reader(&bytes[16..])).unwrap(), root.timing);
+    }
+    let mut invalid = vec![];
+    for value in [2, 0, 1234, 0] {
+        number(&mut invalid, value);
+    }
+    assert!(timing(&mut Reader(&invalid)).is_err());
 }
 
 #[test]

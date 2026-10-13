@@ -53,6 +53,7 @@ impl NativeResources {
                     handle: self.executables[index] as usize,
                     batch_capacity: size(g.batch_capacity)?,
                     token_capacity: size(g.token_capacity)?,
+                    estimated_duration_ns: g.estimated_duration_ns,
                     input_bindings: g
                         .input_bindings
                         .iter()

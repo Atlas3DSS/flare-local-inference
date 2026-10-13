@@ -187,6 +187,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
             handle: field!(graph, "handle", usize),
             batch_capacity: field!(graph, "batch_capacity", usize),
             token_capacity: field!(graph, "token_capacity", usize),
+            estimated_duration_ns: field!(graph, "estimated_duration_ns", u64),
             input_bindings,
         });
     }
@@ -213,7 +214,11 @@ struct ExecutionCompletion {
     #[pyo3(get)]
     records: Vec<Vec<i64>>,
     #[pyo3(get)]
-    elapsed_ns: Option<u64>,
+    gpu_ns: [Option<u64>; 16],
+    #[pyo3(get)]
+    wall_ns: u64,
+    #[pyo3(get)]
+    queued: bool,
 }
 
 #[pyclass(name = "GraphExecutor", module = "flare_heliopause")]
@@ -298,7 +303,9 @@ impl PreparedGraphExecutor {
                 completion.map(|completion| ExecutionCompletion {
                     fence: completion.fence.0,
                     graph_index: completion.graph_index,
-                    elapsed_ns: completion.elapsed_ns,
+                    gpu_ns: completion.timing.gpu_ns,
+                    wall_ns: completion.timing.wall_ns,
+                    queued: completion.timing.queued,
                     records: completion
                         .records
                         .into_iter()

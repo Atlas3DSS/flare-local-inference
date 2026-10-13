@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn tensor_parallel_capacity_rejects_more_than_sixteen_ranks() {
+    let pairs: Vec<_> = (0..16)
+        .map(|_| std::os::unix::net::UnixStream::pair().unwrap())
+        .collect();
+    let (sockets, _peers): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+    let result = unsafe { TensorParallelExecutor::new(manifest(), sockets) };
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("at most sixteen")
+    );
+    let result = unsafe { threaded::ThreadedExecutor::new(manifest(), vec![manifest(); 16]) };
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("at most sixteen")
+    );
+}
+
+#[test]
 fn completion_wire_decodes_every_configured_lane() {
     for capacity in [1, 2, 8, 64] {
         for fields in [8, 24] {
@@ -75,6 +99,7 @@ pub(super) fn manifest() -> ExecutionManifest {
         handle: 0x5000,
         batch_capacity: 4,
         token_capacity: 1,
+        estimated_duration_ns: 1_000_000,
         input_bindings: vec![
             InputBinding {
                 buffer_name: "frame_index".into(),
