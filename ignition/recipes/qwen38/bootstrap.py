@@ -17,6 +17,7 @@ from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.capture import capture_forwards
 from ignition.preparation.execution import GraphSignature
+from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
 from ignition.preparation.model import PreparedModel
@@ -43,30 +44,6 @@ from .state import (
 from .tuning import preparation_session
 from .vision import PreparedVision, VisionScratch
 
-_KV_ALLOCATION_MARGIN = 64 << 20
-
-
-def _allocate_page_pools(cache, capacity, *, page_bytes, device, headroom_bytes, automatic, report,
-                         group=None, fixed_capacity=False):
-    """Fit unbound KV pools to measured device consumption before graph capture."""
-    while capacity > 0:
-        pools = {index: value.resize_pages_for_preparation(capacity) for index, value in cache.items()}
-        torch.cuda.synchronize(device)
-        free = torch.cuda.mem_get_info(device)[0]
-        free = minimum_across_ranks(free, group)
-        if free >= headroom_bytes or fixed_capacity:
-            report(f"{capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {capacity * 64:,} tokens")
-            return pools, capacity
-        del pools
-        torch.cuda.empty_cache()
-        if not automatic:
-            raise MemoryError(f"requested KV cache ({capacity * 64:,} tokens, "
-                              f"{capacity * page_bytes / (1 << 30):.2f} GiB per GPU) violates configured GPU headroom: "
-                              f"{free / (1 << 30):.3f} GiB free, {headroom_bytes / (1 << 30):.3f} GiB required")
-        reduction = (headroom_bytes - free + _KV_ALLOCATION_MARGIN + page_bytes - 1) // page_bytes
-        capacity -= reduction
-    raise MemoryError("prepared graph catalog leaves insufficient memory for KV pages and headroom")
-
 
 @dataclass(frozen=True)
 class PreparationConfig:
@@ -80,8 +57,6 @@ class PreparationConfig:
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     pages: int | None = None
-    # With a minimum, pages fill measured free memory, at most `pages` when it is set.
-    minimum_pages: int | None = None
     kernel_cache: Path | None = None
     mtp: bool = False
     speculative_proposal_source: str = "mtp"
@@ -105,9 +80,6 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
-        if self.minimum_pages is not None and (type(self.minimum_pages) is not int or self.minimum_pages <= 0
-                                               or self.pages is not None and self.minimum_pages > self.pages):
-            raise ValueError("minimum page capacity must be positive and no larger than the page limit")
         if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
             raise TypeError("MTP and history draft switches must be booleans")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
@@ -124,6 +96,11 @@ class PreparationConfig:
         if self.speculative_fixed_width is not None and (
                 type(self.speculative_fixed_width) is not int or self.speculative_fixed_width not in widths):
             raise ValueError("fixed verification width must belong to the prepared catalog")
+
+    @property
+    def preparation_pages(self):
+        # One prefill chunk plus partial and verification-boundary pages for each row.
+        return self.pages if self.pages is not None else self.prefill_chunk_size // 64 + 2 * self.request_capacity
 
     @property
     def request_capacity(self):
@@ -193,7 +170,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_qwen38_checkpoint(snapshot)
     # Loading, construction and tuning free most of what they allocate; a transient package pool returns
-    # that memory to the device once tuning completes, before graph measurement sizes the KV pages.
+    # that memory to the device once tuning completes, before compiled forwards are bound.
     transient = contextlib.ExitStack()
     if package_storage is not None:
         transient.enter_context(package_storage.transient())
@@ -378,14 +355,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             compiled_functions.clear()
             compiled_functions.update(compiled)
 
-        capture_catalog(compile_decoder=False, label="Measure graph memory")
-        free, total = torch.cuda.mem_get_info(device)
-        available = minimum_across_ranks(free - config.headroom_bytes - _KV_ALLOCATION_MARGIN, group)
-        page_capacity = available // page_bytes if config.pages is None else config.pages
-        if config.minimum_pages is not None:
-            page_capacity = min(page_capacity, available // page_bytes)
-        if page_capacity < (config.minimum_pages or 1) or page_capacity * page_bytes > available:
-            raise MemoryError("prepared graph catalog leaves insufficient memory for requested KV pages and headroom")
+        page_capacity = config.preparation_pages
 
         def rebind_cache(pages):
             for decoder in decoders:
@@ -405,29 +375,27 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
 
         final_cache = None
         def materialize_cache():
-            nonlocal final_cache, page_capacity
-            with phase(progress, "Allocate KV cache"):
+            nonlocal final_cache
+            with phase(progress, "Allocate preparation KV cache"):
+                free = minimum_across_ranks(device_memory_info(device)[0], group)
+                if page_capacity * page_bytes + config.headroom_bytes > free:
+                    raise MemoryError("insufficient memory for preparation KV pages and configured headroom")
                 if package_storage is not None:
                     final_cache = {index: value.resize_pages_for_preparation(planned_pages, storage=package_storage,
                         prefix=f"kv-{index}-", backed_pages=page_capacity) for index, value in cache.items()}
-                    report(f"{page_capacity * page_bytes / (1 << 30):.2f} GiB per GPU · {page_capacity * 64:,} tokens")
                 else:
-                    final_cache, page_capacity = _allocate_page_pools(cache, page_capacity, page_bytes=page_bytes,
-                        device=device, headroom_bytes=config.headroom_bytes,
-                        automatic=config.pages is None and not compile_decoder, fixed_capacity=compile_decoder,
-                        report=report, group=group)
+                    final_cache = {index: value.resize_pages_for_preparation(page_capacity)
+                                   for index, value in cache.items()}
+                report(f"{page_capacity * page_bytes / (1 << 20):.1f} MiB per GPU · {page_capacity:,} pages")
                 rebind_cache(final_cache)
                 for owner in owners:
                     if isinstance(owner, PreparedMaintenance):
                         owner.rebind_pages_for_preparation(final_cache)
                 state.memory_capacity[1] = page_capacity
-                for graph in graphs.values():
-                    graph.reset()
-                graphs.clear()
 
         capture_catalog(compile_decoder=compile_decoder, materialize=materialize_cache)
         session.freeze()
-        free, total = torch.cuda.mem_get_info(device)
+        free, total = device_memory_info(device)
         memory = {"weights_bytes": weights.allocated_bytes, "ngram_request_bytes": table.mailbox.host_view.nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "state_rows": state_rows,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
@@ -467,7 +435,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights, collective, vocabulary_collective, coordinator)
-        report(f"prepared {len(graphs)} graphs and {page_capacity * 64} cached-token capacity")
+        report(f"prepared {len(graphs)} graphs with {page_capacity} preparation KV pages")
         from .export import disposable_ranges
 
         export_zero_ranges = disposable_ranges(cache=final_cache, scratch=scratch, workspaces=workspaces,

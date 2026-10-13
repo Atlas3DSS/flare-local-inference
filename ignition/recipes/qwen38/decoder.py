@@ -9,6 +9,7 @@ import torch
 
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.checkpoint import CheckpointManifest
+from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.qwen38 import TEXT_PREFIX
 from ignition.preparation.scratch import ScratchArena
 
@@ -53,7 +54,7 @@ class ModelWeights:
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         if torch.cuda.get_device_capability(device) not in ((12, 0), (12, 1)):
             raise ValueError("the Qwen recipe requires SM120 or SM121")
-        free_bytes, _ = torch.cuda.mem_get_info(device)
+        free_bytes, _ = device_memory_info(device)
         stored = sum(tensor.nbytes for tensor in manifest.tensors.values()
                      if tensor.component not in ("mtp", "ple_tables"))
         # Additional layouts, state, graph memory, and cache pages are planned separately.

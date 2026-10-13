@@ -131,8 +131,8 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     assert (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
     assert (config.speculative_proposal_source, config.history_drafts) == (
         "mtp", False)
-    # Pages fill the free memory measured after capture, at least the plan's minimum.
-    assert (config.pages, config.minimum_pages, config.context) == (None, plan.minimum_pages, plan.context)
+    assert config.pages is None and config.context == plan.recipe.context
+    assert config.preparation_pages == plan.prefill_chunk // 64 + 2 * config.request_capacity
     assert config.prefill_chunk_size == plan.prefill_chunk == 4096 and config.kernel_cache == tmp_path / "kernels"
     assert config.headroom_bytes == planning.HEADROOM_BYTES + (2 << 30)
     layout = HybridStateLayout.build(speculative_tokens=7, world_size=1)

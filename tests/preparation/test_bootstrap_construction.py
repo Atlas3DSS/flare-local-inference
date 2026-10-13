@@ -275,6 +275,7 @@ def _install_boundaries(monkeypatch, checkpoint):
         "get_device_properties": lambda *a: SimpleNamespace(
             major=12,
             minor=0,
+            is_integrated=False,
             multi_processor_count=170,
             name="NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
             uuid="CPU-construction",

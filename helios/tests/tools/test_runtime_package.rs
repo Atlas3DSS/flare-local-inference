@@ -1,5 +1,7 @@
 //! Cross-process CUDA graph replay with every allocation verified to relocate.
 
+mod allocation_watch;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,7 +30,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("expected fixture directory")?,
     );
     let expected: Expected = serde_json::from_slice(&std::fs::read(root.join("expected.json"))?)?;
+    let allocations = allocation_watch::AllocationWatch::new()?;
     let owner = unsafe { NativeResources::load(root.join("package"), 0)? };
+    assert!(
+        allocations.count() > 0,
+        "CUDA allocation callbacks were not recorded"
+    );
     let payload = owner.download("payload")?;
     assert_eq!(payload.len(), (20 << 20) + 17);
     assert!(
@@ -51,15 +58,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (owner.allocation(&reference.allocation)?.address + reference.offset) as u64
         );
     }
-    let driver = unsafe { libloading::Library::new("libcuda.so.1")? };
-    let memory_info = unsafe {
-        driver.get::<unsafe extern "C" fn(*mut usize, *mut usize) -> i32>(b"cuMemGetInfo_v2\0")?
-    };
-    let available = || {
-        let (mut free, mut total) = (0, 0);
-        assert_eq!(unsafe { memory_info(&mut free, &mut total) }, 0);
-        free
-    };
     let worker = unsafe { ReplayWorker::new(owner.graph_bundle(), 1)? };
     let poison = vec![0xff; owner.allocation("scratch")?.nbytes];
     let mut baseline = None;
@@ -87,13 +85,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(output, reference, "output differs for {name}");
         }
         if iteration == 0 {
-            baseline = Some(available());
+            baseline = Some(allocations.count());
         }
     }
     assert_eq!(
-        Some(available()),
+        Some(allocations.count()),
         baseline,
-        "GPU allocation changed during repeated replay"
+        "CUDA allocation occurred during repeated replay"
     );
     let shutdown = worker.close();
     assert!(shutdown.drained, "native replay did not drain");
@@ -108,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     drop(owner);
     println!(
-        "native replay passed: relocated allocations, pointer tables, 64 alternating submissions, 192 graph launches, changed inputs, poisoned scratch, stable GPU memory; no Python or Torch mappings"
+        "native replay passed: relocated allocations, pointer tables, 64 alternating submissions, 192 graph launches, changed inputs, poisoned scratch, no CUDA allocation calls during replay; no Python or Torch mappings"
     );
     Ok(())
 }

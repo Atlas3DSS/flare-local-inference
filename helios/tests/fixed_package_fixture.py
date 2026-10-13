@@ -52,12 +52,14 @@ __global__ void transform(float *output, Shape shape) {
     int i = threadIdx.x;
     output[i] = output[i] * scale + bias + base[i] + (shape.elements & 1);
 }
+__global__ void no_arguments() {}
 }
 ''')
     cubin = root / "globals.cubin"
-    subprocess.run(["/opt/cuda/bin/nvcc", "--cubin", "-arch=sm_120", str(code), "-o", str(cubin)], check=True)
+    architecture = "sm_" + "".join(map(str, torch.cuda.get_device_capability()))
+    subprocess.run(["nvcc", "--cubin", f"-arch={architecture}", str(code), "-o", str(cubin)], check=True)
     cuda = storage.cuda
-    module, function = C.c_void_p(), C.c_void_p()
+    module, function, empty = C.c_void_p(), C.c_void_p(), C.c_void_p()
     cuda.call("cuModuleLoad", C.byref(module), C.c_char_p(str(cubin).encode()))
     for name, value in (("bias", C.c_float(2)), ("scale", C.c_float(3)), ("base", C.c_uint64(source.data_ptr()))):
         address, size = C.c_uint64(), C.c_size_t()
@@ -65,7 +67,8 @@ __global__ void transform(float *output, Shape shape) {
         assert size.value == C.sizeof(value)
         cuda.call("cuMemcpyHtoD_v2", address, C.byref(value), size)
     cuda.call("cuModuleGetFunction", C.byref(function), module, C.c_char_p(b"transform"))
-    return module, function
+    cuda.call("cuModuleGetFunction", C.byref(empty), module, C.c_char_p(b"no_arguments"))
+    return module, function, empty
 
 
 def prepare(root):
@@ -91,7 +94,7 @@ def prepare(root):
                 freed_address = freed.data_ptr()
             region = storage.host_allocate("table", (128,), torch.float32)
             region.host_view.fill_(3)
-            module, function = global_kernel(root, storage, source)
+            module, function, empty = global_kernel(root, storage, source)
             ready = torch.cuda.Event(external=True)
             ready.record()
             buffers = {"frame_index": torch.zeros(1, device="cuda", dtype=torch.int32),
@@ -113,6 +116,15 @@ def prepare(root):
                 storage.cuda.call("cuLaunchKernel", function, C.c_uint(1), C.c_uint(1), C.c_uint(1),
                                   C.c_uint(128), C.c_uint(1), C.c_uint(1), C.c_uint(0),
                                   C.c_void_p(torch.cuda.current_stream().cuda_stream), params, None)
+                packed = (C.c_uint64 * 2)(pointer.value, shape.value)
+                size = C.c_size_t(C.sizeof(packed))
+                extra = (C.c_void_p * 5)(1, C.addressof(packed), 2, C.addressof(size), None)
+                storage.cuda.call("cuLaunchKernel", function, C.c_uint(1), C.c_uint(1), C.c_uint(1),
+                                  C.c_uint(128), C.c_uint(1), C.c_uint(1), C.c_uint(0),
+                                  C.c_void_p(torch.cuda.current_stream().cuda_stream), None, extra)
+                storage.cuda.call("cuLaunchKernel", empty, C.c_uint(1), C.c_uint(1), C.c_uint(1),
+                                  C.c_uint(1), C.c_uint(1), C.c_uint(1), C.c_uint(0),
+                                  C.c_void_p(torch.cuda.current_stream().cuda_stream), None, None)
             run()
             torch.cuda.synchronize()
             graph = torch.cuda.CUDAGraph(keep_graph=True)

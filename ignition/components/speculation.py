@@ -24,6 +24,7 @@ from ignition.components.sampling import (
 )
 
 from ignition.components.sampling import DeviceRequestState
+from ignition.preparation.tensor_metadata import record_numeric_tensor
 
 INVALID_SPECULATION = 6
 TARGET_RNG_DOMAIN = 0x4D54505F56455249
@@ -201,6 +202,8 @@ class PreparedSpeculativeDistributions:
         self.rows = torch.arange(batch, device=device)
         self.columns = torch.arange(width, device=device)
         self.vocab_ids = torch.arange(vocab, device=device)
+        for tensor in (self.rows, self.columns, self.vocab_ids):
+            record_numeric_tensor(tensor)
         self.scores = torch.empty((batch, width, vocab), dtype=torch.float32, device=device)
         self.probabilities = torch.empty_like(self.scores)
         self.counts = torch.empty((batch, width, vocab), dtype=torch.int32, device=device)

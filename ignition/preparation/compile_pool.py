@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from .compilation import _OPTIONS, _defer_full_collection
-from .host_memory import worker_limit
+from .host_memory import device_memory_info, worker_limit
 
 # Device memory one compiler worker can hold: its CUDA context plus Inductor's constant folding.
 _WORKER_DEVICE_BYTES = 2 << 30
@@ -40,8 +40,10 @@ class CompilePool:
         self.device = torch.device(device)
         budget = max(1, _OPTIONS['compile_threads'])
         # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
-        free = torch.cuda.mem_get_info(self.device)[0]
-        self.workers = worker_limit(max(1, min(8, budget, free // _WORKER_DEVICE_BYTES)))
+        free = device_memory_info(self.device)[0]
+        shared = torch.cuda.get_device_properties(self.device).is_integrated
+        self.workers = worker_limit(max(1, min(8, budget, free // _WORKER_DEVICE_BYTES)),
+                                   device_bytes=_WORKER_DEVICE_BYTES if shared else 0)
         self.options = dict(_OPTIONS, compile_threads=max(1, budget // self.workers))
         self.pool = None
 

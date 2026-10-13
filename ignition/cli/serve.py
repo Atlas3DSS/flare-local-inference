@@ -42,19 +42,16 @@ def _keep_reserve(plan, usage) -> None:
                             f"[memory] reserve requires {plan.reserve_bytes / gib:.1f} GiB.")
 
 
-def _server_options(configuration, model, plan, pages: int) -> dict:
-    """Derive the native server's names, HTTP limits, and rejection hints from the settings and allocated pages."""
+def _server_options(configuration, model, plan) -> dict:
+    """Derive native server settings independently of preparation's physical KV backing."""
     recipe, checkpoint = plan.recipe, plan.checkpoint
-    whole = pages * plan.page_tokens >= recipe.context
     return {
         "model_id": model.model_id, "served_names": [checkpoint.alias],
         "reserve_bytes": plan.reserve_bytes,
         "api_key": configuration.get("server.api_key").value,
         "queue_capacity": 4 * plan.concurrency, "frontend_workers": plan.concurrency,
         "max_body_bytes": recipe.max_images * recipe.image_bytes + recipe.context * _BODY_BYTES_PER_TOKEN,
-        "context_hint": (
-            "this is the checkpoint's maximum context" if whole else
-            "a lower --max-concurrency leaves more KV pages for each request"),
+        "context_hint": "context is limited by the checkpoint and available cache capacity",
         "capacity_hint": "--max-concurrency sets the request limit; a lower [memory] reserve leaves more KV pages",
     }
 
@@ -177,9 +174,7 @@ def _prepare(args, *, export_path) -> int:
         except FlareError:
             raise
         except MemoryError as error:
-            raise CapacityError(
-                f"{error};\nmeasured graphs and scratch leave fewer than the minimum {plan.minimum_pages:,} pages"
-                f" for {plan.concurrency} requests of {planning.MINIMUM_REQUEST_TOKENS:,} tokens.") from error
+            raise CapacityError(f"insufficient memory during model preparation: {error}") from error
         except Exception as error:  # noqa: BLE001 - Every other preparation failure maps to one exit code.
             if args.verbose:
                 traceback.print_exc()
@@ -188,7 +183,7 @@ def _prepare(args, *, export_path) -> int:
         with prepared:
             usage = model.recipe.usage(prepared)
             _keep_reserve(plan, usage)
-            options = _server_options(configuration, model, plan, min(rank.pages for rank in usage))
+            options = _server_options(configuration, model, plan)
             from ignition.preparation.model_package import export_package
 
             with phase(progress, "Export native package") as stage:

@@ -10,6 +10,7 @@ make it fit.
 """
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from ignition.errors import CapacityError, UsageError
 from ignition.recipes.declaration import Checkpoint, Recipe, Speculation
@@ -56,12 +57,37 @@ def discover_gpus() -> tuple[Gpu, ...]:
         gpus = []
         for index in range(nvml.device_get_count_v2()):
             handle = nvml.device_get_handle_by_index_v2(index)
-            memory = nvml.device_get_memory_info_v2(handle)
-            gpus.append(Gpu(index, nvml.device_get_name(handle), nvml.device_get_uuid(handle), memory.total,
-                            memory.free, tuple(nvml.device_get_cuda_compute_capability(handle))))
+            try:
+                memory = nvml.device_get_memory_info_v2(handle)
+                total, free = memory.total, memory.free
+            except nvml.NotSupportedError:
+                total, free = _integrated_memory(nvml.device_get_pci_info_v3(handle).bus_id)
+            gpus.append(Gpu(index, nvml.device_get_name(handle), nvml.device_get_uuid(handle), total,
+                            free, tuple(nvml.device_get_cuda_compute_capability(handle))))
         return tuple(gpus)
     finally:
         nvml.shutdown()
+
+
+def _integrated_memory(bus_id: str) -> tuple[int, int]:
+    """Size shared DRAM without a CUDA context or treating swap as GPU capacity."""
+    from cuda.bindings import driver
+
+    def checked(call, *arguments):
+        status, *values = call(*arguments)
+        if status != driver.CUresult.CUDA_SUCCESS:
+            raise CapacityError(f"cannot query integrated GPU memory: {call.__name__}: {status}")
+        return values[0] if values else None
+
+    checked(driver.cuInit, 0)
+    device = checked(driver.cuDeviceGetByPCIBusId, bus_id.encode())
+    if not checked(driver.cuDeviceGetAttribute, driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_INTEGRATED, device):
+        raise CapacityError(f"GPU {bus_id} does not report device memory and is not an integrated GPU")
+    total = checked(driver.cuDeviceTotalMem, device)
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return total, min(total, int(line.split()[1]) * 1024)
+    raise CapacityError("Linux MemAvailable is required to size integrated GPU memory")
 
 
 def restrict_gpus(gpus: tuple[Gpu, ...], visible: str) -> tuple[Gpu, ...]:

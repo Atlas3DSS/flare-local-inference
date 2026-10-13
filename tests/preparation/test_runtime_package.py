@@ -1,5 +1,6 @@
 """Resource binding validation and cross-process native CUDA graph replay."""
 
+import ctypes as C
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +11,7 @@ import pytest
 from ignition.preparation.runtime_package import (
     Allocation, Argument, FileSource, Kernel, Reference, Relocation, RuntimePackage,
     _external_allocations, _merge_ranges, _without_zero_ranges, _write_allocation,
+    _KernelParams, _kernel_argument_data,
 )
 
 
@@ -20,6 +22,34 @@ def package(*, allocations=None, arguments=None):
         kernels=[Kernel(1, "kernel", (Argument(8, (Relocation(0, Reference("weight")),)),)
                         if arguments is None else arguments)],
     )
+
+
+def test_kernel_arguments_preserve_abi_padding_and_allow_parameterless_kernels():
+    packed = C.create_string_buffer(b"ab______12345678")
+    size = C.c_size_t(16)
+    extra = (C.c_void_p * 5)(1, C.addressof(packed), 2, C.addressof(size), None)
+    layout = [(0, 2), (8, 8)]
+    assert _kernel_argument_data(_KernelParams(extra=extra), layout) == [b"ab", b"12345678"]
+    pointers = (C.c_void_p * 2)(C.addressof(packed), C.addressof(packed) + 8)
+    assert _kernel_argument_data(_KernelParams(params=pointers), layout) == [b"ab", b"12345678"]
+    assert _kernel_argument_data(_KernelParams(), []) == []
+    with pytest.raises(ValueError, match="both"):
+        _kernel_argument_data(_KernelParams(params=pointers, extra=extra), layout)
+    with pytest.raises(ValueError, match="no launch arguments"):
+        _kernel_argument_data(_KernelParams(), layout)
+    size.value = 15
+    with pytest.raises(ValueError, match="beyond"):
+        _kernel_argument_data(_KernelParams(extra=extra), layout)
+
+
+@pytest.mark.parametrize("tag,buffer,size_pointer", [(3, True, True), (1, False, True), (1, True, False)])
+def test_invalid_packed_kernel_arguments_are_rejected(tag, buffer, size_pointer):
+    packed = C.create_string_buffer(8)
+    size = C.c_size_t(8)
+    extra = (C.c_void_p * 5)(tag, C.addressof(packed) if buffer else None,
+                            2, C.addressof(size) if size_pointer else None, None)
+    with pytest.raises(ValueError):
+        _kernel_argument_data(_KernelParams(extra=extra), [(0, 8)])
 
 
 def test_views_must_share_one_registered_backing_storage():
@@ -130,6 +160,36 @@ def test_checkpoint_source_requires_a_complete_nonempty_file_range(tmp_path):
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+def test_graph_export_preserves_construction_order_across_branches():
+    import ctypes as C
+    import torch
+    from ignition.preparation.runtime_package import _Cuda, _MemsetParams
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+    data = torch.empty(256, dtype=torch.uint8, device="cuda:0")
+    cuda = _Cuda()
+    graph, context = C.c_void_p(), C.c_void_p()
+    cuda.call("cuCtxGetCurrent", C.byref(context))
+    cuda.call("cuGraphCreate", C.byref(graph), C.c_uint(0))
+    try:
+        nodes = []
+        for value in (17, 29, 41):
+            params = _MemsetParams(dst=data.data_ptr() + len(nodes) * 64, pitch=0,
+                                   value=value, element_size=1, width=64, height=1)
+            node = C.c_void_p()
+            dependencies = (C.c_void_p * 1)(nodes[0].value) if nodes else None
+            cuda.call("cuGraphAddMemsetNode", C.byref(node), graph, dependencies,
+                      C.c_size_t(int(bool(nodes))), C.byref(params), context)
+            nodes.append(node)
+        owner = package(allocations=[Allocation("weight", data.data_ptr(), data.nbytes)])
+        description = owner._graph(cuda, "branches", graph.value)
+        assert [node["value"] for node in description["nodes"]] == [17, 29, 41]
+        assert {(edge["source"], edge["destination"]) for edge in description["edges"]} == {(0, 1), (0, 2)}
+    finally:
+        cuda.call("cuGraphDestroy", graph)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
 @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
     ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
     ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
@@ -146,7 +206,8 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
     if exec_handover:
         arguments.append(executable)
-    result = subprocess.run(arguments, check=True, cwd=root, text=True, capture_output=True, timeout=180)
+    result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
     package_path = tmp_path / "package"
     from ignition.preparation.package_file import read_index
 
@@ -164,5 +225,6 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
                 assert contents(symbol.file).rstrip(b"\0") == b"kernel"
     if not exec_handover:
         result = subprocess.run([executable, str(tmp_path)],
-                                check=True, cwd=root, text=True, capture_output=True, timeout=60)
+                                cwd=root, text=True, capture_output=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
     assert expected in result.stdout

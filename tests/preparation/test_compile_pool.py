@@ -9,6 +9,19 @@ from torch._subclasses import FakeTensor
 from ignition.preparation.forward_metadata import dumps, loads
 
 
+@pytest.mark.parametrize("integrated,expected", [(False, 8), (True, 4)])
+def test_compiler_concurrency_accounts_for_shared_device_ram(monkeypatch, integrated, expected):
+    from ignition.preparation import compile_pool, host_memory
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: ((2 if integrated else 40) << 30, 121 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=integrated))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
+    monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
+    pool = compile_pool.CompilePool("cuda:0")
+    assert pool.workers == expected
+    assert pool.options["compile_threads"] * pool.workers == 16
+
+
 def test_metadata_preserves_tensor_aliases_and_offsets():
     storage = torch.empty(1024, dtype=torch.uint8)
     original = SimpleNamespace(storage=storage, part=storage.view(torch.float32)[16:48],

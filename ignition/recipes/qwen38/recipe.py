@@ -23,7 +23,7 @@ def _costs(state_row_bytes, page_layer_bytes, graph_bytes, *, speculating):
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False, package_storage=None):
     """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1.
 
-    KV pages fill the free memory measured after graph capture, not the plan's estimate.
+    Preparation backs a bounded KV working set; Helios sizes the serving cache.
     """
     from .bootstrap import PreparationConfig, prepare_model, prepare_rank
 
@@ -34,7 +34,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
         max_active=plan.concurrency,
-        context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
+        context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
         mtp=speculation is not None, **drafting)

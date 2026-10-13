@@ -3,6 +3,7 @@
 import gc
 import os
 import struct
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -115,6 +116,27 @@ def test_checkpoint_role_tracks_storage_lifetime_without_retaining_weights():
     del tensor
     gc.collect()
     assert numeric.ranges() == []
+
+
+def test_sampling_indices_do_not_retain_allocations_from_unaligned_token_ids():
+    from ignition.components.speculation import PreparedSpeculativeDistributions
+
+    with NumericStorage() as numeric:
+        sampling = PreparedSpeculativeDistributions(
+            torch.empty((1, 2, 256)),
+            SimpleNamespace(vocab_size=256, generation=torch.zeros(1, dtype=torch.int64)),
+            torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.int64),
+            torch.ones(1, dtype=torch.int32), torch.zeros((1, 1), dtype=torch.int64))
+    indices = sampling.vocab_ids
+    owner = Allocation("indices", indices.data_ptr(), indices.nbytes)
+    unused = Allocation("unrelated", 50 << 16, 8)
+    data = indices.numpy().tobytes()
+    raw = Reachability([owner, unused], roots=("indices",))
+    raw.contents(owner, 0, data)
+    assert raw.reached == {"indices", "unrelated"}
+    typed = Reachability([owner, unused], roots=("indices",), numeric=numeric.ranges())
+    typed.contents(owner, 0, data)
+    assert typed.reached == {"indices"}
 
 
 def test_opaque_bytes_do_not_bridge_noncontiguous_snapshot_spans():

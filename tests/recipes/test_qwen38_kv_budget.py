@@ -1,94 +1,35 @@
-"""KV budgeting preserves headroom using measured allocation consumption."""
-
-import weakref
+"""Preparation KV backing covers graph shapes without sizing the serving cache."""
 
 import pytest
 
-from ignition.recipes.qwen38.bootstrap import _allocate_page_pools
+from ignition.recipes.qwen38.bootstrap import PreparationConfig
 
 
-class Pool:
-    pass
+@pytest.mark.parametrize('concurrency', [1, 3, 4, 32, 64])
+@pytest.mark.parametrize('prefill', [64, 4096, 16384])
+@pytest.mark.parametrize('width', [1, 6, 8])
+def test_preparation_pages_cover_prefill_and_partial_verification_pages(concurrency, prefill, width):
+    config = PreparationConfig(max_active=concurrency, prefill_chunk_size=prefill,
+                               mtp=True, speculative_widths=tuple(sorted({1, width})))
+    # A row beginning at the last token of a page needs a second page for wider verification.
+    row_pages = (63 + width + 63) // 64
+    assert config.preparation_pages >= prefill // 64 + config.request_capacity * row_pages
+    assert config.preparation_pages <= prefill // 64 + 2 * config.request_capacity
 
 
-class Cache:
-    def __init__(self):
-        self.capacities = []
-        self.owners = []
+def test_preparation_budget_does_not_grow_with_serving_context_or_available_memory(monkeypatch):
+    def unexpected(*args):
+        pytest.fail('preparation page count must not depend on free GPU memory')
 
-    def resize_pages_for_preparation(self, capacity):
-        pool = Pool()
-        self.capacities.append(capacity)
-        self.owners.append(weakref.ref(pool))
-        return pool
-
-
-def accounting(monkeypatch, free, caches):
-    events = []
-    available = iter(free)
-    monkeypatch.setattr('torch.cuda.synchronize', lambda device: events.append('fence'))
-    monkeypatch.setattr('torch.cuda.mem_get_info', lambda device: (next(available), 102014189568))
-    monkeypatch.setattr('torch.cuda.memory_allocated', lambda device: 95545701376)
-    monkeypatch.setattr('torch.cuda.memory_reserved', lambda device: 96515129344)
-
-    def release():
-        assert events[-1] == 'fence'
-        assert all(owner() is None for cache in caches.values() for owner in cache.owners)
-        events.append('release')
-
-    monkeypatch.setattr('torch.cuda.empty_cache', release)
-    return events
+    monkeypatch.setattr('torch.cuda.mem_get_info', unexpected)
+    short = PreparationConfig(context=4096)
+    long = PreparationConfig(context=262144)
+    assert short.preparation_pages == long.preparation_pages == 72
+    assert long.preparation_pages * 64 < long.context
 
 
-def test_auto_capacity_releases_rejected_pools_before_reallocation(monkeypatch):
-    caches = {index: Cache() for index in range(3, 48, 4)}
-    events = accounting(monkeypatch, [4293984256, (4 << 30) + (65 << 20)], caches)
-    messages = []
-    pools, capacity = _allocate_page_pools(caches, 8196, page_bytes=1622016,
-        device='cuda:0', headroom_bytes=4 << 30, automatic=True, report=messages.append)
-    assert capacity == 8154
-    assert events == ['fence', 'release', 'fence']
-    assert all(cache.capacities == [8196, 8154] for cache in caches.values())
-    assert all(cache.owners[0]() is None and cache.owners[1]() is pools[index]
-               for index, cache in caches.items())
-    assert messages[-1] == '12.32 GiB per GPU · 521,856 tokens'
-
-
-def test_explicit_capacity_fails_without_resizing(monkeypatch):
-    caches = {3: Cache()}
-    events = accounting(monkeypatch, [4293984256], caches)
-    with pytest.raises(MemoryError, match=r'requested KV cache \(524,544 tokens, 12.38 GiB per GPU\)'):
-        _allocate_page_pools(caches, 8196, page_bytes=1622016,
-            device='cuda:0', headroom_bytes=4 << 30, automatic=False, report=lambda _: None)
-    assert caches[3].capacities == [8196]
-    assert events == ['fence', 'release']
-
-
-def test_compiled_capacity_retains_shape_below_headroom_target(monkeypatch):
-    caches = {3: Cache()}
-    events = accounting(monkeypatch, [(4 << 30) - (2 << 20)], caches)
-    pools, capacity = _allocate_page_pools(caches, 8196, page_bytes=1622016,
-        device='cuda:0', headroom_bytes=4 << 30, automatic=False, fixed_capacity=True,
-        report=lambda _: None)
-    assert capacity == 8196 and pools[3] is caches[3].owners[0]()
-    assert caches[3].capacities == [8196] and events == ['fence']
-
-
-@pytest.mark.parametrize('automatic', [True, False])
-def test_sufficient_headroom_keeps_capacity_and_live_pools(monkeypatch, automatic):
-    caches = {3: Cache()}
-    events = accounting(monkeypatch, [4 << 30], caches)
-    pools, capacity = _allocate_page_pools(caches, 8196, page_bytes=1622016,
-        device='cuda:0', headroom_bytes=4 << 30, automatic=automatic, report=lambda _: None)
-    assert capacity == 8196 and pools[3] is caches[3].owners[0]()
-    assert events == ['fence']
-
-
-def test_insufficient_room_for_one_page_fails_after_release(monkeypatch):
-    caches = {3: Cache()}
-    events = accounting(monkeypatch, [0], caches)
-    with pytest.raises(MemoryError, match='insufficient memory'):
-        _allocate_page_pools(caches, 1, page_bytes=1622016,
-            device='cuda:0', headroom_bytes=4 << 30, automatic=True, report=lambda _: None)
-    assert caches[3].capacities == [1]
-    assert events == ['fence', 'release']
+def test_explicit_preparation_capacity_is_preserved():
+    assert PreparationConfig(pages=128).preparation_pages == 128
+    for pages in (0, -1, 1.5, True):
+        with pytest.raises(ValueError, match='page capacity'):
+            PreparationConfig(pages=pages)

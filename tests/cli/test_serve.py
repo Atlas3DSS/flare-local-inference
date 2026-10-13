@@ -211,7 +211,7 @@ def test_an_address_in_use_fails_before_preparation(host, capsys):
 
 @pytest.mark.parametrize("exception,code,message", [
     (RuntimeError("kernel tuning failed"), 5, "preparation failed: RuntimeError: kernel tuning failed"),
-    (MemoryError("insufficient memory"), 4, "fewer than the minimum 512 pages"),
+    (MemoryError("insufficient memory"), 4, "insufficient memory during model preparation"),
 ])
 def test_export_failures_prevent_native_launch(host, capsys, exception, code, message):
     host["behavior"] = {"raises": exception}

@@ -88,6 +88,37 @@ class _CopyParams(C.Structure):
                 ("width", C.c_size_t), ("height", C.c_size_t), ("depth", C.c_size_t)]
 
 
+def _kernel_argument_data(params, layout):
+    if params.params:
+        if params.extra:
+            raise ValueError("kernel specifies both parameter-array and packed arguments")
+        if any(not params.params[index] for index in range(len(layout))):
+            raise ValueError("kernel parameter array contains a null argument")
+        return [C.string_at(params.params[index], size) for index, (_, size) in enumerate(layout)]
+    if not params.extra:
+        if layout:
+            raise ValueError("kernel has parameters but no launch arguments")
+        return []
+    options = {}
+    for index in range(0, 5, 2):
+        tag = params.extra[index]
+        if tag is None:
+            break
+        if tag not in (1, 2) or tag in options:
+            raise ValueError("invalid packed kernel argument options")
+        options[tag] = params.extra[index + 1]
+    else:
+        raise ValueError("packed kernel argument options lack a terminator")
+    if not options.get(2):
+        raise ValueError("packed kernel arguments lack a buffer size")
+    nbytes = C.c_size_t.from_address(options[2]).value
+    if nbytes and not options.get(1):
+        raise ValueError("packed kernel arguments lack a buffer")
+    if any(offset + size > nbytes for offset, size in layout):
+        raise ValueError("kernel parameter extends beyond its packed argument buffer")
+    return [C.string_at(options[1] + offset, size) for offset, size in layout]
+
+
 class _Cuda:
     def __init__(self):
         self.lib = C.CDLL("libcuda.so.1")
@@ -96,6 +127,9 @@ class _Cuda:
         function = getattr(self.lib, name)
         function.restype = C.c_int
         status = function(*args)
+        self.check(name, status)
+
+    def check(self, name, status):
         if status:
             message = C.c_char_p()
             self.lib.cuGetErrorString(C.c_int(status), C.byref(message))
@@ -398,6 +432,9 @@ class RuntimePackage:
                              f"({sum(a.nbytes for a in omitted) / (1 << 20):.1f} MiB)")
                 self.allocations = tuple(a for a in self.allocations if a.name in self.reachability.reached)
                 self._by_name = {a.name: a for a in self.allocations}
+                self.reservations = tuple(r for r in self.reservations if any(
+                    a.memory == "device" and r["address"] <= a.address < r["address"] + r["nbytes"]
+                    for a in self.allocations))
             document = {"architecture": architecture, "allocations": allocations,
                         "modules": modules, "functions": functions, "graphs": serialized_graphs,
                         "reservations": self.reservations, "execution": execution,
@@ -438,12 +475,16 @@ class RuntimePackage:
         cuda.call("cuGraphGetNodes", C.c_void_p(graph), None, C.byref(count))
         handles = (C.c_void_p * count.value)()
         cuda.call("cuGraphGetNodes", C.c_void_p(graph), handles, C.byref(count))
-        local_ids = {}
+        cupti = C.CDLL("libcupti.so")
+        node_ids = {}
         for handle in handles:
-            local_id = C.c_uint()
-            cuda.call("cuGraphNodeGetLocalId", C.c_void_p(handle), C.byref(local_id))
-            local_ids[handle] = local_id.value
-        ordered = sorted(handles, key=local_ids.__getitem__)
+            node_id = C.c_uint64()
+            status = cupti.cuptiGetGraphNodeId(C.c_void_p(handle), C.byref(node_id))
+            if status:
+                raise RuntimeError(f"cuptiGetGraphNodeId: CUPTI {status}")
+            node_ids[handle] = node_id.value
+        # Preserve construction order, including independent branches.
+        ordered = sorted(handles, key=node_ids.__getitem__)
         indices = {handle: index for index, handle in enumerate(ordered)}
         nodes = []
         for handle in ordered:
@@ -511,15 +552,15 @@ class RuntimePackage:
             name = C.c_char_p()
             cuda.call("cuFuncGetName", C.byref(name), function)
             raise ValueError(f"no explicit argument bindings for kernel {name.value!r}")
-        if not params.params or params.extra:
-            raise ValueError("kernel requires parameter-array launch arguments")
-        arguments = []
+        layout = []
         for index, argument in enumerate(kernel.arguments):
             offset, size = C.c_size_t(), C.c_size_t()
             cuda.call("cuFuncGetParamInfo", function, C.c_size_t(index), C.byref(offset), C.byref(size))
             if size.value != argument.size:
                 raise ValueError(f"kernel parameter {index} size is {size.value}, expected {argument.size}")
-            data = C.string_at(params.params[index], argument.size)
+            layout.append((offset.value, size.value))
+        arguments = []
+        for argument, data in zip(kernel.arguments, _kernel_argument_data(params, layout), strict=True):
             self._check_bindings(cuda, data, argument.relocations)
             arguments.append({"data": list(data), "relocations": [asdict(r) for r in argument.relocations]})
         offset, size = C.c_size_t(), C.c_size_t()
@@ -529,7 +570,11 @@ class RuntimePackage:
         attributes = []
         for attribute in (1, 2, 4, 5, 8, 9, 10, 11, 13, 14):
             value = (C.c_uint64 * 8)()
-            cuda.call("cuGraphKernelNodeGetAttribute", C.c_void_p(handle), C.c_int(attribute), C.byref(value))
+            status = cuda.lib.cuGraphKernelNodeGetAttribute(C.c_void_p(handle), C.c_int(attribute), C.byref(value))
+            # Drivers without preferred-cluster support reject even its default-value query.
+            if attribute == 11 and status == 1:
+                continue
+            cuda.check(f"cuGraphKernelNodeGetAttribute({attribute})", status)
             data = bytes(value)
             if attribute == 13:
                 if any(data):
@@ -572,7 +617,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         raise RuntimeError("native package allocator failed") from storage.error
     if prepared._consumed:
         raise RuntimeError("runtime package export requires an unused prepared model")
-    inactive = storage.inactive_ranges()
+    inactive = storage.unused_ranges()
     dynamic = {region.address: region for region in storage.dynamic_regions}
     zero_ranges = [(address, size) for address, size in prepared.export_zero_ranges
                    if not any(region.address <= address < region.address + region.extent for region in dynamic.values())]
@@ -673,7 +718,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
                              for argument, (_, numeric) in zip(arguments, layout, strict=True)]
             kernels[function.value] = Kernel(function.value, name, tuple(arguments))
     ranges = [(storage.DEVICE_BASE, storage.DEVICE_BASE + storage.RESERVATION_BYTES)]
-    granule = 1 << 30
+    granule = storage.granularity
     ranges.extend((address & -granule, (address + size + granule - 1) & -granule)
                   for address, size in outside)
     merged = []

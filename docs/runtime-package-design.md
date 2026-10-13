@@ -53,7 +53,8 @@ registered with the driver; under unified addressing the device pointer
 equals the host pointer, which the exporter checks. A CUPTI subscriber logs
 driver allocations and removes records when their context is destroyed.
 Persistent device allocations outside the arena are grouped into complete
-VMM pages and placed within additional GiB-aligned reservations. Only their
+VMM pages and placed within reservations aligned to the device's allocation
+granularity. Reservations without retained allocations are omitted. Only their
 live byte spans are considered for payload storage; page gaps are zero. Before
 copying, the exporter checks that each external allocation belongs to the
 serving context.
@@ -75,11 +76,13 @@ retain their holes; fragmented persistent views without bounded span metadata
 remain conservative rather than expanding an unbounded interval catalog.
 
 Preparation uses temporary PyTorch pools backed by the package allocator during
-loading and tuning. Retiring a pool releases whole free segments before KV sizing;
-live tensors retain their storage and addresses. Address candidates must fall
-outside blocks that PyTorch marks inactive in any preparation pool, including
-retired pools with surviving tensors. Those blocks have no live allocation, so stale
-values in opaque arguments cannot keep their backing segments resident. This
+loading and tuning. Retiring a pool releases whole free segments before forward compilation;
+live tensors retain their storage and addresses. Address candidates within those
+pools must fall within requested allocation sizes, including in retired pools
+with surviving tensors. Inactive blocks and the padding between a live block's
+requested size and its allocator-rounded size are cleared and excluded from
+payload reads. Their stale contents cannot retain other allocations, and stale
+address candidates cannot retain those unused bytes' backing segments. This
 filter excludes the private graph pool: its intermediates remain live through
 captured replay even when their Python tensors have been released. Explicit
 resource bindings retain their allocations independently of candidate scanning.
@@ -91,14 +94,14 @@ scanning. Untyped structs, tensor maps, globals, and integer/byte storage withou
 a numeric role are scanned for address candidates. This can retain false
 positives and retains complete backing segments, including unused bytes within
 a reachable segment. The preparation metadata does not enter the serving index.
-Omitted allocations keep their virtual ranges reserved and physically unmapped,
+Omitted arena allocations keep their virtual ranges reserved and physically unmapped,
 so an unexpected access faults instead of reaching another allocation.
 
 Before export, model recipes declare disposable KV and scratch storage,
 including target and MTP page pools, operator workspaces, decoder and vision
 intermediates, and sampling and verification temporaries. The graph memory
-pool holds only graph-local intermediates and is also cleared, as are inactive
-blocks in the preparation allocator. Weight tensors, MTP weights, rotary
+pool holds only graph-local intermediates and is also cleared, as are unused
+bytes in the preparation allocator. Weight tensors, MTP weights, rotary
 tables, pointer tables, and required initialized metadata retain their contents.
 
 A model file starts with eight bytes `FLAREPKG`, a little-endian u64 index
@@ -197,11 +200,13 @@ each template node by node: kernel nodes with grid, block, shared memory,
 every nonzero launch attribute, and the parameter bytes copied verbatim;
 memset and contiguous device-to-device copy nodes with their driver
 parameters; empty nodes; named external event-wait nodes; and every edge
-with its edge data. Nodes are ordered by the driver's local id. External
+with its edge data. CUPTI node ids preserve construction order, including
+independent branches. Kernel parameters may use argument arrays or a packed
+`extra` buffer; the exporter reads individual parameters using the driver's
+offsets and sizes. Parameterless kernels retain an empty argument list. External
 waits refer to declared readiness events that the loader recreates. Host
 nodes, child graphs, undeclared event waits, event-record nodes, conditional
-nodes, kernels launched through the `extra` parameter path, and
-device-updatable nodes fail export.
+nodes, and device-updatable nodes fail export.
 
 **Contract.** The package carries the Helios execution manifest with buffer
 addresses rewritten as allocation references, the server configuration, the
@@ -308,6 +313,12 @@ reservations place fixed resources in the lower half and runtime-sized regions
 in the upper half. Maximum extents are chosen during preparation and validated
 for overflow and overlap before loading.
 
+Qwen preparation backs only a prefill chunk plus two pages per captured request
+row unless its programmatic configuration supplies an explicit page count.
+Forward compilation sees the full virtual tensor shapes. Physical backing is
+allocated after compiler workers exit and before warmup and capture; it does
+not constrain the serving cache or the checkpoint's context limit.
+
 Shared cache records identify the owning rank, reader ranks, and full virtual
 extent. Preparation exports a shareable handle for each physical chunk added
 while growing the cache. Helios maps the owning rank's selected physical prefix
@@ -320,6 +331,10 @@ when configured. Ignition exports `memory.reserve` as this optional serving
 reserve, which defaults to zero; preparation's warm-up and capture headroom does
 not reduce the serving budget. All ranks use the same
 row and page counts, limited by the rank with the smallest remaining budget.
+On integrated GPUs such as GB10, that budget is Linux `MemAvailable`, capped
+by CUDA's device total. CPU allocations, registered buffers, and GPU allocations
+share physical DRAM; reclaimable page cache contributes to available memory,
+while swap does not. Discrete GPUs use CUDA's free device-memory query.
 Rows comprise one null row, `concurrency * verification_width` execution rows,
 three admission checkpoint destinations per active request, and a prefix cache.
 The prefix cache targets eight rows per request, with an eight-row floor and a

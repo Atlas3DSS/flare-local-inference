@@ -103,15 +103,20 @@ class PackageStorage:
             del pool
             torch.cuda.empty_cache()
 
-    def inactive_ranges(self):
-        """Free blocks in preparation pools, including pools retired while tensors remain live."""
+    def unused_ranges(self):
+        """Exclude free blocks and allocator padding from retained preparation pools."""
         import torch
 
-        return [(block["address"], block["address"] + block["size"])
-                for segment in torch.cuda.memory_snapshot()
-                if segment["device"] == self.device
-                and tuple(segment["segment_pool_id"]) in self._preparation_pools
-                for block in segment["blocks"] if block["state"] == "inactive"]
+        ranges = []
+        for segment in torch.cuda.memory_snapshot():
+            if (segment["device"] != self.device
+                    or tuple(segment["segment_pool_id"]) not in self._preparation_pools):
+                continue
+            for block in segment["blocks"]:
+                live = 0 if block["state"] == "inactive" else block["requested_size"]
+                if live < block["size"]:
+                    ranges.append((block["address"] + live, block["address"] + block["size"]))
+        return ranges
 
     def host_allocate(self, name, shape, dtype):
         size = math.prod(shape) * dtype.itemsize

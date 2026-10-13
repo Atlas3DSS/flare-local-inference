@@ -1,7 +1,7 @@
 //! Choose physical cache capacities within reserved virtual address ranges.
 
 use super::{
-    NativeModel,
+    NativeModel, NativeResources,
     format::{Package, invalid},
 };
 use crate::{
@@ -13,6 +13,44 @@ use crate::{
 // Graphs are uploaded before sizing caches; leave room for driver bookkeeping
 // and the execution streams and events created when the server starts.
 const HEADROOM_BYTES: u64 = 64 << 20;
+
+fn shared_available(meminfo: &str, total: usize) -> Result<usize> {
+    let available = meminfo.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != "MemAvailable:" {
+            return None;
+        }
+        let kib = fields.next()?.parse::<usize>().ok()?;
+        (fields.next()? == "kB").then_some(kib)?.checked_mul(1024)
+    });
+    available
+        .map(|n| n.min(total))
+        .ok_or_else(|| invalid("Linux MemAvailable is required to size integrated GPU memory"))
+}
+
+impl NativeResources {
+    pub(super) unsafe fn available_memory(&self) -> Result<usize> {
+        let (mut free, mut total, mut integrated) = (0, 0, 0);
+        unsafe {
+            self.driver
+                .check("cuCtxSetCurrent", (self.driver.context_set)(self.context))?;
+            self.driver.check(
+                "cuMemGetInfo_v2",
+                (self.driver.memory_info)(&mut free, &mut total),
+            )?;
+            self.driver.check(
+                "cuDeviceGetAttribute(INTEGRATED)",
+                (self.driver.device_attribute)(&mut integrated, 18, self.device),
+            )?;
+        }
+        if integrated == 0 {
+            Ok(free)
+        } else {
+            let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+            shared_available(&meminfo, total)
+        }
+    }
+}
 
 fn headroom(config: &serde_json::Value) -> Result<u64> {
     let reserve = config
@@ -164,15 +202,7 @@ impl NativeModel {
             .unwrap_or(1);
         let mut available = Vec::new();
         for rank in &self.ranks {
-            let (mut free, mut total) = (0, 0);
-            unsafe {
-                rank.driver
-                    .check("cuCtxSetCurrent", (rank.driver.context_set)(rank.context))?;
-                rank.driver.check(
-                    "cuMemGetInfo_v2",
-                    (rank.driver.memory_info)(&mut free, &mut total),
-                )?;
-            }
+            let free = unsafe { rank.available_memory()? };
             available.push((free as u64).saturating_sub(reserve));
         }
         let (rows, pages, snapshots) =
@@ -296,6 +326,21 @@ mod tests {
         protobuf::wire::Sizing,
     };
     use super::*;
+
+    #[test]
+    fn integrated_memory_includes_reclaimable_ram_but_not_swap() {
+        let info = "MemFree: 1024 kB\nMemAvailable: 8388608 kB\nSwapFree: 16777216 kB\n";
+        assert_eq!(shared_available(info, 16 << 30).unwrap(), 8 << 30);
+        assert_eq!(shared_available(info, 4 << 30).unwrap(), 4 << 30);
+        for invalid in [
+            "MemFree: 1024 kB\nSwapFree: 16777216 kB\n",
+            "MemAvailable: -1 kB",
+            "MemAvailable: 1024 MB",
+            "MemAvailable: 18446744073709551615 kB",
+        ] {
+            assert!(shared_available(invalid, usize::MAX).is_err());
+        }
+    }
 
     #[test]
     fn serving_headroom_preserves_the_user_reserve() {

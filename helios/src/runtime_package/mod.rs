@@ -221,11 +221,7 @@ impl NativeResources {
                     total.checked_add(allocation.nbytes)
                 })
                 .ok_or_else(|| invalid("package device footprint overflows address space"))?;
-            let (mut free, mut total) = (0, 0);
-            driver.check(
-                "cuMemGetInfo_v2",
-                (driver.memory_info)(&mut free, &mut total),
-            )?;
+            let free = self.available_memory()?;
             if footprint > free {
                 return Err(invalid(format!(
                     "package needs {footprint} device bytes; only {free} are free"

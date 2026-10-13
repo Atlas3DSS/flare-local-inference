@@ -23,6 +23,17 @@ uv sync --locked --extra prepare --extra test
 cargo build --release --manifest-path flare/Cargo.toml
 ```
 
+Build dependencies include a C/C++ compiler, CMake, Ninja, pkg-config, Protobuf's
+`protoc`, OpenSSL headers, Python headers, and liburing headers. On Ubuntu:
+
+```sh
+sudo apt-get install build-essential cmake ninja-build pkg-config protobuf-compiler libssl-dev python3-dev liburing-dev
+```
+
+The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
+the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
+is not supplied by the Python environment.
+
 The preparation environment uses the sibling `../flashinfer` checkout through
 `pyproject.toml`. Inspect that checkout and its local changes before updating
 dependencies. After changing Rust code in `heliopause/`, or Helios code used by
@@ -103,7 +114,10 @@ Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
 `[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`
 leaves GPU memory available for other processes during preparation and serving.
-Ignition additionally keeps 1 GiB for warm-up and capture. Helios sizes its caches
+Ignition additionally keeps 1 GiB for warm-up and capture. Qwen preparation backs
+only a prefill chunk plus two KV pages per captured request row, unless an
+explicit preparation page count is supplied programmatically. It reserves the
+full virtual extent in the package. Helios sizes its caches
 after uploading the selected graphs, keeping a separate 64 MiB driver margin.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
@@ -148,6 +162,26 @@ process with one execution thread per rank. Its dashboard runs on an
 interactive terminal. Use `--api-key-file PATH` to supply a serving API key;
 exported packages do not contain the key. Stop Flare with Ctrl-C or SIGTERM
 so native replay drains before CUDA resources are released.
+
+DGX Spark's GB10 is SM121 and shares physical DRAM with the CPU. Prepare an
+SM121 package on Spark; an SM120 package does not satisfy the architecture
+check. GPU weights, KV, registered host buffers, resident embedding tables,
+compiler workers, and the OS compete for that memory. Set `[memory] reserve`
+for host activity as well as driver headroom; `reserve = "4G"` leaves four GiB
+outside the model's cache budget. RAM embedding tables load before cache
+sizing. Disk embedding tables use bounded staging without a resident table.
+
+Spark's NVML interface does not report VRAM capacity. Ignition identifies an
+integrated device through CUDA and uses Linux `MemAvailable`, capped by CUDA's
+device total, for planning. Qwen preparation and Helios use the same available
+RAM budget when allocating weights and caches; swap is not GPU capacity.
+CUDA free-memory queries exclude reclaimable page cache on GB10. Compiler worker
+budgets account for both CPU and GPU allocations in shared RAM. Helios sizes
+its caches independently after loading.
+VMM allocations and registered host mappings remain distinct CUDA
+memory types despite sharing DRAM; do not dereference a device allocation on
+the CPU or replace system-scope synchronization with volatile accesses. See
+[NVIDIA's Spark CUDA guidance](https://docs.nvidia.com/dgx/dgx-spark-porting-guide/porting/cuda.html).
 
 For preparation followed immediately by serving, use the cached workflow:
 
@@ -359,11 +393,12 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   bind process-local kernel handles and caller-owned tensors at startup. Complete
   b12x preparation, tuning, binding refresh, and compiled warmup before capturing
   each serving graph. Retain compiled kernel owners until native replay has drained.
-- **Allocate large KV pools after forward compilation.** Describe their final
-  shapes with CUDA tensor metadata while compiling. Pass a `materialize` callback
-  to `capture_forwards` to allocate and bind real storage after compiler workers
-  exit and before warmup and capture. Validate compiled guards against those real
-  tensors. Temporary compiler contexts must not reduce the serving KV budget.
+- **Bound preparation KV backing by tuning and capture needs.** Describe the
+  full virtual shapes with CUDA tensor metadata while compiling. Pass a
+  `materialize` callback to `capture_forwards` to bind a bounded physical working
+  set after compiler workers exit and before warmup and capture. Validate compiled
+  guards against those tensors. Helios sizes the serving cache independently;
+  temporary compiler contexts must not reduce its budget.
 - **Compile tensor-parallel forwards on rank zero.** Pass the preparation
   coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
   tensors and native handles, and participate in ordered warmup and local capture.

@@ -67,7 +67,7 @@ def tensor_ranges(tensor):
 
 
 class NumericStorage:
-    """Retain checkpoint tensor roles without retaining their storage."""
+    """Retain numeric tensor roles without retaining their storage."""
 
     def __init__(self):
         self.entries = {}
