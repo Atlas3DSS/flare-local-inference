@@ -15,18 +15,22 @@ pub fn publisher() -> Publisher {
     }
 }
 pub fn authorize(path: impl AsRef<Path>) -> AuthorizedPackage {
-    VerifiedPackage::open(path.as_ref(), &[publisher()])
+    VerifiedPackage::open(path.as_ref(), &[publisher()], None)
         .unwrap()
         .authorize("flare-tests", false)
         .unwrap()
 }
+/// Authenticate a package, every rank or only `rank` of a multi-host package, and digest the
+/// plaintext of each verified rank's executables and supporting resources and of the assets.
 pub fn inspect(
     path: &Path,
     namespace: &str,
     verify_weights: bool,
     publishers: &[Publisher],
+    rank: Option<usize>,
 ) -> Result<Vec<(u64, String)>> {
-    let package = VerifiedPackage::open(path, publishers)?.authorize(namespace, verify_weights)?;
+    let package =
+        VerifiedPackage::open(path, publishers, rank)?.authorize(namespace, verify_weights)?;
     let mut contents = Vec::new();
     let mut spans = Vec::new();
     for rank in &package.index.ranks {
@@ -76,7 +80,7 @@ pub fn inspect(
 
 pub fn inspect_graph(path: &Path, name: &str) -> Result<()> {
     let mut package =
-        VerifiedPackage::open(path, &[publisher()])?.authorize("flare-tests", false)?;
+        VerifiedPackage::open(path, &[publisher()], None)?.authorize("flare-tests", false)?;
     let bundle = super::protobuf::decode(package.index.ranks.remove(0))?;
     let graph = bundle
         .graphs

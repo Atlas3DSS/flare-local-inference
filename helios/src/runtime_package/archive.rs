@@ -54,11 +54,12 @@ impl ByteTensor {
     }
 }
 
-/// Byte ranges of a package file of `length` bytes, payload at `start`, that serving `rank` reads.
-/// Verifying stored weights reads the whole data group instead.
+/// Byte ranges of a package file of `length` bytes, payload at `start`, that serving `rank` reads,
+/// including the signed stored-data ranges `stored` (payload offset, length) that rank verifies.
 fn rank_ranges(
     index: &wire::ModelIndex,
     rank: usize,
+    stored: &[(u64, u64)],
     start: u64,
     payload: u64,
     length: u64,
@@ -83,6 +84,11 @@ fn rank_ranges(
                 .filter_map(Option::as_ref),
         )
         .map(|span| (start + span.offset, span.nbytes))
+        .chain(
+            stored
+                .iter()
+                .map(|&(offset, nbytes)| (start + offset, nbytes)),
+        )
         .chain([(0, start), (index_start, length - index_start)])
         .filter(|&(_, nbytes)| nbytes > 0)
         .collect();
@@ -109,7 +115,11 @@ pub(super) struct Archive {
     pub(super) accepted: bool,
 }
 impl Archive {
-    pub fn open(path: &Path, publishers: &[Publisher]) -> Result<(Self, wire::ModelIndex)> {
+    pub fn open(
+        path: &Path,
+        publishers: &[Publisher],
+        rank: Option<usize>,
+    ) -> Result<(Self, wire::ModelIndex)> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let mut prefix = [0u8; 8];
         file.read_exact_at(&mut prefix, 0)
@@ -149,7 +159,7 @@ impl Archive {
         let mut bytes = vec![0; size as usize];
         file.read_exact_at(&mut bytes, start + payload)
             .map_err(|e| e.to_string())?;
-        let (protection, index) = Protection::verify(&bytes, publishers, payload)?;
+        let (protection, index) = Protection::verify(&bytes, publishers, payload, rank)?;
         Ok((
             Self {
                 path: PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
@@ -164,10 +174,13 @@ impl Archive {
     }
 
     /// File byte ranges, in offset order, that a host serving `rank` of `index` reads: the header,
-    /// the signed index, that rank's bundle, and the assets and tables every rank shares.
+    /// the signed index, that rank's bundle and stored data, and the assets and tables every rank
+    /// shares.
     pub fn rank_ranges(&self, index: &wire::ModelIndex, rank: usize) -> Result<Vec<(u64, u64)>> {
+        let position = self.protection.position(rank)?;
         let length = self.file.metadata().map_err(|e| e.to_string())?.len();
-        rank_ranges(index, rank, self.start, self.payload, length)
+        let stored = self.protection.stored_ranges(position);
+        rank_ranges(index, position, &stored, self.start, self.payload, length)
     }
     pub fn span<'a>(&self, package: &'a Package, key: &str) -> Result<&'a wire::Span> {
         package
@@ -311,9 +324,11 @@ mod tests {
         };
         let (start, payload, length) = (4096, 10_000, 4096 + 10_000 + 300);
         let index_start = start + payload;
+        // The tables' signed range, then each rank's, padding included.
+        let shared = (8192, 1008);
         // Rank zero's bundle abuts the header and its tokenizer.
         assert_eq!(
-            rank_ranges(&index, 0, start, payload, length).unwrap(),
+            rank_ranges(&index, 0, &[shared, (0, 100)], start, payload, length).unwrap(),
             vec![
                 (0, start + 150),
                 (start + 8192, 1008),
@@ -321,16 +336,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            rank_ranges(&index, 1, start, payload, length).unwrap(),
+            rank_ranges(&index, 1, &[shared, (4096, 200)], start, payload, length).unwrap(),
             vec![
                 (0, start),
                 (start + 100, 50),
-                (start + 4096, 100),
+                (start + 4096, 200),
                 (start + 8192, 1008),
                 (index_start, length - index_start)
             ]
         );
-        assert!(rank_ranges(&index, 2, start, payload, length).is_err());
+        assert!(rank_ranges(&index, 2, &[shared], start, payload, length).is_err());
     }
 
     #[test]
@@ -340,7 +355,7 @@ mod tests {
         for size in [0, MAX_HEADER as u64 + 1, u64::MAX] {
             std::fs::write(&path, size.to_le_bytes()).unwrap();
             assert!(
-                Archive::open(&path, &[])
+                Archive::open(&path, &[], None)
                     .err()
                     .unwrap()
                     .to_string()
@@ -358,7 +373,7 @@ mod tests {
         file.write_all(&4088u64.to_le_bytes()).unwrap();
         file.write_all(&bytes).unwrap();
         assert!(
-            Archive::open(&path, &[])
+            Archive::open(&path, &[], None)
                 .err()
                 .unwrap()
                 .to_string()

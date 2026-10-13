@@ -26,8 +26,7 @@ ranks, and serves HTTP.
 - On rank zero, free disk for both rank staging and the signed package during
   publication: about twice the whole model (GLM-5.3 Flash NVFP4: about 360 GB).
   Staging is removed after publication. Each peer keeps only its own rank's part
-  of the newest package it received, in `~/.cache/flare/packages`, or the whole
-  package when serving with `--verify-weights`.
+  of the newest package it received, in `~/.cache/flare/packages`.
 
 ## One-time setup: the Flare agent
 
@@ -77,7 +76,9 @@ rank receives whole packages; reinstall it to keep only the rank's bytes.
 Rank zero authenticates the package and obtains publisher acceptance before
 starting peers. Its authenticated agent request carries that accepted publisher's
 profile and exact signing-key approval. Each peer verifies the package with that
-profile before loading its rank; `--verify-weights` also applies to peers.
+profile before loading its rank. The package signs each rank separately from
+what every rank shares, so a peer verifies its own rank, stored weights too with
+`--verify-weights`, from that rank's bytes alone.
 
 ## Prepare the package
 
@@ -128,9 +129,8 @@ ranks); they must be reachable at port 29900. Rank zero then:
    rank reads, unless the host already holds them, into `~/.cache/flare`. The
    copy is a sparse file of the package's length: the signed index, its rank's
    bundle and the tables every rank shares are written, and other ranks' storage
-   takes no disk. With `--verify-weights` every peer receives the whole package,
-   since verifying stored weights reads all of them. A received package or
-   executable replaces older ones no running rank uses;
+   takes no disk. A received package or executable replaces older ones no
+   running rank uses;
 2. starts each peer's rank with the same serving options (concurrency,
    speculation, embedding-table storage), joining rank zero's rendezvous at port
    29800 (`--rendezvous 0.0.0.0:PORT` changes it);

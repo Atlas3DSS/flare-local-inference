@@ -114,8 +114,8 @@ pub fn package_cluster(package: &AuthorizedPackage) -> Option<(usize, String)> {
 }
 
 /// The byte ranges of an authorized multi-host package, in offset order, that the host serving
-/// `rank` reads. A copy holding only these, at the same offsets and length, verifies and loads as
-/// that rank unless its stored weights are verified, which reads the whole data group.
+/// `rank` reads. A copy holding only these, at the same offsets and length, verifies completely
+/// and loads as that rank.
 pub fn rank_ranges(package: &AuthorizedPackage, rank: usize) -> Result<Vec<(u64, u64)>> {
     if package.index.cluster.is_none() {
         return Err(invalid(
@@ -167,21 +167,20 @@ impl NativeModel {
         let cluster = match (descriptor.cluster.take(), options.cluster_rank) {
             (Some(c), rank) => {
                 let rank = rank.unwrap_or(0);
-                if !(2..=16).contains(&(c.world as usize))
-                    || descriptor.ranks.len() != c.world as usize
-                    || c.export_id.is_empty()
-                {
+                // Verification checked that the package holds every rank of its cluster.
+                if !(2..=16).contains(&(c.world as usize)) || c.export_id.is_empty() {
                     return Err(invalid(
                         "a multi-host package must hold every rank of its cluster",
                     ));
                 }
-                if rank >= descriptor.ranks.len() {
+                let position = archive.protection.position(rank)?;
+                if rank >= c.world as usize || position >= descriptor.ranks.len() {
                     return Err(invalid(format!(
                         "rank {rank} is outside the package's {} ranks",
-                        descriptor.ranks.len()
+                        c.world
                     )));
                 }
-                let bundle = descriptor.ranks.swap_remove(rank);
+                let bundle = descriptor.ranks.swap_remove(position);
                 descriptor.ranks = vec![bundle];
                 Some(ClusterRank {
                     world: c.world as usize,

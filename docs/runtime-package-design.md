@@ -111,9 +111,9 @@ limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
 `flare.payload` covers the resource bytes, including alignment padding, from
 the start of the data buffer. `flare.metadata` immediately follows it and
 contains a serialized `ProtectedIndex` from `helios/proto/runtime_package.proto`.
-The envelope and its authenticated `ModelIndex` use version 3. Unsigned rank
-staging uses `format: flare-staging` and cannot be loaded by Helios. Incompatible
-packages require re-export.
+The envelope uses version 4 and its authenticated `ModelIndex` version 3.
+Unsigned rank staging uses `format: flare-staging` and cannot be loaded by
+Helios. Incompatible packages require re-export.
 These tensors cover the entire data buffer without gaps or overlap. The
 protobuf is the authoritative resource description; safetensors describes
 only the two byte tensors.
@@ -259,16 +259,24 @@ them and relies on identical addresses instead.
 
 ### Publisher authentication and executable access
 
-Every final package carries four ordered Ed25519 signature groups:
+Every final package carries three ordered Ed25519 signature groups for what
+every rank shares, and one signed `RankProtection` per rank for that rank's
+resources:
 
 | Group | Authenticated contents | Payload checks |
 |---|---|---|
-| 1 | Model index, publisher namespace, source URL, development marker, and SHA-256 commitments to groups 2–4 | Before publisher acceptance or CUDA initialization |
-| 2 | Cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes | Each selected resource chunk before decryption |
-| 3 | Module globals and frontend asset spans and hashes | Before those contents are consumed |
-| 4 | Length and SHA-256 of the complete stored allocation/table region, including padding | With `flare run --verify-weights` |
+| 1 | Model index without rank bundles, publisher namespace, source URL, development marker, rank count, and SHA-256 commitments to groups 2–3 | Before publisher acceptance or CUDA initialization |
+| 2 | Frontend asset spans and hashes | Before those contents are consumed |
+| 3 | Range and SHA-256 of the stored embedding tables, including padding | With `flare run --verify-weights` |
+| Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the range and SHA-256 of its stored allocations, including padding | Bundle before loading; resources as for groups 2–3 |
 
-All four signatures are mandatory even when the stored-data scan is omitted.
+Stored data comes first: the tables, then each rank's allocations, each part one
+contiguous range. Executables and supporting resources follow. Every signature
+of the ranks a process serves is mandatory even when the stored-data scan is
+omitted. A process verifies every rank, except a host serving one rank of a
+multi-host package, which verifies the shared groups and its own rank only, so
+a copy holding only that rank's bytes verifies completely and other ranks'
+bytes or signatures do not affect it.
 Resource classification follows actual consumers in the signed index. Missing,
 overlapping, unclassified, or incorrectly classified spans fail loading. The
 128 MiB metadata limit applies to the complete signed envelope. The package
@@ -288,7 +296,8 @@ in `ignition/preparation/protection.py` and
 key or namespace does not produce a loadable package. Weights and tables stay
 plaintext and retain direct-I/O compatibility and storage deduplication.
 
-`VerifiedPackage::open` authenticates the index and publisher binding.
+`VerifiedPackage::open` authenticates the index and publisher binding, for
+every rank or for one rank of a multi-host package.
 `VerifiedPackage::authorize` requires the exact accepted namespace and optionally
 checks the stored-data contents. Only its `AuthorizedPackage` result can enter
 `NativeModel::load` or `NativeResources::load`. Executable resources are

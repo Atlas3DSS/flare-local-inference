@@ -31,8 +31,8 @@ pub fn address_toward(host: &str) -> Result<IpAddr, Failure> {
 }
 
 /// Send the package and this executable to `hosts` (ranks 1 onward, in order) where missing, then
-/// start their ranks joining rank zero at `rendezvous` with the same serving `options`. With
-/// `shares`, each peer's byte ranges in host order, a current agent keeps only its rank's bytes.
+/// start their ranks joining rank zero at `rendezvous` with the same serving `options`. `shares`
+/// holds each peer's byte ranges in host order; a current agent keeps only its rank's bytes.
 #[allow(clippy::too_many_arguments)]
 pub fn start(
     hosts: &[String],
@@ -42,7 +42,7 @@ pub fn start(
     options: &[String],
     token: &[u8],
     publisher: &flare_helios::runtime_package::Publisher,
-    shares: Option<&[Vec<(u64, u64)>]>,
+    shares: &[Vec<(u64, u64)>],
 ) -> Result<Peers, Failure> {
     let binary = std::env::current_exe()?;
     let binary_name = agent::binary_name(&std::fs::read(&binary)?);
@@ -55,7 +55,7 @@ pub fn start(
             let (host, binary, binary_name) = (host.clone(), binary.clone(), binary_name.clone());
             let (package, export_id, token) =
                 (package.to_owned(), export_id.to_owned(), token.to_vec());
-            let share = shares.map(|shares| shares[index].clone());
+            let share = shares[index].clone();
             thread::spawn(move || -> Result<(Agent, String), Failure> {
                 let rank = index + 1;
                 let mut agent = Agent::connect(&host, &token)?;
@@ -63,12 +63,13 @@ pub fn start(
                     eprintln!("{host}: sent flare {binary_name}");
                 }
                 // A current agent keeps only the bytes its rank reads, under a name for that rank.
-                let (name, ranges) = match share.filter(|_| agent.holds_ranges()) {
-                    Some(ranges) => (
+                let (name, ranges) = if agent.holds_ranges() {
+                    (
                         format!("{export_id}-{length}-rank{rank}.safetensors"),
-                        Some(ranges),
-                    ),
-                    None => (format!("{export_id}-{length}.safetensors"), None),
+                        Some(share),
+                    )
+                } else {
+                    (format!("{export_id}-{length}.safetensors"), None)
                 };
                 if agent.ensure("package", &name, &package, ranges.as_deref())? {
                     let sent = ranges.map_or(length, |r| r.iter().map(|&(_, n)| n).sum());

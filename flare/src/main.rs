@@ -82,7 +82,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut progress = StartupProgress::stderr();
     let phase = progress.phase("Verify package", None);
-    let package = VerifiedPackage::open(&root, &trust::publishers(&args.publisher_keys)?)?;
+    // A peer of a multi-host package holds only its rank's bytes, so it verifies that rank alone.
+    let package = VerifiedPackage::open(
+        &root,
+        &trust::publishers(&args.publisher_keys)?,
+        args.rank.filter(|&rank| rank != 0),
+    )?;
     let publisher = package.publisher().clone();
     phase.finish("signatures");
     let authorized = trust::authorize(package, &args, &mut progress)?;
@@ -115,17 +120,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(&agent::default_token_path()),
         )
         .map_err(|e| e.to_string())?;
-        // Peers keep only the bytes their rank reads, unless they verify stored weights, which
-        // reads every rank's.
-        let shares = if args.verify_weights {
-            None
-        } else {
-            Some(
-                (1..world)
-                    .map(|rank| flare_helios::runtime_package::rank_ranges(&authorized, rank))
-                    .collect::<flare_helios::Result<Vec<_>>>()?,
-            )
-        };
+        // Peers keep only the bytes their rank reads, which verify that rank completely.
+        let shares = (1..world)
+            .map(|rank| flare_helios::runtime_package::rank_ranges(&authorized, rank))
+            .collect::<flare_helios::Result<Vec<_>>>()?;
         let phase = progress.phase("Start peer ranks", None);
         let peers = launch::start(
             &args.hosts,
@@ -135,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &rank_options,
             &token,
             &publisher,
-            shares.as_deref(),
+            &shares,
         )
         .map_err(|e| e.to_string())?;
         phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));
