@@ -164,7 +164,7 @@ def _prepare(args, *, export_path) -> int:
                 from ignition.preparation.package_storage import PackageStorage
 
                 torch.cuda.set_device(0)
-                storage = PackageStorage(world=plan.world_size)
+                storage = PackageStorage(world=plan.world_size, unified_memory=any(gpu.unified for gpu in plan.gpus))
                 preparation_options["package_storage"] = storage
                 with storage:
                     prepared = model.recipe.prepare(

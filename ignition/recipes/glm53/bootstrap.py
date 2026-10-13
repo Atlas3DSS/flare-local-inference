@@ -59,6 +59,8 @@ class PreparationConfig:
     minimum_pages: int | None = None
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
+    # The GPUs allocate from system memory: transient preparation work keeps the headroom free too.
+    unified_memory: bool = False
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
@@ -210,7 +212,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "glm5next.graph-inputs.v2"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
-            numerical_policy="default", coordinator=coordinator)
+            numerical_policy="default", coordinator=coordinator,
+            protected_bytes=config.headroom_bytes if config.unified_memory else None)
         session.__enter__()
         register_benchmark_state(session, pool.decoder.layers[0].recurrent,
             storage=pool.backing, restore=pool.clear_for_preparation)

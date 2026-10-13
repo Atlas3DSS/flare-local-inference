@@ -28,11 +28,14 @@ class PackageStorage:
     DEVICE_BASE = 0x200000000000
     HOST_BASE = 0x100000000000
     RESERVATION_BYTES = 1 << 40
+    # Lowest address of device storage that libraries allocate outside the package on a unified-memory GPU.
+    EXTERNAL_FLOOR = 0x400000000
 
-    def __init__(self, *, rank=0, world=1, device=0):
+    def __init__(self, *, rank=0, world=1, device=0, unified_memory=False):
         import torch
 
         self.rank, self.world, self.device = rank, world, device
+        self.unified_memory = unified_memory
         self.DEVICE_BASE += rank * self.RESERVATION_BYTES
         self.HOST_BASE += rank * self.RESERVATION_BYTES
         self.cuda = _Cuda()
@@ -51,6 +54,7 @@ class PackageStorage:
         if self.library.flare_package_initialize(rank, world, device):
             raise self.error or RuntimeError("cannot initialize native package allocator")
         self.granularity = self._snapshot()["granularity"]
+        self.low_window = self._reserve_low_window() if unified_memory else None
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
         self._allocator = allocator
@@ -63,6 +67,32 @@ class PackageStorage:
             from .peer_storage import PeerStorage
 
             self.peer_storage = PeerStorage(self)
+
+    def _reserve_low_window(self):
+        """Keep library allocations outside the package above the addresses a serving context occupies.
+
+        A unified-memory GPU such as GB10 places a context's own storage at low device addresses,
+        and ordinary allocations such as cuBLAS's directly after it. That storage's extent differs
+        between processes, so a serving process could not reserve the addresses those allocations
+        had here. Reserving the window up to EXTERNAL_FLOOR moves them above it.
+        """
+        probe = C.c_uint64()
+        self.cuda.call("cuMemAlloc_v2", C.byref(probe), C.c_size_t(self.granularity))
+        first = probe.value
+        self.cuda.call("cuMemFree_v2", probe)
+        if first >= self.EXTERNAL_FLOOR:
+            return None
+        window = C.c_uint64()
+        size = self.EXTERNAL_FLOOR - first
+        self.cuda.call("cuMemAddressReserve", C.byref(window), C.c_size_t(size), C.c_size_t(self.granularity),
+                       C.c_uint64(first), C.c_uint64(0))
+        self.cuda.call("cuMemAlloc_v2", C.byref(probe), C.c_size_t(self.granularity))
+        above = probe.value
+        self.cuda.call("cuMemFree_v2", probe)
+        if above < self.EXTERNAL_FLOOR:
+            self.cuda.call("cuMemAddressFree", C.c_uint64(window.value), C.c_size_t(size))
+            raise RuntimeError(f"device allocations still start at {above:#x} below {self.EXTERNAL_FLOOR:#x}")
+        return window.value, size
 
     def _snapshot(self):
         pointer = self.library.flare_package_snapshot()
@@ -125,7 +155,8 @@ class PackageStorage:
         extent = -(-size // mmap.PAGESIZE) * mmap.PAGESIZE
         if self._host_cursor + extent > self.HOST_BASE + self.RESERVATION_BYTES:
             raise MemoryError("native package host-address range exhausted")
-        region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype, self.device)
+        region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype, self.device,
+                            lock=self.unified_memory)
         self._host_cursor += extent
         self.host_regions.append(region)
         return region
@@ -177,7 +208,9 @@ class PackageStorage:
 class HostRegion:
     """Registered storage with identical CPU and device addresses."""
 
-    def __init__(self, cuda, address, extent, shape, dtype, device):
+    def __init__(self, cuda, address, extent, shape, dtype, device, *, lock=False):
+        """`lock`, for a unified-memory GPU, keeps the region resident: registering host memory there
+        does not pin it, and a swapped-out page turns each GPU access into a fault."""
         import torch
         from b12x.sequence._shared.disk_table import _tensor_from_pointer
 
@@ -191,6 +224,8 @@ class HostRegion:
         if pointer != address:
             raise OSError(C.get_errno(), f"cannot reserve native package host address {address:#x}")
         try:
+            if lock and self.libc.mlock(C.c_void_p(address), C.c_size_t(extent)):
+                raise OSError(C.get_errno(), f"cannot lock {extent} bytes of mapped host storage; raise RLIMIT_MEMLOCK")
             cuda.call("cuMemHostRegister_v2", C.c_void_p(address), C.c_size_t(extent), C.c_uint(2))
         except BaseException:
             self.libc.munmap(C.c_void_p(address), C.c_size_t(extent))

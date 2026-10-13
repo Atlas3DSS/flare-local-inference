@@ -312,6 +312,7 @@ impl NativeModel {
                     crate::engram::Storage::Ram => "RAM",
                 });
             }
+            archive.release_page_cache();
             model.allocate_caches(&mut packages, progress, active)?;
             model.grant_peer_access(&descriptor.peer_memory)?;
             model.prepare_offload(root, options, progress)?;

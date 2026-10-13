@@ -13,6 +13,11 @@ use crate::{
 // Graphs are uploaded before sizing caches; leave room for driver bookkeeping
 // and the execution streams and events created when the server starts.
 const HEADROOM_BYTES: u64 = 64 << 20;
+// A GPU that allocates from system memory (GB10) shares it with the operating system and with
+// the server's host allocations made after sizing: frontend workers, tokenizers and request
+// buffers took about 1.4 GiB on a DGX Spark. Caches leave room for both beyond the reserve.
+const INTEGRATED_HOST_BYTES: u64 = 2 << 30;
+const INTEGRATED_SYSTEM_SHARE: u64 = 20;
 
 fn shared_available(meminfo: &str, total: usize) -> Result<usize> {
     let available = meminfo.lines().find_map(|line| {
@@ -29,6 +34,21 @@ fn shared_available(meminfo: &str, total: usize) -> Result<usize> {
 }
 
 impl NativeResources {
+    /// Memory the driver reports in total for the rank's device: on an integrated GPU, the
+    /// system's memory.
+    pub(super) unsafe fn total_memory(&self) -> Result<usize> {
+        let (mut free, mut total) = (0, 0);
+        unsafe {
+            self.driver
+                .check("cuCtxSetCurrent", (self.driver.context_set)(self.context))?;
+            self.driver.check(
+                "cuMemGetInfo_v2",
+                (self.driver.memory_info)(&mut free, &mut total),
+            )?;
+        }
+        Ok(total)
+    }
+
     pub(super) unsafe fn available_memory(&self) -> Result<usize> {
         let (mut free, mut total, mut integrated) = (0, 0, 0);
         unsafe {
@@ -65,6 +85,17 @@ fn headroom(config: &serde_json::Value) -> Result<u64> {
     reserve
         .checked_add(HEADROOM_BYTES)
         .ok_or_else(|| invalid("memory reserve overflows the device budget"))
+}
+
+/// Memory caches may use on one rank: free memory less the headroom, and on an integrated GPU
+/// also the server's later host allocations and a twentieth of memory for the system.
+fn budget(free: u64, total: u64, headroom: u64, integrated: bool) -> u64 {
+    let host = if integrated {
+        INTEGRATED_HOST_BYTES + total / INTEGRATED_SYSTEM_SHARE
+    } else {
+        0
+    };
+    free.saturating_sub(headroom.saturating_add(host))
 }
 
 fn bytes(package: &Package, capacity: i32, units: u64) -> Result<u64> {
@@ -202,8 +233,17 @@ impl NativeModel {
             .unwrap_or(1);
         let mut available = Vec::new();
         for rank in &self.ranks {
-            let free = unsafe { rank.available_memory()? };
-            available.push((free as u64).saturating_sub(reserve));
+            let (free, total) = unsafe {
+                (
+                    rank.available_memory()? as u64,
+                    if rank.integrated {
+                        rank.total_memory()? as u64
+                    } else {
+                        0
+                    },
+                )
+            };
+            available.push(budget(free, total, reserve, rank.integrated));
         }
         let (rows, pages, snapshots) =
             capacities(packages, &available, active as u64, width, page_tokens)?;
@@ -358,6 +398,16 @@ mod tests {
         ] {
             assert!(headroom(&serde_json::json!({"reserve_bytes": reserve})).is_err());
         }
+    }
+
+    #[test]
+    fn integrated_gpus_keep_host_memory_for_the_server_beyond_the_reserve() {
+        let gib = 1u64 << 30;
+        assert_eq!(budget(40 * gib, 120 * gib, 5 * gib, false), 35 * gib);
+        // Two GiB for the server and a twentieth of memory for the system.
+        assert_eq!(budget(40 * gib, 120 * gib, 5 * gib, true), 27 * gib);
+        assert_eq!(budget(40 * gib, 120 * gib, 0, true), 32 * gib);
+        assert_eq!(budget(6 * gib, 120 * gib, 0, true), 0);
     }
 
     fn package(row_bytes: u64, page_bytes: u64, maximum_pages: u64) -> Package {

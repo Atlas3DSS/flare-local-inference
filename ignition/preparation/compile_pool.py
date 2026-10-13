@@ -2,6 +2,9 @@
 
 import os
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from multiprocessing import get_context
 from pathlib import Path
 
 import torch
@@ -35,9 +38,32 @@ def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
         temporary.unlink(missing_ok=True)
 
 
+@contextmanager
+def single_process_compilation():
+    """Generate code without Inductor's subprocesses, restoring the shared compile options afterwards."""
+    from torch._inductor import config
+
+    saved = dict(_OPTIONS)
+    try:
+        with config.patch(compile_threads=1):
+            yield
+    finally:
+        _OPTIONS.clear()
+        _OPTIONS.update(saved)
+
+
 class CompilePool:
-    def __init__(self, device):
+    def __init__(self, device, *, unified_memory=False):
+        """On a unified-memory GPU, compiler processes take the memory the system keeps, and a compiler
+        keeps what it allocates until it exits. There, one compiler at a time compiles one forward and
+        exits, generating code without subprocesses."""
         self.device = torch.device(device)
+        self.pool = None
+        self.unified_memory = unified_memory
+        if unified_memory:
+            self.workers = 1
+            self.options = dict(_OPTIONS, compile_threads=1)
+            return
         budget = max(1, _OPTIONS['compile_threads'])
         # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
         free = device_memory_info(self.device)[0]
@@ -45,15 +71,19 @@ class CompilePool:
         self.workers = worker_limit(max(1, min(8, budget, free // _WORKER_DEVICE_BYTES)),
                                    device_bytes=_WORKER_DEVICE_BYTES if shared else 0)
         self.options = dict(_OPTIONS, compile_threads=max(1, budget // self.workers))
-        self.pool = None
 
     def submit(self, forward, path):
-        from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool
         from .forward_metadata import dumps
 
         payload = dumps(forward)
         if self.pool is None:
-            self.pool = SubprocPool(self.workers, kind=SubprocKind.SPAWN)
+            if self.unified_memory:
+                self.pool = ProcessPoolExecutor(max_workers=1, mp_context=get_context('spawn'),
+                                                max_tasks_per_child=1)
+            else:
+                from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool
+
+                self.pool = SubprocPool(self.workers, kind=SubprocKind.SPAWN)
         return self.pool.submit(_compile_forward, payload, self.device, self.options, str(path),
                                 torch.get_num_threads(), torch.is_grad_enabled())
 

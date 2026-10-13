@@ -139,6 +139,25 @@ def test_packed_payload_elides_zero_blocks_without_changing_contents(tmp_path, n
     assert rebuilt == source
 
 
+def test_payload_writes_leave_the_page_cache_as_they_go(tmp_path, monkeypatch):
+    from ignition.preparation import runtime_package
+
+    synced, dropped = [], []
+    monkeypatch.setattr(runtime_package, "_WRITE_BACK_BYTES", 16 << 20)
+    monkeypatch.setattr(runtime_package.os, "fdatasync", lambda fd: synced.append(fd))
+    monkeypatch.setattr(runtime_package.os, "posix_fadvise",
+                        lambda fd, offset, length, advice: dropped.append((offset, length, advice)))
+
+    class Cuda:
+        def download(self, address, nbytes):
+            return bytes([5]) * nbytes
+    file = tmp_path / "weights.bin"
+    _, spans = _write_allocation(Cuda(), Allocation("weights", 0x1000, 40 << 20), file)
+    # Written back after 16 and 32 MiB and at the end, each time dropped from the page cache.
+    assert spans == [[0, 40 << 20]] and file.stat().st_size == 40 << 20
+    assert len(synced) == 3 and dropped == [(0, 0, os.POSIX_FADV_DONTNEED)] * 3
+
+
 def test_declared_zero_ranges_are_not_downloaded(tmp_path):
     class Cuda:
         def download(self, address, nbytes):

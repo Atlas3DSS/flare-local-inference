@@ -2,7 +2,6 @@
 
 from types import MappingProxyType
 
-from ignition.planning import HEADROOM_BYTES
 from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, Speculation
 
 # Each sparse-attention layer stores four latent blocks and one index block per
@@ -41,7 +40,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         max_active=plan.concurrency, context_parallel=plan.context_parallel,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
+        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
+        unified_memory=any(gpu.unified for gpu in plan.gpus),
         mtp=speculation is not None, **drafting)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 

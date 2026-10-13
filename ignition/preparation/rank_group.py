@@ -47,7 +47,8 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             recorder = ModuleImages()
             with recorder:
                 torch.cuda.set_device(config.devices[rank])
-                storage = PackageStorage(rank=rank, world=len(config.devices), device=config.devices[rank])
+                storage = PackageStorage(rank=rank, world=len(config.devices), device=config.devices[rank],
+                                         unified_memory=config.unified_memory)
                 with storage:
                     model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, package_storage=storage)
         else:

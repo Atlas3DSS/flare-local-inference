@@ -23,7 +23,8 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     """
     graphs, compiled = {}, {}
     if compile_decoder:
-        cache = ForwardCache(namespace=session.namespace.to_dict(), device=device, root=cache_root)
+        cache = ForwardCache(namespace=session.namespace.to_dict(), device=device, root=cache_root,
+                             unified_memory=getattr(session, "protected_bytes", None) is not None)
         forwards = {name: function for name, function in functions.items()
                     if signatures[name].kind in ("prefill", "decode", "resume", "speculative")}
         stream.wait_stream(torch.cuda.current_stream(device))

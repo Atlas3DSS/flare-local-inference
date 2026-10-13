@@ -2,7 +2,6 @@
 
 from types import MappingProxyType
 
-from ignition.planning import HEADROOM_BYTES
 from ignition.preparation.qwen38 import ARCHITECTURE, MODEL_ID, REVISION
 from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, Speculation
 
@@ -36,7 +35,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         max_active=plan.concurrency,
         context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
+        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
+        unified_memory=any(gpu.unified for gpu in plan.gpus),
         mtp=speculation is not None, **drafting)
     if plan.world_size == 1:
         storage = {} if package_storage is None else {"package_storage": package_storage}
