@@ -1062,7 +1062,9 @@ GIB = 1 << 30
 
 
 @pytest.mark.parametrize(("free_gib", "race_bytes", "workers"), [
-    (16, 7 * GIB // 4, 2), (12, 3 * GIB // 4, 1), (10, GIB // 4, 0)])
+    # One compiler process runs even without room for one: compiling in the tuning
+    # process would keep its programs through serving.
+    (16, 7 * GIB // 4, 2), (12, 3 * GIB // 4, 1), (10, GIB // 4, 1)])
 def test_integrated_tuning_automatically_budgets_shared_ram(backend, monkeypatch, free_gib, race_bytes, workers):
     events, _ = backend
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))

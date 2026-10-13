@@ -17,6 +17,12 @@ from .scratch import ScratchArena
 from .host_memory import tuning_limits
 
 
+# Requests per tuning job on an integrated GPU: collective declarations with a coordinator,
+# otherwise all requests. Each job's compiler processes then stay within about a gigabyte.
+_COLLECTIVES_PER_JOB = 96
+_REQUESTS_PER_JOB = 192
+
+
 class RecordedPreparationSession(PreparationSession):
     """Retain declarations, tune them together, and refresh selected bindings.
 
@@ -73,6 +79,50 @@ class RecordedPreparationSession(PreparationSession):
         if any(request.retain_benchmark_call for request in requests):
             raise ValueError("serving preparation cannot retain benchmark calls after tuning")
         self._recorded_requests.update(zip(names, requests))
+
+    @property
+    def _integrated(self):
+        import torch
+
+        return torch.cuda.get_device_properties(self.device.ordinal).is_integrated
+
+    def _jobs(self, requests):
+        """Split tuning into jobs on an integrated GPU, whose compiler processes share system memory.
+
+        b12x's compiler processes keep every program they compile, about 2.4 MB each, and
+        last for one job; across a catalog the size of GLM's they would exhaust GB10's memory.
+        Jobs keep dependency groups whole. With a coordinator, every job ends after the same
+        collective declarations on every rank, so ranks enter matching jobs together.
+        """
+        if not self._integrated:
+            return (requests,)
+        names = {request.name: index for index, request in enumerate(requests)}
+        parent = list(range(len(requests)))
+
+        def root(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        for index, request in enumerate(requests):
+            for dependency in request.dependencies:
+                parent[root(names[dependency])] = root(index)
+        collective = self._coordinator is not None
+        total = sum(request.collective is not None for request in requests) if collective else len(requests)
+        per_job = _COLLECTIVES_PER_JOB if collective else _REQUESTS_PER_JOB
+        last = max(0, (total - 1) // per_job)
+        counted, chunk = 0, []
+        for request in requests:
+            chunk.append(min(last, counted // per_job))
+            counted += not collective or request.collective is not None
+        group_chunk = {}
+        for index in range(len(requests)):
+            group_chunk[root(index)] = max(group_chunk.get(root(index), 0), chunk[index])
+        jobs = [[] for _ in range(last + 1)]
+        for index, request in enumerate(requests):
+            jobs[group_chunk[root(index)]].append(request)
+        return tuple(tuple(job) for job in jobs if job)
 
     def _prepare_job(self, requests, *, progress, autotune):
         if self._coordinator is None or not any(request.collective is not None for request in requests):
@@ -183,6 +233,10 @@ class RecordedPreparationSession(PreparationSession):
             pools = 1 if self._coordinator is None else len(self._coordinator.ranks)
             bounded, self.race_budget = tuning_limits(self.device.ordinal, self.compile_workers,
                 pools=pools, headroom_bytes=self.headroom_bytes, race_budget=self.race_budget)
+            if self._integrated and self.compile_workers:
+                # Compiling in this process would keep every program it compiles through serving;
+                # one compiler process returns its memory at the end of each tuning job.
+                bounded = max(1, bounded)
             if bounded < self.compile_workers:
                 self.configure_compile_workers(bounded)
             with ExitStack() as display_stack:
@@ -196,7 +250,8 @@ class RecordedPreparationSession(PreparationSession):
                         if progress is not None:
                             progress(status)
 
-                results.append(self._prepare_job(requests, progress=update, autotune=True))
+                for job in self._jobs(requests):
+                    results.append(self._prepare_job(job, progress=update, autotune=True))
             if self._stop.is_set():
                 raise RuntimeError("b12x tuning was cancelled before serving preparation completed")
             selections = []
@@ -273,7 +328,7 @@ class RecordedPreparationSession(PreparationSession):
             finally:
                 result = None
                 results.clear()
-                requests = ()
+                requests = job = ()
                 request = None
                 callback = None
                 self._benchmark_resources.clear()
