@@ -19,9 +19,11 @@ def _costs(state_row_bytes, page_layer_bytes, graph_bytes, *, speculating):
                      draft_page_bytes=page_layer_bytes if speculating else 0)
 
 
-def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False, package_storage=None):
+def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False, package_storage=None,
+            ranks=None):
     """Prepare the plan's catalog and speculation settings on process-local GPUs 0 through N-1.
 
+    With `ranks`, rank zero's multi-host rendezvous, each rank uses its own host's GPU 0.
     Preparation backs a bounded KV working set; Helios sizes the serving cache.
     """
     from .bootstrap import PreparationConfig, prepare_model, prepare_rank
@@ -31,7 +33,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width,
         "speculative_proposal_source": speculation.proposal_source, "history_drafts": speculation.history_drafts}
     config = PreparationConfig(
-        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards, retain_graphs=retain_graphs,
+        devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
+        hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
         max_active=plan.concurrency,
         context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
@@ -43,7 +46,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
                              **storage)
     from ignition.preparation.rank_group import prepare_group
 
-    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
+    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage,
+                         ranks=ranks, checkpoint=plan.checkpoint)
 
 
 def usage(prepared):

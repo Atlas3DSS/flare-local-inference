@@ -1,12 +1,13 @@
 # Serving one model across DGX Sparks
 
-A model too large for one GB10 runs tensor-parallel across two or four DGX Sparks,
-one rank per host. GLM-5.3 Flash serves this way. The ranks reduce and gather
-through RoCEnante, b12x's RoCE collectives over the Sparks' ConnectX-7 ports,
-whose kernels are part of every captured graph; no NCCL is involved. Preparation
-runs once, across all hosts, and writes one package on rank zero. Serving starts
-on rank zero alone: Flare sends the package and its own executable to each peer
-host's agent where missing, starts the peer ranks, and serves HTTP.
+A model too large for one GB10 runs tensor-parallel across two or four DGX
+Sparks, one rank per host. GLM-5.3 Flash and Qwen3.8 Flash serve this way. The
+ranks reduce and gather through RoCEnante, b12x's RoCE collectives over the
+Sparks' ConnectX-7 ports, whose kernels are part of every captured graph; no
+NCCL is involved. Preparation runs once, across all hosts, and writes one
+package on rank zero. Serving starts on rank zero alone: Flare sends the package
+and its own executable to each peer host's agent where missing, starts the peer
+ranks, and serves HTTP.
 
 ## Requirements
 

@@ -74,3 +74,12 @@ def test_fixed_serving_default_does_not_remove_capture_variants(drafts):
     assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in range(8, 0, -1))
     for batch, width in config.speculative_shapes:
         GraphSignature("speculative", batch, width)
+
+
+def test_ranks_on_separate_hosts_may_share_a_local_device_ordinal():
+    config = PreparationConfig(devices=(0, 0), hosts=("boot-a", "boot-b"))
+    assert config.devices == (0, 0) and config.hosts == ("boot-a", "boot-b")
+    for devices, hosts in (((0, 0), None), ((0, 0), ("boot-a", "boot-a")), ((0, 0), ("boot-a",)),
+                           ((0, 0), ["boot-a", "boot-b"]), (None, ("boot-a",))):
+        with pytest.raises(ValueError):
+            PreparationConfig(devices=devices, hosts=hosts)

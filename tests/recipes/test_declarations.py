@@ -3,6 +3,7 @@
 import math
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -181,18 +182,26 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, *, progress, package_storage=None, ranks=None, checkpoint=None:
-                        seen.append((config, prepare)) or "group")
+                        seen.append((config, prepare, ranks, checkpoint)) or "group")
     from ignition.recipes.glm53 import bootstrap as glm
     from ignition.recipes.qwen38 import bootstrap as qwen
 
     plan = fitted(QWEN, 2)
     assert QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None) == "group"
-    config, prepare = seen.pop()
+    config, prepare, ranks, _ = seen.pop()
     assert prepare is qwen.prepare_rank and config.devices == (0, 1) and config.pages is None
+    assert config.hosts is None and ranks is None
+
+    # Across hosts, each rank prepares on its own host's GPU 0 through rank zero's rendezvous.
+    rendezvous = SimpleNamespace(hosts=("boot-a", "boot-b"))
+    QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None, ranks=rendezvous)
+    config, prepare, ranks, checkpoint = seen.pop()
+    assert config.devices == (0, 0) and config.hosts == ("boot-a", "boot-b")
+    assert ranks is rendezvous and checkpoint == plan.checkpoint
 
     plan = fitted(GLM, 4, concurrency=2, prefill_chunk=2048)
     assert GLM.recipe.prepare(tmp_path, plan, compile_forwards=False, kernel_cache=tmp_path, progress=None) == "group"
-    config, prepare = seen.pop()
+    config, prepare, _, _ = seen.pop()
     assert prepare is glm.prepare_rank and config.devices == (0, 1, 2, 3)
     # Like Qwen, GLM pages fill the memory measured after graph capture, at least the plan's minimum.
     assert (config.max_active, config.pages, config.minimum_pages, config.context) == (
@@ -204,10 +213,10 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
 
     plan = fitted(GLM, 4, speculation=Speculation(2, adaptive=False, ))
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
-    config, _ = seen.pop()
+    config, *_ = seen.pop()
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
 
     plan = fitted(GLM, 4, speculation=None)
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
-    config, _ = seen.pop()
+    config, *_ = seen.pop()
     assert config.mtp is False and config.page_capacity == plan.minimum_pages

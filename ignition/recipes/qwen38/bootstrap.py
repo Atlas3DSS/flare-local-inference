@@ -11,7 +11,12 @@ from pathlib import Path
 import torch
 
 from ignition.components.parallel import TensorParallelShard
-from ignition.preparation.collectives import CollectivePreparation, create_all_reduce_runtime, create_all_gather_runtime
+from ignition.preparation.collectives import (
+    CollectivePreparation,
+    create_all_gather_runtime,
+    create_all_reduce_runtime,
+    create_roce_runtime,
+)
 from ignition.components.capacity import batch_capacities, request_capacity
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation import inspect_qwen38_checkpoint
@@ -49,6 +54,8 @@ from .vision import PreparedVision, VisionScratch
 class PreparationConfig:
     device: int = 0
     devices: tuple[int, ...] | None = None
+    # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
+    hosts: tuple[str, ...] | None = None
     compile_decoder: bool = True
     retain_graphs: bool = False
     max_active: int = 4
@@ -67,9 +74,12 @@ class PreparationConfig:
     def __post_init__(self):
         if self.devices is not None and (
                 not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
-                or len(set(self.devices)) != len(self.devices)
+                or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != len(self.devices))
+                or len(set(zip(self.hosts or ("",) * len(self.devices), self.devices))) != len(self.devices)
                 or any(type(device) is not int or device < 0 for device in self.devices)):
             raise ValueError("tensor parallelism requires one, two or four distinct CUDA devices")
+        if self.hosts is not None and self.devices is None:
+            raise ValueError("ranks on separate hosts require their devices")
         request_capacity(self.max_active)
         for name in ("device", "context", "prefill_chunk_size", "snapshot_budget_bytes", "headroom_bytes"):
             if type(getattr(self, name)) is not int:
@@ -175,6 +185,10 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     if package_storage is not None:
         transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, progress=progress, shard=shard)
+    if torch.cuda.get_device_properties(device).is_integrated:
+        from ignition.preparation.host_memory import release_page_cache
+
+        release_page_cache(manifest.shard_paths)
     mtp_weights = None
     has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
     if has_mtp:
@@ -188,8 +202,16 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     sample_rows = max(batch * width for batch, width in config.speculative_shapes) if config.mtp else config.request_capacity
     coordinator = CollectivePreparation(group) if group is not None else None
     ipc = None if package_storage is None else package_storage.peer_storage
-    collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560, ipc=ipc) if group is not None else None
-    vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc) if group is not None else None
+    collective = vocabulary_collective = None
+    if coordinator is not None and coordinator.spans_hosts:
+        # Ranks on separate Sparks reduce and gather through one RoCEnante runtime: decode rows
+        # one-shot, prefill chunks through the pipelined two-shot path.
+        collective = vocabulary_collective = create_roce_runtime(group, device,
+            max_tokens=max(config.request_capacity, sample_rows), pipe_tokens=config.token_capacity, hidden_size=2560,
+            gather_bytes=sample_rows * (248320 // shard.world_size) * 2, package_storage=package_storage)
+    elif group is not None:
+        collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560, ipc=ipc)
+        vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc)
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
@@ -446,7 +468,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             vision_scratch=vision_scratch, decoders=decoders, owners=owners, speculation=speculation)
         return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
             export_zero_ranges=(*export_zero_ranges, *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
-            export_events=table.events(), package_data=table,
+            export_events=table.events(), package_data=table if rank == 0 else None,
             resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
     except BaseException:
         torch.cuda.synchronize(device)
