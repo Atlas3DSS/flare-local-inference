@@ -112,7 +112,10 @@ class CollectivePreparation:
         records = [cache.records if dist.get_rank() == self.ranks[0] else None]
         dist.broadcast_object_list(records, src=self.ranks[0], group=self.group)
         if dist.get_rank() != self.ranks[0]:
-            cache.records = dict(records[0])
+            # The session's agreed records, which b12x's own cross-rank reconciliation sets, take
+            # precedence over the rank's file. Saving a newly tuned key reloads that file, so
+            # replacing only the loaded records would restore the rank's own choices.
+            cache._agreed_records = dict(records[0])
 
     def agree_selections(self, selections):
         """Fail before compilation when ranks selected different kernels for the same request."""

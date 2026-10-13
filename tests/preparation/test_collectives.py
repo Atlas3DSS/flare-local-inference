@@ -138,12 +138,12 @@ def test_reports_ranks_on_this_host_and_whether_the_group_spans_hosts(monkeypatc
 
 def test_peers_adopt_rank_zero_selections_and_disagreement_fails(monkeypatch):
     owner = coordinator(monkeypatch)
-    cache = SimpleNamespace(records={"key": "peer"})
+    cache = SimpleNamespace(records={"key": "peer"}, _agreed_records=None)
     monkeypatch.setattr(dist, "get_rank", lambda: 7)
     monkeypatch.setattr(dist, "broadcast_object_list",
                         lambda values, *, src, group: values.__setitem__(0, {"key": "zero"}))
     owner.share_selections(cache)
-    assert cache.records == {"key": "zero"}
+    assert cache._agreed_records == {"key": "zero"} and cache.records == {"key": "peer"}
 
     def selection(config):
         return [{"name": "layer0.mlp", "component": "gemm", "config": config}]

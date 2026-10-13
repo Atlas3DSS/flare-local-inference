@@ -166,6 +166,10 @@ def _expanded_bmm_weight(weight):
     return expanded
 
 
+# Rows b12x's BF16-by-MXFP8 BMM covers in one launch.
+_BMM_ROWS = 4096
+
+
 class BatchedQuantizedProjection:
     """Prepared BF16-by-rowwise-MXFP8 BMM over caller-owned strided tensors.
 
@@ -193,10 +197,18 @@ class BatchedQuantizedProjection:
             if self.expanded.shape != (source.shape[0], source.shape[2], output.shape[2]):
                 raise ValueError("batched projection weights must match the source and output widths")
             return
-        self.plan = gemm.plan_bmm(BmmQuery(batch=source.shape[0], max_rows=source.shape[1],
-            in_features=source.shape[2], out_features=output.shape[2], b_major=major, sf_axis=major))
-        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
-            run=lambda: state.run(source, weight, output, b_major=major, sf_axis=major))),))
+        # b12x's kernel covers at most _BMM_ROWS rows; longer prefill chunks run in row slices.
+        rows = source.shape[1]
+        self.slices = tuple((start, min(rows, start + _BMM_ROWS)) for start in range(0, rows, _BMM_ROWS))
+        self.plans = []
+        for start, end in self.slices:
+            plan = gemm.plan_bmm(BmmQuery(batch=source.shape[0], max_rows=end - start,
+                in_features=source.shape[2], out_features=output.shape[2], b_major=major, sf_axis=major))
+            rows_in, rows_out = source[:, start:end], output[:, start:end]
+            declare(session, (plan.request(name=name if len(self.slices) == 1 else f"{name}.rows{start}",
+                prepare_call=lambda state, rows_in=rows_in, rows_out=rows_out: PreparedCall(
+                    run=lambda: state.run(rows_in, weight, rows_out, b_major=major, sf_axis=major))),))
+            self.plans.append(plan)
 
     def __call__(self, source):
         from b12x import gemm
@@ -204,9 +216,11 @@ class BatchedQuantizedProjection:
         if self.expanded is not None:
             torch.ops.flare.sm103_bmm_out(source, self.expanded, self.output)
             return self.output
-        return gemm.bmm(source, self.weight, self.output, plan=self.plan,
-            a_dtype="bfloat16", b_dtype="float8_e4m3fn", sf_dtype="float8_e8m0fnu",
-            c_dtype="bfloat16", sf_vec_size=32, b_major=self.major, sf_axis=self.major)
+        for (start, end), plan in zip(self.slices, self.plans, strict=True):
+            gemm.bmm(source[:, start:end], self.weight, self.output[:, start:end], plan=plan,
+                a_dtype="bfloat16", b_dtype="float8_e4m3fn", sf_dtype="float8_e8m0fnu",
+                c_dtype="bfloat16", sf_vec_size=32, b_major=self.major, sf_axis=self.major)
+        return self.output
 
 
 # cuBLAS writes strided-batched results straight into the caller's per-head views; traced copies would
