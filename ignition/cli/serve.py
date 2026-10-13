@@ -398,7 +398,6 @@ def join(args) -> int:
     import time
 
     from ignition.preparation.host_ranks import knock, local_topology, serve_peer, source_identity
-    from ignition.recipes import resolve
 
     started = time.monotonic()
 
@@ -414,12 +413,5 @@ def join(args) -> int:
     environment.apply(configuration, (gpu,))
     control, executor = knock(args.rendezvous, args.rank, args.ranks, identity=source_identity(),
                               topology=local_topology(gpu), report=progress)
-
-    def resolve_snapshot(checkpoint):
-        model = resolve(checkpoint.alias, hub_cache)
-        if model.checkpoint.revision != checkpoint.revision or not model.cached(hub_cache):
-            raise UsageError(f"{checkpoint.repository} at {checkpoint.revision[:8]} is not cached on this host")
-        return model.snapshot(hub_cache)
-
-    serve_peer(control, executor, args.rank, args.ranks, resolve_snapshot=resolve_snapshot, progress=progress)
+    serve_peer(control, executor, args.rank, args.ranks, hub_cache=hub_cache, progress=progress)
     return 0

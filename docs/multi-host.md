@@ -16,8 +16,9 @@ ranks, and serves HTTP.
 - Each host's RoCE ports up, with an IPv4 RoCEv2 GID at index 3. RoCEnante uses
   every active RDMA device, at most two rails per peer. On a DGX Spark these are
   `rocep1s0f0` and `roceP2p1s0f0` for a cabled port 0.
-- The source checkpoint in each host's `[paths] hub_cache`; every rank prepares
-  its own shard.
+- The checkpoint in rank zero's `[paths] hub_cache`. Preparation sends each peer
+  the files its own `hub_cache` lacks, checking each against its content hash,
+  and the peer keeps them there; every rank prepares its own shard.
 - The same Flare, Ignition and FlashInfer sources on every host during
   preparation. Ranks with different sources refuse to join.
 - On rank zero, free disk for both rank staging and the signed package during
@@ -91,11 +92,14 @@ On each peer host, with ranks numbered 1 through N-1:
 .venv/bin/ignition join 10.200.0.12:29630 --rank 1 --ranks 2
 ```
 
-Rank zero admits each rank once and plans from every rank's GPU. All ranks
-prepare together. Rank zero compiles forwards and sends peers those they lack.
-Each peer then exports its rank and streams it over its connection to rank zero,
-which appends it to the package as it arrives. The package exists only on rank
-zero; it holds every rank and records the cluster's size and an export id.
+Rank zero admits each rank once and plans from every rank's GPU. It sends each
+peer the checkpoint files the peer lacks, all peers at once; the first
+preparation on a new peer copies the whole checkpoint, and later ones copy
+nothing. All ranks prepare together. Rank zero compiles forwards and sends peers
+those they lack. Each peer then exports its rank and streams it over its
+connection to rank zero, which appends it to the package as it arrives. The
+package exists only on rank zero; it holds every rank and records the cluster's
+size and an export id.
 
 ## Serve
 
@@ -140,6 +144,8 @@ Without an agent, start each peer's rank yourself with identical serving options
 - `agent token mismatch` or `cannot reach flare agent`: install the agent and
   the same token on that host, and open port 29900.
 - `rank zero refused rank R`: the peer runs a different export or world size.
+- `rank R cannot hold the checkpoint`: that peer lacks disk space for the
+  checkpoint files it was missing, or a file arrived damaged.
 - `tensor-parallel rank identity or graph I/O schema differs`: serving options
   differ between ranks.
 - `package RoCE kernels use proxy ABI ...`: the package was prepared with a
