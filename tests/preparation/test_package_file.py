@@ -185,3 +185,31 @@ def test_publication_failure_and_overwrite_leave_files_untouched(tmp_path):
     with pytest.raises(FileExistsError):
         publish(output, index(), [])
     assert output.read_bytes() == saved
+
+
+def test_multi_host_rank_file_records_its_cluster_and_transport(tmp_path):
+    from ignition.preparation.runtime_package import _roce_transport
+
+    source = tmp_path / "source"
+    source.write_bytes(b"weights")
+    description = index()
+    description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=7))
+    _roce_transport(description.ranks[0].roce, {
+        "proxy_abi": 6, "world_size": 2, "rank": 1,
+        "region": {"address": 0x100000000000, "nbytes": 1 << 20},
+        "counters": {"address": 0x200000001000, "nbytes": 1024},
+        "slot_bytes": 1 << 20, "pipe_bytes": 64 << 20, "ctrl_offset": 4 << 20,
+        "hca_names": ["rocep1s0f0", "roceP2p1s0f0"], "gid_index": 3, "traffic_class": 0, "rails": 2,
+        "routes": [[[0, 0], [1, 1]], []]})
+    rank = tmp_path / "rank.safetensors"
+    publish(rank, description, [(0, source, 0, 7)])
+    output = tmp_path / "model.safetensors"
+    combine(output, [rank], [], cluster=(2, 1, "export-a"))
+    result, _ = read_index(output)
+    assert (result.cluster.world, result.cluster.rank, result.cluster.export_id) == (2, 1, "export-a")
+    transport = result.ranks[0].roce
+    assert (transport.world, transport.rank, transport.rails, list(transport.hcas)) == (
+        2, 1, 2, ["rocep1s0f0", "roceP2p1s0f0"])
+    assert [[(l.local, l.remote) for l in route.links] for route in transport.routes] == [[(0, 0), (1, 1)], []]
+    with pytest.raises(ValueError, match="exactly one rank"):
+        combine(tmp_path / "two.safetensors", [rank, rank], [], cluster=(2, 0, "export-a"))

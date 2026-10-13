@@ -12,7 +12,7 @@ def host_identity():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, gather_bytes):
+def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, gather_bytes, package_storage=None):
     """Allocate RoCEnante for ranks on separate DGX Sparks: BF16 hidden reductions and logit gathers.
 
     One runtime serves every reduction and gather in rank-serial order. Reductions of up
@@ -20,6 +20,9 @@ def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, 
     sends its whole payload to every peer, which is fastest for decode rows. Longer
     reductions, up to `pipe_tokens` rows, run as a pipelined two-shot reduce-scatter and
     all-gather, which moves a ring's bytes for prefill chunks.
+
+    With `package_storage`, the pinned region is package host storage at a recorded address and
+    the runtime is registered for export, so a native rank can rebuild the transport over it.
     """
     from b12x.comm import roce
 
@@ -30,8 +33,15 @@ def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, 
     pipe_bytes = pipe_tokens * hidden_size * 2
     if nbytes % 16 or pipe_bytes % 16 or gather_bytes % 16:
         raise ValueError("RoCE capacities must occupy complete 16-byte packs")
-    return roce.AllReduce(exchange_group=group, device=device, max_size=nbytes, max_gather_bytes=gather_bytes,
-                          pipe_bytes=pipe_bytes)
+    import torch
+
+    region = None if package_storage is None else (
+        lambda size: package_storage.host_allocate("roce", (size,), torch.uint8).host_view)
+    runtime = roce.AllReduce(exchange_group=group, device=device, max_size=nbytes, max_gather_bytes=gather_bytes,
+                             pipe_bytes=pipe_bytes, region_allocator=region)
+    if package_storage is not None:
+        package_storage.transports.append(runtime)
+    return runtime
 
 def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
     """Allocate one b12x IPC channel for the largest BF16 hidden activation.

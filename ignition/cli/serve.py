@@ -108,7 +108,79 @@ def export(args) -> int:
         args.output = args.output.with_name(args.output.name + ".safetensors")
     if args.output.exists():
         raise UsageError(f"export destination already exists: {args.output}")
+    if args.ranks > 1:
+        return _export_hosts(args, export_path=args.output)
     return _prepare(args, export_path=args.output)
+
+
+def _export_hosts(args, *, export_path) -> int:
+    """Prepare rank zero here and one peer rank per other host; every host writes its own rank's file.
+
+    Each peer host runs `ignition join` for this rendezvous. Every rank exports to `export_path` on
+    its own host; `flare run FILE --rendezvous ADDR:PORT` then serves each rank's file on its host.
+    """
+    import uuid
+
+    from ignition.progress import phase
+    from ignition.preparation.host_ranks import HostRendezvous, local_topology, source_identity, topology_gpu
+
+    if args.rendezvous is None:
+        raise UsageError("--ranks greater than one requires --rendezvous ADDRESS:PORT for the peer hosts")
+    progress = _serving_progress(args.verbose)
+    configuration = Configuration.load(args.config)
+    hub_cache = configuration.directory("hub_cache")
+    model = resolve_model(configuration, args.model)
+    if not model.cached(hub_cache):
+        raise UsageError(f"{model.checkpoint.alias} is not cached; a single-host export downloads it")
+    concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
+                                                args.max_concurrency)
+    host = Host.discover()
+    selected = planning.parse_gpus(args.gpus or "0")
+    if len(selected) != 1 or selected[0] >= len(host.gpus):
+        raise UsageError("multi-host ranks each use one GPU; --gpus names this host's")
+    local = (host.gpus[selected[0]],)
+    rendezvous = HostRendezvous(args.rendezvous, args.ranks, identity=source_identity(),
+                                topology=local_topology(local[0]))
+    with phase(progress, "Wait for tensor-parallel hosts") as stage:
+        topologies = rendezvous.accept(report=stage.update)
+    gpus = tuple(topology_gpu(topology, index) for index, topology in enumerate(topologies))
+    plan = planning.plan(model.recipe, model.checkpoint, gpus, selected=tuple(range(len(gpus))),
+                         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
+                         speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                         context_parallel=False)
+    environment.apply(configuration, local)
+    options = _server_options(configuration, model, plan)
+    options.pop("api_key")
+    print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
+    import flare_heliopause
+
+    signals = flare_heliopause.CliSignals()
+    signals.__enter__()
+    try:
+        import torch
+
+        from ignition.preparation.module_images import ModuleImages
+        from ignition.preparation.package_storage import PackageStorage
+
+        recorder = ModuleImages()
+        with recorder:
+            torch.cuda.set_device(0)
+            storage = PackageStorage(world=plan.world_size)
+            with storage:
+                prepared = model.recipe.prepare(
+                    model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
+                    kernel_cache=configuration.directory("kernel_cache"), progress=progress,
+                    retain_graphs=True, package_storage=storage, ranks=rendezvous)
+        with prepared:
+            with phase(progress, "Export native packages") as stage:
+                prepared.export(export_path, options=options, export_id=uuid.uuid4().hex, images=recorder,
+                                storage=storage, progress=progress if args.verbose else None)
+                stage.update(f"{export_path} on each of {plan.world_size} hosts")
+        for region in storage.host_regions:
+            region.close()
+        return 0
+    finally:
+        signals.__exit__(None, None, None)
 
 
 def _prepare(args, *, export_path) -> int:

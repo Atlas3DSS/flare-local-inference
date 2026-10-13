@@ -32,11 +32,13 @@ def _parser() -> argparse.ArgumentParser:
         listening.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
         listening.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
     _preparation_arguments(serving)
-    hosts = serving.add_argument_group("multi-host tensor parallelism")
-    hosts.add_argument("--ranks", type=int, default=1, choices=(1, 2, 4), metavar="N",
-                       help="tensor-parallel ranks, one per host; this process is rank zero (default: 1)")
-    hosts.add_argument("--rendezvous", metavar="ADDR:PORT",
-                       help="IPv4 address and port on which rank zero admits its peers")
+    for spanning in (serving, exporting):
+        hosts = spanning.add_argument_group("multi-host tensor parallelism")
+        hosts.add_argument("--ranks", type=int, default=1, choices=(1, 2, 4), metavar="N",
+                           help="tensor-parallel ranks, one per host; this process is rank zero (default: 1);"
+                                " an export writes each host's own rank file at --output on that host")
+        hosts.add_argument("--rendezvous", metavar="ADDR:PORT",
+                           help="IPv4 address and port on which rank zero admits its peers")
     serving.add_argument("--prefix-cache-states", type=int, metavar="N",
                          help="advanced: cached request states kept resident for prefix reuse; fewer leave more"
                               " memory for KV pages (default: sized from free memory)")

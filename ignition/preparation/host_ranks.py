@@ -268,8 +268,11 @@ class HostRendezvous:
         else:
             reject(f"unknown rank channel {hello.get('channel')!r}")
 
-    def prepare(self, snapshot, config, prepare, *, checkpoint, progress=None):
-        """Prepare every rank before returning the root-owned group; any failure ends every rank."""
+    def prepare(self, snapshot, config, prepare, *, checkpoint, progress=None, package_storage=None):
+        """Prepare every rank before returning the root-owned group; any failure ends every rank.
+
+        With `package_storage`, every rank prepares into its own package storage for export.
+        """
         import torch.distributed as dist
 
         from ignition.progress import phase
@@ -285,12 +288,13 @@ class HostRendezvous:
                 self.store = dist.TCPStore(self.address[0], 0, self.world, True, timeout=_PREPARATION_TIMEOUT,
                                            wait_for_workers=False)
                 assignment = {"store": (self.address[0], self.store.port), "checkpoint": checkpoint,
-                              "config": config, "prepare": prepare}
+                              "config": config, "prepare": prepare, "packaged": package_storage is not None}
                 for control in controls:
                     send_object(control, assignment)
                 dist.init_process_group("gloo", store=self.store, rank=0, world_size=self.world,
                                         timeout=_PREPARATION_TIMEOUT)
-            model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress)
+            model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress,
+                            **({} if package_storage is None else {"package_storage": package_storage}))
             model.manifest()
             with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
                 reports = []
@@ -351,6 +355,22 @@ class HostRankGroup:
 
     def manifest(self):
         return self.model.manifest()
+
+    def export(self, path, *, options, export_id, images, storage, progress=None):
+        """Write every rank's own package file on its host: rank zero's here, each peer's at `path` on its host."""
+        from .model_package import export_rank_package
+
+        if self._started or self._closed:
+            raise RuntimeError("prepared rank group has already been consumed or closed")
+        world = self.rendezvous.world
+        for rank, control in enumerate(self.controls, 1):
+            send_object(control, ("export", str(path), options, (world, rank, export_id)))
+        export_rank_package(self.model, images, storage, path, options=options, cluster=(world, 0, export_id),
+                            progress=progress)
+        for rank, control in enumerate(self.controls, 1):
+            reply = receive_object(control)
+            if "exported" not in reply:
+                raise RuntimeError(f"rank {rank} export failed: {reply}")
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:
@@ -442,10 +462,34 @@ def serve_peer(control, executor, rank, world, *, resolve_snapshot, progress=Non
 
         store = dist.TCPStore(store_host, store_port, world, False, timeout=_PREPARATION_TIMEOUT)
         dist.init_process_group("gloo", store=store, rank=rank, world_size=world, timeout=_PREPARATION_TIMEOUT)
-        model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress)
+        recorder = storage = None
+        if assignment.get("packaged"):
+            import torch
+
+            from .module_images import ModuleImages
+            from .package_storage import PackageStorage
+
+            recorder = ModuleImages()
+            with recorder:
+                torch.cuda.set_device(0)
+                storage = PackageStorage(rank=rank, world=world, device=0)
+                with storage:
+                    model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress,
+                                    package_storage=storage)
+        else:
+            model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress)
         model.manifest()
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)
+        if isinstance(command, tuple) and command[0] == "export":
+            from .model_package import export_rank_package
+
+            _, path, options, cluster = command
+            if progress is not None:
+                progress(f"exporting rank {rank} to {path}")
+            export_rank_package(model, recorder, storage, path, options=options, cluster=cluster)
+            send_object(control, {"exported": path})
+            command = receive_object(control)
         if command == "serve":
             if progress is not None:
                 progress("serving")
@@ -456,6 +500,9 @@ def serve_peer(control, executor, rank, world, *, resolve_snapshot, progress=Non
             raise RuntimeError("invalid prepared rank handoff")
         executor.close()
         model.close()
+        if storage is not None:
+            for region in storage.host_regions:
+                region.close()
         dist.destroy_process_group()
         finished.set()
         send_object(control, {"exit": 0})

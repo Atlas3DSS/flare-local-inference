@@ -236,8 +236,10 @@ class RuntimePackage:
     completes; graph templates must have been captured with keep_graph=True.
     """
 
-    def __init__(self, *, allocations, modules, kernels, owners=(), reservations=(), reachability=None, events=None):
+    def __init__(self, *, allocations, modules, kernels, owners=(), reservations=(), reachability=None, events=None,
+                 transports=()):
         self.allocations = tuple(allocations)
+        self.transports = tuple(transports)
         self.modules = dict(modules)
         kernels = tuple(kernels)
         self.kernels = {kernel.function: kernel for kernel in kernels}
@@ -457,6 +459,8 @@ class RuntimePackage:
                         "context": {"flags": flags.value, "cache": cache.value, "limits": limits},
                         "events": list(self.events)}
             index = ModelIndex(version=1, ranks=[bundle(document)])
+            for transport in self.transports:
+                _roce_transport(index.ranks[0].roce, transport)
             asset_files = {}
             if server is not None:
                 from google.protobuf.json_format import ParseDict
@@ -636,6 +640,24 @@ def _external_allocations(spans, granularity):
             for index, (start, end, contents) in enumerate(pages)]
 
 
+def _roce_transport(message, transport):
+    """Fill a bundle's RoceTransport from b12x's `AllReduce.native_description()`."""
+    message.proxy_abi = transport["proxy_abi"]
+    message.world, message.rank = transport["world_size"], transport["rank"]
+    message.region_address, message.region_bytes = transport["region"]["address"], transport["region"]["nbytes"]
+    message.counters_address = transport["counters"]["address"]
+    message.counters_bytes = transport["counters"]["nbytes"]
+    message.slot_bytes, message.pipe_bytes = transport["slot_bytes"], transport["pipe_bytes"]
+    message.ctrl_offset = transport["ctrl_offset"]
+    message.hcas.extend(transport["hca_names"])
+    message.gid_index, message.traffic_class = transport["gid_index"], transport["traffic_class"]
+    message.rails = transport["rails"]
+    for links in transport["routes"]:
+        route = message.routes.add()
+        for local, remote in links:
+            route.links.add(local=local, remote=remote)
+
+
 def export_model(prepared, images, storage, path, *, options, progress=None):
     """Export one rank's graphs and storage with recorded virtual addresses."""
     cuda = _Cuda()
@@ -651,6 +673,17 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
     zero_ranges.extend((segment["address"], segment["total_size"])
                        for segment in storage.graph_pool.snapshot(include_traces=False))
     zero_ranges.extend((start, end - start) for start, end in inactive)
+    # A native rank rebuilds each RoCE transport over its recorded region and counters, which
+    # restore zeroed so every rank starts again at sequence 1. The proxy stops first: its doorbell
+    # lives in the region.
+    transports = [runtime.native_description() for runtime in storage.transports]
+    if len(transports) > 1:
+        raise ValueError("a rank exports at most one RoCE transport")
+    for runtime in storage.transports:
+        runtime.close()
+    for transport in transports:
+        zero_ranges.extend((transport[part]["address"], transport[part]["nbytes"])
+                           for part in ("region", "counters"))
     zero_ranges = _merge_ranges(zero_ranges)
     for address, nbytes in zero_ranges:
         cuda.call("cuMemsetD8_v2", C.c_uint64(address), C.c_ubyte(0), C.c_size_t(nbytes))
@@ -755,11 +788,14 @@ def export_model(prepared, images, storage, path, *, options, progress=None):
         else:
             merged.append((start, end))
     peer_addresses = set() if storage.peer_storage is None else storage.peer_storage.owned.keys()
+    # RoCE kernels take their region and counters as integer arguments, which reachability cannot follow.
+    pinned = [transport[part]["address"] for transport in transports for part in ("region", "counters")]
     reachability = Reachability(allocations, numeric=numeric, inactive=inactive,
-                               roots=[a.name for a in allocations if a.address in peer_addresses])
+                               roots=[a.name for a in allocations if a.address in peer_addresses
+                                      or any(a.address <= p < a.address + a.nbytes for p in pinned)])
     package = RuntimePackage(allocations=allocations, modules=modules, kernels=kernels.values(), owners=(prepared, storage),
         reservations=[{"address": start, "nbytes": end - start} for start, end in merged], reachability=reachability,
-        events=prepared.export_events)
+        events=prepared.export_events, transports=transports)
     execution = prepared.manifest(all_variants=True)
     execution.pop("context")
     execution.pop("device")

@@ -41,3 +41,20 @@ def export_package(prepared, images, storage, path, *, options, progress=None):
     finally:
         if stage.exists():
             shutil.rmtree(stage)
+
+
+def export_rank_package(prepared, images, storage, path, *, options, cluster, progress=None):
+    """Export this host's rank of a model whose ranks run on separate hosts as its own package file.
+
+    `cluster` is (world, rank, export id); every rank's file of one export carries the same id, and
+    the native runtime joins only ranks of one export. The caller closes the prepared rank.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=path.parent))
+    try:
+        export_model(prepared, images, storage, stage / "rank.safetensors", options=options, progress=progress)
+        combine(path, [stage / "rank.safetensors"], [], cluster=cluster)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)

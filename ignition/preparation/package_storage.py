@@ -63,6 +63,8 @@ class PackageStorage:
         self._preparation_pools = {self.pool.id}
         self._scope = torch.cuda.use_mem_pool(self.pool, device=device)
         self.peer_storage = None
+        # RoCEnante runtimes whose regions this storage holds; export records them for native ranks.
+        self.transports = []
         if world > 1:
             from .peer_storage import PeerStorage
 
