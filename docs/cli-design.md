@@ -360,6 +360,9 @@ initialize GPUs, allocate model memory, load weights and compiled kernels,
 instantiate graphs, allocate caches, load frontend assets, and start HTTP.
 Loading performs no kernel compilation or graph capture. Helios reports each stage with a ten-column bracketed
 progress bar, a result, and elapsed time.
+Terminal bars use cyan completed segments, dark gray remaining segments, and
+half-cell boundaries. Stages without a known total animate a cyan-to-gray
+gradient across all ten cells.
 The `Verify package` stage times signed metadata authentication before model
 loading. `--verify-weights` adds a timed `Verify stored data` stage after publisher
 acceptance. Executable resources are verified as part of kernel and graph

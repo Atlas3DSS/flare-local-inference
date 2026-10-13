@@ -146,3 +146,66 @@ with torch.no_grad():
         subprocess.run([sys.executable, "-c", script, mode, str(Path(__file__).resolve()),
                         str(artifact)], check=True, timeout=180)
     assert artifact.stat().st_size < 2 * 1024 * 1024
+
+
+@torch.no_grad()
+def test_aot_shared_expert_order_rebinds_without_recompilation(weights, tmp_path, monkeypatch):
+    from ignition.preparation import aot
+
+    weights, _scale_owners = weights
+    arena = ScratchArena("cuda:0")
+    source = torch.randn(1, 2560, dtype=torch.bfloat16, device="cuda") * .1
+    output = torch.empty_like(source)
+    shared = torch.empty_like(source)
+    with RecordedPreparationSession(device="cuda:0", checkpoint="qwen38-moe-order",
+            workload_schema="qwen38-moe-order", numerical_policy="b12x") as session:
+        session.register_scratch(arena)
+        moe = PreparedQwenMoe(source, weights, session=session, name="overlap",
+                              workspace=arena, projection_workspace=arena)
+        session.tune()
+        session.freeze()
+        assert moe.concurrent_shared is not None
+        moe.concurrent_shared.defer_launch = False
+
+        def forward():
+            moe(source)
+            output.copy_(moe.output)
+            shared.copy_(moe.shared.finish())
+            arena.tensor.fill_(255)
+
+        artifact = aot.aot_forward(forward)
+        artifact(forward)
+        path = tmp_path / "shared-order.bin"
+        artifact.save_compiled_function(str(path))
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("rebinding shared-expert launch order must not trace or compile")
+
+        monkeypatch.setattr(aot, "make_fx", forbidden)
+        monkeypatch.setattr(aot.StorageBackend, "__init__", forbidden)
+        monkeypatch.setattr(torch._dynamo.convert_frame, "fullgraph_capture", forbidden)
+        with path.open("rb") as file:
+            restored = torch.compiler.load_compiled_function(file)
+        for deferred in (True, False, True):
+            moe.concurrent_shared.defer_launch = deferred
+            assert restored.guard_check(forward)
+            restored(forward)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                restored(forward)
+            for _ in range(2):
+                source.normal_(std=.1)
+                moe.shared(source)
+                expected_shared = moe.shared.output.clone()
+                moe.router_projection(source)
+                moe.routing(moe.router_logits)
+                moe.experts()
+                expected = moe.routed_output + expected_shared
+                allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+                graph.replay()
+                torch.cuda.synchronize()
+                assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+                torch.testing.assert_close(shared, expected_shared, rtol=0, atol=0)
+                torch.testing.assert_close(output, expected, rtol=.01, atol=.001)
+            graph.reset()

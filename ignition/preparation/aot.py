@@ -297,7 +297,7 @@ def _execute(forward):
 
 
 def aot_forward(forward):
-    sources = r'.*\.(?:_?handle|stream_handle|plans\[\d+\])$'
+    sources = r'.*\.(?:_?handle|stream_handle|launch_order|plans\[\d+\])$'
     with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
         return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
                              dynamic=False).aot_compile(((forward,), {}))

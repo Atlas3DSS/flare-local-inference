@@ -213,6 +213,44 @@ enum Status {
 }
 
 impl State {
+    fn bar(&self, elapsed: f64) -> String {
+        use std::fmt::Write;
+
+        let mut bar = String::new();
+        if let Some(total) = self.total {
+            let halves = if total == 0 {
+                20
+            } else {
+                (20.0 * self.completed.min(total) as f64 / total as f64) as usize
+            };
+            let full = halves / 2;
+            let half = halves % 2;
+            let color = if self.completed >= total { 32 } else { 36 };
+            let _ = write!(bar, "\x1b[{color}m{}", "━".repeat(full));
+            if half != 0 {
+                bar.push('╸');
+            }
+            let mut remaining = 10 - full - half;
+            if remaining != 0 {
+                bar.push_str("\x1b[38;2;58;58;58m");
+                if half == 0 && full != 0 {
+                    bar.push('╺');
+                    remaining -= 1;
+                }
+                bar.push_str(&"━".repeat(remaining));
+            }
+        } else {
+            let offset = (20 - (elapsed * 15.0) as usize % 20) % 20;
+            for index in offset..offset + 10 {
+                let fade = 0.5 + (index as f64 / 20.0 * std::f64::consts::TAU).cos() / 2.0;
+                let red = (58.0 * fade) as u8;
+                let cyan = (128.0 * (1.0 - fade) + 58.0 * fade) as u8;
+                let _ = write!(bar, "\x1b[38;2;{red};{cyan};{cyan}m━");
+            }
+        }
+        bar
+    }
+
     fn render(&self, terminal: bool, status: Status) -> String {
         use std::fmt::Write;
         let elapsed = self
@@ -222,17 +260,7 @@ impl State {
         let status_text = match status {
             Status::Ok => "    OK    ".to_owned(),
             Status::Failed => "  FAILED  ".to_owned(),
-            Status::Running if terminal => {
-                if let Some(total) = self.total {
-                    let filled = ((self.completed as f64 / total.max(1) as f64) * 10.0)
-                        .clamp(0.0, 10.0) as usize;
-                    "━".repeat(filled) + &"─".repeat(10 - filled)
-                } else {
-                    let tick = (elapsed * 8.0) as usize % 14;
-                    let start = if tick <= 7 { tick } else { 14 - tick };
-                    "─".repeat(start) + "━━━" + &"─".repeat(7 - start)
-                }
-            }
+            Status::Running if terminal => self.bar(elapsed),
             Status::Running => " PENDING  ".to_owned(),
         };
         let label = format!("] {}.", self.label);

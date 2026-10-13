@@ -34,19 +34,19 @@ def _start_shared_expert(
     scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
     scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
     plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
-    defer_launch: bool,
+    launch_order: int,
 ) -> None:
     main = torch.cuda.current_stream(source.device)
     auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
     auxiliary.wait_stream(main)
-    if not defer_launch:
+    if not launch_order:
         _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
                            workspace, plans, limit, round_silu, auxiliary)
 
 
 @_start_shared_expert.register_fake
 def _fake_start_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
-                             workspace, plans, limit, round_silu, auxiliary_stream, defer_launch):
+                             workspace, plans, limit, round_silu, auxiliary_stream, launch_order):
     pass
 
 
@@ -56,11 +56,11 @@ def _join_shared_expert(
     scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
     scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
     plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
-    defer_launch: bool,
+    launch_order: int,
 ) -> None:
     main = torch.cuda.current_stream(source.device)
     auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
-    if defer_launch:
+    if launch_order:
         _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
                            workspace, plans, limit, round_silu, auxiliary)
     main.wait_stream(auxiliary)
@@ -68,7 +68,7 @@ def _join_shared_expert(
 
 @_join_shared_expert.register_fake
 def _fake_join_shared_expert(source, routed, weights, scales, gains, scale_kinds, outputs,
-                            workspace, plans, limit, round_silu, auxiliary_stream, defer_launch):
+                            workspace, plans, limit, round_silu, auxiliary_stream, launch_order):
     pass
 
 
@@ -84,6 +84,8 @@ class ConcurrentSharedExpert:
     With ``defer_launch``, ``start`` records the fork and ``finish`` enqueues the
     MLP before joining. The GPU branches still overlap, while main-stream kernels
     precede shared-expert kernels in graph construction order.
+    Launch order is a rank-local integer binding during AOT compilation, so
+    ranks can retain their configured order while sharing a compiled forward.
     """
 
     def __init__(self, mlp, *, parallel_plans, session, workspace: ScratchArena,
@@ -121,6 +123,14 @@ class ConcurrentSharedExpert:
         self.stream_handle = self.stream.cuda_stream
         register_finalizer(session, self.refresh, workspace=workspace)
 
+    @property
+    def defer_launch(self):
+        return bool(self.launch_order)
+
+    @defer_launch.setter
+    def defer_launch(self, value):
+        self.launch_order = int(bool(value))
+
     def refresh(self):
         main_bytes = max(plan.memory_requirements().scratch_nbytes for plan in self.parallel_plans)
         shared_bytes = max(projection.plan.memory_requirements().scratch_nbytes for projection in self.projections)
@@ -129,10 +139,10 @@ class ConcurrentSharedExpert:
     def start(self, source):
         _start_shared_expert(source, self.weights, self.scales, self.gains, self.scale_kinds,
                             self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                            self.mlp.round_silu, self.stream_handle, self.defer_launch)
+                            self.mlp.round_silu, self.stream_handle, self.launch_order)
 
     def finish(self, source, routed):
         _join_shared_expert(source, routed, self.weights, self.scales, self.gains, self.scale_kinds,
                            self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                           self.mlp.round_silu, self.stream_handle, self.defer_launch)
+                           self.mlp.round_silu, self.stream_handle, self.launch_order)
         return self.mlp.down_projection.output
