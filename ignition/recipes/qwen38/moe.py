@@ -212,6 +212,12 @@ class PreparedQwenMoe:
             self.concurrent_shared.start(source)
         self.router_projection(source)
         self.routing(self.router_logits)
+        if getattr(self.experts, "reduces_into_shared", False):
+            # SM103: one kernel reduces the routed FC2 rows into the shared-expert sum.
+            staged = self.experts.stage_rows()
+            if self.concurrent_shared is not None:
+                self.concurrent_shared.finish(source, staged)
+            return self.experts.reduce(self.shared.finish(), self.output)
         routed = self.experts()
         if self.concurrent_shared is not None:
             self.concurrent_shared.finish(source, routed)

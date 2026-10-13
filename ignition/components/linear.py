@@ -9,6 +9,7 @@ import torch
 from b12x.gemm import bf16_gemv, blockscaled
 from b12x.preparation import PreparationSession, PreparedCall
 
+from ignition.components import sm103_projection
 from ignition.preparation.fixtures import bf16_gemv as bf16_fixtures
 from ignition.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 from ignition.preparation.scratch import ScratchArena, prime_owners, scratch_storage
@@ -67,12 +68,25 @@ class QuantizedProjection:
         self.activation_mode = activation_mode
         self.bias = bias
         self.workspace = workspace
-        query = blockscaled.query_from_call(source, weight, out=output, activation_mode=activation_mode,
-                                           workspace=None if isinstance(workspace, ScratchArena) else workspace)
-        if isinstance(workspace, ScratchArena):
-            query = replace(query, workspace_form="provided", workspace_nbytes=None)
-        self.plan = blockscaled.plan(query)
+        self.sm103 = sm103_projection.is_sm103(source.device)
+        if self.sm103:
+            # b12x targets SM120/SM121; SM103 runs FlashInfer's native GEMMs under the same preparation.
+            from b12x.gemm.blockscaled._a16 import _weight_parts as parts
+
+            self.plan = sm103_projection.plan(sm103_projection.query_for(
+                source, weight, output, workspace_form="owned" if workspace is None else "provided"),
+                weight=parts(weight)[:2])
+        else:
+            query = blockscaled.query_from_call(source, weight, out=output, activation_mode=activation_mode,
+                                               workspace=None if isinstance(workspace, ScratchArena) else workspace)
+            if isinstance(workspace, ScratchArena):
+                query = replace(query, workspace_form="provided", workspace_nbytes=None)
+            self.plan = blockscaled.plan(query)
         values, scales, gain, _ = _weight_parts(weight)
+        if self.sm103 and scales.dtype == torch.float8_e8m0fnu:
+            # Operators receive UE8M0 scales as bytes, as b12x's own packed operators do.
+            scales = scales.view(torch.uint8)
+        self.parts = values, scales, gain
 
         def selected_workspace(nbytes=None):
             if workspace is None:
@@ -98,6 +112,16 @@ class QuantizedProjection:
         register_finalizer(session, lambda: setattr(self, "workspace", selected_workspace()), workspace=workspace)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
+        if self.sm103:
+            values, scales, gain = self.parts
+            if self.workspace is None:
+                torch.ops.flare.sm103_packed_out_owned(source, values, scales, gain, self.output, self.plan.handle)
+            else:
+                torch.ops.flare.sm103_packed_out(source, values, scales, gain, self.output, self.workspace,
+                                                 self.plan.handle)
+            if self.bias is not None:
+                self.output.add_(self.bias)
+            return self.output
         return blockscaled.mm(source, self.weight, out=self.output, plan=self.plan, bias=self.bias,
                               workspace=self.workspace)
 
@@ -136,14 +160,12 @@ def _parallel_mx_projections(
     outputs: list[torch.Tensor], workspaces: list[torch.Tensor],
     plans: list[int], auxiliary_stream: int, join: bool = True,
 ) -> None:
-    from b12x.gemm.blockscaled._ops import _out_workspace
-
     main = torch.cuda.current_stream(source.device)
     auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
     auxiliary.wait_stream(main)
 
     def project(index):
-        _out_workspace(
+        sm103_projection.packed_out_workspace(
             source, values[index], scales[index], None, None, outputs[index],
             workspaces[index], "none", None, plans[index], "any")
 

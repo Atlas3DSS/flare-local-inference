@@ -110,7 +110,8 @@ def _replacement(qualified: Checkpoint, repository: str, revision: str, stored_b
     scale = stored_bytes / qualified.stored_bytes
     return replace(qualified, repository=repository, revision=revision, stored_bytes=stored_bytes,
                    device_bytes=round(qualified.device_bytes * scale),
-                   mapped_host_bytes=round(qualified.mapped_host_bytes * scale))
+                   mapped_host_bytes=round(qualified.mapped_host_bytes * scale),
+                   expansion_bytes=round(qualified.expansion_bytes * scale))
 
 
 def _hub_metadata(repository: str, revision: str | None, hub_cache: Path | None) -> tuple[Path, Path]:

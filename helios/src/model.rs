@@ -87,6 +87,9 @@ pub struct ModelConfig {
     pub speculative_fixed_width: Option<usize>,
     pub history_drafts: bool,
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
+    /// Execution state rows each active request holds; absent, one per verified position of
+    /// the widest speculative graph.
+    pub state_rows_per_request: Option<usize>,
 }
 
 #[derive(Clone, Debug)]

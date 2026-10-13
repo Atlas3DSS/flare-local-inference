@@ -56,6 +56,8 @@ class PreparationConfig:
     prefill_chunk_size: int = 4096
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
+    # The GPUs allocate from system memory: transient preparation work keeps the headroom free too.
+    unified_memory: bool = False
     pages: int | None = None
     kernel_cache: Path | None = None
     mtp: bool = False
@@ -192,7 +194,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc) if group is not None else None
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
-        namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size})
+        namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
+        protected_bytes=config.headroom_bytes if config.unified_memory else None)
     session.__enter__()
     graphs = {}
     try:
@@ -201,7 +204,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             layout = HybridStateLayout.build(speculative_tokens=speculative_tokens, world_size=shard.world_size)
             snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
             slots = config.request_capacity
-            state_rows = snapshots + slots * (max(config.speculative_widths) if config.mtp else 1)
+            # Verification commits into each request's live row, so a request holds one row.
+            state_rows = snapshots + slots
             state = HybridStatePool.allocate(state_rows + 1, device,
                                              speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage)
             register_benchmark_state(
@@ -421,6 +425,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 64,
+            # Verification commits accepted tokens into each request's live row.
+            "state_rows_per_request": 1,
             "eos_token_ids": [248046, 248044],
             "model_contract": {"schema": "qwen4exp.graph-inputs.v3", "vocabulary": 248320,
                 "vision": {"features_per_request": 16384, "max_images": 4,

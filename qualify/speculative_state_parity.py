@@ -479,7 +479,7 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
     evidence.value["state_contract"] = {"regions": [r.name for r in owner.pool.layout.regions],
         "region_layout": [{"name": r.name, "shape": list(r.shape), "dtype": str(r.dtype),
                            "offset_bytes": r.offset, "nbytes": r.nbytes} for r in owner.pool.layout.regions],
-        "all_hybrid_rows": owner.pool.backing.shape[0], "extra_base": owner.extra_base,
+        "all_hybrid_rows": owner.pool.backing.shape[0],
         "row_bytes": owner.pool.layout.row_bytes, "qsa_layers": list(owner.cache),
         "readback_limit_bytes": 32 << 30, "executor_overlap": False,
         "snapshot_slot": 5, "draft_model_exercised": False}
@@ -558,9 +558,6 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                 mutating = [slot for slot in active if spec["kind"] != "snapshot"
                             and (spec["kind"] != "speculative" or emitted.get(slot, 0))]
                 writable_rows = {slot + 1 for slot in mutating}
-                if spec["kind"] == "speculative":
-                    writable_rows.update(row for slot in mutating
-                        for row in range(owner.extra_base + slot * 7, owner.extra_base + (slot + 1) * 7))
                 if spec["kind"] == "snapshot":
                     writable_rows.add(5 + spec["snapshot"])
                 unchanged = [name for name in current if name.startswith("hybrid.") and int(name.split(".")[1]) not in writable_rows]
@@ -593,7 +590,7 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                     accepted = operation.state.gdn.accepted_tokens.cpu().tolist()
                     for row, slot in enumerate(spec["slots"]):
                         was_running = slot >= 0 and (emitted.get(slot, 0) > 0)
-                        expected_indices = ([slot + 1, *range(owner.extra_base + slot * 7, owner.extra_base + (slot + 1) * 7)] if was_running else [0] * 8)
+                        expected_indices = [slot + 1, *[0] * 7] if was_running else [0] * 8
                         _require(evidence, f"{side}.{index}.indices{row}", indices[row] == expected_indices)
                         if was_running:
                             previous = (command["previous_accepted_before"][slot] if command["accepted_generation_before"][slot] == builder.requests[slot]["generation"] else 1)
@@ -606,8 +603,7 @@ def compare(model, owner, fixture, evidence, artifacts, progress):
                     request_state = builder.requests[slot]
                     for key, passed in checkpoint_transfer_checks(owner.pool, owner.cache,
                             slot=slot, snapshot=spec["snapshot"], pages=request_state["pages"],
-                            consumed=request_state["consumed"], accepted=builder.previous[slot],
-                            extra_base=owner.extra_base).items():
+                            consumed=request_state["consumed"], accepted=builder.previous[slot]).items():
                         _require(evidence, f"{side}.{index}.checkpoint.{key}", passed)
                 previous_stage = stage
                 evidence.value["commands"] = commands

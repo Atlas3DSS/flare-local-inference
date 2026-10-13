@@ -69,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         speculative_fixed_width: None,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
+        state_rows_per_request: None,
     };
     let mut text_count = 0;
     let mut tool_string_count = 0;

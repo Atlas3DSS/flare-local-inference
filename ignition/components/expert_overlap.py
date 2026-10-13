@@ -9,13 +9,13 @@ from ignition.preparation.tuning import register_finalizer
 
 def _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
                        workspace, plans, limit, round_silu, auxiliary):
-    from b12x.gemm.blockscaled._ops import _out_workspace
+    from ignition.components.sm103_projection import packed_out_workspace
 
     def project(value, index, output):
         if scales[index] is None:
             torch.ops.b12x.bf16_gemv_small_n_out(value, weights[index], output, plans[index], None)
         else:
-            _out_workspace(
+            packed_out_workspace(
                 value, weights[index], scales[index], gains[index], None, output,
                 workspace, ("none", "multiplier", "reciprocal")[scale_kinds[index]], None, plans[index], "any")
 

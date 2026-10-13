@@ -74,6 +74,7 @@ impl ModelContract for Qwen4Exp {
             vision: config.contract.vision.clone(),
 
             draft_pages_per_request: 1,
+            state_rows_per_request: config.state_rows_per_request,
         }
     }
     fn pack(inputs: &mut Self::Inputs, step: &crate::model::InputStep<'_, Self>) -> Result<()> {

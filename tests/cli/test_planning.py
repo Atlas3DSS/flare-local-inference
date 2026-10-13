@@ -51,6 +51,11 @@ def gpu(index, free_gib, capability=(12, 0)):
                         capability)
 
 
+def spark(index, free_gib):
+    return planning.Gpu(index, "NVIDIA GB10", f"GPU-{index:04d}", 121 * GIB, int(free_gib * GIB), (12, 1),
+                        unified=True)
+
+
 DEFAULT = object()
 
 
@@ -140,16 +145,26 @@ def test_speculation_settings_are_validated_and_described():
         "up to 1 draft token from history")
 
 
+def test_headroom_grows_with_prefill_chunk_tokens_past_4096():
+    # The fixture sets four GiB of headroom; each 4096 chunk tokens past 4096 add half a GiB.
+    assert derive().headroom_bytes == derive(prefill_chunk=1024).headroom_bytes == 4 * GIB
+    assert derive(prefill_chunk=8192).headroom_bytes == 4 * GIB + GIB // 2
+    assert derive(prefill_chunk=8192).supply_bytes == derive().supply_bytes - GIB // 2
+    assert derive(prefill_chunk=8192).to_dict()["headroom_bytes"] == 4 * GIB + GIB // 2
+
+
 def test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override():
     assert derive().prefill_chunk == 4096
     assert derive(prefill_chunk=1024).prefill_chunk == 1024
-    assert derive(prefill_chunk=262144).prefill_chunk == 262144
+    # A whole-context chunk's activations need about 32 GiB more headroom.
+    assert derive(gpus=(gpu(0, 140),), prefill_chunk=262144).prefill_chunk == 262144
     for chunk in (0, 100, 262208):
         with pytest.raises(UsageError, match="multiple of 64 from 64 through 262,144"):
             derive(prefill_chunk=chunk)
-    # Twenty GiB of reserve leaves pages for 104,576 tokens, the longest sequence this plan allows.
-    with pytest.raises(UsageError, match="131,072 exceeds the 104,576-token context"):
-        derive(reserve=20, prefill_chunk=131072)
+    # 14 GiB of reserve and the chunk's 11.5 GiB headroom leave pages for 61,824 tokens, the longest
+    # sequence this plan allows.
+    with pytest.raises(UsageError, match="65,536 exceeds the 61,824-token context"):
+        derive(reserve=14, prefill_chunk=65536)
 
 
 def test_context_parallel_pages_hold_every_rank_share_unless_disabled():
@@ -187,9 +202,9 @@ def test_explicit_gpus_set_the_tensor_parallel_size():
         derive(gpus=gpus, selected=(0, 1, 2))
     with pytest.raises(UsageError, match="names a GPU this host does not have"):
         derive(gpus=gpus, selected=(4,))
-    with pytest.raises(CapacityError, match="not an SM120 or SM121 device"):
+    with pytest.raises(CapacityError, match="not an SM103, SM120, or SM121 device"):
         derive(gpus=(gpu(0, 95, (9, 0)),), selected=(0,))
-    with pytest.raises(CapacityError, match="pair needs 2 or 4 SM120 or SM121 GPUs; this host has 1"):
+    with pytest.raises(CapacityError, match="pair needs 2 or 4 SM103, SM120, or SM121 GPUs; this host has 1"):
         derive(PAIR, (gpu(0, 95),))
 
 
@@ -283,3 +298,9 @@ def test_gpu_lists_and_restrictions():
     for text in ("7", "GPU-", "1,1", "GPU-9"):
         with pytest.raises(UsageError):
             planning.restrict_gpus(gpus, text)
+
+
+def test_unified_memory_gpus_plan_from_their_reported_free_memory():
+    # The PLE table reaches the GPU through compact row delivery, so no mapped table is subtracted.
+    discrete, unified = derive(gpus=(gpu(0, 95),)), derive(gpus=(spark(0, 95),))
+    assert discrete.free_bytes == unified.free_bytes == 95 * GIB

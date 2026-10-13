@@ -28,7 +28,8 @@ class RecordedPreparationSession(PreparationSession):
 
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
                  numerical_policy: str, search_limits=None, namespace=None, race_budget=None,
-                 coordinator=None):
+                 coordinator=None, protected_bytes=None):
+        """`protected_bytes`, given for a unified-memory GPU, is the free memory preparation keeps for the system."""
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
         if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
@@ -42,6 +43,9 @@ class RecordedPreparationSession(PreparationSession):
         super().__init__(device=device, autotune=True, compile_workers=0,
                          namespace=identity, race_budget=race_budget,
                          collective_barrier=None if coordinator is None else coordinator.barrier)
+        if protected_bytes is not None and (type(protected_bytes) is not int or protected_bytes < 0):
+            raise ValueError("protected_bytes must be a nonnegative byte count")
+        self.protected_bytes = protected_bytes
         self._coordinator = coordinator
         self._recorded_requests = {}
         self._finalizers = []
@@ -164,6 +168,26 @@ class RecordedPreparationSession(PreparationSession):
                 "candidate_reserved_bytes": arena.nbytes,
                 "pending_persistent_bytes": envelope.pending_persistent_nbytes}
 
+    def _bound_transient_memory(self):
+        """Fit candidate trials and compiler processes into the memory above the protected amount.
+
+        b12x races candidates within half of the free memory and starts its compiler processes
+        regardless of it. Here the spare memory first allows for this process's own growth; a
+        quarter of the rest bounds the race, and a candidate larger than that still runs, alone
+        beside the champion. Compilers, which grow as they compile, share the remainder, and
+        without room for one, compilation runs in this process.
+        """
+        from .unified_memory import B12X_COMPILER_BYTES, PROCESS_GROWTH_BYTES, shortfall, spare_bytes
+
+        spare = spare_bytes(self.device.ordinal, self.protected_bytes)
+        if spare <= 0:
+            raise shortfall("kernel tuning", self.device.ordinal, self.protected_bytes)
+        usable = max(0, spare - PROCESS_GROWTH_BYTES)
+        self.race_budget = max(1, usable // 4)
+        compilers = max(0, usable - self.race_budget) // B12X_COMPILER_BYTES
+        if compilers < self.compile_workers:
+            self.configure_compile_workers(compilers)
+
     def tune(self, *, progress=None, show_progress=False, console=None):
         self._require_collecting()
         if not self._recorded_requests:
@@ -182,6 +206,8 @@ class RecordedPreparationSession(PreparationSession):
                 bounded = worker_limit(self.compile_workers, pools=pools)
                 if bounded < self.compile_workers:
                     self.configure_compile_workers(bounded)
+            if self.protected_bytes is not None:
+                self._bound_transient_memory()
             with ExitStack() as display_stack:
                 update = progress
                 if show_progress:
@@ -229,6 +255,7 @@ class RecordedPreparationSession(PreparationSession):
             self.tuning_report = {
                 "workload_schema": self._workload_schema, "namespace": self.namespace.to_dict(),
                 "requests": len(requests), "compile_workers": self.compile_workers,
+                "race_budget_bytes": self.race_budget, "protected_bytes": self.protected_bytes,
                 "cache_hits": sum(result.cache_hits for result in results),
                 "benchmarked_candidates": sum(result.benchmarked_candidates for result in results),
                 "elapsed_seconds": sum(result.elapsed_seconds for result in results),

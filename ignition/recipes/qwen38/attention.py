@@ -10,11 +10,19 @@ from b12x.attention import paged_kv_write, qsa
 from b12x.preparation import PreparationSession, PreparedCall
 from transformers.models.qwen4_exp.modeling_qwen4_exp import apply_rotary_pos_emb
 
+from ignition.components import sm103
+from ignition.components.sm103_sparse_attention import PARTIAL_ROWS, SPLIT_ROWS, PreparedSparseAttention
 from ignition.components.linear import QuantizedProjection, UnquantizedProjection
 from ignition.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from ignition.preparation.tuning import declare, register_finalizer
 
 from .attention_overlap import ConcurrentAttention
+
+
+# b12x attends at most this many rows with its split schedule: it splits each row's selected
+# positions across programs, which verification rounds (at most batch x width rows) need. Larger
+# prefill chunks use the row-per-program Triton kernel; at 128 rows it would leave the GPU nearly idle.
+_SPARSE_ATTENTION_MIN_ROWS = 512
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,9 @@ class QSAScratch:
     gated: torch.Tensor
     output: torch.Tensor
     projected_qkv: torch.Tensor
+    # Split attention's FP32 partial rows; every row view keeps them whole.
+    partial: torch.Tensor
+    partial_lse: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> QSAScratch:
@@ -150,11 +161,19 @@ class QSAScratch:
         q_heads, kv_heads = 24 // world_size, max(1, 2 // world_size)
         q_width, kv_width = q_heads * 512, kv_heads * 256
         qkv = zeros(tokens, q_width + 2 * kv_width)
+        partial_rows = PARTIAL_ROWS if sm103.is_sm103(device) else 0
         return cls(qkv[:, :q_width], qkv[:, q_width:q_width + kv_width], qkv[:, q_width + kv_width:],
                    zeros(tokens, 640), zeros(tokens, q_heads, 256), zeros(tokens, kv_heads, 256),
                    zeros(tokens, q_heads, 256),
                    torch.full((tokens, 2051), -1, device=device, dtype=torch.int32),
-                   zeros(tokens, q_heads * 256), zeros(tokens, 2560), qkv)
+                   zeros(tokens, q_heads * 256), zeros(tokens, 2560), qkv,
+                   torch.zeros((partial_rows, q_heads, 256), device=device, dtype=torch.float32),
+                   torch.zeros((partial_rows, q_heads), device=device, dtype=torch.float32))
+
+    def rows(self, tokens: int) -> QSAScratch:
+        whole = ("partial", "partial_lse")
+        return QSAScratch(*(getattr(self, field)[:None if field in whole else tokens]
+                            for field in self.__dataclass_fields__))
 
 
 class PreparedAttention:
@@ -188,6 +207,9 @@ class PreparedAttention:
         if type(cache_pages) is not int or cache_pages < state.main_k_cache.shape[0]:
             raise ValueError("planned QSA page capacity must cover the bound page pools")
         self.cache_page_capacity = cache_pages
+        # On SM103 one score workspace covers every representative group of a
+        # prefill chunk, so selection makes a single pass instead of one per 128 MiB.
+        score_workspace = self.tokens * (context // 4) * 4 if sm103.is_sm103(source.device) else None
         caps = qsa.Caps(device=source.device, max_batch=batch,
                         max_raw_state_slots=state.raw_k_ring.shape[0], max_q_rows=self.tokens,
                         max_seq_len=context, num_main_cache_pages=cache_pages,
@@ -196,7 +218,8 @@ class PreparedAttention:
                         max_speculative_tokens=draft_tokens, position_axes=3,
                         q_heads=self.q_heads, kv_heads=self.kv_heads,
                         mrope_sections=(11, 11, 10), mrope_interleaved=True,
-                        rms_norm_eps=module.config.rms_norm_eps)
+                        rms_norm_eps=module.config.rms_norm_eps,
+                        score_workspace_bytes=max(score_workspace, 128 << 20) if score_workspace else None)
         if rotary.cos.shape[0] < context:
             raise ValueError("rotary table capacity must cover the admitted context")
         self.projections = {}
@@ -248,12 +271,21 @@ class PreparedAttention:
                              "slot_mapping": metadata.slot_mapping}
         declare(session, (self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
             PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),))
-        self.concurrent = None
-        if (not cache_only and self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
-                and workspace is projection_workspace
-                and all(isinstance(self.projections[key], QuantizedProjection)
-                        for key in ("qkv_proj", "indexer.index_qk_proj"))):
-            self.concurrent = ConcurrentAttention(self, session=session, workspace=workspace)
+        concurrent = (not cache_only and self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)
+                      and workspace is projection_workspace
+                      and all(isinstance(self.projections[key], QuantizedProjection)
+                              for key in ("qkv_proj", "indexer.index_qk_proj")))
+        # SM103 attends QSA's selection with Triton kernels: prefill chunks in one pass and
+        # decode-sized rows split across programs. Rows between, and rows whose selection
+        # overlaps QKV production, keep b12x's attention.
+        self.sparse = None
+        if (not cache_only and not concurrent and sm103.is_sm103(source.device)
+                and (self.tokens > _SPARSE_ATTENTION_MIN_ROWS or self.tokens <= SPLIT_ROWS)):
+            self.sparse = PreparedSparseAttention(scratch.query, state.main_k_cache, state.main_v_cache,
+                scratch.selected_positions, metadata.main_block_table, metadata.request_ids,
+                metadata.query_positions, scratch.attended, partial=scratch.partial,
+                partial_lse=scratch.partial_lse)
+        self.concurrent = ConcurrentAttention(self, session=session, workspace=workspace) if concurrent else None
 
     def dynamic(self) -> dict:
         return {"query": self.scratch.query, "index_query": self.index_query,
@@ -298,7 +330,13 @@ class PreparedAttention:
         if self.cache_only:
             qsa.run(self.binding, **self.dynamic(), cache_only=True)
             return None
-        attention = qsa.run(self.binding, **self.dynamic()) if self.concurrent is None else self.concurrent.attend(source)
+        if self.sparse is not None:
+            qsa.run(self.binding, **self.dynamic(), selection_only=True)
+            attention = self.sparse(self.state.main_k_cache, self.state.main_v_cache)
+        elif self.concurrent is None:
+            attention = qsa.run(self.binding, **self.dynamic())
+        else:
+            attention = self.concurrent.attend(source)
         s.gated.copy_(attention.flatten(1) * torch.sigmoid(gate.reshape(self.tokens, self.q_heads * 256)))
         output = self.projections["o_proj"](s.gated)
         output.masked_fill_((self.metadata.request_ids < 0)[:, None], 0)

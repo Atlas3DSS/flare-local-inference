@@ -10,14 +10,14 @@ from ignition.preparation.tuning import register_finalizer
 @torch.library.custom_op("flare::start_projection_chain", mutates_args=("outputs", "workspace"))
 def _start(source: torch.Tensor, weights: list[torch.Tensor], scales: list[torch.Tensor],
            outputs: list[torch.Tensor], workspace: torch.Tensor, plans: list[int], stream: int) -> None:
-    from b12x.gemm.blockscaled._ops import _out_workspace
+    from ignition.components.sm103_projection import packed_out_workspace
 
     auxiliary = torch.cuda.ExternalStream(stream, device=source.device)
     auxiliary.wait_stream(torch.cuda.current_stream(source.device))
     with torch.cuda.stream(auxiliary):
         value = source
         for weight, scale, output, plan in zip(weights, scales, outputs, plans, strict=True):
-            _out_workspace(value, weight, scale, None, None, output, workspace, "none", None, plan, "any")
+            packed_out_workspace(value, weight, scale, None, None, output, workspace, "none", None, plan, "any")
             value = output
 
 

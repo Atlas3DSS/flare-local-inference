@@ -98,6 +98,7 @@ impl ModelContract for DeepSeek41 {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            state_rows_per_request: config.state_rows_per_request,
         }
     }
     fn pack(inputs: &mut Self::Inputs, step: &crate::model::InputStep<'_, Self>) -> Result<()> {
@@ -244,6 +245,7 @@ mod contract_tests {
             speculative_fixed_width: None,
             history_drafts: false,
             speculative_proposal_source: crate::scheduler::speculation::ProposalSource::Mtp,
+            state_rows_per_request: None,
         }
     }
 

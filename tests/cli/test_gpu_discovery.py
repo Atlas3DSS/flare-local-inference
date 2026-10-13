@@ -57,6 +57,7 @@ def test_discrete_discovery_does_not_initialize_cuda(devices):
     _, _, calls = devices
     gpu, = planning.discover_gpus()
     assert (gpu.total_bytes, gpu.free_bytes) == (96 * GIB, 80 * GIB)
+    assert not gpu.unified
     assert calls == ["init", "shutdown"]
 
 
@@ -76,6 +77,7 @@ def test_integrated_discovery_uses_available_dram_without_swap(devices, monkeypa
     monkeypatch.setattr(planning.Path, "read_text", meminfo)
     gpu, = planning.discover_gpus()
     assert (gpu.total_bytes, gpu.free_bytes, gpu.capability) == (121 * GIB, expected * GIB, (12, 1))
+    assert gpu.unified
     assert calls == ["init", "driver_init", "shutdown"]
 
 

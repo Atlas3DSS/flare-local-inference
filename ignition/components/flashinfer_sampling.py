@@ -23,5 +23,6 @@ def sample_probabilities(probabilities, seed, offset, return_valid=False):
 
 @torch.compiler.allow_in_graph
 def verify_chain(draft_probs, draft_ids, target_probs, accepted, emitted, seed, offset):
+    # Each row draws from its own seed and offset only, so its tokens do not depend on its batch slot.
     return sampling.chain_speculative_sampling(draft_probs, draft_ids, target_probs,
-        accepted, emitted, deterministic=True, seed=seed, offset=offset)
+        accepted, emitted, deterministic=True, seed=seed, offset=offset, row_independent_rng=True)

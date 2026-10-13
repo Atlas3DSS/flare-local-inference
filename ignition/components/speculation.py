@@ -30,6 +30,14 @@ INVALID_SPECULATION = 6
 TARGET_RNG_DOMAIN = 0x4D54505F56455249
 DRAFT_RNG_DOMAIN = 0x4D54505F44524146
 WIDTHS = tuple(range(1, 9))
+# Vocabulary-wide checks reduce each row in slices first, so compiled forwards spread
+# them over many programs instead of one serial program per row.
+VOCABULARY_SLICES = 128
+
+
+def _sliced(values: torch.Tensor) -> torch.Tensor:
+    slices = VOCABULARY_SLICES if values.shape[-1] % VOCABULARY_SLICES == 0 else 1
+    return values.unflatten(-1, (slices, values.shape[-1] // slices))
 
 
 def _tensor(value, shape, dtype, device, name):
@@ -358,9 +366,10 @@ class PreparedStochasticVerification:
             target_probs = torch.where(target_used[:, :, None], self.target_probs, self.dummy)
             ids = torch.where(draft_used, self.drafts, 0)
         for probabilities in (draft_probs, target_probs):
-            valid &= (torch.isfinite(probabilities) & (probabilities >= 0)).all(dim=(-1, -2))
-            mass = probabilities.sum(-1)
-            valid &= (torch.isfinite(mass) & ((mass - 1).abs() <= 1e-4)).all(-1)
+            slices = _sliced(probabilities)
+            entries = (torch.isfinite(slices) & (slices >= 0)).all(-1).all(-1)
+            mass = slices.sum(-1).sum(-1)
+            valid &= (entries & torch.isfinite(mass) & ((mass - 1).abs() <= 1e-4)).all(-1)
         self.safe_draft_probs.copy_(torch.where(valid[:, None, None], draft_probs, self.dummy))
         self.safe_target_probs.copy_(torch.where(valid[:, None, None], target_probs, self.dummy))
         self.safe_ids.copy_(torch.where(valid[:, None], ids, 0))
@@ -368,12 +377,9 @@ class PreparedStochasticVerification:
         self.offset.copy_(torch.where(self.rng.generation[safe] == self.generations, self.rng.target_offset[safe], 0))
         self.independent_accepted.zero_()
         self.emitted_drafts.zero_()
-        for row in range(self.drafts.shape[0]):
-            tokens, _, _ = verify_chain(
-                self.safe_draft_probs[row:row + 1], self.safe_ids[row:row + 1], self.safe_target_probs[row:row + 1],
-                self.independent_accepted[row:row + 1], self.emitted_drafts[row:row + 1],
-                seed=self.seed_bits[row:row + 1], offset=self.offset[row:row + 1])
-            out.token_ids[row:row + 1].copy_(tokens)
+        tokens, _, _ = verify_chain(self.safe_draft_probs, self.safe_ids, self.safe_target_probs,
+            self.independent_accepted, self.emitted_drafts, seed=self.seed_bits, offset=self.offset)
+        out.token_ids.copy_(tokens)
         out.accepted_drafts.copy_(torch.where(valid, self.emitted_drafts, 0))
         out.proposed_count.copy_(torch.where(valid, self.emitted_drafts + 1, 0))
         out.offered_drafts.fill_(self.drafts.shape[1])
@@ -430,12 +436,20 @@ class PreparedSpeculativeCommit:
         self.consumed_before = torch.zeros(batch, dtype=torch.int64, device=device)
         self.generated_before = torch.zeros_like(self.consumed_before)
         self.history_before = torch.zeros((batch, 2), dtype=torch.int64, device=device)
+        # Pool-backed request state is staged here, so compiled commits write the pool without copying it.
         self.consumed_after = torch.empty(requests.capacity, dtype=torch.int64, device=device)
         self.history_after = torch.empty((requests.capacity, 2), dtype=torch.int64, device=device)
+        # One extra entry receives the rows that own no slot.
+        self.owners = torch.empty(requests.capacity + 1, dtype=torch.int64, device=device)
         self._records = torch.zeros((requests.capacity, 24), dtype=torch.int64, device=device)
+        self.idle_record = torch.zeros(24, dtype=torch.int64, device=device)
+        self.idle_record[[4, 12, *range(16, 24)]] = -1
+        if draft_context_lag is None:
+            self.idle_record[13] = -1
 
     def __call__(self):
         state, acceptance, columns = self.state, self.acceptance, self.columns
+        width = columns.numel()
         safe = self.slots.long().clamp(0, state.capacity - 1)
         selected = ((self.rows < self.live[0]) & (self.live[0] >= 0) & (self.live[0] <= self.rows.numel())
             & (self.slots >= 0) & (self.slots < state.capacity) & (state.generation[safe] == self.generations))
@@ -443,103 +457,116 @@ class PreparedSpeculativeCommit:
         self.generated_before.copy_(state.generated_tokens[safe])
         if self.history is not None:
             self.history_before.copy_(self.history[safe])
-        self.emitted_ids.fill_(-1)
-        self.committed_input_ids.fill_(-1)
-        self.emitted_count.zero_()
-        self.accepted_count.zero_()
-        self.accepted_drafts.zero_()
-        self.commit_column.fill_(-1)
-        self._records.zero_()
-        self._records[:, 4].fill_(-1)
-        self._records[:, 12].fill_(-1)
-        self._records[:, 16:].fill_(-1)
 
-        for slot in range(state.capacity):
-            matches = selected & (self.slots == slot)
-            count = matches.sum()
-            row = torch.where(matches, self.rows, 0).amax().view(1)
-            ids = acceptance.token_ids.index_select(0, row)[0]
-            inputs = self.inputs.index_select(0, row)[0]
-            proposed = acceptance.proposed_count.index_select(0, row)[0].long()
-            accepted = acceptance.accepted_drafts.index_select(0, row)[0].long()
-            offered = acceptance.offered_drafts.index_select(0, row)[0].long()
-            valid = acceptance.valid.index_select(0, row)[0]
-            increment = acceptance.rng_increment.index_select(0, row)[0]
-            remaining = (state.max_new_tokens[slot] - state.generated_tokens[slot]).clamp_min(0)
-            enabled = (count == 1) & (state.status[slot] == RUNNING) & (remaining > 0)
-            shape_valid = ((proposed >= 1) & (proposed <= columns.numel()) & (accepted == proposed - 1)
-                & (offered >= accepted) & (offered <= columns.numel() - 1))
-            shape_valid &= (((ids >= 0) & (ids < state.vocab_size)) | ~(columns < proposed)).all()
-            shape_valid &= (((inputs >= 0) & (inputs < state.vocab_size)) | ~(columns < proposed)).all()
-            shape_valid &= (state.pending_token[slot] >= 0) & (inputs[0] == state.pending_token[slot])
-            shape_valid &= ((ids[:-1] == inputs[1:]) | ~(columns[:-1] < accepted)).all()
-            if self.rng is None:
-                shape_valid &= increment == 0
-            else:
-                shape_valid &= increment >= 0
-            valid = valid & shape_valid
-            eos = ((ids[:, None] == state.eos_token_ids[slot])
-                & (self.eos_columns < state.eos_count[slot])).any(-1)
-            eos_position = torch.where(eos & (columns < proposed), columns + 1, columns.numel()).amin()
-            emitted = torch.minimum(torch.minimum(proposed, remaining), eos_position)
-            if self.token_limits is not None:
-                emitted = torch.minimum(emitted, self.token_limits.index_select(0, row)[0])
-            emitted = torch.where(enabled & valid, emitted, 0)
-            emitted_drafts = torch.minimum(accepted.clamp_min(0), emitted)
-            take = columns < emitted
-            pending = ids.gather(0, (emitted - 1).clamp(0, columns.numel() - 1).view(1))[0]
-            consumed = state.consumed_tokens[slot] + emitted
-            generated = state.generated_tokens[slot] + emitted
-            if self.history is not None:
-                history = torch.cat((self.history[slot], inputs))
-                tail = history.gather(0, emitted + self.history_columns)
-            terminal = (generated >= state.max_new_tokens[slot]) | (eos & take).any()
-            failed = enabled & ~valid
-            duplicate = count > 1
-            status = torch.where(duplicate | failed, ERROR,
-                torch.where((count == 1) & (state.status[slot] == RUNNING) & (terminal | (remaining == 0)), FINISHED, state.status[slot]))
-            error = torch.where(duplicate, DUPLICATE_SLOT,
-                torch.where(failed, torch.where(shape_valid, INVALID_DISTRIBUTION, INVALID_SPECULATION), state.error_code[slot]))
+        # Every row commits from its slot's last selected row, which alone writes the slot's state.
+        # Rows are evaluated together from the state before the round; each slot then takes its
+        # owner's values in one update, so no slot is written twice whatever the package capacity.
+        matches = selected[:, None] & selected[None, :] & (self.slots[:, None] == self.slots[None, :])
+        count = matches.sum(1)
+        row = torch.where(matches, self.rows[None, :], 0).amax(1)
+        leader = selected & (row == self.rows)
+        ids = acceptance.token_ids[row]
+        inputs = self.inputs[row]
+        proposed = acceptance.proposed_count[row].long()
+        accepted = acceptance.accepted_drafts[row].long()
+        offered = acceptance.offered_drafts[row].long()
+        valid = acceptance.valid[row]
+        increment = acceptance.rng_increment[row]
+        status_before, error_before = state.status[safe], state.error_code[safe]
+        generated_before, pending_before = state.generated_tokens[safe], state.pending_token[safe]
+        max_new_tokens = state.max_new_tokens[safe]
+        remaining = (max_new_tokens - generated_before).clamp_min(0)
+        enabled = (count == 1) & (status_before == RUNNING) & (remaining > 0)
+        proposal = columns[None, :] < proposed[:, None]
+        shape_valid = ((proposed >= 1) & (proposed <= width) & (accepted == proposed - 1)
+            & (offered >= accepted) & (offered <= width - 1))
+        shape_valid &= (((ids >= 0) & (ids < state.vocab_size)) | ~proposal).all(-1)
+        shape_valid &= (((inputs >= 0) & (inputs < state.vocab_size)) | ~proposal).all(-1)
+        shape_valid &= (pending_before >= 0) & (inputs[:, 0] == pending_before)
+        shape_valid &= ((ids[:, :-1] == inputs[:, 1:]) | ~(columns[None, :-1] < accepted[:, None])).all(-1)
+        if self.rng is None:
+            shape_valid &= increment == 0
+        else:
+            shape_valid &= increment >= 0
+        valid = valid & shape_valid
+        eos = ((ids[:, :, None] == state.eos_token_ids[safe][:, None, :])
+            & (self.eos_columns[None, None, :] < state.eos_count[safe][:, None, None])).any(-1)
+        eos_position = torch.where(eos & proposal, columns[None, :] + 1, width).amin(-1)
+        emitted = torch.minimum(torch.minimum(proposed, remaining), eos_position)
+        if self.token_limits is not None:
+            emitted = torch.minimum(emitted, self.token_limits[row])
+        emitted = torch.where(enabled & valid, emitted, 0)
+        emitted_drafts = torch.minimum(accepted.clamp_min(0), emitted)
+        take = columns[None, :] < emitted[:, None]
+        pending = ids.gather(1, (emitted - 1).clamp(0, width - 1)[:, None])[:, 0]
+        consumed = state.consumed_tokens[safe] + emitted
+        generated = generated_before + emitted
+        terminal = (generated >= max_new_tokens) | (eos & take).any(-1)
+        failed = enabled & ~valid
+        duplicate = count > 1
+        status = torch.where(duplicate | failed, ERROR,
+            torch.where((count == 1) & (status_before == RUNNING) & (terminal | (remaining == 0)), FINISHED, status_before))
+        error = torch.where(duplicate, DUPLICATE_SLOT,
+            torch.where(failed, torch.where(shape_valid, INVALID_DISTRIBUTION, INVALID_SPECULATION), error_before))
+        generation = state.generation[safe]
+        counter = state.rng_counter.view(torch.int64)
+        counters = counter[safe] + emitted.view(-1, *([1] * (counter.dim() - 1)))
+        if self.history is not None:
+            history = self.history[safe]
+            tail = torch.cat((history, inputs), 1).gather(1, emitted[:, None] + self.history_columns[None, :])
+            history = torch.where((emitted > 0)[:, None], tail, history)
+        if self.rng is not None:
+            offset = self.rng.target_offset[safe]
+            base = torch.where(self.rng.generation[safe] == generation, offset, 0)
+            advance = (emitted > 0) & (increment > 0)
+            rng_offset = torch.where(advance, base + increment, offset)
+            rng_generation = torch.where(advance, generation, self.rng.generation[safe])
+        live = enabled & valid
+        record = torch.cat((torch.stack((generation, self.sequence.expand_as(generation), consumed, generated,
+            torch.where(emitted > 0, pending, -1), status.long(), error.long(), torch.zeros_like(emitted), emitted,
+            torch.where(live, offered, 0), emitted_drafts, torch.where(live, self.copy_offered_mask[row], 0),
+            torch.full_like(emitted, -1),
+            ((consumed - self.draft_context_lag).clamp_min(0) if self.draft_context_lag is not None
+             else torch.full_like(emitted, -1)),
+            torch.zeros_like(emitted), torch.full_like(emitted, width)), 1),
+            torch.where(take, ids, -1), torch.full((emitted.numel(), 8 - width), -1, dtype=torch.int64, device=ids.device)), 1)
 
-            # Records and per-row outputs precede request-state mutation: compiled graphs must not
-            # re-derive enabled/valid fields from the status and token counts this round rewrites.
-            self.emitted_ids.copy_(torch.where(matches[:, None] & take[None, :], ids, self.emitted_ids))
-            self.committed_input_ids.copy_(torch.where(matches[:, None] & take[None, :], inputs, self.committed_input_ids))
-            for output, value in ((self.emitted_count, emitted), (self.accepted_count, emitted),
-                    (self.accepted_drafts, emitted_drafts), (self.commit_column, emitted - 1)):
-                output.copy_(torch.where(matches, value, output))
-            record = self._records[slot]
-            participating = count > 0
-            record[0].copy_(torch.where(participating, state.generation[slot], 0))
-            record[1].copy_(torch.where(participating, self.sequence[0], 0))
-            record[2].copy_(torch.where(participating, consumed, 0))
-            record[3].copy_(torch.where(participating, generated, 0))
-            record[4].copy_(torch.where(emitted > 0, pending, -1))
-            record[5].copy_(torch.where(participating, status, 0))
-            record[6].copy_(torch.where(participating, error, 0))
-            record[8].copy_(emitted)
-            record[9].copy_(torch.where(enabled & valid, offered, 0))
-            record[10].copy_(emitted_drafts)
-            record[11].copy_(torch.where(enabled & valid, self.copy_offered_mask.index_select(0, row)[0], 0))
-            if self.draft_context_lag is not None:
-                record[13].copy_(torch.where(participating, (consumed - self.draft_context_lag).clamp_min(0), 0))
-            else:
-                record[13].fill_(-1)
-            record[15].copy_(torch.where(participating, columns.numel(), 0))
-            record[16:16 + columns.numel()].copy_(torch.where(take, ids, -1))
-            state.histogram[slot].scatter_add_(0, ids.clamp(0, state.vocab_size - 1), take.to(torch.int32))
-            self.consumed_after[slot].copy_(consumed)
-            state.generated_tokens[slot].copy_(generated)
-            state.pending_token[slot].copy_(torch.where(emitted > 0, pending, state.pending_token[slot]))
-            state.rng_counter.view(torch.int64)[slot].add_(emitted)
-            if self.history is not None:
-                self.history_after[slot].copy_(torch.where(emitted > 0, tail, self.history[slot]))
-            state.status[slot].copy_(status)
-            state.error_code[slot].copy_(error)
-            if self.rng is not None:
-                base = torch.where(self.rng.generation[slot] == state.generation[slot], self.rng.target_offset[slot], 0)
-                self.rng.target_offset[slot].copy_(torch.where((emitted > 0) & (increment > 0), base + increment, self.rng.target_offset[slot]))
-                self.rng.generation[slot].copy_(torch.where((emitted > 0) & (increment > 0), state.generation[slot], self.rng.generation[slot]))
+        # Records and per-row outputs precede request-state mutation: compiled graphs must not
+        # re-derive enabled/valid fields from the status and token counts this round rewrites.
+        self.emitted_ids.copy_(torch.where(selected[:, None] & take, ids, -1))
+        self.committed_input_ids.copy_(torch.where(selected[:, None] & take, inputs, -1))
+        self.emitted_count.copy_(torch.where(selected, emitted, 0))
+        self.accepted_count.copy_(torch.where(selected, emitted, 0))
+        self.accepted_drafts.copy_(torch.where(selected, emitted_drafts, 0))
+        self.commit_column.copy_(torch.where(selected, emitted - 1, -1))
+        self.owners.fill_(-1)
+        self.owners.scatter_(0, torch.where(leader, safe, state.capacity), self.rows)
+        owner = self.owners[:state.capacity]
+        owned, source = owner >= 0, owner.clamp_min(0)
+
+        def updated(tensor, values):
+            mask = owned.view(-1, *([1] * (tensor.dim() - 1)))
+            return torch.where(mask, values[source].to(tensor.dtype), tensor)
+
+        def commit(tensor, values):
+            tensor.copy_(updated(tensor, values))
+
+        # Consumed tokens and history may be views of the state pool: both are read before
+        # either is written, so compiled commits never materialize an updated pool.
+        self.consumed_after.copy_(updated(state.consumed_tokens, consumed))
+        if self.history is not None:
+            self.history_after.copy_(updated(self.history, history))
+        self._records.copy_(torch.where(owned[:, None], record[source], self.idle_record))
+        state.histogram.view(-1).scatter_add_(0, (safe[:, None] * state.vocab_size
+            + ids.clamp(0, state.vocab_size - 1)).view(-1), (take & leader[:, None]).to(torch.int32).view(-1))
+        commit(state.generated_tokens, generated)
+        commit(state.pending_token, torch.where(emitted > 0, pending, pending_before))
+        commit(counter, counters)
+        commit(state.status, status)
+        commit(state.error_code, error)
+        if self.rng is not None:
+            commit(self.rng.target_offset, rng_offset)
+            commit(self.rng.generation, rng_generation)
         state.consumed_tokens.copy_(self.consumed_after)
         if self.history is not None:
             self.history.copy_(self.history_after)

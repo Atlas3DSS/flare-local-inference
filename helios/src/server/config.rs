@@ -158,6 +158,15 @@ impl Bootstrap {
                     _ => return Err("speculative_proposal_source must be mtp or copy".into()),
                 },
             )?,
+            state_rows_per_request: object
+                .get("state_rows_per_request")
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|v| usize::try_from(v).ok())
+                        .filter(|v| (1..=8).contains(v))
+                        .ok_or("state_rows_per_request must be an integer from 1 through 8")
+                })
+                .transpose()?,
             speculative_widths: object
                 .get("speculative_widths")
                 .map(|v| {

@@ -66,11 +66,15 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     recipe, checkpoint = model.recipe, model.checkpoint
     world = recipe.tensor_parallel[0]
     learned = recipe.weights_bytes(checkpoint, world, recipe.speculation)
-    assert learned == -(-checkpoint.device_bytes // world) and 0 < checkpoint.draft_bytes < checkpoint.device_bytes
+    loaded = checkpoint.device_bytes + checkpoint.expansion_bytes
+    assert learned == -(-loaded // world) and 0 < checkpoint.draft_bytes < checkpoint.device_bytes
     for speculation in (None, COPY):
         assert recipe.weights_bytes(checkpoint, world, speculation) == -(
-            -(checkpoint.device_bytes - checkpoint.draft_bytes) // world)
-    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * 6 + 12 and recipe.live_rows(4, None) == 1 + 4 + 12
+            -(loaded - checkpoint.draft_bytes) // world)
+    # Qwen commits verified tokens into the live row; GLM keeps a row per verified position.
+    verification = 0 if model is QWEN else recipe.speculation.draft_tokens
+    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * (1 + verification) + 12
+    assert recipe.live_rows(4, None) == 1 + 4 + 12
 
 
 def test_qwen_stored_bytes_match_the_cached_checkpoint():
@@ -78,14 +82,18 @@ def test_qwen_stored_bytes_match_the_cached_checkpoint():
         pytest.skip("the pinned Qwen revision is not in the hub cache")
     from ignition.preparation.checkpoint import inspect_qwen38_checkpoint
 
-    sizes = Counter()
-    for tensor in inspect_qwen38_checkpoint(QWEN.snapshot(HUB)).tensors.values():
+    sizes, compressed_scales = Counter(), 0
+    for name, tensor in inspect_qwen38_checkpoint(QWEN.snapshot(HUB)).tensors.items():
         sizes[tensor.component] += tensor.nbytes
+        if name.startswith("model.language_model.layers.") and ".mlp.experts." in name and ".weight_scale." in name:
+            compressed_scales += tensor.nbytes
     checkpoint = QWEN.checkpoint
     assert checkpoint.stored_bytes == sum(sizes.values())
     assert checkpoint.mapped_host_bytes == 0
     assert checkpoint.device_bytes == sum(sizes.values()) - sizes["ple_tables"]
     assert checkpoint.draft_bytes == sizes["mtp"]
+    # Routed experts expand their CSF block scales to native storage at load.
+    assert checkpoint.expansion_bytes == 48 * 512 * 307_200 - compressed_scales
 
 
 def test_glm_stored_bytes_match_the_cached_checkpoint():
@@ -137,8 +145,8 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     assert config.headroom_bytes == planning.HEADROOM_BYTES + (2 << 30)
     layout = HybridStateLayout.build(speculative_tokens=7, world_size=1)
     assert layout.snapshot_capacity(config.snapshot_budget_bytes) == plan.snapshots
-    # The pool holds a null row, live and speculative rows per slot, and the snapshot rows.
-    assert 1 + config.request_capacity * max(config.speculative_widths) + plan.snapshots == plan.live_rows + plan.cache_states
+    # The pool holds a null row, one live row per slot, and the snapshot rows.
+    assert 1 + config.request_capacity + plan.snapshots == plan.live_rows + plan.cache_states
 
 
 def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):

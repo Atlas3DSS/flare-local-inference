@@ -382,6 +382,11 @@ class DirectWeightLoader:
             self._copy(target, values)
             device_scales.append(target)
         self._session.flush()
+        from .sm103 import is_sm103
+
+        if is_sm103(self.device):
+            return _sm103_fp4_experts(w13, s13, w2, s2, vectors, format=format,
+                                      activation_mode=activation_mode, swiglu_limit=swiglu_limit)
         plan = moe.plan_weights(
             source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32", w13_layout="w13"),
             activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
@@ -403,8 +408,10 @@ class DirectWeightLoader:
 
         ``scale_vectors`` supplies up/gate and down global multipliers followed
         by their activation reciprocal scales. Gate/up scalar compatibility is
-        the recipe's responsibility. Scale scratch can be shared by serialized
-        layers; both buffers remain caller-owned through replay.
+        the recipe's responsibility. Without ``scale_scratch`` (and always on
+        SM103) the CSF scales expand once here into persistent storage. With it,
+        each call expands them into the scratch, which serialized layers can
+        share; both buffers remain caller-owned through replay.
         """
         import torch
         from b12x.moe import fused_moe as moe
@@ -418,10 +425,14 @@ class DirectWeightLoader:
         count = len(prefixes)
         shapes = ((count, (2 * local + 127) // 128 * 128, hidden_size // 16),
                   (count, hidden_size, (local // 16 + 3) // 4 * 4))
-        if scale_scratch is None:
-            scale_scratch = tuple(torch.empty(shape, dtype=torch.float8_e4m3fn, device=self.device)
-                                  for shape in shapes)
-        for scratch, shape in zip(scale_scratch, shapes, strict=True):
+        from .sm103 import is_sm103
+
+        sm103 = is_sm103(self.device)
+        # Expanding once at load spends the expanded scales' memory to keep the expansion,
+        # its scratch writes and their rereads off every forward's critical path.
+        expand = sm103 or scale_scratch is None
+        for scratch, shape in zip(() if scale_scratch is None else scale_scratch,
+                                  () if scale_scratch is None else shapes, strict=True):
             if (scratch.device != self.device or scratch.dtype != torch.float8_e4m3fn
                     or tuple(scratch.shape) != shape or not scratch.is_contiguous()):
                 raise ValueError("expert scale scratch shape, dtype, device, or layout mismatch")
@@ -462,6 +473,23 @@ class DirectWeightLoader:
         self._session.flush()
         if self._display is not None:
             self._display.update(self._session.payload_bytes)
+        if expand:
+            from b12x._lib.quant._csf_prepare import expand_source_scales, validate_source
+
+            # SM103's kernels take row-major scales; b12x takes the native swizzled F8_128x4 grid.
+            native = ((count, 2 * local, hidden_size // 16), (count, hidden_size, local // 16))
+            expanded = []
+            for source, shape in zip((scales13, scales2), native if sm103 else shapes, strict=True):
+                validate_source(source)
+                expanded.append(torch.empty(shape, dtype=torch.uint8 if sm103 else torch.float8_e4m3fn,
+                                            device=self.device))
+                expand_source_scales(source, expanded[-1], swizzled=not sm103)
+            if sm103:
+                return _sm103_fp4_experts(w13, expanded[0], w2, expanded[1], scale_vectors, format="nvfp4",
+                                          activation_mode=activation_mode, swiglu_limit=swiglu_limit)
+            block_scales = expanded
+        else:
+            block_scales = scale_scratch
         plan = moe.plan_weights(
             source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
             activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
@@ -469,11 +497,13 @@ class DirectWeightLoader:
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local),
         )
         packed = moe.PackedWeights(
-            w13=w13, w2=w2, w13_block_scales=scale_scratch[0], w2_block_scales=scale_scratch[1],
+            w13=w13, w2=w2, w13_block_scales=block_scales[0], w2_block_scales=block_scales[1],
             w13_global_scales=device_scales[0], w2_global_scales=device_scales[1],
             input_scale=device_scales[2], intermediate_scale=device_scales[3],
             immutable_input_scales=True,
         )
+        if expand:
+            return moe.prepare_weights(plan=plan, weights=packed)
         return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
             packed=packed, w13_scales=scales13, w2_scales=scales2))
 
@@ -492,6 +522,19 @@ class DirectWeightLoader:
         for tensor in (*result.components, result.starts):
             record_numeric_tensor(tensor)
         return result
+
+
+def _sm103_fp4_experts(w13, s13, w2, s2, scale_vectors, *, format, activation_mode, swiglu_limit):
+    """Prepare packed NVFP4 experts with row-major scales for FlashInfer's SM103 MoE kernels."""
+    from .moe_sm103 import prepare_cute_w4a16_experts, prepare_trtllm_nvfp4_experts
+
+    if format != "nvfp4" or swiglu_limit is not None:
+        raise ValueError("SM103 routed experts support NVFP4 storage with plain SwiGLU")
+    if activation_mode == "a4":
+        return prepare_trtllm_nvfp4_experts(w13, s13, w2, s2, scale_vectors)
+    if activation_mode == "a16":
+        return prepare_cute_w4a16_experts(w13, s13, w2, s2, *scale_vectors[:2])
+    raise ValueError(f"SM103 routed experts do not support activation mode {activation_mode!r}")
 
 
 def _aligned_range(selected, extent, alignment):

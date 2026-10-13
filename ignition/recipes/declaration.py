@@ -28,6 +28,9 @@ class Checkpoint:
     mapped_host_bytes: int = 0
     # The share of `device_bytes` that holds the draft model, loaded only for learned drafts.
     draft_bytes: int = 0
+    # Device bytes that loading adds beyond the stored tensors, such as block scales
+    # expanded from a compressed encoding.
+    expansion_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,8 +99,8 @@ class Recipe:
     default. A recipe that declares `speculation` drafts with those settings
     unless a plan overrides them, and `plain_ranks` holds its costs with
     speculation disabled. Each active request has one execution state row per
-    selected verification position. `history_copy` states that drafts can be
-    copied from request history.
+    selected verification position unless `verification_rows` gives another count
+    of extra rows. `history_copy` states that drafts can be copied from request history.
     """
 
     name: str
@@ -117,6 +120,7 @@ class Recipe:
     speculation: Speculation | None = None
     plain_ranks: Mapping[int, RankCosts] = field(default_factory=lambda: MappingProxyType({}))
     history_copy: bool = False
+    verification_rows: int | None = None
 
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):
@@ -135,14 +139,16 @@ class Recipe:
             costs, page_bytes=costs.page_bytes - costs.draft_page_bytes, draft_page_bytes=0)
 
     def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None) -> int:
-        """Estimate one rank's device weights from the checkpoint's stored tensors."""
+        """Estimate one rank's device weights from the checkpoint's stored tensors and their expansion."""
         learned = speculation is not None and speculation.learned
-        return -(-(checkpoint.device_bytes - (0 if learned else checkpoint.draft_bytes)) // world_size)
+        return -(-(checkpoint.device_bytes + checkpoint.expansion_bytes
+                   - (0 if learned else checkpoint.draft_bytes)) // world_size)
 
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:
         """State rows held for running requests: null, live, speculative, and admission rows."""
         slots = request_capacity(concurrency)
-        speculative = speculation.draft_tokens if speculation is not None else 0
+        speculative = (0 if speculation is None else speculation.draft_tokens if self.verification_rows is None
+                       else self.verification_rows)
         return 1 + slots * (1 + speculative) + ADMISSION_SNAPSHOTS * concurrency
 
     def snapshot_rows(self, cache_states: int, concurrency: int) -> int:

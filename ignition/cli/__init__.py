@@ -11,7 +11,7 @@ def _parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="ignition", allow_abbrev=False,
-        description="Prepare native runtime packages for NVIDIA SM120 and SM121 GPUs.")
+        description="Prepare native runtime packages for NVIDIA SM103, SM120, and SM121 GPUs.")
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     def command(name, handler, summary):

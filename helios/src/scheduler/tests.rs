@@ -67,6 +67,7 @@ fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
+            state_rows_per_request: None,
         },
     )
     .unwrap()
@@ -298,6 +299,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
+                state_rows_per_request: None,
             },
         )
         .unwrap();
@@ -365,6 +367,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
+                state_rows_per_request: None,
             },
         );
         assert!(matches!(
@@ -1102,6 +1105,29 @@ fn measured_acceptance_selects_the_width_with_most_tokens_per_round_time() {
 }
 
 #[test]
+fn a_width_with_one_slow_first_round_is_measured_again() {
+    use super::speculation::WidthController;
+    let widths = [1, 2, 3, 4];
+    // Width three is fastest per token once measured, but its first round took 40 ms.
+    let cost = |w: usize, first: bool| match w {
+        3 if first => 40_000_000,
+        _ => [8_000_000, 10_000_000, 12_000_000, 15_000_000][w - 1],
+    };
+    let mut c = WidthController::default();
+    // Two drafts are almost always accepted; the third keeps its even prior.
+    for _ in 0..128 {
+        c.observe_acceptance(&[(2, 2)]);
+    }
+    let mut first = [true; 4];
+    for _ in 0..69 {
+        let w = c.choose(&widths, 1, 100, 8).unwrap();
+        c.observe(1, 100, w, cost(w, first[w - 1]), 1).unwrap();
+        first[w - 1] = false;
+    }
+    assert_eq!(c.choose(&widths, 1, 100, 8), Some(3));
+}
+
+#[test]
 fn draft_boundary_page_remains_private_across_published_prefix_branches() {
     let mut scheduler = scheduler(2, 16, 4);
     scheduler.enable_speculation(&[1, 2, 4, 8]).unwrap();
@@ -1343,6 +1369,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             patch_capacities: vec![8, 32],
         },
         draft_pages_per_request: 1,
+        state_rows_per_request: None,
     };
     let limits = SchedulerLimits {
         request_slots: 1,
@@ -1395,6 +1422,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         },
         SchedulerCapabilities {
             draft_pages_per_request: 9,
+            state_rows_per_request: None,
             ..capabilities
         },
     ] {

@@ -9,7 +9,8 @@ use crate::{Result, execution::BATCH_CAPACITIES};
 
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
-    pub embedding_table_storage: crate::engram::Storage,
+    /// Absent, [`crate::engram::Storage::choose`] picks RAM or disk at load.
+    pub embedding_table_storage: Option<crate::engram::Storage>,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
     pub adaptive_verification: Option<bool>,

@@ -9,7 +9,7 @@ import os
 import pickle
 import tempfile
 from concurrent.futures import FIRST_COMPLETED, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -330,11 +330,12 @@ _COMMAND_SOURCES = ('cli', 'errors.py', 'planning.py', 'progress.py')
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
-    def __init__(self, *, namespace, device, root=None):
+    def __init__(self, *, namespace, device, root=None, unified_memory=False):
         import flashinfer
         from torch._inductor.codecache import torch_key
 
         self.device = torch.device(device)
+        self.unified_memory = unified_memory
         properties = torch.cuda.get_device_properties(device)
         options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
         key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
@@ -374,9 +375,16 @@ class ForwardCache:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
-        """Trace and compile in workers, then bind and warm on the owning rank."""
+        """Trace and compile in workers, then bind and warm on the owning rank.
+
+        On a unified-memory GPU, restoring and warming compiled forwards also loads their kernels
+        without Inductor's code-generation subprocesses.
+        """
+        from .compile_pool import single_process_compilation
+
         # Compiler workers own parallel compilation; artifact binding needs no second worker pool.
-        with self._publication_lock(coordinator), torch._inductor.config.patch(compile_threads=1):
+        with self._publication_lock(coordinator), torch._inductor.config.patch(compile_threads=1), (
+                single_process_compilation() if self.unified_memory else nullcontext()):
             return self._prepare_many(functions, signatures, progress=progress,
                                       coordinator=coordinator, materialize=materialize)
 
@@ -387,7 +395,7 @@ class ForwardCache:
         if coordinator is not None:
             return self._prepare_ranks(functions, signatures, coordinator, progress=progress, materialize=materialize)
         compiled, paths, pending = {}, {}, []
-        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device) as compiler:
+        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, unified_memory=self.unified_memory) as compiler:
             def finish():
                 name, bound, path = _completed(pending)
                 try:
@@ -438,7 +446,7 @@ class ForwardCache:
                 variants = {name: function.compilation_variants() if hasattr(function, "compilation_variants")
                             else {"shared": function} for name, function in functions.items()}
                 pending, paths = [], {}
-                with phase(progress, "Compile model forwards", total=sum(map(len, variants.values()))) as stage, CompilePool(self.device) as compiler:
+                with phase(progress, "Compile model forwards", total=sum(map(len, variants.values()))) as stage, CompilePool(self.device, unified_memory=self.unified_memory) as compiler:
                     def finish():
                         name, variant, bound, path = _completed(pending)
                         if bound.pending is not None:

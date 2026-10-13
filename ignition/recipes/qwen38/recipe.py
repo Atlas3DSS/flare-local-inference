@@ -2,7 +2,6 @@
 
 from types import MappingProxyType
 
-from ignition.planning import HEADROOM_BYTES
 from ignition.preparation.qwen38 import ARCHITECTURE, MODEL_ID, REVISION
 from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, Speculation
 
@@ -36,7 +35,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         max_active=plan.concurrency,
         context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
+        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
+        unified_memory=any(gpu.unified for gpu in plan.gpus),
         mtp=speculation is not None, **drafting)
     if plan.world_size == 1:
         storage = {} if package_storage is None else {"package_storage": package_storage}
@@ -60,11 +60,15 @@ RECIPE = Recipe(
         # Decoder, vision, and draft tensors; PLE rows are delivered through compact inputs.
         device_bytes=73_529_505_900,
         # The MTP module's tensors.
-        draft_bytes=1_596_720_640),),
+        draft_bytes=1_596_720_640,
+        # Routed-expert block scales expand at load from 4,156,604,564 CSF bytes to
+        # 48 layers x 512 experts x 307,200 bytes.
+        expansion_bytes=3_393_142_636),),
     context=262144, page_tokens=64, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    # Rounds adapt among zero through five drafts. Verification retains recurrent
-    # state for seven draft positions per request whatever the captured counts.
-    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, history_copy=True,
+    # Rounds adapt among zero through five drafts, up to seven. Verification records
+    # corrections and commits accepted tokens into the live state row, so it keeps
+    # no extra rows.
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, verification_rows=0, history_copy=True,
     ranks=MappingProxyType({
         1: _costs(122_932_224, 135_168, _GRAPH_BYTES[1], speculating=True),
         2: _costs(61_705_216, 69_632, _GRAPH_BYTES[2], speculating=True),

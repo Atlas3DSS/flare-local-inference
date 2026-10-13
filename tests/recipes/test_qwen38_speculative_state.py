@@ -49,7 +49,7 @@ CUDA = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 @CUDA
 @torch.no_grad()
-def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
+def test_live_row_state_survives_width_one_and_retains_accepted_endpoint():
     from ignition.recipes.qwen38.decoder_state import DecoderInputs
     from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
     from ignition.recipes.qwen38.speculative_state import PreparedVerificationState
@@ -79,7 +79,8 @@ def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
     accepted[2] = 8
     states[1].begin()
     assert states[1].gdn.accepted_tokens.tolist() == [8]
-    assert states[1].gdn.state_indices.tolist() == [[3, 20, 21, 22, 23, 24, 25, 26]]
+    # Verification resumes from and commits into the live row; later columns stay null.
+    assert states[1].gdn.state_indices.tolist() == [[3, 0, 0, 0, 0, 0, 0, 0]]
     assert states[1].token_ids.tolist() == [901]
     for width in range(2, 8):
         states[width].begin()
@@ -89,8 +90,6 @@ def test_eight_column_state_survives_width_one_and_retains_accepted_endpoint():
     states[8].begin()
     assert states[8].qsa.slot_mapping.tolist() == [381, 382, 383, 192, 193, 194, 195, 196]
     for layer in pool.gdn.values():
-        for column, index in enumerate(states[8].gdn.state_indices[0].tolist()):
-            layer.recurrent[index].fill_(column / 16)
         layer.convolution[3].copy_(torch.arange(100, 110, device=device, dtype=torch.bfloat16))
     pool.ple_convolution[3].copy_(torch.arange(100, 116, device=device, dtype=torch.bfloat16))
     states[8].commit()

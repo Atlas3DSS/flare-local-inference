@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from ignition.components.parallel import TensorParallelShard
+from ignition.planning import SUPPORTED_ARCHITECTURES, SUPPORTED_CAPABILITIES
 from ignition.preparation.checkpoint import CheckpointManifest
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.qwen38 import TEXT_PREFIX
@@ -17,7 +18,7 @@ from .hyperconnection import packed_down_projection
 from .model import create_model_tree
 from .moe import QwenMoeWeights
 from .vision import VisionWeights
-from .weights import QwenWeightLoader, allocate_expert_scale_scratch
+from .weights import QwenWeightLoader
 
 
 @dataclass(frozen=True)
@@ -33,14 +34,12 @@ class ModelWeights:
     Canonical quantized Linear and expert parameters remain on meta storage;
     their prepared replacements own the checkpoint's packed representations.
     PLE table ownership is separate because those tables reside in mapped host
-    memory. All expert layers share the same scale-expansion workspace and
-    therefore execute serially.
+    memory. Expert layers expand their CSF block scales once at load.
     """
 
     tree: torch.nn.Module
     layers: tuple[DecoderLayerWeights, ...]
     vision: VisionWeights
-    expert_scale_scratch: tuple[torch.Tensor, torch.Tensor]
     allocated_bytes: int
     shard: TensorParallelShard = TensorParallelShard(0, 1)
 
@@ -52,8 +51,8 @@ class ModelWeights:
         if device.type != "cuda":
             raise ValueError("model weights require a CUDA device")
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
-        if torch.cuda.get_device_capability(device) not in ((12, 0), (12, 1)):
-            raise ValueError("the Qwen recipe requires SM120 or SM121")
+        if torch.cuda.get_device_capability(device) not in SUPPORTED_CAPABILITIES:
+            raise ValueError(f"the Qwen recipe requires {SUPPORTED_ARCHITECTURES}")
         free_bytes, _ = device_memory_info(device)
         stored = sum(tensor.nbytes for tensor in manifest.tensors.values()
                      if tensor.component not in ("mtp", "ple_tables"))
@@ -62,7 +61,6 @@ class ModelWeights:
             raise MemoryError(f"model weight loading requires at least {stored // shard.world_size + (8 << 30)} free CUDA bytes; found {free_bytes}")
         tree = create_model_tree(manifest)
         before = torch.cuda.memory_allocated(device)
-        scale_scratch = allocate_expert_scale_scratch(device, shard=shard)
         layers = []
         with QwenWeightLoader(manifest, device, progress=progress, shard=shard) as loader:
             def parameters(paths, extents=None):
@@ -108,7 +106,7 @@ class ModelWeights:
                     module.num_v_heads //= shard.world_size
                     module.conv_dim //= shard.world_size
                 attention = load_projections(attention_prefix)
-                moe = QwenMoeWeights.load(loader, layer, scale_scratch=scale_scratch)
+                moe = QwenMoeWeights.load(loader, layer)
                 module = tree.get_submodule(f"{prefix}.mlp")
                 module.gate.weight = torch.nn.Parameter(moe.router, requires_grad=False)
                 module.shared_expert_gate.weight = torch.nn.Parameter(moe.shared.gate, requires_grad=False)
@@ -120,7 +118,7 @@ class ModelWeights:
                  "norm_query.weight", "norm_conv.weight")))
             vision = VisionWeights.load(tree.model.visual, loader)
         torch.cuda.synchronize(device)
-        return cls(tree, tuple(layers), vision, scale_scratch,
+        return cls(tree, tuple(layers), vision,
                    torch.cuda.memory_allocated(device) - before, shard)
 
 
@@ -172,7 +170,7 @@ class DecoderScratch:
 
         return type(self)(self.embedding[:tokens], self.residual[:tokens], self.hidden[:tokens],
             self.sample_hidden[:sequences], self.logits[:sequences], self.hyperconnection.rows(tokens),
-            self.gdn.rows(tokens), rows(self.qsa), rows(self.ple), self.moe.rows(tokens),
+            self.gdn.rows(tokens), self.qsa.rows(tokens), rows(self.ple), self.moe.rows(tokens),
             None if self.local_logits is None else self.local_logits[:sequences])
 
 
@@ -194,7 +192,7 @@ class PreparedDecoder:
                  stage_outputs: dict[str, torch.Tensor] | None = None,
                  max_cache_pages: int | None = None,
                  residual_output: torch.Tensor | None = None, verification: bool = False,
-                 runtime=None, vocabulary_runtime=None, coordinator=None):
+                 gdn_records=None, gdn_in_place: bool = False, runtime=None, vocabulary_runtime=None, coordinator=None):
         from ignition.components.embedding import PreparedEmbedding
         from ignition.components.linear import UnquantizedProjection
 
@@ -239,7 +237,8 @@ class PreparedDecoder:
                 attention = PreparedGDN(module.linear_attn, layer_weights.attention, source,
                     scratch.gdn, state.pool.gdn[index], state.gdn, mode=state.mode,
                     session=session, name=f"{prefix}.gdn", checkpoint_export=False,
-                    workspace=workspaces, projection_workspace=workspaces)
+                    workspace=workspaces, projection_workspace=workspaces,
+                    records=None if gdn_records is None else gdn_records[index], in_place=gdn_in_place)
             moe = PreparedQwenMoe(source, layer_weights.moe, session=session, name=f"{prefix}.moe",
                 scratch=scratch.moe, workspace=workspaces,
                 projection_workspace=workspaces)

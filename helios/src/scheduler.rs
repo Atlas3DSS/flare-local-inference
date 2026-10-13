@@ -74,6 +74,8 @@ pub struct SchedulerCapabilities {
     pub page_tokens: usize,
     pub vision: crate::model::VisionCapabilities,
     pub draft_pages_per_request: usize,
+    /// Execution state rows each active request holds; None, the widest speculative graph's width.
+    pub state_rows_per_request: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -389,6 +391,13 @@ impl RequestScheduler {
             .unwrap_or(1)
     }
 
+    /// Execution state rows each active request holds, from its first state slot on.
+    pub fn execution_rows(&self) -> usize {
+        self.capabilities
+            .state_rows_per_request
+            .unwrap_or_else(|| self.execution_width())
+    }
+
     pub fn prefill_graphs(&mut self, capacities: &[usize]) -> Result<()> {
         let mut catalog = capacities.to_vec();
         catalog.sort_unstable();
@@ -405,7 +414,7 @@ impl RequestScheduler {
     }
 
     pub fn snapshot_slot(&self, snapshot: SnapshotId) -> StateSlotId {
-        StateSlotId((1 + self.limits.max_active * self.execution_width()) as u32 + snapshot.0)
+        StateSlotId((1 + self.limits.max_active * self.execution_rows()) as u32 + snapshot.0)
     }
 
     pub fn enable_speculation(&mut self, widths: &[usize]) -> Result<()> {
@@ -765,13 +774,7 @@ impl RequestScheduler {
             Some(inbound) if creating => (inbound.pages, 1),
             _ => (0, 0),
         };
-        let execution_rows = self
-            .speculative_catalog
-            .iter()
-            .flatten()
-            .copied()
-            .max()
-            .unwrap_or(1);
+        let execution_rows = self.execution_rows();
         if let Err(error) = self.ensure_resources(
             reserved_count + ticket_pages,
             1 + usize::from(need_system) + usize::from(need_prompt) + ticket_snapshots,

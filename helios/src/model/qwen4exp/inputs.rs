@@ -56,7 +56,7 @@ impl Inputs {
                 "request_state_rows",
                 lane.request.slot as usize * 8 * 8,
                 (0..8).map(|column| {
-                    if column < scheduler.execution_width() {
+                    if column < scheduler.execution_rows() {
                         request.state_slot.0 as i64 + column as i64
                     } else {
                         0

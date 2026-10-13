@@ -54,6 +54,8 @@ pub struct NativeResources {
     names: Vec<String>,
     reservations: Vec<(u64, usize)>,
     execution: Option<protobuf::wire::Execution>,
+    // An integrated GPU (GB10) registers host memory without pinning it.
+    integrated: bool,
     events: HashMap<String, Handle>,
     cache: Option<crate::offload::CacheGeometry>,
 }
@@ -114,6 +116,11 @@ impl NativeResources {
                     return Err(invalid("package GPU architecture does not match device"));
                 }
             }
+            let mut integrated = 0;
+            driver.check(
+                "cuDeviceGetAttribute",
+                (driver.device_attribute)(&mut integrated, 18, device),
+            )?;
             let mut context = null_mut();
             driver.check(
                 "cuCtxCreate_v2",
@@ -131,6 +138,7 @@ impl NativeResources {
                 names: vec![],
                 reservations: vec![],
                 execution: package.execution.clone(),
+                integrated: integrated != 0,
                 events: HashMap::new(),
                 cache: None,
             };
@@ -290,6 +298,16 @@ impl NativeResources {
                                 return Err(invalid(format!(
                                     "host address collision at {address:#x}: {}",
                                     std::io::Error::last_os_error()
+                                )));
+                            }
+                            // Registration does not pin host memory for an integrated GPU, and a
+                            // swapped-out page turns each GPU access during replay into a fault.
+                            if self.integrated && libc::mlock(mapped, allocation.nbytes) != 0 {
+                                let error = std::io::Error::last_os_error();
+                                libc::munmap(mapped, allocation.nbytes);
+                                return Err(invalid(format!(
+                                    "cannot lock {} bytes of mapped host storage: {error}; raise RLIMIT_MEMLOCK",
+                                    allocation.nbytes
                                 )));
                             }
                             let status = (driver.host_register)(mapped, allocation.nbytes, 2);

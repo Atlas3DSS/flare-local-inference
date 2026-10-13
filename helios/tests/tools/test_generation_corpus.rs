@@ -80,6 +80,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         speculative_fixed_width: None,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
+        state_rows_per_request: None,
     };
     let compiler = GrammarCompiler::new(frontend.tokenizer(), VOCABULARY, &model.eos_token_ids)?;
     let mut results = Vec::new();

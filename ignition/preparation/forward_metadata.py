@@ -97,6 +97,11 @@ class _ForwardPickler(pickle.Pickler):
             return _deserialize_triton_kernel, (_serialize_triton_kernel(value),)
         if isinstance(value, types.MappingProxyType):
             return _mapping_proxy, (dict(value),)
+        from tvm_ffi.core import CObject
+
+        if isinstance(value, CObject) or (not isinstance(value, type) and '<locals>' in type(value).__qualname__):
+            # FlashInfer's TVM-FFI kernel libraries and its locally defined kernel runners are process-local.
+            return _Unavailable, (f'{type(value).__module__}.{type(value).__qualname__}',)
         if isinstance(value, (torch.cuda.Stream, torch.cuda.Event, torch.cuda.CUDAGraph,
                               torch.distributed.ProcessGroup, socket.socket, ctypes.CDLL, ctypes._Pointer,
                               ctypes._CFuncPtr, ctypes.Structure, ctypes.Array, ctypes._SimpleCData,

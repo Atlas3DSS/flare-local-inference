@@ -88,6 +88,15 @@ class PreparedRoutedExperts:
     Reduction order follows the execution plan selected by b12x.
     """
 
+    def __new__(cls, source=None, experts=None, *args, **kwargs):
+        # Experts loaded for SM103 execute through FlashInfer's native kernels. Unpickling, as compiler
+        # workers do with a forward's metadata, creates the instance without arguments.
+        from ignition.components.moe_sm103 import Sm103Experts, Sm103RoutedExperts
+
+        if isinstance(experts, Sm103Experts):
+            return Sm103RoutedExperts(source, experts, *args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, source, experts, ids, weights, output, *, session: PreparationSession, name: str,
                  workspace: ScratchArena | torch.Tensor | None = None, router_weight=None, router_plan=None,
                  correction_bias=None, a4_prefill=False):

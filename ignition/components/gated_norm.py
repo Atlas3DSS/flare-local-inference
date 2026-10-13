@@ -8,9 +8,12 @@ from ignition.preparation.triton import launch_triton
 
 
 @triton.jit
-def _gated_rms_norm(Hidden, Gate, Weight, Output, Live, eps, HEADS: tl.constexpr, DIM: tl.constexpr,
-                    HEAD_BLOCK: tl.constexpr):
-    # FP32 RMS normalization per head, then weight, then the sigmoid gate, rounded once to BF16.
+def _gated_rms_norm(Hidden, Gate, Weight, Output, Live, gate_row_stride, EPS: tl.constexpr, HEADS: tl.constexpr,
+                    DIM: tl.constexpr, HEAD_BLOCK: tl.constexpr, ROUND_NORMALIZED: tl.constexpr,
+                    BF16_WEIGHT: tl.constexpr, SILU_GATE: tl.constexpr):
+    # FP32 RMS normalization per head, then weight, then the sigmoid gate, rounded to BF16 at the end.
+    # ROUND_NORMALIZED rounds the normalized values to BF16 before weighting, and BF16_WEIGHT also
+    # rounds their product with a BF16 weight, as a module computing in its input dtype does.
     # Rows at or after the live count are written as zeros.
     row = tl.program_id(0)
     head = tl.program_id(1) * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)[:, None]
@@ -19,35 +22,53 @@ def _gated_rms_norm(Hidden, Gate, Weight, Output, Live, eps, HEADS: tl.constexpr
     offset = row * (HEADS * DIM) + head * DIM + column
     hidden = tl.load(Hidden + offset, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(hidden * hidden, axis=1)[:, None] / DIM
-    hidden = hidden * tl.rsqrt(variance + eps)
-    hidden = tl.load(Weight + column).to(tl.float32) * hidden
-    gate = tl.load(Gate + offset, mask=mask, other=0.0).to(tl.float32)
-    value = hidden * tl.sigmoid(gate)
+    # A constexpr epsilon keeps the arithmetic FP32 under whole-forward compilation,
+    # which would pass a float argument as FP64.
+    hidden = hidden * tl.rsqrt(variance + EPS)
+    if ROUND_NORMALIZED:
+        hidden = hidden.to(tl.bfloat16)
+        if BF16_WEIGHT:
+            hidden = (hidden * tl.load(Weight + column)).to(tl.bfloat16).to(tl.float32)
+        else:
+            hidden = tl.load(Weight + column).to(tl.float32) * hidden.to(tl.float32)
+    else:
+        hidden = tl.load(Weight + column).to(tl.float32) * hidden
+    gate = tl.load(Gate + row.to(tl.int64) * gate_row_stride + head * DIM + column, mask=mask, other=0.0)
+    gate = gate.to(tl.float32)
+    value = hidden * (gate * tl.sigmoid(gate) if SILU_GATE else tl.sigmoid(gate))
     live = row < tl.load(Live)
     tl.store(Output + offset, tl.where(live, value, 0.0).to(Output.dtype.element_ty), mask=mask)
 
 
 class PreparedGatedRMSNorm:
-    """Normalize [rows, heads, dim] BF16 outputs per head and gate them with sigmoid(gate).
+    """Normalize [rows, heads, dim] BF16 outputs per head and gate them with sigmoid(gate) or silu(gate).
 
     Matches an FP32 gated RMSNorm (normalize, scale by the weight, multiply by
     the sigmoid gate, round to BF16) such as Transformers' RMSNormGated with a
-    sigmoid activation. Rows at or after the device live count become zeros.
-    Inputs and output are caller-owned contiguous storage; the output may feed
-    a projection directly.
+    sigmoid activation. ``round_normalized`` instead matches a module that rounds
+    the normalized values to its BF16 input dtype before weighting them, as
+    Qwen's gated norms do. Rows at or after the device live count become zeros.
+    Inputs and output are caller-owned storage with contiguous rows; the gate
+    may be a column slice of a wider row. The output may feed a projection directly.
     """
 
-    def __init__(self, hidden, gate, weight, output, live, *, eps):
+    def __init__(self, hidden, gate, weight, output, live, *, eps, round_normalized=False, activation="sigmoid"):
         rows, heads, dim = hidden.shape
+        gate_rows_contiguous = gate.stride()[1:] == (dim, 1)
         if (gate.shape != hidden.shape or output.shape != hidden.shape or weight.shape != (dim,)
                 or any(t.dtype != torch.bfloat16 for t in (hidden, gate, output))
-                or not all(t.is_contiguous() for t in (hidden, gate, output, weight))
-                or live.shape != (1,) or dim & (dim - 1)):
-            raise ValueError("gated RMS norm requires contiguous BF16 [rows,heads,dim] tensors and a [dim] weight")
+                or weight.dtype not in (torch.bfloat16, torch.float32)
+                or not all(t.is_contiguous() for t in (hidden, output, weight)) or not gate_rows_contiguous
+                or live.shape != (1,) or dim & (dim - 1) or activation not in ("sigmoid", "silu")):
+            raise ValueError("gated RMS norm requires BF16 [rows,heads,dim] tensors with contiguous rows "
+                             "and a [dim] weight")
         self.head_block = min(8, triton.next_power_of_2(heads))
-        self.args = (hidden, gate, weight, output, live, float(eps))
+        self.args = (hidden, gate, weight, output, live, gate.stride(0))
         self.grid = (rows, triton.cdiv(heads, self.head_block), 1)
-        self.options = {"HEADS": heads, "DIM": dim, "HEAD_BLOCK": self.head_block, "num_warps": 4}
+        self.options = {"EPS": float(eps), "HEADS": heads, "DIM": dim, "HEAD_BLOCK": self.head_block,
+                        "ROUND_NORMALIZED": bool(round_normalized),
+                        "BF16_WEIGHT": weight.dtype == torch.bfloat16, "SILU_GATE": activation == "silu",
+                        "num_warps": 4}
         self.compiled = _gated_rms_norm.warmup(*self.args, grid=self.grid, **self.options)
 
     def __call__(self):

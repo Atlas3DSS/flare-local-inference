@@ -9,7 +9,7 @@ from qualify.checkpoint_state import checkpoint_transfer_checks
 
 
 def fixture(consumed, accepted):
-    slot, live, frozen, extra = 2, 3, 5, 8
+    slot, live, frozen = 2, 3, 5
     pages = [1, 4, 2]
     page = pages[consumed // 64]
     regions = {
@@ -37,8 +37,8 @@ def fixture(consumed, accepted):
         regions["qsa.3." + name][frozen].copy_(source)
     regions["qsa.3.raw_positions"][frozen, -1] = -1
     regions["qsa.3.raw_anchor"] = torch.full((40, 1), consumed - 1, dtype=torch.int64)
-    recurrent = live if accepted == 1 else extra + slot * 7 + accepted - 2
-    regions["gdn.0.recurrent"][frozen].copy_(regions["gdn.0.recurrent"][recurrent])
+    # Rounds commit accepted recurrent state into the live row.
+    regions["gdn.0.recurrent"][frozen].copy_(regions["gdn.0.recurrent"][live])
     for name, history in (("gdn.0.convolution", 3), ("ple_convolution", 9)):
         regions[name][frozen].zero_()
         regions[name][frozen, :, :history].copy_(regions[name][live, :, accepted - 1:accepted - 1 + history])
@@ -50,8 +50,7 @@ def fixture(consumed, accepted):
         ple_convolution=regions["ple_convolution"],
         gdn={0: SimpleNamespace(recurrent=regions["gdn.0.recurrent"], convolution=regions["gdn.0.convolution"])}
     )
-    return pool, {3: cache}, dict(slot=slot, snapshot=0, pages=pages, consumed=consumed,
-                                 accepted=accepted, extra_base=extra)
+    return pool, {3: cache}, dict(slot=slot, snapshot=0, pages=pages, consumed=consumed, accepted=accepted)
 
 
 @pytest.mark.parametrize("consumed", [64, 65, 66, 67, 127])

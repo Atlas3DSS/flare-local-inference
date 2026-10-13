@@ -65,7 +65,8 @@ def _verification_metadata(Slots, Live, Active, Positions, Pending, Candidates, 
     previous = tl.load(PreviousAccepted + slot, active, other=1)
     tl.store(Accepted + row, previous)
     columns = tl.arange(0, 8)
-    indices = tl.load(StateRows + slot * 8 + columns, active, other=0)
+    # Verification resumes from and commits into the request's live state row; later columns are unused.
+    indices = tl.where(columns == 0, tl.load(StateRows + slot * 8, active, other=0), 0)
     tl.store(StateIndices + row * 8 + columns, tl.where(active, indices, 0))
     length = WIDTH
     if LIMITED:
@@ -114,7 +115,7 @@ def _commit_hidden(Hidden, Residual, SavedHidden, SavedResidual, Rope, SavedRope
 
 
 class PreparedVerificationState:
-    """Bind all widths to eight persistent recurrent checkpoint columns.
+    """Bind all widths to verification metadata that resumes from each request's live state row.
 
     Model evaluation leaves counters, PLE history and prefix publication private.
     The acceptance operation supplies clipped consumed counts before commit.

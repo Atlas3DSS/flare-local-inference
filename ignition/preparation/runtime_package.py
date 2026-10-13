@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes as C
 from dataclasses import asdict, dataclass, replace
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -176,6 +177,18 @@ def _without_zero_ranges(allocation, zero_ranges):
                    snapshot_spans=tuple(kept) if kept else None)
 
 
+# Payload bytes written between write-backs. A package holds the model's full weights; on a GPU that
+# allocates from system memory, page cache filling with them would take the memory the model occupies.
+_WRITE_BACK_BYTES = 256 << 20
+
+
+def _write_back(output):
+    """Write buffered payload to disk and drop it from the page cache."""
+    output.flush()
+    os.fdatasync(output.fileno())
+    os.posix_fadvise(output.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
+
 def _write_allocation(cuda, allocation, path, *, visit=None):
     """Pack nonzero ranges into a file; the loader zeroes omitted bytes."""
     import numpy as np
@@ -188,6 +201,8 @@ def _write_allocation(cuda, allocation, path, *, visit=None):
         for start, nbytes in (allocation.snapshot_spans if allocation.snapshot_spans is not None
                               else ((0, allocation.nbytes),)):
             for offset in range(start, start + nbytes, 8 << 20):
+                if offset > start and (offset - start) % _WRITE_BACK_BYTES == 0:
+                    _write_back(output)
                 size = min(8 << 20, start + nbytes - offset)
                 data = (C.string_at(allocation.address + offset, size) if allocation.memory == "mapped_host"
                         else cuda.download(allocation.address + offset, size))
@@ -205,6 +220,7 @@ def _write_allocation(cuda, allocation, path, *, visit=None):
                         stored[-1][1] += length
                     else:
                         stored.append([begin, length])
+        _write_back(output)
     if not stored:
         path.unlink()
         return None, []

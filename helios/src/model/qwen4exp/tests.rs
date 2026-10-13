@@ -36,6 +36,7 @@ fn config() -> ModelConfig {
         speculative_fixed_width: None,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
+        state_rows_per_request: None,
     }
 }
 fn manifest(config: &ModelConfig) -> ExecutionManifest {

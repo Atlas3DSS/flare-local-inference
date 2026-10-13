@@ -119,6 +119,17 @@ impl Archive {
         }
         Ok(())
     }
+    /// Drop the archive's pages from the page cache once loading has copied them out.
+    ///
+    /// Caches are sized from the free device memory the driver reports. An integrated GPU such as
+    /// GB10 allocates from system memory, where the driver does not count cached file pages as free,
+    /// so weights read through the cache would otherwise leave no room for caches.
+    pub fn release_page_cache(&self) {
+        // SAFETY: an advisory call on an open descriptor; failure only leaves the pages cached.
+        unsafe {
+            libc::posix_fadvise(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
+    }
     pub fn read(&self, package: &Package, key: &str) -> Result<Vec<u8>> {
         let span = self.span(package, key)?;
         let mut bytes = vec![0; super::protobuf::size(span.nbytes)?];
@@ -130,7 +141,10 @@ impl Archive {
     pub fn map(&self, package: &Package, key: &str) -> Result<Mapped> {
         let span = self.span(package, key)?;
         let offset = self.start + span.offset;
-        let base = offset / 4096 * 4096;
+        // mmap offsets must be multiples of the host page size, which is 64 KiB on some Arm kernels.
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        let base = offset / page * page;
         let skip = (offset - base) as usize;
         let size = super::protobuf::size(span.nbytes)?;
         let length = size

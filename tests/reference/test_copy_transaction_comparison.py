@@ -73,11 +73,11 @@ def test_shape_contract_has_all_fourteen_without_duplicates():
 
 
 @pytest.mark.parametrize("slot", range(4))
-def test_all_eight_recurrent_columns_remain_addressable(slot):
-    assert [state_column(slot, count, 44) for count in range(1, 9)] == [slot + 1, *range(44 + slot * 7, 51 + slot * 7)]
+def test_every_accepted_count_resumes_from_the_live_recurrent_row(slot):
+    assert [state_column(slot, count) for count in range(1, 9)] == [slot + 1] * 8
     for accepted in (0, 9, True):
         with pytest.raises(ValueError):
-            state_column(slot, accepted, 44)
+            state_column(slot, accepted)
 
 
 def test_cross_width_errors_are_measured_and_integer_errors_still_fail():
@@ -111,8 +111,8 @@ def test_logical_pages_never_use_physical_allocation_order_or_uncommitted_tail()
         logical_pages(cache, [5], 5)
 
 
-def test_committed_state_selects_column_eight_and_normalizes_cache_on_cpu():
-    slot, position, count, extra = 3, 75, 8, 9
+def test_committed_state_reads_the_live_row_and_normalizes_cache_on_cpu():
+    slot, position, count = 3, 75, 8
     recurrent = torch.arange(40 * 4, dtype=torch.float32).reshape(40, 1, 2, 2)
     convolution = torch.arange(40 * 2 * 10, dtype=torch.bfloat16).reshape(40, 2, 10)
     ple = torch.arange(40 * 2 * 16, dtype=torch.bfloat16).reshape(40, 2, 16)
@@ -138,12 +138,12 @@ def test_committed_state_selects_column_eight_and_normalizes_cache_on_cpu():
     requests = SimpleNamespace(pending_token=torch.ones(4, dtype=torch.int64), histogram=torch.ones(4, 12, dtype=torch.int32),
                                status=torch.ones(4, dtype=torch.int32), error_code=torch.zeros(4, dtype=torch.int32))
     owner = SimpleNamespace(pool=pool, previous_accepted=torch.tensor([1, 1, 1, count]),
-                            extra_base=extra, requests=requests, cache={3: cache})
+                            requests=requests, cache={3: cache})
     builder = SimpleNamespace(requests={slot: {"consumed": position, "pages": [5, 2]}})
     before_cuda = torch.cuda.is_initialized()
     tensors, metadata, checks = committed_state(owner, builder, [slot])
     assert all(checks.values())
-    assert torch.equal(tensors["slot3.gdn.0.recurrent"], recurrent[36])
+    assert torch.equal(tensors["slot3.gdn.0.recurrent"], recurrent[slot + 1])
     assert torch.equal(tensors["slot3.gdn.0.convolution"], convolution[4, :, 7:10])
     assert torch.equal(tensors["slot3.ple_convolution"], ple[4, :, 7:16])
     assert torch.equal(tensors["slot3.qsa.3.main_k_cache"], torch.cat((cache.main_k_cache[5], cache.main_k_cache[2, :11])))

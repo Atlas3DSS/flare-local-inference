@@ -142,7 +142,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--max-concurrency N` | Reduce concurrency within captured batch capacities | Package default |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
-| `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
+| `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | RAM on a discrete GPU when the tables take at most half of available host memory; otherwise `disk` |
 | `--weight-loading auto\|direct\|gds` | Automatic cuFile selection, staged direct I/O, or required cuFile weight loading | `auto` |
 
 Selected concurrency and draft depth cannot exceed prepared capacity.

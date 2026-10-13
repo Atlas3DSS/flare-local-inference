@@ -37,6 +37,7 @@ def backend(monkeypatch):
         self.namespace = FrozenMapping(namespace)
         self._stop = Event()
         self.compile_workers = 0
+        self.race_budget = kwargs.get("race_budget")
         self._published_owners = {}
 
     def prepare(self, requests, *, autotune, **kwargs):
@@ -78,9 +79,8 @@ def backend(monkeypatch):
             persistent=getattr(item.plan, "persistent", ())) for item in requests)
 
     def workers(self, count):
-        assert count is None
-        events.append(("workers",))
-        self.compile_workers = 8
+        events.append(("workers", count))
+        self.compile_workers = 8 if count is None else count
 
     @contextmanager
     def capture(self):
@@ -1055,3 +1055,42 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
     assert not source.count_nonzero() and not output.count_nonzero()
     with session.capture():
         pass
+
+
+GIB = 1 << 30
+
+
+@pytest.mark.parametrize(("free_gib", "race_bytes", "workers"), [
+    (16, 9 * GIB // 4, 6), (9.4, int(2.4 * GIB) // 4, 1), (6.5, 1, 0)])
+def test_unified_memory_tuning_keeps_the_protected_memory_free(backend, monkeypatch, free_gib, race_bytes, workers):
+    events, _ = backend
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (int(free_gib * GIB), 121 * GIB))
+    session = make_session(device=0, checkpoint="revision", protected_bytes=6 * GIB)
+    declare(session, (declaration("projection"),))
+    report = session.tune()
+    # Above the protected 6 GiB, 1 GiB allows for this process's growth; a quarter of the rest
+    # bounds the candidate race and compilers share what remains.
+    assert session.race_budget == report["race_budget_bytes"] == race_bytes
+    assert session.compile_workers == report["compile_workers"] == min(8, workers)
+    assert report["protected_bytes"] == 6 * GIB
+    assert [event for event in events if event[0] == "workers"] == [("workers", None)] + (
+        [] if workers >= 8 else [("workers", workers)])
+
+
+def test_unified_memory_tuning_fails_before_using_protected_memory(backend, monkeypatch):
+    events, _ = backend
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (5 * GIB, 121 * GIB))
+    session = make_session(device=0, checkpoint="revision", protected_bytes=6 * GIB)
+    declare(session, (declaration("projection"),))
+    with pytest.raises(MemoryError, match="6.0 GiB of headroom and \\[memory\\] reserve.*5.0 GiB is free"):
+        session.tune()
+    assert not [event for event in events if event[0] == "prepare"]
+
+
+def test_discrete_gpu_tuning_keeps_b12x_defaults(backend):
+    events, _ = backend
+    session = make_session(device=0, checkpoint="revision")
+    declare(session, (declaration("projection"),))
+    report = session.tune()
+    assert session.race_budget is None and report["protected_bytes"] is None
+    assert [event for event in events if event[0] == "workers"] == [("workers", None)]

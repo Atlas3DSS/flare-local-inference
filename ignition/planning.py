@@ -15,10 +15,16 @@ from pathlib import Path
 from ignition.errors import CapacityError, UsageError
 from ignition.recipes.declaration import Checkpoint, Recipe, Speculation
 
-# Preparation headroom covers compiled warm-up and graph capture, measured at
-# 0.83 GiB for one Qwen rank. Helios sizes its caches after graph upload with a
-# separate driver margin. Graphs, scratch, and the CUDA context are planned separately.
+# Free memory kept after the final KV allocation during preparation. Headroom
+# covers the transient working memory of compiled warm-up and graph capture,
+# measured at 0.83 GiB for one Qwen rank with 4096-token prefill chunks. Part of
+# it holds chunk activations, so chunk tokens past 4096 add HEADROOM_CHUNK_TOKEN_BYTES
+# each (8192-token chunks need about 1.3 GiB on GB300). Helios sizes its caches
+# after graph upload with a separate driver margin. Graphs, scratch, and the CUDA
+# context are planned separately.
 HEADROOM_BYTES = 1 << 30
+HEADROOM_CHUNK_TOKENS = 4096
+HEADROOM_CHUNK_TOKEN_BYTES = 128 << 10
 MINIMUM_REQUEST_TOKENS = 8192
 # The prefix cache keeps about four recent exchanges per concurrent request
 # resident; each exchange retains its prompt and terminal checkpoints.
@@ -27,7 +33,8 @@ CACHE_STATES_PER_REQUEST = 8
 # live state, so KV pages for active requests keep the larger share.
 CACHE_SHARE = 4
 CACHE_FLOOR = 8
-SUPPORTED_CAPABILITIES = ((12, 0), (12, 1))
+SUPPORTED_CAPABILITIES = ((10, 3), (12, 0), (12, 1))
+SUPPORTED_ARCHITECTURES = "SM103, SM120, or SM121"
 _GIB = 1 << 30
 
 
@@ -39,6 +46,8 @@ class Gpu:
     total_bytes: int
     free_bytes: int
     capability: tuple[int, int]
+    # Integrated GPU (GB10): device allocations and mapped host memory share system memory.
+    unified: bool = False
 
     @property
     def supported(self) -> bool:
@@ -59,11 +68,13 @@ def discover_gpus() -> tuple[Gpu, ...]:
             handle = nvml.device_get_handle_by_index_v2(index)
             try:
                 memory = nvml.device_get_memory_info_v2(handle)
-                total, free = memory.total, memory.free
+                total, free, unified = memory.total, memory.free, False
             except nvml.NotSupportedError:
+                # GB10 has no framebuffer for NVML to report; it allocates from system memory.
                 total, free = _integrated_memory(nvml.device_get_pci_info_v3(handle).bus_id)
+                unified = True
             gpus.append(Gpu(index, nvml.device_get_name(handle), nvml.device_get_uuid(handle), total,
-                            free, tuple(nvml.device_get_cuda_compute_capability(handle))))
+                            free, tuple(nvml.device_get_cuda_compute_capability(handle)), unified))
         return tuple(gpus)
     finally:
         nvml.shutdown()
@@ -187,8 +198,12 @@ class Plan:
         return min(gpu.free_bytes for gpu in self.gpus)
 
     @property
+    def headroom_bytes(self) -> int:
+        return HEADROOM_BYTES + max(0, self.prefill_chunk - HEADROOM_CHUNK_TOKENS) * HEADROOM_CHUNK_TOKEN_BYTES
+
+    @property
     def supply_bytes(self) -> int:
-        return self.free_bytes - HEADROOM_BYTES - self.reserve_bytes
+        return self.free_bytes - self.headroom_bytes - self.reserve_bytes
 
     @property
     def page_bytes(self) -> int:
@@ -237,13 +252,14 @@ class Plan:
             "snapshots": self.snapshots,
             "pages": self.pages, "demand_pages": self.demand_pages, "page_tokens": self.page_tokens,
             "page_bytes": self.page_bytes, "tokens": self.tokens, "guaranteed_tokens": self.guaranteed_tokens,
-            "free_bytes": self.free_bytes, "headroom_bytes": HEADROOM_BYTES, "reserve_bytes": self.reserve_bytes,
+            "free_bytes": self.free_bytes, "headroom_bytes": self.headroom_bytes, "reserve_bytes": self.reserve_bytes,
             "supply_bytes": self.supply_bytes,
         }
 
 
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
-        speculation: Speculation | None, prefill_chunk: int | None = None, context_parallel: bool = True) -> Plan:
+        speculation: Speculation | None, prefill_chunk: int | None = None,
+        context_parallel: bool = True) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
@@ -283,7 +299,7 @@ def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
         f" + {_gib(plan.live_bytes)} GiB live state + {_gib(plan.cache_bytes)} GiB prefix cache",
         f"+ {_gib(plan.page_bytes)} GiB minimum pages ({plan.concurrency} × {MINIMUM_REQUEST_TOKENS:,} tokens)"
         f" = {_gib(need)} GiB{_per_gpu(plan)};",
-        f"has {_gib(plan.free_bytes)} GiB free − {_gib(HEADROOM_BYTES)} GiB headroom"
+        f"has {_gib(plan.free_bytes)} GiB free − {_gib(plan.headroom_bytes)} GiB headroom"
         f" − {_gib(plan.reserve_bytes)} GiB reserve = {_gib(plan.supply_bytes)} GiB.",
         f"Options: {', or '.join(options)}." if options
         else f"No setting makes {plan.checkpoint.alias} fit on {scope}.",
@@ -325,9 +341,9 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
             raise CapacityError(f"{checkpoint.alias} needs {sizes} GPUs; {len(chosen)} selected; use --gpus {example}")
         for gpu in chosen:
             if not gpu.supported:
-                raise CapacityError(f"GPU {gpu.index} ({gpu.name}) is not an SM120 or SM121 device")
+                raise CapacityError(f"GPU {gpu.index} ({gpu.name}) is not an {SUPPORTED_ARCHITECTURES} device")
     elif len(supported) < recipe.tensor_parallel[0]:
-        raise CapacityError(f"{checkpoint.alias} needs {sizes} SM120 or SM121 GPUs; this host has {len(supported)}")
+        raise CapacityError(f"{checkpoint.alias} needs {sizes} {SUPPORTED_ARCHITECTURES} GPUs; this host has {len(supported)}")
 
     def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes, speculation=speculation):
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,

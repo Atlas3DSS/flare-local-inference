@@ -161,7 +161,8 @@ layer 1; DeepSeek V4.1 consumes its two tables at layers 1 and 14.
 A shared reader gathers each step's rows once. `--embedding-table-storage disk` uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
 registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
-resident memory and gathers the same rows. Both modes write bounded pinned
+resident memory and gathers the same rows; on GB300, Qwen's disk reads lengthened
+32-request rounds by a quarter. Both modes write bounded pinned
 staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
 512 KiB request mailbox per rank. The two DeepSeek V4.1 tables need 49.5 MiB of
 pinned row staging. Direct-I/O buffers add 8 MiB per table in disk mode.
