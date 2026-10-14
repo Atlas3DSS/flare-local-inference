@@ -376,10 +376,17 @@ class PreparedStochasticVerification:
         self.emitted_drafts.zero_()
         tokens, _, _ = verify_chain(self.safe_draft_probs, self.safe_ids, self.safe_target_probs,
             self.independent_accepted, self.emitted_drafts, seed=self.seed_bits, offset=self.offset)
+        accepted = self.emitted_drafts
+        if self.token_limits is None:
+            out.offered_drafts.fill_(self.drafts.shape[1])
+        else:
+            # The fixed-width library may accept dummy columns beyond a short
+            # tail. Only the real prefix belongs to the commit contract.
+            out.offered_drafts.copy_((self.token_limits - 1).clamp(0, self.drafts.shape[1]))
+            accepted = torch.minimum(accepted, out.offered_drafts)
         out.token_ids.copy_(tokens)
-        out.accepted_drafts.copy_(torch.where(valid, self.emitted_drafts, 0))
-        out.proposed_count.copy_(torch.where(valid, self.emitted_drafts + 1, 0))
-        out.offered_drafts.fill_(self.drafts.shape[1])
+        out.accepted_drafts.copy_(torch.where(valid, accepted, 0))
+        out.proposed_count.copy_(torch.where(valid, accepted + 1, 0))
         out.valid.copy_(valid)
         out.rng_increment.copy_(torch.where(valid, self.draw_reservation, 0))
         out.token_ids.masked_fill_(~valid[:, None], -1)

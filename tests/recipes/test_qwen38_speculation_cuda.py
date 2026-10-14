@@ -397,13 +397,13 @@ def test_native_chain_one_row_stream_is_invariant_to_packed_lane(compiled):
 
 
 @pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("bonus", [100, 0])
 @torch.no_grad()
-def test_fixed_graph_commits_bounded_prefixes_at_batch_four(compiled):
+def test_fixed_graph_commits_bounded_prefixes_at_batch_four(compiled, bonus):
     args = tensors(4, 4)
     state, slots, epochs, live, inputs, records, frame, sequence = args
     limits = torch.tensor([4, 1, 2, 3], dtype=torch.int32, device="cuda")
     columns = torch.arange(4, device="cuda")
-    inputs[:, 1:].masked_fill_(columns[None, :-1] >= limits[:, None] - 1, 0)
     drafts = inputs[:, 1:].contiguous()
     draft_probs = torch.zeros((4, 3, VOCAB), dtype=torch.float32, device="cuda")
     draft_probs.scatter_(2, drafts[:, :, None], 1.)
@@ -411,7 +411,7 @@ def test_fixed_graph_commits_bounded_prefixes_at_batch_four(compiled):
     for row in range(4):
         length = int(limits[row])
         for column in range(length):
-            target_probs[row, column, int(inputs[row, column + 1]) if column + 1 < length else 100] = 1
+            target_probs[row, column, int(inputs[row, column + 1]) if column + 1 < length else bonus] = 1
         target_probs[row, length:] = torch.nan
     target_valid = columns[None, :] < limits[:, None]
     draft_valid = columns[None, :-1] < limits[:, None] - 1
@@ -434,7 +434,11 @@ def test_fixed_graph_commits_bounded_prefixes_at_batch_four(compiled):
     with captured(run, (*args, limits, verify, commit, rng), {"records": records}, restore) as replay:
         replay()
         assert verify.output.valid.all()
+        assert verify.output.proposed_count.tolist() == [4, 1, 2, 3]
+        assert verify.output.accepted_drafts.tolist() == [3, 0, 1, 2]
+        assert verify.output.offered_drafts.tolist() == [3, 0, 1, 2]
+        assert state.error_code.eq(0).all()
         assert commit.emitted_count.tolist() == [4, 1, 2, 3]
         assert state.consumed_tokens.tolist() == [4, 3, 5, 6]
-        assert state.pending_token.tolist() == [100] * 4
+        assert state.pending_token.tolist() == [bonus] * 4
         assert records[0, :, 15].tolist() == [4] * 4
