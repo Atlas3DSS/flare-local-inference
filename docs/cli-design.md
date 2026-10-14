@@ -123,12 +123,15 @@ Advanced flags appear in their own section of `--help`. Recipe values apply when
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
+| `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
 others. The `Select GPUs.` startup line states the settings in effect: `up to
 N draft tokens` while verification adapts, `exactly N draft tokens` when it is
-fixed.
+fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
+recorded in the plan and the package cache key; it changes graph scheduling,
+not kernel selection, so its packages share tuned kernels with overlapped ones.
 
 Both Ignition commands accept `--config`.
 
@@ -283,6 +286,7 @@ Configuration assigns each decision to one owner:
 | Serving driver margin | 64 MiB after graph upload |
 | Prefill chunk | Recipe default, overridden by `--prefill-chunk-size` |
 | Speculation | Recipe default, overridden by `--no-mtp` and the advanced speculation flags |
+| Branch overlap | Recipe declaration, serialized by `--no-stream-overlap` |
 | Weight format, KV precision, page geometry, kernel plans | Checkpoint metadata and recipe preparation |
 | Queue, frontend workers, event capacity, body limit | Concurrency and recipe image limits |
 | Compiler workers | Host CPU capacity |

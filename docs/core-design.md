@@ -758,6 +758,9 @@ forks, joins, input lifetimes, and tensor mutations through forward compilation.
 Every branch rejoins before dependent outputs or reused scratch are consumed.
 Python captures these dependencies inside one CUDA graph; Rust submits that
 graph without calling Python or managing the internal streams.
+Preparation with `--no-stream-overlap` creates no auxiliary stream: recipes
+compose each branch on the main stream with the same kernels and register no
+concurrent scratch, to test whether a fault depends on overlap.
 
 Startup compiles complete text forwards with Inductor before capture, including
 prefill absorption, ordinary decode, resume sampling, and speculative rounds.

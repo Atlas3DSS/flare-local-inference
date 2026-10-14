@@ -64,6 +64,21 @@ def test_arena_owns_one_aligned_highwater_storage_across_operator_specs():
     assert arena.nbytes == 512
 
 
+def test_serial_arena_admits_no_auxiliary_stream_or_concurrent_plans():
+    plan = SimpleNamespace(memory_requirements=lambda: SimpleNamespace(scratch_nbytes=256))
+    assert ScratchArena("cpu").overlap
+    serial = ScratchArena("cpu", overlap=False)
+    assert serial.overlap is False
+    with pytest.raises(RuntimeError, match="stream overlap is disabled; compose this branch on the main stream"):
+        serial.auxiliary_stream
+    with pytest.raises(RuntimeError, match="stream overlap is disabled"):
+        serial.register_parallel(plan, plan)
+    # Serial work shares one region: nothing reserves concurrent storage.
+    assert serial.parallel_nbytes(lambda plan: plan.memory_requirements().scratch_nbytes) == 0
+    with pytest.raises(TypeError, match="overlap must be a boolean"):
+        ScratchArena("cpu", overlap=1)
+
+
 @pytest.mark.parametrize("nbytes", [-1, True, False, 1.5, "256", None])
 def test_invalid_sizes_reject_before_allocating_or_replacing_owner(nbytes):
     arena = ScratchArena("cpu")

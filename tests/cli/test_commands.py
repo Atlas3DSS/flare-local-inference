@@ -92,6 +92,19 @@ def test_multi_host_ranks_parse_for_rank_zero_and_its_peers():
     assert (peer.rendezvous, peer.rank, peer.ranks, peer.gpu) == ("10.0.0.1:29600", 3, 4, 0)
 
 
+def test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_accept(host, tmp_path, capsys):
+    for command in (["run"], ["export", "--output", str(tmp_path / "package")], ["serve"]):
+        assert _parser().parse_args([*command, "glm-5.3-flash", "--no-stream-overlap"]).no_stream_overlap
+        assert not _parser().parse_args([*command, "glm-5.3-flash"]).no_stream_overlap
+    for model in ("qwen3.8-flash", "glm-5.3-flash", "deepseek-v4-flash", "deepseek-v4.1-flash"):
+        serial = _parser().parse_args(["run", model, "--no-stream-overlap"])
+        assert not preparation.stream_overlap(serial, resolve(model))
+        assert preparation.stream_overlap(_parser().parse_args(["run", model]), resolve(model))
+    # MiMo composes no concurrent branches, so serializing them is rejected rather than ignored.
+    assert run("mimo-v2.6-pro-mopd", "--no-stream-overlap") == 2
+    assert "--no-stream-overlap: mimo-v2.6-pro-mopd runs no branches concurrently" in failure(capsys)[0]
+
+
 def speculation(*arguments, model="qwen3.8-flash"):
     """Resolve the speculation settings `run` would prepare for a command line."""
     return preparation.speculation(_parser().parse_args(["run", model, *arguments]), resolve(model))

@@ -64,7 +64,7 @@ class PreparedGlmMoe:
             router_weight=weights.router, router_plan=self.routing.plan, correction_bias=weights.correction,
             a4_prefill=prefill and weights.experts_a4_prefill)
         self.concurrent_shared = None
-        if source.shape[0] <= 256:
+        if source.shape[0] <= 256 and workspace.overlap:
             self.concurrent_shared = ConcurrentSharedExpert(self.shared,
                 parallel_plans=(self.routing.plan, self.experts.plan),
                 session=session, workspace=workspace, defer_launch=source.shape[0] == 1)

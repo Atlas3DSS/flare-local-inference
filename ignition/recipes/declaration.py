@@ -123,6 +123,8 @@ class Recipe:
     speculation disabled. Each active request has one execution state row per
     selected verification position unless `verification_rows` gives another count
     of extra rows. `history_copy` states that drafts can be copied from request history.
+    `stream_overlap` states that captured graphs run independent branches on an
+    auxiliary stream, which a plan can serialize onto the main stream.
     """
 
     name: str
@@ -144,6 +146,7 @@ class Recipe:
     plain_ranks: Mapping[int, RankCosts] = field(default_factory=lambda: MappingProxyType({}))
     history_copy: bool = False
     verification_rows: int | None = None
+    stream_overlap: bool = False
 
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):

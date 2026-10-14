@@ -111,7 +111,10 @@ context parallelism), so N ranks hold about N times the KV of unsharded pages.
 Each sparse-attention layer then exchanges query heads, index candidates and
 partial attention outputs per decode step, and prefill gathers the request's
 context from every rank, all through RoCEnante. Export with
-`--no-context-parallel` to keep whole pages on every rank instead.
+`--no-context-parallel` to keep whole pages on every rank instead. Decode
+projects, absorbs and exchanges query heads on an auxiliary stream; export with
+`--no-stream-overlap` to run that chain and every other concurrent branch
+serially on each rank's main stream when diagnosing scheduling-dependent faults.
 
 ## Serve
 

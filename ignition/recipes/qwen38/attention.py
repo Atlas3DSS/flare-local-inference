@@ -277,7 +277,8 @@ class PreparedAttention:
                               for key in ("qkv_proj", "indexer.index_qk_proj")))
         # SM103 attends QSA's selection with Triton kernels: prefill chunks in one pass and
         # decode-sized rows split across programs. Rows between, and rows whose selection
-        # overlaps QKV production, keep b12x's attention.
+        # overlaps QKV production, keep b12x's attention. Without stream overlap those rows
+        # run the same kernels serially.
         self.sparse = None
         if (not cache_only and not concurrent and sm103.is_sm103(source.device)
                 and (self.tokens > _SPARSE_ATTENTION_MIN_ROWS or self.tokens <= SPLIT_ROWS)):
@@ -285,7 +286,8 @@ class PreparedAttention:
                 scratch.selected_positions, metadata.main_block_table, metadata.request_ids,
                 metadata.query_positions, scratch.attended, partial=scratch.partial,
                 partial_lse=scratch.partial_lse)
-        self.concurrent = ConcurrentAttention(self, session=session, workspace=workspace) if concurrent else None
+        self.concurrent = (ConcurrentAttention(self, session=session, workspace=workspace)
+                           if concurrent and workspace.overlap else None)
 
     def dynamic(self) -> dict:
         return {"query": self.scratch.query, "index_query": self.index_query,

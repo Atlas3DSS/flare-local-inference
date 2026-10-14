@@ -74,6 +74,9 @@ class PreparationConfig:
     context_parallel: bool = False
     # Expand routed experts' CSF block scales once at load instead of before every expert launch.
     expand_expert_scales: bool = False
+    # Run shared experts, KDA gate projections, and decode query chains on an auxiliary stream;
+    # without overlap every branch runs serially on the main stream.
+    stream_overlap: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
 
@@ -85,8 +88,8 @@ class PreparationConfig:
                 type(self.speculative_fixed_width) is not int
                 or self.speculative_fixed_width not in self.speculative_widths):
             raise ValueError("fixed speculative width must belong to the configured widths")
-        if type(self.compile_decoder) is not bool:
-            raise TypeError("compile_decoder must be a boolean")
+        if type(self.compile_decoder) is not bool or type(self.stream_overlap) is not bool:
+            raise TypeError("compile_decoder and stream_overlap must be booleans")
         placements = tuple(zip(self.hosts or ("",) * len(self.devices), self.devices))
         if (not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
                 or len(set(placements)) != len(self.devices)
@@ -315,7 +318,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         session.__enter__()
         register_benchmark_state(session, pool.decoder.layers[0].recurrent,
             storage=pool.backing, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         forwards, signatures, decoders, scratch, metadata = {}, {}, {}, {}, {}
         buffers = dict(inputs.buffers(), **commands.buffers(), **{

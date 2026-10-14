@@ -201,6 +201,39 @@ def test_context_parallelism_follows_the_flag():
         context_parallel(flag, whole)
 
 
+def test_serialized_branches_are_planned_and_recorded_without_changing_memory():
+    overlapping = replace(PAIR, stream_overlap=True)
+    pair = (gpu(0, 95), gpu(1, 95))
+
+    def planned(model, **settings):
+        return planning.plan(model, model.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                             speculation=None, **settings)
+
+    overlapped, serial = planned(overlapping), planned(overlapping, stream_overlap=False)
+    assert overlapped.stream_overlap and not serial.stream_overlap
+    assert overlapped.to_dict()["stream_overlap"] is True
+    assert json.loads(json.dumps(serial.to_dict()))["stream_overlap"] is False
+    # Serializing branches changes graph scheduling only; both plans size the same pages and state.
+    assert serial == replace(overlapped, stream_overlap=False)
+    # A recipe that runs no branches concurrently plans without overlap either way.
+    assert not planned(PAIR).stream_overlap and planned(PAIR) == planned(PAIR, stream_overlap=False)
+
+
+def test_stream_overlap_flag_applies_only_to_recipes_that_overlap_branches():
+    from types import SimpleNamespace
+
+    from ignition.cli.preparation import stream_overlap
+
+    flag, default = SimpleNamespace(no_stream_overlap=True), SimpleNamespace(no_stream_overlap=False)
+    overlapping = replace(PAIR, stream_overlap=True)
+    model = SimpleNamespace(recipe=overlapping, checkpoint=overlapping.checkpoints[0])
+    assert stream_overlap(default, model) and not stream_overlap(flag, model)
+    serial = SimpleNamespace(recipe=PAIR, checkpoint=PAIR.checkpoints[0])
+    assert stream_overlap(default, serial)
+    with pytest.raises(UsageError, match="--no-stream-overlap: pair runs no branches concurrently"):
+        stream_overlap(flag, serial)
+
+
 def test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size():
     assert [g.index for g in derive(gpus=(gpu(0, 10), gpu(1, 95), gpu(2, 95))).gpus] == [1]
     assert [g.index for g in derive(gpus=(gpu(0, 95, (9, 0)), gpu(1, 95))).gpus] == [1]

@@ -155,10 +155,13 @@ class PreparedGlmKDA:
         ):
             self.projections[key] = QuantizedProjection(input, weights[key], output,
                 session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
-        self.gate_overlap = ConcurrentProjectionChain(
-            (self.projections["g_a_proj"], self.projections["g_b_proj"]),
-            parallel_plans=(self.projections["input_proj"].plan, self.projections["f_b_proj"].plan),
-            session=session, workspace=workspace)
+        # The output-gate chain runs beside the input projections, or after them on the main stream.
+        self.gate_overlap = None
+        if workspace.overlap:
+            self.gate_overlap = ConcurrentProjectionChain(
+                (self.projections["g_a_proj"], self.projections["g_b_proj"]),
+                parallel_plans=(self.projections["input_proj"].plan, self.projections["f_b_proj"].plan),
+                session=session, workspace=workspace)
         conv_args = {
             "x": scratch.projected_qkv, "conv_weight": weights["conv1d.weight"],
             "query_start_loc": metadata.query_start_loc, "state_slot_ids": metadata.convolution_slots,
@@ -237,12 +240,16 @@ class PreparedGlmKDA:
 
     def __call__(self, source):
         s, p = self.scratch, self.projections
-        self.gate_overlap.start(source)
+        if self.gate_overlap is not None:
+            self.gate_overlap.start(source)
         p["input_proj"](source)
         if self.tokens > 1:
             s.forget_input.copy_(s.projected_input[:, -128:])
         p["f_b_proj"](s.forget_input)
-        self.gate_overlap.finish(source, s.raw_g)
+        if self.gate_overlap is None:
+            p["g_b_proj"](p["g_a_proj"](source))
+        else:
+            self.gate_overlap.finish(source, s.raw_g)
         short_conv.run(self.conv_binding)
         if self.verification is not None:
             self.verification()

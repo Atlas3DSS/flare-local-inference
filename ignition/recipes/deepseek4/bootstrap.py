@@ -62,8 +62,12 @@ class PreparationConfig:
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
+    stream_overlap: bool = True
 
     def __post_init__(self):
+        if type(self.stream_overlap) is not bool:
+            raise TypeError("stream_overlap must be a boolean")
         if (
             len(self.devices) != 4
             or len(set(self.devices)) != len(self.devices)
@@ -190,7 +194,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device, blocks=blocks)
         decoder_storage = Scratch.allocate(

@@ -382,6 +382,37 @@ def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_
     torch.testing.assert_close(fresh.output, -(fresh.source + 73.25))
 
 
+class BranchForward:
+    """A layer whose optional concurrent-branch owner is absent when stream overlap is disabled."""
+
+    def __init__(self, chain):
+        self.source = torch.randn(32, device="cuda")
+        self.output = torch.empty_like(self.source)
+        self.chain = chain
+
+    def __call__(self):
+        self.output.copy_(self.source)
+        if self.chain is not None:
+            self.output.mul_(2)
+
+
+@torch.no_grad()
+def test_forward_cache_rebuilds_forwards_whose_branch_composition_changed(tmp_path, monkeypatch):
+    from ignition.components.projection_overlap import ConcurrentProjectionChain
+    from ignition.preparation.execution import GraphSignature
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    cache = ForwardCache(namespace={"model": "branches"}, device="cuda:0")
+    signature = GraphSignature("decode", 1, 1)
+    hits = []
+    # Serial and overlapped preparations share a cache path; guards keep either from restoring the other.
+    for overlap in (True, True, False, False, True):
+        forward = BranchForward(object.__new__(ConcurrentProjectionChain) if overlap else None)
+        hits.append(cache.prepare(forward, name="decode", signature=signature).cache_hit)
+        torch.testing.assert_close(forward.output, forward.source * (2 if overlap else 1), rtol=0, atol=0)
+    assert hits == [False, True, False, True, False]
+
+
 @torch.no_grad()
 def test_parallel_forward_preparation_captures_and_restores_without_workers(tmp_path, monkeypatch):
     import ignition.preparation.aot as aot

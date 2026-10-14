@@ -210,6 +210,7 @@ class PreparedGlmMLA:
             raise ValueError("GLM MLA cache or head partition geometry mismatch")
         self.module, self.scratch, self.state, self.metadata = module, scratch, state, metadata
         # Decode projects, absorbs and gathers queries on an auxiliary stream while records are selected.
+        # Without stream overlap, the main stream projects, absorbs and gathers them before attention.
         self.query_chain = None
         for key in ("q_a_layernorm", "kv_a_layernorm"):
             module.get_submodule(key).weight = torch.nn.Parameter(weights[f"{key}.weight"], requires_grad=False)
@@ -262,7 +263,7 @@ class PreparedGlmMLA:
             self.attention = attend(scratch.absorbed_query, state.cache, scratch.index.physical,
                 scratch.visible, scratch.index.selected_lengths, scratch.attended, caps=caps,
                 session=session, name=f"{name}.attention", workspace=workspace)
-            if mode != "prefill":
+            if mode != "prefill" and workspace.overlap:
                 self.query_chain = QueryChain(self.projections["q_b_proj"], self.query_absorption,
                     scratch.query_residual, scratch.query, scratch.absorbed_query, session=session,
                     workspace=workspace, parallel_plans=self.indexer.scratch_plans)
@@ -330,7 +331,7 @@ class PreparedGlmMLA:
             combine = PreparedLseReduceScatter(partial, lse, attended, runtime=context.heads,
                 session=session, coordinator=context.coordinator, name=f"{name}.combine{start}", **remote)
             self.slices.append((start, end, absorb, gather, attention, combine, expand))
-        if len(self.slices) == 1:
+        if len(self.slices) == 1 and workspace.overlap:
             start, end, absorb, gather = self.slices[0][:4]
             self.query_chain = QueryChain(self.projections["q_b_proj"], absorb, scratch.query_residual,
                 scratch.query, scratch.absorbed_query[:end - start], gather, scratch.gathered[:end - start],

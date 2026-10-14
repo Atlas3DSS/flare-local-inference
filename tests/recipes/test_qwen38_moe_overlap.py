@@ -22,6 +22,33 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
 
 
+def runs_concurrently(graph):
+    """Whether two nodes of a retained captured graph can run at once: unordered by any dependency path.
+
+    Redundant dependencies, such as an event wait on the stream that recorded it, are not concurrency.
+    """
+    raw = cuda.CUgraph(graph.raw_cuda_graph())
+    status, _, _, _, count = cuda.cuGraphGetEdges(raw)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, parents, children, _, _ = cuda.cuGraphGetEdges(raw, count)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, nodes, _ = cuda.cuGraphGetNodes(raw, cuda.cuGraphGetNodes(raw)[2])
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    edges = [(int(parent), int(child)) for parent, child in zip(parents, children, strict=True)]
+    waiting = {int(node): 0 for node in nodes}
+    for _, child in edges:
+        waiting[child] += 1
+    ready = [node for node, count in waiting.items() if not count]
+    while len(ready) == 1:
+        node = ready.pop()
+        for parent, child in edges:
+            if parent == node:
+                waiting[child] -= 1
+                if not waiting[child]:
+                    ready.append(child)
+    return bool(ready)
+
+
 @pytest.fixture(scope="module", params=[1, 2], ids=["tp1", "tp2"])
 def weights(request):
     snapshot = os.environ.get("FLARE_QWEN38_SNAPSHOT")
@@ -34,12 +61,14 @@ def weights(request):
         return QwenMoeWeights.load(loader, 0, scale_scratch=scales), scales
 
 
-@pytest.mark.parametrize("rows", [1, 2, 4, 6, 8, 24, 256, 512, 4096])
+# Without stream overlap the shared expert precedes routing on the main stream at every row count.
+@pytest.mark.parametrize("rows,overlap", [*((rows, True) for rows in (1, 2, 4, 6, 8, 24, 256, 512, 4096)),
+                                          *((rows, False) for rows in (1, 8, 256))])
 @pytest.mark.parametrize("compiled", [False, True])
 @torch.no_grad()
-def test_shared_routed_composition_and_arena_reuse(weights, rows, compiled):
+def test_shared_routed_composition_and_arena_reuse(weights, rows, overlap, compiled):
     weights, _scale_owners = weights
-    arena = ScratchArena("cuda:0")
+    arena = ScratchArena("cuda:0", overlap=overlap)
     source = torch.randn(rows, 2560, dtype=torch.bfloat16, device="cuda") * .1
     input_copy = torch.empty_like(source)
     output_copy = torch.empty_like(source)
@@ -51,7 +80,7 @@ def test_shared_routed_composition_and_arena_reuse(weights, rows, compiled):
                               workspace=arena, projection_workspace=arena)
         session.tune()
         session.freeze()
-        assert (moe.concurrent_shared is not None) == (rows <= 256)
+        assert (moe.concurrent_shared is not None) == (overlap and rows <= 256)
         if moe.concurrent_shared is not None:
             routed_bytes = moe.experts.plan.memory_requirements().scratch_nbytes
             assert moe.experts.scratch.data_ptr() + routed_bytes <= moe.concurrent_shared.workspace.data_ptr()
@@ -80,6 +109,8 @@ def test_shared_routed_composition_and_arena_reuse(weights, rows, compiled):
         if moe.concurrent_shared is not None:
             assert any(sum(parent == node for parent, _ in edges) >= 2 for node, _ in edges)
             assert any(sum(child == node for _, child in edges) >= 2 for _, node in edges)
+        elif not overlap:
+            assert not runs_concurrently(graph)
         for _ in range(3):
             source.normal_(std=.1)
             input_copy.copy_(source)
@@ -137,10 +168,10 @@ module.compile_forward = compile_forward
 with torch.no_grad():
     weights = module.weights.__wrapped__(SimpleNamespace(param=2))
     if mode == "load":
-        module.test_shared_routed_composition_and_arena_reuse(weights, 1, False)
-    module.test_shared_routed_composition_and_arena_reuse(weights, 1, True)
+        module.test_shared_routed_composition_and_arena_reuse(weights, rows=1, overlap=True, compiled=False)
+    module.test_shared_routed_composition_and_arena_reuse(weights, rows=1, overlap=True, compiled=True)
     if mode == "load":
-        module.test_shared_routed_composition_and_arena_reuse(weights, 1, True)
+        module.test_shared_routed_composition_and_arena_reuse(weights, rows=1, overlap=True, compiled=True)
 '''
     for mode in ("save", "load"):
         subprocess.run([sys.executable, "-c", script, mode, str(Path(__file__).resolve()),
