@@ -161,27 +161,32 @@ def test_preparation_flags_select_distinct_packages(host):
     assert host["exports"] == 2 and host["plan"].speculation is None
 
 
-def test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package(host, capsys):
-    assert run("qwen3.8-flash") == 0
+@pytest.mark.parametrize("overlap", [False, True])
+def test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package(host, capsys, overlap):
+    options = () if overlap else ("--no-stream-overlap",)
+    assert run("qwen3.8-flash", *options) == 0
     ordinary_package = host["exec"][2]
-    assert run("qwen3.8-flash", "--mixed-prefill") == 0
+    assert run("qwen3.8-flash", "--mixed-prefill", *options) == 0
     mixed_package = host["exec"][2]
     assert mixed_package != ordinary_package and host["exports"] == 2
     assert host["plan"].mixed_prefill and len(host["plan"].mixed_shapes) == 50
+    assert host["plan"].stream_overlap == overlap
     assert "mixed prefill on" in capsys.readouterr().err
-    assert run("qwen3.8-flash", "--mixed-prefill") == 0
+    assert run("qwen3.8-flash", "--mixed-prefill", *options) == 0
     assert host["exec"][2] == mixed_package and host["exports"] == 2
-    assert run("qwen3.8-flash", "--mixed-prefill", "--no-mtp") == 0
+    assert run("qwen3.8-flash", "--mixed-prefill", "--no-mtp", *options) == 0
     assert host["exports"] == 3 and host["plan"].speculation is None
+    assert host["plan"].stream_overlap == overlap
     assert len(host["plan"].mixed_shapes) == 20
     assert all(not enabled for enabled, _, _, _ in host["plan"].mixed_shapes)
 
 
-def test_package_cache_key_includes_mixed_capture():
+@pytest.mark.parametrize("overlap", [False, True])
+def test_package_cache_key_includes_mixed_capture(overlap):
     model = resolve("qwen3.8-flash")
     gpu = planning.Gpu(0, "NVIDIA RTX PRO 6000 Blackwell", "GPU-test", 96 * GIB, FREE, (12, 0))
     plan = planning.fit(model.recipe, model.checkpoint, (gpu,), concurrency=4,
-                        reserve_bytes=0, speculation=model.recipe.speculation)
+                        reserve_bytes=0, speculation=model.recipe.speculation, stream_overlap=overlap)
     assert runtime.package_key(model, plan, False) != runtime.package_key(
         model, replace(plan, mixed_prefill=True), False)
 
@@ -209,15 +214,17 @@ def test_package_cache_keys_distinguish_serialized_branches():
 
 @pytest.mark.parametrize("reserve", [0, 2 * GIB])
 @pytest.mark.parametrize("mixed", [False, True])
-def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tmp_path, reserve, mixed):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tmp_path, reserve, mixed, overlap):
     output = tmp_path / "package"
     config = tmp_path / "config.toml"
     config.write_text(f'[memory]\nreserve = "{reserve}"\n')
     assert main(["export", "qwen3.8-flash", "--output", str(output), "--config", str(config),
-                 *(["--mixed-prefill"] if mixed else [])]) == 0
+                 *(["--mixed-prefill"] if mixed else []), *([] if overlap else ["--no-stream-overlap"])]) == 0
     assert host["exports"] == 1 and "exec" not in host
     assert host["plan"].prefill_chunk == 4096 and host["compile_forwards"]
     assert host["plan"].mixed_prefill == mixed
+    assert host["plan"].stream_overlap == overlap
     assert host["options"]["queue_capacity"] == 16
     assert host["options"]["served_names"] == ["qwen3.8-flash"]
     assert host["options"]["reserve_bytes"] == reserve
