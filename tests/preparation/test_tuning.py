@@ -1036,10 +1036,12 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
                 arguments=dict(token_embedding=source, multi_state=source, output=output),
                 session=session, name="op", workspace=None, eps=1e-6)
         elif operator == "bf16_gemv":
-            call = bf16_gemv.benchmark_call(state, source=source, output=output,
+            from ignition.preparation.fixtures.projection import input_factory
+            call = bf16_gemv.benchmark_call(state, inputs=input_factory(source, output),
                 weight=torch.ones(32, 32, dtype=torch.bfloat16), bias=None)
         else:
-            call = blockscaled_gemm.benchmark_call(state, source=source, output=output,
+            from ignition.preparation.fixtures.projection import input_factory
+            call = blockscaled_gemm.benchmark_call(state, inputs=input_factory(source, output),
                 values=torch.ones(32, 32), scales=None, gain=None, bias=None,
                 weight=object(), selected_workspace=lambda _: None)
         if call.reset is not None:

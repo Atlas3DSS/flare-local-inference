@@ -12,6 +12,7 @@ from b12x.preparation import PreparationSession, PreparedCall
 from ignition.components import sm103_projection
 from ignition.preparation.fixtures import bf16_gemv as bf16_fixtures
 from ignition.preparation.fixtures import blockscaled_gemm as gemm_fixtures
+from ignition.preparation.fixtures.projection import input_factory
 from ignition.preparation.scratch import ScratchArena, prime_owners, scratch_storage
 from ignition.preparation.tuning import declare, register_finalizer
 
@@ -43,7 +44,7 @@ class UnquantizedProjection:
                 str(output.dtype).removeprefix("torch.")), source.device)
             declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
                 run=lambda: state.run(source, weight, out=output)),
-                benchmark_call=partial(bf16_fixtures.benchmark_call, source=source, weight=weight, output=output,
+                benchmark_call=partial(bf16_fixtures.benchmark_call, inputs=input_factory(source, output), weight=weight,
                                        bias=None)),))
             return
         query = bf16_gemv.query_from_call(source, weight, out=output, bias=bias)
@@ -54,8 +55,8 @@ class UnquantizedProjection:
         declare(session, (self.plan.request(
             name=name,
             prepare_call=lambda state: PreparedCall(run=lambda: state.run(source, weight, out=output, bias=bias)),
-            benchmark_call=partial(bf16_fixtures.benchmark_call, source=source,
-                                   weight=weight, output=output, bias=bias),
+            benchmark_call=partial(bf16_fixtures.benchmark_call, inputs=input_factory(source, output),
+                                   weight=weight, bias=bias),
         ),))
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
@@ -124,7 +125,7 @@ class QuantizedProjection:
         declare(session, (self.plan.request(
             name=name,
             prepare_call=prepare,
-            benchmark_call=partial(gemm_fixtures.benchmark_call, source=source, output=output,
+            benchmark_call=partial(gemm_fixtures.benchmark_call, inputs=input_factory(source, output),
                 values=values, scales=scales, gain=gain, bias=bias, weight=weight,
                 activation_scale=self.activation_scale,
                 selected_workspace=selected_workspace),

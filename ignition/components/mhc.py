@@ -9,7 +9,8 @@ from b12x.preparation import PreparedCall
 
 from ignition.components import mhc_sm103, sm103
 from ignition.preparation.scratch import planned_scratch, prime_owners
-from ignition.preparation.tuning import declare, benchmark_resource, register_finalizer
+from ignition.preparation.tuning import declare, register_finalizer
+from ignition.preparation.fixtures.resources import candidate_inputs
 
 
 @dataclass(frozen=True)
@@ -153,9 +154,10 @@ class PreparedMHC:
                 output=tuple(buffers.bind_args().values()),
                 owners=(*prime_owners(workspace, storage, binding), fixture))
 
+        benchmark_inputs = candidate_inputs(lambda: _BenchmarkInputs(residual, self.operation, pre_mix is not None))
+
         def benchmark(state):
-            fixture = benchmark_resource(session, ("mhc", str(residual.device), tokens, hidden, self.operation, pre_mix is not None),
-                                         lambda: _BenchmarkInputs(residual, self.operation, pre_mix is not None))
+            fixture = benchmark_inputs()
             return call(state, fixture.inputs, fixture.scratch, fixture)
 
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: call(state, inputs, scratch),

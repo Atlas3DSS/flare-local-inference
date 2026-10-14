@@ -7,7 +7,6 @@ from b12x.attention._shared.mla.compressed_reference import (
 )
 
 from ignition.preparation.scratch import planned_scratch
-from ignition.preparation.tuning import benchmark_resource
 
 
 class Inputs:
@@ -57,14 +56,8 @@ class Inputs:
         self.binding["q"].copy_(self.query_seed)
 
 
-def benchmark_call(state, *, query, window, indexed, arguments, session, workspace,
-                   cache_format, window_page_size, indexed_page_size):
-    key = (cache_format, window_page_size, indexed_page_size,
-           query.shape, query.device, window.shape[1:], window.stride(),
-           None if indexed is None else indexed.shape[1:],
-           tuple((name, None if value is None else (value.shape, value.stride())) for name, value in arguments.items()))
-    inputs = benchmark_resource(session, ("compressed_mla", key), lambda: Inputs(
-        query, window, indexed, arguments, cache_format, window_page_size, indexed_page_size))
+def benchmark_call(state, *, inputs, workspace):
+    inputs = inputs()
     scratch = planned_scratch(state.scratch_specs(), workspace)
     binding = state.bind_for_preparation(scratch=scratch, **inputs.binding)
     return PreparedCall(run=lambda: state.run(binding, swa_k_cache=inputs.window,
