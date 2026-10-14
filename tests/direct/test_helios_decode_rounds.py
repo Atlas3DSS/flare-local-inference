@@ -79,7 +79,7 @@ def layout(scenario):
         graphs.update({(kind, batch, 1): f"{kind}{batch}" for batch in batches})
     graphs.update({("speculative", batch, width): f"speculative{batch}x{width}"
                    for batch in batches for width in scenario["widths"]})
-    return Layout(capacity=capacity, max_active=active, context=131072, page_tokens=64, table_width=2048,
+    return Layout(bindings={}, buffer_specs={}, page_views={}, capacity=capacity, max_active=active, context=131072, page_tokens=64, table_width=2048,
                   pages=1 << 16, snapshots=64, prefill_chunk=4096, vocabulary=1024, eos=(7,), graphs=graphs,
                   widths=scenario["widths"], fixed_width=scenario["fixed"], state_rows_per_request=1,
                   draft_pages=0, record_fields=24)

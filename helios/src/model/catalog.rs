@@ -3,35 +3,26 @@
 use crate::{
     Result,
     execution::{
-        BATCH_CAPACITIES, Dtype, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION,
-        SamplingMode,
+        BATCH_CAPACITIES, ExecutionManifest, GraphKind, SPECULATIVE_ABI_VERSION, SamplingMode,
     },
-    model::{ModelConfig, ModelContract},
+    model::ModelConfig,
     scheduler::speculation,
 };
 
-pub type BufferSpec = (&'static str, Dtype, Vec<usize>);
-
-pub fn validate<M: ModelContract>(
-    config: &ModelConfig,
-    manifest: &ExecutionManifest,
-) -> Result<()> {
-    validate_inner::<M>(config, manifest).map_err(|error| match error {
+pub fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
+    validate_inner(config, manifest).map_err(|error| match error {
         crate::Error::Execution(crate::ExecutionError::Manifest(_)) => error,
         _ => crate::ExecutionError::Manifest(crate::Failure::caused_by(error.to_string(), error))
             .into(),
     })
 }
 
-fn validate_inner<M: ModelContract>(
-    config: &ModelConfig,
-    manifest: &ExecutionManifest,
-) -> Result<()> {
+fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
     manifest.validate()?;
-    M::validate_config(config, manifest)?;
+    config.contract.validate(manifest)?;
     config.sampling_defaults.validate()?;
     config.limits.validate_prefill()?;
-    let page_tokens = M::scheduler_capabilities(config).page_tokens;
+    let page_tokens = crate::model::scheduler_capabilities(config).page_tokens;
     if config.model_id.is_empty()
         || config.limits.max_active == 0
         || config.limits.max_active > manifest.max_active
@@ -76,41 +67,34 @@ fn validate_inner<M: ModelContract>(
     } else if manifest.abi_version != SPECULATIVE_ABI_VERSION {
         return Err("speculative catalog requires ABI3".into());
     }
-    let packed = manifest
-        .graphs
-        .iter()
-        .filter(|g| g.kind == GraphKind::Mixed)
-        .map(|g| g.packed_tokens())
-        .max()
-        .unwrap_or(0);
-    for (name, dtype, mut shape) in M::required_buffers(config) {
-        let packed_input = matches!(
-            name,
-            "token_ids"
-                | "prefill_positions"
-                | "vision_token_indices"
-                | "vision_left"
-                | "vision_right"
-        );
-        if packed_input {
-            shape[0] = shape[0].max(packed);
-        }
-        let buffer = manifest.buffer(name)?;
-        let valid_shape = if packed_input {
-            buffer.shape.len() == shape.len()
-                && buffer.shape[0] >= shape[0]
-                && buffer.shape[1..] == shape[1..]
-        } else {
-            buffer.shape == shape
-        };
-        if buffer.dtype != dtype || !valid_shape {
-            return Err(
-                format!("invalid semantic buffer {name}: expected {dtype:?}{shape:?}").into(),
-            );
-        }
-    }
     for graph in &manifest.graphs {
-        select::<M>(
+        if matches!(graph.kind, GraphKind::Speculative | GraphKind::Mixed)
+            && graph.token_capacity > 1
+            && (config.history_drafts
+                || config.speculative_proposal_source == speculation::ProposalSource::Copy)
+        {
+            use super::contract::ValueSource::*;
+            let inputs = &config.contract.graph(&graph.name)?.inputs;
+            let mut required = vec![
+                CopyTokenIds,
+                CopyTokenCount,
+                CopyConsumedTokens,
+                CopyGeneration,
+            ];
+            if config.speculative_proposal_source == speculation::ProposalSource::Copy {
+                required.extend([CopyGrammarMask, CopyGrammarCount]);
+            }
+            if required
+                .iter()
+                .any(|source| !inputs.iter().any(|input| input.source == *source))
+            {
+                return Err(
+                    "copied proposals require prepared token, generation, cursor, and mask inputs"
+                        .into(),
+                );
+            }
+        }
+        select(
             config,
             manifest,
             graph.kind,
@@ -131,10 +115,10 @@ fn validate_inner<M: ModelContract>(
             continue;
         }
         for batch in batches(config) {
-            select::<M>(config, manifest, kind, batch, 1, 0, SamplingMode::General)?;
+            select(config, manifest, kind, batch, 1, 0, SamplingMode::General)?;
         }
     }
-    select::<M>(
+    select(
         config,
         manifest,
         GraphKind::Prefill,
@@ -144,7 +128,7 @@ fn validate_inner<M: ModelContract>(
         SamplingMode::General,
     )?;
     for &tokens in &config.contract.vision.patch_capacities {
-        select::<M>(
+        select(
             config,
             manifest,
             GraphKind::Vision,
@@ -184,7 +168,7 @@ fn batches(config: &ModelConfig) -> impl Iterator<Item = usize> {
         .filter(|batch| *batch <= config.limits.max_active.next_power_of_two())
 }
 
-pub fn select<M: ModelContract>(
+pub fn select(
     config: &ModelConfig,
     manifest: &ExecutionManifest,
     kind: GraphKind,
@@ -231,22 +215,11 @@ pub fn select<M: ModelContract>(
             && graph.prefill_capacity == prefill
             && graph.sampling_mode == mode
     });
-    let (index, graph) = matches.next().ok_or_else(|| {
+    let (index, _) = matches.next().ok_or_else(|| {
         format!("prepared model lacks {kind:?}/{mode:?} graph with batch {batch}, tokens {tokens}")
     })?;
     if matches.next().is_some() {
         return Err("ambiguous prepared model graph capacity".into());
-    }
-    for name in M::required_inputs(config, kind) {
-        if !graph
-            .input_bindings
-            .iter()
-            .any(|binding| binding.buffer_name == name)
-        {
-            return Err(
-                format!("prepared graph {} lacks required input {name}", graph.name).into(),
-            );
-        }
     }
     Ok(index)
 }

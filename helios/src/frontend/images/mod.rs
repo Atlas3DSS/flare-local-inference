@@ -3,8 +3,11 @@
 #[cfg(test)]
 mod decoding_tests;
 mod deepseek4;
+#[cfg(feature = "server")]
+pub(crate) mod layouts;
 mod mimo;
 mod orientation;
+pub(crate) mod packing;
 mod patches;
 mod qwen;
 mod resize;
@@ -114,6 +117,17 @@ pub enum ImageSettings {
     Qwen(QwenImageSettings),
     Mimo(MimoImageSettings),
     Deepseek4 {},
+}
+
+impl ImageSettings {
+    pub fn preparation_kind(&self) -> crate::model::contract::ImagePreparationKind {
+        use crate::model::contract::ImagePreparationKind;
+        match self {
+            Self::Qwen(_) => ImagePreparationKind::Qwen,
+            Self::Mimo(_) => ImagePreparationKind::Mimo,
+            Self::Deepseek4 {} => ImagePreparationKind::Deepseek,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

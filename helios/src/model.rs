@@ -1,26 +1,33 @@
-//! Statically dispatched prepared-model semantics; CUDA transport remains model-independent.
+//! Shared execution of prepared storage and graph-input contracts.
 
 pub mod admission;
 pub mod catalog;
-pub mod deepseek4;
-pub mod deepseek41;
-pub mod glm5next;
+pub mod contract;
 pub(crate) mod inputs;
-pub mod mimo;
-pub(crate) mod paged_text;
-pub mod qwen4exp;
-#[cfg(feature = "images")]
-use crate::scheduler::RequestHandle;
+mod packing;
+#[cfg(feature = "server")]
+mod prompt;
+
 use crate::{
     Result,
-    execution::{CompletionRecord, ExecutionManifest, GraphKind, Upload},
+    execution::{CompletionRecord, GraphKind},
     scheduler::{SchedulerCapabilities, SchedulerLimits},
 };
 pub use admission::Admission;
+pub use contract::PreparedContract;
 pub use inputs::{InputStep, pack_inputs};
+pub use packing::Inputs;
+#[cfg(feature = "server")]
+pub use prompt::{prepare_input, prepare_output, system_boundary};
 
-#[cfg_attr(feature = "server", derive(serde::Deserialize))]
-#[cfg_attr(feature = "server", serde(deny_unknown_fields))]
+#[cfg_attr(
+    any(feature = "frontend", feature = "runtime-package"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(
+    any(feature = "frontend", feature = "runtime-package"),
+    serde(deny_unknown_fields)
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisionCapabilities {
     pub features_per_request: usize,
@@ -63,23 +70,11 @@ impl VisionCapabilities {
     }
 }
 
-#[cfg_attr(feature = "server", derive(serde::Deserialize))]
-#[cfg_attr(feature = "server", serde(deny_unknown_fields))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContractMetadata {
-    pub schema: String,
-    pub vocabulary: usize,
-    pub vision: VisionCapabilities,
-    /// Global tokens per KV page when the model shards pages across ranks; absent for its default.
-    #[cfg_attr(feature = "server", serde(default))]
-    pub page_tokens: Option<usize>,
-}
-
 #[derive(Clone, Debug)]
 pub struct ModelConfig {
     /// Context extent of captured page tables and workspaces; serving may use a smaller limit.
     pub prepared_sequence_tokens: usize,
-    pub contract: ContractMetadata,
+    pub contract: PreparedContract,
     pub identity: [u8; 32],
     pub model_id: String,
     pub limits: SchedulerLimits,
@@ -90,9 +85,6 @@ pub struct ModelConfig {
     pub speculative_fixed_width: Option<usize>,
     pub history_drafts: bool,
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
-    /// Execution state rows each active request holds; absent, one per verified position of
-    /// the widest speculative graph.
-    pub state_rows_per_request: Option<usize>,
 }
 
 #[cfg_attr(feature = "server", derive(serde::Serialize, serde::Deserialize))]
@@ -167,8 +159,8 @@ impl SamplingParameters {
 }
 
 impl ModelConfig {
-    pub fn fit_context<M: ModelContract>(&mut self) {
-        let capabilities = M::scheduler_capabilities(self);
+    pub fn fit_context(&mut self) {
+        let capabilities = scheduler_capabilities(self);
         let draft_pages = if self.has_learned_drafts() {
             capabilities.draft_pages_per_request
         } else {
@@ -188,83 +180,164 @@ impl ModelConfig {
     }
 }
 
-/// Adapts prepared graph inputs, storage layouts, and frontend metadata.
-///
-/// Runtime policy belongs in shared code. Members must describe concrete data or
-/// binding requirements independently of model identity. Per-model boolean policy
-/// flags, default-false opt-ins, and equivalent enum or callback allowlists are
-/// prohibited. Review every consumer when adding or changing a member.
-pub trait ModelContract: Send + Sync + Sized + 'static {
-    type PromptData: Clone + Send;
-    type Inputs: Default;
-    fn create_inputs(_: &ExecutionManifest) -> Result<Self::Inputs> {
-        Ok(Self::Inputs::default())
-    }
-    fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()>;
-    fn required_buffers(config: &ModelConfig) -> Vec<catalog::BufferSpec>;
-    fn required_inputs(config: &ModelConfig, kind: GraphKind)
-    -> impl Iterator<Item = &'static str>;
-    fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities;
-    fn pack(inputs: &mut Self::Inputs, step: &InputStep<'_, Self>) -> Result<()>;
-    fn uploads(inputs: &Self::Inputs) -> Vec<Upload<'_>>;
-    fn validate_completion(
-        config: &ModelConfig,
-        kind: GraphKind,
-        record: &CompletionRecord,
-    ) -> Result<()>;
-    #[cfg(feature = "images")]
-    fn pack_vision(
-        inputs: &mut Self::Inputs,
-        config: &ModelConfig,
-        handle: RequestHandle,
-        images: &crate::frontend::images::ProcessedImages,
-        image: usize,
-    ) -> Result<()>;
-    #[cfg(feature = "server")]
-    type OutputConfig: Send;
-    #[cfg(feature = "server")]
-    type Output: crate::output::ModelOutput<Config = Self::OutputConfig> + Send;
-    #[cfg(feature = "server")]
-    fn prepare_input(
-        frontend: &crate::frontend::Frontend,
-        processor: Option<&crate::frontend::images::ImageProcessor>,
-        rendered: &crate::frontend::RenderedPrompt,
-        images: Vec<crate::frontend::images::RgbImage>,
-    ) -> Result<PreparedInput<Self::PromptData>>;
-    #[cfg(feature = "server")]
-    fn system_boundary(
-        frontend: &crate::frontend::Frontend,
-        prompt_tokens: &[u32],
-        messages: &[serde_json::Value],
-        options: &serde_json::Map<String, serde_json::Value>,
-    ) -> Option<usize>;
-    #[cfg(feature = "server")]
-    fn prepare_output(
-        frontend: &crate::frontend::Frontend,
-        rendered: &crate::frontend::RenderedPrompt,
-        messages: &[serde_json::Value],
-        options: &serde_json::Map<String, serde_json::Value>,
-        structured: bool,
-    ) -> Result<Self::OutputConfig>;
-    fn input_vocabulary(config: &ModelConfig) -> usize {
-        config.contract.vocabulary
-    }
-    fn prefill_spans(_: &Self::PromptData) -> &[std::ops::Range<usize>] {
-        &[]
-    }
-    fn validate_prompt_data(
-        config: &ModelConfig,
-        tokens: &[u32],
-        data: &Self::PromptData,
-    ) -> Result<()>;
-    #[cfg(feature = "server")]
-    fn prompt_metadata(data: &mut Self::PromptData) -> admission::PromptMetadataMut<'_>;
+#[derive(Clone, Debug, Default)]
+pub struct PromptData {
+    pub positions: Vec<[i64; 3]>,
+    pub vision_token_indices: Vec<i32>,
+    pub spans: Vec<std::ops::Range<usize>>,
 }
 
 #[cfg(feature = "server")]
-pub struct PreparedInput<D> {
+pub struct PreparedInput {
     pub tokens: Vec<u32>,
-    pub data: D,
+    pub data: PromptData,
     pub conditioning: Vec<crate::cache::ConditioningEvent>,
     pub images: Option<crate::frontend::images::ProcessedImages>,
 }
+
+pub fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {
+    use contract::{GraphOperation, ValueSource};
+    SchedulerCapabilities {
+        vocabulary: config.contract.vocabulary,
+        page_tokens: config.contract.cache.page_tokens,
+        vision: config.contract.vision.clone(),
+        draft_pages_per_request: config
+            .contract
+            .cache
+            .page_tables
+            .iter()
+            .filter(|view| {
+                config
+                    .contract
+                    .graphs
+                    .iter()
+                    .any(|g| g.inputs.iter().any(|b| b.buffer == view.buffer))
+            })
+            .map(|view| view.page_offset)
+            .max()
+            .unwrap_or(0),
+        completion_inputs: config
+            .contract
+            .graphs
+            .iter()
+            .filter(|g| g.kind == GraphOperation::Decode)
+            .flat_map(|g| &g.inputs)
+            .filter(|b| {
+                matches!(
+                    b.source,
+                    ValueSource::PendingToken | ValueSource::PromptAndPendingToken
+                )
+            })
+            .map(|b| b.buffer.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        state_rows_per_request: Some(
+            config
+                .contract
+                .graphs
+                .iter()
+                .map(|g| g.state_rows_per_request)
+                .max()
+                .unwrap_or(1),
+        ),
+    }
+}
+
+pub fn validate_completion(
+    config: &ModelConfig,
+    contract: &contract::GraphContract,
+    kind: GraphKind,
+    record: &CompletionRecord,
+) -> Result<()> {
+    if ((record.status == 1 || record.status == 2)
+        && record.token_id >= config.contract.vocabulary as i64)
+        || record.vector.is_some_and(|v| {
+            v.model_reserved != -1
+                || v.tokens
+                    .iter()
+                    .any(|id| *id >= config.contract.vocabulary as i64)
+                || (kind == GraphKind::Speculative
+                    && record.status != 3
+                    && v.draft_cache_consumed
+                        != contract.draft_cursor.as_ref().map_or(-1, |cursor| {
+                            record
+                                .consumed_tokens
+                                .saturating_sub(cursor.lag_tokens as i64)
+                                .max(0)
+                        }))
+        })
+    {
+        return Err(crate::Error::execution(
+            crate::ExecutionError::Completion,
+            "completion violates its prepared token or history contract",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_prompt_data(config: &ModelConfig, tokens: &[u32], data: &PromptData) -> Result<()> {
+    let positions = config.contract.frontend.position_dimensions;
+    if (positions == 0 && !data.positions.is_empty())
+        || (positions == 3
+            && (data.positions.len() != tokens.len()
+                || data.positions.iter().flatten().any(|p| *p < 0)))
+        || (!data.vision_token_indices.is_empty()
+            && (data.vision_token_indices.len() != tokens.len()
+                || data
+                    .vision_token_indices
+                    .iter()
+                    .any(|i| *i < -1 || *i >= config.contract.vision.features_per_request as i32)))
+        || data.spans.windows(2).any(|p| p[0].end > p[1].start)
+        || data.spans.iter().any(|s| {
+            s.start >= s.end || s.end > tokens.len() || s.len() > config.limits.prefill_chunk_size
+        })
+    {
+        return Err("prompt arrays violate prepared geometry".into());
+    }
+    if let Some(layout) = &config.contract.frontend.image_tokens {
+        if data.vision_token_indices.len() != tokens.len()
+            || tokens
+                .iter()
+                .zip(&data.vision_token_indices)
+                .any(|(token, index)| (*token == layout.feature_token) != (*index >= 0))
+        {
+            return Err("image feature tokens do not match their feature indices".into());
+        }
+        if let Some(span) = &layout.span {
+            if data.spans.iter().any(|s| {
+                s.len() > span.max_tokens
+                    || tokens[s.start] != span.start_token
+                    || tokens[s.end - 1] != span.end_token
+            }) || tokens.iter().enumerate().any(|(position, token)| {
+                let scoped = *token == layout.feature_token
+                    || *token == span.start_token
+                    || *token == span.end_token
+                    || span.interior_tokens.contains(token);
+                scoped
+                    && !span.unscoped_tokens.contains(token)
+                    && !data.spans.iter().any(|s| s.contains(&position))
+            }) {
+                return Err("image token spans do not match their declared boundaries".into());
+            }
+        } else if !data.spans.is_empty() {
+            return Err("image layout does not declare atomic spans".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+pub fn prompt_metadata(data: &mut PromptData) -> admission::PromptMetadataMut<'_> {
+    admission::PromptMetadataMut {
+        positions: (!data.positions.is_empty()).then_some(&mut data.positions),
+        vision_token_indices: (!data.vision_token_indices.is_empty())
+            .then_some(&mut data.vision_token_indices),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing;
+
+#[cfg(test)]
+mod tests;

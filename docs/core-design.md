@@ -324,14 +324,14 @@ same boundary; violations must be resolved before committing.
   Restrictions require concrete storage or execution constraints in the contract.
   Validate affected cache schemes and request lifecycles; untested models remain
   a validation limitation, not a reason for model-specific policy.
-- **The model trait cannot select runtime policy.** `ModelContract` adapts
-  prepared graph inputs, storage layouts, and frontend metadata. Its members
-  must describe concrete data or binding requirements independently of model
-  identity. Per-model boolean policy flags, including `supports_*`, `can_*`, and
-  default-false opt-ins, are prohibited. Enums, callbacks, schema names, and
-  metadata fields must not disguise the same allowlist. Shared code derives
-  behavior from actual geometry and dependencies; every trait change requires
-  reviewing its consumers as well as its declaration.
+- **Prepared contracts cannot select runtime policy by model identity.**
+  `PreparedContract` describes graph value sources, storage views, dependencies,
+  capacities, and frontend syntax. Per-model boolean policy flags, including
+  `supports_*`, `can_*`, and default-false opt-ins, are prohibited. Enums,
+  callbacks, schema names, and metadata fields must not disguise the same
+  allowlist. Shared code derives behavior from concrete geometry and dataflow.
+  Independent enum identifiers select reusable tool/reasoning parsers and image
+  preparation/layout implementations only. Review every field and all consumers.
 - **Numerical and performance requirements are separate.** State copies and
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine
@@ -350,13 +350,15 @@ portability are outside this design.
 
 ## 1. Target and execution contract
 
-The model recipes and their native contracts are:
+Recipes declare the data consumed by the shared native contract:
 
-| Recipe | Native contract | State and execution |
+| Recipe | Contract declaration | State and execution |
 |---|---|---|
-| [Qwen3.8 Flash](../ignition/recipes/qwen38/recipe.py) | [Qwen4Exp](../helios/src/model/qwen4exp.rs) | GDN recurrence, QSA sparse attention, PLE, vision, and learned or copied proposals |
-| [GLM 5.3 Flash](../ignition/recipes/glm53/recipe.py) | [Glm5Next](../helios/src/model/glm5next.rs) | KDA recurrence, indexed MLA, mHC, and learned MTP |
-| [DeepSeek V4.1 Flash](../ignition/recipes/deepseek41/recipe.py) | [DeepSeek41](../helios/src/model/deepseek41.rs) | Compressed latent attention, sliding windows, Engram tables, and DSpark proposal composition |
+| [Qwen3.8 Flash](../ignition/recipes/qwen38/recipe.py) | [Prepared data](../ignition/recipes/qwen38/contract.py) | GDN recurrence, QSA sparse attention, PLE, vision, and learned or copied proposals |
+| [GLM 5.3 Flash](../ignition/recipes/glm53/recipe.py) | [Prepared data](../ignition/recipes/glm53/contract.py) | KDA recurrence, indexed MLA, mHC, and learned MTP |
+| [DeepSeek V4.1 Flash](../ignition/recipes/deepseek41/recipe.py) | [Prepared data](../ignition/recipes/deepseek41/contract.py) | Compressed latent attention, sliding windows, Engram tables, and DSpark proposal composition |
+| [DeepSeek V4 Flash](../ignition/recipes/deepseek4/recipe.py) | [Prepared data](../ignition/recipes/deepseek4/contract.py) | Compressed latent attention, sliding windows, vision, and DSpark proposals |
+| [MiMo V2.6 Pro](../ignition/recipes/mimo_v2/recipe.py) | [Prepared data](../ignition/recipes/mimo_v2/contract.py) | Paged KV, sliding windows, vision, and DFlash proposals |
 
 Recipes declare supported GPU counts, checkpoint revisions, and feature
 capacities. Each architecture and tensor-parallel size requires independent
@@ -399,9 +401,9 @@ its b12x operators and FlashInfer sampling supply the prepared GPU computation.
 - Identical inputs to deterministic plans produce identical logits. Plans with
   atomic or otherwise variable reduction order use component tolerances derived
   from measured repeatability. State transfers and request metadata remain exact.
-- A statically selected `ModelContract` defines buffer schemas, admission and
-  graph input packing, state-operation metadata, and completion interpretation.
-  Vocabulary size and feature capacities come from the package configuration.
+- A typed `PreparedContract` defines semantic value bindings, state views,
+  graph dependencies, completion cursor relationships, and frontend syntax.
+  Shared admission and packing code binds these to each rank's buffer geometry.
 
 ### Capacities and memory
 
@@ -929,15 +931,22 @@ sockets, and owns the server lifetime and request paths. The
 [runtime-package design](runtime-package-design.md) specifies storage, kernel,
 graph, and frontend reconstruction.
 
-`Server<M>` and `ModelRuntime<M>` statically select the
-[`ModelContract`](../helios/src/model.rs). Shared core code validates graph
-geometry, constructs admissions, schedules work, and retires completions. The
-contract supplies prepared-buffer declarations, model-specific constraints,
-input encoding, and completion checks. Its associated output protocol composes
-separate reasoning and tool parsers. The Flare command selects Qwen4Exp, Glm5Next, or DeepSeek41 once from the
-package's input schema. Each uses the shared native lifecycle.
-Unknown schema versions, fields, or capabilities fail before asset loading and
-CUDA worker construction.
+`Server` and `ModelRuntime` consume the package's
+[`PreparedContract`](../helios/src/model/contract.rs). Shared code validates
+vocabulary and capacities, resolves each graph's value sources and byte views
+into a `BoundContract`, packs uploads, and validates completion records.
+Neither Flare nor Heliopause dispatches on model identity or schema names.
+Tool and reasoning parsers and image preparation/layout functions are selected
+independently by typed frontend enums. Missing fields, unknown or unspecified
+enum values, invalid storage views, and incompatible input geometry reject loading.
+
+Pending-token input sources determine the scheduler's completion dependency.
+Host-fed decode waits for its preceding completion; device-fed decode declares a
+persistent state read and the admission and sampling graphs that produce it.
+Each selected graph declares its continuation-row requirement and embedding-table
+resource IDs. A speculative completion cursor references the graph's updated
+history storage and a token lag, or is absent when the graph maintains no draft
+history. These declarations preserve the existing completion ABI.
 
 Captured operators use b12x's default numerical policy and tuned execution plans.
 MoE reductions may use arrival-ordered atomic additions, so identical graph inputs
@@ -1095,8 +1104,8 @@ Prepare these operations:
 - **Vision:** encode preprocessed patches and write fixed-capacity embedding
   storage.
 - **State maintenance:** initialize or restore a live slot, or freeze its exact
-  consumed state into an immutable snapshot. The model input schema
-  `qwen4exp.graph-inputs.v3` carries the expected consumed count and physical-slot
+  consumed state into an immutable snapshot. Semantic bindings carry the
+  expected consumed count, source and destination state rows, and physical-slot
   target/draft page tables for snapshot and restore.
 
 Padding changes capacity, never logical sequence length. Every padded row must

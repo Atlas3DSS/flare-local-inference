@@ -340,15 +340,17 @@ architectural boundary before committing the change.
   allowlists behind capability flags. A cache scheme may require different page
   geometry, state storage, or restore constraints; keep those differences in
   its storage contract and let shared policy consume that contract.
-- `ModelContract` is a prepared-data adapter, never a runtime policy extension
-  point. Its members may validate and bind graph inputs, expose concrete storage
-  layouts, and adapt frontend metadata. Never add per-model boolean flags,
+- `PreparedContract` is validated Protobuf data, never a runtime policy extension
+  point. Declare concrete graph value sources, storage views, dependencies,
+  frontend syntax, and capacities; shared code validates and binds them. Never add per-model boolean flags,
   including `supports_*`, `can_*`, or default-false opt-ins, to enable or disable
   runtime behavior. Enum values, callbacks, schema names, and metadata fields
   must not encode the same model allowlist. Every member must have a meaning
   independent of model identity, and its consumers must implement shared behavior
   from actual data, geometry, and dependencies. Review both declarations and all
-  call sites; moving a model branch behind the trait does not make it acceptable.
+  consumers. Tool/reasoning parsers and image preparation/layout implementations
+  use independent typed enum identifiers; those identifiers cannot select
+  scheduling, cache policy, text-graph input packing, or completion behavior.
 - A runtime defect reproduced on one model must be traced through every
   supported cache scheme before choosing the implementation boundary. Apply
   the fix to every compatible contract. Any restriction must follow from a

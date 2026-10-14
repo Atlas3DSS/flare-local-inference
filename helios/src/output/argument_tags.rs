@@ -2,15 +2,15 @@
 
 use crate::{
     Result,
-    frontend::{Frontend, RenderedPrompt},
-    output::tagged::{TaggedOutput, ToolDialect, parameter_value},
+    output::tagged::{ToolDialect, parameter_value},
 };
 use serde_json::{Map, Value};
 
-pub use crate::output::tagged::OutputConfig;
+#[cfg(test)]
+use crate::output::tagged::{OutputConfig, TaggedOutput};
 
-pub struct GlmArgumentTags;
-impl ToolDialect for GlmArgumentTags {
+pub struct ArgumentTags;
+impl ToolDialect for ArgumentTags {
     const NAME: &'static str = "GLM";
     const TRIM_NEWLINES: bool = false;
     const OPEN: &'static str = "<tool_call>";
@@ -64,50 +64,8 @@ impl ToolDialect for GlmArgumentTags {
     }
 }
 
-pub type GlmOutput = TaggedOutput<GlmArgumentTags>;
-
-pub fn prepare_output(
-    frontend: &Frontend,
-    rendered: &RenderedPrompt,
-    messages: &[Value],
-    options: &Map<String, Value>,
-    structured: bool,
-) -> OutputConfig {
-    let effective = |name: &str| {
-        options
-            .get(name)
-            .or_else(|| frontend.template_default(name))
-    };
-    let continuation = effective("continue_final_message")
-        .is_some_and(|v| v == &Value::Bool(true) || v.as_str().is_some_and(|s| !s.is_empty()));
-    let generation = effective("add_generation_prompt") == Some(&Value::Bool(true));
-    let prefix = if generation
-        || (continuation && messages.last().is_some_and(|m| m["role"] == "assistant"))
-    {
-        rendered
-            .text
-            .rsplit_once("<|assistant|>")
-            .map(|(_, text)| text)
-            .filter(|text| {
-                !["<|user|>", "<|system|>", "<|observation|>"]
-                    .iter()
-                    .any(|marker| text.contains(marker))
-            })
-    } else {
-        None
-    };
-    OutputConfig {
-        structured,
-        reasoning: prefix.is_some_and(|text| {
-            text.rfind("<think>")
-                .is_some_and(|open| text.rfind("</think>").is_none_or(|close| open > close))
-        }),
-        tools: effective("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    }
-}
+#[cfg(test)]
+type ArgumentTagOutput = TaggedOutput<ArgumentTags>;
 
 #[cfg(test)]
 mod tests {
@@ -138,7 +96,7 @@ mod tests {
             .map(|(index, _)| index)
             .chain([text.len()])
         {
-            let mut parser = GlmOutput::new(config());
+            let mut parser = ArgumentTagOutput::new(config());
             let mut output = Accumulator::new("test".into());
             output
                 .apply(parser.push(Input::Text(&text[..boundary])).unwrap())
@@ -177,7 +135,7 @@ mod tests {
             "run<arg_key>x</arg_key>text",
         ] {
             assert!(
-                GlmArgumentTags::parse(body, &config().tools).is_err(),
+                ArgumentTags::parse(body, &config().tools).is_err(),
                 "{body}"
             );
         }
@@ -185,12 +143,12 @@ mod tests {
 
     #[test]
     fn truncation_and_structured_output_keep_protocol_semantics() {
-        let mut parser = GlmOutput::new(config());
+        let mut parser = ArgumentTagOutput::new(config());
         parser
             .push(Input::Text("</think><tool_call>run<arg_key>text</arg_key>"))
             .unwrap();
         assert!(parser.finish(Termination::OutputLimit).unwrap().is_empty());
-        let mut parser = GlmOutput::new(OutputConfig {
+        let mut parser = ArgumentTagOutput::new(OutputConfig {
             structured: true,
             reasoning: false,
             ..config()

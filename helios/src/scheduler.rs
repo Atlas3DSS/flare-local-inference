@@ -86,7 +86,7 @@ pub struct SchedulerCapabilities {
     pub draft_pages_per_request: usize,
     /// Decode consumes a token uploaded from a host-visible completion rather than GPU-owned state.
     /// The request cannot queue another decode before its preceding decode completes.
-    pub host_decode_tokens: bool,
+    pub completion_inputs: Vec<String>,
     /// Execution state rows each active request holds; None, the widest speculative graph's width.
     pub state_rows_per_request: Option<usize>,
 }

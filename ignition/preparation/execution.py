@@ -62,8 +62,8 @@ class GraphSignature:
 class PreparedExecution(PreparedGraphBundle):
     """Retain immutable graph ownership and export the matching native ABI.
 
-    Only graph I/O tensors belong in ``buffers``; packed weights, cache pools,
-    graph scratch, and mapped-host storage belong in ``resources``. Native
+    Graph I/O and declared persistent-state views belong in ``buffers``. Their
+    storage owners, packed weights, and graph scratch belong in ``resources``. Native
     validation rejects overlapping I/O spans, incompatible graph capacities,
     and malformed reserved buffers before its worker becomes ready.
     """

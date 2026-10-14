@@ -116,7 +116,7 @@ async fn retrieve(State(catalog): State<Arc<ModelCatalog>>, Path(model): Path<St
 mod tests {
     use super::*;
     use crate::{
-        model::{ContractMetadata, SamplingParameters, VisionCapabilities},
+        model::{SamplingParameters, VisionCapabilities},
         scheduler::SchedulerLimits,
     };
     use std::{
@@ -128,11 +128,10 @@ mod tests {
     fn config() -> ModelConfig {
         ModelConfig {
             prepared_sequence_tokens: 16384,
-            contract: ContractMetadata {
-                schema: "test".into(),
+            contract: crate::model::PreparedContract {
                 vocabulary: 1024,
-                vision: VisionCapabilities::disabled(),
-                page_tokens: None,
+                input_vocabulary: 1024,
+                ..crate::model::testing::metadata()
             },
             identity: [0; 32],
             model_id: "organization/model".into(),
@@ -156,7 +155,6 @@ mod tests {
             speculative_fixed_width: None,
             history_drafts: false,
             speculative_proposal_source: Default::default(),
-            state_rows_per_request: None,
         }
     }
 

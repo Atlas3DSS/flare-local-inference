@@ -37,7 +37,6 @@ pub(crate) struct Table {
 
 #[derive(Debug)]
 pub(crate) struct Index {
-    pub(crate) vocabulary: usize,
     pub(crate) tables: Vec<Table>,
 }
 
@@ -271,12 +270,6 @@ impl std::fmt::Debug for Binding {
             .finish()
     }
 }
-impl Binding {
-    pub(crate) fn index(&self) -> Arc<Index> {
-        self.shared.index.clone()
-    }
-}
-
 struct Transfer {
     stream: Stream,
     flag: usize,

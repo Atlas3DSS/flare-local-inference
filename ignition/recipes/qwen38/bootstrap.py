@@ -21,6 +21,9 @@ from ignition.components.capacity import batch_capacities, request_capacity
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
+from ignition.preparation.contract import history_region
+from ignition.preparation import runtime_package_pb2 as contract_proto
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.deferred import deferred_mode
@@ -502,16 +505,17 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 history_drafts=config.history_drafts)
         hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
             "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"])}
+        cache_regions = [history_region(buffers, f"cache.{layer}.{name}", getattr(value, name), contract_proto.PAGED_KEY_VALUE,
+            tokens_per_record=4 if name == "compressed_k_cache" else 1)
+            for layer, value in (final_cache or cache).items()
+            for name in ("main_k_cache", "main_v_cache", "compressed_k_cache")]
+        buffers["request_pending_token"] = requests.pending_token
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 64,
-            # Verification commits accepted tokens into each request's live row.
-            "state_rows_per_request": 1,
             "frontend": prepare_frontend(manifest.snapshot, eos_token_ids=[248046, 248044], image_profile="qwen"),
             "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
-            "model_contract": {"schema": "qwen4exp.graph-inputs.v3", "vocabulary": 248320,
-                "vision": {"features_per_request": 16384, "max_images": 4,
-                    "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
+            "model_contract": prepare_contract(signatures, buffers, state, page_tokens=64, draft_lag=1 if has_mtp else None, embedding_tables=(0,), regions=cache_regions),
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}
                        for name, (filename, digest) in hashes.items()}}
         if speculation is not None:

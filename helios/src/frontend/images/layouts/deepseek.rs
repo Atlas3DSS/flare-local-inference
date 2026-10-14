@@ -1,4 +1,4 @@
-use super::{PromptData, VOCABULARY};
+use crate::model::PromptData;
 use crate::{
     Result,
     cache::ConditioningEvent,
@@ -10,6 +10,7 @@ use crate::{
 };
 
 fn image_block(
+    vocabulary: usize,
     height: usize,
     width: usize,
     position: usize,
@@ -46,20 +47,21 @@ fn image_block(
     types.push(4);
     indices.push(-1);
     (
-        types.into_iter().map(|t| VOCABULARY as u32 + t).collect(),
+        types.into_iter().map(|t| vocabulary as u32 + t).collect(),
         indices,
         padding,
     )
 }
 
-pub(super) fn prepare_input(
+pub(crate) fn prepare_input(
+    vocabulary: usize,
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
     images: Vec<RgbImage>,
-) -> Result<PreparedInput<PromptData>> {
+) -> Result<PreparedInput> {
     let placeholder = frontend.encode("<｜deepseek_image｜>", false)?;
-    if placeholder.len() != 1 || rendered.token_ids.iter().any(|t| *t as usize >= VOCABULARY) {
+    if placeholder.len() != 1 || rendered.token_ids.iter().any(|t| *t as usize >= vocabulary) {
         return Err("invalid DeepSeek image placeholder or prompt vocabulary".into());
     }
     if rendered
@@ -95,6 +97,7 @@ pub(super) fn prepare_input(
         let geometry = &processed.as_ref().unwrap().geometry[image_index];
         let start = tokens.len();
         let (block, indices, padding) = image_block(
+            vocabulary,
             (geometry.grid_thw[1] as usize).div_ceil(3),
             (geometry.grid_thw[2] as usize).div_ceil(3),
             start,

@@ -1,14 +1,15 @@
 #![cfg(feature = "server")]
 
 use flare_helios::frontend;
+use flare_helios::{model, scheduler};
 #[path = "support/frontend.rs"]
 mod support;
 
 use flare_helios::{
     frontend::{Asset, Frontend, FrontendAssets},
     grammar::GrammarCompiler,
-    model::{ModelConfig, ModelContract, SamplingParameters, glm5next::Glm5Next},
-    output::{Event, Input, ModelOutput, Termination},
+    model::{ModelConfig, SamplingParameters},
+    output::{Event, Input, Termination},
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
@@ -42,7 +43,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     .unwrap();
     let config = ModelConfig {
         prepared_sequence_tokens: 1048576,
-        contract: Glm5Next::metadata(),
+        contract: support::contract("glm53"),
         identity: [9; 32],
         model_id: "glm53".into(),
         limits: SchedulerLimits {
@@ -60,7 +61,6 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         speculative_fixed_width: None,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
-        state_rows_per_request: None,
     };
     let compiler =
         GrammarCompiler::new(frontend.tokenizer(), 154880, &config.eos_token_ids).unwrap();
@@ -70,11 +70,9 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     .unwrap();
     for case in reference["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        let prepared =
-            prepare_request::<Glm5Next>(&frontend, None, &compiler, &config, case["body"].clone())
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
-        flare_helios::model::admission::validate_prompt::<Glm5Next>(&config, &prepared.prompt)
-            .unwrap();
+        let prepared = prepare_request(&frontend, None, &compiler, &config, case["body"].clone())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        flare_helios::model::admission::validate_prompt(&config, &prepared.prompt).unwrap();
         assert_eq!(
             prepared.rendered_prompt,
             case["rendered"].as_str().unwrap(),
@@ -95,14 +93,14 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
             "{name}"
         );
         assert_eq!(
-            prepared.output.reasoning,
+            prepared.output.content.reasoning,
             case["reasoning"].as_bool().unwrap(),
             "{name}"
         );
-        assert!(!prepared.output.structured, "{name}");
+        assert!(!prepared.output.content.structured, "{name}");
         assert!(prepared.prompt.grammar.is_none(), "{name}");
-        let reasoning = prepared.output.reasoning;
-        let mut output = <Glm5Next as ModelContract>::Output::new(prepared.output);
+        let reasoning = prepared.output.content.reasoning;
+        let mut output = flare_helios::output::OutputPipeline::new(prepared.output);
         let text = if reasoning {
             "analysis</think>result"
         } else {
@@ -133,13 +131,15 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
                 .as_array()
                 .unwrap()
                 .clone();
-            let mut output = <Glm5Next as ModelContract>::Output::new(
-                flare_helios::model::glm5next::output::OutputConfig {
-                    structured: false,
-                    reasoning: false,
-                    tools,
-                },
-            );
+            let mut output =
+                flare_helios::output::OutputPipeline::new(flare_helios::output::OutputConfig {
+                    syntax: support::contract("glm53").frontend,
+                    content: flare_helios::output::tagged::OutputConfig {
+                        structured: false,
+                        reasoning: false,
+                        tools,
+                    },
+                });
             let mut events = Vec::new();
             for character in text.chars() {
                 events.extend(output.push(Input::Text(&character.to_string())).unwrap());
@@ -164,8 +164,13 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     for request in [
         json!({"model":"glm53", "messages":[{"role":"user", "content":[{"type":"image_url", "image_url":{"url":"data:image/png;base64,AA=="}}]}]}),
         json!({"model":"glm53", "messages":[{"role":"user", "content":"<|begin_of_image|><|image|><|end_of_image|>"}]}),
-        json!({"model":"glm53", "messages":[{"role":"user", "content":"JSON please"}], "response_format":{"type":"json_object"}}),
     ] {
-        assert!(prepare_request::<Glm5Next>(&frontend, None, &compiler, &config, request).is_err());
+        assert!(prepare_request(&frontend, None, &compiler, &config, request).is_err());
     }
+    let structured = prepare_request(&frontend, None, &compiler, &config,
+        json!({"model":"glm53", "messages":[{"role":"user", "content":"JSON please"}], "response_format":{"type":"json_object"}})
+    ).unwrap();
+    assert!(structured.output.content.reasoning);
+    assert!(structured.output.content.structured);
+    assert!(structured.prompt.grammar.is_some());
 }

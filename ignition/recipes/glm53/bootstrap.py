@@ -14,6 +14,9 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
+from ignition.preparation.contract import history_region
+from ignition.preparation import runtime_package_pb2 as contract_proto
 from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
@@ -539,16 +542,23 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
         for role, filename in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
     generation = json.loads((snapshot / "generation_config.json").read_text())
+    from .mla import MLAState
+    cache_regions = []
+    for layer, value in enumerate((*pool.decoder.layers, *((pool.draft,) if pool.draft is not None else ()))):
+        if isinstance(value, MLAState):
+            cache_regions.append(history_region(buffers, f"cache.{layer}.latent", value.cache.view(-1, 4, 64, 528),
+                contract_proto.PAGED_LATENT, tokens_per_record=config.page_tokens // 256))
+            cache_regions.append(history_region(buffers, f"cache.{layer}.index", value.index.cache,
+                contract_proto.PAGED_LATENT, tokens_per_record=config.page_tokens // 64))
+    buffers["request_pending_token"] = requests.pending_token
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,
         "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": config.page_tokens,
         "frontend": prepare_frontend(snapshot, eos_token_ids=generation["eos_token_id"]),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
-        "model_contract": {"schema": "glm5next.graph-inputs.v2", "vocabulary": 154880,
-            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
-            "page_tokens": config.page_tokens}}
+        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=config.page_tokens, draft_lag=1 if config.mtp else None, regions=cache_regions)}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
-            speculative_fixed_width=config.speculative_fixed_width, state_rows_per_request=1)
+            speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,

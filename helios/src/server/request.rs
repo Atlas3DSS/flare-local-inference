@@ -2,25 +2,25 @@ use super::runtime::Prompt;
 use crate::{
     AdmissionError, Error, Failure, FrontendError, Result,
     frontend::{Frontend, images::ImageProcessor},
-    model::{ModelConfig, ModelContract, SamplingParameters},
+    model::{ModelConfig, SamplingParameters},
 };
 use base64::Engine;
 use serde_json::{Map, Value};
 
-pub struct PreparedRequest<M: ModelContract> {
-    pub prompt: Prompt<M>,
+pub struct PreparedRequest {
+    pub prompt: Prompt,
     pub stream: bool,
-    pub output: M::OutputConfig,
+    pub output: crate::output::OutputConfig,
     pub rendered_prompt: String,
 }
 
-pub fn prepare<M: ModelContract>(
+pub fn prepare(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     compiler: &crate::grammar::GrammarCompiler,
     config: &ModelConfig,
     body: Value,
-) -> Result<PreparedRequest<M>> {
+) -> Result<PreparedRequest> {
     prepare_inner(frontend, processor, compiler, config, body).map_err(|error| match error {
         Error::Admission(_) => error,
         Error::Frontend(FrontendError::ImageDecode(_)) => {
@@ -30,18 +30,18 @@ pub fn prepare<M: ModelContract>(
     })
 }
 
-fn prepare_inner<M: ModelContract>(
+fn prepare_inner(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     compiler: &crate::grammar::GrammarCompiler,
     config: &ModelConfig,
     body: Value,
-) -> Result<PreparedRequest<M>> {
+) -> Result<PreparedRequest> {
     if body.get("model").and_then(Value::as_str) != Some(config.model_id.as_str()) {
         return Err("requested model is not loaded".into());
     }
     let decoded = super::protocol::decode(super::protocol::Protocol::Chat, body, false)?;
-    let prepared = prepare_inference::<M>(
+    let prepared = prepare_inference(
         frontend,
         processor,
         compiler,
@@ -58,14 +58,14 @@ fn prepare_inner<M: ModelContract>(
     })
 }
 
-pub(super) struct PreparedInference<M: ModelContract> {
-    pub prompt: Prompt<M>,
-    pub output: Option<M::OutputConfig>,
+pub(super) struct PreparedInference {
+    pub prompt: Prompt,
+    pub output: Option<crate::output::OutputConfig>,
     pub rendered_prompt: String,
     pub echo: String,
 }
 
-pub(super) fn prepare_inference<M: ModelContract>(
+pub(super) fn prepare_inference(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     compiler: &crate::grammar::GrammarCompiler,
@@ -73,7 +73,7 @@ pub(super) fn prepare_inference<M: ModelContract>(
     request: &super::inference::Request,
     index: usize,
     count_only: bool,
-) -> Result<PreparedInference<M>> {
+) -> Result<PreparedInference> {
     use super::inference::{Constraint, Input, RawPrompt, ToolChoice};
     let opts = &request.options;
     let mut object = serde_json::to_value(&opts.sampling)
@@ -240,7 +240,8 @@ pub(super) fn prepare_inference<M: ModelContract>(
     let output = if raw.is_some() {
         None
     } else {
-        Some(M::prepare_output(
+        Some(crate::model::prepare_output(
+            config,
             frontend,
             &rendered,
             &normalized,
@@ -248,8 +249,9 @@ pub(super) fn prepare_inference<M: ModelContract>(
             structured,
         )?)
     };
-    use crate::output::ModelOutput;
-    let envelope = output.as_ref().and_then(M::Output::grammar_envelope);
+    let envelope = output
+        .as_ref()
+        .and_then(crate::output::OutputPipeline::grammar_envelope);
     let grammar = match &opts.constraint {
         Some(Constraint::Json(schema)) => {
             Some(compiler.compile_json_schema_in(schema, envelope.as_ref())?)
@@ -264,11 +266,11 @@ pub(super) fn prepare_inference<M: ModelContract>(
         data,
         conditioning,
         images,
-    } = M::prepare_input(frontend, processor, &rendered, images)?;
+    } = crate::model::prepare_input(config, frontend, processor, &rendered, images)?;
     let system_boundary = if raw.is_some() {
         None
     } else {
-        M::system_boundary(frontend, &tokens, &normalized, &options)
+        crate::model::system_boundary(config, frontend, &tokens, &normalized, &options)
     };
     let mut sampling = sampling_parameters(object, &config.sampling_defaults)?;
     sampling.seed = sampling.seed.wrapping_add(index as u64);

@@ -111,12 +111,36 @@ limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
 `flare.payload` covers the resource bytes, including alignment padding, from
 the start of the data buffer. `flare.metadata` immediately follows it and
 contains a serialized `ProtectedIndex` from `helios/proto/runtime_package.proto`.
-The envelope uses version 4 and its authenticated `ModelIndex` version 3.
+The envelope uses version 4 and its authenticated `ModelIndex` version 4.
 Unsigned rank staging uses `format: flare-staging` and cannot be loaded by
 Helios. Incompatible packages require re-export.
 These tensors cover the entire data buffer without gaps or overlap. The
 protobuf is the authoritative resource description; safetensors describes
 only the two byte tensors.
+
+`ModelIndex.contract` is a typed `ServingContract`. It declares serving defaults
+and a versioned `ModelContract` containing vocabulary bounds, vision capacities,
+attention-history storage, page-table views, graph value sources and dependencies,
+completion cursors, and frontend syntax. Field 4 is reserved; arbitrary Protobuf
+`Struct` configuration is not accepted. Execution ABI 2/3 and protected envelope
+version 4 are versioned separately; packages with a different model-index version require
+re-export.
+
+Semantic bindings name a destination buffer and an enum-selected value source.
+Indexing distinguishes scalar, submission row, active row, physical request row,
+and packed-token storage. Offsets and padding are explicit. Omitted transfers
+retain device bytes. Persistent state views contain byte offsets, strides, and
+extents within declared buffers; graph state accesses describe reads and writes.
+Paged key/value and latent histories refer to actual cache planes. Continuation
+rows hold recurrent state, sliding windows, partial pages, and other captured
+model histories. Shared cache allocation sizes the physical backing independently
+of model identity. Native code implements no attention state-update computation.
+
+Frontend enums independently select tool/reasoning parsers and image preparation
+and layouts. Marker strings, prefix-boundary rules, feature tokens, and atomic
+image spans are data. Enum zero and unknown identifiers are rejected; enum
+numbers are stable and removed values must be reserved. Frontend identifiers
+cannot select scheduler, cache, text-graph packing, or completion policy.
 
 The index stores complete recipe-declared sampling parameters in
 `DefaultSamplingParameters` and structural frontend settings in
@@ -375,7 +399,7 @@ package; set function attributes; add nodes, attributes, and edges; and
 instantiate each graph with its recorded flags. The execution manifest is
 then rebased onto the live addresses and validated, and the server starts
 from this reconstructed contract. `flare run PACKAGE` in
-`flare/src/main.rs` selects the Qwen, GLM, DeepSeek V4, or DeepSeek V4.1 contract.
+`flare/src/main.rs` starts the shared server directly from the typed contract.
 
 Before any CUDA initialization or worker threads, Flare restricts
 `CUDA_VISIBLE_DEVICES` to `--gpus`, resolving indices within an inherited mask.

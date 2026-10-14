@@ -564,8 +564,6 @@ pub(crate) mod tests {
     }
     impl ModelOutput for Controls {
         type Config = Arc<Mutex<Vec<String>>>;
-        type Reasoning = ControlReasoning;
-        type Tools = ControlTools;
         fn new(observed: Self::Config) -> Self {
             Self {
                 observed,

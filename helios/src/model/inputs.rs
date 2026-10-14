@@ -3,15 +3,15 @@
 use crate::{
     Result,
     execution::{GraphKind, OwnedUpload, REQUEST_LANES, Upload},
-    model::{Admission, ModelConfig, ModelContract, SamplingParameters},
+    model::{Admission, ModelConfig},
     scheduler::{LiveRequest, RequestScheduler, ScheduledStep},
 };
 
-pub struct InputStep<'a, M: ModelContract> {
+pub struct InputStep<'a> {
     pub config: &'a ModelConfig,
     pub scheduler: &'a RequestScheduler,
     pub step: &'a ScheduledStep,
-    pub admissions: &'a [Option<Admission<M>>],
+    pub admissions: &'a [Option<Admission>],
     pub slots: [i32; REQUEST_LANES],
     pub generations: [i64; REQUEST_LANES],
     pub lengths: [i32; REQUEST_LANES],
@@ -19,12 +19,12 @@ pub struct InputStep<'a, M: ModelContract> {
 }
 
 /// Pack after the scheduler reserves every page referenced by the submission.
-pub fn pack_inputs<M: ModelContract>(
-    inputs: &mut M::Inputs,
+pub fn pack_inputs(
+    inputs: &mut crate::model::Inputs,
     config: &ModelConfig,
     scheduler: &RequestScheduler,
     step: &ScheduledStep,
-    admissions: &[Option<Admission<M>>],
+    admissions: &[Option<Admission>],
 ) -> Result<()> {
     step.validate_mixed()?;
     if let Some(mixed) = &step.mixed {
@@ -84,7 +84,7 @@ pub fn pack_inputs<M: ModelContract>(
                     == Some(live.prompt_tokens as u64),
         );
     }
-    M::pack(inputs, &frame)
+    inputs.pack(&frame)
 }
 
 pub fn append_pages(
@@ -125,14 +125,6 @@ pub fn append_pages(
         counts[slot] = (request.handle.generation, available);
     }
     Ok(())
-}
-
-pub struct SamplingAdmission<'a> {
-    pub sampling: &'a SamplingParameters,
-    pub max_new_tokens: u32,
-    pub prompt: &'a [u32],
-    pub grammar_mask: Option<&'a [i32]>,
-    pub ignore_eos: bool,
 }
 
 /// Graph execution copies active staging bytes before submit returns.
@@ -177,83 +169,5 @@ impl UploadBatch {
                 bytes: &upload.bytes,
             })
             .collect()
-    }
-
-    pub fn admission(
-        &mut self,
-        config: &ModelConfig,
-        row: usize,
-        admission: SamplingAdmission<'_>,
-    ) -> Result<()> {
-        self.i64(
-            "admission_seed_bits",
-            row * 8,
-            [admission.sampling.seed as i64],
-        );
-        self.put(
-            "admission_parameters",
-            row * 24,
-            admission
-                .sampling
-                .values()
-                .into_iter()
-                .flat_map(f32::to_le_bytes),
-        );
-        self.i32("admission_top_k", row * 4, [admission.sampling.top_k]);
-        self.i64(
-            "admission_max_new_tokens",
-            row * 8,
-            [admission.max_new_tokens as i64],
-        );
-        self.i64(
-            "admission_eos_token_ids",
-            row * 64,
-            config
-                .eos_token_ids
-                .iter()
-                .map(|id| *id as i64)
-                .chain(std::iter::repeat(-1))
-                .take(8),
-        );
-        self.i32(
-            "admission_eos_count",
-            row * 4,
-            [if admission.ignore_eos {
-                0
-            } else {
-                config.eos_token_ids.len() as i32
-            }],
-        );
-        let mut histogram = vec![0i32; config.contract.vocabulary];
-        for token in admission.prompt {
-            // Image sentinels are inputs outside the sampled vocabulary.
-            if let Some(count) = histogram.get_mut(*token as usize) {
-                *count = count.checked_add(1).ok_or("prompt histogram overflow")?;
-            }
-        }
-        self.i32(
-            "admission_histogram",
-            row * config.contract.vocabulary * 4,
-            histogram,
-        );
-        if let Some(mask) = admission.grammar_mask {
-            self.i32(
-                "admission_grammar_mask",
-                row * config.contract.vocabulary.div_ceil(32) * 4,
-                mask.iter().copied(),
-            );
-        } else {
-            self.i32(
-                "admission_grammar_mask",
-                row * config.contract.vocabulary.div_ceil(32) * 4,
-                std::iter::repeat_n(-1, config.contract.vocabulary.div_ceil(32)),
-            );
-        }
-        self.i32(
-            "admission_grammar_enabled",
-            row * 4,
-            [i32::from(admission.grammar_mask.is_some())],
-        );
-        Ok(())
     }
 }

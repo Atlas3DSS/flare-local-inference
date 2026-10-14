@@ -14,7 +14,6 @@ use std::{
 
 use clap::Parser;
 use flare_helios::{
-    model::{ModelContract, glm5next::Glm5Next, qwen4exp::Qwen4Exp},
     runtime_package::{NativeModel, VerifiedPackage},
     server::{Bootstrap, Server},
     startup::StartupProgress,
@@ -190,24 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config["bind"] = args.bind.to_string().into();
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
-    match config["model_contract"]["schema"].as_str() {
-        Some(flare_helios::model::qwen4exp::INPUT_SCHEMA) => {
-            serve::<Qwen4Exp>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
-            serve::<Glm5Next>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::deepseek4::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::mimo::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::mimo::MiMo>(owner, config, progress, cluster)
-        }
-        _ => Err("unsupported model contract".into()),
-    }
+    serve(owner, config, progress, cluster)
 }
 
 /// Run a peer rank of a multi-host package: join rank zero and replay its coordinated steps until
@@ -246,7 +228,7 @@ fn serve_peer(
     }
 }
 
-fn serve<M: ModelContract>(
+fn serve(
     owner: NativeModel,
     config: serde_json::Value,
     mut progress: StartupProgress,
@@ -273,7 +255,7 @@ fn serve<M: ModelContract>(
         None => (!manifests.is_empty())
             .then_some(flare_helios::execution::RankPeers::Threads(manifests)),
     };
-    let bootstrap = Bootstrap::load::<M>(&config.to_string(), &manifest)?;
+    let bootstrap = Bootstrap::load(&config.to_string(), &manifest)?;
     phase.finish(format!(
         "{} token vocabulary",
         bootstrap.model.contract.vocabulary
@@ -281,7 +263,7 @@ fn serve<M: ModelContract>(
     let phase = progress.phase("Start server", None);
     let context_tokens = bootstrap.model.limits.max_sequence_tokens;
     let server = match unsafe {
-        Server::<M>::start(
+        Server::start(
             manifest,
             bootstrap.model,
             bootstrap.frontend,

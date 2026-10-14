@@ -334,7 +334,7 @@ impl Protection {
             .index
             .ok_or_else(|| invalid("missing signed model index"))?;
         let count = metadata.ranks as usize;
-        if index.version != 3
+        if index.version != 4
             || !index.ranks.is_empty()
             || envelope.ranks.len() != count
             || index
