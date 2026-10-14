@@ -176,6 +176,8 @@ class PreparedGlmIndexer:
             name=f"{name}.select" if end - start == rows else f"{name}.select{start}", workspace=workspace,
             scores=None if context is None else scratch.scores[start:end])
             for start in range(0, rows, step) for end in (min(start + step, rows),))
+        self.scratch_plans = (self.query_projection.plan,
+            *(selector.plan for selector in self.selectors if isinstance(selector, PreparedSparseIndexer)))
         self.gathers = ()
         if context is not None:
             from ignition.components.collectives import PreparedAllGather

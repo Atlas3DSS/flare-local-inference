@@ -87,6 +87,13 @@ def test_glm_mla_checkpoint_native_replay(model_weights, mode, rows):
                 mode=mode, session=session, name="mla", workspace=arena)
             session.tune()
 
+            value_expansion = attention.value_expansion
+            def record_attended(values):
+                # Observe the attention output before serial scratch reuse overwrites it.
+                scratch.attended.copy_(values.transpose(0, 1))
+                return value_expansion(values)
+            attention.value_expansion = record_attended
+
             def forward():
                 attention(source)
                 arena.tensor.fill_(255)

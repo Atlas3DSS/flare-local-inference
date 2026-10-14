@@ -104,13 +104,14 @@ def _fake_start_query_chain(source, query, absorbed, gathered, workspace, handle
     pass
 
 
-@torch.library.custom_op("flare::join_glm_query_chain", mutates_args=("query", "absorbed", "gathered"))
-def _join_query_chain(query: torch.Tensor, absorbed: torch.Tensor, gathered: torch.Tensor, stream: int) -> None:
+@torch.library.custom_op("flare::join_glm_query_chain", mutates_args=("query", "absorbed", "gathered", "workspace"))
+def _join_query_chain(query: torch.Tensor, absorbed: torch.Tensor, gathered: torch.Tensor,
+                      workspace: torch.Tensor, stream: int) -> None:
     torch.cuda.current_stream(query.device).wait_stream(torch.cuda.ExternalStream(stream, device=query.device))
 
 
 @_join_query_chain.register_fake
-def _fake_join_query_chain(query, absorbed, gathered, stream):
+def _fake_join_query_chain(query, absorbed, gathered, workspace, stream):
     pass
 
 
@@ -119,12 +120,12 @@ class QueryChain:
 
     The chain reads only the normalized low-rank query and writes the query, absorbed query and gathered
     heads, which the main stream's latent writes and record selection never touch. Its projection uses
-    dedicated scratch, the absorption BMM none, and the head exchange its own channel. The main stream
+    a disjoint arena suffix, the absorption BMM none, and the head exchange its own channel. The main stream
     joins before attention reads the chain's outputs.
     """
 
     def __init__(self, projection: QuantizedProjection, absorb: BatchedQuantizedProjection, source, query,
-                 absorbed, gather=None, gathered=None, *, session, workspace):
+                 absorbed, gather=None, gathered=None, *, session, workspace, parallel_plans):
         from b12x.gemm.blockscaled._a16 import _weight_parts
 
         values, scales, gain, fp4 = _weight_parts(projection.weight)
@@ -134,16 +135,18 @@ class QueryChain:
         self.values, self.scales = values, scales.view(torch.uint8)
         self.source, self.query, self.absorbed = source, query, absorbed
         self.gathered = gathered if gathered is not None else absorbed
-        self.workspace = torch.empty(0, dtype=torch.uint8, device=source.device)
+        self.arena, self.parallel_plans = workspace, tuple(parallel_plans)
+        for main in self.parallel_plans:
+            workspace.register_parallel(main, projection.plan)
         self.stream_handle = workspace.auxiliary_stream.cuda_stream
         self.handle = next(_CHAIN_HANDLES)
         _CHAINS[self.handle] = self
         register_finalizer(session, self.refresh, workspace=workspace)
 
     def refresh(self):
-        nbytes = self.projection.plan.memory_requirements().scratch_nbytes
-        if nbytes > self.workspace.numel():
-            self.workspace = torch.empty((nbytes + 255) // 256 * 256, dtype=torch.uint8, device=self.source.device)
+        main_bytes = max(plan.memory_requirements().scratch_nbytes for plan in self.parallel_plans)
+        side_bytes = self.projection.plan.memory_requirements().scratch_nbytes
+        _, self.workspace = self.arena.views(((main_bytes,), torch.uint8), ((side_bytes,), torch.uint8))
 
     def run(self, source, workspace):
         from ignition.components.sm103_projection import packed_out_workspace
@@ -160,7 +163,7 @@ class QueryChain:
                            self.stream_handle)
 
     def finish(self):
-        _join_query_chain(self.query, self.absorbed, self.gathered, self.stream_handle)
+        _join_query_chain(self.query, self.absorbed, self.gathered, self.workspace, self.stream_handle)
 
 
 class PreparedGlmMLA:
@@ -244,7 +247,8 @@ class PreparedGlmMLA:
                 session=session, name=f"{name}.attention", workspace=workspace)
             if mode != "prefill":
                 self.query_chain = QueryChain(self.projections["q_b_proj"], self.query_absorption,
-                    scratch.query_residual, scratch.query, scratch.absorbed_query, session=session, workspace=workspace)
+                    scratch.query_residual, scratch.query, scratch.absorbed_query, session=session,
+                    workspace=workspace, parallel_plans=self.indexer.scratch_plans)
             return
         if mode == "prefill":
             # Prefill gathers every rank's records of the context into the slab, where a record's index is its
@@ -300,7 +304,7 @@ class PreparedGlmMLA:
             start, end, absorb, gather = self.slices[0][:4]
             self.query_chain = QueryChain(self.projections["q_b_proj"], absorb, scratch.query_residual,
                 scratch.query, scratch.absorbed_query[:end - start], gather, scratch.gathered[:end - start],
-                session=session, workspace=workspace)
+                session=session, workspace=workspace, parallel_plans=self.indexer.scratch_plans)
 
     def attend_gathered_context(self):
         """Attend one prefill request over its context gathered from every rank, one query slice at a time."""
