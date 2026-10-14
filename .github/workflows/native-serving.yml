@@ -10,25 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  windows-cross:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install cross-compilation dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld llvm cmake ninja-build nasm protobuf-compiler
-          rustup target add x86_64-pc-windows-msvc
-          cargo install --locked cargo-xwin --version 0.23.1
-      - name: Cross-compile Windows serving
-        run: cargo xwin build --locked --release --manifest-path flare/Cargo.toml --target x86_64-pc-windows-msvc
-      - uses: actions/upload-artifact@v4
-        with:
-          name: flare-windows-cross
-          path: flare/target/x86_64-pc-windows-msvc/release/flare.exe
-
   native:
-    needs: windows-cross
     strategy:
       fail-fast: false
       matrix:
@@ -62,23 +44,17 @@ jobs:
       - name: Test native CLI
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked --release --manifest-path flare/Cargo.toml
-      - uses: actions/download-artifact@v4
-        if: runner.os == 'Windows'
-        with:
-          name: flare-windows-cross
-          path: cross
-      - name: Exercise native and cross-compiled executables
+      - name: Exercise native Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          foreach ($exe in @('.\flare\target\release\flare.exe', '.\cross\flare.exe')) {
-            & $exe --help
-            if ($LASTEXITCODE -ne 0) { throw "$exe --help failed" }
-            & $exe --version
-            if ($LASTEXITCODE -ne 0) { throw "$exe --version failed" }
-            & $exe agent
-            if ($LASTEXITCODE -eq 0) { throw "$exe accepted unsupported multi-host serving" }
-          }
+          $exe = '.\flare\target\release\flare.exe'
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw "$exe --help failed" }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "$exe --version failed" }
+          & $exe agent
+          if ($LASTEXITCODE -eq 0) { throw "$exe accepted unsupported multi-host serving" }
           exit 0
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'

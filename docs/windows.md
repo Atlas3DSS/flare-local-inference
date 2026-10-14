@@ -48,8 +48,8 @@ cargo test --locked --release --manifest-path helios/Cargo.toml --features runti
 cargo test --locked --release --manifest-path flare/Cargo.toml
 ```
 
-The `Native serving` GitHub Actions workflow builds on Linux and Windows,
-runs the native CPU tests, and exercises both Windows executables on Windows.
+The `Native serving` GitHub Actions workflow builds natively on Linux and Windows,
+runs the native CPU tests, and exercises the Windows executable on Windows.
 GPU tests require explicitly supplied packages and hardware and remain ignored
 in the CPU suite.
 
