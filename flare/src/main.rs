@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(peers)
     };
     // SAFETY: The trusted package owners remain live until every rank drains.
-    let owner = unsafe { NativeModel::load(authorized, &local_devices, &options, &progress)? };
+    let mut owner = unsafe { NativeModel::load(authorized, &local_devices, &options, &progress)? };
     let cluster = match (owner.cluster().cloned(), rendezvous) {
         (Some(cluster), Some(address)) => Some((cluster, address)),
         (Some(_), None) => {
@@ -146,6 +146,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return serve_peer(owner, cluster, address, progress);
         }
     }
+    // Agree on cache limits before copying configuration or creating execution manifests.
+    let joined = match &cluster {
+        Some((cluster, address)) => Some(cluster::rank_zero(&mut owner, cluster, address, &progress)?),
+        None => None,
+    };
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
     config["bind"] = args.bind.to_string().into();
@@ -153,19 +158,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     phase.finish(config["model_id"].as_str().unwrap_or_default());
     match config["model_contract"]["schema"].as_str() {
         Some(flare_helios::model::qwen4exp::INPUT_SCHEMA) => {
-            serve::<Qwen4Exp>(owner, config, progress, cluster)
+            serve::<Qwen4Exp>(owner, config, progress, joined)
         }
         Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
-            serve::<Glm5Next>(owner, config, progress, cluster)
+            serve::<Glm5Next>(owner, config, progress, joined)
         }
         Some(flare_helios::model::deepseek4::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress, cluster)
+            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress, joined)
         }
         Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress, cluster)
+            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress, joined)
         }
         Some(flare_helios::model::mimo::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::mimo::MiMo>(owner, config, progress, cluster)
+            serve::<flare_helios::model::mimo::MiMo>(owner, config, progress, joined)
         }
         _ => Err("unsupported model contract".into()),
     }
@@ -174,13 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Run a peer rank of a multi-host package: join rank zero and replay its coordinated steps until
 /// rank zero drains every rank.
 fn serve_peer(
-    owner: NativeModel,
+    mut owner: NativeModel,
     cluster: &flare_helios::runtime_package::ClusterRank,
     address: &str,
     mut progress: StartupProgress,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let joined = cluster::peer(&mut owner, cluster, address, &progress)?;
     let mut manifest = owner.manifests()?.remove(0);
-    let joined = cluster::peer(&owner, cluster, address, &progress)?;
     manifest.collectives = Some(cluster::health(&joined.transport));
     progress.finish_animation();
     eprintln!(
@@ -210,7 +215,7 @@ fn serve<M: ModelContract>(
     owner: NativeModel,
     config: serde_json::Value,
     mut progress: StartupProgress,
-    cluster: Option<(flare_helios::runtime_package::ClusterRank, String)>,
+    joined: Option<cluster::Joined<Vec<flare_helios::execution::RankStream>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
@@ -218,9 +223,8 @@ fn serve<M: ModelContract>(
     let mut manifests = owner.manifests()?;
     let mut manifest = manifests.remove(0);
     let mut transport = None;
-    let peers = match &cluster {
-        Some((cluster, address)) => {
-            let joined = cluster::rank_zero(&owner, cluster, address, &progress)?;
+    let peers = match joined {
+        Some(joined) => {
             manifest.collectives = Some(cluster::health(&joined.transport));
             transport = Some(joined.transport);
             Some(flare_helios::execution::RankPeers::Processes(

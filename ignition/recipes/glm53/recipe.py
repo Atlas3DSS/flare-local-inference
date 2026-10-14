@@ -65,8 +65,8 @@ RECIPE = Recipe(
     # Model-card sampling: https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
     checkpoints=(Checkpoint(
-        alias="glm-5.3-flash", repository="local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
-        revision="dec48abd33efa73c3bb7c95b74eee10cad34f9be", architecture="Glm5NextForConditionalGeneration",
+        alias="glm-5.3-flash", repository="nvidia/GLM-5.3-Flash-FP4-Local",
+        revision="5b865baa418c3ebd339c310df11b5e4faa2daa18", architecture="Glm5NextForConditionalGeneration",
         stored_bytes=178_175_535_810,
         # Language model, draft layer, and output head; the vision tower is not loaded.
         device_bytes=177_784_906_130,

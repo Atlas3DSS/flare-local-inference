@@ -812,9 +812,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
             graph["draft_tokens"] = graph["token_capacity"] - 1
             graph["verify_tokens"] = graph["token_capacity"]
             graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"
-    server = {**prepared.server_config, **options}
-    if bundle_only:
-        server["assets"] = {}
+    server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
                   package_data=None if bundle_only else prepared.package_data, publisher=publisher)
     return package

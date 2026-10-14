@@ -2,8 +2,8 @@
 //!
 //! Every host runs `flare run` on its own rank's file. Rank zero listens on the rendezvous address
 //! and each peer knocks there with its rank, the world size and its file's export identifier; rank
-//! zero admits every rank once and only from the same export. The admitted connection first carries
-//! the transport records the ranks exchange, then confirmation that every peer connected its
+//! zero admits every rank once and only from the same export. The admitted connection first agrees
+//! on cache capacities, then carries transport records and confirmation that every peer connected its
 //! transport, and finally the coordinated execution protocol.
 
 use std::io::{Read, Write};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use super::RankStream;
 use crate::{Error, ExecutionError, Result};
 
-const MAGIC: &[u8; 8] = b"FLARERV1";
+const MAGIC: &[u8; 8] = b"FLARERV2";
 const ADMITTED: u8 = 0;
 const REFUSED: u8 = 1;
 const CONNECTED: &[u8] = b"connected";
@@ -112,6 +112,9 @@ pub fn accept(
             continue;
         };
         let refusal = match parse_hello(&bytes) {
+            None if bytes.starts_with(b"FLARERV") => Some(
+                "incompatible rendezvous protocol; rebuild Flare on every host".to_owned(),
+            ),
             None => Some("not a flare rank".to_owned()),
             Some((_, peer_world, _)) if peer_world != world => Some(format!(
                 "its file has {peer_world} ranks, rank zero's has {world}"
@@ -201,6 +204,60 @@ pub fn knock(
     }
 }
 
+fn read_capacity(stream: &mut impl Read) -> Result<[u64; 2]> {
+    let bytes = read_frame(stream)?;
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| failure("invalid rank cache capacity"))?;
+    let capacity = [
+        u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+        u64::from_le_bytes(bytes[8..].try_into().unwrap()),
+    ];
+    if capacity.contains(&0) {
+        return Err(failure("rank cache capacity must be positive"));
+    }
+    Ok(capacity)
+}
+
+fn write_capacity(stream: &mut impl Write, capacity: [u64; 2]) -> Result<()> {
+    if capacity.contains(&0) {
+        return Err(failure("rank cache capacity must be positive"));
+    }
+    let bytes: Vec<_> = capacity.into_iter().flat_map(u64::to_le_bytes).collect();
+    write_frame(stream, &bytes)
+}
+
+/// Rank zero: agree on the minimum backed [state rows, KV pages] across hosts.
+pub fn share_cache_capacity(peers: &mut [RankStream], mut capacity: [u64; 2]) -> Result<[u64; 2]> {
+    if capacity.contains(&0) {
+        return Err(failure("rank cache capacity must be positive"));
+    }
+    for peer in peers.iter_mut() {
+        peer.set_read_timeout(Some(HELLO_TIMEOUT))
+            .and_then(|_| peer.set_write_timeout(Some(HELLO_TIMEOUT)))
+            .map_err(|e| io("cache negotiation timeout", e))?;
+        let offered = read_capacity(peer)?;
+        capacity = [capacity[0].min(offered[0]), capacity[1].min(offered[1])];
+    }
+    for peer in peers.iter_mut() {
+        write_capacity(peer, capacity)?;
+    }
+    Ok(capacity)
+}
+
+/// A peer: offer its backed capacity and receive limits no larger than its allocation.
+pub fn exchange_cache_capacity(stream: &mut RankStream, local: [u64; 2]) -> Result<[u64; 2]> {
+    // Rank zero may still be waiting for the remaining hosts to finish loading.
+    write_capacity(stream, local)?;
+    let capacity = read_capacity(stream)?;
+    if capacity[0] > local[0] || capacity[1] > local[1] {
+        return Err(failure(
+            "negotiated cache capacity exceeds this rank's allocation",
+        ));
+    }
+    Ok(capacity)
+}
+
 /// Rank zero: collect every peer's transport record and send all of them, in rank order, to each.
 pub fn share_records(peers: &mut [RankStream], local: Vec<u8>) -> Result<Vec<Vec<u8>>> {
     let mut records = vec![local];
@@ -287,6 +344,10 @@ mod tests {
             std::thread::spawn(move || {
                 let mut peers =
                     accept(&address, 3, "export-a", Duration::from_secs(20), |_| {}).unwrap();
+                assert_eq!(
+                    share_cache_capacity(&mut peers, [84, 14428]).unwrap(),
+                    [80, 12000]
+                );
                 let records = share_records(&mut peers, b"zero".to_vec()).unwrap();
                 await_connected(&mut peers).unwrap();
                 records
@@ -304,6 +365,11 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut stream =
                         knock(&address, rank, 3, "export-a", Duration::from_secs(20)).unwrap();
+                    let local = if rank == 1 { [80, 13560] } else { [90, 12000] };
+                    assert_eq!(
+                        exchange_cache_capacity(&mut stream, local).unwrap(),
+                        [80, 12000]
+                    );
                     let records =
                         exchange_record(&mut stream, format!("rank{rank}").as_bytes(), 3).unwrap();
                     report_connected(&mut stream).unwrap();
@@ -316,5 +382,26 @@ mod tests {
         for join in joins {
             assert_eq!(join.join().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn cache_negotiation_rejects_malformed_or_oversized_limits() {
+        use std::os::unix::net::UnixStream;
+
+        for capacity in [[81, 100], [80, 101], [0, 100]] {
+            let (root, peer) = UnixStream::pair().unwrap();
+            let sender = std::thread::spawn(move || {
+                let mut root = RankStream::from(root);
+                assert_eq!(read_capacity(&mut root).unwrap(), [80, 100]);
+                let bytes: Vec<_> = capacity.into_iter().flat_map(u64::to_le_bytes).collect();
+                write_frame(&mut root, &bytes).unwrap();
+            });
+            assert!(exchange_cache_capacity(&mut peer.into(), [80, 100]).is_err());
+            sender.join().unwrap();
+        }
+        let mut frame = Vec::new();
+        write_frame(&mut frame, &[0; 15]).unwrap();
+        assert!(read_capacity(&mut frame.as_slice()).is_err());
+        assert!(parse_hello(b"FLARERV1\x02\0\0\0\x01\0\0\0export-a").is_none());
     }
 }

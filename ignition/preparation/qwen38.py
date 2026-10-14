@@ -1,7 +1,7 @@
 """Stored tensor contract for the pinned Qwen3.8 Flash Next checkpoint."""
 
-MODEL_ID = "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD"
-REVISION = "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2"
+MODEL_ID = "nvidia/Qwen-3.8-Flash-Next-FP4-Local"
+REVISION = "fb75f0a572feb417652f76aceeb83afdd20fe7f0"
 ARCHITECTURE = "Qwen4ExpForConditionalGeneration"
 TRANSFORMERS_REVISION = "4cc2aa84301c9aa210b5513dab9fefae03981f6e"
 CONFIG_SHA256 = "b50dbc52a0c83b0cd2a44a372c1fb6b5e0e6827d22f2611c97d4d030f92f6b28"

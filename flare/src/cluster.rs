@@ -53,7 +53,7 @@ fn open(owner: &NativeModel) -> Result<RoceTransport, Failure> {
 /// Rank zero: admit every peer at `address`, exchange transport records, and wait until every
 /// rank's transport is connected.
 pub fn rank_zero(
-    owner: &NativeModel,
+    owner: &mut NativeModel,
     cluster: &ClusterRank,
     address: &str,
     progress: &StartupProgress,
@@ -72,6 +72,11 @@ pub fn rank_zero(
             |rank| eprintln!("Rank {rank} joined"),
         )?;
         phase.finish(format!("{} peer ranks at {address}", streams.len()));
+        let phase = progress.phase("Agree cache capacity", None);
+        let capacity = rendezvous::share_cache_capacity(&mut streams, owner.cache_capacity()?)?;
+        // SAFETY: No manifests have been handed to execution and no graph has run.
+        unsafe { owner.limit_cache_capacity(capacity)? };
+        phase.finish(format!("{} state rows · {} KV pages", capacity[0], capacity[1]));
         let phase = progress.phase("Connect RoCE transport", None);
         let records = rendezvous::share_records(&mut streams, transport.local_record()?)?;
         transport.connect(&records)?;
@@ -95,7 +100,7 @@ pub fn rank_zero(
 
 /// A peer rank: join rank zero at `address`, exchange transport records, and connect.
 pub fn peer(
-    owner: &NativeModel,
+    owner: &mut NativeModel,
     cluster: &ClusterRank,
     address: &str,
     progress: &StartupProgress,
@@ -117,6 +122,11 @@ pub fn peer(
             "rank {} of {} at {address}",
             cluster.rank, cluster.world
         ));
+        let phase = progress.phase("Agree cache capacity", None);
+        let capacity = rendezvous::exchange_cache_capacity(&mut stream, owner.cache_capacity()?)?;
+        // SAFETY: No manifests have been handed to execution and no graph has run.
+        unsafe { owner.limit_cache_capacity(capacity)? };
+        phase.finish(format!("{} state rows · {} KV pages", capacity[0], capacity[1]));
         let phase = progress.phase("Connect RoCE transport", None);
         let records =
             rendezvous::exchange_record(&mut stream, &transport.local_record()?, cluster.world)?;
