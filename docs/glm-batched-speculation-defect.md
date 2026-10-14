@@ -1,7 +1,8 @@
 # GLM-5.3 Flash: batched speculative decoding corrupts answers on DGX Spark
 
-Status: cause found; the fix (section 7) is validated on Spark at TP2 and TP4
-and not yet merged. Exporting a GLM package zeroes the DSA indexer's selection width,
+Status: fixed on `main` by 22887c1 (section 7), validated on Spark at TP2 and
+TP4. A separate, rarer device error at TP4 with 16 concurrent requests remains
+open (section 7). Exporting a GLM package zeroes the DSA indexer's selection width,
 which only the b12x indexer's tiled route reads, so every verification graph
 above 16 query rows attends to the wrong records.
 
@@ -50,7 +51,7 @@ those is correct.
 | Item | Value |
 | --- | --- |
 | Reproduced on | A development branch of Flare `main` carrying unmerged multi-host changes, with FlashInfer 64916e85 plus the RoCEnante variable-length all-gather from [local-inference-lab/flashinfer#12](https://github.com/local-inference-lab/flashinfer/pull/12) |
-| Flare `main` | Reproduced at 7ba743d with its pinned FlashInfer (64916e85, `pyproject.toml`) at TP2: 2 correct and 6 corrupt of 8. `main` cannot export a multi-host package without the one-line export fix in section 4. Sections 4 and 5 use `main` |
+| Flare `main` | Reproduced at 7ba743d with its pinned FlashInfer (64916e85, `pyproject.toml`) at TP2, with the multi-host export fix: 2 correct and 6 corrupt of 8. Fixed by 22887c1; to reproduce, build 41c9ff6, which has the export fix and not the indexer fix |
 | Checkpoint | `local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` (revision dec48abd) |
 | Packages | TP2: `--ranks 2 --max-concurrency 8`; TP4: `--ranks 4 --max-concurrency 16`; both `--gpus 0 --prefill-chunk-size 4096 --no-context-parallel` with the default adaptive MTP |
 | Hardware | DGX Spark, ConnectX-7 at 200G through one switch |
@@ -160,31 +161,14 @@ verification graph has 128 rows, cannot use it as a workaround unchanged.
 
 ## 4. Reproduce on DGX Spark
 
-Build Flare `main` with its pinned FlashInfer (`git -C ../flashinfer checkout
-64916e85`) and set up multi-host serving as in [multi-host.md](multi-host.md):
-`flare agent` on every peer with the same token, and RoCE between the Sparks.
-Two Sparks suffice. Host names and addresses below are examples.
-
-On `main`, peer ranks fail at the end of the export with `ValueError: runtime
-assets must contain only tokenizer and chat_template`: a peer clears its assets
-but still encodes the shared serving contract. Until the fix lands, edit
-`export_model` in `ignition/preparation/runtime_package.py` on every host,
-replacing
-
-```python
-    server = {**prepared.server_config, **options}
-    if bundle_only:
-        server["assets"] = {}
-```
-
-with
-
-```python
-    server = None if bundle_only else {**prepared.server_config, **options}
-```
-
-Rank zero still writes the tokenizer, chat template and sampling defaults into
-the final package.
+Build Flare at 41c9ff6, the last `main` commit before the fix, with its
+pinned FlashInfer (`git -C ../flashinfer checkout 64916e85`), and set up
+multi-host serving as in [multi-host.md](multi-host.md): `flare agent` on every
+peer with the same token, and RoCE between the Sparks. Two Sparks suffice. Host
+names and addresses below are examples. Commits before 41c9ff6 cannot export a
+multi-host package at all: each peer stops with `ValueError: runtime assets
+must contain only tokenizer and chat_template`. To confirm the fix, repeat the
+steps at 22887c1 or later.
 
 1. Export a TP2 package. On rank zero:
 
@@ -306,9 +290,9 @@ logs, so it does not cover this case.
 
 ## 7. Fix and next steps
 
-Rewrite the width inside every graph, where the first indexer layer already
-rewrites the page table and pool lengths (`PreparedGlmIndexer.__call__` in
-`ignition/recipes/glm53/indexer.py`):
+22887c1 rewrites the width inside every graph, where the first indexer layer
+already rewrites the page table and pool lengths (`PreparedGlmIndexer.__call__`
+in `ignition/recipes/glm53/indexer.py`):
 
 ```python
         if self.prepares_tables:
@@ -322,10 +306,12 @@ development branch and on `main`, and a compiled TP4 package at concurrency 16,
 the configuration in which the defect was first seen, including 96K-token
 cached and uncached prompts (section 3).
 
-1. Merge the fix and the export fix, with a regression test that overwrites
-   the export's disposable ranges after preparation and checks that every
-   captured graph still produces the same output, so any graph that depends on
-   preparation-time contents of disposable storage fails.
+1. Merged: 41c9ff6 (multi-host export) and 22887c1 (the fix). The indexer's
+   native-replay test (`tests/recipes/test_glm53_indexer_cuda.py`) now replays
+   a 32-row tiled decode graph after zeroing all index scratch, as export does;
+   it fails with 95.8% of selections wrong without the fix. A broader check
+   that zeroes every export-disposable range before replaying each captured
+   graph would catch this class of defect in any recipe.
 2. Find the source of the remaining device error 6 at TP4, concurrency 16. A
    TP4 package carrying the fix and a diagnostic that reports which part of the
    target distribution is invalid (NaN or infinite logits by vocabulary
