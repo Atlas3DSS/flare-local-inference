@@ -8,7 +8,6 @@ use crate::{
 };
 pub(crate) use reader::Plane;
 use std::{
-    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -125,7 +124,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn new(
         index: Index,
-        path: &Path,
+        file: &std::fs::File,
         ranks: usize,
         max_tokens: usize,
         context: usize,
@@ -136,7 +135,8 @@ impl Shared {
         let index = Arc::new(index);
         let mut layers = Vec::new();
         for table in &index.tables {
-            let mut reader = reader::Reader::open(path, &table.planes, storage == Storage::Ram)?;
+            let mut reader =
+                reader::Reader::from_file(file, &table.planes, storage == Storage::Ram)?;
             let staging = Arc::new(Staging {
                 data: stream.mapped_host_buffer(
                     max_tokens

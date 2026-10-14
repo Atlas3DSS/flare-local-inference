@@ -48,12 +48,14 @@
 //! Per-page checksums let a restore that reads only a suffix of the pages verify
 //! what it read.
 
+#[cfg(unix)]
+use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _};
+
 use std::{
     collections::HashSet,
     fmt::Write as _,
     fs,
     io::{self, Read as _},
-    os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -624,6 +626,7 @@ impl DirectoryLock {
         fs::create_dir_all(path).map_err(|error| {
             io_failure(format!("create record directory {}", path.display()), error)
         })?;
+        #[cfg(unix)]
         let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -631,6 +634,7 @@ impl DirectoryLock {
             .map_err(|error| {
                 io_failure(format!("open record directory {}", path.display()), error)
             })?;
+        #[cfg(unix)]
         loop {
             // SAFETY: The directory descriptor remains open for the guard's lifetime.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -650,6 +654,30 @@ impl DirectoryLock {
             };
             return Err(io_failure(message, error));
         }
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(path.join(".lock"))
+                .map_err(|e| {
+                    let action = if e.raw_os_error()
+                        == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)
+                    {
+                        format!(
+                            "host prefix cache directory {} is already in use",
+                            path.display()
+                        )
+                    } else {
+                        format!("lock prefix cache directory {}", path.display())
+                    };
+                    io_failure(action, e)
+                })?
+        };
         Ok(Self {
             path: path.to_owned(),
             _file: file,
@@ -841,11 +869,9 @@ pub fn checksum(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::offload::{geometry::tests::geometry, index::Index};
-    use std::{
-        fs::File,
-        io::Write as _,
-        os::unix::fs::{PermissionsExt, symlink},
-    };
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{fs::File, io::Write as _};
 
     const IDENTITY: [u8; 32] = [0xab; 32];
     const FINGERPRINT: [u8; 16] = [0xcd; 16];
@@ -1243,7 +1269,9 @@ mod tests {
         fs::write(&foreign, b"ignored").unwrap();
         let subdirectory = directory.join("nested.ckpt");
         fs::create_dir(&subdirectory).unwrap();
+        #[cfg(unix)]
         let link = directory.join(file_name(&key(999, 9)));
+        #[cfg(unix)]
         symlink("/nonexistent/target.ckpt", &link).unwrap();
 
         let records = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
@@ -1265,6 +1293,7 @@ mod tests {
         }
         assert!(foreign.exists());
         assert!(subdirectory.is_dir());
+        #[cfg(unix)]
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
 
         let again = scan(&lock, &IDENTITY, &FINGERPRINT, &geometry).unwrap();
@@ -1324,6 +1353,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scan_keeps_a_record_it_cannot_read_and_fails() {
         // SAFETY: `geteuid` has no preconditions.
         if unsafe { libc::geteuid() } == 0 {

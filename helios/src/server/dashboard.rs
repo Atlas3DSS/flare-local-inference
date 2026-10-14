@@ -48,8 +48,13 @@ pub(super) fn restore_for_exit() {
     if VISIBLE.load(Ordering::Relaxed) {
         let leave = b"\x1b[?1049l";
         // SAFETY: Signal handlers may only use async-signal-safe terminal writes.
+        #[cfg(unix)]
         unsafe {
             libc::write(libc::STDERR_FILENO, leave.as_ptr().cast(), leave.len());
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::io::Write::write_all(&mut io::stderr(), leave);
         }
     }
 }
@@ -182,11 +187,13 @@ impl Drop for Telemetry<'_> {
     }
 }
 
+#[cfg(unix)]
 struct InputMode {
     fd: libc::c_int,
     original: libc::termios,
 }
 
+#[cfg(unix)]
 impl InputMode {
     fn open() -> io::Result<Option<Self>> {
         io::stdin()
@@ -214,6 +221,7 @@ impl InputMode {
     }
 }
 
+#[cfg(unix)]
 impl Drop for InputMode {
     fn drop(&mut self) {
         unsafe {
@@ -625,6 +633,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn terminal_input_retains_signals_and_restores_the_original_mode() {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         unsafe {
@@ -747,6 +756,42 @@ mod tests {
                         .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
                 );
             }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct InputMode {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    original: u32,
+}
+#[cfg(windows)]
+impl InputMode {
+    fn open() -> io::Result<Option<Self>> {
+        use windows_sys::Win32::System::Console::*;
+        if !io::stdin().is_terminal() {
+            return Ok(None);
+        }
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            let mut original = 0;
+            if GetConsoleMode(handle, &mut original) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mode =
+                (original | ENABLE_PROCESSED_INPUT) & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+            if SetConsoleMode(handle, mode) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Some(Self { handle, original }))
+        }
+    }
+}
+#[cfg(windows)]
+impl Drop for InputMode {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleMode(self.handle, self.original);
         }
     }
 }

@@ -1,12 +1,13 @@
 //! A thread that moves record segments between files and caller-owned buffers
 //! with direct I/O.
 //!
-//! The thread owns one `io_uring` ring. Files are opened with `O_DIRECT`, so
+//! The thread owns an io_uring ring on Linux or a completion port on Windows.
+//! Files use unbuffered I/O, so
 //! every buffer, offset, and length is a multiple of [`BLOCK_BYTES`], which the
 //! record layout guarantees. Transfers are chunked at [`CHUNK_BYTES`]. Writes
 //! hash every page record and the row as they pass through; reads verify them
 //! against the record's checksum segment and header. The thread runs under
-//! `SCHED_BATCH` with a positive nice value so it yields to serving threads.
+//! reduced scheduling priority so it yields to serving threads.
 //!
 //! Jobs execute one at a time in submission order, so a record's `Create`,
 //! page and row writes, and `Commit` or `Abort` form a sequence under one id,
@@ -24,12 +25,14 @@ use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
     io,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TrySendError},
 };
 
+#[cfg(unix)]
 use io_uring::{EnterFlags, IoUring, opcode, types};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use crate::{Error, Result};
 
@@ -262,15 +265,9 @@ fn run(ring: Ring, scratch: AlignedBuffer, jobs: Receiver<Job>, replies: mpsc::S
     }
 }
 
-/// Batch scheduling with a raised nice value; a host that refuses either
-/// request leaves the thread at its inherited priority.
+/// Lower scheduling priority where the host permits it.
 fn lower_priority() {
-    // SAFETY: Both calls take plain values and act on the calling thread only.
-    unsafe {
-        let param: libc::sched_param = std::mem::zeroed();
-        libc::sched_setscheduler(0, libc::SCHED_BATCH, &param);
-        libc::setpriority(libc::PRIO_PROCESS, 0, NICE);
-    }
+    crate::os::lower_priority(NICE);
 }
 
 /// A record being written: its temporary file, header, and the checksums of
@@ -378,13 +375,7 @@ impl Worker {
             return Err(invalid(format!("disk job {} is already open", id.0)));
         }
         check_tail_pages(&header)?;
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(libc::O_DIRECT)
-            .open(&temporary)
+        let file = crate::os::direct_file(&temporary, true)
             .map_err(|error| direct_open_failure("create record file", &temporary, error))?;
         let tail = header.tail_pages as usize;
         self.records.insert(
@@ -548,10 +539,7 @@ impl Worker {
         if self.records.contains_key(&id) {
             return Err(invalid(format!("disk job {} is already open", id.0)));
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&path)
+        let file = crate::os::direct_file(&path, false)
             .map_err(|error| direct_open_failure("open record file", &path, error))?;
         let header_span = Span {
             address: self.scratch.address(),
@@ -790,6 +778,7 @@ impl Iterator for Chunks<'_> {
 }
 
 /// The ring and the per-slot bookkeeping of chunks in flight.
+#[cfg(unix)]
 struct Ring {
     ring: IoUring,
     slots: Vec<Chunk>,
@@ -800,6 +789,7 @@ struct Ring {
     broken: Option<String>,
 }
 
+#[cfg(unix)]
 impl Ring {
     fn new() -> Result<Self> {
         let ring = IoUring::new(RING_DEPTH as u32)
@@ -948,6 +938,100 @@ impl Ring {
     }
 }
 
+#[cfg(windows)]
+struct Ring {
+    queue: crate::os::completion::Queue,
+    slots: Vec<Chunk>,
+    free: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl Ring {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            queue: crate::os::completion::Queue::new(RING_DEPTH)
+                .map_err(|e| io_failure("create disk completion port", e))?,
+            slots: vec![Chunk::default(); RING_DEPTH],
+            free: (0..RING_DEPTH).collect(),
+        })
+    }
+
+    fn transfer(&mut self, file: &File, spans: &[Span], write: bool) -> Result<u64> {
+        for span in spans {
+            if !aligned(span.address as u64)
+                || !aligned(span.offset)
+                || !aligned(span.length as u64)
+            {
+                return Err(invalid("direct I/O span must be 4096-byte aligned"));
+            }
+        }
+        let mut chunks = Chunks {
+            spans,
+            index: 0,
+            done: 0,
+        };
+        let mut pending = chunks.next();
+        let mut moved = 0;
+        let mut failure = None;
+        loop {
+            while failure.is_none() {
+                let Some(chunk) = pending else { break };
+                let Some(slot) = self.free.pop() else { break };
+                match unsafe {
+                    self.queue
+                        .submit(slot, file, chunk.address, chunk.length, chunk.offset, write)
+                } {
+                    Ok(()) => {
+                        self.slots[slot] = chunk;
+                        pending = chunks.next();
+                    }
+                    Err(error) => {
+                        self.free.push(slot);
+                        failure = Some(io_failure("submit direct I/O", error));
+                        self.queue.cancel();
+                    }
+                }
+            }
+            if self.queue.pending() == 0 {
+                break;
+            }
+            match self.queue.wait() {
+                Ok((slot, result)) => {
+                    self.free.push(slot);
+                    let chunk = self.slots[slot];
+                    match result {
+                        Ok(n) if n == chunk.length as usize => moved += n as u64,
+                        Ok(n) => {
+                            failure.get_or_insert_with(|| {
+                                invalid(format!(
+                                    "short direct I/O of {n} bytes at {}; {} requested",
+                                    chunk.offset, chunk.length
+                                ))
+                            });
+                        }
+                        Err(error) => {
+                            failure.get_or_insert_with(|| io_failure("complete direct I/O", error));
+                        }
+                    }
+                    if failure.is_some() {
+                        self.queue.cancel();
+                    }
+                }
+                Err(error) => {
+                    failure.get_or_insert_with(|| io_failure("wait for direct I/O", error));
+                    self.queue.cancel();
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(moved),
+        }
+    }
+}
+
+#[cfg(any(unix, test))]
 fn drain_completions(mut pending: usize, mut wait: impl FnMut(usize) -> (usize, io::Result<()>)) {
     while pending > 0 {
         let (completed, waited) = wait(pending);
@@ -965,6 +1049,7 @@ fn drain_completions(mut pending: usize, mut wait: impl FnMut(usize) -> (usize, 
 /// `io_uring_enter` errors after which the call is repeated: an interrupting
 /// signal, or the kernel asking for a retry because a request could not be
 /// allocated or the completion queue has overflowed.
+#[cfg(any(unix, test))]
 fn retryable(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -983,15 +1068,9 @@ unsafe impl Send for AlignedBuffer {}
 
 impl AlignedBuffer {
     fn new(length: usize) -> Result<Self> {
-        let mut pointer = std::ptr::null_mut();
-        // SAFETY: `posix_memalign` receives a valid out-pointer and a power-of-two alignment.
-        let status = unsafe { libc::posix_memalign(&mut pointer, BLOCK_BYTES as usize, length) };
-        if status != 0 {
-            return Err(io_failure(
-                format!("allocate {length} aligned bytes"),
-                io::Error::from_raw_os_error(status),
-            ));
-        }
+        let pointer = crate::os::allocate_aligned(length)
+            .map_err(|e| io_failure(format!("allocate {length} aligned bytes"), e))?
+            as *mut u8;
         // SAFETY: The allocation holds `length` bytes.
         unsafe { std::ptr::write_bytes(pointer as *mut u8, 0, length) };
         Ok(Self {
@@ -1017,8 +1096,8 @@ impl AlignedBuffer {
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
-        // SAFETY: The pointer came from `posix_memalign` and is freed once.
-        unsafe { libc::free(self.address as *mut libc::c_void) };
+        // SAFETY: The pointer came from `allocate_aligned` and is freed once.
+        unsafe { crate::os::free_aligned(self.address, self.length) };
     }
 }
 
@@ -1047,18 +1126,12 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let probe = directory.join(".probe");
-        match OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&probe)
-        {
+        match crate::os::direct_file(&probe, true) {
             Ok(_) => {
                 fs::remove_file(&probe).unwrap();
                 Some(directory)
             }
-            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+            Err(error) if cfg!(unix) && error.raw_os_error() == Some(libc::EINVAL) => {
                 eprintln!(
                     "skipping {test}: {} refuses direct I/O",
                     directory.display()

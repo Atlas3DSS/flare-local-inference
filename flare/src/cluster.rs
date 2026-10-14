@@ -1,6 +1,7 @@
 //! Ranks of one model on separate hosts: rendezvous at rank zero and connect their RoCE transport.
 
 use std::sync::Arc;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use std::time::Duration;
 
 use flare_helios::{
@@ -12,6 +13,7 @@ use flare_helios::{
 type Failure = Box<dyn std::error::Error>;
 
 // Every host loads its rank before joining; the slowest load bounds the wait.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const JOIN_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]

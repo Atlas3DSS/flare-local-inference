@@ -143,31 +143,8 @@ impl SlabPool {
                 "a slab pool requires at least one page or row slab",
             ));
         }
-        // SAFETY: An anonymous private mapping with no address hint has no
-        // preconditions; the result is checked before use.
-        let mapping = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                mapping_bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE,
-                -1,
-                0,
-            )
-        };
-        if mapping == libc::MAP_FAILED {
-            return Err(invalid(format!(
-                "mapping {mapping_bytes} bytes of host memory for slabs failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        // Huge pages are an optimization; a kernel that refuses the advice
-        // leaves the mapping backed by ordinary pages.
-        // SAFETY: The range was mapped by this call and is not yet shared.
-        unsafe {
-            libc::madvise(mapping, mapping_bytes, libc::MADV_HUGEPAGE);
-        }
-        let base = mapping as usize;
+        let base = crate::os::map_host(mapping_bytes)
+            .map_err(|error| invalid(format!("allocate host slabs: {error}")))?;
         Ok(Self {
             mapping: base,
             mapping_bytes,
@@ -338,7 +315,7 @@ impl Drop for SlabPool {
         if self.mapping != 0 {
             // SAFETY: The mapping was created by this pool and is no longer registered.
             unsafe {
-                libc::munmap(self.mapping as *mut libc::c_void, self.mapping_bytes);
+                crate::os::unmap_host(self.mapping, self.mapping_bytes);
             }
         }
     }

@@ -6,13 +6,13 @@
 
 use super::{archive::Archive, format::invalid, protobuf::wire};
 use crate::Result;
+use crate::os::FileReadAt;
 use prost::Message;
 use ring::{aead, digest, hkdf, signature};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
     io::{self, Read},
-    os::unix::fs::FileExt,
     path::Path,
     sync::Arc,
 };

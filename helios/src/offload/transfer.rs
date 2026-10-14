@@ -259,15 +259,9 @@ pub(crate) fn batch_end(descriptors: &[Descriptor], start: usize) -> usize {
     end
 }
 
-/// Best-effort move of the calling thread to `SCHED_BATCH` at nice [`NICE`].
-/// A refusal, such as `EPERM`, leaves the default scheduling in place.
+/// Lower scheduling priority where the host permits it.
 fn lower_priority() {
-    // SAFETY: Both calls act on the calling thread with fully initialized arguments.
-    unsafe {
-        let parameters: libc::sched_param = std::mem::zeroed();
-        libc::sched_setscheduler(0, libc::SCHED_BATCH, &parameters);
-        libc::setpriority(libc::PRIO_PROCESS, 0, NICE);
-    }
+    crate::os::lower_priority(NICE);
 }
 
 struct RankWorker {
@@ -1082,18 +1076,7 @@ mod tests {
         let pages = sources.len() as u64;
         let bytes = (pages * layout.page_record_bytes + layout.row_record_bytes) as usize;
         // SAFETY: An anonymous private mapping sized for the records, released at the end.
-        let host = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(host, libc::MAP_FAILED);
-        let host = host as usize;
+        let host = crate::os::map_host(bytes).unwrap();
         let registration = unsafe { register_host(context, host, bytes) }.unwrap();
         let page_slabs: Vec<usize> = (0..pages)
             .map(|index| host + (index * layout.page_record_bytes) as usize)
@@ -1240,7 +1223,7 @@ mod tests {
         drop(transfers);
         drop(registration);
         unsafe {
-            assert_eq!(libc::munmap(host as *mut libc::c_void, bytes), 0);
+            crate::os::unmap_host(host, bytes);
         }
         drop(staging);
         drop(stream);

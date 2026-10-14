@@ -638,6 +638,7 @@ dependencies = [
  "tokio",
  "turbojpeg",
  "twox-hash",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 

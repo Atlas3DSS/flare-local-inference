@@ -1,12 +1,15 @@
 //! Bounded, direct-I/O row gathering into the same buffers used by resident tables.
 
 use crate::Result;
+#[cfg(unix)]
 use io_uring::{IoUring, opcode, types};
-use std::{
-    fs::{File, OpenOptions},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
-    path::Path,
-};
+use std::fs::File;
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+#[cfg(test)]
+use std::path::Path;
 
 const BLOCK: usize = 4096;
 const CHUNK: usize = 64 << 10;
@@ -35,31 +38,22 @@ struct Read {
     fragments: std::ops::Range<usize>,
 }
 
-struct Aligned(usize);
+struct Aligned(usize, usize);
 impl Aligned {
     fn new(nbytes: usize) -> Result<Self> {
-        let mut ptr = std::ptr::null_mut();
-        let status = unsafe { libc::posix_memalign(&mut ptr, BLOCK, nbytes) };
-        if status != 0 {
-            return Err(format!(
-                "Engram aligned allocation: {}",
-                std::io::Error::from_raw_os_error(status)
-            )
-            .into());
-        }
-        Ok(Self(ptr as usize))
+        Ok(Self(
+            crate::os::allocate_aligned(nbytes).map_err(|e| format!("Engram allocation: {e}"))?,
+            nbytes,
+        ))
     }
     fn at(&self, slot: usize) -> *mut u8 {
         (self.0 + slot * CHUNK) as *mut u8
     }
 }
 
+#[cfg(test)]
 fn open_file(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECT)
-        .open(path)
-        .map_err(|e| format!("open Engram package for direct I/O: {e}").into())
+    crate::os::direct_file(path, false).map_err(|e| format!("open Engram package: {e}").into())
 }
 
 pub(crate) struct Resident {
@@ -95,27 +89,10 @@ impl Resident {
                                 let nbytes = LOAD_CHUNK.min(extent - begin);
                                 let source = offset
                                     .checked_add(begin as u64)
-                                    .and_then(|n| libc::off_t::try_from(n).ok())
                                     .ok_or("resident Engram file offset exceeds range")?;
-                                let count = loop {
-                                    // SAFETY: Workers own disjoint aligned ranges. Raw I/O
-                                    // initializes storage before any byte slice is exposed.
-                                    let count = unsafe {
-                                        libc::pread(
-                                            file.as_raw_fd(),
-                                            (address + begin) as *mut libc::c_void,
-                                            nbytes,
-                                            source,
-                                        )
-                                    };
-                                    if count >= 0 {
-                                        break count as usize;
-                                    }
-                                    let error = std::io::Error::last_os_error();
-                                    if error.kind() != std::io::ErrorKind::Interrupted {
-                                        return Err(format!("resident Engram read at {source}: {error}").into());
-                                    }
-                                };
+                                // SAFETY: Each reader initializes a disjoint aligned allocation range.
+                                let count = unsafe { crate::os::read_at_raw(file, (address + begin) as *mut u8, nbytes, source) }
+                                    .map_err(|e| format!("resident Engram read at {source}: {e}"))?;
                                 let needed = nbytes.min(required - begin);
                                 if count < needed {
                                     return Err(format!(
@@ -152,13 +129,16 @@ impl Resident {
 }
 impl Drop for Aligned {
     fn drop(&mut self) {
-        unsafe { libc::free(self.0 as *mut libc::c_void) };
+        unsafe { crate::os::free_aligned(self.0, self.1) };
     }
 }
 
 pub(crate) struct DiskReader {
     // Destroying the ring cancels and drains outstanding I/O before the buffers are freed.
+    #[cfg(unix)]
     ring: IoUring,
+    #[cfg(windows)]
+    ring: crate::os::completion::Queue,
     staging: Aligned,
     file: File,
     fragments: Vec<Fragment>,
@@ -166,18 +146,26 @@ pub(crate) struct DiskReader {
 }
 
 impl DiskReader {
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = open_file(path)?;
-        let ring = IoUring::new(DEPTH as u32).map_err(|e| format!("Engram io_uring: {e}"))?;
+    fn from_file(source: &File) -> Result<Self> {
+        let file = crate::os::direct_reopen(source)
+            .map_err(|e| format!("open Engram direct reader: {e}"))?;
         let staging = Aligned::new(DEPTH * CHUNK)?;
-        let buffers: Vec<_> = (0..DEPTH)
-            .map(|i| libc::iovec {
-                iov_base: staging.at(i).cast(),
-                iov_len: CHUNK,
-            })
-            .collect();
-        unsafe { ring.submitter().register_buffers(&buffers) }
-            .map_err(|e| format!("register Engram I/O staging: {e}"))?;
+        #[cfg(unix)]
+        let ring = {
+            let ring = IoUring::new(DEPTH as u32).map_err(|e| format!("Engram io_uring: {e}"))?;
+            let buffers: Vec<_> = (0..DEPTH)
+                .map(|i| libc::iovec {
+                    iov_base: staging.at(i).cast(),
+                    iov_len: CHUNK,
+                })
+                .collect();
+            unsafe { ring.submitter().register_buffers(&buffers) }
+                .map_err(|e| format!("register Engram staging: {e}"))?;
+            ring
+        };
+        #[cfg(windows)]
+        let ring = crate::os::completion::Queue::new(DEPTH)
+            .map_err(|e| format!("Engram completion port: {e}"))?;
         Ok(Self {
             ring,
             staging,
@@ -234,6 +222,7 @@ impl DiskReader {
                 });
             }
         }
+        #[cfg(unix)]
         for batch in self.reads.chunks(DEPTH) {
             for (slot, read) in batch.iter().enumerate() {
                 let entry = opcode::ReadFixed::new(
@@ -286,6 +275,67 @@ impl DiskReader {
                 return Err(error.into());
             }
         }
+        #[cfg(windows)]
+        for batch in self.reads.chunks(DEPTH) {
+            let mut failure = None;
+            for (slot, read) in batch.iter().enumerate() {
+                if let Err(error) = unsafe {
+                    self.ring.submit(
+                        slot,
+                        &self.file,
+                        self.staging.at(slot) as usize,
+                        read.nbytes as u32,
+                        read.offset,
+                        false,
+                    )
+                } {
+                    failure = Some(format!("submit Engram read: {error}"));
+                    self.ring.cancel();
+                    break;
+                }
+            }
+            while self.ring.pending() != 0 {
+                match self.ring.wait() {
+                    Err(error) => {
+                        failure.get_or_insert_with(|| format!("wait for Engram read: {error}"));
+                        self.ring.cancel();
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Ok((slot, result)) => {
+                        let read = &batch[slot];
+                        match result {
+                            Ok(count) if count >= read.required => {
+                                for fragment in &self.fragments[read.fragments.clone()] {
+                                    let source = unsafe {
+                                        std::slice::from_raw_parts(
+                                            self.staging
+                                                .at(slot)
+                                                .add((fragment.source - read.offset) as usize),
+                                            fragment.nbytes,
+                                        )
+                                    };
+                                    output[fragment.destination
+                                        ..fragment.destination + fragment.nbytes]
+                                        .copy_from_slice(source);
+                                }
+                            }
+                            result => {
+                                failure.get_or_insert_with(|| {
+                                    format!(
+                                        "Engram read at {} requires {} bytes: {result:?}",
+                                        read.offset, read.required
+                                    )
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error.into());
+            }
+        }
+
         Ok(())
     }
 }
@@ -295,15 +345,20 @@ pub(crate) enum Reader {
     Ram([Resident; 2]),
 }
 impl Reader {
-    pub fn open(path: &Path, planes: &[Plane; 2], resident: bool) -> Result<Self> {
+    #[cfg(test)]
+    fn open(path: &Path, planes: &[Plane; 2], resident: bool) -> Result<Self> {
+        Self::from_file(&File::open(path).unwrap(), planes, resident)
+    }
+    pub fn from_file(source: &File, planes: &[Plane; 2], resident: bool) -> Result<Self> {
         if resident {
-            let file = open_file(path)?;
+            let file = crate::os::direct_reopen(source)
+                .map_err(|e| format!("open resident Engram reader: {e}"))?;
             Ok(Self::Ram([
                 Resident::load(&file, planes[0])?,
                 Resident::load(&file, planes[1])?,
             ]))
         } else {
-            Ok(Self::Disk(DiskReader::open(path)?))
+            Ok(Self::Disk(DiskReader::from_file(source)?))
         }
     }
     pub fn gather(&mut self, planes: &[Plane; 2], ids: &[i64], output: &mut [u8]) -> Result<()> {
@@ -345,6 +400,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
 
     #[test]
     fn resident_load_covers_parallel_chunks_and_rejects_truncated_planes() {

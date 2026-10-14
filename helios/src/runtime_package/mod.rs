@@ -64,6 +64,8 @@ pub struct NativeResources {
     integrated: bool,
     events: HashMap<String, Handle>,
     cache: Option<crate::offload::CacheGeometry>,
+    #[cfg(windows)]
+    host_reservations: std::mem::ManuallyDrop<crate::os::HostReservations>,
 }
 
 // SAFETY: CUDA contexts may move between threads. Resource operations bind the
@@ -146,6 +148,8 @@ impl NativeResources {
                 integrated: integrated != 0,
                 events: HashMap::new(),
                 cache: None,
+                #[cfg(windows)]
+                host_reservations: std::mem::ManuallyDrop::new(Default::default()),
             };
             for [limit, value] in &package.context.limits {
                 owner.driver.check(
@@ -215,6 +219,18 @@ impl NativeResources {
     }
 
     unsafe fn allocate(&mut self, package: &Package, phase: &Phase) -> Result<()> {
+        #[cfg(windows)]
+        if self.host_reservations.is_empty() {
+            self.host_reservations
+                .reserve(
+                    package
+                        .allocations
+                        .iter()
+                        .filter(|a| matches!(a.memory, Memory::MappedHost))
+                        .map(|a| (a.address.unwrap() as usize, a.nbytes)),
+                )
+                .map_err(|e| invalid(format!("reserve mapped host storage: {e}")))?;
+        }
         let driver = self.driver.clone();
         // SAFETY: Package validation bounds all indexes and relocation fields.
         // Every CUDA resource is immediately retained by self for error cleanup.
@@ -292,31 +308,47 @@ impl NativeResources {
                             driver.check("cuMemMap", mapped)?;
                         }
                         Memory::MappedHost => {
-                            let mapped = libc::mmap(
-                                address as Handle,
-                                allocation.nbytes,
-                                libc::PROT_READ | libc::PROT_WRITE,
-                                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
-                                -1,
-                                0,
-                            );
-                            if mapped != address as Handle {
-                                return Err(invalid(format!(
-                                    "host address collision at {address:#x}: {}",
-                                    std::io::Error::last_os_error()
-                                )));
-                            }
-                            // Registration does not pin host memory for an integrated GPU, and a
-                            // swapped-out page turns each GPU access during replay into a fault.
-                            if self.integrated && libc::mlock(mapped, allocation.nbytes) != 0 {
-                                let error = std::io::Error::last_os_error();
-                                libc::munmap(mapped, allocation.nbytes);
-                                return Err(invalid(format!(
-                                    "cannot lock {} bytes of mapped host storage: {error}; raise RLIMIT_MEMLOCK",
-                                    allocation.nbytes
-                                )));
-                            }
+                            #[cfg(windows)]
+                            let mapped = {
+                                self.host_reservations
+                                    .commit(address as usize, allocation.nbytes)
+                                    .map_err(|e| {
+                                        invalid(format!("commit mapped host storage: {e}"))
+                                    })?;
+                                address as Handle
+                            };
+                            #[cfg(unix)]
+                            let mapped = {
+                                let mapped = libc::mmap(
+                                    address as Handle,
+                                    allocation.nbytes,
+                                    libc::PROT_READ | libc::PROT_WRITE,
+                                    libc::MAP_PRIVATE
+                                        | libc::MAP_ANONYMOUS
+                                        | libc::MAP_FIXED_NOREPLACE,
+                                    -1,
+                                    0,
+                                );
+                                if mapped != address as Handle {
+                                    return Err(invalid(format!(
+                                        "host address collision at {address:#x}: {}",
+                                        std::io::Error::last_os_error()
+                                    )));
+                                }
+                                // Registration does not pin host memory for an integrated GPU, and a
+                                // swapped-out page turns each GPU access during replay into a fault.
+                                if self.integrated && libc::mlock(mapped, allocation.nbytes) != 0 {
+                                    let error = std::io::Error::last_os_error();
+                                    libc::munmap(mapped, allocation.nbytes);
+                                    return Err(invalid(format!(
+                                        "cannot lock {} bytes of mapped host storage: {error}; raise RLIMIT_MEMLOCK",
+                                        allocation.nbytes
+                                    )));
+                                }
+                                mapped
+                            };
                             let status = (driver.host_register)(mapped, allocation.nbytes, 2);
+                            #[cfg(unix)]
                             if status != 0 {
                                 libc::munmap(mapped, allocation.nbytes);
                             }
@@ -843,6 +875,7 @@ impl Drop for NativeResources {
                     }
                     (Memory::MappedHost, _) => {
                         (self.driver.host_unregister)(allocation.address as Handle);
+                        #[cfg(unix)]
                         libc::munmap(allocation.address as Handle, allocation.nbytes);
                     }
                     (Memory::Peer, _) => {}
@@ -851,6 +884,8 @@ impl Drop for NativeResources {
             for (address, size) in self.reservations.iter().rev() {
                 (self.driver.release_address)(*address, *size);
             }
+            #[cfg(windows)]
+            std::mem::ManuallyDrop::drop(&mut self.host_reservations);
             (self.driver.context_destroy)(self.context);
             if previous != self.context {
                 (self.driver.context_set)(previous);

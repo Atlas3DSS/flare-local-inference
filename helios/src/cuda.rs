@@ -104,9 +104,9 @@ impl Driver {
         // SAFETY: The CUDA driver exports these ABI signatures. The retained
         // Library keeps every resolved function pointer valid for this Driver.
         unsafe {
-            let library = Library::new("libcuda.so.1").map_err(|e| {
+            let library = crate::os::cuda_library().map_err(|e| {
                 ExecutionError::State(Failure::caused_by(
-                    format!("cannot load NVIDIA CUDA driver libcuda.so.1: {e}"),
+                    format!("cannot load NVIDIA CUDA driver: {e}"),
                     e,
                 ))
             })?;
@@ -251,8 +251,7 @@ pub(crate) unsafe fn register_host(
     address: usize,
     nbytes: usize,
 ) -> Result<HostRegistration> {
-    // SAFETY: sysconf has no memory-safety preconditions.
-    let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
+    let page = crate::os::page_size();
     if address == 0 || !address.is_multiple_of(page) || nbytes == 0 {
         return Err(Error::execution(
             ExecutionError::State,
@@ -697,6 +696,7 @@ mod tests {
         ((offset * 7) ^ (offset >> 9)) as u8
     }
 
+    #[cfg(unix)]
     fn thread_cpu_time() -> std::time::Duration {
         let mut time = libc::timespec {
             tv_sec: 0,
@@ -712,6 +712,7 @@ mod tests {
 
     /// Read a patterned file with `O_DIRECT` into the registered mapping and
     /// compare. Returns `false` when the directory refuses direct I/O.
+    #[cfg(unix)]
     fn direct_read_matches(host: *mut u8, capacity: usize) -> bool {
         use std::os::unix::ffi::OsStrExt;
         const FILE_BYTES: usize = 4 << 20;
@@ -764,6 +765,7 @@ mod tests {
     #[cfg(feature = "runtime-package")]
     #[test]
     #[ignore = "requires a CUDA device; FLARE_OFFLOAD_TEST_DIR names a directory supporting direct I/O"]
+    #[cfg(unix)]
     fn batched_copies_round_trip_through_registered_memory() {
         use crate::runtime_package::driver::Driver as Loader;
         const BYTES: usize = 8 << 20;

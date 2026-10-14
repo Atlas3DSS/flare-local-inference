@@ -6,12 +6,12 @@ use super::{
     protobuf::wire,
 };
 use crate::Result;
+use crate::os::FileReadAt;
 use prost::Message;
 use serde::Deserialize;
 use std::{
     fs::File,
     io::{BufReader, Read, Take},
-    os::{fd::AsRawFd, unix::fs::FileExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -63,7 +63,17 @@ pub(super) struct Archive {
 }
 impl Archive {
     pub fn open(path: &Path, publishers: &[Publisher]) -> Result<(Self, wire::ModelIndex)> {
+        #[cfg(unix)]
         let file = File::open(path).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+                .open(path)
+                .map_err(|e| e.to_string())?
+        };
         let mut prefix = [0u8; 8];
         file.read_exact_at(&mut prefix, 0)
             .map_err(|e| e.to_string())?;
@@ -105,7 +115,13 @@ impl Archive {
         let (protection, index) = Protection::verify(&bytes, publishers, payload)?;
         Ok((
             Self {
-                path: PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
+                #[cfg(unix)]
+                path: {
+                    use std::os::fd::AsRawFd;
+                    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+                },
+                #[cfg(windows)]
+                path: path.to_owned(),
                 start,
                 file: Arc::new(file),
                 protection,
@@ -161,9 +177,7 @@ impl Archive {
     /// so weights read through the cache would otherwise leave no room for caches.
     pub fn release_page_cache(&self) {
         // SAFETY: an advisory call on an open descriptor; failure only leaves the pages cached.
-        unsafe {
-            libc::posix_fadvise(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
-        }
+        crate::os::release_page_cache(&self.file);
     }
     fn reader(&self, package: &Package, key: &str) -> Result<ResourceReader> {
         if !self.accepted {
@@ -247,6 +261,7 @@ mod tests {
         let mut file = File::create(&path).unwrap();
         file.write_all(&4088u64.to_le_bytes()).unwrap();
         file.write_all(&bytes).unwrap();
+        drop(file);
         assert!(
             Archive::open(&path, &[])
                 .err()

@@ -507,7 +507,7 @@ impl NativeModel {
                 let storage = options.embedding_table_storage.unwrap_or_default();
                 model.engram = Some(crate::engram::Shared::new(
                     index,
-                    root,
+                    &archive.file,
                     devices.len(),
                     tokens,
                     model.ranks[0].context as usize,

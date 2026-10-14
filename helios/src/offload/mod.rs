@@ -356,6 +356,7 @@ pub fn prepare(
 }
 
 /// Free bytes on the filesystem holding `path`.
+#[cfg(unix)]
 fn free_space(path: &std::path::Path) -> Result<u64> {
     let text = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| "record directory path contains a NUL byte")?;
@@ -735,4 +736,9 @@ mod tests {
         slow.estimated_seconds = 0.6;
         assert!(!worth_fetching(&slow, 8000.0));
     }
+}
+
+#[cfg(windows)]
+fn free_space(path: &std::path::Path) -> Result<u64> {
+    crate::os::free_space(path).map_err(|e| format!("inspect disk capacity: {e}").into())
 }

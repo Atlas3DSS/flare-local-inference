@@ -386,19 +386,5 @@ fn terminal_width() -> usize {
 }
 
 fn terminal_size() -> (usize, usize) {
-    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-    // SAFETY: ioctl writes the terminal dimensions into a valid winsize.
-    unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
-    (
-        if size.ws_col > 0 {
-            usize::from(size.ws_col)
-        } else {
-            80
-        },
-        if size.ws_row > 0 {
-            usize::from(size.ws_row)
-        } else {
-            24
-        },
-    )
+    crate::os::terminal_size()
 }

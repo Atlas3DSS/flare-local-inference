@@ -3302,7 +3302,6 @@ mod tests {
     /// A fresh directory for one test under `FLARE_OFFLOAD_TEST_DIR` or the
     /// system temporary directory, or `None` when it refuses direct I/O.
     fn test_directory(test: &str) -> Option<PathBuf> {
-        use std::os::unix::fs::OpenOptionsExt;
         let base = std::env::var_os("FLARE_OFFLOAD_TEST_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -3313,18 +3312,12 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let probe = directory.join(".probe");
-        match fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&probe)
-        {
+        match crate::os::direct_file(&probe, true) {
             Ok(_) => {
                 fs::remove_file(&probe).unwrap();
                 Some(directory)
             }
-            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+            Err(error) if cfg!(unix) && error.raw_os_error() == Some(libc::EINVAL) => {
                 eprintln!(
                     "skipping {test}: {} refuses direct I/O",
                     directory.display()
