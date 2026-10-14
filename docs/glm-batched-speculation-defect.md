@@ -60,7 +60,7 @@ time.
 | Spark TP4, adaptive MTP, concurrency 16 | cached 10K ×16 | 1/16 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 96K ×16 | 0/16 (13 reached the 16,384-token limit) |
 | Spark TP4, adaptive MTP | cached 10K ×2, ×4, ×8 | 2/2, 3/4, 1/8 |
-| Spark TP4, fixed width 2 (`--mtp-draft-tokens 1 --no-mtp-adaptive-verification`), concurrency 8 | cached 10K ×8 | 3/8 |
+| Spark TP4, fixed width 2 (`--mtp-draft-tokens 1 --no-mtp-adaptive-verification`), concurrency 8 | cached 10K ×8 | 3/8, all five misses the neighbouring record (no corruption) |
 | Spark TP4, fixed width 4 (`--mtp-draft-tokens 3`), concurrency 8 | cached 10K ×8 | 1/8 |
 | Spark TP4, speculation off | cached 10K ×16 | 10/16 |
 | Spark TP4, speculation off | uncached 48K–133K | 5/5 |
@@ -73,13 +73,19 @@ the prompt holds no code, and records far from the needle. The misses with
 speculation off all name the neighbouring record (199 for 198), a model-level
 miss the GB300 also makes at a similar rate. Those are a separate question.
 
-Total rows per round do not explain it. Eight requests at width 2 make 16 rows,
-the same as plain decode at 16 requests, and still fail. The batch capacity of
-the speculative graph does: a single live request fails when it runs in a
-batch-4, 8 or 16 speculative graph (the post-prefill rounds above), and passes
-in batch-1 and batch-2 graphs. With the MTP draft removed, every round commits
-exactly one token per request, as plain decode does, and still fails, so the
-fault is in the target verification graph rather than in the draft model.
+The trigger is the number of query rows in the speculative graph, batch
+capacity times verification width: corruption appears above 16 rows and not
+at or below it. Plain decode at 16 requests, eight requests at width 2, two at
+width 6 and the draftless diagnostic at two requests and width 4 are all
+correct apart from the neighbouring-record misses; eight requests at width 4
+or 6, and sixteen at any width above one, corrupt. A single live request also
+fails when it runs in a larger graph (the post-prefill rounds above), so the
+graph's planned capacity matters, not the number of live requests. With the
+MTP draft removed, every round commits exactly one token per request, as plain
+decode does, and still fails, so the fault is in the target verification
+graph rather than in the draft model. Kernels that change their planned
+variant above 16 rows on SM12x include the b12x DSA indexer, which switches
+from its fused route to its tiled route there.
 
 ## 4. Reproduce on DGX Spark
 
