@@ -459,6 +459,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
             max_new_tokens: 16,
             grammar_constrained: false,
             host_stops: false,
+            growable_output: false,
         })
         .unwrap();
     let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
@@ -750,6 +751,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
             max_new_tokens: 4,
             grammar_constrained: false,
             host_stops: false,
+            growable_output: false,
         })
         .unwrap();
     let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
@@ -893,6 +895,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
             max_new_tokens: 4,
             grammar_constrained: false,
             host_stops: false,
+            growable_output: false,
         })
         .unwrap();
     let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
@@ -1080,6 +1083,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
                     max_new_tokens: 16,
                     grammar_constrained: slot == 2,
                     host_stops: false,
+                    growable_output: false,
                 })
                 .unwrap()
         })
@@ -1398,6 +1402,7 @@ fn state_transfer_and_resume_upload_fixture() {
                 max_new_tokens: 2,
                 grammar_constrained: false,
                 host_stops: false,
+                growable_output: false,
             })
             .unwrap();
         let mut admissions: [_; 4] = std::array::from_fn(|_| None);
@@ -1624,6 +1629,7 @@ fn exact_restore_uploads_use_packed_endpoints_and_physical_page_rows() {
                 max_new_tokens: 1,
                 grammar_constrained: false,
                 host_stops: false,
+                growable_output: false,
             };
             let seed = scheduler.admit(spec(7)).unwrap();
             let mut fence = 0;
@@ -1948,6 +1954,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
                     max_new_tokens: 16,
                     grammar_constrained: false,
                     host_stops: false,
+                    growable_output: false,
                 })
                 .unwrap();
             admissions[h.slot as usize] = Some(Admission {

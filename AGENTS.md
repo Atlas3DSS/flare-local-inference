@@ -312,12 +312,34 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 
 ## Flexible recipes, reusable components, shared native machinery
 
+Helios's shared runtime policy and separation from model computation are
+non-negotiable architectural invariants. Correct output, performance gains,
+delivery pressure, and intended cleanup do not justify violating them. A
+temporary model-specific policy path is still a violation. Resolve the
+architectural boundary before committing the change.
+
 - Keep Helios as simple as possible. Model-specific execution behavior,
   composition, and optimization belong in Ignition and its captured programs.
-  Limit model-specific Helios support to K/V cache management and how cache
-  storage is exposed to captured graphs, through contracts kept as general as
-  possible. Model state-update computation belongs in Ignition; native code
-  manages its declared storage without implementing per-model algorithms.
+  Limit native specialization to concrete cache storage requirements and how
+  that storage is exposed to captured graphs. Express differences through cache
+  schemes and prepared layout metadata, with contracts reusable by every model
+  that has those requirements. Model state-update computation belongs in
+  Ignition; native code manages its declared storage without implementing
+  per-model algorithms.
+- Admission, page reservation and growth, eviction, preemption, readmission,
+  and offload are shared runtime policy and mechanisms. Do not select them by
+  model or recipe identity, duplicate them in model contracts, or hide model
+  allowlists behind capability flags. A cache scheme may require different page
+  geometry, state storage, or restore constraints; keep those differences in
+  its storage contract and let shared policy consume that contract.
+- A runtime defect reproduced on one model must be traced through every
+  supported cache scheme before choosing the implementation boundary. Apply
+  the fix to every compatible contract. Any restriction must follow from a
+  concrete storage or execution constraint expressed in the contract. For
+  example, incremental page reservation must depend on the cache's growth and
+  continuation requirements; testing it with GLM does not justify a GLM-only
+  scheduler path. Validate affected cache schemes and request lifecycles, and
+  report untested models separately from implementation restrictions.
 - Introducing a captured-graph operation family requires prior explicit approval
   from project owner Luke Alonso <lalonso@gmail.com>. Shape and capacity variants
   of an existing family do not constitute a new type when its operation contract
@@ -333,8 +355,8 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   are examples of mechanisms that should not be copied between recipes.
 - Keep native input packing, frontend processing, transport, scheduling, cache
   machinery, and request handling shared. Express model-dependent behavior through
-  prepared metadata and frontend assets; keep native model-specific execution
-  contracts focused on cache management and graph cache bindings.
+  prepared metadata and frontend assets; keep native specialization focused on
+  cache storage contracts and graph cache bindings.
 
 ## Python prepares; Helios serves
 
@@ -354,6 +376,11 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 - Keep graph executables, captured buffers, resource owners, and the CUDA
   context alive for their full native use. Model state and metadata must be
   explicit storage that Helios can manage without Python execution.
+- `ignition serve --direct [--eager]` is the one Python execution path, a
+  diagnostic and qualification tool requested by the project owner for
+  reproducing model faults without Helios ([direct execution](docs/direct-execution.md)).
+  It is never production serving or a fallback, and only its explicit flags
+  select it.
 
 ## No environment-variable switches
 

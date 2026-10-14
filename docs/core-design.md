@@ -272,11 +272,18 @@ rank ownership and coordination.
 
 ### Design principles
 
+Helios's shared runtime policy and separation from model computation are
+non-negotiable architectural invariants. Correct output, performance gains,
+delivery pressure, and intended cleanup do not justify model-specific runtime
+policy or native model computation. Temporary implementations must obey the
+same boundary; violations must be resolved before committing.
+
 - **Helios stays minimal.** Model-specific execution behavior, composition,
   state-update computation, and optimization belong in Ignition and its captured
-  programs. Limit model-specific Helios support to K/V cache management and how
-  cache storage is exposed to captured graphs, through contracts kept as general
-  as possible. Introducing a captured-graph operation family requires
+  programs. Native specialization is limited to concrete cache storage
+  requirements and graph cache bindings. Cache schemes and prepared layout
+  metadata express those differences through contracts reusable by every model
+  with the same requirements. Introducing a captured-graph operation family requires
   prior explicit approval from project owner Luke Alonso <lalonso@gmail.com>.
   Shape and capacity variants preserve an existing family's operation contract;
   a new operation contract requires approval even when it reuses an existing
@@ -304,9 +311,19 @@ rank ownership and coordination.
   `ignition/components/`.
 - **One native lifecycle serves every model.** Transport, scheduling, cache
   ownership, input packing, frontend processing, and request handling stay shared.
-  Express model-dependent behavior through prepared metadata and frontend assets;
-  keep model-specific native execution contracts focused on cache management
-  and graph cache bindings.
+  Admission, page reservation and growth, eviction, preemption, readmission, and
+  offload use shared policy and mechanisms. Model or recipe identity must not
+  select those behaviors, including through capability flags that encode model
+  allowlists. Cache schemes supply concrete page geometry, state storage, and
+  restore constraints; shared policy consumes those contracts. Express other
+  model-dependent behavior through prepared metadata and frontend assets.
+- **Runtime fixes follow the affected contract.** Trace a defect through every
+  supported cache scheme and apply the fix to every compatible contract. For
+  example, incremental page reservation depends on cache growth and continuation
+  requirements. A GLM reproducer does not justify a GLM-only scheduler path.
+  Restrictions require concrete storage or execution constraints in the contract.
+  Validate affected cache schemes and request lifecycles; untested models remain
+  a validation limitation, not a reason for model-specific policy.
 - **Numerical and performance requirements are separate.** State copies and
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine
@@ -425,7 +442,19 @@ Every rank uses the same row and page counts, limited by the smallest rank
 budget. Weights and fixed transport buffers retain their prepared layouts.
 
 The context limit bounds one request; aggregate page capacity bounds all
-active and cached histories. Admission reserves prompt and output capacity.
+active and cached histories. On models whose prompts can grow by their
+output (GLM), the output limit only bounds a text request: admission reserves
+its prompt and one page of output, and the request takes further pages a page
+ahead of its decode rounds, evicting unpinned prefix pages first; admission
+waits while pages are short. When a running request still cannot continue, the
+newest one finishes through its terminal checkpoint and is readmitted with its
+history as the prompt and the rest of its output limit, restoring that
+checkpoint from the GPU or the host prefix store unless both evicted it. Its
+output stream, stop and grammar state, and penalty counts continue; its
+random streams restart on the device, so it samples with a seed derived from
+the request's seed and the number of tokens generated before preemption. A request whose history exceeds the
+whole pool ends at that length instead. Other models, and requests with
+images, reserve prompt and output capacity at admission.
 For Qwen's target cache, BF16 KV and compressed selector keys cost 24.75 KiB
 per token; MTP pages, continuation rows, and graph resources add separate
 costs. The loader reports actual capacities. The [CLI design](cli-design.md)
@@ -949,6 +978,11 @@ ServerHandle.close()
 `ServerHandle` retains the runtime and resource owner until shutdown finishes.
 Request submission, cancellation, event consumption, and stats are internal
 Rust interfaces exposed through the native server, not Python methods.
+
+[Direct execution](direct-execution.md) is a separate diagnostic path,
+requested by the project owner, for reproducing model faults without Helios:
+Ignition schedules, packs and replays the prepared graphs from Python, or
+calls their captured forwards with `--eager`. It is never production serving.
 
 A normalized native request contains token IDs, generation parameters,
 positional/conditioning metadata, any preprocessed image inputs with their

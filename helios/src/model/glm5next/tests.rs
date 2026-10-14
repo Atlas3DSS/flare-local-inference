@@ -300,6 +300,7 @@ fn add(
             max_new_tokens: 8,
             grammar_constrained: true,
             host_stops: false,
+            growable_output: false,
         })
         .unwrap();
     admissions[handle.slot as usize] = Some(Admission {

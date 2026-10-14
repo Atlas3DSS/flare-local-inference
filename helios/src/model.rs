@@ -191,6 +191,9 @@ impl ModelConfig {
 pub trait ModelContract: Send + Sync + Sized + 'static {
     type PromptData: Clone + Send;
     type Inputs: Default;
+    /// Whether a text prompt can be extended by its generated tokens, so requests
+    /// without an output limit may grow their pages and be preempted and readmitted.
+    const GROWABLE_OUTPUT: bool = false;
     fn create_inputs(_: &ExecutionManifest) -> Result<Self::Inputs> {
         Ok(Self::Inputs::default())
     }

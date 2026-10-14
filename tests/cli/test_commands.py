@@ -105,6 +105,21 @@ def test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_acce
     assert "--no-stream-overlap: mimo-v2.6-pro-mopd runs no branches concurrently" in failure(capsys)[0]
 
 
+def test_direct_execution_is_an_explicit_serve_diagnostic(host, capsys):
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash", "--direct", "--eager"])
+    assert arguments.direct and arguments.eager
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash"])
+    assert not arguments.direct and not arguments.eager
+    assert main(["serve", "glm-5.3-flash", "--eager"]) == 2
+    assert "--eager applies only to --direct" in failure(capsys)[0]
+    for arguments in (["run", "glm-5.3-flash", "--direct"], ["export", "glm-5.3-flash", "--output", "x", "--eager"],
+                      ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "2", "--direct"]):
+        with pytest.raises(SystemExit) as exit:
+            main(arguments)
+        assert exit.value.code == 2
+    capsys.readouterr()
+
+
 def speculation(*arguments, model="qwen3.8-flash"):
     """Resolve the speculation settings `run` would prepare for a command line."""
     return preparation.speculation(_parser().parse_args(["run", model, *arguments]), resolve(model))

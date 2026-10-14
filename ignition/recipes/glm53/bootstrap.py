@@ -557,6 +557,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
+        forwards={name: compiled.get(name, forward) for name, forward in forwards.items()},
         export_zero_ranges=disposable_ranges((decoder_storage, prefill_storage), arena, forwards),
         close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
                          *(() if virtual_pages is None else (virtual_pages,)),

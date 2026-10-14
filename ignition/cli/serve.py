@@ -317,10 +317,13 @@ def _serving_progress(verbose):
 def serve(args) -> int:
     """Prepare in this process and serve over HTTP; with --ranks, one peer rank per other host joins.
 
-    Requires heliopause's qualification build, which embeds the HTTP server in Python.
+    Requires heliopause's qualification build, which embeds the HTTP server in Python. With
+    --direct, Ignition's diagnostic step loop serves instead, without Helios or that build.
     """
     from ignition.progress import phase
 
+    if args.eager and not args.direct:
+        raise UsageError("--eager applies only to --direct execution")
     progress = _serving_progress(args.verbose)
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
@@ -365,7 +368,13 @@ def serve(args) -> int:
         model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
         kernel_cache=configuration.directory("kernel_cache"), progress=progress,
         **({} if rendezvous is None else {"ranks": rendezvous}))
-    code = _serve_prepared(prepared, bind, options)
+    if args.direct:
+        from ignition.direct.server import serve_direct
+
+        code = serve_direct(prepared, bind=bind, eager=args.eager, verbose=args.verbose,
+                            served_names=(*options["served_names"], options["model_id"]))
+    else:
+        code = _serve_prepared(prepared, bind, options)
     print("Stopped; every rank drained and released its resources.", flush=True)
     return code
 

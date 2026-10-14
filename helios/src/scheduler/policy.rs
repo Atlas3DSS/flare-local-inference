@@ -172,6 +172,7 @@ impl RequestScheduler {
             request.scheduled_consumed < self.limits.max_sequence_tokens as u64
                 && request.generated_tokens as usize + request.pending
                     < request.max_new_tokens as usize
+                && self.fits_next_rounds(request)
         } else {
             true
         }
