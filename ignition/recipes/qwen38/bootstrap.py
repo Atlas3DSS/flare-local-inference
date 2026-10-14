@@ -21,6 +21,9 @@ from ignition.components.capacity import batch_capacities, request_capacity
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
+from ignition.preparation.contract import history_region
+from ignition.preparation import runtime_package_pb2 as contract_proto
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.deferred import deferred_mode
@@ -119,6 +122,11 @@ class PreparationConfig:
     def preparation_pages(self):
         # One prefill chunk plus partial and verification-boundary pages for each row.
         return self.pages if self.pages is not None else self.prefill_chunk_size // 64 + 2 * self.request_capacity
+
+    @property
+    def preparation_state_rows(self):
+        # Null row, live request rows, and disjoint snapshot destinations for tuning and capture.
+        return 1 + 2 * self.request_capacity
 
     @property
     def request_capacity(self):
@@ -248,7 +256,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             # Verification commits into each request's live row, so a request holds one row.
             state_rows = snapshots + slots
             state = HybridStatePool.allocate(state_rows + 1, device,
-                                             speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage)
+                speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage,
+                backed_slots=(min(state_rows + 1, config.preparation_state_rows) if package_storage is not None else None))
             register_benchmark_state(
                 session, next(iter(state.gdn.values())).recurrent,
                 storage=state.backing, restore=state.reset_for_preparation,
@@ -475,6 +484,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         free, total = device_memory_info(device)
         memory = {"weights_bytes": weights.allocated_bytes, "ngram_request_bytes": table.mailbox.host_view.nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "state_rows": state_rows,
+            "preparation_state_bytes": state.backed_slots * layout.row_bytes,
+            "preparation_state_rows": state.backed_slots,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
             "cached_token_capacity": page_capacity * 64, "headroom_bytes": config.headroom_bytes, "page_tokens": 64,
             "free_device_bytes": free, "total_device_bytes": total,
@@ -494,16 +505,17 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 history_drafts=config.history_drafts)
         hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
             "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"])}
+        cache_regions = [history_region(buffers, f"cache.{layer}.{name}", getattr(value, name), contract_proto.PAGED_KEY_VALUE,
+            tokens_per_record=4 if name == "compressed_k_cache" else 1)
+            for layer, value in (final_cache or cache).items()
+            for name in ("main_k_cache", "main_v_cache", "compressed_k_cache")]
+        buffers["request_pending_token"] = requests.pending_token
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 64,
-            # Verification commits accepted tokens into each request's live row.
-            "state_rows_per_request": 1,
             "frontend": prepare_frontend(manifest.snapshot, eos_token_ids=[248046, 248044], image_profile="qwen"),
             "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
-            "model_contract": {"schema": "qwen4exp.graph-inputs.v3", "vocabulary": 248320,
-                "vision": {"features_per_request": 16384, "max_images": 4,
-                    "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
+            "model_contract": prepare_contract(signatures, buffers, state, page_tokens=64, draft_lag=1 if has_mtp else None, embedding_tables=(0,), regions=cache_regions),
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}
                        for name, (filename, digest) in hashes.items()}}
         if speculation is not None:

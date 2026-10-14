@@ -36,7 +36,7 @@ def read(native, path, namespace='flare-tests', weights=False, profile=None, ran
 
 
 def fixture(tmp_path, *, size=CHUNK + 39, signer=None):
-    index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
     rank = index.ranks[0]
     rank.allocations.add(name='weights', file='weights')
     module = rank.modules.add(name='kernel', file='kernel')
@@ -117,7 +117,7 @@ def cluster_package(tmp_path, monkeypatch):
     from ignition.preparation import model_package
 
     def export(rank, path):
-        index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+        index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
         bundle = index.ranks[0]
         bundle.roce.world, bundle.roce.rank = 2, rank
         bundle.allocations.add(name='weights', file='weights')
@@ -320,7 +320,7 @@ def test_authenticated_but_inconsistent_index_is_rejected(native, tmp_path, chan
 
 def test_native_loader_rejects_unsigned_staging(native, tmp_path):
     path = tmp_path / 'stage'
-    publish(path, proto.ModelIndex(version=3, ranks=[proto.BundleIndex()]), [])
+    publish(path, proto.ModelIndex(version=4, ranks=[proto.BundleIndex()]), [])
     result = read(native, path)
     assert result.returncode != 0 and 'not a Flare safetensors package' in result.stderr
 
@@ -451,7 +451,7 @@ def test_tensor_parallel_assembly_authenticates_all_ranks(native, tmp_path):
     from ignition.preparation.package_file import combine
     ranks = []
     for rank in range(2):
-        index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+        index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
         bundle = index.ranks[0]
         bundle.allocations.add(name='weight', file='weight')
         bundle.graphs.add(name='decode', resource='graph')
@@ -478,7 +478,7 @@ def test_native_record_reader_selects_independently_and_rejects_malformed_record
     valid = struct.pack('<I', len(node)) + node
     data = {'selected': valid, 'oversize': struct.pack('<I', (1 << 20) + 1),
             'truncated': struct.pack('<I', 100) + b'x', 'trailing': valid + b'x'}
-    index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex(architecture=[12, 0], context=proto.Context())])
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex(architecture=[12, 0], context=proto.Context())])
     bundle = index.ranks[0]
     payload = []
     for ordinal, (name, contents) in enumerate(data.items()):

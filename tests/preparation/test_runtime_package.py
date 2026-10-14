@@ -150,7 +150,7 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
     for rank, path in enumerate(paths):
         runtime_package.export_model(prepared, images, storage, path, options={}, bundle_only=rank > 0)
     peer, _ = read_index(paths[1])
-    assert not peer.assets and not peer.server.fields
+    assert not peer.assets and not peer.HasField("contract")
     assert not peer.HasField("frontend") and not peer.HasField("sampling_defaults")
     assert [graph.name for graph in peer.ranks[0].graphs] == ["decode"]
     with paths[1].open("rb") as stream:
@@ -158,7 +158,7 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
     combined, _ = read_index(paths[0])
     assert len(combined.ranks) == 2
     assert {asset.name for asset in combined.assets} == {"tokenizer", "chat_template"}
-    assert combined.server["model_id"] == "fixture"
+    assert combined.contract.model_id == "fixture"
     assert list(combined.frontend.eos_token_ids) == [17]
     assert combined.sampling_defaults.temperature == 1.
     assert prepared.server_config["assets"] == assets

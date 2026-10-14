@@ -25,7 +25,7 @@ use crate::{
     AdmissionError, Error, ExecutionError, Failure, Result, Shutdown,
     execution::ExecutionManifest,
     frontend::{Frontend, images::ImageProcessor},
-    model::{ModelConfig, ModelContract},
+    model::ModelConfig,
 };
 use axum::{
     Extension, Json, Router,
@@ -81,8 +81,8 @@ impl Default for ServerConfig {
 }
 const GENERATED_WINDOW: Duration = Duration::from_secs(60);
 const GENERATED_SAMPLE_PERIOD: Duration = Duration::from_secs(5);
-struct HttpState<M: ModelContract> {
-    model: Arc<ModelRuntime<M>>,
+struct HttpState {
+    model: Arc<ModelRuntime>,
     frontend: Arc<Frontend>,
     images: Option<Arc<ImageProcessor>>,
     grammar: Arc<crate::grammar::GrammarCompiler>,
@@ -98,7 +98,7 @@ struct HttpState<M: ModelContract> {
     started: Instant,
     generated: Mutex<VecDeque<(Instant, u64)>>,
 }
-impl<M: ModelContract> HttpState<M> {
+impl HttpState {
     /// Records the generated-token counter, retaining one sample at or before the window start.
     fn sample_generated(&self) {
         let now = Instant::now();
@@ -119,9 +119,9 @@ impl<M: ModelContract> HttpState<M> {
     }
 }
 
-pub struct Server<M: ModelContract> {
+pub struct Server {
     address: SocketAddr,
-    model: Arc<ModelRuntime<M>>,
+    model: Arc<ModelRuntime>,
     control: Mutex<HttpControl>,
     shutdown: Mutex<Option<Shutdown>>,
     dashboard: Mutex<Option<dashboard::Dashboard>>,
@@ -148,7 +148,7 @@ impl From<&str> for StartFailure {
         Error::from(message).into()
     }
 }
-impl<M: ModelContract> Server<M> {
+impl Server {
     /// # Safety
     /// The caller owns stable, exclusive prepared resources until close confirms
     /// both CUDA streams drained. No Python code runs on either native worker.
@@ -183,7 +183,7 @@ impl<M: ModelContract> Server<M> {
         // their owners until drain. This server propagates that obligation to the
         // model worker and reports uncertain drain through StartFailure or close.
         let model = Arc::new(unsafe {
-            ModelRuntime::<M>::start(
+            ModelRuntime::start(
                 manifest,
                 model,
                 config.queue_capacity,
@@ -231,16 +231,16 @@ impl<M: ModelContract> Server<M> {
                         }
                     });
                     let router = Router::new()
-                        .route("/metrics", get(metrics::<M>))
+                        .route("/metrics", get(metrics))
                         .merge(models::router(state.model.config(), &config.served_names))
-                        .route("/v1/chat/completions", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
-                        .route("/v1/completions", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
-                        .route("/v1/messages", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
-                        .route("/v1/messages/count_tokens", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
-                        .route("/v1/responses", post(http::generate::<M>).get(http::no_websocket).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
+                        .route("/v1/chat/completions", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+                        .route("/v1/completions", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+                        .route("/v1/messages", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+                        .route("/v1/messages/count_tokens", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+                        .route("/v1/responses", post(http::generate).get(http::no_websocket).layer(middleware::from_fn_with_state(state.clone(), admit_http)));
                     let router = router
-                        .route_layer(middleware::from_fn_with_state(state.clone(), authorize::<M>))
-                        .route("/health", get(health::<M>))
+                        .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+                        .route("/health", get(health))
                         .layer(DefaultBodyLimit::max(config.max_body_bytes))
                         .with_state(state);
                     let listener = match tokio::net::TcpListener::bind(config.bind).await {
@@ -379,13 +379,13 @@ impl<M: ModelContract> Server<M> {
         shutdown
     }
 }
-impl<M: ModelContract> Drop for Server<M> {
+impl Drop for Server {
     fn drop(&mut self) {
         self.close();
     }
 }
 
-async fn health<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
+async fn health(State(state): State<Arc<HttpState>>) -> Response {
     if state.model.healthy() {
         Json(json!({"status":"ok"})).into_response()
     } else {
@@ -395,7 +395,7 @@ async fn health<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Res
         )
     }
 }
-async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
+async fn metrics(State(state): State<Arc<HttpState>>) -> Response {
     let mut text = state.model.metrics().render();
     for (name, help, value) in [
         (
@@ -468,11 +468,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-async fn authorize<M: ModelContract>(
-    State(state): State<Arc<HttpState<M>>>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn authorize(State(state): State<Arc<HttpState>>, request: Request, next: Next) -> Response {
     let protocol = protocol::Protocol::from_path(request.uri().path());
     if let Some(key) = &state.api_key {
         let authorization = request.headers().get(axum::http::header::AUTHORIZATION);
@@ -508,8 +504,8 @@ fn error(status: StatusCode, message: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
-async fn admit_http<M: ModelContract>(
-    State(state): State<Arc<HttpState<M>>>,
+async fn admit_http(
+    State(state): State<Arc<HttpState>>,
     mut request: Request,
     next: Next,
 ) -> Response {

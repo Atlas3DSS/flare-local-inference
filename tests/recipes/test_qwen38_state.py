@@ -108,6 +108,35 @@ def test_speculative_state_retains_checkpoint_horizon_and_draft_boundary():
             HybridStateLayout.build(speculative_tokens=value)
 
 
+def test_partial_state_backing_initializes_and_resets_only_mapped_rows(monkeypatch):
+    layout = HybridStateLayout.build()
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (8 * layout.row_bytes,) * 2)
+
+    class Storage:
+        def device_allocate(self, name, shape, dtype, *, group, maximum, units):
+            assert name == "continuations" and group == "STATE_ROWS"
+            assert shape == (4, layout.row_bytes) and maximum == 8 and units == 2
+            backing = torch.zeros(shape, dtype=dtype)
+            backing[2:].fill_(0xA5)
+            return backing
+
+    pool = HybridStatePool.allocate(4, "cpu", storage=Storage(), backed_slots=2)
+    assert pool.backing.shape == (4, layout.row_bytes)
+    assert pool.memory_capacity.tolist() == [2, 0]
+    assert pool.gdn[0].recurrent.shape[0] == 4
+    assert torch.all(pool.backing[2:] == 0xA5)
+    pool.backing[:2].fill_(0x3D)
+    pool.reset_for_preparation()
+    assert not pool.backing[0].count_nonzero()
+    assert torch.equal(pool.ple_history[1], torch.tensor([EOS_TOKEN_ID, EOS_TOKEN_ID]))
+    assert torch.all(pool.backing[2:] == 0xA5)
+    with pytest.raises(ValueError, match="package storage"):
+        HybridStatePool.allocate(4, "meta", backed_slots=2)
+    for count in (0, 1, 5, True):
+        with pytest.raises(ValueError, match="backed state slots"):
+            HybridStatePool.allocate(4, "meta", backed_slots=count)
+
+
 def test_state_transfer_metadata_starts_inactive():
     metadata = StateTransferMetadata.allocate(4, "cpu")
     assert metadata.num_ops.item() == 0

@@ -40,7 +40,8 @@ before committing; a design acknowledgment cannot authorize them.
    policy. Trace runtime fixes across supported cache schemes and apply them to
    every compatible contract; a single-model reproducer does not justify a
    single-model implementation.
-   `ModelContract` only adapts prepared inputs, storage, and frontend metadata.
+   `PreparedContract` contains typed prepared inputs, storage, dependencies, and
+   frontend metadata; there is no per-model native trait.
    Reject per-model boolean policy flags, including `supports_*`, `can_*`, and
    default-false opt-ins. Enums, callbacks, schema names, and metadata fields
    cannot serve as alternative model allowlists. Review each member and its

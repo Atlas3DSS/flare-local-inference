@@ -27,6 +27,21 @@ def test_shared_sources_preserve_compression_geometry():
     assert PAGE_TOKENS == 128
 
 
+def test_contract_registers_compressed_planes_from_their_storage_owner():
+    from ignition.recipes.deepseek41.contract import prepare
+
+    pool = ContinuationPool.allocate(config(), 2, 3, "cpu")
+    buffers = {}
+    contract = prepare({}, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=None)
+    regions = {r["storage"]["buffer"]: r for r in contract["cache"]["regions"]}
+    assert len(regions) == 1 + len(pool.pages)
+    for name, tensor in pool.pages.items():
+        region = regions["cache." + name]
+        assert buffers["cache." + name] is tensor
+        assert region["storage"]["nbytes"] == tensor.shape[1]
+        assert region["tokens_per_record"] == (1 if name.startswith("layer20.") else 2)
+
+
 def test_continuation_copies_window_compressor_and_hidden_state():
     pool = ContinuationPool.allocate(config(), 3, 2, "cpu")
     for name in ("layer39.window", "layer2.pending_values", "layer14.pending_gates",

@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "vocabulary": 129280,
+  "input_vocabulary": 129280,
+  "vision": {
+    "features_per_request": 0,
+    "max_images": 0,
+    "patches_per_feature": 0,
+    "patch_capacities": []
+  },
+  "cache": {
+    "page_tokens": 128,
+    "page_tables": [],
+    "regions": []
+  },
+  "graphs": [],
+  "frontend": {
+    "tools": {
+      "kind": 3,
+      "wrapping_newlines": 0,
+      "tag_separator": " "
+    },
+    "reasoning": {
+      "kind": 1,
+      "open": "<think>",
+      "close": "</think>",
+      "wrapping_newlines": 0,
+      "terminal_markers": []
+    },
+    "image_preparation": null,
+    "image_layout": null,
+    "position_dimensions": 0,
+    "rejected_tokens": [
+      129264
+    ],
+    "assistant_marker": "<｜Assistant｜>",
+    "message_end_markers": [
+      "<｜User｜>",
+      "<｜end▁of▁sentence｜>"
+    ],
+    "prefix_boundary": {
+      "roles": [
+        "system"
+      ],
+      "append_role": null,
+      "continue_final_message": false,
+      "minimum_messages": 1,
+      "required_start": "",
+      "required_end": "",
+      "required_marker": ""
+    },
+    "image_tokens": null
+  }
+}

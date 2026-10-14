@@ -115,7 +115,7 @@ ABI3 appends these fields at zero-based indices:
 | 9 | Offered draft count, 0 through width minus one |
 | 10 | Accepted drafts within the emitted prefix |
 | 11 | Bitmask of offered drafts supplied by copying; bit zero is the first draft |
-| 12 | Model-reserved field; the `qwen4exp.graph-inputs.v3` contract requires `-1` |
+| 12 | Reserved field; every prepared model contract requires `-1` |
 | 13 | Committed draft-cache length, `max(consumed_tokens-1,0)`; `-1` for a copy-only speculative round with no draft cache |
 | 14 | Reserved, `0` |
 | 15 | Verification width, an integer from 1 through 8 |

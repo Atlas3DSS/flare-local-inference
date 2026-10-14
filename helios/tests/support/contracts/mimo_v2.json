@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "vocabulary": 152576,
+  "input_vocabulary": 152576,
+  "vision": {
+    "features_per_request": 16384,
+    "max_images": 4,
+    "patches_per_feature": 4,
+    "patch_capacities": [
+      256,
+      1024,
+      4096,
+      16384
+    ]
+  },
+  "cache": {
+    "page_tokens": 128,
+    "page_tables": [],
+    "regions": []
+  },
+  "graphs": [],
+  "frontend": {
+    "tools": {
+      "kind": 1,
+      "wrapping_newlines": 0,
+      "tag_separator": ""
+    },
+    "reasoning": {
+      "kind": 1,
+      "open": "<think>",
+      "close": "</think>",
+      "wrapping_newlines": 0,
+      "terminal_markers": [
+        "<tool_call>"
+      ]
+    },
+    "image_preparation": 2,
+    "image_layout": 2,
+    "position_dimensions": 0,
+    "rejected_tokens": [
+      151656
+    ],
+    "assistant_marker": "<|im_start|>assistant\n",
+    "message_end_markers": [
+      "<|im_end|>"
+    ],
+    "prefix_boundary": {
+      "roles": [
+        "system",
+        "developer"
+      ],
+      "append_role": "user",
+      "continue_final_message": true,
+      "minimum_messages": 0,
+      "required_start": "<|im_start|>system\n",
+      "required_end": "",
+      "required_marker": "<|im_end|>"
+    },
+    "image_tokens": {
+      "feature_token": 151655,
+      "span": null
+    }
+  }
+}

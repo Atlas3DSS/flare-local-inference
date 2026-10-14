@@ -76,7 +76,10 @@ def test_image_metadata_is_a_tight_consumed_contract():
 
 
 def server():
-    return dict(model_id="fixture", sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1).as_dict(),
+    return dict(model_id="fixture", served_names=["fixture-alias"], reserve_bytes=1 << 30,
+        queue_capacity=16, frontend_workers=4, max_body_bytes=32 << 20,
+        context_hint="prepared context", capacity_hint="prepared concurrency",
+        sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1).as_dict(),
         frontend=dict(tokenizer={"eos_token": "<eos>"}, eos_token_ids=[17],
             image={"mimo": dict(min_pixels=3136, max_pixels=12845056,
                 image_mean=[0.48145466, 0.4578275, 0.40821073], image_std=[0.26862954, 0.26130258, 0.27577711])}),
@@ -86,9 +89,12 @@ def server():
 def test_typed_settings_survive_publication_and_tensor_parallel_assembly(tmp_path):
     paths = []
     for rank in range(2):
-        index = ModelIndex(version=3, ranks=[BundleIndex()])
+        index = ModelIndex(version=4, ranks=[BundleIndex()])
         serving(index, server())
-        assert set(index.server.fields) == {"model_id"}
+        assert index.contract.model_id == "fixture"
+        assert list(index.contract.served_names) == ["fixture-alias"]
+        assert index.contract.reserve_bytes == 1 << 30
+        assert index.contract.frontend_workers == 4
         assert index.HasField("sampling_defaults") and index.sampling_defaults.HasField("seed")
         assert index.frontend.image.WhichOneof("profile") == "mimo"
         path = tmp_path / f"rank-{rank}.safetensors"

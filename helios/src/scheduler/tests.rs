@@ -124,7 +124,7 @@ pub(super) fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestSch
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
-            host_decode_tokens: false,
+            completion_inputs: vec![],
             state_rows_per_request: None,
         },
     )
@@ -472,7 +472,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
-                host_decode_tokens: false,
+                completion_inputs: vec![],
                 state_rows_per_request: None,
             },
         )
@@ -549,7 +549,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                     patch_capacities: vec![256, 1024, 4096, 16384],
                 },
                 draft_pages_per_request: 1,
-                host_decode_tokens: false,
+                completion_inputs: vec![],
                 state_rows_per_request: None,
             },
         );
@@ -915,7 +915,7 @@ fn branching_requests_own_distinct_tail_pages_and_terminal_snapshots() {
 #[test]
 fn host_uploaded_decode_waits_for_its_previous_sample() {
     let mut scheduler = scheduler(1, 8, 2);
-    scheduler.capabilities.host_decode_tokens = true;
+    scheduler.capabilities.completion_inputs = vec!["token_ids".into()];
     let handle = scheduler.admit(spec(63, 3)).unwrap();
     init(&mut scheduler, 1);
     let prefill = scheduler.plan().unwrap();
@@ -1880,7 +1880,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             patch_capacities: vec![8, 32],
         },
         draft_pages_per_request: 1,
-        host_decode_tokens: false,
+        completion_inputs: vec![],
         state_rows_per_request: None,
     };
     let limits = SchedulerLimits {
@@ -1944,7 +1944,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         },
         SchedulerCapabilities {
             draft_pages_per_request: 9,
-            host_decode_tokens: false,
+            completion_inputs: vec![],
             state_rows_per_request: None,
             ..capabilities
         },

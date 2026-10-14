@@ -194,9 +194,11 @@ Both Ignition commands accept `--config PATH`; the default configuration is
 leaves GPU memory available for other processes during preparation and serving.
 Ignition additionally keeps 1 GiB for warm-up and capture. Qwen preparation backs
 only a prefill chunk plus two KV pages per captured request row, unless an
-explicit preparation page count is supplied programmatically. It reserves the
-full virtual extent in the package. Helios sizes its caches
-after uploading the selected graphs, keeping a separate 64 MiB driver margin.
+explicit preparation page count is supplied programmatically. Continuation
+storage backs a null row, live request rows, and disjoint snapshot destinations
+during preparation. Both retain their full virtual extents in the package. Helios
+sizes its caches after uploading the selected graphs, keeping a separate 64 MiB
+driver margin.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
 and every verification width through the draft-token maximum. Flare can reduce
@@ -338,15 +340,17 @@ architectural boundary before committing the change.
   allowlists behind capability flags. A cache scheme may require different page
   geometry, state storage, or restore constraints; keep those differences in
   its storage contract and let shared policy consume that contract.
-- `ModelContract` is a prepared-data adapter, never a runtime policy extension
-  point. Its members may validate and bind graph inputs, expose concrete storage
-  layouts, and adapt frontend metadata. Never add per-model boolean flags,
+- `PreparedContract` is validated Protobuf data, never a runtime policy extension
+  point. Declare concrete graph value sources, storage views, dependencies,
+  frontend syntax, and capacities; shared code validates and binds them. Never add per-model boolean flags,
   including `supports_*`, `can_*`, or default-false opt-ins, to enable or disable
   runtime behavior. Enum values, callbacks, schema names, and metadata fields
   must not encode the same model allowlist. Every member must have a meaning
   independent of model identity, and its consumers must implement shared behavior
   from actual data, geometry, and dependencies. Review both declarations and all
-  call sites; moving a model branch behind the trait does not make it acceptable.
+  consumers. Tool/reasoning parsers and image preparation/layout implementations
+  use independent typed enum identifiers; those identifiers cannot select
+  scheduling, cache policy, text-graph input packing, or completion behavior.
 - A runtime defect reproduced on one model must be traced through every
   supported cache scheme before choosing the implementation boundary. Apply
   the fix to every compatible contract. Any restriction must follow from a

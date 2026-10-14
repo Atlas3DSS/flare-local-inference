@@ -41,7 +41,7 @@ def _byte_tensor(tensor):
 
 
 def _validate_spans(index, length):
-    if index.version != 3 or not index.ranks:
+    if index.version != 4 or not index.ranks:
         raise ValueError("unsupported model index")
     spans = chain(
         (span for rank in index.ranks for span in rank.resources.values()),
@@ -175,7 +175,7 @@ def _publish(path, index, payload, protection=None):
 
 def combine(path, ranks, peer_memory, *, publisher=None):
     """Place every rank's tensor storage before execution resources and the index."""
-    result = proto.ModelIndex(version=3, peer_memory=peer_memory)
+    result = proto.ModelIndex(version=4, peer_memory=peer_memory)
     storage, execution = [], []
     for rank, source in enumerate(ranks):
         index, start = read_index(source)
@@ -187,7 +187,7 @@ def combine(path, ranks, peer_memory, *, publisher=None):
         for name, span in sorted(bundle.resources.items()):
             (storage if name in stored else execution).append((span, source, start + span.offset))
         if rank == 0:
-            result.server.CopyFrom(index.server)
+            result.contract.CopyFrom(index.contract)
             if index.HasField("sampling_defaults"):
                 result.sampling_defaults.CopyFrom(index.sampling_defaults)
             if index.HasField("frontend"):

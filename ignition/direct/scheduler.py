@@ -2,9 +2,9 @@
 
 This is the CPU half of Ignition's diagnostic direct execution. It owns request
 slots, state rows, KV pages and an exact-prompt prefix cache, chooses each step,
-packs that step's uploads byte for byte as Helios's `paged_text` contract packs
-them, and interprets the completion records the graph writes. It replicates
-only what reproducing model-level faults needs:
+packs that step's uploads from the prepared semantic input bindings, and
+interprets the completion records the graph writes. It replicates only what
+reproducing model-level faults needs:
 
 - FIFO admission into free slots. Each request reserves every page its prompt,
   output limit and widest verification round can reach, plus the draft page.
@@ -64,6 +64,9 @@ class Layout:
     vocabulary: int
     eos: tuple[int, ...]
     graphs: MappingProxyType
+    bindings: dict
+    buffer_specs: dict
+    page_views: dict
     widths: tuple[int, ...] = ()
     fixed_width: int | None = None
     state_rows_per_request: int | None = None
@@ -84,17 +87,22 @@ class Layout:
         speculative = any(signature.kind == "speculative" for signature in model.signatures.values())
         graphs = {(signature.kind, signature.batch_capacity, signature.token_capacity): name
                   for name, signature in model.signatures.items()
-                  if signature.speculation_enabled in (None, speculative)}
+                  if signature.kind in ("init", "restore", "snapshot", "prefill", "decode", "resume", "speculative")
+                  and signature.speculation_enabled in (None, speculative)}
         return cls(capacity=buffers["row_slot_ids"].numel(), max_active=model.max_active,
-                   context=config["max_sequence_tokens"], page_tokens=config["page_tokens"],
+                   context=config["max_sequence_tokens"], page_tokens=config["model_contract"]["cache"]["page_tokens"],
                    table_width=buffers["page_tables"].shape[1], pages=config["pages"],
                    snapshots=config["snapshots"], prefill_chunk=config["prefill_chunk_size"],
                    vocabulary=config["model_contract"]["vocabulary"],
                    eos=tuple(config["frontend"]["eos_token_ids"]), graphs=graphs,
                    widths=tuple(config.get("speculative_widths") or ()) if speculative else (),
                    fixed_width=config.get("speculative_fixed_width") if speculative else None,
-                   state_rows_per_request=config.get("state_rows_per_request"),
-                   draft_pages=int("draft_page_tables" in buffers),
+                   bindings={g["graph"]: g["inputs"] for g in config["model_contract"]["graphs"] if g["graph"] in graphs.values()},
+                   buffer_specs={name: (np.dtype(str(tensor.dtype).removeprefix("torch.")), tuple(tensor.shape))
+                       for name, tensor in buffers.items() if name in {b["buffer"] for g in config["model_contract"]["graphs"] if g["graph"] in graphs.values() for b in g["inputs"]}},
+                   page_views={v["buffer"]: v["page_offset"] for v in config["model_contract"]["cache"]["page_tables"]},
+                   state_rows_per_request=max(g["state_rows_per_request"] for g in config["model_contract"]["graphs"] if g["graph"] in graphs.values()),
+                   draft_pages=max((v["page_offset"] for v in config["model_contract"]["cache"]["page_tables"]), default=0),
                    record_fields=buffers["completion_records"].shape[-1])
 
     @property
@@ -300,28 +308,6 @@ class PagePool:
                 heapq.heappush(self.free, page)
 
 
-class Uploads:
-    """Partial input-buffer writes for one step, as (buffer, byte offset, bytes)."""
-
-    def __init__(self):
-        self.items = []
-
-    def put(self, name, offset, values, dtype):
-        data = np.asarray(values, dtype=dtype).tobytes()
-        if data:
-            self.items.append((name, offset * np.dtype(dtype).itemsize, data))
-
-    def i32(self, name, offset, values):
-        self.put(name, offset, values, np.int32)
-
-    def i64(self, name, offset, values):
-        self.put(name, offset, values, np.int64)
-
-
-def _padded(values, length, fill):
-    return list(values)[:length] + [fill] * max(0, length - len(values))
-
-
 class Scheduler:
     def __init__(self, layout, *, prefix_cache=True):
         self.layout = layout
@@ -521,77 +507,9 @@ class Scheduler:
         return max(1, min(width, self.layout.context - request.consumed,
                           request.max_new_tokens - len(request.generated)))
 
-    # Input packing, as Helios's paged_text contract packs each graph kind.
-
     def pack(self, step):
-        layout, uploads = self.layout, Uploads()
-        capacity, lanes, kind = layout.capacity, step.lanes, step.kind
-        slots = [lane.request.slot for lane in lanes]
-        generations = [lane.request.generation for lane in lanes]
-        for lane in lanes:
-            row = layout.state_row(lane.request.slot)
-            uploads.i64("request_state_rows", lane.request.slot * 8,
-                        [row + column if column < layout.execution_width else 0 for column in range(8)])
-        admit = kind in ("init", "restore")
-        if not admit:
-            uploads.i32("row_slot_ids", 0, _padded(slots, capacity, -1))
-            uploads.i64("row_generations", 0, _padded(generations, capacity, 0))
-            uploads.i32("live_rows", 0, [len(lanes)])
-        if kind != "resume":
-            for lane in lanes:
-                pages = lane.request.pages[:layout.table_width]
-                uploads.i32("page_tables", lane.request.slot * layout.table_width, pages)
-                if layout.draft_pages:
-                    uploads.i32("draft_page_tables", lane.request.slot * layout.table_width,
-                                lane.request.pages[1:1 + min(len(lane.request.pages) - 1, layout.table_width)])
-        if kind in ("prefill", "decode", "speculative"):
-            samples = [int(kind != "prefill" or lane.start + lane.tokens == len(lane.request.prompt)) for lane in lanes]
-            uploads.i32("sample_enabled", 0, _padded(samples, capacity, 0))
-            uploads.i32("query_lengths", 0, _padded([lane.tokens for lane in lanes], capacity, 0))
-        if kind == "prefill":
-            lane = lanes[0]
-            uploads.i64("token_ids", 0, lane.request.prompt[lane.start:lane.start + lane.tokens])
-        elif kind in ("decode", "speculative"):
-            uploads.i64("token_ids", 0, _padded([lane.request.pending_token for lane in lanes], step.batch, 0))
-        if admit or kind == "snapshot":
-            uploads.i64("state_request_slots", 0, _padded(slots, capacity, -1))
-            source, destination, operation, expected = [], [], [], []
-            for lane in lanes:
-                request = lane.request
-                if kind == "init":
-                    source.append(-1), destination.append(layout.state_row(request.slot))
-                    operation.append(1), expected.append(0)
-                elif kind == "restore":
-                    source.append(layout.snapshot_row(request.prefix.snapshot))
-                    destination.append(layout.state_row(request.slot))
-                    operation.append(0), expected.append(request.consumed)
-                else:
-                    source.append(layout.state_row(request.slot))
-                    destination.append(layout.snapshot_row(request.capture))
-                    operation.append(0), expected.append(request.consumed)
-            uploads.i64("state_source_slots", 0, _padded(source, capacity, -1))
-            uploads.i64("state_destination_slots", 0, _padded(destination, capacity, -1))
-            uploads.i64("state_expected_consumed", 0, _padded(expected, capacity, -1))
-            uploads.i32("state_operation", 0, _padded(operation, capacity, 0))
-            uploads.i32("state_num_ops", 0, [len(lanes)])
-        if admit:
-            vocabulary, words = layout.vocabulary, -(-layout.vocabulary // 32)
-            uploads.i32("admission_count", 0, [len(lanes)])
-            uploads.i32("admission_slots", 0, _padded(slots, capacity, -1))
-            uploads.i64("admission_generations", 0, _padded(generations, capacity, 0))
-            for row, lane in enumerate(lanes):
-                request, sampling = lane.request, lane.request.sampling
-                uploads.put("admission_seed_bits", row, [sampling.seed], np.uint64)
-                uploads.put("admission_parameters", row * 6, sampling.values(), np.float32)
-                uploads.i32("admission_top_k", row, [sampling.top_k])
-                uploads.i64("admission_max_new_tokens", row, [request.max_new_tokens])
-                uploads.i64("admission_eos_token_ids", row * 8, _padded(list(layout.eos), 8, -1))
-                uploads.i32("admission_eos_count", row, [0 if request.ignore_eos else len(layout.eos)])
-                uploads.i32("admission_histogram", row * vocabulary,
-                            np.bincount(np.asarray(request.prompt, dtype=np.int64), minlength=vocabulary))
-                uploads.i32("admission_grammar_mask", row * words, np.full(words, -1, dtype=np.int32))
-                uploads.i32("admission_grammar_enabled", row, [0])
-        return uploads.items
+        from .packing import pack
+        return pack(self.layout, step)
 
     # Completion.
 

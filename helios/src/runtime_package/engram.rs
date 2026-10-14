@@ -205,8 +205,5 @@ pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> R
             request: gpu.then_some(table.request_buffer),
         });
     }
-    Ok(Index {
-        vocabulary: value.token_map.len(),
-        tables,
-    })
+    Ok(Index { tables })
 }

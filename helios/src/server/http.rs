@@ -17,18 +17,11 @@ pub(super) async fn no_websocket() -> Response {
         "WebSockets are not supported; use POST /v1/responses with HTTP/SSE",
     )
 }
-fn rejection<M: ModelContract>(
-    state: &HttpState<M>,
-    protocol: Protocol,
-    failure: Error,
-) -> Response {
+fn rejection(state: &HttpState, protocol: Protocol, failure: Error) -> Response {
     let (status, message) = rejection_details(state, failure);
     error(protocol, status, message)
 }
-fn rejection_details<M: ModelContract>(
-    state: &HttpState<M>,
-    failure: Error,
-) -> (StatusCode, String) {
+fn rejection_details(state: &HttpState, failure: Error) -> (StatusCode, String) {
     let hint = match &failure {
         Error::Admission(AdmissionError::Context(_)) => &state.context_hint,
         Error::Admission(AdmissionError::Capacity(_)) => &state.capacity_hint,
@@ -93,8 +86,8 @@ enum Delivery {
     Failed(Error, Frame),
 }
 
-pub(super) async fn generate<M: ModelContract>(
-    State(state): State<Arc<HttpState<M>>>,
+pub(super) async fn generate(
+    State(state): State<Arc<HttpState>>,
     Extension(ingress): Extension<Arc<OwnedSemaphorePermit>>,
     request: Request,
 ) -> Response {
@@ -200,7 +193,7 @@ pub(super) async fn generate<M: ModelContract>(
         let mut prepared = Vec::with_capacity(size);
         for index in 0..size {
             prepared.push(
-                request::prepare_inference::<M>(
+                request::prepare_inference(
                     &prepare_state.frontend,
                     prepare_state.images.as_deref(),
                     &prepare_state.grammar,
@@ -317,7 +310,7 @@ pub(super) async fn generate<M: ModelContract>(
         let mut decoders: Vec<_> = configs
             .into_iter()
             .map(|config| {
-                output::Decoder::<M::Output>::new(
+                output::Decoder::<crate::output::OutputPipeline>::new(
                     &state.frontend,
                     &state.model.config().eos_token_ids,
                     config,

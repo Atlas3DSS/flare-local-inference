@@ -26,7 +26,23 @@ def layout(**overrides):
                   snapshots=2, prefill_chunk=512, vocabulary=VOCABULARY, eos=EOS, graphs=graphs,
                   widths=(1, 2, 3), state_rows_per_request=1, draft_pages=1, record_fields=24)
     values.update(overrides)
-    return Layout(**values)
+    from ignition.preparation import contract as c, runtime_package_pb2 as p
+    bindings = {name: list(c.text_inputs(kind).values()) for (kind, _, _), name in values["graphs"].items()}
+    specs = {}
+    for fields in bindings.values():
+        for b in fields:
+            source, name = b["source"], b["buffer"]
+            width = {p.SAMPLING_PARAMETERS: 6, p.EOS_TOKEN_IDS: 8, p.LIVE_STATE_ROWS: 8,
+                     p.PROMPT_HISTOGRAM: values["vocabulary"], p.GRAMMAR_MASK: -(-values["vocabulary"] // 32),
+                     p.PAGE_TABLE: values["table_width"], p.COPY_TOKEN_IDS: 7,
+                     p.COPY_GRAMMAR_MASK: 8 * -(-values["vocabulary"] // 32), p.PROMPT_POSITION: 3}.get(source, 1)
+            dtype = np.float32 if source == p.SAMPLING_PARAMETERS else np.int64 if name in _INT64 or name.startswith("copy_") and source in (p.COPY_TOKEN_IDS, p.COPY_CONSUMED_TOKENS, p.COPY_GENERATION) or source == p.PROMPT_POSITION else np.int32
+            rows = values["prefill_chunk"] if b["indexing"] == p.PACKED_TOKEN else values["capacity"]
+            shape = (1,) if b["indexing"] == p.SCALAR else (rows, width) if width > 1 else (rows,)
+            if name not in specs or np.prod(shape) > np.prod(specs[name][1]):
+                specs[name] = (np.dtype(dtype), shape)
+    return Layout(**values, bindings=bindings, buffer_specs=specs,
+                  page_views={"page_tables": 0, "draft_page_tables": 1})
 
 
 def request(ident, prompt, limit=8, seed=0):
@@ -74,7 +90,7 @@ def test_a_cold_request_initializes_prefills_in_chunks_snapshots_and_decodes():
     step = scheduler.plan()
     assert (step.kind, step.graph, [lane.request for lane in step.lanes]) == ("init", "init1", [first])
     packed = uploads(scheduler, step)
-    assert packed["request_state_rows"] == {0: [1, 2, 3, 0, 0, 0, 0, 0]}
+    assert packed["request_state_rows"] == {0: [1, 0, 0, 0, 0, 0, 0, 0]}
     assert packed["state_source_slots"] == {0: [-1, -1, -1, -1]}
     assert packed["state_destination_slots"] == {0: [1, -1, -1, -1]}
     assert packed["state_operation"] == {0: [1, 0, 0, 0]} and packed["state_expected_consumed"] == {0: [0, -1, -1, -1]}
@@ -120,7 +136,7 @@ def test_a_cold_request_initializes_prefills_in_chunks_snapshots_and_decodes():
     step = scheduler.plan()
     assert (step.kind, step.graph, step.lanes[0].tokens) == ("speculative", "speculative1x3", 3)
     packed = uploads(scheduler, step)
-    assert packed["token_ids"] == {0: [42]} and packed["query_lengths"] == {0: [3, 0, 0, 0]}
+    assert packed["token_ids"] == {0: [42, 0, 0, 0]} and packed["query_lengths"] == {0: [3, 0, 0, 0]}
     assert packed["sample_enabled"] == {0: [1, 0, 0, 0]}
     scheduler.complete(step, records(scheduler, step, {first: (1, 702, [43, 44], 0, 2, 1)}))
     assert first.generated == [42, 43, 44] and first.consumed == 702 and first.pending_token == 44
@@ -364,6 +380,16 @@ def test_layout_selects_the_serving_variant_of_each_graph():
                          "frontend": {"eos_token_ids": [7, 8]}, "speculative_widths": [1, 2],
                          "speculative_fixed_width": None, "state_rows_per_request": 1}
 
+    fixture = layout(context=8192, table_width=32, graphs={
+        (v.kind, v.batch_capacity, v.token_capacity): name for name, v in Model.signatures.items()
+        if v.speculation_enabled in (None, True)})
+    Model.server_config["model_contract"].update(cache={"page_tokens": 256,
+        "page_tables": [{"buffer": name, "page_offset": shift} for name, shift in fixture.page_views.items()]},
+        graphs=[{"graph": name, "inputs": fields, "state_rows_per_request": 1} for name, fields in fixture.bindings.items()])
+    for name, (dtype, shape) in fixture.buffer_specs.items():
+        tensor = Tensor(*shape)
+        tensor.dtype = dtype
+        Model.buffers[name] = tensor
     result = Layout.of(Model())
     assert result.graphs == {("prefill", 1, 128): "prefill128", ("init", 4, 1): "init4",
                              ("speculative", 4, 2): "speculative4x2"}

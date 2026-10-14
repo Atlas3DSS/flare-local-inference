@@ -2,7 +2,7 @@
 
 use crate::{
     Result,
-    model::{ModelConfig, ModelContract, SamplingParameters, inputs::SamplingAdmission},
+    model::{ModelConfig, SamplingParameters},
     scheduler::RequestHandle,
 };
 
@@ -50,17 +50,17 @@ impl PromptMetadataMut<'_> {
     }
 }
 
-pub struct Admission<M: ModelContract> {
+pub struct Admission {
     pub handle: RequestHandle,
     pub sampling: SamplingParameters,
     pub max_new_tokens: u32,
     pub prompt: Vec<u32>,
-    pub data: M::PromptData,
+    pub data: crate::model::PromptData,
     pub grammar_mask: Option<Vec<i32>>,
     pub ignore_eos: bool,
 }
 
-impl<M: ModelContract> Admission<M> {
+impl Admission {
     pub fn validate(&self, config: &ModelConfig) -> Result<()> {
         self.sampling.validate()?;
         if self.handle.slot as usize >= config.limits.max_active
@@ -73,7 +73,7 @@ impl<M: ModelContract> Admission<M> {
             || self
                 .prompt
                 .iter()
-                .any(|token| *token as usize >= M::input_vocabulary(config))
+                .any(|token| *token as usize >= config.contract.input_vocabulary)
             || self
                 .grammar_mask
                 .as_ref()
@@ -83,17 +83,7 @@ impl<M: ModelContract> Admission<M> {
                 "invalid prompt, sampling parameters, grammar mask, or request generation".into(),
             );
         }
-        M::validate_prompt_data(config, &self.prompt, &self.data)
-    }
-
-    pub(crate) fn sampling(&self) -> SamplingAdmission<'_> {
-        SamplingAdmission {
-            sampling: &self.sampling,
-            max_new_tokens: self.max_new_tokens,
-            prompt: &self.prompt,
-            grammar_mask: self.grammar_mask.as_deref(),
-            ignore_eos: self.ignore_eos,
-        }
+        crate::model::validate_prompt_data(config, &self.prompt, &self.data)
     }
 
     #[cfg(feature = "server")]
@@ -108,7 +98,7 @@ impl<M: ModelContract> Admission<M> {
     pub fn from_prompt(
         config: &ModelConfig,
         handle: RequestHandle,
-        prompt: &crate::server::Prompt<M>,
+        prompt: &crate::server::Prompt,
         ignore_eos: bool,
     ) -> Result<Self> {
         let admission = Self {
@@ -129,10 +119,7 @@ impl<M: ModelContract> Admission<M> {
 }
 
 #[cfg(feature = "server")]
-pub fn validate_prompt<M: ModelContract>(
-    config: &ModelConfig,
-    prompt: &crate::server::Prompt<M>,
-) -> Result<()> {
+pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> Result<()> {
     prompt.sampling.validate()?;
     if prompt
         .tokens
@@ -157,7 +144,7 @@ pub fn validate_prompt<M: ModelContract>(
         || prompt
             .tokens
             .iter()
-            .any(|token| *token as usize >= M::input_vocabulary(config))
+            .any(|token| *token as usize >= config.contract.input_vocabulary)
         || prompt.sampling.top_k > config.contract.vocabulary as i32
         || prompt.max_new_tokens == 0
         || prompt.max_new_tokens > i32::MAX as u32
@@ -166,5 +153,5 @@ pub fn validate_prompt<M: ModelContract>(
     {
         return Err("prompt, output limit, or inputs violate the prepared model contract".into());
     }
-    M::validate_prompt_data(config, &prompt.tokens, &prompt.data)
+    crate::model::validate_prompt_data(config, &prompt.tokens, &prompt.data)
 }

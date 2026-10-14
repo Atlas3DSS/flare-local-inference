@@ -48,6 +48,21 @@ def test_c128_has_one_record_per_logical_page_and_c4_has_its_own_index():
         assert records * 584 <= size < records * 584 + 576
 
 
+def test_contract_registers_compressed_planes_from_their_storage_owner():
+    from ignition.recipes.deepseek4.contract import prepare
+
+    pool = ContinuationPool.allocate(model(), 2, 3, "cpu", dspark=False)
+    buffers = {}
+    contract = prepare({}, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=None)
+    regions = {r["storage"]["buffer"]: r for r in contract["cache"]["regions"]}
+    assert len(regions) == 1 + len(pool.pages)
+    for name, tensor in pool.pages.items():
+        region = regions["cache." + name]
+        assert buffers["cache." + name] is tensor
+        assert region["storage"]["nbytes"] == tensor.shape[1]
+        assert region["tokens_per_record"] == (128 if name.startswith("layer3.") else 4)
+
+
 def test_compressor_rows_preserve_overlap_and_the_complete_c128_interval():
     config = model()
     pool = ContinuationPool.allocate(config, 3, 2, "cpu")

@@ -110,7 +110,7 @@ def test_peer_rank_file_streams_over_its_control_connection_into_the_package(tmp
     for rank, data in enumerate((b"rank-zero" * 300, b"rank-one" * 700)):
         source = tmp_path / f"source-{rank}"
         source.write_bytes(data)
-        description = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+        description = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
         description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=len(data)))
         files.append(tmp_path / f"rank-{rank}.safetensors")
         publish(files[-1], description, [(0, source, 0, len(data))])

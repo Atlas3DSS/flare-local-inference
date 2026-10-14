@@ -305,7 +305,7 @@ mod tests {
             ..Default::default()
         };
         let index = wire::ModelIndex {
-            version: 3,
+            version: 4,
             ranks: vec![bundle(0), bundle(4096)],
             assets: vec![wire::Asset {
                 name: "tokenizer".into(),

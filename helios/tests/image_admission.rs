@@ -1,6 +1,7 @@
 #![cfg(feature = "server")]
 
 use flare_helios::frontend;
+use flare_helios::{model, scheduler};
 #[path = "support/frontend.rs"]
 mod support;
 use base64::Engine;
@@ -9,7 +10,7 @@ use flare_helios::{
         Asset, Frontend, FrontendAssets,
         images::{ImageLimits, ImageProcessor},
     },
-    model::{ModelConfig, SamplingParameters, qwen4exp::Qwen4Exp},
+    model::{ModelConfig, SamplingParameters},
     scheduler::SchedulerLimits,
     server::prepare_request,
 };
@@ -46,7 +47,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     .unwrap();
     let config = ModelConfig {
         prepared_sequence_tokens: 262144,
-        contract: Qwen4Exp::metadata(),
+        contract: support::contract("qwen38"),
         model_id: "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD".into(),
         identity: [0; 32],
         limits: SchedulerLimits {
@@ -64,7 +65,6 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         speculative_fixed_width: None,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
-        state_rows_per_request: None,
     };
     let compiler = flare_helios::grammar::GrammarCompiler::new(
         frontend.tokenizer(),
@@ -82,7 +82,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         );
         let request = json!({"model":config.model_id,"messages":[{"role":"user","content":[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":url}}]}],"max_tokens":8,"chat_template_kwargs":{"add_generation_prompt":true}});
-        let prepared = prepare_request::<Qwen4Exp>(
+        let prepared = prepare_request(
             &frontend,
             Some(&processor),
             &compiler,
@@ -132,7 +132,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         )
         .unwrap();
         assert!(matches!(
-            prepare_request::<Qwen4Exp>(&frontend, Some(&limited), &compiler, &config, request)
+            prepare_request(&frontend, Some(&limited), &compiler, &config, request)
                 .err()
                 .unwrap(),
             flare_helios::Error::Admission(flare_helios::AdmissionError::Image(_))
@@ -146,10 +146,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         "data:image/webp;base64,AA==",
     ] {
         let body = json!({"model":config.model_id,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":url}}]}]});
-        assert!(
-            prepare_request::<Qwen4Exp>(&frontend, Some(&processor), &compiler, &config, body)
-                .is_err()
-        );
+        assert!(prepare_request(&frontend, Some(&processor), &compiler, &config, body).is_err());
     }
     println!("{counts} JPEG/EXIF checkpoint admissions and encoded-size rejections passed");
 }
