@@ -4,14 +4,20 @@ Every commit requires review of its staged diff against the principles below.
 They summarize [the core design](core-design.md) and [repository guidance](../AGENTS.md).
 Consult those specifications for details relevant to the change.
 
+Helios's shared runtime policy and separation from model computation are
+non-negotiable. Reject changes that violate this boundary even when tests pass,
+performance improves, or the implementation is described as temporary. Delivery
+pressure and intended cleanup do not waive the requirement. Resolve violations
+before committing; a design acknowledgment cannot authorize them.
+
 ## Principles
 
 1. **Keep Helios as simple as possible.** Model-specific execution behavior,
    composition, state-update computation, and optimization belong in Ignition and
-   its captured programs. Limit model-specific Helios support to K/V cache
-   management and how cache storage is exposed to captured graphs, through
-   contracts kept as general as possible. Native code manages declared model-state
-   storage without implementing per-model algorithms.
+   its captured programs. Limit native specialization to concrete cache storage
+   requirements and graph cache bindings. Express differences through cache
+   schemes and prepared layout metadata reusable across models. Native code
+   manages declared model-state storage without implementing per-model algorithms.
    Introducing a captured-graph operation family requires prior explicit approval
    from project owner **Luke Alonso <lalonso@gmail.com>**. Shape and capacity
    variants are allowed within an unchanged operation contract. A new operation
@@ -27,7 +33,13 @@ Consult those specifications for details relevant to the change.
    experts, collectives, and state transfers belong in `ignition/components/`.
    Native transport, scheduling, cache ownership, input packing, frontend processing,
    and request handling stay shared; use prepared metadata and frontend assets
-   to express model-dependent behavior.
+   to express model-dependent behavior. Admission, page reservation and growth,
+   eviction, preemption, readmission, and offload must not branch on model or
+   recipe identity or capability flags that encode model allowlists. Differences
+   must follow concrete cache storage or execution constraints consumed by shared
+   policy. Trace runtime fixes across supported cache schemes and apply them to
+   every compatible contract; a single-model reproducer does not justify a
+   single-model implementation.
 4. **Use FlashInfer/b12x and NVIDIA directly.** Target SM120/SM121, reuse proven
    operators and sampling, and avoid interchangeable backends or portability layers.
    Remove superseded internal paths unless compatibility is explicitly required.
