@@ -40,8 +40,8 @@ For rank `r`, each range spans 1 TiB:
 
 | Region | Base |
 |---|---|
-| Device | `0x2000_0000_0000 + r × 2^40` |
-| Mapped host | `0x1000_0000_0000 + r × 2^40` |
+| Device | `0x0200_0000_0000 + r × 2^40` |
+| Mapped host | `0x0c00_0000_0000 + r × 2^40` |
 
 The [preparation allocator](../heliopause/src/allocator.rs) serves these
 disjoint arenas. Owners export VMM physical allocations as POSIX file

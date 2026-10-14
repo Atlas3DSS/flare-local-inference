@@ -77,6 +77,18 @@ indices refer to the exposed device list. Each tensor-parallel size requires a
 separately prepared package; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 and
 GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation.
 
+`qwen3.8-27b` prepares `nvidia/Qwen3.8-27B-NVFP4` for text generation on one GPU.
+It uses the canonical Qwen3.5 dense decoder with tensor-scaled FP8 attention
+projections and NVFP4 MLP and vocabulary weights. KV pages and Gated DeltaNet
+continuations reside in device memory; the recipe has no host-mapped tables,
+vision graphs, or learned draft model. Prepare on the same GPU architecture
+as the serving device:
+
+```sh
+.venv/bin/ignition export qwen3.8-27b --gpus 0 --max-concurrency 4 \
+  --output /data/flare-runtime/qwen38-27b-tp1-c4.safetensors --verbose
+```
+
 Export Qwen with up to five MTP draft tokens per round:
 
 ```sh

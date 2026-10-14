@@ -1,10 +1,10 @@
 //! Bounded pinned staging overlaps direct file reads with asynchronous GPU uploads.
 
+use crate::os::FileReadAt;
 use std::{
     collections::VecDeque,
-    fs::{File, OpenOptions},
+    fs::File,
     io,
-    os::unix::fs::{FileExt, OpenOptionsExt},
     ptr::null_mut,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -153,10 +153,7 @@ pub(super) unsafe fn load(
         .map(|chunk| chunk.read_range().2)
         .max()
         .unwrap();
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECT)
-        .open(&archive.path)
+    let file = crate::os::direct_reopen(&archive.file)
         .map_err(|e| invalid(format!("open model payload for direct I/O: {e}")))?;
     // SAFETY: The owning context is current throughout loading and cleanup.
     let staging = unsafe { Staging::new(&owner.driver, count, chunk_size)? };
@@ -282,6 +279,7 @@ pub(super) unsafe fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
 
     #[repr(align(4096))]
@@ -296,11 +294,7 @@ mod tests {
             .create_new(true)
             .open(&path)
             .unwrap();
-        let reader = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&path)
-            .unwrap();
+        let reader = crate::os::direct_file(&path, false).unwrap();
         std::fs::remove_file(path).unwrap();
         let payload: Vec<_> = (0..BLOCK + 37).map(|i| (i % 251) as u8).collect();
         for offset in [0, 7, BLOCK as u64 - 1, BLOCK as u64, (1u64 << 32) + 7] {

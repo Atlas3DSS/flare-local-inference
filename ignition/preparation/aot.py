@@ -1,7 +1,6 @@
 """Serializable compiled forwards with caller-owned storage and runtime handles."""
 
 import hashlib
-import fcntl
 import importlib
 import inspect
 import operator
@@ -16,6 +15,7 @@ from pathlib import Path
 from threading import RLock
 
 import torch
+from filelock import FileLock
 from torch._dynamo.aot_compile_types import SerializableCallable
 from torch._dynamo.guards import GuardsStatePickler, _Missing
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -433,8 +433,8 @@ class ForwardCache:
             for turn in hosts:
                 if holder and turn == host:
                     self.root.mkdir(parents=True, exist_ok=True)
-                    lock = (self.root / 'publication.lock').open('a+b')
-                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    lock = FileLock(self.root / 'publication.lock')
+                    lock.acquire()
                 if coordinator is not None:
                     dist.barrier(group=coordinator.group)
             yield
@@ -443,8 +443,7 @@ class ForwardCache:
                 dist.barrier(group=coordinator.group)
         finally:
             if lock is not None:
-                fcntl.flock(lock, fcntl.LOCK_UN)
-                lock.close()
+                lock.release()
 
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
         """Trace and compile in workers, then bind and warm on the owning rank."""

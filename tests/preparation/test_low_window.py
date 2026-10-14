@@ -1,6 +1,10 @@
 """Sealing the low device window keeps every free span below the external floor reserved."""
 
 import ctypes as C
+import os
+from types import SimpleNamespace
+
+import pytest
 
 from ignition.preparation.package_storage import PackageStorage
 
@@ -40,6 +44,7 @@ def storage(space):
     return owner
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows retains its low device allocation pool")
 def test_every_free_span_below_the_floor_is_reserved_and_frees_are_resealed():
     floor, start = PackageStorage.EXTERNAL_FLOOR, PackageStorage.LOW_SCAN_START
     context = (0x327c00000, 0x32ee00000 - 0x327c00000)
@@ -56,21 +61,23 @@ def test_every_free_span_below_the_floor_is_reserved_and_frees_are_resealed():
     space.taken.remove(scratch)
     calls = space.calls
     owner.seal_low_window()
-    assert sorted(owner.low_reservations) == sorted(reserved + [scratch])
+    assert all(span in owner.low_reservations for span in reserved)
+    filled = sorted(set(owner.low_reservations) - set(reserved))
+    assert filled[0][0] == scratch[0] and filled[-1][0] + filled[-1][1] == sum(scratch)
+    assert all(a + n == b for (a, n), (b, _) in zip(filled, filled[1:]))
     # Held spans are skipped, and a taken granule costs one probe (a reserve and a free).
     assert space.calls - calls < 2 * (context[1] // GRANULE) + 50
 
 
 def test_low_external_allocations_are_named_on_an_integrated_gpu():
     owner = storage(AddressSpace([]))
-    assert owner.low_allocations({0x327c00000: 8 << 20, 0x41b400000: 8 << 20}) == [(0x327c00000, 8 << 20)]
+    assert owner.low_allocations({0x327c00000: 8 << 20, PackageStorage.EXTERNAL_FLOOR: 8 << 20}) == [(0x327c00000, 8 << 20)]
     owner.integrated = False
     assert owner.low_allocations({0x327c00000: 8 << 20}) == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows retains its low device allocation pool")
 def test_setup_seals_the_window_and_verifies_allocations_land_above_the_floor():
-    import pytest
-
     space = AddressSpace([(0x327c00000, 0x32ee00000 - 0x327c00000)])
     owner = storage(space)
     owner._reserve_low_window()
@@ -80,3 +87,12 @@ def test_setup_seals_the_window_and_verifies_allocations_land_above_the_floor():
     owner.seal_low_window = lambda: None
     with pytest.raises(RuntimeError, match="still start at 0x100000000"):
         owner._reserve_low_window()
+
+
+def test_windows_keeps_low_addresses_available_for_driver_allocations(monkeypatch):
+    from ignition.preparation import package_storage
+
+    monkeypatch.setattr(package_storage, "os", SimpleNamespace(name="nt"))
+    space = AddressSpace([])
+    storage(space).seal_low_window()
+    assert space.calls == 0

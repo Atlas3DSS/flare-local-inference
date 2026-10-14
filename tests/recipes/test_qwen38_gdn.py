@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from ignition.components.recurrent import DeltaMetadata
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.qwen38 import TEXT_PREFIX
-from ignition.recipes.qwen38.gdn import (
+from ignition.components.gated_delta import (
     GDNScratch,
     GDNState,
     PreparedGDN,

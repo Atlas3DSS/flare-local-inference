@@ -19,6 +19,7 @@ const HEADROOM_BYTES: u64 = 64 << 20;
 const INTEGRATED_HOST_BYTES: u64 = 2 << 30;
 const INTEGRATED_SYSTEM_SHARE: u64 = 20;
 
+#[cfg(any(unix, test))]
 fn shared_available(meminfo: &str, total: usize) -> Result<usize> {
     let available = meminfo.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
@@ -66,8 +67,17 @@ impl NativeResources {
         if integrated == 0 {
             Ok(free)
         } else {
-            let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-            shared_available(&meminfo, total)
+            #[cfg(windows)]
+            {
+                // CUDA includes both the dedicated carveout and shared system memory.
+                Ok(free.min(total))
+            }
+            #[cfg(unix)]
+            {
+                let meminfo =
+                    std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+                shared_available(&meminfo, total)
+            }
         }
     }
 }

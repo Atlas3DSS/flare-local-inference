@@ -15,13 +15,13 @@ class PreparedVocabularyProjection:
     """
 
     def __init__(self, source, weight, local_output, output, *, runtime, session,
-                 coordinator, name):
+                 coordinator, name, activation_mode="a16"):
         if isinstance(weight, torch.Tensor):
             self.projection = UnquantizedProjection(source, weight, local_output,
                 session=session, name=f"{name}.projection")
         else:
             self.projection = QuantizedProjection(source, weight, local_output,
-                session=session, name=f"{name}.projection", activation_mode="a16")
+                session=session, name=f"{name}.projection", activation_mode=activation_mode)
         self.gather = PreparedAllGather(local_output, output, runtime=runtime,
             session=session, coordinator=coordinator, name=f"{name}.gather")
         self.output = output

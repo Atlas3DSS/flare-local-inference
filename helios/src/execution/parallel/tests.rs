@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 
 use super::*;
 use crate::execution::{CompletionRecord, Dtype};
@@ -56,7 +55,7 @@ fn rank_layout_requires_equal_cache_capacities_and_snapshot_exclusions() {
 
 #[test]
 fn fragmented_completion_remains_pending_until_all_bytes_arrive() {
-    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    let (mut sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
     let mut channel = Channel::new(receiver).unwrap();
     channel.nonblocking(true).unwrap();
     sender.write_all(&[COMPLETE, 3]).unwrap();
@@ -77,7 +76,7 @@ fn fragmented_completion_remains_pending_until_all_bytes_arrive() {
 
 #[test]
 fn packet_bounds_and_peer_errors_are_reported() {
-    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    let (mut sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
     let mut channel = Channel::new(receiver).unwrap();
     sender.write_all(&[COMPLETE, 255, 255, 255, 255]).unwrap();
     assert!(
@@ -87,7 +86,7 @@ fn packet_bounds_and_peer_errors_are_reported() {
             .to_string()
             .contains("oversized")
     );
-    let (sender, receiver) = UnixStream::pair().unwrap();
+    let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
     let mut sender = Channel::new(sender).unwrap();
     let mut receiver = Channel::new(receiver).unwrap();
     sender.send(FAILED, b"rank fence differs").unwrap();

@@ -71,3 +71,34 @@ def test_unknown_packing_fields_do_not_acquire_sources_from_model_identity():
         {}, pool, page_tokens=256, draft_lag=None)
     assert [v["buffer"] for v in value["graphs"][0]["inputs"]] == ["token_ids"]
     assert value["graphs"][0]["pending_token"] is None
+
+
+def test_dense_qwen_preserves_device_decode_and_page_storage_in_typed_contract():
+    import torch
+    from ignition.components.paged_batch import BatchInputs
+    from ignition.recipes.qwen38_dense.contract import prepare
+
+    inputs = BatchInputs.allocate(128, 2, "cpu", capacity=4)
+    buffers = inputs.buffers()
+    pool = SimpleNamespace(layout=SimpleNamespace(row_bytes=4096),
+        pages={name: torch.empty((8, 128 * 4 * 256 * 2), dtype=torch.uint8)
+               for name in ("layer3.key", "layer3.value")})
+    signatures = {kind: GraphSignature(kind, 4, 128 if kind == "prefill" else 1, tuple(buffers))
+                  for kind in ("prefill", "decode")}
+    value = ParseDict(prepare(signatures, buffers, pool, vocabulary=248320), p.ModelContract())
+    assert value.cache.page_tokens == 128 and value.vision.max_images == 0
+    prefill, decode = value.graphs
+    assert any(b.source == p.PROMPT_TOKEN and b.indexing == p.PACKED_TOKEN for b in prefill.inputs)
+    assert all(b.source not in (p.PENDING_TOKEN, p.PROMPT_AND_PENDING_TOKEN) for b in decode.inputs)
+    assert decode.pending_token.buffer == "request_pending_token"
+    assert decode.pending_token.stride == decode.pending_token.nbytes == 8
+    assert not decode.HasField("draft_cursor") and not decode.embedding_tables
+    for graph in (prefill, decode):
+        assert any(s.view == decode.pending_token and s.access == p.READ_WRITE for s in graph.state)
+    assert [(t.buffer, t.page_offset) for t in value.cache.page_tables] == [("page_tables", 0)]
+    pages = [r for r in value.cache.regions if r.kind == p.PAGED_KEY_VALUE]
+    assert len(pages) == 2
+    for region, (name, tensor) in zip(pages, pool.pages.items()):
+        assert buffers[region.storage.buffer] is tensor
+        assert region.storage.buffer == f"cache.{name}"
+        assert region.storage.stride == region.storage.nbytes == 128 * 4 * 256 * 2

@@ -7,6 +7,7 @@ no physical memory. Active requests need at least 8,192 tokens each.
 """
 
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 
 from ignition.errors import CapacityError, UsageError
@@ -46,7 +47,7 @@ class Gpu:
 
 
 def discover_gpus() -> tuple[Gpu, ...]:
-    """Enumerate GPUs through NVML without creating a CUDA context."""
+    """Enumerate NVML devices and include the shared CUDA budget on Windows iGPUs."""
     try:
         from cuda.bindings import nvml
 
@@ -60,6 +61,10 @@ def discover_gpus() -> tuple[Gpu, ...]:
             try:
                 memory = nvml.device_get_memory_info_v2(handle)
                 total, free = memory.total, memory.free
+                if os.name == "nt":
+                    shared = _integrated_memory(nvml.device_get_pci_info_v3(handle).bus_id, required=False)
+                    if shared is not None:
+                        total, free = shared
             except nvml.NotSupportedError:
                 # GB10 has no framebuffer for NVML to report; it allocates from system memory.
                 total, free = _integrated_memory(nvml.device_get_pci_info_v3(handle).bus_id)
@@ -70,20 +75,33 @@ def discover_gpus() -> tuple[Gpu, ...]:
         nvml.shutdown()
 
 
-def _integrated_memory(bus_id: str) -> tuple[int, int]:
-    """Size shared DRAM without a CUDA context or treating swap as GPU capacity."""
+def _integrated_memory(bus_id: str, *, required=True) -> tuple[int, int] | None:
+    """Query shared DRAM on Linux or the dedicated-plus-shared CUDA budget on Windows."""
     from cuda.bindings import driver
 
     def checked(call, *arguments):
         status, *values = call(*arguments)
         if status != driver.CUresult.CUDA_SUCCESS:
             raise CapacityError(f"cannot query integrated GPU memory: {call.__name__}: {status}")
-        return values[0] if values else None
+        return values[0] if len(values) == 1 else tuple(values) if values else None
 
     checked(driver.cuInit, 0)
     device = checked(driver.cuDeviceGetByPCIBusId, bus_id.encode())
     if not checked(driver.cuDeviceGetAttribute, driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_INTEGRATED, device):
+        if not required:
+            return None
         raise CapacityError(f"GPU {bus_id} does not report device memory and is not an integrated GPU")
+    if os.name == "nt":
+        context = checked(driver.cuDevicePrimaryCtxRetain, device)
+        try:
+            checked(driver.cuCtxPushCurrent, context)
+            try:
+                free, total = checked(driver.cuMemGetInfo)
+                return total, free
+            finally:
+                checked(driver.cuCtxPopCurrent)
+        finally:
+            checked(driver.cuDevicePrimaryCtxRelease, device)
     total = checked(driver.cuDeviceTotalMem, device)
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):

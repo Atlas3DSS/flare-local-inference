@@ -1,11 +1,15 @@
 //! Serve a prepared model package without a Python interpreter.
 
+#[cfg(unix)]
 mod agent;
 mod cli;
 mod cluster;
 mod environment;
+#[cfg(unix)]
 mod launch;
 mod trust;
+#[cfg(windows)]
+mod windows;
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -20,6 +24,7 @@ use flare_helios::{
 };
 
 static STOP: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 extern "C" fn stop(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
 }
@@ -27,6 +32,11 @@ extern "C" fn stop(_: libc::c_int) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match cli::Cli::parse().command {
         cli::Command::Run(args) => args,
+        #[cfg(windows)]
+        cli::Command::Agent(_) => {
+            return Err("multi-host serving is not supported on Windows".into());
+        }
+        #[cfg(unix)]
         cli::Command::Agent(agent_args) => {
             let token = agent::read_token(
                 &agent_args
@@ -47,6 +57,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return trust::revoke(&fingerprint, trust_store.as_deref());
         }
     };
+    #[cfg(windows)]
+    if !args.hosts.is_empty() || args.rank.is_some() || args.rendezvous.is_some() {
+        return Err("multi-host serving is not supported on Windows".into());
+    }
+    #[cfg(windows)]
+    unsafe {
+        if windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(stop_console), 1) == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
     let root = args
         .package
         .canonicalize()
@@ -61,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
     let options = args.load_options();
+    #[cfg(unix)]
     let rank_options = args.rank_options();
     let devices = &args.gpus;
     let inherited =
@@ -87,11 +108,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &trust::publishers(&args.publisher_keys)?,
         args.rank.filter(|&rank| rank != 0),
     )?;
+    #[cfg(unix)]
     let publisher = package.publisher().clone();
     phase.finish("signatures");
     let authorized = trust::authorize(package, &args, &mut progress)?;
     // Rank zero of a multi-host package starts its peers first, so every host loads in parallel.
+    #[cfg(unix)]
     let mut rendezvous = args.rendezvous;
+    #[cfg(windows)]
+    let rendezvous = args.rendezvous;
+    #[cfg(unix)]
     let _peers = if args.hosts.is_empty() {
         None
     } else {
@@ -285,6 +311,7 @@ fn serve(
         "http://{} · {context_tokens} tokens/request",
         server.address()
     ));
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
@@ -316,4 +343,15 @@ fn serve(
     drop(owner);
     phase.finish("");
     Ok(())
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn stop_console(event: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        STOP.store(true, Ordering::Relaxed);
+        1
+    } else {
+        0
+    }
 }

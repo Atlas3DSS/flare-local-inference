@@ -1071,7 +1071,6 @@ mod tests {
     };
     use std::{
         fs,
-        os::unix::fs::{OpenOptionsExt, PermissionsExt},
         path::Path,
         sync::{Arc, Mutex},
     };
@@ -1178,18 +1177,12 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let probe = directory.join(".probe");
-        match fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&probe)
-        {
+        match crate::os::direct_file(&probe, true) {
             Ok(_) => {
                 fs::remove_file(&probe).unwrap();
                 Some(directory)
             }
-            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+            Err(error) if cfg!(unix) && error.raw_os_error() == Some(libc::EINVAL) => {
                 eprintln!(
                     "skipping {test}: {} refuses direct I/O",
                     directory.display()
@@ -1518,6 +1511,7 @@ mod tests {
             (4, 2)
         );
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1550,6 +1544,7 @@ mod tests {
         store.memory.complete_record(&other, true).unwrap();
         assert!(store.retains_chain(&chain));
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1600,6 +1595,7 @@ mod tests {
             }
         );
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1673,6 +1669,7 @@ mod tests {
         assert!(store.store(&short).is_err());
         assert_eq!(store.stats().store_failed, 3);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1776,6 +1773,7 @@ mod tests {
         );
         assert_eq!((stats.memory_records, stats.disk_records), (0, 0));
         small.close().unwrap();
+        drop(small);
 
         // A parent that left the disk index fails the child, whose memory copy
         // holds only its tail pages.
@@ -1838,6 +1836,7 @@ mod tests {
         );
         assert!(stats.outbound_rate > 0.0);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1859,7 +1858,8 @@ mod tests {
             10,
             StateSlotId(2),
         );
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let blocked = directory.join(record::temporary_name(&root.key));
+        fs::create_dir(&blocked).unwrap();
         let (_, bytes) = copy_landed(&mut store, &root, None, 1);
         let mut events = Vec::new();
         store.memory_stored(root.id, root.key, Ok(bytes), &mut events);
@@ -1886,7 +1886,7 @@ mod tests {
         assert!(!store.memory.index().contains(&root.key));
         assert!(!store.disk.index().contains(&root.key));
         assert!(!directory.join(record::file_name(&root.key)).exists());
-        assert!(!directory.join(record::temporary_name(&root.key)).exists());
+        assert!(blocked.is_dir());
         let stats = store.stats();
         assert_eq!(
             (stats.store_failed, stats.stored, stats.store_skipped),
@@ -1899,7 +1899,7 @@ mod tests {
         assert_eq!(stats.outbound_in_flight, 1);
         let waiting = &store.outbound[&child.key];
         assert!(waiting.parent_failed && waiting.parent.is_none());
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir(&blocked).unwrap();
 
         // The child's copy lands without a parent to extend: it fails too.
         let record = landed(&mut store, child.key, child.bucket, 10, 2);
@@ -1910,6 +1910,7 @@ mod tests {
         assert!(store.outbound.is_empty());
         assert_eq!(store.stats().store_failed, 2);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2065,6 +2066,7 @@ mod tests {
         assert!(store.memory.index().nodes().all(|node| !node.pinned()));
         assert!(store.disk.index().nodes().all(|node| !node.pinned()));
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2139,6 +2141,7 @@ mod tests {
         }
         assert_eq!(store.stats().memory_records, 3);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2229,6 +2232,7 @@ mod tests {
             (2, 2, 4)
         );
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2260,6 +2264,7 @@ mod tests {
         // The closed store still answers: the key is indexed, so it is skipped.
         assert!(!store.store(&root).unwrap());
         assert_eq!(store.stats().store_skipped, 1);
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2587,6 +2592,7 @@ mod tests {
         assert_eq!(store.stats().fetched, 1);
         assert!(store.memory.record(&child.key).is_some());
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2915,8 +2921,9 @@ mod tests {
         assert_eq!((stats.memory_records, stats.disk_records), (2, 3));
 
         // A record whose file cannot be created is dropped from memory and counted.
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
         let fourth = &checkpoints[3];
+        let blocked = directory.join(record::temporary_name(&fourth.key));
+        fs::create_dir(&blocked).unwrap();
         assert!(store.store(fourth).unwrap());
         match wait_event(&mut store) {
             StoreEvent::Stored { key, result, .. } => {
@@ -2926,7 +2933,7 @@ mod tests {
             other => panic!("unexpected event {other:?}"),
         }
         wait_until(&mut store, |store| store.outbound.is_empty());
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir(&blocked).unwrap();
         assert!(!store.memory.index().contains(&fourth.key));
         assert!(!store.disk.index().contains(&fourth.key));
         assert!(store.memory.index().contains(&first.key));

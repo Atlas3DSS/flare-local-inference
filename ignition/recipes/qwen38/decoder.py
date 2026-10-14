@@ -145,7 +145,7 @@ class DecoderScratch:
         if type(sample_rows) is not int or sample_rows <= 0:
             raise ValueError("decoder sampling capacity must be positive")
         from .attention import QSAScratch
-        from .gdn import GDNScratch
+        from ignition.components.gated_delta import GDNScratch
         from .hyperconnection import HyperconnectionScratch
         from .moe import QwenMoeScratch
         from .ple import PLEScratch
@@ -198,7 +198,7 @@ class PreparedDecoder:
         from ignition.components.linear import UnquantizedProjection
 
         from .attention import PreparedAttention
-        from .gdn import PreparedGDN
+        from ignition.components.gated_delta import PreparedGDN
         from .hyperconnection import PreparedHyperconnection
         from .moe import PreparedQwenMoe
         from .ple import PreparedPLE

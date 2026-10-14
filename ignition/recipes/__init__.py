@@ -20,9 +20,10 @@ def recipes() -> tuple[Recipe, ...]:
     from .deepseek41.recipe import RECIPE as deepseek41
     from .glm53.recipe import RECIPE as glm53
     from .qwen38.recipe import RECIPE as qwen38
+    from .qwen38_dense.recipe import RECIPE as qwen38_dense
     from .mimo_v2.recipe import RECIPE as mimo_v2
 
-    return qwen38, glm53, deepseek41, deepseek4, mimo_v2
+    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2
 
 
 def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:

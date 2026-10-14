@@ -89,7 +89,7 @@ macro_rules! driver {
                 // SAFETY: These signatures match the CUDA driver ABI; the library
                 // remains loaded for the lifetime of all resolved entrypoints.
                 unsafe {
-                    let library = Library::new("libcuda.so.1").map_err(|e| e.to_string())?;
+                    let library = crate::os::cuda_library().map_err(|e| e.to_string())?;
                     $(let $field = *library.get(concat!($symbol, "\0").as_bytes())
                         .map_err(|e| e.to_string())?;)*
                     Ok(Self { _library: library, $($field,)* })
