@@ -217,6 +217,8 @@ class PreparedGlmIndexer:
         glm_pool.quantize_queries(*self.query_arguments, plan=self.query_plan)
         glm_pool.update_pools(*self.pool_arguments, plan=self.pool_plan)
         if self.prepares_tables:
+            # Packages zero this scratch, so every graph restores the selection width b12x reads.
+            s.active_width.fill_(s.page_table.shape[1] * 64)
             pools = (m.positions + 1) // 4
             s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
             if self.mode == "prefill":
