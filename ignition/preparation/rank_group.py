@@ -57,6 +57,22 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
         model.manifest()
         control.send(model.memory_report)
         command = control.recv()
+        if isinstance(command, tuple) and command[0] == "embedding_tables":
+            from multiprocessing.reduction import recv_handle
+
+            _, catalog, count = command
+            if catalog != model.embedding_catalog or count != 2 * len(catalog["tables"]):
+                raise ValueError("shared embedding catalog differs between prepared ranks")
+            descriptors = []
+            try:
+                for _ in range(count):
+                    descriptors.append(recv_handle(control))
+                model.prepare_embedding_tables(descriptors=descriptors)
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+            control.send("embedding_tables_ready")
+            command = control.recv()
         if isinstance(command, tuple) and command[0] == "export":
             from .runtime_package import export_model
 
@@ -90,9 +106,10 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
 class PreparedRankGroup:
     """Root model and owned peer processes through native coordinated shutdown."""
 
-    def __init__(self, model, processes, connections, controls, supervisor, rendezvous, reports):
+    def __init__(self, model, processes, connections, controls, supervisor, rendezvous, reports, *, progress=None):
         self.model, self.processes, self.connections, self.controls = model, processes, connections, controls
         self.supervisor, self.rendezvous = supervisor, rendezvous
+        self.progress = progress
         self.memory_report = {"world_size": len(processes) + 1, "ranks": [model.memory_report, *reports]}
         self._started = self._closed = False
 
@@ -100,6 +117,20 @@ class PreparedRankGroup:
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         try:
+            if self.model.embedding_catalog is not None:
+                from multiprocessing.reduction import send_handle
+
+                with phase(self.progress, "Load embedding tables into shared RAM") as stage:
+                    tables = self.model.prepare_embedding_tables()
+                    stage.update(f"{tables.nbytes / (1 << 30):.1f} GiB shared across {len(self.processes) + 1} ranks")
+                descriptors = tables.descriptors
+                for control, process in zip(self.controls, self.processes, strict=True):
+                    control.send(("embedding_tables", self.model.embedding_catalog, len(descriptors)))
+                    for descriptor in descriptors:
+                        send_handle(control, descriptor, process.pid)
+                for control in self.controls:
+                    if control.recv() != "embedding_tables_ready":
+                        raise RuntimeError("rank did not confirm its resident embedding binding")
             for control in self.controls:
                 control.send("serve")
                 control.close()
@@ -204,7 +235,8 @@ def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=N
             for control in controls:
                 reports.append(control.recv())
                 stage.update(advance=1)
-        return PreparedRankGroup(model, processes, connections, controls, supervisor, rendezvous, reports)
+        return PreparedRankGroup(model, processes, connections, controls, supervisor, rendezvous, reports,
+                                 progress=progress)
     except BaseException:  # noqa: BLE001 - Preparation interruption must terminate every rank.
         traceback.print_exc()
         supervisor.abort("tensor-parallel preparation failed")

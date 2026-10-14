@@ -146,7 +146,7 @@ fn current_context() -> PyResult<(usize, i32)> {
     crate::current_context().map_err(|error| PyRuntimeError::new_err(error.to_string()))
 }
 
-fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
+pub(crate) fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
     macro_rules! field {
         ($value:expr, $name:literal, $kind:ty) => {
             $value.get_item($name)?.extract::<$kind>()?
@@ -193,7 +193,7 @@ fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<ExecutionManifest> {
     }
     Ok(ExecutionManifest {
         collectives: None,
-        engram: None,
+        engram: crate::embedding_tables::binding(value)?,
         cache: None,
         offload: None,
         abi_version: field!(value, "abi_version", u32),
@@ -497,6 +497,8 @@ fn flare_heliopause(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_class::<ReplayCompletion>()?;
     }
     module.add_class::<PreparedGraphExecutor>()?;
+    module.add_class::<crate::embedding_tables::NativeEmbeddingTables>()?;
+    module.add_class::<crate::embedding_tables::NativeEmbeddingBinding>()?;
     module.add_class::<ExecutionCompletion>()?;
     module.add_class::<NativeRankSupervisor>()?;
     module.add_class::<NativeCliSignals>()?;

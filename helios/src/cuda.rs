@@ -23,6 +23,7 @@ type EventElapsed = unsafe extern "C" fn(*mut f32, Handle, Handle) -> c_int;
 type StreamWait = unsafe extern "C" fn(Handle, Handle, c_uint) -> c_int;
 type WaitValue = unsafe extern "C" fn(Handle, u64, u32, c_uint) -> c_int;
 type HostPointer = unsafe extern "C" fn(*mut u64, Handle, c_uint) -> c_int;
+type PointerAttribute = unsafe extern "C" fn(*mut c_void, c_int, u64) -> c_int;
 type StreamCreatePriority = unsafe extern "C" fn(*mut Handle, c_uint, c_int) -> c_int;
 type PriorityRange = unsafe extern "C" fn(*mut c_int, *mut c_int) -> c_int;
 type HostRegister = unsafe extern "C" fn(Handle, usize, c_uint) -> c_int;
@@ -90,6 +91,7 @@ struct Driver {
     stream_wait: StreamWait,
     wait_value: WaitValue,
     host_pointer: HostPointer,
+    pointer_attribute: PointerAttribute,
     stream_create_priority: StreamCreatePriority,
     priority_range: PriorityRange,
     host_register: HostRegister,
@@ -142,6 +144,7 @@ impl Driver {
                 stream_wait: symbol!("cuStreamWaitEvent"),
                 wait_value: symbol!("cuStreamWaitValue32_v2"),
                 host_pointer: symbol!("cuMemHostGetDevicePointer_v2"),
+                pointer_attribute: symbol!("cuPointerGetAttribute"),
                 stream_create_priority: symbol!("cuStreamCreateWithPriority"),
                 priority_range: symbol!("cuCtxGetStreamPriorityRange"),
                 host_register: symbol!("cuMemHostRegister_v2"),
@@ -493,6 +496,49 @@ impl Stream {
             (self.driver.host_pointer)(&mut address, host.handle as Handle, 0)
         })?;
         Ok(address as usize)
+    }
+
+    /// Resolve a mapped host allocation's CPU address before a native reader
+    /// polls a graph-produced mailbox. Ordinary device storage is not readable
+    /// through a host pointer, even when its virtual address is nonzero.
+    pub(crate) fn host_address(&self, address: usize, nbytes: usize) -> Result<usize> {
+        let last = address
+            .checked_add(nbytes.checked_sub(1).ok_or("empty host mailbox")?)
+            .ok_or("host mailbox address overflow")?;
+        let mut host_start = 0;
+        for pointer in [address, last] {
+            let mut kind: c_int = 0;
+            self.driver
+                .check("cuPointerGetAttribute(MEMORY_TYPE)", unsafe {
+                    (self.driver.pointer_attribute)(
+                        (&mut kind as *mut c_int).cast(),
+                        2,
+                        pointer as u64,
+                    )
+                })?;
+            if kind != 1 {
+                // CU_MEMORYTYPE_HOST
+                return Err("embedding request mailbox must use mapped host storage".into());
+            }
+            let mut host: Handle = std::ptr::null_mut();
+            self.driver
+                .check("cuPointerGetAttribute(HOST_POINTER)", unsafe {
+                    (self.driver.pointer_attribute)(
+                        (&mut host as *mut Handle).cast(),
+                        4,
+                        pointer as u64,
+                    )
+                })?;
+            if pointer == address {
+                host_start = host as usize;
+            } else if host_start.checked_add(nbytes - 1) != Some(host as usize) {
+                return Err("embedding request mailbox is not one contiguous host range".into());
+            }
+        }
+        if host_start == 0 {
+            return Err("embedding request mailbox lacks a host address".into());
+        }
+        Ok(host_start)
     }
 
     pub(crate) fn wait(&self, event: &Event) -> Result<()> {

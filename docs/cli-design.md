@@ -164,6 +164,29 @@ changes require preparation again but no Rust rebuild. Validate the chosen
 configuration through an exported package before publishing native-serving
 performance results.
 
+DeepSeek V4.1 development serving keeps its Engram tables in shared RAM. Allow
+about 189 GiB of host RAM for the tables, in addition to preparation and serving
+memory. One rank loads the checkpoint spans into immutable resident storage;
+the other ranks share those bytes. Requests gather rows from RAM without reading
+the checkpoint files or calling Python. Each rank owns its delivery staging and
+CUDA events. This development path supports ranks on one host and uses RAM only.
+
+With four serving GPUs and four reserved compiler GPUs, run:
+
+```sh
+.venv/bin/ignition serve deepseek-v4.1-flash --gpus 0,1,2,3 --compile-gpus 4,5,6,7 \
+  --max-concurrency 1 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
+  --host 0.0.0.0 --port 8001 --verbose
+```
+
+The command prepares and captures graphs, loads the RAM tables once, and starts
+Helios directly. It does not write or reload a runtime package. The extension
+build above is required once; model edits reuse cached kernel and forward
+artifacts where their prepared computation is unchanged. Use an exported package
+for final native performance validation: development ranks run in separate
+processes with separate delivery staging, while the native CLI shares staging
+between its rank threads.
+
 ### 3.2 Native serving flags
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration

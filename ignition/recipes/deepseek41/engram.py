@@ -52,7 +52,7 @@ class Tables:
                 inputs[layer] = EngramInputs.allocate(tokens, device)
                 mailboxes[layer] = host_allocator(f"engram_{layer}_requests", (tokens * 24 + 1,), torch.int64)
                 mailboxes[layer].host_view.zero_()
-            stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB on disk")
+            stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB in checkpoint spans")
         return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence)
 
     def buffers(self):
@@ -61,6 +61,17 @@ class Tables:
 
     def events(self):
         return {f"engram_{layer}_ready": inputs.ready.cuda_event for layer, inputs in self.inputs.items()}
+
+    def resident_catalog(self):
+        """Source spans and native bindings for shared RAM delivery without package export."""
+        return {"vocabulary": len(self.token_map), "tables": [
+            {"planes": [{"path": str(source.path), "offset": source.offset,
+                         "nbytes": source.nbytes, "row_bytes": row_bytes}
+                        for source, row_bytes in zip(self.sources[layer], (256, 8), strict=True)],
+             "heads": 24, "weights": f"engram_{layer}_weights", "scales": f"engram_{layer}_scales",
+             "hashes": f"engram_{layer}_hashes", "event": f"engram_{layer}_ready",
+             "request": f"engram_{layer}_requests"}
+            for layer in self.geometry.layer_ids]}
 
     def append(self, index, payload, cursor):
         from ignition.preparation.package_file import align

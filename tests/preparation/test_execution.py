@@ -48,6 +48,47 @@ def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
     assert manifest["buffers"][-1]["dtype"] == "bool"
 
 
+def test_resident_binding_is_retained_for_diagnostics_and_excluded_from_export(monkeypatch):
+    import flare_heliopause
+    from ignition.preparation.model import PreparedModel
+
+    catalog, binding, events = {"vocabulary": 32, "tables": []}, object(), {"ready": 123}
+    calls = []
+
+    class Resident:
+        def __init__(self, supplied, *, descriptors):
+            calls.append((supplied, descriptors))
+
+        def bind(self, manifest, supplied_events):
+            assert "engram" not in manifest
+            assert supplied_events == events
+            return binding
+
+    monkeypatch.setattr(flare_heliopause, "EmbeddingTables", Resident)
+    model = _execution(model_class=PreparedModel, server_config={}, memory_report={}, session=None,
+                       embedding_catalog=catalog, export_events=events)
+    spans = [(4096, 4), (8192, 8), (12288, 512), (16384, 128), (20480, 1)]
+    monkeypatch.setattr(model, "_validate_resources", lambda: (9, [11, 12], spans))
+    owner = model.prepare_embedding_tables(descriptors=[31, 32])
+    assert calls == [(catalog, [31, 32])]
+    assert model.embedding_tables is owner and model.manifest()["engram"] is binding
+    assert "engram" not in model.manifest(all_variants=True)
+    with pytest.raises(RuntimeError, match="existing attachment"):
+        model.prepare_embedding_tables()
+
+
+def test_resident_tables_reject_an_extension_without_table_registration_before_cuda(monkeypatch):
+    import flare_heliopause
+    from ignition.preparation.model import PreparedModel
+
+    monkeypatch.delattr(flare_heliopause, "EmbeddingTables", raising=False)
+    model = _execution(model_class=PreparedModel, server_config={}, memory_report={}, session=None,
+                       embedding_catalog={"vocabulary": 32, "tables": []})
+    with pytest.raises(RuntimeError, match="rebuilding the installed Heliopause extension"):
+        model.prepare_embedding_tables()
+    assert model.embedding_tables is None and not model.consumed
+
+
 def test_speculative_manifest_exports_vector_abi(monkeypatch):
     execution = _execution()
     buffers = dict(execution.buffers)

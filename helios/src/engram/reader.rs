@@ -4,8 +4,12 @@ use crate::Result;
 use io_uring::{IoUring, opcode, types};
 use std::{
     fs::{File, OpenOptions},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::OpenOptionsExt,
+    },
     path::Path,
+    sync::Arc,
 };
 
 const BLOCK: usize = 4096;
@@ -54,7 +58,7 @@ impl Aligned {
     }
 }
 
-fn open_file(path: &Path) -> Result<File> {
+pub(super) fn open_file(path: &Path) -> Result<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECT)
@@ -63,13 +67,55 @@ fn open_file(path: &Path) -> Result<File> {
 }
 
 pub(crate) struct Resident {
-    storage: Aligned,
+    storage: ResidentMapping,
+    file: File,
     skip: usize,
     nbytes: usize,
 }
 
+struct ResidentMapping {
+    address: usize,
+    nbytes: usize,
+}
+
+impl ResidentMapping {
+    fn new(file: &File, nbytes: usize, writable: bool) -> Result<Self> {
+        let protection = libc::PROT_READ | if writable { libc::PROT_WRITE } else { 0 };
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                nbytes,
+                protection,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            return Err(format!(
+                "map resident embedding table: {}",
+                std::io::Error::last_os_error()
+            )
+            .into());
+        }
+        Ok(Self {
+            address: address as usize,
+            nbytes,
+        })
+    }
+}
+
+impl Drop for ResidentMapping {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.address as *mut libc::c_void, self.nbytes) };
+    }
+}
+
+const RESIDENT_SEALS: i32 =
+    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+
 impl Resident {
-    fn load(file: &File, plane: Plane) -> Result<Self> {
+    pub(super) fn load(file: &File, plane: Plane) -> Result<Self> {
         let skip = (plane.offset % BLOCK as u64) as usize;
         let required = skip
             .checked_add(plane.nbytes)
@@ -79,12 +125,31 @@ impl Resident {
             .ok_or("resident Engram allocation exceeds host range")?
             / BLOCK
             * BLOCK;
-        let storage = Aligned::new(extent.max(BLOCK))?;
+        let extent = extent.max(BLOCK);
+        let descriptor = unsafe {
+            libc::memfd_create(
+                c"flare-embedding-table".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        if descriptor < 0 {
+            return Err(format!(
+                "create resident embedding table: {}",
+                std::io::Error::last_os_error()
+            )
+            .into());
+        }
+        // The descriptor is newly created and owned exclusively until published.
+        let backing = unsafe { File::from_raw_fd(descriptor) };
+        backing
+            .set_len(extent as u64)
+            .map_err(|e| format!("size resident embedding table: {e}"))?;
+        let storage = ResidentMapping::new(&backing, extent, true)?;
         let offset = plane.offset - skip as u64;
         std::thread::scope(|scope| -> Result<()> {
             let mut workers = Vec::new();
             for reader in 0..LOAD_READERS.min(extent.div_ceil(LOAD_CHUNK)) {
-                let address = storage.0;
+                let address = storage.address;
                 workers.push(
                     std::thread::Builder::new()
                         .name(format!("helios-table-loader-{reader}"))
@@ -135,18 +200,57 @@ impl Resident {
             }
             Ok(())
         })?;
+        drop(storage);
+        if unsafe { libc::fcntl(backing.as_raw_fd(), libc::F_ADD_SEALS, RESIDENT_SEALS) } < 0 {
+            return Err(format!(
+                "seal resident embedding table: {}",
+                std::io::Error::last_os_error()
+            )
+            .into());
+        }
+        Self::from_shared(backing, plane)
+    }
+
+    pub(super) fn from_shared(file: File, plane: Plane) -> Result<Self> {
+        let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+        if seals < 0 || seals & RESIDENT_SEALS != RESIDENT_SEALS {
+            return Err("resident embedding table must have immutable size and contents".into());
+        }
+        let skip = (plane.offset % BLOCK as u64) as usize;
+        let required = skip
+            .checked_add(plane.nbytes)
+            .ok_or("resident embedding plane exceeds host range")?;
+        let extent = required
+            .checked_add(BLOCK - 1)
+            .ok_or("resident embedding plane exceeds host range")?
+            / BLOCK
+            * BLOCK;
+        let extent = extent.max(BLOCK);
+        if file
+            .metadata()
+            .map_err(|e| format!("inspect resident embedding table: {e}"))?
+            .len()
+            != extent as u64
+        {
+            return Err("shared resident embedding table extent differs from its plane".into());
+        }
         Ok(Self {
-            storage,
+            storage: ResidentMapping::new(&file, extent, false)?,
+            file,
             skip,
             nbytes: plane.nbytes,
         })
+    }
+
+    pub(super) fn descriptor(&self) -> i32 {
+        self.file.as_raw_fd()
     }
 
     fn bytes(&self) -> &[u8] {
         // SAFETY: Every logical byte was initialized by successful reads, and
         // scoped readers joined before this immutable view becomes available.
         unsafe {
-            std::slice::from_raw_parts((self.storage.0 + self.skip) as *const u8, self.nbytes)
+            std::slice::from_raw_parts((self.storage.address + self.skip) as *const u8, self.nbytes)
         }
     }
 }
@@ -292,15 +396,15 @@ impl DiskReader {
 
 pub(crate) enum Reader {
     Disk(DiskReader),
-    Ram([Resident; 2]),
+    Ram([Arc<Resident>; 2]),
 }
 impl Reader {
     pub fn open(path: &Path, planes: &[Plane; 2], resident: bool) -> Result<Self> {
         if resident {
             let file = open_file(path)?;
             Ok(Self::Ram([
-                Resident::load(&file, planes[0])?,
-                Resident::load(&file, planes[1])?,
+                Arc::new(Resident::load(&file, planes[0])?),
+                Arc::new(Resident::load(&file, planes[1])?),
             ]))
         } else {
             Ok(Self::Disk(DiskReader::open(path)?))
@@ -345,6 +449,40 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_resident_plane_outlives_source_and_loader_and_rejects_mutation() {
+        let path =
+            std::env::temp_dir().join(format!("helios-engram-shared-{}.bin", std::process::id()));
+        let bytes: Vec<_> = (0..12345).map(|i| (i * 19 + i / 7) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let plane = Plane {
+            offset: 97,
+            nbytes: 8192,
+            row_bytes: 128,
+        };
+        let original = Resident::load(&open_file(&path).unwrap(), plane).unwrap();
+        let peer = Resident::from_shared(original.file.try_clone().unwrap(), plane).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            original.file.metadata().unwrap().ino(),
+            peer.file.metadata().unwrap().ino()
+        );
+        assert!(original.file.set_len(1).is_err());
+        let value = 255u8;
+        assert_eq!(
+            unsafe { libc::pwrite(original.descriptor(), (&value as *const u8).cast(), 1, 97) },
+            -1
+        );
+        let wrong = Plane {
+            nbytes: plane.nbytes + BLOCK,
+            ..plane
+        };
+        assert!(Resident::from_shared(original.file.try_clone().unwrap(), wrong).is_err());
+        std::fs::remove_file(path).unwrap();
+        drop(original);
+        assert_eq!(peer.bytes(), &bytes[97..97 + 8192]);
+    }
 
     #[test]
     fn resident_load_covers_parallel_chunks_and_rejects_truncated_planes() {

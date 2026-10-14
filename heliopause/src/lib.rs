@@ -3,6 +3,7 @@
 pub use helios_core::*;
 
 mod allocator;
+mod embedding_tables;
 mod lifetime;
 mod processes;
 mod python;

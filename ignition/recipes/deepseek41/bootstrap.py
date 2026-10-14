@@ -297,6 +297,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
         export_zero_ranges=storage_ranges(disposable), export_events=tables.events(),
+        embedding_catalog=tables.resident_catalog(),
         package_data=tables if rank == 0 else None,
         resources=(weights, tables, pool, requests, inputs, admission, commands, arena, forwards,
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,

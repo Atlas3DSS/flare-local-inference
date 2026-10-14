@@ -1,11 +1,13 @@
 //! Host- or graph-produced n-gram requests and asynchronous compact-row delivery.
 
+mod prepared;
 mod reader;
 use crate::{
     Error, Result,
     cuda::{PinnedHost, Stream},
     execution::{ExecutionManifest, GraphKind, Upload},
 };
+pub use prepared::{PlaneSource, PreparedTables, TableSource};
 pub(crate) use reader::Plane;
 use std::{
     path::Path,
@@ -51,7 +53,7 @@ impl Storage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Table {
     pub(crate) planes: [Plane; 2],
     pub(crate) heads: usize,
@@ -62,7 +64,7 @@ pub(crate) struct Table {
     pub(crate) request: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Index {
     pub(crate) vocabulary: usize,
     pub(crate) tables: Vec<Table>,
@@ -159,17 +161,38 @@ impl Shared {
         device: i32,
         storage: Storage,
     ) -> Result<Arc<Self>> {
-        let stream = Stream::open(context, device)?;
         let index = Arc::new(index);
+        let readers = index
+            .tables
+            .iter()
+            .map(|table| reader::Reader::open(path, &table.planes, storage == Storage::Ram))
+            .collect::<Result<Vec<_>>>()?;
+        Self::with_readers(index, readers, ranks, max_tokens, context, device)
+    }
+
+    fn with_readers(
+        index: Arc<Index>,
+        readers: Vec<reader::Reader>,
+        ranks: usize,
+        max_tokens: usize,
+        context: usize,
+        device: i32,
+    ) -> Result<Arc<Self>> {
+        if ranks == 0 || ranks > 16 || max_tokens == 0 || readers.len() != index.tables.len() {
+            return Err("invalid embedding delivery geometry".into());
+        }
+        let stream = Stream::open(context, device)?;
         let mut layers = Vec::new();
-        for table in &index.tables {
-            let mut reader = reader::Reader::open(path, &table.planes, storage == Storage::Ram)?;
+        for (table, mut reader) in index.tables.iter().zip(readers) {
+            let staging_bytes = table
+                .planes
+                .iter()
+                .try_fold(0usize, |total, plane| total.checked_add(plane.row_bytes))
+                .and_then(|n| n.checked_mul(table.heads))
+                .and_then(|n| n.checked_mul(max_tokens))
+                .ok_or("embedding staging exceeds host range")?;
             let staging = Arc::new(Staging {
-                data: stream.mapped_host_buffer(
-                    max_tokens
-                        * table.heads
-                        * table.planes.iter().map(|p| p.row_bytes).sum::<usize>(),
-                )?,
+                data: stream.mapped_host_buffer(staging_bytes)?,
                 ready: stream.mapped_host_buffer(4)?,
                 error: Mutex::new(None),
             });
@@ -322,20 +345,22 @@ impl Transfers {
         for (i, table) in binding.shared.index.tables.iter().enumerate() {
             let stream = Stream::open(manifest.context, manifest.device)?;
             let flag = stream.mapped_address(&binding.shared.layers[i].staging.ready)?;
+            let request = table
+                .request
+                .as_ref()
+                .map(|name| {
+                    let buffer = manifest.buffer(name)?;
+                    let address = stream.host_address(buffer.address, buffer.nbytes)?;
+                    Ok::<_, Error>((address, address + buffer.nbytes - 8))
+                })
+                .transpose()?;
             layers.push(Transfer {
                 stream,
                 flag,
                 weights: manifest.buffer(&table.weights)?.address,
                 scales: manifest.buffer(&table.scales)?.address,
                 event: binding.events[i],
-                request: table
-                    .request
-                    .as_ref()
-                    .map(|name| {
-                        let buffer = manifest.buffer(name)?;
-                        Ok::<_, Error>((buffer.address, buffer.address + buffer.nbytes - 8))
-                    })
-                    .transpose()?,
+                request,
             });
         }
         Ok(Self { binding, layers })
