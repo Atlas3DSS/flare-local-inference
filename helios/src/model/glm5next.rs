@@ -40,6 +40,7 @@ impl Glm5Next {
 }
 
 impl ModelContract for Glm5Next {
+    const GROWABLE_OUTPUT: bool = true;
     type Inputs = inputs::Inputs;
 
     fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {

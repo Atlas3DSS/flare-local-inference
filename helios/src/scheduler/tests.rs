@@ -200,6 +200,7 @@ pub(super) fn spec(tokens: usize, max_new: u32) -> RequestSpec {
         max_new_tokens: max_new,
         grammar_constrained: false,
         host_stops: false,
+        growable_output: false,
     }
 }
 fn records(
@@ -1901,6 +1902,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             max_new_tokens: 8,
             grammar_constrained: false,
             host_stops: false,
+            growable_output: false,
         })
         .unwrap();
     assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(1));
@@ -2738,12 +2740,13 @@ fn invalid_inbound_requests_reserve_nothing_and_planned_admission_matches_admit(
     assert_eq!(scheduler.stats().host_hits, 0);
     let plan = scheduler.plan_admission(&request).unwrap();
     assert_eq!(plan.resident_tokens(), 0);
-    let lookups = scheduler.stats().cache_lookups;
+    // Lookups count once per admitted request; the failed attempts above count none.
+    assert_eq!(scheduler.stats().cache_lookups, 0);
     let admitted = scheduler
         .admit_planned(request.clone(), plan, None)
         .unwrap();
     assert!(admitted.ticket.is_none());
-    assert_eq!(scheduler.stats().cache_lookups, lookups);
+    assert_eq!(scheduler.stats().cache_lookups, 1);
     let live = scheduler.request(admitted.handle).unwrap();
     assert_eq!(live.phase, RequestPhase::Initialize);
     assert_eq!(live.consumed_tokens, 0);
@@ -2922,4 +2925,140 @@ fn shutdown_release_drops_inbound_tickets_and_their_ancestor_pins() {
     assert_eq!(free(&scheduler), (7, 3));
     scheduler.ensure_resources(8, 4).unwrap();
     assert_eq!(free(&scheduler), (8, 4));
+}
+
+/// Plans, commits, and completes one step: state transfers complete as copies, and every
+/// other lane consumes its tokens and samples one more.
+fn sample_round(scheduler: &mut RequestScheduler, fence: u64) -> ScheduledStep {
+    let plan = scheduler.plan().unwrap();
+    let step = plan.step.clone();
+    scheduler.commit(&plan, Fence(fence)).unwrap();
+    if matches!(
+        step.kind,
+        GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot | GraphKind::Vision
+    ) {
+        let completions = state_records(scheduler, &step, fence);
+        scheduler
+            .complete(Fence(fence), &completions, Default::default())
+            .unwrap();
+        return step;
+    }
+    let mut output = [CompletionRecord::default(); 4];
+    for lane in &step.lanes {
+        let request = scheduler.request(lane.request).unwrap();
+        output[lane.request.slot as usize] = CompletionRecord {
+            generation: lane.request.generation as i64,
+            submission_sequence: fence as i64,
+            consumed_tokens: (lane.start_position + lane.tokens as u64) as i64,
+            generated_tokens: request.generated_tokens as i64 + 1,
+            token_id: 100,
+            status: 1,
+            ..Default::default()
+        };
+    }
+    scheduler
+        .complete(Fence(fence), &output, Default::default())
+        .unwrap();
+    step
+}
+
+fn growable(tokens: usize, max_new: u32) -> RequestSpec {
+    RequestSpec {
+        growable_output: true,
+        ..spec(tokens, max_new)
+    }
+}
+
+#[test]
+fn growable_requests_reserve_a_page_of_output_and_grow_while_decoding() {
+    let mut scheduler = scheduler(2, 4, 4);
+    let handle = scheduler.admit(growable(60, 400)).unwrap();
+    // The prompt and one page of output, not the eight pages its output limit spans.
+    assert_eq!(scheduler.free_page_count(), 2);
+    init(&mut scheduler, 1);
+    let mut fence = 2;
+    while scheduler.request(handle).unwrap().consumed_tokens < 70 {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+    }
+    // Two rounds and a page ahead of its position, the request took a third page.
+    assert_eq!(scheduler.free_page_count(), 1);
+    // A request without an output limit waits for pages instead of reserving them.
+    assert!(scheduler.admit(growable(60, 400)).is_err());
+    assert_eq!(scheduler.stats().preemptions, 0);
+}
+
+#[test]
+fn starved_growable_request_preempts_the_newest_and_resumes_from_its_checkpoint() {
+    let mut scheduler = scheduler(2, 6, 4);
+    let older = scheduler.admit(growable(60, 400)).unwrap();
+    let newer = scheduler.admit(growable(60, 400)).unwrap();
+    assert_eq!(scheduler.free_page_count(), 2);
+    let mut fence = 1;
+    while !scheduler.request(newer).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "no request ran out of pages");
+    }
+    // The pool cannot hold both histories; the newest growable request yields its pages.
+    assert!(!scheduler.request(older).unwrap().preempted());
+    let request = scheduler.request(newer).unwrap();
+    assert_eq!(request.phase, RequestPhase::Snapshot);
+    assert_eq!(scheduler.stats().preemptions, 1);
+    let tokens = request.tokens().to_vec();
+    let remaining = 400 - request.generated_tokens;
+    freeze(&mut scheduler, newer, fence);
+    let checkpoint = scheduler.finish(newer).unwrap().unwrap();
+    scheduler.cancel(older).unwrap();
+    // Readmitting the history restores the published checkpoint instead of recomputing it.
+    let resumed = scheduler
+        .admit(RequestSpec {
+            prompt: tokens,
+            growable_output: true,
+            ..spec(1, remaining)
+        })
+        .unwrap();
+    let request = scheduler.request(resumed).unwrap();
+    assert_eq!(request.phase, RequestPhase::Restore);
+    assert_eq!(request.prefix(), Some(checkpoint));
+}
+
+#[test]
+fn growable_request_longer_than_the_pool_finishes_instead_of_yielding() {
+    let mut scheduler = scheduler(1, 4, 4);
+    let handle = scheduler.admit(growable(60, 400)).unwrap();
+    let mut fence = 1;
+    while scheduler.request(handle).unwrap().phase != RequestPhase::Finishing {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "the request never finished");
+    }
+    // Four pages hold 256 positions; it ends there, not through repeated preemption.
+    let request = scheduler.request(handle).unwrap();
+    assert!(!request.preempted() && request.consumed_tokens + 2 > 4 * 64);
+    assert_eq!(scheduler.stats().preemptions, 0);
+    scheduler.finish(handle).unwrap();
+    // Admission rejects a prompt that the whole pool cannot hold instead of queueing it.
+    let error = scheduler.admit(growable(4 * 64, 10)).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::Error::Admission(crate::AdmissionError::Context(_))
+    ));
+}
+
+#[test]
+fn requests_with_an_output_limit_keep_their_reservation_and_are_never_preempted() {
+    let mut scheduler = scheduler(2, 8, 4);
+    let reserved = scheduler.admit(spec(60, 190)).unwrap();
+    assert_eq!(scheduler.free_page_count(), 8 - 4);
+    let grower = scheduler.admit(growable(60, 400)).unwrap();
+    assert_eq!(scheduler.free_page_count(), 2);
+    let mut fence = 1;
+    while !scheduler.request(grower).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "the growable request never ran out of pages");
+    }
+    assert!(!scheduler.request(reserved).unwrap().preempted());
+    assert_eq!(scheduler.stats().preemptions, 1);
 }

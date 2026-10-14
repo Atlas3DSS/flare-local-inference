@@ -321,6 +321,7 @@ pub(super) fn prepare_inference<M: ModelContract>(
             stop_strings,
             grammar,
             ignore_eos,
+            explicit_output_limit: opts.output_limit.is_some(),
         },
         output,
         rendered_prompt: rendered.text,

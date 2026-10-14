@@ -74,6 +74,7 @@ fn mixed_prefill_vision_indices_follow_packed_decode_tokens() {
                     max_new_tokens: 16,
                     grammar_constrained: false,
                     host_stops: false,
+                    growable_output: false,
                 })
                 .unwrap();
             let admission = Admission {

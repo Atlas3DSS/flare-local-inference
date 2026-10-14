@@ -45,6 +45,7 @@ fn spec(system: Option<usize>, prompt: usize, output: u32) -> RequestSpec {
         max_new_tokens: output,
         grammar_constrained: false,
         host_stops: false,
+        growable_output: false,
     }
 }
 fn run_step(s: &mut RequestScheduler) -> ScheduledPlan {
