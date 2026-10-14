@@ -40,6 +40,11 @@ before committing; a design acknowledgment cannot authorize them.
    policy. Trace runtime fixes across supported cache schemes and apply them to
    every compatible contract; a single-model reproducer does not justify a
    single-model implementation.
+   `ModelContract` only adapts prepared inputs, storage, and frontend metadata.
+   Reject per-model boolean policy flags, including `supports_*`, `can_*`, and
+   default-false opt-ins. Enums, callbacks, schema names, and metadata fields
+   cannot serve as alternative model allowlists. Review each member and its
+   consumers for a concrete meaning independent of model identity.
 4. **Use FlashInfer/b12x and NVIDIA directly.** Target SM120/SM121, reuse proven
    operators and sampling, and avoid interchangeable backends or portability layers.
    Remove superseded internal paths unless compatibility is explicitly required.

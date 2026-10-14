@@ -79,6 +79,8 @@ pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
 #[derive(Clone, Debug)]
 pub struct SchedulerCapabilities {
     pub vocabulary: usize,
+    /// Logical history tokens per appendable page, including compressed or sharded storage.
+    /// Recurrent state and sliding windows occupy separately reserved continuation rows.
     pub page_tokens: usize,
     pub vision: crate::model::VisionCapabilities,
     pub draft_pages_per_request: usize,

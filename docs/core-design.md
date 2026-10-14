@@ -324,6 +324,14 @@ same boundary; violations must be resolved before committing.
   Restrictions require concrete storage or execution constraints in the contract.
   Validate affected cache schemes and request lifecycles; untested models remain
   a validation limitation, not a reason for model-specific policy.
+- **The model trait cannot select runtime policy.** `ModelContract` adapts
+  prepared graph inputs, storage layouts, and frontend metadata. Its members
+  must describe concrete data or binding requirements independently of model
+  identity. Per-model boolean policy flags, including `supports_*`, `can_*`, and
+  default-false opt-ins, are prohibited. Enums, callbacks, schema names, and
+  metadata fields must not disguise the same allowlist. Shared code derives
+  behavior from actual geometry and dependencies; every trait change requires
+  reviewing its consumers as well as its declaration.
 - **Numerical and performance requirements are separate.** State copies and
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine
@@ -442,19 +450,38 @@ Every rank uses the same row and page counts, limited by the smallest rank
 budget. Weights and fixed transport buffers retain their prepared layouts.
 
 The context limit bounds one request; aggregate page capacity bounds all
-active and cached histories. On models whose prompts can grow by their
-output (GLM), the output limit only bounds a text request: admission reserves
-its prompt and one page of output, and the request takes further pages a page
-ahead of its decode rounds, evicting unpinned prefix pages first; admission
-waits while pages are short. When a running request still cannot continue, the
-newest one finishes through its terminal checkpoint and is readmitted with its
-history as the prompt and the rest of its output limit, restoring that
-checkpoint from the GPU or the host prefix store unless both evicted it. Its
-output stream, stop and grammar state, and penalty counts continue; its
-random streams restart on the device, so it samples with a seed derived from
-the request's seed and the number of tokens generated before preemption. A request whose history exceeds the
-whole pool ends at that length instead. Other models, and requests with
-images, reserve prompt and output capacity at admission.
+active and cached histories. Cache management follows attention storage:
+
+| Attention mechanism | Growing history | Continuation state |
+|---|---|---|
+| Causal full or sparse attention | Append logical KV or latent/index pages | Partial page and saved hidden state |
+| Compressed latent attention | Append pages at the declared compression geometry | Compression interval, overlap, partial pages, and sliding window |
+| Recurrent linear attention | No token-proportional pages for the recurrence | Recurrent matrices and convolution history |
+| Sliding-window attention | Fixed window in a continuation row | Window contents and position |
+
+A hybrid model combines these storage requirements. Every prepared model uses
+the same page-growth policy; page size, draft-page headroom, and continuation-row
+extent describe its storage. Model names and per-model support flags do not
+participate in the decision.
+
+For text requests, admission reserves the prompt and one page of output. The
+output limit bounds generation without reserving all of its potential history.
+Reservations grow a page ahead of decode rounds, evicting unpinned prefix pages
+first; admission waits while pages are short. When a running request still cannot
+continue, the newest eligible decoder publishes its terminal checkpoint when
+backing allows and is readmitted with its history and remaining output budget.
+The checkpoint restores all declared continuation state; eviction can instead
+require recomputing the history. Shared handling extends text-position and
+image-index metadata for generated tokens before readmission.
+
+The output stream, stop and grammar state, and penalty counts continue. Random
+streams restart on the device with a seed derived from the request's seed and
+the number of tokens generated before preemption. A request whose history
+exceeds the whole pool ends at that length. Requests with image inputs or
+conditioning retain full reservations because readmission does not reconstruct
+their image-feature execution. This restriction concerns retained frontend
+inputs, not the attention mechanism.
+
 For Qwen's target cache, BF16 KV and compressed selector keys cost 24.75 KiB
 per token; MTP pages, continuation rows, and graph resources add separate
 costs. The loader reports actual capacities. The [CLI design](cli-design.md)

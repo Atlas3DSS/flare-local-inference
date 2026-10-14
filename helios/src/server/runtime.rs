@@ -824,10 +824,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            // The output limit only bounds a request; pages follow what it generates.
-            let growable = M::GROWABLE_OUTPUT
-                && incoming.prompt.images.is_none()
-                && incoming.prompt.conditioning.is_empty();
+            // Causal history pages grow independently of fixed continuation rows.
+            // Image-feature replay across readmission requires retained frontend state.
+            let growable =
+                incoming.prompt.images.is_none() && incoming.prompt.conditioning.is_empty();
             let stats = self.scheduler.stats();
             let resources = (
                 self.scheduler.completed(),
@@ -1236,6 +1236,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         let active = self.active[slot].take().unwrap();
         self.admissions[slot] = None;
         let mut incoming = active.incoming;
+        M::prompt_metadata(&mut incoming.prompt.data)
+            .extend_text(incoming.prompt.tokens.len(), tokens.len())?;
         incoming.prompt.tokens = tokens;
         incoming.prompt.max_new_tokens -= generated;
         incoming.readmitted = true;
