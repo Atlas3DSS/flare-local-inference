@@ -122,7 +122,7 @@ def _kernel_argument_data(params, layout):
 
 class _Cuda:
     def __init__(self):
-        self.lib = C.CDLL("libcuda.so.1")
+        self.lib = C.WinDLL("nvcuda.dll", winmode=0x800) if os.name == "nt" else C.CDLL("libcuda.so.1")
 
     def call(self, name, *args):
         function = getattr(self.lib, name)
@@ -183,10 +183,13 @@ _WRITE_BACK_BYTES = 256 << 20
 
 
 def _write_back(output):
-    """Write buffered payload to disk and drop it from the page cache."""
+    """Write buffered payload to disk and discard Linux page-cache copies."""
     output.flush()
-    os.fdatasync(output.fileno())
-    os.posix_fadvise(output.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    if os.name == "nt":
+        os.fsync(output.fileno())
+    else:
+        os.fdatasync(output.fileno())
+        os.posix_fadvise(output.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
 
 
 def _write_allocation(cuda, allocation, path, *, visit=None):
@@ -237,7 +240,10 @@ class RuntimePackage:
     """
 
     def __init__(self, *, allocations, modules, kernels, owners=(), reservations=(), reachability=None, events=None,
-                 transports=()):
+                 transports=(), device_address_floor=0):
+        if type(device_address_floor) is not int or device_address_floor < 0:
+            raise ValueError("device address floor must be a nonnegative integer")
+        self.device_address_floor = device_address_floor
         self.allocations = tuple(allocations)
         self.transports = tuple(transports)
         self.modules = dict(modules)
@@ -425,6 +431,10 @@ class RuntimePackage:
             selected = (self.allocations if self.reachability is None
                         else iter(self.reachability.take, None))
             for allocation in selected:
+                if (allocation.memory == "device" and allocation.preserve_address
+                        and allocation.address < self.device_address_floor):
+                    raise ValueError(f"retained device allocation {allocation.name!r} at {allocation.address:#x} "
+                                     f"is below the restorable address floor {self.device_address_floor:#x}")
                 index = len(allocations)
                 if progress is not None and allocation.snapshot_spans is not None:
                     progress(f"Copy {allocation.name}: {allocation.address:#x}+{allocation.nbytes}; "
@@ -506,7 +516,9 @@ class RuntimePackage:
         cuda.call("cuGraphGetNodes", C.c_void_p(graph), None, C.byref(count))
         handles = (C.c_void_p * count.value)()
         cuda.call("cuGraphGetNodes", C.c_void_p(graph), handles, C.byref(count))
-        cupti = C.CDLL("libcupti.so")
+        from .module_images import cupti_library
+
+        cupti = cupti_library()
         node_ids = {}
         for handle in handles:
             node_id = C.c_uint64()
@@ -781,11 +793,10 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
                 arguments = [replace(argument, numeric=((0, argument.size),) if numeric else ())
                              for argument, (_, numeric) in zip(arguments, layout, strict=True)]
             kernels[function.value] = Kernel(function.value, name, tuple(arguments))
-    ranges = [(storage.DEVICE_BASE, storage.DEVICE_BASE + storage.RESERVATION_BYTES)]
-    # CUDA may ignore small address hints; reserve large enclosing virtual ranges.
+    # CUDA may ignore small address hints; enclose live storage in GiB-aligned ranges.
     granule = max(storage.granularity, 1 << 30)
-    ranges.extend((address & -granule, (address + size + granule - 1) & -granule)
-                  for address, size in outside)
+    ranges = [(a.address & -granule, (a.address + a.nbytes + granule - 1) & -granule)
+              for a in allocations if a.memory == "device"]
     merged = []
     for start, end in sorted(ranges):
         if merged and start <= merged[-1][1]:
@@ -800,7 +811,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
                                       or any(a.address <= p < a.address + a.nbytes for p in pinned)])
     package = RuntimePackage(allocations=allocations, modules=modules, kernels=kernels.values(), owners=(prepared, storage),
         reservations=[{"address": start, "nbytes": end - start} for start, end in merged], reachability=reachability,
-        events=prepared.export_events, transports=transports)
+        events=prepared.export_events, transports=transports,
+        device_address_floor=storage.EXTERNAL_FLOOR if storage.integrated else 0)
     execution = prepared.manifest(all_variants=True)
     execution.pop("context")
     execution.pop("device")

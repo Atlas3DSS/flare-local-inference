@@ -22,6 +22,8 @@ _OPTIONS = {'max_autotune': True, 'emulate_precision_casts': True,
             'triton.cudagraphs': False, 'triton.autotune_at_compile_time': False,
             'triton.cooperative_reductions': True,
             'compile_threads': min(16, os.cpu_count() or 1)}
+if os.name == 'nt':
+    _OPTIONS['worker_start_method'] = 'spawn'
 # Compiled forwards and their guards persist beside b12x kernels and tuning selections.
 DEFAULT_CACHE_ROOT = Path.home() / '.cache' / 'flare' / 'kernels'
 

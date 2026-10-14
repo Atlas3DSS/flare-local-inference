@@ -9,6 +9,8 @@ import os
 from importlib import util
 from pathlib import Path
 
+_DLL_DIRECTORIES = []
+
 
 def toolkit(configured: Path | None) -> Path | None:
     """Locate a CUDA toolkit in installed packages, else use the configured directory."""
@@ -36,3 +38,9 @@ def apply(configuration, gpus) -> None:
     cuda = toolkit(configuration.directory("cuda"))
     if cuda is not None:
         os.environ["CUDA_HOME"] = str(cuda)
+        if os.name == "nt":
+            os.environ["CUDA_PATH"] = str(cuda)
+            os.environ["TRITON_PTXAS.EXE_PATH"] = str(cuda / "bin/ptxas.exe")
+            for path in (cuda / "bin", cuda / "bin/x64", cuda / "lib/x64"):
+                if path.is_dir():
+                    _DLL_DIRECTORIES.append(os.add_dll_directory(str(path)))

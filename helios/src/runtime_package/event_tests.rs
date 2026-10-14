@@ -85,10 +85,10 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
         }
         let shared = Shared::new(
             tables,
-            if fail_read {
-                &failed_source
+            &if fail_read {
+                std::fs::File::open(&failed_source).unwrap()
             } else {
-                &archive.path
+                archive.file.try_clone().unwrap()
             },
             1,
             4,

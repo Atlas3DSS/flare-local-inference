@@ -399,25 +399,24 @@ mod tests {
 
     #[test]
     fn cache_negotiation_rejects_malformed_or_invalid_limits() {
-        use std::os::unix::net::UnixStream;
+        use super::super::rank_stream::test_pair;
 
         for capacity in [(81, 100), (80, 101), (0, 100), (80, 0)] {
-            let (root, peer) = UnixStream::pair().unwrap();
+            let (mut root, mut peer) = test_pair().unwrap();
             let sender = std::thread::spawn(move || {
-                let mut root = RankStream::from(root);
                 assert_eq!(
                     decode_capacity(&read_frame(&mut root).unwrap()).unwrap(),
                     (80, 100)
                 );
                 write_frame(&mut root, &encode_capacity(capacity)).unwrap();
             });
-            assert!(propose_capacity(&mut peer.into(), (80, 100)).is_err());
+            assert!(propose_capacity(&mut peer, (80, 100)).is_err());
             sender.join().unwrap();
         }
         for capacity in [(0, 100), (80, 0)] {
             assert!(agree_capacity(&mut [], capacity).is_err());
-            let (_root, peer) = UnixStream::pair().unwrap();
-            assert!(propose_capacity(&mut peer.into(), capacity).is_err());
+            let (_root, mut peer) = test_pair().unwrap();
+            assert!(propose_capacity(&mut peer, capacity).is_err());
         }
         assert!(decode_capacity(&[0; 15]).is_err());
         assert!(decode_capacity(&[0; 17]).is_err());

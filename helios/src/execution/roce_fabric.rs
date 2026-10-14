@@ -154,6 +154,7 @@ pub fn discover_in(root: &Path, prefix: impl Fn(&str, Ipv4Addr) -> Option<u8>) -
 }
 
 /// The prefix length of the IPv4 address `address` on network device `device`, from getifaddrs.
+#[cfg(target_os = "linux")]
 fn interface_prefix(device: &str, address: Ipv4Addr) -> Option<u8> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills a list this function frees before returning; it reads entries only
@@ -190,6 +191,7 @@ fn interface_prefix(device: &str, address: Ipv4Addr) -> Option<u8> {
 }
 
 /// Discover this host's RoCE devices.
+#[cfg(target_os = "linux")]
 pub fn discover() -> Result<Fabric> {
     discover_in(Path::new("/sys/class/infiniband"), interface_prefix)
 }

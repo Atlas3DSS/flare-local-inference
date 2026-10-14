@@ -14,9 +14,12 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::execution(ExecutionError::Manifest, message)
 }
 
-const BASE: u64 = 0x200000000000;
+#[cfg(target_os = "linux")]
+const BASE: u64 = 0x20000000000;
+#[cfg(target_os = "windows")]
+const BASE: u64 = 0x40000000000;
 const EXTENT: usize = 1 << 40;
-const HOST_BASE: u64 = 0x100000000000;
+const HOST_BASE: u64 = 0xc0000000000;
 struct Arena {
     driver: Driver,
     device: i32,
@@ -31,7 +34,7 @@ static ERROR: Mutex<Option<CString>> = Mutex::new(None);
 fn properties(device: i32, gpudirect: bool) -> AllocationProperties {
     AllocationProperties {
         kind: 1,
-        handles: 1,
+        handles: i32::from(cfg!(target_os = "linux")),
         location: Location { kind: 1, device },
         windows: null_mut(),
         // cuFile registration requires gpuDirectRDMACapable on VMM allocations.
@@ -54,7 +57,7 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
         if world == 0 || rank >= world || device < 0 {
             return Err(invalid("invalid package rank or device"));
         }
-        if u64::from(world) * EXTENT as u64 > BASE - HOST_BASE {
+        if u64::from(world) * EXTENT as u64 > BASE.abs_diff(HOST_BASE) {
             return Err(invalid(
                 "package host reservations would overlap device reservations",
             ));
@@ -82,7 +85,9 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
                         (driver.release_address)(address, EXTENT);
                     }
                     driver.check("cuMemAddressReserve", status)?;
-                    return Err(invalid("native package device address range is occupied"));
+                    return Err(invalid(format!(
+                        "native package device address range {base:#x}+{EXTENT:#x} is unavailable; CUDA returned {address:#x}"
+                    )));
                 }
                 reserved.push(address);
             }

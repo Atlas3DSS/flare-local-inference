@@ -1,6 +1,7 @@
 """Package storage keeps only requested allocator bytes and, on unified memory, library
 allocations above the addresses a serving context occupies."""
 
+import ctypes
 import struct
 from types import SimpleNamespace
 
@@ -9,6 +10,14 @@ import torch
 from ignition.preparation.package_storage import PackageStorage
 from ignition.preparation.reachability import Reachability
 from ignition.preparation.runtime_package import Allocation, _without_zero_ranges, _write_allocation
+
+
+def test_cuda_access_descriptor_array_matches_driver_abi():
+    from ignition.preparation.package_storage import _Access, _Location
+
+    access = (_Access * 2)(_Access(_Location(3, 0), 3), _Access(_Location(1, 7), 3))
+    assert bytes(access) == struct.pack("<6i", 3, 0, 3, 1, 7, 3)
+    assert ctypes.sizeof(_Access) == 12
 
 
 def test_unused_bytes_include_live_block_padding_and_retired_pools(monkeypatch, tmp_path):

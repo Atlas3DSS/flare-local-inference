@@ -17,7 +17,7 @@ HUB = Path.home() / ".cache/huggingface/hub"
 def test_declarations_import_without_model_dependencies():
     result = subprocess.run(
         [sys.executable, "-c", "import sys; from ignition.recipes import aliases; from ignition import planning;"
-         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash', 'mimo-v2.6-pro-mopd');"
+         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'qwen3.8-27b', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash', 'mimo-v2.6-pro-mopd');"
          " assert not {'torch', 'transformers', 'flare_heliopause'} & set(sys.modules)"],
         cwd=ROOT, check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -105,7 +105,7 @@ def test_a_different_revision_of_a_declared_repository_is_not_the_pinned_checkpo
 
 @pytest.mark.parametrize("name", ["qwen", "Qwen3.8-Flash", "qwen3.8-flash@main"])
 def test_unknown_aliases_list_the_supported_aliases(name):
-    with pytest.raises(UsageError, match="supported models: qwen3.8-flash, glm-5.3-flash"):
+    with pytest.raises(UsageError, match="supported models: qwen3.8-flash, qwen3.8-27b, glm-5.3-flash"):
         resolve(name)
 
 

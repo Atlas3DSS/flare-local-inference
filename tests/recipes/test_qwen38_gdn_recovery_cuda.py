@@ -93,7 +93,7 @@ def _case(lengths):
 
 def _recurrence(case, state, records):
     from ignition.components.gated_norm import PreparedGatedRMSNorm
-    from ignition.recipes.qwen38.gdn_recovery import PreparedRecoveredRecurrence
+    from ignition.components.gdn_recovery import PreparedRecoveredRecurrence
 
     tokens = case["tokens"]
     recurrence = torch.full((tokens, VALUE_HEADS * 128), float("nan"), device="cuda").bfloat16()
@@ -109,7 +109,7 @@ def _recurrence(case, state, records):
 
 @pytest.mark.parametrize(("lengths", "accepted"), [((4,), (3,)), ((6, 6, 0, 6), (1, 6, 0, 2)), ((5, 2), (5, 1))])
 def test_recorded_verification_and_commit_match_checkpointing_decode(lengths, accepted):
-    from ignition.recipes.qwen38.gdn_recovery import GDNLayerRecords, PreparedGDNCommit
+    from ignition.components.gdn_recovery import GDNLayerRecords, PreparedGDNCommit
 
     case = _case(lengths)
     initial, metadata, model_slots = case["initial"], case["metadata"], case["model_slots"]
@@ -155,7 +155,7 @@ def test_compilation_sees_every_recovery_store():
     """Forward compilation keeps a user kernel only for the operands its stores reach."""
     from torch._higher_order_ops.triton_kernel_wrap import get_mutated_tensors, kernel_side_table
 
-    from ignition.recipes.qwen38 import gdn_recovery
+    from ignition.components import gdn_recovery
 
     def mutated(kernel, names, options):
         constants = {name: value for name, value in options.items()}

@@ -4,5 +4,6 @@ pub use helios_core::*;
 
 mod allocator;
 mod lifetime;
+#[cfg_attr(target_os = "windows", path = "processes_windows.rs")]
 mod processes;
 mod python;

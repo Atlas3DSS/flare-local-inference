@@ -13,7 +13,8 @@ from ignition.preparation.forward_metadata import dumps, loads
 def test_compiler_concurrency_accounts_for_shared_device_ram(monkeypatch, integrated, expected, threads):
     from ignition.preparation import compile_pool, host_memory
 
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: ((2 if integrated else 40) << 30, 121 << 30))
+    free = (24 if host_memory.os.name == "nt" else 2) if integrated else 40
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free << 30, 121 << 30))
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=integrated))
     monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
@@ -160,9 +161,13 @@ def test_compiler_reuses_its_budgeted_worker_pool(monkeypatch, tmp_path, integra
     executors = []
 
     class Executor:
-        def __init__(self, count, *, kind):
+        def __init__(self, count, *, kind=None, mp_context=None):
             self.calls, self.closed = [], False
-            assert count == workers and kind == subproc_pool.SubprocKind.SPAWN
+            assert count == workers
+            if compile_pool.os.name == "nt":
+                assert mp_context.get_start_method() == "spawn"
+            else:
+                assert kind == subproc_pool.SubprocKind.SPAWN
             executors.append(self)
 
         def submit(self, function, *arguments):
@@ -175,6 +180,7 @@ def test_compiler_reuses_its_budgeted_worker_pool(monkeypatch, tmp_path, integra
             self.closed = True
 
     monkeypatch.setattr(subproc_pool, "SubprocPool", Executor)
+    monkeypatch.setattr(compile_pool, "ProcessPoolExecutor", Executor)
     with compile_pool.CompilePool("cuda:0") as pool:
         pool.submit(SimpleNamespace(), tmp_path / "first.bin")
         pool.submit(SimpleNamespace(), tmp_path / "second.bin")
@@ -208,3 +214,15 @@ def test_ranks_sharing_a_host_split_its_compilers(monkeypatch, pools, workers):
     pool = compile_pool.CompilePool("cuda:0", pools=pools)
     # Every rank's pool together stays within the host's threads and RAM.
     assert pool.workers == workers and pools * pool.workers * pool.options["compile_threads"] == 16
+
+
+def test_windows_compiler_workers_fit_host_ram_with_larger_device_budget(monkeypatch):
+    from ignition.preparation import compile_pool, host_memory
+
+    monkeypatch.setattr(compile_pool, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
+    monkeypatch.setattr(compile_pool, "device_memory_info", lambda device: (105 << 30, 110 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
+    pool = compile_pool.CompilePool("cuda:0", headroom_bytes=8 << 30)
+    assert (pool.workers, pool.options["compile_threads"]) == (4, 1)

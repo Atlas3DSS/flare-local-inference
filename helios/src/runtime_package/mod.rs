@@ -7,6 +7,8 @@ mod engram;
 #[cfg(test)]
 mod event_tests;
 mod format;
+#[cfg(any(windows, test))]
+mod host;
 mod memory;
 mod model;
 mod payload;
@@ -64,6 +66,8 @@ pub struct NativeResources {
     integrated: bool,
     events: HashMap<String, Handle>,
     cache: Option<crate::offload::CacheGeometry>,
+    #[cfg(windows)]
+    host_mappings: Vec<(u64, usize)>,
 }
 
 // SAFETY: CUDA contexts may move between threads. Resource operations bind the
@@ -146,6 +150,8 @@ impl NativeResources {
                 integrated: integrated != 0,
                 events: HashMap::new(),
                 cache: None,
+                #[cfg(windows)]
+                host_mappings: Vec::new(),
             };
             for [limit, value] in &package.context.limits {
                 owner.driver.check(
@@ -215,6 +221,10 @@ impl NativeResources {
     }
 
     unsafe fn allocate(&mut self, package: &Package, phase: &Phase) -> Result<()> {
+        #[cfg(windows)]
+        if self.host_mappings.is_empty() {
+            unsafe { self.allocate_host(package)? };
+        }
         let driver = self.driver.clone();
         // SAFETY: Package validation bounds all indexes and relocation fields.
         // Every CUDA resource is immediately retained by self for error cleanup.
@@ -292,35 +302,40 @@ impl NativeResources {
                             driver.check("cuMemMap", mapped)?;
                         }
                         Memory::MappedHost => {
-                            let mapped = libc::mmap(
-                                address as Handle,
-                                allocation.nbytes,
-                                libc::PROT_READ | libc::PROT_WRITE,
-                                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
-                                -1,
-                                0,
-                            );
-                            if mapped != address as Handle {
-                                return Err(invalid(format!(
-                                    "host address collision at {address:#x}: {}",
-                                    std::io::Error::last_os_error()
-                                )));
+                            #[cfg(unix)]
+                            {
+                                let mapped = libc::mmap(
+                                    address as Handle,
+                                    allocation.nbytes,
+                                    libc::PROT_READ | libc::PROT_WRITE,
+                                    libc::MAP_PRIVATE
+                                        | libc::MAP_ANONYMOUS
+                                        | libc::MAP_FIXED_NOREPLACE,
+                                    -1,
+                                    0,
+                                );
+                                if mapped != address as Handle {
+                                    return Err(invalid(format!(
+                                        "host address collision at {address:#x}: {}",
+                                        std::io::Error::last_os_error()
+                                    )));
+                                }
+                                // Registration does not pin host memory for an integrated GPU, and a
+                                // swapped-out page turns each GPU access during replay into a fault.
+                                if self.integrated && libc::mlock(mapped, allocation.nbytes) != 0 {
+                                    let error = std::io::Error::last_os_error();
+                                    libc::munmap(mapped, allocation.nbytes);
+                                    return Err(invalid(format!(
+                                        "cannot lock {} bytes of mapped host storage: {error}; raise RLIMIT_MEMLOCK",
+                                        allocation.nbytes
+                                    )));
+                                }
+                                let status = (driver.host_register)(mapped, allocation.nbytes, 2);
+                                if status != 0 {
+                                    libc::munmap(mapped, allocation.nbytes);
+                                }
+                                driver.check("cuMemHostRegister_v2", status)?;
                             }
-                            // Registration does not pin host memory for an integrated GPU, and a
-                            // swapped-out page turns each GPU access during replay into a fault.
-                            if self.integrated && libc::mlock(mapped, allocation.nbytes) != 0 {
-                                let error = std::io::Error::last_os_error();
-                                libc::munmap(mapped, allocation.nbytes);
-                                return Err(invalid(format!(
-                                    "cannot lock {} bytes of mapped host storage: {error}; raise RLIMIT_MEMLOCK",
-                                    allocation.nbytes
-                                )));
-                            }
-                            let status = (driver.host_register)(mapped, allocation.nbytes, 2);
-                            if status != 0 {
-                                libc::munmap(mapped, allocation.nbytes);
-                            }
-                            driver.check("cuMemHostRegister_v2", status)?;
                         }
                         // The owning rank maps peer storage and grants this rank access.
                         Memory::Peer => {}
@@ -363,15 +378,18 @@ impl NativeResources {
                             )?;
                         }
                         Memory::MappedHost => {
-                            let mut gpu = 0;
-                            driver.check(
-                                "cuMemHostGetDevicePointer_v2",
-                                (driver.host_device)(&mut gpu, address as Handle, 0),
-                            )?;
-                            if gpu != address {
-                                return Err(invalid(
-                                    "mapped host address differs from recorded CUDA address",
-                                ));
+                            #[cfg(unix)]
+                            {
+                                let mut gpu = 0;
+                                driver.check(
+                                    "cuMemHostGetDevicePointer_v2",
+                                    (driver.host_device)(&mut gpu, address as Handle, 0),
+                                )?;
+                                if gpu != address {
+                                    return Err(invalid(
+                                        "mapped host address differs from recorded CUDA address",
+                                    ));
+                                }
                             }
                         }
                         Memory::Peer => {}
@@ -842,11 +860,18 @@ impl Drop for NativeResources {
                         }
                     }
                     (Memory::MappedHost, _) => {
-                        (self.driver.host_unregister)(allocation.address as Handle);
-                        libc::munmap(allocation.address as Handle, allocation.nbytes);
+                        #[cfg(unix)]
+                        {
+                            (self.driver.host_unregister)(allocation.address as Handle);
+                            libc::munmap(allocation.address as Handle, allocation.nbytes);
+                        }
                     }
                     (Memory::Peer, _) => {}
                 }
+            }
+            #[cfg(windows)]
+            for &(address, bytes) in self.host_mappings.iter().rev() {
+                (self.driver.unmap)(address, bytes);
             }
             for (address, size) in self.reservations.iter().rev() {
                 (self.driver.release_address)(*address, *size);

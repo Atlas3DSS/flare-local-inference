@@ -125,6 +125,7 @@ class PreparedBatch:
         self.accept_unsampled = shard.rank != 0
         self.pool = pool
         self.verification_width = verification_width
+        self.device_pending = shard.world_size == 1 and verification_width == 1
         self.input_vocabulary = requests.vocab_size if input_vocabulary is None else input_vocabulary
         self.validate_prefill = validate_prefill
         device, capacity = metadata.token_ids.device, requests.capacity
@@ -176,8 +177,11 @@ class PreparedBatch:
             if self.validate_prefill is not None:
                 valid &= self.validate_prefill(tokens, lengths)
         else:
-            valid &= (tokens >= 0) & (tokens < r.vocab_size)
-            valid &= (pending == tokens) | (self.accept_unsampled & (pending < 0))
+            if self.device_pending:
+                valid &= (pending >= 0) & (pending < r.vocab_size)
+            else:
+                valid &= (tokens >= 0) & (tokens < r.vocab_size)
+                valid &= (pending == tokens) | (self.accept_unsampled & (pending < 0))
         present = resident & (r.status[safe] == RUNNING)
         bad = present & ~valid
         bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & bad[None, :]).any(1)
@@ -216,11 +220,14 @@ class PreparedBatch:
         if self.rows > 1:
             m.token_page_table.copy_(m.page_table[request])
         m.positions.copy_(torch.where(live, t.positions[request] + self.token_offsets - starts[request], -1))
-        m.token_ids.copy_(
-            torch.where(
-                live, b.token_ids[: self.tokens] if self.mode == "prefill" else b.token_ids[request], 0
-            )
-        )
+        if self.mode == "prefill":
+            tokens = b.token_ids[:self.tokens]
+        elif self.device_pending:
+            # Queued single-rank decode consumes tokens before their completion reaches the host.
+            tokens = t.pending_tokens[request]
+        else:
+            tokens = b.token_ids[request]
+        m.token_ids.copy_(torch.where(live, tokens, 0))
 
     def finish(self):
         self.token_state.consume()

@@ -2,7 +2,9 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -12,12 +14,14 @@ use std::time::Duration;
 /// connect over TCP; every step exchanges a few small messages, so TCP sends
 /// without Nagle coalescing.
 pub enum RankStream {
+    #[cfg(unix)]
     Unix(UnixStream),
     Tcp(TcpStream),
 }
 
 impl RankStream {
     /// Adopt a connected stream socket, choosing its transport from the socket's family.
+    #[cfg(unix)]
     pub fn from_socket(socket: OwnedFd) -> io::Result<Self> {
         use std::os::fd::AsRawFd;
 
@@ -53,8 +57,10 @@ impl RankStream {
         Ok(stream)
     }
 
+    #[cfg(unix)]
     fn connected(&self) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.peer_addr().map(drop),
             Self::Tcp(stream) => stream.peer_addr().map(drop),
         }
@@ -62,6 +68,7 @@ impl RankStream {
 
     pub fn set_nonblocking(&self, enabled: bool) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.set_nonblocking(enabled),
             Self::Tcp(stream) => stream.set_nonblocking(enabled),
         }
@@ -69,6 +76,7 @@ impl RankStream {
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.set_read_timeout(timeout),
             Self::Tcp(stream) => stream.set_read_timeout(timeout),
         }
@@ -76,6 +84,7 @@ impl RankStream {
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.set_write_timeout(timeout),
             Self::Tcp(stream) => stream.set_write_timeout(timeout),
         }
@@ -83,12 +92,14 @@ impl RankStream {
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.shutdown(how),
             Self::Tcp(stream) => stream.shutdown(how),
         }
     }
 }
 
+#[cfg(unix)]
 impl From<UnixStream> for RankStream {
     fn from(stream: UnixStream) -> Self {
         Self::Unix(stream)
@@ -104,6 +115,7 @@ impl From<TcpStream> for RankStream {
 impl Read for RankStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.read(buffer),
             Self::Tcp(stream) => stream.read(buffer),
         }
@@ -113,6 +125,7 @@ impl Read for RankStream {
 impl Write for RankStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.write(buffer),
             Self::Tcp(stream) => stream.write(buffer),
         }
@@ -120,13 +133,14 @@ impl Write for RankStream {
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Self::Unix(stream) => stream.flush(),
             Self::Tcp(stream) => stream.flush(),
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::net::TcpListener;
@@ -151,5 +165,23 @@ mod tests {
     fn rejects_unconnected_sockets() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(RankStream::from_socket(OwnedFd::from(listener)).is_err());
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_pair() -> std::io::Result<(RankStream, RankStream)> {
+    #[cfg(unix)]
+    {
+        let (a, b) = UnixStream::pair()?;
+        Ok((a.into(), b.into()))
+    }
+    #[cfg(windows)]
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let a = TcpStream::connect(listener.local_addr()?)?;
+        let (b, _) = listener.accept()?;
+        a.set_nodelay(true)?;
+        b.set_nodelay(true)?;
+        Ok((a.into(), b.into()))
     }
 }

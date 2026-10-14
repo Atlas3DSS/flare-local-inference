@@ -14,7 +14,7 @@ from ignition.recipes import recipes
 from ignition.recipes.declaration import SamplingDefaults
 
 
-@pytest.mark.parametrize("name,top_k", [("qwen38", 20), ("glm53", -1), ("deepseek41", -1),
+@pytest.mark.parametrize("name,top_k", [("qwen38", 20), ("qwen38_dense", 20), ("glm53", -1), ("deepseek41", -1),
                                       ("deepseek4", -1), ("mimo_v2", -1)])
 def test_default_mode_uses_manually_declared_model_card_sampling(name, top_k):
     defaults = next(recipe for recipe in recipes() if recipe.name == name).sampling_defaults

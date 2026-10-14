@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import math
 import json
 import mmap
+import os
 
 from .runtime_package import _Cuda
 
@@ -25,11 +26,11 @@ class PackageStorage:
     alive until all tensors and graphs using the pool have been released.
     """
 
-    DEVICE_BASE = 0x200000000000
-    HOST_BASE = 0x100000000000
+    DEVICE_BASE = 0x40000000000 if os.name == "nt" else 0x20000000000
+    HOST_BASE = 0xc0000000000
     RESERVATION_BYTES = 1 << 40
-    # Lowest address of device storage that libraries allocate outside the package on a unified-memory GPU.
-    EXTERNAL_FLOOR = 0x400000000
+    # Keep library-owned device storage above the ranges occupied by Linux and WDDM contexts.
+    EXTERNAL_FLOOR = 0x4000000000
     # Where sealing below the floor starts; a context's own storage lies above it.
     LOW_SCAN_START = 1 << 32
 
@@ -56,9 +57,9 @@ class PackageStorage:
         if self.library.flare_package_initialize(rank, world, device):
             raise self.error or RuntimeError("cannot initialize native package allocator")
         self.granularity = self._snapshot()["granularity"]
-        # Reserved spans below EXTERNAL_FLOOR, so external allocations land above it.
         self.low_reservations = []
-        if self.integrated:
+        # WDDM retains its low allocation pool; export rejects retained storage below the floor.
+        if self.integrated and os.name != "nt":
             self._reserve_low_window()
         allocator = torch.cuda.memory.CUDAPluggableAllocator(
             native.__file__, "flare_package_allocate", "flare_package_free")
@@ -115,7 +116,7 @@ class PackageStorage:
         Storage occupied when the window was first reserved and freed later would otherwise let
         an external allocation land below the floor, where a serving context's own storage lies.
         """
-        if not self.integrated:
+        if not self.integrated or os.name == "nt":
             return
         granule = self.granularity
         address = -(-self.LOW_SCAN_START // granule) * granule
@@ -130,7 +131,9 @@ class PackageStorage:
                 address += granule
                 continue
             self._release_last()
-            size = self.EXTERNAL_FLOOR - address
+            end = min((start for start, _ in self.low_reservations if start > address),
+                      default=self.EXTERNAL_FLOOR)
+            size = end - address
             while not self._reserve_at(address, size) and size > granule:
                 size = max(granule, size // 2 // granule * granule)
             # A granule taken since the probe is skipped.
@@ -203,11 +206,15 @@ class PackageStorage:
         size = math.prod(shape) * dtype.itemsize
         # Host mappings are whole host pages; Grace kernels may use 64 KiB pages.
         extent = -(-size // mmap.PAGESIZE) * mmap.PAGESIZE
+        region_type = WindowsHostRegion if os.name == "nt" else HostRegion
         if self._host_cursor + extent > self.HOST_BASE + self.RESERVATION_BYTES:
             raise MemoryError("native package host-address range exhausted")
-        region = HostRegion(self.cuda, self._host_cursor, extent, shape, dtype, self.device,
-                            lock=self.integrated)
-        self._host_cursor += extent
+        region = region_type(self.cuda, self._host_cursor, extent, shape, dtype, self.device,
+                             lock=self.integrated)
+        if self._host_cursor + region.extent > self.HOST_BASE + self.RESERVATION_BYTES:
+            region.close()
+            raise MemoryError("native package host-address range exhausted")
+        self._host_cursor += region.extent
         self.host_regions.append(region)
         return region
 
@@ -312,7 +319,58 @@ class _Properties(C.Structure):
 
 
 class _Access(C.Structure):
-    _fields_ = [("location", _Location), ("flags", C.c_uint64)]
+    _fields_ = [("location", _Location), ("flags", C.c_int)]
+
+
+class WindowsHostRegion:
+    """Host-backed CUDA VMM storage at one recorded CPU/GPU virtual address."""
+
+    def __init__(self, cuda, address, extent, shape, dtype, device, *, lock=False):
+        import torch
+        from b12x.sequence._shared.disk_table import _tensor_from_pointer
+
+        self.cuda, self.address = cuda, address
+        self.nbytes = math.prod(shape) * dtype.itemsize
+        self.closed = True
+        numa = C.c_int()
+        cuda.call("cuDeviceGetAttribute", C.byref(numa), C.c_int(134), C.c_int(device))
+        properties = _Properties(1, 0, _Location(3, max(0, numa.value)), None, (C.c_ubyte * 8)())
+        granularity = C.c_size_t()
+        cuda.call("cuMemGetAllocationGranularity", C.byref(granularity), C.byref(properties), C.c_int(0))
+        self.extent = -(-extent // granularity.value) * granularity.value
+        pointer = C.c_uint64()
+        cuda.call("cuMemAddressReserve", C.byref(pointer), C.c_size_t(self.extent),
+                  C.c_size_t(granularity.value), C.c_uint64(address), C.c_uint64(0))
+        mapped = False
+        try:
+            if pointer.value != address:
+                raise RuntimeError(f"cannot reserve mapped host CUDA address {address:#x}")
+            physical = C.c_uint64()
+            cuda.call("cuMemCreate", C.byref(physical), C.c_size_t(self.extent), C.byref(properties), C.c_uint64(0))
+            try:
+                cuda.call("cuMemMap", pointer, C.c_size_t(self.extent), C.c_size_t(0), physical, C.c_uint64(0))
+                mapped = True
+            finally:
+                cuda.call("cuMemRelease", physical)
+            access = (_Access * 2)(_Access(properties.location, 3), _Access(_Location(1, device), 3))
+            cuda.call("cuMemSetAccess", pointer, C.c_size_t(self.extent), access, C.c_size_t(2))
+            C.memset(address, 0, self.extent)
+            self.host_view, self.device_view = [
+                _tensor_from_pointer(address, shape=shape, dtype=dtype, device=location, nbytes=self.nbytes)
+                for location in (torch.device("cpu"), torch.device("cuda", device))]
+        except BaseException:
+            if mapped:
+                cuda.call("cuMemUnmap", pointer, C.c_size_t(self.extent))
+            cuda.call("cuMemAddressFree", pointer, C.c_size_t(self.extent))
+            raise
+        self.closed = False
+
+    def close(self):
+        if not self.closed:
+            self.cuda.call("cuCtxSynchronize")
+            self.cuda.call("cuMemUnmap", C.c_uint64(self.address), C.c_size_t(self.extent))
+            self.cuda.call("cuMemAddressFree", C.c_uint64(self.address), C.c_size_t(self.extent))
+            self.closed = True
 
 
 class DeviceRegion:
@@ -329,7 +387,7 @@ class DeviceRegion:
         cuda, device = self.cuda, self.device
         address, size = self.address + self.nbytes, nbytes - self.nbytes
         handle = C.c_uint64()
-        properties = _Properties(1, 1, _Location(1, device), None, (C.c_ubyte * 8)())
+        properties = _Properties(1, 0 if os.name == "nt" else 1, _Location(1, device), None, (C.c_ubyte * 8)())
         cuda.call("cuMemCreate", C.byref(handle), C.c_size_t(size), C.byref(properties), C.c_uint64(0))
         try:
             cuda.call("cuMemMap", C.c_uint64(address), C.c_size_t(size), C.c_size_t(0), handle, C.c_uint64(0))
