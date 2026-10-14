@@ -6,6 +6,7 @@ mod http;
 mod inference;
 mod listener;
 mod metrics;
+mod models;
 mod observation;
 pub(crate) mod output;
 mod protocol;
@@ -92,7 +93,6 @@ struct HttpState<M: ModelContract> {
     ingress_capacity: usize,
     ids: AtomicU64,
     api_key: Option<String>,
-    served_names: Vec<String>,
     context_hint: String,
     capacity_hint: String,
     started: Instant,
@@ -204,7 +204,6 @@ impl<M: ModelContract> Server<M> {
             ingress_capacity,
             ids: AtomicU64::new(1),
             api_key: config.api_key.clone(),
-            served_names: config.served_names.clone(),
             context_hint: config.context_hint.clone(),
             capacity_hint: config.capacity_hint.clone(),
             started: Instant::now(),
@@ -233,7 +232,7 @@ impl<M: ModelContract> Server<M> {
                     });
                     let router = Router::new()
                         .route("/metrics", get(metrics::<M>))
-                        .route("/v1/models", get(models::<M>))
+                        .merge(models::router(state.model.config(), &config.served_names))
                         .route("/v1/chat/completions", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
                         .route("/v1/completions", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
                         .route("/v1/messages", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
@@ -395,14 +394,6 @@ async fn health<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Res
             "prepared model runtime is unavailable",
         )
     }
-}
-async fn models<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
-    let identifier = &state.model.config().model_id;
-    let data: Vec<Value> = std::iter::once(identifier)
-        .chain(state.served_names.iter().filter(|name| *name != identifier))
-        .map(|id| json!({"id":id,"object":"model","owned_by":"local"}))
-        .collect();
-    Json(json!({"object":"list","data":data})).into_response()
 }
 async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Response {
     let mut text = state.model.metrics().render();

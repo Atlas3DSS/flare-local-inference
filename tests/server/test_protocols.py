@@ -11,6 +11,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -44,6 +45,40 @@ FUNCTION = {
         "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]
     },
 }
+
+
+def test_model_discovery_and_lookup(clients):
+    o, _, http = clients
+    listed = http.get("/v1/models")
+    listed.raise_for_status()
+    assert listed.json()["object"] == "list"
+    cards = listed.json()["data"]
+    assert cards and len({card["id"] for card in cards}) == len(cards)
+    assert [model.id for model in o.models.list()] == [card["id"] for card in cards]
+    for card in cards:
+        assert card["object"] == "model"
+        assert card["created"] > 0
+        assert card["max_model_len"] > 0
+        assert card["root"] == cards[0]["id"]
+        assert card["parent"] is None
+        assert card["flare"]["max_concurrency"] > 0
+        assert card["flare"]["input_modalities"][0] == "text"
+        assert card["flare"]["sampling_defaults"]["temperature"] > 0
+        assert card["permission"][0]["allow_sampling"] is True
+        assert card["permission"][0]["allow_logprobs"] is False
+        assert o.models.retrieve(card["id"]).model_dump() == card
+        encoded = http.get("/v1/models/" + quote(card["id"], safe=""))
+        encoded.raise_for_status()
+        assert encoded.json() == card
+    assert http.get("/v1/models").json()["data"] == cards
+    missing = http.get("/v1/models/__flare_missing_model__")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "model_not_found"
+    if os.environ.get("FLARE_API_TEST_KEY"):
+        wrong_key = os.environ["FLARE_API_TEST_KEY"] + "-invalid"
+        for path in ["/v1/models", "/v1/models/" + quote(cards[0]["id"], safe="")]:
+            denied = http.get(path, headers={"Authorization": f"Bearer {wrong_key}"})
+            assert denied.status_code == 401
 
 
 def test_sdk_buffered_and_streaming_text(clients):

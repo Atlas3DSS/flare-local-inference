@@ -13,9 +13,36 @@ and return their results in subsequent requests.
 | `POST /v1/messages/count_tokens` | Anthropic message request without generation | Exact prepared input token count |
 | `POST /v1/responses` | Responses input items and instructions | Ordered output items or named SSE events |
 
-`GET /v1/models` lists the loaded model and configured aliases. As with Chat
-Completions, generation requests always use the loaded model, regardless of the
-request's `model` string. Returned objects identify the loaded model. `/health`
+`GET /v1/models` lists the loaded model and configured aliases, with duplicate
+names removed. `GET /v1/models/{model}` returns the same model card for a listed
+identifier or alias; repository IDs containing slashes are supported. Unknown
+names return HTTP 404 with an OpenAI-style `model_not_found` error. Both routes
+use the configured bearer authentication.
+
+Model cards include the vLLM-compatible fields `id`, `object`, `created`,
+`owned_by`, `root`, `parent`, `max_model_len`, and `permission`. `max_model_len`
+is the effective serving context limit in tokens, including prompt and output.
+`root` is the loaded model's identifier, `parent` is null, and `owned_by` remains
+`local`. `created` is the serving instance's discovery initialization time in
+Unix seconds; cards and permission IDs stay stable until the server restarts.
+Permissions advertise sampling and viewing, with unsupported log probabilities,
+fine-tuning, engine creation, and search indices disabled.
+
+The additional `flare` object reports prepared and selected serving metadata:
+
+| Field | Meaning |
+| --- | --- |
+| `vocab_size` | Prepared output vocabulary size |
+| `max_concurrency` | Selected maximum active requests |
+| `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
+| `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
+| `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
+| `max_images_per_prompt` | Prepared image count limit; zero for text-only packages |
+| `input_modalities` | `text`, plus `image` when vision is prepared |
+| `output_modalities` | `text` |
+
+Generation requests always use the loaded model, regardless of the request's
+`model` string. Returned generation objects identify the loaded model. `/health`
 and `/metrics` retain their existing behavior.
 
 ## Transport and admission
