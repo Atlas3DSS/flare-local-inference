@@ -135,6 +135,34 @@ class DirectWeightLoader:
         return {name for name in self.manifest.tensors
                 if self.prefixes is None or name.startswith(self.prefixes)}
 
+    def _load_tensor_fp8_linear(self, prefix, *, rows=None, columns=None):
+        import torch
+        from b12x.gemm.blockscaled import pack_weight
+        from ignition.components.tensor_fp8 import TensorFP8Weight
+
+        source = self._sources[f"{prefix}.weight"]
+        if source.ndim != 2 or source.dtype != torch.float8_e4m3fn:
+            raise ValueError(f"{prefix}: tensor-FP8 weight must be an E4M3 matrix")
+        r0, r1 = _aligned_range(rows, source.shape[0], 1)
+        c0, c1 = _aligned_range(columns, source.shape[1], 32)
+        values = torch.empty((r1 - r0, c1 - c0), dtype=source.dtype, device=self.device)
+        self._copy(values, source[r0:r1, c0:c1])
+        scales = []
+        for suffix in ("weight_scale", "input_scale"):
+            scalar = self._sources[f"{prefix}.{suffix}"]
+            if scalar.dtype != torch.float32 or scalar.numel() != 1:
+                raise ValueError(f"{prefix}.{suffix} must be a positive finite FP32 scalar")
+            scale = torch.empty(scalar.shape, dtype=torch.float32, device=self.device)
+            self._copy(scale, scalar)
+            scales.append(scale)
+        self._session.flush()
+        for suffix, scale in zip(("weight_scale", "input_scale"), scales, strict=True):
+            if not bool((torch.isfinite(scale) & (scale > 0)).all()):
+                raise ValueError(f"{prefix}.{suffix} must be a positive finite FP32 scalar")
+        weight_scale, input_scale = scales
+        packed = pack_weight(values, weight_scale * input_scale, recipe="tensor_fp8")
+        return TensorFP8Weight(packed, input_scale)
+
     @contextmanager
     def _loading_display(self):
         from b12x.loader import CheckpointDisplay
@@ -267,6 +295,9 @@ class DirectWeightLoader:
         from b12x.gemm.blockscaled import pack_weight
         if row_ranges is None:
             row_ranges = (None,) * len(prefixes)
+        if fmt == "tensor_fp8":
+            (rows,) = tuple(row_ranges)
+            return self._load_tensor_fp8_linear(prefixes[0], rows=rows, columns=column_range)
         if fmt == "nvfp4":
             (rows,) = tuple(row_ranges)
             return self._load_nvfp4_linear(prefixes[0], rows=rows, columns=column_range)

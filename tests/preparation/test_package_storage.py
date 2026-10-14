@@ -2,6 +2,7 @@
 allocations above the addresses a serving context occupies."""
 
 import struct
+import ctypes
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,14 @@ import torch
 from ignition.preparation.package_storage import PackageStorage
 from ignition.preparation.reachability import Reachability
 from ignition.preparation.runtime_package import Allocation, _without_zero_ranges, _write_allocation
+
+
+def test_cuda_access_descriptor_array_matches_driver_abi():
+    from ignition.preparation.package_storage import _Access, _Location
+
+    access = (_Access * 2)(_Access(_Location(3, 0), 3), _Access(_Location(1, 7), 3))
+    assert bytes(access) == struct.pack("<6i", 3, 0, 3, 1, 7, 3)
+    assert ctypes.sizeof(_Access) == 12
 
 
 def test_unused_bytes_include_live_block_padding_and_retired_pools(monkeypatch, tmp_path):
@@ -72,15 +81,15 @@ def storage(driver):
 
 
 def test_unified_memory_reserves_the_window_below_the_external_floor():
-    driver = Driver([0x327e00000, 0x411800000])
+    driver = Driver([0x327e00000, 0x4011800000])
     window = PackageStorage._reserve_low_window(storage(driver))
-    assert window == (0x327e00000, 0x400000000 - 0x327e00000)
-    assert driver.reservation == (0x327e00000, 0x400000000 - 0x327e00000, 2 << 20)
+    assert window == (0x327e00000, 0x4000000000 - 0x327e00000)
+    assert driver.reservation == (0x327e00000, 0x4000000000 - 0x327e00000, 2 << 20)
     assert driver.calls == ["cuMemAlloc_v2", "cuMemFree_v2", "cuMemAddressReserve", "cuMemAlloc_v2", "cuMemFree_v2"]
 
 
 def test_allocations_already_above_the_floor_need_no_window():
-    driver = Driver([0x500000000])
+    driver = Driver([0x5000000000])
     assert PackageStorage._reserve_low_window(storage(driver)) is None
     assert "cuMemAddressReserve" not in driver.calls
 

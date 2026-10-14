@@ -11,7 +11,8 @@ from b12x.preparation import PreparationSession
 from b12x.sequence import gdn_decode, gdn_prefill, short_conv
 
 from ignition.components.gated_norm import PreparedGatedRMSNorm
-from ignition.components.linear import QuantizedProjection
+from ignition.components.linear import QuantizedProjection, UnquantizedProjection
+from ignition.components.tensor_fp8 import TensorFP8Projection, TensorFP8Weight
 from ignition.components.recurrent import (
     DeltaMetadata,
     DeltaState,
@@ -67,14 +68,14 @@ class GDNScratch:
     prefill_beta: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> GDNScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, hidden_size=2560) -> GDNScratch:
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("GDN token capacity must be positive")
         qkvz = torch.zeros((tokens, 16384 // world_size), device=device, dtype=torch.bfloat16)
         ba = torch.zeros((tokens, 96 // world_size), device=device, dtype=torch.bfloat16)
         convolved, recurrence, gated, output = (
             torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
-            for width in (10240 // world_size, 6144 // world_size, 6144 // world_size, 2560))
+            for width in (10240 // world_size, 6144 // world_size, 6144 // world_size, hidden_size))
         prefill = PrefillBuffers.allocate(tokens, device, key_heads=16 // world_size, value_heads=48 // world_size)
         return cls(qkvz[:, :10240 // world_size], convolved, qkvz[:, 10240 // world_size:], ba[:, 48 // world_size:], ba[:, :48 // world_size],
                    recurrence, gated, output, qkvz, ba, prefill.query, prefill.key, prefill.value, prefill.decay,
@@ -90,7 +91,6 @@ class GDNScratch:
 
 def _validate_geometry(module: torch.nn.Module, world_size=1) -> None:
     required = {
-        "hidden_size": 2560,
         "num_k_heads": 16 // world_size,
         "num_v_heads": 48 // world_size,
         "head_k_dim": 128,
@@ -99,7 +99,7 @@ def _validate_geometry(module: torch.nn.Module, world_size=1) -> None:
         "conv_kernel_size": 4,
     }
     if any(getattr(module, name, None) != value for name, value in required.items()):
-        raise ValueError("GDN module geometry differs from Qwen3.8 Flash Next")
+        raise ValueError("GDN geometry requires 16 key heads, 48 value heads, and 128-element head dimensions before sharding")
     if module.activation != "silu" or module.norm.activation not in ("silu", "sigmoid"):
         raise ValueError(
             "Qwen GDN requires SiLU convolution and SiLU/sigmoid output gating"
@@ -112,7 +112,8 @@ class PreparedGDN:
     """One fixed-capacity decode or prefill pipeline over a canonical GDN module.
 
     The module supplies geometry and exact unquantized parameters. The projection
-    mapping supplies packed MXFP8 QKV/Z, B/A, and output weights. Preparation
+    mapping supplies calibrated QKV/Z and output weights with packed or BF16 B/A
+    projections. Preparation
     requires zero live counts and must finish before graph capture. All plans,
     buffers, weights, and canonical norm parameters remain strongly owned.
 
@@ -161,16 +162,16 @@ class PreparedGDN:
         self.tokens, self.device = source.shape[0], source.device
         if (
             source.ndim != 2
-            or source.shape[1] != 2560
+            or source.shape[1] != module.hidden_size
             or source.dtype != torch.bfloat16
         ):
-            raise ValueError("GDN source must be BF16 [token_capacity, 2560]")
+            raise ValueError("GDN source must be BF16 with the module's hidden width")
         if self.device.type != "cuda":
             raise ValueError("prepared GDN requires CUDA")
         widths = tuple(width if index == 7 else width // world_size for index, width in
-                       enumerate((10240, 10240, 6144, 48, 48, 6144, 6144, 2560, 16384, 96)))
+                       enumerate((10240, 10240, 6144, 48, 48, 6144, 6144, module.hidden_size, 16384, 96)))
         strides = tuple(stride if index == 7 else stride // world_size for index, stride in
-                        enumerate((16384, 10240, 16384, 96, 96, 6144, 6144, 2560, 16384, 96)))
+                        enumerate((16384, 10240, 16384, 96, 96, 6144, 6144, module.hidden_size, 16384, 96)))
         # Projection operands; the chunked-prefill buffers are validated where they are used.
         projected = [field for field in fields(scratch) if not field.name.startswith("prefill_")]
         for field, width, stride in zip(projected, widths, strides, strict=True):
@@ -228,35 +229,32 @@ class PreparedGDN:
             raise ValueError(
                 "GDN preparation requires zero live token and sequence counts"
             )
-        expected = {"in_proj_qkvz", "in_proj_ba", "out_proj"}
+        self.fused_qkvz = "in_proj_qkvz" in projections
+        expected = ({"in_proj_qkvz"} if self.fused_qkvz else {"in_proj_qkv", "in_proj_z"})
+        expected |= {"in_proj_ba", "out_proj"}
         if set(projections) != expected:
-            raise ValueError("GDN requires packed QKV/Z, B/A, and output projection weights")
-        self.projections = {
-            projection: QuantizedProjection(
-                source,
-                projections[projection],
-                output,
-                session=session,
-                name=f"{name}.{projection}",
-                activation_mode="auto",
-                workspace=projection_workspace,
-            )
-            for projection, output in (
-                ("in_proj_qkvz", scratch.projected_qkvz),
-                ("in_proj_ba", scratch.projected_ba),
-            )
-        }
-        self.projections["out_proj"] = QuantizedProjection(
-            scratch.gated,
-            projections["out_proj"],
-            scratch.output,
-            session=session,
-            name=f"{name}.out_proj",
-            activation_mode="auto",
-            workspace=projection_workspace,
-        )
+            raise ValueError("GDN requires QKV/Z, packed B/A, and output projection weights")
+
+        def projection(key, inputs, output):
+            weight = projections[key]
+            options = dict(session=session, name=f"{name}.{key}")
+            if isinstance(weight, TensorFP8Weight):
+                return TensorFP8Projection(inputs, weight, output, **options)
+            if isinstance(weight, torch.Tensor):
+                return UnquantizedProjection(inputs, weight, output, **options)
+            return QuantizedProjection(inputs, weight, output, activation_mode="auto",
+                                       workspace=projection_workspace, **options)
+
+        inputs = (("in_proj_qkvz", scratch.projected_qkvz),) if self.fused_qkvz else (
+            ("in_proj_qkv", scratch.projected_qkv), ("in_proj_z", scratch.z))
+        self.projections = {key: projection(key, source, output)
+                            for key, output in (*inputs, ("in_proj_ba", scratch.projected_ba))}
+        self.projections["out_proj"] = projection("out_proj", scratch.gated, scratch.output)
         self.parallel_projections = None
-        if mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena):
+        if (self.fused_qkvz and mode == "decode" and self.tokens <= 16
+                and isinstance(projection_workspace, ScratchArena)
+                and all(isinstance(self.projections[key], QuantizedProjection)
+                        for key in ("in_proj_qkvz", "in_proj_ba"))):
             from ignition.components.linear import ParallelProjections
 
             self.parallel_projections = ParallelProjections(
@@ -412,7 +410,11 @@ class PreparedGDN:
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
         scratch = self.scratch
         if self.parallel_projections is None:
-            self.projections["in_proj_qkvz"](source)
+            if self.fused_qkvz:
+                self.projections["in_proj_qkvz"](source)
+            else:
+                self.projections["in_proj_qkv"](source)
+                self.projections["in_proj_z"](source)
             self.projections["in_proj_ba"](source)
         else:
             self.parallel_projections(source)

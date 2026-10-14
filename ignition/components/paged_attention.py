@@ -37,7 +37,7 @@ def _fake_attend(q, key, value, pages, lengths, cu, sink, output, scratch, handl
 class PreparedPagedAttention:
     def __init__(self, q, key, value, pages, lengths, cu, output, *, sink=None, mode,
                  window=-1, width=1, causal=True, session, workspace, name):
-        self.decode = mode in ("decode", "verify")
+        self.decode = mode in ("decode", "verify") and q.shape[2] != 256
         self.window, self.workspace = window, workspace
         self.arguments = dict(q=q, k_cache=key, v_cache=value, page_table=pages,
             cache_seqlens=lengths, cu_seqlens_q=cu, output=output, attention_sink_bias=sink)
@@ -47,15 +47,22 @@ class PreparedPagedAttention:
                 page_size=key.shape[1], max_batch=pages.shape[0], max_q_per_req=width,
                 window_left=window, has_sinks=sink is not None, causal=causal))
         else:
-            capacity = paged.extend_graph_capacity(device=q.device, q_dtype=q.dtype, kv_dtype=key.dtype,
+            geometry = dict(device=q.device, q_dtype=q.dtype, kv_dtype=key.dtype,
                 num_q_heads=q.shape[1], num_kv_heads=key.shape[2], head_dim_qk=q.shape[2],
                 head_dim_vo=value.shape[3], page_size=key.shape[1], batch=pages.shape[0],
-                total_q_capacity=q.shape[0], max_cache_page_count=pages.shape[1], window_left=window)
-            caps = paged.Caps(device=q.device, mode="extend", dtype=q.dtype, kv_dtype=key.dtype,
+                max_cache_page_count=pages.shape[1], window_left=window)
+            if mode == "decode":
+                capacity = paged.decode_graph_capacity(**geometry)
+            elif mode == "verify":
+                capacity = paged.verify_graph_capacity(**geometry, query_len=width)
+            else:
+                capacity = paged.extend_graph_capacity(**geometry, total_q_capacity=q.shape[0])
+            caps = paged.Caps(device=q.device, mode=mode if mode in ("decode", "verify") else "extend",
+                dtype=q.dtype, kv_dtype=key.dtype,
                 num_q_heads=q.shape[1], num_kv_heads=key.shape[2], head_dim_qk=q.shape[2],
                 head_dim_vo=value.shape[3], page_size=key.shape[1], max_total_q=q.shape[0],
                 max_batch=pages.shape[0], max_page_table_width=pages.shape[1], num_cache_pages=key.shape[0],
-                max_work_items=capacity.max_work_items, max_partial_rows=0,
+                max_work_items=capacity.max_work_items, max_partial_rows=getattr(capacity, "max_partial_rows", 0),
                 use_cuda_graph=True)
             invocation = dict(paged.invocation_from_tensors(caps, **self.arguments), window_left=window)
             self.plan = paged.plan(caps, invocation=invocation)

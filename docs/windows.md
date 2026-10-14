@@ -1,12 +1,16 @@
 # Native Windows serving
 
-Flare targets Windows 11 x64 through Rust's `x86_64-pc-windows-msvc` target.
-Ignition preparation remains on Linux. Copy the exported SM120 `.safetensors`
-package and its publisher profile to the Windows serving host.
+Flare builds on Windows 11 x64 and ARM64 through Rust's
+`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` targets.
+Copy an exported `.safetensors` package matching the serving GPU's SM120 or
+SM121 architecture and its publisher profile to the Windows serving host.
+Ignition can also prepare the single-GPU `qwen3.8-27b` recipe on Windows with
+`--no-compile`.
 
 The Windows runtime uses the NVIDIA driver directly through `nvcuda.dll`.
 Python, the CUDA toolkit, WSL, and Wine are not runtime dependencies.
-Install the NVIDIA driver and the Microsoft Visual C++ x64 Redistributable.
+Install the NVIDIA driver and the Microsoft Visual C++ Redistributable for the
+host architecture.
 
 ## Build from Linux
 
@@ -27,9 +31,14 @@ include the debug CRT requested by libjpeg-turbo's debug configuration.
 
 ## Build and test on Windows
 
-Install Rust with the MSVC toolchain, Visual Studio's C++ build tools and Windows
-SDK, CMake, NASM, and `protoc`. Make NASM and `protoc` available on `PATH`.
-From the repository root:
+Install Rust with the native MSVC toolchain, Visual Studio's C++ build tools and
+Windows SDK, CMake, and `protoc`. x64 builds also require NASM. ARM64 builds
+require the ARM64 C++ tools and Clang for the `ring` dependency. Use the ARM64
+host tools through `vcvarsarm64.bat` on an ARM64 machine.
+
+Run in a Visual Studio developer shell with Cargo, CMake, `protoc`, and the
+architecture-specific Clang or NASM on `PATH`. Confirm `rustc -vV` reports the
+intended host target. From the repository root:
 
 ```powershell
 cargo build --locked --release --manifest-path flare/Cargo.toml
@@ -63,22 +72,84 @@ The open package handle prevents replacement or writes while it is loaded.
 
 ## Hardware compatibility
 
-Native inference on GeForce GPUs under WDDM requires hardware validation.
-CPU tests and successful linking do not establish CUDA compatibility.
+Native ARM64 Flare serves `nvidia/Qwen3.8-27B-NVFP4` on an RTX Spark N1X
+(SM121) under Windows 11 WDDM. Generation, prefix restoration, and resume have
+been exercised with both Linux-prepared and Windows-prepared packages containing
+only device allocations. A Linux-exported SM121 Engram fixture also passes native Windows
+replay with mapped mailboxes, disk and RAM row delivery, inactive rows, and read
+failure handling. Mailbox publication tests cover up to 65,536 IDs across repeated
+allocation-free graph replay on Linux and Windows. These fixture tests do not
+establish complete Qwen PLE model correctness or performance on Windows.
+Concurrent 27B generation can emit EOS before completing a requested counting
+sequence; the complete scheduler test suite does not pass. Linux-prepared device
+reservations can also fail intermittently with an address collision before
+weight loading. Successful single-request generation does not cover these cases.
 
-The runtime preserves the package's recorded virtual addresses. Windows host
-reservations are rounded to allocation granularity, with individual pages
-committed at their recorded addresses. CUDA registration must preserve the
-recorded GPU-visible host address. Address collisions and incompatible mappings
-fail loading; the runtime does not relocate a package or change its graph contract.
+On RTX Spark, CUDA's free and total memory include the dedicated GPU carveout
+and shared system memory. Windows reports only CPU-visible RAM through its
+physical-memory API; NVML reports only the dedicated carveout. GPU planning and
+cache sizing use CUDA's combined budget. Compiler and tuning worker budgets are
+also bounded by available CPU-visible RAM. The configured reserve, driver margin,
+and integrated-GPU host headroom are subtracted before allocating caches.
+Page-file capacity is not GPU memory.
 
-Validate fixed device mappings, mapped host access, stream-memory waits, external
-event ordering, and graph replay using the exported runtime fixtures before
-running a model. Validate Qwen generation, ordinary/speculative transitions,
-disk/RAM table delivery, prefix-cache restoration, cancellation, and shutdown
-through the actual Windows service. Test tensor-parallel packages separately on
-the intended GPU pair, including CUDA access to peer memory.
+The runtime preserves the package's recorded virtual addresses. Linux registers
+host pages for mapped graph storage. Windows uses host-backed CUDA VMM with CPU
+and GPU access to the same address. Linux host allocations are rounded and merged
+to satisfy the Windows driver's allocation granularity without changing recorded
+buffer addresses or graph parameters. This requires host-NUMA VMM support from
+the Windows driver and GPU.
 
-Multi-host RoCE serving, integrated GPUs, and native Windows preparation are not
-supported. Windows uses the existing single-process, per-rank-thread execution
+Ignition places rank-zero host storage at 12 TiB on both operating systems.
+The package format and mailbox release/acquire protocol are shared. Packages
+still require matching GPU architecture, available virtual addresses, and supported
+CUDA operations. On RTX Spark N1X with driver 617.42, requesting the 16 TiB host
+address used by earlier exports hangs inside `cuMemAddressReserve`; those packages
+need re-exporting before Windows use. The runtime does not relocate graph storage.
+
+Validate fixed device mappings and graph replay using the exported runtime
+fixtures on each target GPU. Packages with mapped host storage additionally
+require mapped access, stream-memory waits, and external event ordering tests.
+Speculation, disk/RAM table delivery, and tensor parallelism require separate
+model tests, including CUDA access to peer memory on the intended GPU pair.
+
+Multi-host RoCE serving is not supported on Windows.
+Windows uses the single-process, per-rank-thread execution
 path for single-host tensor parallelism, subject to driver and device capabilities.
+
+## Prepare Qwen on Windows
+
+The exercised preparation environment uses x64 CPython 3.12, PyTorch
+2.13.0+cu130, CuTe DSL 4.8.0, triton-windows 3.7.1.post27, and the x64 CUDA
+13.4.1 toolkit. On ARM64 Windows, Python and the preparation tools run under
+x64 emulation; the serving executable remains native ARM64. Build Heliopause
+for `x86_64-pc-windows-msvc` to match Python, using the MSVC ARM64-to-x64
+developer shell. FlashInfer must include its Windows checkpoint reader and
+MSVC JIT build support. The Linux dependency lock does not provision this
+Windows environment.
+
+Configure `[paths] cuda` with the toolkit root. Preparation requires NVCC,
+NVVM, CCCL, the CUDA runtime, cuRAND headers, NVRTC, nvJitLink, and CUPTI.
+The toolkit's PTX assembler must support SM121; Ignition selects it from the
+configured toolkit. Use an explicit memory reserve for the OS and compiler
+workers, such as `[memory] reserve = "8G"`.
+
+From the repository root in that x64 preparation environment:
+
+```powershell
+python -m ignition export qwen3.8-27b --gpus 0 --max-concurrency 4 `
+  --prefill-chunk-size 4096 --no-compile --config C:\models\ignition.toml `
+  --output C:\models\qwen38-27b.safetensors
+```
+
+`--no-compile` disables forward compilation. Kernel compilation, autotuning,
+warmup, and CUDA graph capture still run before export. The checkpoint reader
+uses unbuffered overlapped reads and bounded pinned transfer buffers; the
+prepared model's storage remains device memory. Export rejects any reachable
+library allocation below the restorable address floor. Development signing
+keys use a protected Windows DACL granting access only to the owner and SYSTEM.
+
+Forward compilation uses spawn-based worker pools on Windows. The GPU AOT tests
+exercise parallel metadata-only compilation, saved-forward restoration, mutation
+and alias preservation, and allocation-stable graph replay. Omit `--no-compile`
+to enable compilation for a model export.

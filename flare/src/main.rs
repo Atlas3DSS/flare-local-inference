@@ -181,6 +181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(flare_helios::model::qwen4exp::INPUT_SCHEMA) => {
             serve::<Qwen4Exp>(owner, config, progress, cluster)
         }
+        Some(flare_helios::model::qwen35::INPUT_SCHEMA) => {
+            serve::<flare_helios::model::qwen35::Qwen35>(owner, config, progress, cluster)
+        }
         Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
             serve::<Glm5Next>(owner, config, progress, cluster)
         }

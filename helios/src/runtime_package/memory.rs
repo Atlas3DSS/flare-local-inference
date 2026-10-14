@@ -68,7 +68,10 @@ impl NativeResources {
             Ok(free)
         } else {
             #[cfg(windows)]
-            return Err(invalid("integrated GPUs are not supported on Windows"));
+            {
+                // CUDA includes both the dedicated carveout and shared system memory.
+                Ok(free.min(total))
+            }
             #[cfg(unix)]
             {
                 let meminfo =

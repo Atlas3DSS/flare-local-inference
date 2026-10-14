@@ -22,6 +22,10 @@ def publisher(configuration):
         descriptor, temporary = tempfile.mkstemp(prefix='.development-key-', dir=directory)
         try:
             with os.fdopen(descriptor, 'wb') as output:
+                if os.name == 'nt':
+                    from ._windows_permissions import restrict_file
+
+                    restrict_file(temporary)
                 output.write(encoded)
                 output.flush()
                 os.fsync(output.fileno())
@@ -31,7 +35,13 @@ def publisher(configuration):
                 pass
         finally:
             Path(temporary).unlink(missing_ok=True)
-    if path.stat().st_mode & 0o077:
+    if os.name == 'nt':
+        from ._windows_permissions import owner_only
+
+        private = owner_only(path)
+    else:
+        private = not path.stat().st_mode & 0o077
+    if not private:
         raise ValueError(f'development signing key must have owner-only permissions: {path}')
     key = serialization.load_pem_private_key(path.read_bytes(), password=None)
     signer = Publisher(key, 'local-development', 'local-development', development=True)

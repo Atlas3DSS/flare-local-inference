@@ -139,7 +139,7 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
                        "sampling_defaults": SamplingDefaults(temperature=1., top_p=.95, top_k=-1).as_dict(),
                        "frontend": {"eos_token_ids": [17]}},
         manifest=lambda **kwargs: {"context": {}, "device": 0, "buffers": [], "graphs": []})
-    storage = SimpleNamespace(error=None, dynamic_regions=[], transports=[],
+    storage = SimpleNamespace(error=None, dynamic_regions=[], transports=[], integrated=False,
         mappings={address: SimpleNamespace(address=address, nbytes=4096)},
         peer_storage=None, host_regions=[], granularity=4096, DEVICE_BASE=0x100000000000,
         RESERVATION_BYTES=1 << 20, unused_ranges=lambda: [], low_allocations=lambda outside: {},
@@ -170,6 +170,50 @@ def test_external_allocations_share_pages_without_reading_unallocated_bytes():
     assert allocations[0].snapshot_spans == ((0x300, 512), (0xF00, 512))
     owner = package(allocations=allocations, arguments=(Argument(8),))
     assert owner._reference(0x1F00, 512) == {"allocation": "external-0", "offset": 0xF00}
+
+
+@pytest.mark.parametrize("dependency", ["unused", "direct", "indirect"])
+def test_export_rejects_reachable_storage_below_the_address_floor(tmp_path, monkeypatch, dependency):
+    from types import SimpleNamespace
+    from ignition.preparation import module_images, runtime_package
+    from ignition.preparation.package_file import read_index
+    from ignition.preparation.reachability import Reachability
+
+    low, high, floor = 0x1208400000, 0x40000000000, 0x4000000000
+
+    class Cuda:
+        lib = SimpleNamespace(cuCtxGetLimit=lambda *args: 215)
+
+        def call(self, name, *args):
+            if name == "cuFuncGetName":
+                args[0]._obj.value = b"fixture"
+
+        def download(self, address, size):
+            assert address == high and size == 256
+            return (low if dependency == "indirect" else 0).to_bytes(8, "little") + bytes(248)
+
+    monkeypatch.setattr(runtime_package, "_Cuda", Cuda)
+    monkeypatch.setattr(RuntimePackage, "_graph", lambda self, cuda, name, graph:
+                        {"name": name, "nodes": [], "edges": []})
+    monkeypatch.setattr(module_images, "strip_debug", lambda image: image)
+    monkeypatch.setattr(module_images, "global_symbols", lambda image: [])
+    allocations = [Allocation("device", high, 256, preserve_address=True),
+                   Allocation("external", low, 256, preserve_address=True)]
+    roots = ("external",) if dependency == "direct" else ("device",)
+    owner = RuntimePackage(allocations=allocations, modules={"kernel": b"\x7fELFfixture"},
+        kernels=[Kernel(1, "kernel", ())], device_address_floor=floor,
+        reachability=Reachability(allocations, roots=roots))
+    graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
+    path = tmp_path / "package.safetensors"
+    if dependency == "unused":
+        owner.write(path, {"decode": graph})
+        index, _ = read_index(path)
+        assert [a.name for a in index.ranks[0].allocations] == ["device"]
+    else:
+        with pytest.raises(ValueError, match="below the restorable address floor"):
+            owner.write(path, {"decode": graph})
+        assert not path.exists()
+        assert not list(tmp_path.iterdir())
 
 
 def test_disposable_spans_preserve_neighbors_and_external_page_gaps():
@@ -206,23 +250,27 @@ def test_packed_payload_elides_zero_blocks_without_changing_contents(tmp_path, n
     assert rebuilt == source
 
 
-def test_payload_writes_leave_the_page_cache_as_they_go(tmp_path, monkeypatch):
+def test_payload_writes_flush_in_bounded_batches(tmp_path, monkeypatch):
     from ignition.preparation import runtime_package
 
     synced, dropped = [], []
     monkeypatch.setattr(runtime_package, "_WRITE_BACK_BYTES", 16 << 20)
-    monkeypatch.setattr(runtime_package.os, "fdatasync", lambda fd: synced.append(fd))
-    monkeypatch.setattr(runtime_package.os, "posix_fadvise",
-                        lambda fd, offset, length, advice: dropped.append((offset, length, advice)))
+    monkeypatch.setattr(runtime_package.os, "fsync" if os.name == "nt" else "fdatasync",
+                        lambda fd: synced.append(fd))
+    if os.name != "nt":
+        monkeypatch.setattr(runtime_package.os, "posix_fadvise",
+                            lambda fd, offset, length, advice: dropped.append((offset, length, advice)))
 
     class Cuda:
         def download(self, address, nbytes):
             return bytes([5]) * nbytes
     file = tmp_path / "weights.bin"
     _, spans = _write_allocation(Cuda(), Allocation("weights", 0x1000, 40 << 20), file)
-    # Written back after 16 and 32 MiB and at the end, each time dropped from the page cache.
+    # Flush after 16 and 32 MiB and at the end.
     assert spans == [[0, 40 << 20]] and file.stat().st_size == 40 << 20
-    assert len(synced) == 3 and dropped == [(0, 0, os.POSIX_FADV_DONTNEED)] * 3
+    assert len(synced) == 3
+    if os.name != "nt":
+        assert dropped == [(0, 0, os.POSIX_FADV_DONTNEED)] * 3
 
 
 def test_declared_zero_ranges_are_not_downloaded(tmp_path):

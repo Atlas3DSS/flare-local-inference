@@ -28,14 +28,29 @@ def test_unified_memory_budgets_host_and_device_storage_together():
         worker_limit(8, available=11 << 30, device_bytes=2 << 30)
 
 
+@pytest.mark.parametrize("platform", ["posix", "nt"])
 @pytest.mark.parametrize("available,expected", [(12 << 30, 12 << 30), (40 << 30, 32 << 30)])
-def test_integrated_device_uses_available_ram(monkeypatch, available, expected):
+def test_integrated_device_uses_available_ram(monkeypatch, available, expected, platform):
     import torch
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (4 << 30, 32 << 30))
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
     monkeypatch.setattr(host_memory, "available_bytes", lambda: available)
-    assert host_memory.device_memory_info("cuda:0") == (expected, 32 << 30)
+    monkeypatch.setattr(host_memory, "os", SimpleNamespace(name=platform))
+    assert host_memory.device_memory_info("cuda:0") == (
+        4 << 30 if platform == "nt" else expected, 32 << 30)
+
+
+def test_windows_device_budget_includes_dedicated_memory_beyond_host_ram(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(host_memory, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (105 << 30, 110 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 48 << 30)
+    assert host_memory.device_memory_info("cuda:0") == (105 << 30, 110 << 30)
+    workers, race = host_memory.tuning_limits("cuda:0", 8, headroom_bytes=8 << 30)
+    assert workers * (2 << 30) + race + (1 << 30) + (8 << 30) <= 48 << 30
 
 
 def test_discrete_device_budget_is_independent_of_host_ram(monkeypatch):
@@ -55,7 +70,7 @@ def test_tuning_races_and_compilers_share_one_ram_budget(monkeypatch, pools, hea
 
     available = 40 << 30
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1 << 30, 121 << 30))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (available, 121 << 30))
     monkeypatch.setattr(host_memory, "available_bytes", lambda: available)
     workers, race = host_memory.tuning_limits("cuda:0", 8, pools=pools,
         headroom_bytes=headroom, race_budget=race_budget)

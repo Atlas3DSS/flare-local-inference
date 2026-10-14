@@ -1,11 +1,14 @@
 """Trace and compile prepared forwards in workers without model storage."""
 
+import multiprocessing
 import os
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import torch
 
+from . import host_memory
 from .compilation import _OPTIONS, _defer_full_collection
 from .host_memory import compile_threads, device_memory_info, worker_limit
 
@@ -45,6 +48,8 @@ class CompilePool:
         # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
         free = device_memory_info(self.device)[0]
         shared = torch.cuda.get_device_properties(self.device).is_integrated
+        if shared and os.name == "nt":
+            free = min(free, host_memory.available_bytes())
         capacity = (free - headroom_bytes) // _WORKER_DEVICE_BYTES
         if capacity < 1:
             raise MemoryError("forward compilation requires memory for a CUDA worker beyond preparation headroom")
@@ -64,7 +69,10 @@ class CompilePool:
 
         payload = dumps(forward)
         if self.pool is None:
-            self.pool = SubprocPool(self.workers, kind=SubprocKind.SPAWN)
+            if os.name == "nt":
+                self.pool = ProcessPoolExecutor(self.workers, mp_context=multiprocessing.get_context("spawn"))
+            else:
+                self.pool = SubprocPool(self.workers, kind=SubprocKind.SPAWN)
         return self.pool.submit(_compile_forward, payload, self.device, self.options, str(path),
                                 torch.get_num_threads(), torch.is_grad_enabled())
 

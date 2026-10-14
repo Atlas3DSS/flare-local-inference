@@ -41,23 +41,28 @@ Ignition records four things while preparing a model, and refuses to
 write a package when any of them is incomplete.
 
 **Storage.** PyTorch's persistent device allocations come from one address range
-reserved before any other allocation: 1 TiB at `0x2000_0000_0000`, backed on
-demand with `cuMemCreate` and `cuMemMap` at allocation granularity. PyTorch
+reserved before model loading: 1 TiB at `0x0200_0000_0000` on Linux or
+`0x0400_0000_0000` on Windows, backed on
+demand with `cuMemCreate` and `cuMemMap` at allocation granularity. Packages
+reserve GiB-aligned ranges covering stored allocations and the declared maximum
+extents of dynamic caches; unused gaps in the preparation arena are omitted. PyTorch
 allocates through a `MemPool` whose pluggable allocator is the Rust arena in
 `heliopause/src/allocator.rs`, so weights, state, pages, and the
 graph pool all live inside the range. Ordinary preparation and capture use
 separate PyTorch pools backed by that arena. Mapped host buffers, including
-n-gram request mailboxes, are placed by `mmap` at fixed addresses from
-`0x1000_0000_0000` and
-registered with the driver; under unified addressing the device pointer
-equals the host pointer, which the exporter checks. A CUPTI subscriber logs
+n-gram request mailboxes, use fixed addresses from `0x0c00_0000_0000`.
+Linux maps and registers host pages; Windows uses host-backed CUDA VMM.
+Both expose the recorded address to the CPU and GPU. A CUPTI subscriber logs
 driver allocations and removes records when their context is destroyed.
 Persistent device allocations outside the arena are grouped into complete
 VMM pages and placed within reservations aligned to the device's allocation
 granularity. Reservations without retained allocations are omitted. Only their
 live byte spans are considered for payload storage; page gaps are zero. Before
 copying, the exporter checks that each external allocation belongs to the
-serving context.
+serving context. On Linux integrated GPUs, preparation reserves the low address
+window through 256 GiB without physical backing. Windows retains the driver's
+low allocation pool. Export on either integrated platform rejects reachable
+external device storage below 256 GiB, where context mappings can prevent replay.
 
 The model exporter retains allocations reachable from graph arguments, copy
 and memset endpoints, module globals, native execution buffers, and declared
@@ -193,6 +198,13 @@ sequence with a system-scope release operation. The reader observes that
 sequence with an acquire operation before accessing the IDs. Both models publish
 after input-state preparation, before target layer 0. Qwen consumes rows at
 layer 1; DeepSeek V4.1 consumes its two tables at layers 1 and 14.
+
+Mapped mailbox addresses and synchronization are independent of the host operating
+system. Linux backs them with registered host pages; Windows uses host-backed CUDA
+VMM with CPU and GPU access at the recorded address. Windows rounds and merges
+adjacent host allocations to its CUDA allocation granularity while preserving
+each buffer's address and extent in the package. No OS-specific mailbox graph or
+package encoding is required.
 
 A shared reader gathers each step's rows once. The default, `--embedding-table-storage disk`, uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
@@ -342,8 +354,8 @@ that is done.
   128 MiB, 1 GiB, 64 GiB, or 1 TiB is honored anywhere from 8 TiB to 127 TiB.
   A package therefore uses large enclosing reservations and maps allocations
   at their recorded offsets inside them; it never relies on small fixed
-  reservations. The controlled arena uses 1 TiB and external spans use
-  GiB-aligned enclosing ranges.
+  reservations. Preparation reserves a 1 TiB arena; runtime packages use
+  GiB-aligned enclosing ranges for retained arena storage and external spans.
 - Host memory mapped with `MAP_FIXED_NOREPLACE` and registered with the driver
   receives the same device address in every process.
 - Tensor-map parameters embed a global address and are 128 opaque bytes;
@@ -549,8 +561,8 @@ and status. A 120-second deadline bounds a stranded collective. Shutdown
 confirms drain on every rank before releasing any shared storage.
 
 Preparation uses one Python process per rank. Each process reserves every
-rank's 1 TiB arena; rank r owns device base `0x2000_0000_0000 + r * 2^40`
-and host base `0x1000_0000_0000 + r * 2^40`. b12x collective allocations
+rank's 1 TiB arena; rank r owns device base `0x0200_0000_0000 + r * 2^40`
+and host base `0x0c00_0000_0000 + r * 2^40`. b12x collective allocations
 use the native package allocator. POSIX descriptor passing shares VMM physical
 allocations, and importers map each allocation at its owner's recorded address.
 Collective signals and generation-tagged payloads are reset after all ranks

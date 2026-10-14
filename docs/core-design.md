@@ -678,7 +678,7 @@ a slow configuration. Same-capacity replay is exact for deterministic plans;
 atomic reductions use measured repeatability bounds. Whole-model logit
 distance is diagnostic and cannot select a recurrence policy.
 
-The GDN declaration in [gdn.py](../ignition/recipes/qwen38/gdn.py) restricts
+The GDN declaration in [gated_delta.py](../ignition/components/gated_delta.py) restricts
 prefill to `recurrence_policy="sequential_k1"`. Removing that restriction
 requires component and prefix-continuation checks, plus before/after
 prefill throughput and kernel timelines. QSA's declaration uses the library's

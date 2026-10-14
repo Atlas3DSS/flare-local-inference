@@ -8,6 +8,7 @@ pub mod glm5next;
 pub(crate) mod inputs;
 pub mod mimo;
 pub(crate) mod paged_text;
+pub mod qwen35;
 pub mod qwen4exp;
 #[cfg(feature = "images")]
 use crate::scheduler::RequestHandle;

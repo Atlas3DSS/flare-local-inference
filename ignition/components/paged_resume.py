@@ -27,6 +27,7 @@ class PreparedResume:
         coordinator,
         session,
         name,
+        activation_mode="a16",
     ):
         self.state = PreparedResumeState(
             requests,
@@ -62,6 +63,7 @@ class PreparedResume:
             coordinator=coordinator,
             session=session,
             name=name + ".head",
+            activation_mode=activation_mode,
         )
         args = (
             requests,

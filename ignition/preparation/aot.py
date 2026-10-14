@@ -1,7 +1,6 @@
 """Serializable compiled forwards with caller-owned storage and runtime handles."""
 
 import hashlib
-import fcntl
 import importlib
 import inspect
 import operator
@@ -16,6 +15,7 @@ from pathlib import Path
 from threading import RLock
 
 import torch
+from filelock import FileLock
 from torch._dynamo.aot_compile_types import SerializableCallable
 from torch._dynamo.guards import GuardsStatePickler, _Missing
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -400,12 +400,8 @@ class ForwardCache:
         self.root.mkdir(parents=True, exist_ok=True)
         # Cached variants share filenames. Hold publication through binding on
         # every rank so another launch cannot replace a catalog still in use.
-        with (self.root / 'publication.lock').open('a+b') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        with FileLock(self.root / 'publication.lock'):
+            yield
 
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
         """Trace and compile in workers, then bind and warm on the owning rank."""

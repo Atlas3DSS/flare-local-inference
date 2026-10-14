@@ -9,7 +9,7 @@ from ignition.components.state import gather_rows
 
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
-from .gdn_recovery import GDNLayerRecords, PreparedGDNCommit
+from ignition.components.gdn_recovery import GDNLayerRecords, PreparedGDNCommit
 from .mtp import MTPScratch, PreparedMTP
 from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedCopyProposals, PreparedSpeculativeCommit,
