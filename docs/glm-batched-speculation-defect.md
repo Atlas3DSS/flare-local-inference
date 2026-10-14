@@ -4,12 +4,13 @@ Status: open, under investigation (Oct 14, 2026). Root cause not yet identified.
 
 ## 1. Summary
 
-On four DGX Sparks (SM121, tensor parallel 4 over RoCEnante), GLM-5.3 Flash
+On DGX Sparks (SM121, ranks on separate hosts over RoCEnante), GLM-5.3 Flash
 produces corrupted answers whenever MTP speculative decoding runs with several
-requests in one batch. With eight or more concurrent requests the replies are
-mostly empty or invented. The same package is correct with speculation
-disabled, and with speculation at concurrency one or two. The GB300 (SM103,
-one rank) is correct on the identical test at concurrency 16.
+requests in one batch. It reproduces at tensor parallel 2 and 4, so it is not
+specific to one sharding width. With eight or more concurrent requests the
+replies are mostly empty or invented. The same packages are correct with
+speculation disabled, and with speculation at concurrency one or two. The
+GB300 (SM103, one rank) is correct on the identical test at concurrency 16.
 
 The defect also explains two earlier symptoms:
 
@@ -29,9 +30,10 @@ The defect also explains two earlier symptoms:
 | Flare | `rebase-series` a02621e |
 | FlashInfer / b12x | local-inference-lab/flashinfer f6552169 (PR #12) |
 | Checkpoint | local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD dec48abd |
-| Package | `ignition export glm-5.3-flash --ranks 4 --gpus 0 --max-concurrency 16 --prefill-chunk-size 4096 --no-context-parallel` |
-| Hardware | 4x DGX Spark (GB10, SM121), RoCE 200G, ranks hertz/maxwell/faraday/ampere |
-| Capacity | 6,716,416 KV tokens per rank, 176 state rows, FP32 recurrent / BF16 convolution state |
+| TP4 package | `ignition export glm-5.3-flash --ranks 4 --gpus 0 --max-concurrency 16 --prefill-chunk-size 4096 --no-context-parallel` |
+| TP2 package | the same with `--ranks 2 --max-concurrency 8` |
+| Hardware | DGX Spark (GB10, SM121), RoCE 200G; TP4 ranks hertz/maxwell/faraday/ampere, TP2 ranks hertz/maxwell |
+| Capacity (TP4) | 6,716,416 KV tokens per rank, 176 state rows, FP32 recurrent / BF16 convolution state |
 | Sampling | T=1, top-p 0.95 (model card); per-request seeds |
 
 ## 3. Results
@@ -55,6 +57,8 @@ prompts with distinct leading nonces one at a time. The 10K prompt is
 | Spark TP4, speculation off | uncached 48K–133K | 5/5 |
 | Spark TP4, adaptive MTP, default concurrency | uncached 48K–133K | about 2/15 |
 | Spark TP4, adaptive MTP, `--max-concurrency 1` / `2` | uncached 96K–133K | 5/5, 4/4 |
+| Spark TP2, adaptive MTP, concurrency 8 | cached 10K x8 | 1/8 |
+| Spark TP2, adaptive MTP | cached 10K x2 | 2/2 |
 
 The misses with speculation off name a neighbouring record (199 for 198), the
 same model-level miss the GB300 makes at a similar rate. They are a separate
@@ -64,12 +68,15 @@ claims that the prompt contains no code.
 Row count alone is not the trigger. Eight requests at width 2 (16 rows, the
 same row count as plain decode at concurrency 16) still fail. The failing
 configuration is several requests, each verifying several tokens, on SM121
-ranks.
+ranks. The TP2 misses look like the TP4 ones: empty replies, a garbled code
+(`2U2GYZF`), and records far from the needle.
 
 ## 4. Reproduce on DGX Sparks
 
-1. Export a TP4 package without decode context parallelism, following
-   [multi-host.md](multi-host.md):
+1. Export a package without decode context parallelism, following
+   [multi-host.md](multi-host.md). Four Sparks at TP4 are shown; two Sparks at
+   TP2 (`--ranks 2`, one `join`, `--hosts` naming the one peer) reproduce the
+   same way with `--max-concurrency 8` and `--concurrency 8` in step 3:
 
    ```sh
    .venv/bin/ignition export glm-5.3-flash --config ~/glm/config.toml --ranks 4 \
@@ -112,7 +119,9 @@ Raw outputs, probes and logs from the runs above are on gracie under
 
 ## 5. Reproduce on RTX PRO 6000 (SM120)
 
-Flare's GLM recipe branches only on SM103 versus everything else, so an SM120
+Since the defect appears at both TP2 and TP4 on the Sparks, any tensor-parallel
+width that fits should do on SM120. Flare's GLM recipe branches only on SM103
+versus everything else, so an SM120
 host runs the same b12x path as the Sparks: the DSA indexer, sparse MLA, KDA
 recording and commit, fused NVFP4 MoE, blockscaled GEMMs, and the short
 convolution. Three things differ: b12x compiles for `sm_120a`, autotuning
@@ -169,6 +178,7 @@ Each check below passed at the shapes the failing rounds use. Scripts are in
 | b12x short convolution, speculative mode | 6144 and 24576 channels, 1–16 sequences, 7 draft columns (`short_conv_spec_check.py`, SM120) | exact |
 | Auxiliary-stream overlaps | diagnostic package with the MLA query chain and MoE shared expert serialized | still 0/16 |
 | KDA verification and commit implementation | diagnostic package using the portable Triton recorder and replay (SM103's) on the Sparks | still 0/16 |
+| Autotuned b12x tactics | diagnostic package prepared with b12x heuristic defaults (autotuning off) | still 0/16 |
 | Step inputs to peer ranks | wire format sends each upload separately; device copies are partial and ordered before launch | correct by inspection |
 | Rank divergence | the step validator compares every rank's pending token each round; no error 32 | none observed |
 
@@ -180,10 +190,9 @@ it does not cover this case.
 
 ## 7. Next steps
 
-1. A Spark package prepared with b12x heuristic defaults (autotuning off) is
-   being built. If it passes, a measured tactic is at fault; bisect by kernel
-   family using the package's recorded selections.
-2. If it fails, skip the MTP draft's cache absorption during decode in a
-   diagnostic package. Drafts degrade but answers must stay correct; a pass
-   would place the corruption in the draft's cache writes.
-3. Run the RTX PRO 6000 reproduction in section 5.
+1. A TP2 package whose decode rounds skip the MTP draft model entirely (each
+   draft repeats the pending token with certainty; no draft forward and no
+   draft-cache writes during decode) is being tested at fixed width 4. A pass
+   places the corruption in the MTP draft path; a failure places it in target
+   verification and commit.
+2. Run the RTX PRO 6000 reproduction in section 5.
