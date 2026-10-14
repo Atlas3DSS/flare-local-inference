@@ -55,6 +55,8 @@ time.
 | Spark TP2, adaptive MTP, concurrency 8 | cached 10K ×8, two seeds | 1/8, 0/8 |
 | Spark TP2, adaptive MTP | cached 10K ×2 | 2/2 |
 | Spark TP2, speculation off, concurrency 8 | cached 10K ×8 | 8/8 |
+| Spark TP2, MTP draft removed from decode rounds (diagnostic, see section 6), fixed width 4, concurrency 8 | cached 10K ×8, two seeds | 0/8, 0/8 |
+| Spark TP2, same diagnostic | cached 10K ×2 | 2/2 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 10K ×16 | 1/16 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 96K ×16 | 0/16 (13 reached the 16,384-token limit) |
 | Spark TP4, adaptive MTP | cached 10K ×2, ×4, ×8 | 2/2, 3/4, 1/8 |
@@ -72,8 +74,12 @@ speculation off all name the neighbouring record (199 for 198), a model-level
 miss the GB300 also makes at a similar rate. Those are a separate question.
 
 Total rows per round do not explain it. Eight requests at width 2 make 16 rows,
-the same as plain decode at 16 requests, and still fail. What fails is several
-requests in one round, each verifying several tokens, on SM121 ranks.
+the same as plain decode at 16 requests, and still fail. The batch capacity of
+the speculative graph does: a single live request fails when it runs in a
+batch-4, 8 or 16 speculative graph (the post-prefill rounds above), and passes
+in batch-1 and batch-2 graphs. With the MTP draft removed, every round commits
+exactly one token per request, as plain decode does, and still fails, so the
+fault is in the target verification graph rather than in the draft model.
 
 ## 4. Reproduce on DGX Spark
 
@@ -185,6 +191,7 @@ standalone against b12x or PyTorch references.
 | Concurrent branches | Package with the MLA query chain and the MoE shared expert (`ConcurrentSharedExpert`) run serially | Still fails (0/16) |
 | KDA verification implementation | Package that records and replays KDA verification through the portable Triton path (`glm53/kda_recovery.py`) on SM121 | Still fails (0/16) |
 | Autotuned b12x tactics | Package prepared with b12x heuristic defaults (autotuning off) | Still fails (0/16) |
+| MTP draft model and draft-cache writes | Package whose decode rounds propose the pending token with certainty, with no draft forward or draft-cache writes (`glm53/speculative.py`), fixed width 4 | Still fails (0/8) |
 | Per-step inputs to peer ranks | Each upload is sent separately and copied before the graph launches | Correct by inspection |
 | Ranks disagreeing on tokens | The step validator compares every rank's pending token each round (error 32 on mismatch) | No mismatches |
 
@@ -198,9 +205,9 @@ logs, so it does not cover this case.
 
 1. Confirm the reproduction on Flare `main` with FlashInfer 64916e85
    (section 2).
-2. Test a package whose decode rounds skip the MTP draft model: each draft
-   repeats the pending token with certainty, with no draft forward or
-   draft-cache writes during decode, at fixed width 4. A pass places the
-   corruption in the MTP draft path; a failure places it in target
-   verification and commit.
+2. Test a package exported with `--no-compile`. Each rank then captures its
+   own uncompiled forwards, which removes both suspects that depend on the
+   speculative graph's shape: compiled forwards shared between ranks with
+   per-process integer handles baked in, and Inductor or Triton code generated
+   for those shapes on `sm_121`.
 3. Run the RTX PRO 6000 reproduction in section 5.
