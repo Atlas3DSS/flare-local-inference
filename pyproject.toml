@@ -20,7 +20,7 @@ prepare = [
     "torch==2.13.0+cu130",
     "torchvision==0.28.0+cu130",
     "transformers[torch,vision,chat_template] @ git+https://github.com/huggingface/transformers.git@4cc2aa84301c9aa210b5513dab9fefae03981f6e",
-    "flashinfer-python[b12x]",
+    "flashinfer-python[b12x] @ git+https://github.com/local-inference-lab/flashinfer.git@main",
     "cuda-python==13.3.1",
     "safetensors==0.8.0",
     "tokenizers==0.23.2",
@@ -40,11 +40,7 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
-flashinfer-python = { path = "../flashinfer", editable = true }
 flare-heliopause = { path = "heliopause" }
-
-[tool.ignition.source-revisions]
-flashinfer = "64916e85d62eedfb1e8c436f8cbe103396e94559"
 
 [tool.setuptools.packages.find]
 include = ["ignition*"]

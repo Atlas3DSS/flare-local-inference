@@ -1,10 +1,11 @@
 # GLM-5.3 Flash: batched speculative decoding corrupts answers on DGX Spark
 
-Status: fixed on `main` by 22887c1 (section 7), validated on Spark at TP2 and
-TP4. A separate, rarer device error at TP4 with 16 concurrent requests remains
-open (section 7). Exporting a GLM package zeroes the DSA indexer's selection width,
-which only the b12x indexer's tiled route reads, so every verification graph
-above 16 query rows attends to the wrong records.
+Status: 22887c1 restored the selection width inside each graph and was validated
+on Spark at TP2 and TP4. GLM now uses b12x's page-table extent directly, without
+a width tensor in scratch (section 7). A separate, rarer device error at TP4
+with 16 concurrent requests remains open. Before the fix, export zeroed the
+selection width read by the tiled indexer, corrupting verification above 16
+query rows.
 
 ## 1. Summary
 
@@ -19,11 +20,12 @@ concurrent requests.
 
 Two other symptoms were attributed to it:
 
-- **Long prompts without a cached prefix answer wrongly.** Right after its
-  prefill, a request runs one speculative round at each larger batch capacity
-  the server allows (16, 8, 4, then 2 rows, with the request in row zero and the
-  rest inactive) before settling at batch one. Those first rounds corrupt it.
-  A request that restores a cached prompt starts at batch one and skips them.
+- **Long prompts without a cached prefix answer wrongly.** In the failing runs,
+  post-prefill execution included speculative rounds at larger batch capacities
+  (16, 8, 4, then 2 rows, with the request in row zero and the rest inactive)
+  before settling at batch one. Cached-prefix requests in those runs started
+  at batch one. Cache reuse does not itself determine the graph capacity;
+  scheduler state and adaptive verification determine the selected graph.
 - **Concurrent streams occasionally fail with device error 6
   (`INVALID_SPECULATION`).** An instrumented build that reports the failing
   check shows the verifier rejecting the target distribution (non-finite or
@@ -236,10 +238,11 @@ an SM120 package exported without the fix in section 7 should corrupt answers
 the same way and one exported with it should not. GLM has not yet been run
 this way.
 
-The checkpoint holds about 166 GB of weights, so use four 96 GB cards in one
-host at tensor parallel 4 (about 44 GB of weights per rank). Two cards leave no
-room for the KV cache. The defect appears at both TP2 and TP4 on Spark, so TP4
-is a fair test.
+The checkpoint holds about 166 GB of weights. Four 96 GB cards at tensor
+parallel 4 leave about 44 GB of weights per rank. TP2 also fits on two 96 GB
+RTX PRO 6000 cards, with less KV capacity; the available capacity depends on
+concurrency, graph workspace, and continuation-state backing. The defect appears
+at both TP2 and TP4 on Spark.
 
 1. Export, one rank per GPU:
 
@@ -288,7 +291,7 @@ Sparks that we inspected uses the same b12x kernel families, but with b12x
 tuning off, PyNCCL collectives and at most two concurrent requests in its
 logs, so it does not cover this case.
 
-## 7. Fix and next steps
+## 7. Fix and remaining device error
 
 22887c1 rewrites the width inside every graph, where the first indexer layer
 already rewrites the page table and pool lengths (`PreparedGlmIndexer.__call__`
@@ -306,6 +309,20 @@ development branch and on `main`, and a compiled TP4 package at concurrency 16,
 the configuration in which the defect was first seen, including 96K-token
 cached and uncached prompts (section 3).
 
+The b12x FP8 DSA indexer accepts `active_width=None` to use the page-table
+extent as its scoring bound. Its kernels derive that extent from tensor shape
+metadata and still mask each row by its visible cache length. Callers with a
+device-computed width, including DeepSeek, retain the explicit tensor input.
+Neither binding nor scratch initialization manufactures a constant width tensor.
+
+GLM passes `None` and has no `IndexScratch.active_width` or width-fill graph
+node. The native GLM regression covers 2- and 32-row decode and 65- and
+4096-row prefill after zeroing all index scratch. b12x graph tests cover
+static and device widths, scratch poisoning, inactive rows, multiple page
+spans, logical and physical selection outputs, and allocation stability.
+These checks ran on SM120; the page-table-extent implementation has not been
+rerun on Spark. Packages prepared before the fix require re-export.
+
 1. Merged: 41c9ff6 (multi-host export) and 22887c1 (the fix). The indexer's
    native-replay test (`tests/recipes/test_glm53_indexer_cuda.py`) now replays
    a 32-row tiled decode graph after zeroing all index scratch, as export does;
@@ -318,10 +335,11 @@ cached and uncached prompts (section 3).
    A TP4 package carrying the fix and a diagnostic that replaces error 6 with
    the failing check (`ignition/components/speculation.py`) failed 6 of 160
    cached 96K requests, every one with code 115: NaN raw target logits in all
-   four vocabulary quarters, each the slice one TP4 rank projects. The hidden
-   state is therefore already NaN, identically on every rank, before the
-   vocabulary projection; the projection, the logit gather, sampling and the
-   verifier only report it. Failures arrive together (4 and 2 replies in two
+   four vocabulary quarters, each the slice one TP4 rank projects. NaNs in all
+   four slices do not establish that the pre-projection hidden state is NaN
+   or identical across ranks. Measurements before and after projection and
+   gathering are required to locate the first non-finite values. Failures
+   arrive together (4 and 2 replies in two
    of ten batches of 16), with no batch × width mix distinguishing the
    failing batches. Locating the layer that first produces NaN is next.
 
@@ -338,7 +356,8 @@ cached and uncached prompts (section 3).
    time, so the race is not yet tied to error 6.
 3. An audit of the other recipes (DeepSeek V4 and V4.1, Qwen 3.8, MiMo V2.6)
    and of the b12x and FlashInfer bindings they serve found no other
-   preparation-time value that export zeroes and a graph reads. Two b12x
-   values follow the same pattern but are unread today: the compressed sparse
-   MLA split-control scalars written at binding, and the indexer's internal
-   width cap used only when a caller passes no `active_width`.
+   preparation-time value that export zeroes and a graph reads. b12x's
+   compressed sparse MLA split-control scalars written at binding were also
+   identified as initialized scratch but were unread by the inspected kernels.
+   The indexer's internal constant width cap has been removed; omitting
+   `active_width` uses page-table extent without initialized scratch.

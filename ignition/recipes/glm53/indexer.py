@@ -60,7 +60,6 @@ class IndexScratch:
     gate: torch.Tensor
     weights: torch.Tensor
     pool_lengths: torch.Tensor
-    active_width: torch.Tensor
     pools: torch.Tensor
     physical: torch.Tensor
     selected_lengths: torch.Tensor
@@ -80,7 +79,7 @@ class IndexScratch:
         return cls(tensor(4096), tensor(4096, torch.float8_e4m3fn), tensor(32, torch.float32),
             tensor(128), tensor(128), tensor(32, torch.float32),
             torch.zeros(tokens, dtype=torch.int32, device=device),
-            torch.tensor([blocks * 64], dtype=torch.int32, device=device), tensor(512, torch.int32),
+            tensor(512, torch.int32),
             tensor(2051, torch.int32), torch.zeros(tokens, dtype=torch.int32, device=device),
             torch.zeros((tokens if mode == "decode" else 1, blocks), dtype=torch.int32, device=device),
             *cls._context_selection(tokens if context_ranks > 1 else 0, context_ranks, device))
@@ -100,7 +99,7 @@ class IndexScratch:
             raise ValueError("GLM index request rows exceed page-table capacity")
         return IndexScratch(self.query[:tokens], self.query_fp8[:tokens], self.query_scales[:tokens],
             self.normalized_key[:tokens], self.gate[:tokens], self.weights[:tokens], self.pool_lengths[:tokens],
-            self.active_width, self.pools[:tokens], self.physical[:tokens], self.selected_lengths[:tokens],
+            self.pools[:tokens], self.physical[:tokens], self.selected_lengths[:tokens],
             self.page_table[:sequences], self.scores[:tokens], self.candidates[:tokens], self.gathered[:tokens],
             self.global_pools[:tokens])
 
@@ -172,7 +171,7 @@ class PreparedGlmIndexer:
         cache = state.cache.view(state.cache.shape[0], -1)
         self.selectors = tuple(selector(scratch.query_fp8[start:end].view(end - start, 32, 128),
             scratch.weights[start:end], cache, page_table[start:end], scratch.pool_lengths[start:end],
-            scratch.active_width, scratch.pools[start:end], caps=caps, session=session,
+            None, scratch.pools[start:end], caps=caps, session=session,
             name=f"{name}.select" if end - start == rows else f"{name}.select{start}", workspace=workspace,
             scores=None if context is None else scratch.scores[start:end])
             for start in range(0, rows, step) for end in (min(start + step, rows),))
@@ -219,8 +218,6 @@ class PreparedGlmIndexer:
         glm_pool.quantize_queries(*self.query_arguments, plan=self.query_plan)
         glm_pool.update_pools(*self.pool_arguments, plan=self.pool_plan)
         if self.prepares_tables:
-            # Packages zero this scratch, so every graph restores the selection width b12x reads.
-            s.active_width.fill_(s.page_table.shape[1] * 64)
             pools = (m.positions + 1) // 4
             s.pool_lengths.copy_(pools if self.context is None else self.context.shards.local_pools(pools))
             if self.mode == "prefill":

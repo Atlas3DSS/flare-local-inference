@@ -379,7 +379,8 @@ source = { directory = "heliopause" }
 
 [[package]]
 name = "flashinfer-python"
-source = { editable = "../flashinfer" }
+version = "0.7.1"
+source = { git = "https://github.com/local-inference-lab/flashinfer.git?rev=main#6d7f238d40da62075f355fa5b000b0b25bfeb700" }
 dependencies = [
     { name = "apache-tvm-ffi" },
     { name = "click" },
@@ -411,43 +412,6 @@ b12x = [
     { name = "safetensors" },
     { name = "torch" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "apache-tvm-ffi", specifier = ">=0.1.11,<0.2" },
-    { name = "apache-tvm-ffi", marker = "extra == 'ptx'", specifier = ">=0.1.12,<0.2" },
-    { name = "click" },
-    { name = "cuda-python", specifier = ">=12.0" },
-    { name = "cuda-tile", specifier = ">=1.4.0" },
-    { name = "einops" },
-    { name = "nccl-extensions", specifier = ">=0.1.0" },
-    { name = "nccl4py", specifier = ">=0.4.1" },
-    { name = "ninja" },
-    { name = "numpy" },
-    { name = "nvidia-cuda-nvcc", marker = "extra == 'ptx'", specifier = ">=13.2" },
-    { name = "nvidia-cudnn-frontend", specifier = ">=1.30.0" },
-    { name = "nvidia-cutlass-dsl", specifier = ">=4.6.2a0" },
-    { name = "nvidia-cutlass-dsl", marker = "extra == 'b12x'", specifier = "==4.7.1" },
-    { name = "nvidia-cutlass-dsl", marker = "extra == 'cu12'", specifier = ">=4.7.0a0" },
-    { name = "nvidia-cutlass-dsl", extras = ["cu13"], marker = "extra == 'cu13'", specifier = ">=4.7.0a0" },
-    { name = "nvidia-cutlass-dsl", extras = ["cu13"], marker = "extra == 'sm107'", specifier = ">=4.8.0.dev0" },
-    { name = "nvidia-cutlass-dsl-libs-base", marker = "extra == 'b12x'", specifier = "==4.7.1" },
-    { name = "nvidia-cutlass-dsl-libs-core", marker = "extra == 'b12x'", specifier = "==4.7.1" },
-    { name = "nvidia-cutlass-dsl-libs-cu12", marker = "extra == 'b12x'", specifier = "==4.7.1" },
-    { name = "nvidia-cutlass-dsl-libs-cu13", marker = "extra == 'b12x'", specifier = "==4.7.1" },
-    { name = "nvidia-ml-py" },
-    { name = "nvshmem4py-cu13", marker = "extra == 'sm107'", specifier = ">=0.3.1" },
-    { name = "packaging", specifier = ">=24.2" },
-    { name = "requests" },
-    { name = "rich", marker = "extra == 'b12x'", specifier = ">=13" },
-    { name = "safetensors", marker = "extra == 'b12x'", specifier = ">=0.6" },
-    { name = "tabulate" },
-    { name = "torch" },
-    { name = "torch", marker = "extra == 'b12x'", specifier = ">=2.12.0" },
-    { name = "torch", marker = "extra == 'sm107'", specifier = ">=2.8" },
-    { name = "tqdm" },
-]
-provides-extras = ["b12x", "ptx", "cu12", "cu13", "sm107", "nvep"]
 
 [[package]]
 name = "fsspec"
@@ -578,7 +542,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'prepare'", specifier = ">=46,<52" },
     { name = "cuda-python", marker = "extra == 'prepare'", specifier = "==13.3.1" },
     { name = "flare-heliopause", marker = "extra == 'prepare'", directory = "heliopause" },
-    { name = "flashinfer-python", extras = ["b12x"], marker = "extra == 'prepare'", editable = "../flashinfer" },
+    { name = "flashinfer-python", extras = ["b12x"], marker = "extra == 'prepare'", git = "https://github.com/local-inference-lab/flashinfer.git?rev=main" },
     { name = "huggingface-hub", marker = "extra == 'prepare'", specifier = "==1.33.0" },
     { name = "openai", marker = "extra == 'api-test'", specifier = ">=2,<3" },
     { name = "pillow", marker = "extra == 'prepare'", specifier = "==12.3.0" },

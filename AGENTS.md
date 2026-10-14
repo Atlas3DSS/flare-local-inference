@@ -56,10 +56,15 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation environment uses the sibling `../flashinfer` checkout through
-`pyproject.toml`. Inspect that checkout and its local changes before updating
-dependencies. After changing Rust code in `heliopause/`, or Helios code used by
-the extension, rebuild the installed extension explicitly:
+The preparation dependency targets `main` in `local-inference-lab/flashinfer`;
+`uv.lock` records the resolved commit. Run
+`uv lock --upgrade-package flashinfer-python` to advance it to the branch tip,
+then sync the environment. For local FlashInfer development, install the sibling
+checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
+`uv sync --locked --extra prepare --extra test` restores the Git dependency.
+Inspect that checkout and its local changes before modifying it. After changing
+Rust code in `heliopause/`, or Helios code used by the extension, rebuild the
+installed extension explicitly:
 
 ```sh
 uv pip install --python .venv/bin/python --no-deps ./heliopause
