@@ -75,7 +75,7 @@ def stream(service, request, barrier=None, cancel_after=None):
     body = {
         "model": service[1],
         "messages": [{"role": "user", "content": request.prompt}],
-        "temperature": 0,
+        "temperature": 1,
         "top_p": 1,
         "top_k": 0,
         "min_p": 0,

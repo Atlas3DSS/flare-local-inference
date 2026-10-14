@@ -1,0 +1,7 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000",
+    "ANTHROPIC_API_KEY": "local",
+    "ANTHROPIC_MODEL": "flare"
+  }
+}

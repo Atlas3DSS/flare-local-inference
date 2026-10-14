@@ -47,9 +47,9 @@ class RequestAdmission:
             if not math.isfinite(value) or abs(value) > torch.finfo(torch.float32).max:
                 raise ValueError(f"{name} must be finite FP32")
             if name in ("temperature", "top_p", "repetition_penalty") and 0 < value < torch.finfo(torch.float32).tiny:
-                raise ValueError(f"{name} must be zero or a normal FP32 value")
-        if self.temperature < 0 or not 0 < self.top_p <= 1 or not 0 <= self.min_p <= 1 or self.repetition_penalty <= 0:
-            raise ValueError("require temperature >= 0, 0 < top_p <= 1, 0 <= min_p <= 1 and repetition_penalty > 0")
+                raise ValueError(f"{name} must be a positive normal FP32 value")
+        if self.temperature <= 0 or not 0 < self.top_p <= 1 or not 0 <= self.min_p <= 1 or self.repetition_penalty <= 0:
+            raise ValueError("require temperature > 0, 0 < top_p <= 1, 0 <= min_p <= 1 and repetition_penalty > 0")
         if len(self.eos_token_ids) > EOS_CAPACITY or any(type(x) is not int or not 0 <= x < vocab_size for x in self.eos_token_ids):
             raise ValueError(f"EOS requires at most {EOS_CAPACITY} vocabulary token IDs")
 
@@ -256,7 +256,7 @@ def _scores(Logits, Scores, Slots, Epochs, Live, Generation, Status, Counts, Par
     frequency = tl.load(Params + slot * 6 + 5, valid, other=0.)
     x = tl.where(counts > 0, tl.where(x > 0., x / repetition, x * repetition) - presence, x)
     x = x - frequency * counts
-    x = x / tl.where(temperature > 0., temperature, 1.)
+    x = x / tl.where(valid, temperature, 1.)
     enabled = tl.load(GrammarEnabled + slot, valid, other=0)
     bits = tl.load(Grammar + slot * WORDS + token // 32, valid & (token < V), other=0).to(tl.uint32)
     allowed = (enabled == 0) | ((bits >> (token % 32)) & 1 != 0)
@@ -300,18 +300,13 @@ def _mask_min_p(Input, Output, Maximum, MinP, V: tl.constexpr, BLOCK: tl.constex
 
 
 @triton.jit
-def _normalize_probs(Probability, Mass, Slots, Params, PointMassIds,
-                     V: tl.constexpr, BLOCK: tl.constexpr, SLOTS: tl.constexpr = 4):
+def _normalize_probs(Probability, Mass, V: tl.constexpr, BLOCK: tl.constexpr):
     row, block = tl.program_id(0), tl.program_id(1)
     token = block * BLOCK + tl.arange(0, BLOCK)
     mass = tl.load(Mass + row)
     valid = (mass > 0.) & (mass != float("inf"))
     value = tl.load(Probability + row * V + token, token < V, other=0.)
     value = tl.where(valid, value / mass, (token == 0).to(tl.float32))
-    slot = tl.minimum(tl.maximum(tl.load(Slots + row), 0), SLOTS - 1)
-    point_mass = tl.load(Params + slot * 6) == 0.
-    point_mass_id = tl.load(PointMassIds + row)
-    value = tl.where(point_mass, (token == point_mass_id).to(tl.float32), value)
     tl.store(Probability + row * V + token, value, token < V)
 
 
@@ -446,13 +441,13 @@ class PreparedSampling:
     Penalties and grammar precede temperature and FlashInfer top-k, softmax,
     and top-p. Both cutoff filters retain boundary ties. Min-p keeps equality
     against the largest remaining probability, then renormalizes. Temperature
-    zero constructs a point mass at the lowest-ID maximum before sampling.
+    must be positive.
 
     Each row uses a separate FlashInfer call with device seed and
     offset=4*counter. CUDA's Philox subsequence is therefore zero regardless
     of packed row or physical slot. One word is drawn per generated token;
-    the logical counter advances once, including temperature-zero tokens. FlashInfer's
-    temporary outputs remain inside the captured graph. ``scratch_tensors``
+    the logical counter advances once. FlashInfer's temporary outputs remain
+    inside the captured graph. ``scratch_tensors``
     enumerates mutable storage retained through graph replay.
     """
 
@@ -480,7 +475,6 @@ class PreparedSampling:
             return tensor
         scratch("scores", (rows, vocab), torch.float32)
         scratch("maximum", (rows,), torch.float32)
-        scratch("point_mass_ids", (rows,), torch.int64)
         self._rows = rows
         self._grid = (rows, triton.cdiv(vocab, 1024), 1)
         self._score_args = (logits, self.scores, row_slot_ids, row_generations, live_rows, state.generation,
@@ -499,8 +493,7 @@ class PreparedSampling:
             state.parameters, state.top_k, state.seed, state.rng_counter, self.packed_top_k,
             self.packed_top_p, self.packed_min_p, self.packed_seed, self.packed_offset, vocab, state.capacity)
         self._sanitize_args = (self.scores, self.maximum, vocab, 1024)
-        self._normalize_args = (self.probabilities, self.probability_mass, self.slots,
-            state.parameters, self.point_mass_ids, vocab, 1024, state.capacity)
+        self._normalize_args = (self.probabilities, self.probability_mass, vocab, 1024)
         # The top-p output address is graph-private and supplied during capture.
         self._min_p_kernel = None
         sampled, valid, mass = self.sampled_tokens, self.sample_valid, self.probability_mass
@@ -534,7 +527,7 @@ class PreparedSampling:
         self._prepared = True
 
     def _filter_scores(self):
-        torch.max(self.scores, dim=-1, out=(self.maximum, self.point_mass_ids))
+        torch.amax(self.scores, dim=-1, out=self.maximum)
         self._metadata()
         self._sanitize()
         probabilities = filter_probabilities(self.scores, self.packed_top_k, self.packed_top_p,
@@ -587,8 +580,8 @@ def _admission_validate(Count, Slots, Epochs, Params, TopK, Budget, Eos, EosCoun
         scalar_valid &= tl.sum((~finite).to(tl.int32), 0) == 0
         temperature, top_p, min_p = tl.load(Params + row * 6), tl.load(Params + row * 6 + 1), tl.load(Params + row * 6 + 2)
         repetition = tl.load(Params + row * 6 + 3)
-        scalar_valid &= (temperature >= 0.) & (top_p > 0.) & (top_p <= 1.) & (min_p >= 0.) & (min_p <= 1.) & (repetition > 0.)
-        scalar_valid &= ((temperature == 0.) | (temperature >= 1.1754943508222875e-38))
+        scalar_valid &= (temperature > 0.) & (top_p > 0.) & (top_p <= 1.) & (min_p >= 0.) & (min_p <= 1.) & (repetition > 0.)
+        scalar_valid &= (temperature >= 1.1754943508222875e-38)
         scalar_valid &= (top_p >= 1.1754943508222875e-38) & (repetition >= 1.1754943508222875e-38)
         k, budget = tl.load(TopK + row), tl.load(Budget + row)
         scalar_valid &= (k >= -1) & (k <= V) & (budget >= 0) & (budget <= 2147483647)

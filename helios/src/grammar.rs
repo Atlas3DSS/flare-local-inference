@@ -148,19 +148,45 @@ impl GrammarCompiler {
     /// Compile the llguidance Lark dialect. Embedded JSON and compiler directives
     /// use separate APIs so they cannot override strict JSON-schema validation.
     pub fn compile_lark(&self, grammar: &str) -> Result<RequestGrammar> {
-        if grammar.is_empty() || grammar.len() > MAX_GRAMMAR_BYTES {
-            return Err(Error::admission(
-                AdmissionError::Grammar,
-                format!("Lark grammar must contain 1..={MAX_GRAMMAR_BYTES} bytes"),
-            ));
-        }
-        if grammar.contains("%json") || grammar.contains("%llguidance") {
-            return Err(Error::admission(
-                AdmissionError::Grammar,
-                "Lark %json and %llguidance directives are unsupported; use the JSON-schema API for schemas",
-            ));
-        }
+        validate_lark(grammar)?;
         self.compile(TopLevelGrammar::from_lark(grammar.to_owned()))
+    }
+
+    /// Compile a complete custom-tool input contract without sampling masks.
+    pub(crate) fn compile_text(&self, syntax: &str, source: &str) -> Result<TextGrammar> {
+        let grammar = match syntax {
+            "lark" => {
+                validate_lark(source)?;
+                TopLevelGrammar::from_lark(source.to_owned())
+            }
+            "regex" if !source.is_empty() && source.len() <= MAX_GRAMMAR_BYTES => {
+                TopLevelGrammar::from_regex(source)
+            }
+            _ => {
+                return Err(Error::admission(
+                    AdmissionError::Grammar,
+                    "custom tool format requires a bounded Lark or regex grammar",
+                ));
+            }
+        };
+        let parser = self.factory.create_parser(grammar).map_err(|e| {
+            Error::admission(
+                AdmissionError::Grammar,
+                format!("invalid custom tool grammar: {e:#}"),
+            )
+        })?;
+        let mut matcher = Matcher::new(Ok(parser));
+        let warnings = matcher.grammar_warnings();
+        if !warnings.is_empty() || matcher.is_error() {
+            return Err(Error::admission(
+                AdmissionError::Grammar,
+                format!(
+                    "invalid custom tool grammar: {}",
+                    matcher.get_error().unwrap_or_else(|| warnings.join("; "))
+                ),
+            ));
+        }
+        Ok(TextGrammar { matcher })
     }
 
     fn compile(&self, grammar: TopLevelGrammar) -> Result<RequestGrammar> {
@@ -192,6 +218,49 @@ impl GrammarCompiler {
         };
         request.refresh_mask()?;
         Ok(request)
+    }
+}
+
+fn validate_lark(grammar: &str) -> Result<()> {
+    if grammar.is_empty() || grammar.len() > MAX_GRAMMAR_BYTES {
+        return Err(Error::admission(
+            AdmissionError::Grammar,
+            format!("Lark grammar must contain 1..={MAX_GRAMMAR_BYTES} bytes"),
+        ));
+    }
+    if grammar.contains("%json") || grammar.contains("%llguidance") {
+        return Err(Error::admission(
+            AdmissionError::Grammar,
+            "Lark %json and %llguidance directives are unsupported; use the JSON-schema API for schemas",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) struct TextGrammar {
+    matcher: Matcher,
+}
+impl TextGrammar {
+    pub fn validate(&self, text: &str) -> Result<()> {
+        let mut matcher = self.matcher.clone();
+        let environment = matcher
+            .tok_env()
+            .map_err(|e| format!("custom tool grammar: {e}"))?;
+        let trie = environment.tok_trie();
+        // Greedy tokenization preserves the exact bytes, without checkpoint normalization.
+        let tokens = trie.greedy_tokenize(text.as_bytes());
+        if trie.decode_raw(&tokens) != text.as_bytes() {
+            return Err(
+                "custom tool input cannot be represented by the tokenizer byte trie".into(),
+            );
+        }
+        let consumed = matcher
+            .try_consume_tokens(&tokens)
+            .map_err(|e| format!("custom tool input failed grammar validation: {e}"))?;
+        if consumed != tokens.len() || !matcher.is_accepting().map_err(|e| e.to_string())? {
+            return Err("custom tool input does not match its grammar".into());
+        }
+        Ok(())
     }
 }
 
@@ -513,6 +582,34 @@ mod tests {
         assert!(request.is_stopped());
         assert!(request.mask().iter().all(|&word| word == 0));
         assert!(request.advance(257).is_err());
+    }
+
+    #[test]
+    fn custom_tool_grammars_validate_complete_exact_text_repeatedly() {
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        for (syntax, source) in [
+            ("regex", "café[0-9]+"),
+            ("lark", "start: \"café\" /[0-9]+/"),
+        ] {
+            let grammar = compiler.compile_text(syntax, source).unwrap();
+            for _ in 0..2 {
+                assert!(grammar.validate("café42").is_ok());
+                for text in ["", "café", "cafe\u{301}42", "café42tail", "prefixcafé42"] {
+                    assert!(grammar.validate(text).is_err(), "{syntax}: {text:?}");
+                }
+            }
+        }
+        assert!(
+            compiler
+                .compile_text("lark", "start: missing_rule")
+                .is_err()
+        );
+        assert!(
+            compiler
+                .compile_text("lark", "%llguidance {}\nstart: /./")
+                .is_err()
+        );
+        assert!(compiler.compile_text("regex", "(").is_err());
     }
 
     #[test]

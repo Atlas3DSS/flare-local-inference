@@ -374,11 +374,9 @@ at each conditional prefix. A copied token has a point-mass proposal law:
 `q(copy_token)=1`, with zero mass elsewhere. Copy substitutions use that law
 at every temperature, including when replacing a native MTP proposal.
 
-Temperature zero constructs a point mass at the first maximum logit and passes
-it through the same FlashInfer probability sampler and chain verifier. There are
-no separate greedy graphs, acceptance kernels or scheduler routes. Positive
-temperatures use the checkpoint's sampling defaults unless a request overrides
-them.
+Temperature must be positive. Requests use the checkpoint's sampling defaults
+unless explicit values override them. Target distributions use the same
+FlashInfer probability sampler and chain verifier across supported temperatures.
 
 The chain sampler's counters accumulate in place. Reset them per round; use
 **emitted draft count plus one**, not independent acceptance count, for output

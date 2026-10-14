@@ -32,7 +32,7 @@ def service():
         body = {
             "model": model,
             "messages": [{"role": "user", "content": content}],
-            "temperature": 0,
+            "temperature": 1,
             "seed": 1234,
             "max_tokens": 128,
             "enable_thinking": False,

@@ -14,6 +14,7 @@ ignition = "ignition.__main__:main"
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
+api-test = ["pytest>=9,<10", "openai>=2,<3", "anthropic>=0.70,<1"]
 prepare = [
     "cryptography>=46,<52",
     "torch==2.13.0+cu130",

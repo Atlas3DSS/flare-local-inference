@@ -305,7 +305,11 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
-            assert!(parser.finish(cause).is_err());
+            if cause == Termination::Eos {
+                assert!(parser.finish(cause).is_err());
+            } else {
+                assert!(parser.finish(cause).unwrap().is_empty());
+            }
         }
         for cause in [
             Termination::Cancelled,

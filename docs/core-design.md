@@ -1091,9 +1091,9 @@ The graph boundary includes sampling.
 
 Temperature, top-k, top-p, min-p and penalty controls use one captured
 probability-sampling path built from FlashInfer primitives. Captured operations
-manage penalties, grammar masks and request-state updates. Temperature zero
-constructs a point mass at the first maximum logit and uses the same sampler.
-There is no separate greedy graph or runtime route.
+manage penalties, grammar masks and request-state updates. Temperature must be
+positive; zero-temperature requests are rejected because greedy decoding
+collapses the model's probability distribution.
 
 Execution ABIs 2 and 3 retain `sampling_mode="general"` as their sole
 supported manifest value. Bounded top-k optimization is deferred. Measure
@@ -1112,7 +1112,7 @@ Keep explicit per-request seeds and counters in server-owned device state.
 Pass device seed and offset tensors to FlashInfer's sampler. Each request uses
 a one-row draw with Philox subsequence zero and word offset `4 * counter`, so
 batch packing cannot change its random stream. Counters advance once for each
-successful live sample, including temperature-zero samples, and remain unchanged for
+successful live sample and remain unchanged for
 inactive, invalid or terminal requests.
 
 Do not capture PyTorch generator-backed random operations in graphs launched
@@ -1493,8 +1493,7 @@ end-to-end TTFT, inter-token latency, and completed-work throughput across the
 required local workloads at concurrency 1, 2, and 4. Report individual workloads
 and tail latency; an aggregate win does not erase a workload regression. Repeat
 noisy measurements before declaring parity. Primary serving measurements use
-temperature 1, top-k 20, and top-p 0.95; temperature-zero diagnostics remain
-separate. Correctness and request-completion gates apply to both engines.
+temperature 1, top-k 20, and top-p 0.95. Correctness and request-completion gates apply to both engines.
 
 Measure three paths with matching model, inputs, precision, and generation
 behavior:

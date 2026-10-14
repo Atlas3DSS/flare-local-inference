@@ -337,11 +337,6 @@ impl Bootstrap {
                         error,
                     ))
                 })?,
-            qualification_token_trace: match object.get("qualification_token_trace") {
-                None => false,
-                Some(Value::Bool(enabled)) => *enabled,
-                _ => return Err("qualification_token_trace must be a boolean".into()),
-            },
         };
         Ok(Self {
             model,

@@ -189,7 +189,7 @@ mod tests {
         parser
             .push(Input::Text("</think><tool_call>run<arg_key>text</arg_key>"))
             .unwrap();
-        assert!(parser.finish(Termination::OutputLimit).is_err());
+        assert!(parser.finish(Termination::OutputLimit).unwrap().is_empty());
         let mut parser = GlmOutput::new(OutputConfig {
             verbatim: true,
             ..config()

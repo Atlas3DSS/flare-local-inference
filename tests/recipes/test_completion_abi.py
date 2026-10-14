@@ -55,7 +55,7 @@ def _kernel_cases(fields, device="cpu"):
     # Strided live counts exercise the hybrid-state view contract.
     backing = torch.zeros((8, 19), dtype=torch.int64, device=device)
     state = DeviceRequestState.allocate(device, vocab_size=32, consumed_tokens=backing[:4, 0])
-    state.admit(2, RequestAdmission(7, 11, temperature=0., max_new_tokens=2, eos_token_ids=()), [3] * 64 + [4],
+    state.admit(2, RequestAdmission(7, 11, temperature=1., max_new_tokens=2, eos_token_ids=()), [3] * 64 + [4],
         consumed_tokens=65, ple_history=(3, 4))
     records = torch.full((2, 4, fields), -99, dtype=torch.int64, device=device)
     frame, sequence = tensor([1], torch.int32), tensor([91])
@@ -96,7 +96,7 @@ def _kernel_cases(fields, device="cpu"):
     check(2, [0, 0, 0, 0, -1, 0, 0, 0])
 
     admission = AdmissionBuffers.allocate(device, vocab_size=32)
-    admission.stage(0, 2, RequestAdmission(8, 19, temperature=0., eos_token_ids=()), [3, 4])
+    admission.stage(0, 2, RequestAdmission(8, 19, temperature=1., eos_token_ids=()), [3, 4])
     admission.admission_count.fill_(1)
     errors = torch.zeros(4, dtype=torch.int32, device=device)
     a = admission

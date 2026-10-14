@@ -110,7 +110,7 @@ def test_live_row_state_survives_width_one_and_retains_accepted_endpoint():
     graph.reset()
 
 
-@pytest.mark.parametrize("temperature", [0., 1.])
+@pytest.mark.parametrize("temperature", [.7, 1.])
 @pytest.mark.parametrize("copy_epoch", [12, 13])
 def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature, copy_epoch):
     from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission

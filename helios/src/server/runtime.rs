@@ -56,6 +56,7 @@ pub enum GenerationEvent {
         reused_prompt_tokens: u64,
         reason: &'static str,
         termination: crate::output::Termination,
+        stop_sequence: Option<String>,
     },
     AdmissionRejected(Error),
     Error(Error),
@@ -89,6 +90,7 @@ impl Drop for Generation {
 }
 
 struct Incoming<M: ModelContract> {
+    _capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     arrival_ns: u64,
     publications: std::cell::Cell<u64>,
     prompt: Prompt<M>,
@@ -96,7 +98,6 @@ struct Incoming<M: ModelContract> {
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     metrics: Arc<super::metrics::Metrics>,
-    qualification: bool,
     observation: Option<bool>,
     /// Consult the host prefix store at admission; cleared after a failed restore.
     host_lookup: bool,
@@ -180,11 +181,12 @@ impl<M: ModelContract> Active<'_, M> {
 }
 
 pub struct ModelRuntime<M: ModelContract> {
-    sender: mpsc::SyncSender<Incoming<M>>,
+    sender: mpsc::SyncSender<Vec<Incoming<M>>>,
     stop: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     config: Arc<ModelConfig>,
     event_capacity: usize,
+    capacity: Arc<tokio::sync::Semaphore>,
     thread: Mutex<Option<JoinHandle<Shutdown>>>,
     shutdown: Mutex<Option<Shutdown>>,
     finished: Arc<(Mutex<bool>, Condvar)>,
@@ -208,6 +210,9 @@ impl<M: ModelContract> ModelRuntime<M> {
         if queue_capacity == 0 || queue_capacity > 1024 || !(2..=4096).contains(&event_capacity) {
             return Err("invalid native request/event queue capacity".into());
         }
+        let capacity = Arc::new(tokio::sync::Semaphore::new(
+            queue_capacity + config.limits.max_active,
+        ));
         let config = Arc::new(config);
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -387,6 +392,7 @@ impl<M: ModelContract> ModelRuntime<M> {
                 healthy,
                 config,
                 event_capacity,
+                capacity,
                 thread: Mutex::new(Some(thread)),
                 shutdown: Mutex::new(None),
                 finished,
@@ -431,7 +437,7 @@ impl<M: ModelContract> ModelRuntime<M> {
         self.healthy()
     }
     pub fn generate(&self, prompt: Prompt<M>) -> Result<Generation> {
-        self.enqueue(prompt, false, None)
+        self.enqueue(prompt, None)
     }
 
     pub(super) fn generate_observed(
@@ -439,62 +445,91 @@ impl<M: ModelContract> ModelRuntime<M> {
         prompt: Prompt<M>,
         timestamps: bool,
     ) -> Result<Generation> {
-        self.enqueue(prompt, false, Some(timestamps))
+        self.enqueue(prompt, Some(timestamps))
     }
 
-    pub(super) fn generate_qualification(&self, prompt: Prompt<M>) -> Result<Generation> {
-        super::qualification::validate_prompt(&prompt)?;
-        self.enqueue(prompt, true, None)
+    fn enqueue(&self, prompt: Prompt<M>, observation: Option<bool>) -> Result<Generation> {
+        self.enqueue_many(vec![prompt], observation)
+            .map(|mut group| group.remove(0))
     }
 
-    fn enqueue(
+    pub fn generate_many(&self, prompts: Vec<Prompt<M>>) -> Result<Vec<Generation>> {
+        self.enqueue_many(prompts, None)
+    }
+
+    fn enqueue_many(
         &self,
-        prompt: Prompt<M>,
-        qualification: bool,
+        prompts: Vec<Prompt<M>>,
         observation: Option<bool>,
-    ) -> Result<Generation> {
+    ) -> Result<Vec<Generation>> {
         if !self.healthy() {
             return Err(Error::admission(
                 AdmissionError::Unavailable,
                 "prepared model runtime is unavailable",
             ));
         }
-        prompt
-            .sampling
-            .validate()
-            .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
-        super::stops::TokenStops::new(
-            prompt.stop_sequences.clone(),
-            self.config.contract.vocabulary,
-        )?;
-        super::stops::validate_strings(
-            &prompt.stop_strings,
-            !prompt.stop_sequences.is_empty(),
-            prompt.grammar.is_some(),
-        )?;
-        crate::model::admission::validate_prompt::<M>(&self.config, &prompt)
-            .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
-        let (events, receiver) = async_mpsc::channel(self.event_capacity);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let failure = Arc::new(Mutex::new(None));
-        let incoming = Incoming {
-            arrival_ns: super::observation::monotonic_ns(),
-            publications: Default::default(),
-            prompt,
-            events,
-            cancelled: cancelled.clone(),
-            failure: failure.clone(),
-            metrics: self.metrics.clone(),
-            qualification,
-            observation,
-            host_lookup: true,
-            readmitted: false,
-        };
-        let enqueue_ns = observation
-            .filter(|timestamps| *timestamps)
-            .map(|_| super::observation::monotonic_ns());
+        let count = u32::try_from(prompts.len())
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or("generation group must be nonempty and bounded")?;
+        let capacity = Arc::new(
+            self.capacity
+                .clone()
+                .try_acquire_many_owned(count)
+                .map_err(|_| {
+                    Error::admission(
+                        AdmissionError::Capacity,
+                        "native generation capacity is full",
+                    )
+                })?,
+        );
+        let mut incoming_group = Vec::with_capacity(prompts.len());
+        let mut generations = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            prompt
+                .sampling
+                .validate()
+                .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
+            super::stops::TokenStops::new(
+                prompt.stop_sequences.clone(),
+                self.config.contract.vocabulary,
+            )?;
+            super::stops::validate_strings(
+                &prompt.stop_strings,
+                !prompt.stop_sequences.is_empty(),
+                prompt.grammar.is_some(),
+            )?;
+            crate::model::admission::validate_prompt::<M>(&self.config, &prompt)
+                .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
+            let (events, receiver) = async_mpsc::channel(self.event_capacity);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let failure = Arc::new(Mutex::new(None));
+            let incoming = Incoming {
+                _capacity: Some(capacity.clone()),
+                arrival_ns: super::observation::monotonic_ns(),
+                publications: Default::default(),
+                prompt,
+                events,
+                cancelled: cancelled.clone(),
+                failure: failure.clone(),
+                metrics: self.metrics.clone(),
+                observation,
+                host_lookup: true,
+                readmitted: false,
+            };
+            let enqueue_ns = observation
+                .filter(|timestamps| *timestamps)
+                .map(|_| super::observation::monotonic_ns());
+            incoming_group.push(incoming);
+            generations.push(Generation {
+                events: receiver,
+                cancelled,
+                failure,
+                enqueue_ns,
+            });
+        }
         self.sender
-            .try_send(incoming)
+            .try_send(incoming_group)
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => {
                     Error::admission(AdmissionError::Capacity, "native request queue is full")
@@ -504,12 +539,7 @@ impl<M: ModelContract> ModelRuntime<M> {
                     "native model worker disconnected",
                 ),
             })?;
-        Ok(Generation {
-            events: receiver,
-            cancelled,
-            failure,
-            enqueue_ns,
-        })
+        Ok(generations)
     }
     pub fn close(&self) -> Shutdown {
         // Join serialization precedes the cached result lock; request callbacks never use either.
@@ -556,7 +586,7 @@ struct Worker<'a, M: ModelContract> {
     frontend: &'a crate::frontend::Frontend,
     stop: &'a AtomicBool,
     metrics: &'a super::metrics::Metrics,
-    receiver: mpsc::Receiver<Incoming<M>>,
+    receiver: mpsc::Receiver<Vec<Incoming<M>>>,
     scheduler: RequestScheduler,
     pending: VecDeque<Incoming<M>>,
     active: Vec<Option<Active<'a, M>>>,
@@ -577,7 +607,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         stop: &'a AtomicBool,
         metrics: &'a super::metrics::Metrics,
         scheduler: RequestScheduler,
-        receiver: mpsc::Receiver<Incoming<M>>,
+        receiver: mpsc::Receiver<Vec<Incoming<M>>>,
         queue_capacity: usize,
     ) -> Self {
         Self {
@@ -654,7 +684,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                         .receiver
                         .recv_timeout(std::time::Duration::from_millis(2))
                     {
-                        Ok(request) => self.pending.push_back(request),
+                        Ok(request) => self.pending.extend(request),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
                     }
@@ -708,7 +738,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         while self.pending.len() < self.queue_capacity {
             match self.receiver.try_recv() {
                 Ok(request) => {
-                    self.pending.push_back(request);
+                    self.pending.extend(request);
                     progress = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -747,9 +777,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             };
             self.scheduler
                 .advance_to(super::observation::monotonic_ns())?;
-            let admission = if incoming.qualification {
-                self.scheduler.admit_cold(spec)
-            } else if let Some(store) = self.store.as_mut().filter(|_| incoming.host_lookup) {
+            let admission = if let Some(store) =
+                self.store.as_mut().filter(|_| incoming.host_lookup)
+            {
                 admit_with_host_store(&mut self.scheduler, store.as_mut(), spec, self.prefill_rate)
             } else {
                 self.scheduler.admit(spec)
@@ -792,7 +822,7 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 self.config,
                 handle,
                 &incoming.prompt,
-                incoming.qualification || incoming.prompt.ignore_eos,
+                incoming.prompt.ignore_eos,
             )?);
             self.active[slot] = Some(Active {
                 request: handle,
@@ -899,17 +929,6 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             {
                 request.incoming.observe_token(token.token);
                 request.last_token = Some(token.token);
-                if request.incoming.qualification {
-                    let before = request.incoming.publications.get();
-                    request.incoming.emit_token(token.token);
-                    if request.incoming.publications.get() != before {
-                        self.scheduler
-                            .advance_to(super::observation::monotonic_ns())?;
-                        self.scheduler
-                            .published_output(token.request, completion.fence)?;
-                    }
-                    continue;
-                }
                 if let Some(grammar) = &mut request.incoming.prompt.grammar {
                     if let Err(error) = grammar.advance(token.token) {
                         request.incoming.fail(
@@ -954,6 +973,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                             reused_prompt_tokens: live.reused_prompt_tokens(),
                             reason: "stop",
                             termination: crate::output::Termination::UserStop,
+                            stop_sequence: request
+                                .text_stops
+                                .as_ref()
+                                .and_then(|s| s.matched().map(str::to_owned)),
                         })
                         .is_err()
                     {
@@ -1021,10 +1044,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                             }
                         }
                         let reason = if user_stop
-                            || (!request.incoming.qualification
-                                && request.last_token.is_some_and(|token| {
-                                    self.config.eos_token_ids.contains(&token)
-                                })) {
+                            || request
+                                .last_token
+                                .is_some_and(|token| self.config.eos_token_ids.contains(&token))
+                        {
                             "stop"
                         } else {
                             "length"
@@ -1037,6 +1060,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                                 generated_tokens: live.generated_tokens,
                                 reused_prompt_tokens: live.reused_prompt_tokens(),
                                 reason,
+                                stop_sequence: request
+                                    .text_stops
+                                    .as_ref()
+                                    .and_then(|s| s.matched().map(str::to_owned)),
                                 termination: if user_stop {
                                     crate::output::Termination::UserStop
                                 } else if reason == "stop" {
@@ -1304,8 +1331,10 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         for request in &self.pending {
             request.fail(error.clone());
         }
-        while let Ok(request) = self.receiver.try_recv() {
-            request.fail(error.clone());
+        while let Ok(group) = self.receiver.try_recv() {
+            for request in group {
+                request.fail(error.clone());
+            }
         }
     }
 }
@@ -1445,7 +1474,7 @@ mod tests {
     use crate::scheduler::SchedulerCapabilities;
 
     #[test]
-    fn general_sampler_handles_zero_positive_and_mixed_temperatures_with_matching_epochs() {
+    fn general_sampler_handles_mixed_positive_temperatures_with_matching_epochs() {
         use crate::scheduler::ScheduledLane;
 
         let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|slot| {
@@ -1455,7 +1484,7 @@ mod tests {
                     generation: 17 + slot as u64,
                 },
                 sampling: SamplingParameters {
-                    temperature: if slot == 0 { 1. } else { -0. },
+                    temperature: if slot == 0 { 1. } else { 0.5 },
                     top_k: 1,
                     ..Default::default()
                 },
@@ -1693,6 +1722,7 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
+            _capacity: None,
             arrival_ns: super::super::observation::monotonic_ns(),
             publications: Default::default(),
             prompt: Prompt {
@@ -1715,7 +1745,6 @@ mod tests {
             cancelled: cancelled.clone(),
             failure: failure.clone(),
             metrics: Arc::new(super::super::metrics::Metrics::default()),
-            qualification: false,
             observation: None,
             host_lookup: true,
             readmitted: false,

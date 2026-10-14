@@ -22,6 +22,12 @@ def test_default_mode_uses_manually_declared_model_card_sampling(name, top_k):
         min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)
 
 
+@pytest.mark.parametrize("temperature", [0., -0., -1., float("nan"), float("inf")])
+def test_recipe_defaults_require_positive_finite_temperature(temperature):
+    with pytest.raises(ValueError, match="invalid recipe sampling defaults"):
+        SamplingDefaults(temperature=temperature, top_p=.95, top_k=20)
+
+
 def test_tokenizer_metadata_preserves_token_contents_and_omits_unconsumed_fields():
     source = dict(bos_token={"content": "<bos>", "special": True}, eos_token="<eos>",
         pad_token=None, additional_special_tokens=[{"content": "<extra>"}, "<other>"],

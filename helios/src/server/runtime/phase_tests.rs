@@ -91,7 +91,7 @@ impl Fixture {
         }
     }
 
-    fn worker(&self, receiver: mpsc::Receiver<Incoming<Qwen4Exp>>) -> Worker<'_, Qwen4Exp> {
+    fn worker(&self, receiver: mpsc::Receiver<Vec<Incoming<Qwen4Exp>>>) -> Worker<'_, Qwen4Exp> {
         let mut scheduler = RequestScheduler::new(
             self.config.identity,
             self.config.limits,
@@ -149,6 +149,7 @@ impl Fixture {
         let length = tokens.len();
         (
             Incoming {
+                _capacity: None,
                 arrival_ns: super::super::observation::monotonic_ns(),
                 publications: Default::default(),
                 prompt: Prompt {
@@ -171,7 +172,6 @@ impl Fixture {
                 cancelled: cancelled.clone(),
                 failure: failure.clone(),
                 metrics: self.metrics.clone(),
-                qualification: false,
                 observation: Some(false),
                 host_lookup: true,
                 readmitted: false,
@@ -233,8 +233,8 @@ fn all_lanes_validate_before_scheduler_or_observation_mutation() {
     let (sender, receiver) = mpsc::channel();
     let (first, mut first_generation) = fixture.incoming(vec![0], 8);
     let (second, mut second_generation) = fixture.incoming(vec![1], 8);
-    sender.send(first).unwrap();
-    sender.send(second).unwrap();
+    sender.send(vec![first]).unwrap();
+    sender.send(vec![second]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     let step = planned(&mut worker, GraphKind::Init, 1);
@@ -268,7 +268,7 @@ fn worker_observes_prefill_decode_and_prerequisite_timings() {
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     for (kind, fence, token) in [
@@ -308,7 +308,7 @@ fn worker_discovers_indeterminate_costs_and_records_actual_progress() {
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     worker
         .scheduler
@@ -359,7 +359,7 @@ fn output_clock_advances_only_after_stop_buffering_releases_tokens() {
     let (mut incoming, mut generation) = fixture.incoming(vec![0], 8);
     let arrival = incoming.arrival_ns;
     incoming.prompt.stop_sequences = vec![vec![1, 2]];
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     let h = worker.active[0].as_ref().unwrap().request;
@@ -466,7 +466,7 @@ fn packing_sees_reserved_pages_and_pack_failure_retains_submission_until_drain()
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (incoming, _generation) = fixture.incoming(vec![0; 65], 8);
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     advance(&mut worker, GraphKind::Init, 1, None);
@@ -520,7 +520,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
     let (sender, receiver) = mpsc::channel();
     let (mut incoming, mut generation) = fixture.incoming(vec![0; 13], 2);
     incoming.prompt.system_boundary = Some(10);
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     let handle = worker.active[0].as_ref().unwrap().request;
@@ -587,7 +587,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
     }
     assert_eq!(finished, 1);
     let (repeat, _generation) = fixture.incoming(vec![0; 13], 2);
-    sender.send(repeat).unwrap();
+    sender.send(vec![repeat]).unwrap();
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     let live = worker
         .scheduler
@@ -608,7 +608,7 @@ fn disabled_host_store_preserves_decode_prefix_reuse_and_cancellation() {
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (incoming, mut generation) = fixture.incoming(vec![0; 13], 1);
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert!(worker.store.is_none());
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
@@ -641,7 +641,7 @@ fn disabled_host_store_preserves_decode_prefix_reuse_and_cancellation() {
     }
     assert!(finished);
     let (incoming, mut generation) = fixture.incoming(vec![0; 13], 2);
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     let handle = worker.active[0].as_ref().unwrap().request;
     let request = worker.scheduler.request(handle).unwrap();
@@ -697,7 +697,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
         }
         let (sender, receiver) = mpsc::channel();
         let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
-        sender.send(incoming).unwrap();
+        sender.send(vec![incoming]).unwrap();
         let mut worker = fixture.worker(receiver);
         worker.scheduler.enable_speculation(&[1, 4]).unwrap();
         worker.scheduler.fixed_speculative_width(Some(4)).unwrap();
@@ -792,7 +792,7 @@ fn observations_precede_grammar_failures_and_token_stop_completion() {
         } else {
             incoming.prompt.stop_sequences = vec![vec![0]];
         }
-        sender.send(incoming).unwrap();
+        sender.send(vec![incoming]).unwrap();
         let mut worker = fixture.worker(receiver);
         assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
         advance(&mut worker, GraphKind::Init, 1, None);
@@ -834,13 +834,13 @@ fn fatal_broadcast_preserves_first_failure_and_reaches_pending_and_ingress() {
         ExecutionError::Completion,
         "first completion failure",
     ));
-    sender.send(first).unwrap();
+    sender.send(vec![first]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     let (pending, pending_generation) = fixture.incoming(vec![1], 8);
     worker.pending.push_back(pending);
     let (queued, queued_generation) = fixture.incoming(vec![2], 8);
-    sender.send(queued).unwrap();
+    sender.send(vec![queued]).unwrap();
     worker.fail_all(&Error::execution(ExecutionError::Worker, "worker failed"));
     assert_eq!(
         first_generation.failure().to_string(),
@@ -1071,7 +1071,7 @@ fn host_hit_holds_the_request_inbound_until_the_restore_completes() {
     let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
     let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
     history.append(&incoming.prompt.tokens, &[]).unwrap();
-    sender.send(incoming).unwrap();
+    sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     worker.attach_store(Some(Box::new(FakeStore::new(Some(host_hit(&history, 70))))));
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
@@ -1167,7 +1167,7 @@ fn failed_restores_readmit_the_request_without_the_host_store() {
         let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
         let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
         history.append(&incoming.prompt.tokens, &[]).unwrap();
-        sender.send(incoming).unwrap();
+        sender.send(vec![incoming]).unwrap();
         let mut worker = fixture.worker(receiver);
         let mut store = FakeStore::new(Some(host_hit(&history, 70)));
         store.reject_fetch = reject_at_fetch;
@@ -1224,4 +1224,62 @@ fn failed_restores_readmit_the_request_without_the_host_store() {
         assert_eq!(worker.scheduler.free_page_count(), free_pages);
         assert_eq!(worker.scheduler.free_snapshot_count(), free_snapshots);
     }
+}
+
+fn group_runtime(
+    fixture: &Fixture,
+    capacity: usize,
+) -> (
+    ModelRuntime<Qwen4Exp>,
+    mpsc::Receiver<Vec<Incoming<Qwen4Exp>>>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(2);
+    (
+        ModelRuntime {
+            sender,
+            stop: Arc::new(AtomicBool::new(false)),
+            healthy: Arc::new(AtomicBool::new(true)),
+            config: Arc::new(fixture.config.clone()),
+            event_capacity: 16,
+            capacity: Arc::new(tokio::sync::Semaphore::new(capacity)),
+            thread: Mutex::new(None),
+            shutdown: Mutex::new(None),
+            finished: Arc::new((Mutex::new(false), Condvar::new())),
+            metrics: fixture.metrics.clone(),
+        },
+        receiver,
+    )
+}
+#[test]
+fn grouped_submission_validates_all_children_before_enqueue_and_releases_capacity() {
+    let fixture = Fixture::new();
+    let (runtime, receiver) = group_runtime(&fixture, 4);
+    let good = fixture.incoming(vec![1, 2], 4).0.prompt;
+    let mut bad = fixture.incoming(vec![1, 2], 4).0.prompt;
+    bad.tokens.clear();
+    assert!(runtime.generate_many(vec![good, bad]).is_err());
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(runtime.capacity.available_permits(), 4);
+    let prompts = (0..3)
+        .map(|_| fixture.incoming(vec![1, 2], 4).0.prompt)
+        .collect();
+    let generations = runtime.generate_many(prompts).unwrap();
+    let group = receiver.try_recv().unwrap();
+    assert_eq!(group.len(), 3);
+    assert_eq!(runtime.capacity.available_permits(), 1);
+    let prompts = (0..2)
+        .map(|_| fixture.incoming(vec![1, 2], 4).0.prompt)
+        .collect();
+    assert!(runtime.generate_many(prompts).is_err());
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    drop(generations);
+    assert!(group.iter().all(|r| r.cancelled.load(Ordering::Acquire)));
+    drop(group);
+    assert_eq!(runtime.capacity.available_permits(), 4);
 }

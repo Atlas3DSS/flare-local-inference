@@ -16,7 +16,7 @@ from ignition.components.speculation import (
 
 def copy_fixture(width=4, batch=2, device="cpu", vocab=64):
     state = DeviceRequestState.allocate(device, vocab_size=vocab)
-    state.admit(3, RequestAdmission(13, 2**64 - 1, temperature=0, max_new_tokens=100,
+    state.admit(3, RequestAdmission(13, 2**64 - 1, temperature=1, max_new_tokens=100,
                 eos_token_ids=()), [1, 2], consumed_tokens=2)
     state.pending_token[3] = 3
     slots = torch.tensor([3, 1][:batch], dtype=torch.int32, device=device)
@@ -108,7 +108,7 @@ def test_per_prefix_masks_use_physical_slot_and_include_bonus():
         grammar_masks=masks, grammar_mask_count=args["grammar_mask_count"])
     proposals(); op.prepare_scores()
     assert op.valid.tolist() == [[True] * 4, [False] * 4]
-    assert op.point_mass_ids[0].tolist() == [4, 5, 6, 33]
+    assert op.scores[0].argmax(-1).tolist() == [4, 5, 6, 33]
     assert torch.isfinite(op.scores[0]).sum(-1).tolist() == [1] * 4
     masks[3, 3].zero_()
     op.prepare_scores()

@@ -20,7 +20,7 @@ from ignition.components.speculation import (
 def example(*, batch=1, width=4, consumed=2, budget=20, eos=(), slot=2):
     state = DeviceRequestState.allocate("cpu", vocab_size=16)
     state.admit(slot, RequestAdmission(generation=7, seed=2**64 - 1, max_new_tokens=budget,
-        temperature=0, top_k=0, top_p=1, eos_token_ids=eos), [1, 2], consumed_tokens=2, ple_history=(1, 2))
+        temperature=1, top_k=0, top_p=1, eos_token_ids=eos), [1, 2], consumed_tokens=2, ple_history=(1, 2))
     state.consumed_tokens[slot] = consumed
     state.generated_tokens[slot] = 1
     state.pending_token[slot] = 3

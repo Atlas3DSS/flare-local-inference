@@ -29,7 +29,7 @@ def service():
     assert 'mimo' in model.lower(), model
 
     def ask(content, **options):
-        body = dict(model=model, messages=[dict(role='user', content=content)], temperature=0,
+        body = dict(model=model, messages=[dict(role='user', content=content)], temperature=1,
                     seed=1234, max_tokens=128, enable_thinking=False)
         body.update(options)
         request = urllib.request.Request(url + '/v1/chat/completions', json.dumps(body).encode(),

@@ -20,7 +20,7 @@ def _state(generator):
     state.status[3] = 0
     state.histogram.copy_(torch.randint(0, 3, (4, VOCAB), generator=generator, dtype=torch.int32))
     state.parameters.copy_(torch.tensor([[0.7, 0.9, 0.0, 1.3, 0.2, 0.05],
-                                         [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                                         [1.0, 1.0, 0.0, 1.0, 0.0, 0.0],
                                          [1.2, 0.8, 0.1, 0.8, -0.1, 0.1],
                                          [1.0, 1.0, 0.0, 1.0, 0.0, 0.0]]))
     state.top_k.copy_(torch.tensor([0, 40, 0, 5], dtype=torch.int32))
@@ -63,6 +63,5 @@ def test_fused_draft_scores_match_reference(prefix, live, layout):
     rows = reference.valid[:, 0]
     assert torch.equal(fused.scores[rows], reference.scores[rows])
     assert torch.equal(fused.maximum[rows], reference.maximum[rows])
-    assert torch.equal(fused.point_mass_ids[rows], reference.point_mass_ids[rows])
     assert torch.equal(fused.packed_top_k, reference.packed_top_k)
     assert torch.equal(fused.packed_top_p, reference.packed_top_p)

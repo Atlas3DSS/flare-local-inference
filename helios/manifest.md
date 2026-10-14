@@ -74,10 +74,10 @@ bindings address those partitions independently of transport slot indices.
 A loaded manifest contains only the selected graph
 variants, and scheduling chooses verification widths from those actual graphs.
 
-The sampling mode is `general` for every graph. Temperature zero is represented
-by a one-hot distribution in the same stochastic sampling executable used for
-positive temperatures. Unsupported mode strings reject manifest parsing before
-CUDA initialization. A model contract defines the required graph capacities.
+The sampling mode is `general` for every graph. Requests require a positive
+normal FP32 temperature and use the same stochastic sampling executable.
+Unsupported mode strings reject manifest parsing before CUDA initialization.
+A model contract defines the required graph capacities.
 
 Two graph inputs are reserved and required in every executable's bindings:
 

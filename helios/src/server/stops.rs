@@ -82,7 +82,7 @@ pub(super) fn validate_strings(strings: &[String], token_stops: bool, grammar: b
 struct StringStops {
     strings: Vec<String>,
     held: String,
-    matched: bool,
+    matched: Option<String>,
 }
 impl StringStops {
     fn new(strings: Vec<String>) -> Result<Self> {
@@ -90,23 +90,24 @@ impl StringStops {
         Ok(Self {
             strings,
             held: String::new(),
-            matched: false,
+            matched: None,
         })
     }
     fn push(&mut self, text: &str) -> (String, bool) {
-        if self.matched {
+        if self.matched.is_some() {
             return (String::new(), true);
         }
         self.held.push_str(text);
-        if let Some((_, at)) = self
+        if let Some((_, at, matched)) = self
             .strings
             .iter()
-            .filter_map(|stop| self.held.find(stop).map(|at| (at + stop.len(), at)))
+            .enumerate()
+            .filter_map(|(i, stop)| self.held.find(stop).map(|at| (at + stop.len(), at, i)))
             .min()
         {
             let visible = self.held[..at].to_owned();
             self.held.clear();
-            self.matched = true;
+            self.matched = Some(self.strings[matched].clone());
             return (visible, true);
         }
         let retain = self
@@ -140,6 +141,9 @@ pub(super) struct TextStops<'a> {
     visible_bytes: usize,
 }
 impl<'a> TextStops<'a> {
+    pub fn matched(&self) -> Option<&str> {
+        self.stops.matched.as_deref()
+    }
     pub fn new(frontend: &'a crate::frontend::Frontend, strings: Vec<String>) -> Result<Self> {
         Ok(Self {
             decoder: frontend.incremental_decoder(false),
@@ -311,6 +315,7 @@ pub(super) mod string_tests {
             }
             assert_eq!(visible, "abc");
             assert!(matched);
+            assert_eq!(stops.matched.as_deref(), Some("STOP"));
             assert_eq!(stops.push("more"), (String::new(), true));
             assert_eq!(stops.finish(), "");
         }
@@ -328,6 +333,7 @@ pub(super) mod string_tests {
             let (b, hit) = stops.push(&full[split..]);
             assert!(hit);
             assert_eq!(a + &b, "café ");
+            assert_eq!(stops.matched.as_deref(), Some("世界END"));
         }
         let mut stops = StringStops::new(vec!["世界END".into()]).unwrap();
         assert_eq!(stops.push("ok世界EN"), ("ok".into(), false));

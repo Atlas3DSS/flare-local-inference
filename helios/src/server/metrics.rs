@@ -52,6 +52,7 @@ pub(super) struct Metrics {
     accepted_drafts: AtomicU64,
     draft_rounds: AtomicU64,
     pub admitted: AtomicU64,
+    pub http_requests: [AtomicU64; 5],
     pub completed: AtomicU64,
     pub cancelled: AtomicU64,
     pub failed: AtomicU64,
@@ -277,6 +278,24 @@ impl Metrics {
 
     pub fn render(&self) -> String {
         let mut text = String::with_capacity(4096);
+        text.push_str("# HELP flare_http_requests_total HTTP generation or token-count requests by API, before request validation.\n# TYPE flare_http_requests_total counter\n");
+        for (api, count) in [
+            "chat",
+            "completions",
+            "messages",
+            "responses",
+            "count_tokens",
+        ]
+        .into_iter()
+        .zip(&self.http_requests)
+        {
+            let _ = writeln!(
+                &mut text,
+                "flare_http_requests_total{{api=\"{api}\"}} {}",
+                count.load(Ordering::Relaxed)
+            );
+        }
+
         text.push_str("# HELP flare_sampling_graph_launches_total Successful native submissions by captured sampler mode; includes consumption-only prefill.\n# TYPE flare_sampling_graph_launches_total counter\n");
         for (kind, count) in ["prefill", "decode", "resume", "speculative", "mixed"]
             .into_iter()

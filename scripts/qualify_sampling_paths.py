@@ -72,13 +72,15 @@ def cpu_case(artifact, rows, block_steps, policy, *, one_sample=False):
     from ignition.components.sampling import philox4x32_reference
     from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 
+    if policy != "checkpoint_defaults":
+        raise ValueError("sampling paths require checkpoint_defaults")
     steps = 1 if one_sample else block_steps
     initial = DeviceRequestState.allocate("cpu")
     parameters = []
     for row, slot in enumerate(SLOTS[:rows]):
         prefix = artifact["prompt"] + artifact["tokens"][:row]
         parameter = RequestAdmission(generation=31 + slot, seed=0xF123000000000001 + slot * 0x100000001,
-            max_new_tokens=block_steps + 1, temperature=0. if policy == "temperature_zero" else 1.,
+            max_new_tokens=block_steps + 1, temperature=1.,
             top_k=20, top_p=.95)
         initial.admit(slot, parameter, prefix, consumed_tokens=len(prefix), ple_history=tuple(prefix[-2:]))
         initial.rng_counter[slot] = row * 7
@@ -108,13 +110,10 @@ def cpu_case(artifact, rows, block_steps, policy, *, one_sample=False):
                 records[0, slot, 4] = -1
                 continue
             counter = int(expected["rng_counter"][slot].item())
-            if policy == "temperature_zero":
-                token = int(scores.argmax())
-            else:
-                word = philox4x32_reference(parameters[row].seed, counter)[0]
-                uniform = float(torch.tensor(word, dtype=torch.float32) * 2**-32 + 2**-33)
-                index = int(torch.searchsorted(cdf, torch.tensor(uniform, dtype=torch.float64), right=False))
-                token = index if index < len(cdf) else int(torch.nonzero(probabilities > 0)[-1])
+            word = philox4x32_reference(parameters[row].seed, counter)[0]
+            uniform = float(torch.tensor(word, dtype=torch.float32) * 2**-32 + 2**-33)
+            index = int(torch.searchsorted(cdf, torch.tensor(uniform, dtype=torch.float64), right=False))
+            token = index if index < len(cdf) else int(torch.nonzero(probabilities > 0)[-1])
             trace[step, slot] = token
             sampled_rows[step] += 1
             consumed = int(expected["consumed_tokens"][slot])
@@ -283,7 +282,6 @@ def measure(args, artifact, cases, receipt):
         if result is None or result.ticket != ticket or result.error is not None:
             raise RuntimeError(f"native replay did not complete {name}: {result}")
 
-    baselines = {}
     worker = None
     try:
         worker = bundle.start_worker()
@@ -301,16 +299,11 @@ def measure(args, artifact, cases, receipt):
                 observed = owner.readback()
                 label = f"{owner.name}-iteration{iteration}"
                 hashes, failures = check_outputs(owner.case["expected"], observed, args.artifacts, label)
-                paired_key = owner.case["name"]
-                if owner.case["policy"] == "temperature_zero":
-                    if paired_key in baselines and baselines[paired_key] != hashes:
-                        failures.append({"tensor": "repeated_temperature_zero_state", "expected": baselines[paired_key], "actual": hashes})
-                    baselines.setdefault(paired_key, hashes)
                 record = {"name": owner.name, "iteration": iteration, "warmup": iteration < args.warmup,
                     "allocation_count_before": before, "allocation_count_after": after,
                     "elapsed_block_ms": elapsed, "sampled_lane_tokens": owner.case["sampled_lane_tokens"],
                     "state_sha256": hashes, "sampled_ids": observed["sampled_ids"].tolist(), "failures": failures}
-                if owner.case["policy"] == "temperature_zero" or owner.case["steps"] == 1:
+                if owner.case["steps"] == 1:
                     record["elapsed_per_active_batch_step_ms"] = elapsed / owner.case["steps"]
                 receipt["observations"].append(record)
                 if iteration >= args.warmup:
@@ -322,7 +315,7 @@ def measure(args, artifact, cases, receipt):
         receipt["summary_block_ms"] = {name: quantiles(values) for name, values in receipt["timings"].items()}
         receipt["summary_active_batch_step_ms"] = {owner.name:
             quantiles([value / owner.case["steps"] for value in receipt["timings"][owner.name]])
-            for owner in owners if owner.case["policy"] == "temperature_zero" or owner.case["steps"] == 1}
+            for owner in owners if owner.case["steps"] == 1}
         receipt["passed"] = True
     finally:
         try:
@@ -379,15 +372,14 @@ def main():
             "Operator measurement on recorded checkpoint logits; excludes vocabulary projection, transformer computation and HTTP/runtime scheduling.",
             "Timed blocks include production sampler, sampled-ID trace copy, pending-token gather/copy/consume and CUDA graph event scope.",
             "Each block reuses fixed logits with neutral penalties; captured copies reset independent request state outside the timed span.",
-            "Temperature-zero cases use one-hot probabilities through the same FlashInfer sampling path as checkpoint-default cases.",
             "Stochastic block timings retain EOS and inactive iterations and are not divided by block length as fully active latency; one-sample captures measure active default sampling separately.",
             "Model arithmetic acceptance remains unresolved; these logits are fingerprinted execution artifacts, not an independent model oracle."]}
     started = time.monotonic()
     try:
         artifact, provenance = load_inputs(args.receipt.resolve(), args.logits_artifact)
         receipt["inputs"] = provenance
-        cases = [cpu_case(artifact, rows, steps, policy) for rows in (1, 2, 4) for steps in args.blocks
-                 for policy in ("checkpoint_defaults", "temperature_zero")]
+        cases = [cpu_case(artifact, rows, steps, "checkpoint_defaults")
+                 for rows in (1, 2, 4) for steps in args.blocks]
         cases.extend(cpu_case(artifact, rows, steps, "checkpoint_defaults", one_sample=True)
                      for rows in (1, 2, 4) for steps in args.blocks)
         receipt["cases"] = [{key: value for key, value in case.items() if key not in ("initial", "expected")}

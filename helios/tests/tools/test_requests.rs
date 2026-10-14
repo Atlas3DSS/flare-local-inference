@@ -86,7 +86,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if case["messages"].to_string().contains("\"image") {
             continue;
         }
-        let body = json!({"model":config.model_id,"messages":case["messages"],"chat_template_kwargs":case["options"],"temperature":0});
+        let body = json!({"model":config.model_id,"messages":case["messages"],"chat_template_kwargs":case["options"]});
         let result = prepare_request::<Qwen4Exp>(
             &frontend,
             Some(&processor),
@@ -94,6 +94,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &config,
             body.clone(),
         );
+        if case["name"] == "invalid_role" && case["messages"][1]["role"] == "developer" {
+            let prepared = result?;
+            let expected = frontend.render_chat(
+                &[
+                    json!({"role":"system","content":"Developer instructions:\nInvalid role."}),
+                    case["messages"][0].clone(),
+                ],
+                case["options"].as_object().unwrap(),
+            )?;
+            assert_eq!(prepared.prompt.tokens, expected.token_ids);
+            text_count += 1;
+            continue;
+        }
         if let Some(expected) = case.get("error") {
             let expected = expected
                 .as_str()

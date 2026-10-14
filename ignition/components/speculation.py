@@ -215,7 +215,6 @@ class PreparedSpeculativeDistributions:
         self.scores = torch.empty((batch, width, vocab), dtype=torch.float32, device=device)
         self.probabilities = torch.empty_like(self.scores)
         self.counts = torch.empty((batch, width, vocab), dtype=torch.int32, device=device)
-        self.point_mass_ids = torch.empty((batch, width), dtype=torch.int64, device=device)
         self.maximum = torch.empty((batch, width), dtype=torch.float32, device=device)
         self.valid = torch.empty((batch, width), dtype=torch.bool, device=device)
         self.packed_top_k = torch.empty(batch * width, dtype=torch.int32, device=device)
@@ -250,7 +249,7 @@ class PreparedSpeculativeDistributions:
             words = self.grammar_masks[safe][:, prefix][:, :, self.vocab_ids // 32]
         allowed = ((words >> (self.vocab_ids % 32)) & 1).bool() | ~state.grammar_enabled[safe, None, None].bool()
         self.scores.copy_(torch.where(allowed, scores, -torch.inf))
-        torch.max(self.scores, -1, out=(self.maximum, self.point_mass_ids))
+        torch.amax(self.scores, -1, out=self.maximum)
         self.valid.copy_(live[:, None] & prefix_valid & torch.isfinite(self.maximum))
         if self.grammar_masks is not None:
             count = self.grammar_mask_count[safe, None]
@@ -289,9 +288,7 @@ class PreparedSpeculativeDistributions:
         mass = filtered.sum(-1, keepdim=True)
         self.valid.logical_and_(torch.isfinite(mass.squeeze(-1)) & (mass.squeeze(-1) > 0))
         normalized = filtered / mass.clamp_min(torch.finfo(torch.float32).tiny)
-        point_mass = (self.vocab_ids == self.point_mass_ids[:, :, None]).float()
-        probabilities = torch.where(params[:, None, :1] == 0, point_mass, normalized)
-        self.probabilities.copy_(torch.where(self.valid[:, :, None], probabilities, (self.vocab_ids == 0).float()))
+        self.probabilities.copy_(torch.where(self.valid[:, :, None], normalized, (self.vocab_ids == 0).float()))
         return self.probabilities
 
 

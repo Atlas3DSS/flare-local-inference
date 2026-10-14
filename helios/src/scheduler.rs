@@ -813,19 +813,9 @@ impl RequestScheduler {
         Ok(self.admit_planned(spec, plan, None)?.handle)
     }
 
-    #[cfg(any(test, feature = "server"))]
-    pub(crate) fn admit_cold(&mut self, spec: RequestSpec) -> Result<RequestHandle> {
-        let plan = self.admission_plan(&spec, false)?;
-        Ok(self.admit_planned(spec, plan, None)?.handle)
-    }
-
     /// Validates the request, builds its prefix history, and looks up the GPU
     /// cache without reserving anything.
     pub fn plan_admission(&mut self, spec: &RequestSpec) -> Result<AdmissionPlan> {
-        self.admission_plan(spec, true)
-    }
-
-    fn admission_plan(&mut self, spec: &RequestSpec, reuse_prefix: bool) -> Result<AdmissionPlan> {
         if spec.prompt.is_empty()
             || spec
                 .system_boundary
@@ -845,20 +835,10 @@ impl RequestScheduler {
         self.free_slot()?;
         let mut history = PrefixHistory::new(self.identity);
         history.append(&spec.prompt, &spec.conditioning)?;
-        let lookup = if reuse_prefix {
-            let lookup = self.cache.lookup(&history)?;
-            self.stats.cache_lookups += 1;
-            self.stats.cache_hits += u64::from(lookup.checkpoint.is_some());
-            self.stats.reused_tokens += lookup.consumed_tokens;
-            lookup
-        } else {
-            Lookup {
-                checkpoint: None,
-                consumed_tokens: 0,
-                pages: Vec::new(),
-                snapshot: None,
-            }
-        };
+        let lookup = self.cache.lookup(&history)?;
+        self.stats.cache_lookups += 1;
+        self.stats.cache_hits += u64::from(lookup.checkpoint.is_some());
+        self.stats.reused_tokens += lookup.consumed_tokens;
         Ok(AdmissionPlan { history, lookup })
     }
 

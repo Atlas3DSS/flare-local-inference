@@ -789,45 +789,6 @@ fn terminal_checkpoint_full_prompt_hit_restores_and_resumes_without_prefill() {
 }
 
 #[test]
-fn cold_admission_skips_matching_checkpoint_but_retains_capacity_eviction() {
-    let mut scheduler = scheduler(1, 2, 2);
-    let handle = scheduler.admit(spec(64, 1)).unwrap();
-    init(&mut scheduler, 1);
-    let prefill = scheduler.plan().unwrap();
-    scheduler.commit(&prefill, Fence(2)).unwrap();
-    scheduler
-        .complete(
-            Fence(2),
-            &records(handle, 2, 64, 1, 99, 2),
-            Default::default(),
-        )
-        .unwrap();
-    freeze(&mut scheduler, handle, 3);
-    scheduler.finish(handle).unwrap().unwrap();
-
-    let warm = scheduler.admit(spec(64, 64)).unwrap();
-    assert_eq!(
-        scheduler.request(warm).unwrap().phase,
-        RequestPhase::Restore
-    );
-    assert_eq!(scheduler.request(warm).unwrap().reused_prompt_tokens(), 64);
-    scheduler.cancel(warm).unwrap();
-    let lookups = scheduler.stats().cache_lookups;
-    let cold = scheduler.admit_cold(spec(64, 64)).unwrap();
-    let request = scheduler.request(cold).unwrap();
-    assert_eq!(request.phase, RequestPhase::Initialize);
-    assert_eq!(request.consumed_tokens, 0);
-    assert_eq!(request.reused_prompt_tokens(), 0);
-    assert!(request.prefix().is_none());
-    assert_eq!(scheduler.stats().cache_lookups, lookups);
-    assert_eq!(scheduler.stats().snapshot_evictions, 1);
-    assert_eq!(scheduler.free_page_count(), 0);
-    scheduler.cancel(cold).unwrap();
-    assert_eq!(scheduler.free_page_count(), 2);
-    assert_eq!(scheduler.free_snapshot_count(), 2);
-}
-
-#[test]
 fn appended_conversation_outlives_snapshot_capacity_without_losing_prefix_pages() {
     let mut scheduler = scheduler(1, 32, 3);
     for turn in 1..=12 {

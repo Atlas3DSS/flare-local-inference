@@ -2,11 +2,13 @@
 
 mod config;
 mod dashboard;
+mod http;
+mod inference;
 mod listener;
 mod metrics;
 mod observation;
 pub(crate) mod output;
-mod qualification;
+mod protocol;
 mod request;
 pub use request::{PreparedRequest, prepare as prepare_request};
 mod runtime;
@@ -29,10 +31,7 @@ use axum::{
     extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::{self, Next},
-    response::{
-        IntoResponse, Response, Sse,
-        sse::{Event, KeepAlive},
-    },
+    response::{IntoResponse, Response, Sse, sse::KeepAlive},
     routing::{get, post},
 };
 use serde_json::{Value, json};
@@ -55,8 +54,7 @@ pub struct ServerConfig {
     pub event_capacity: usize,
     pub frontend_workers: usize,
     pub max_body_bytes: usize,
-    pub qualification_token_trace: bool,
-    /// Bearer token required by every route except `/health`; `None` admits all callers.
+    /// Serving key; Messages also accepts `x-api-key`. `/health` is unauthenticated.
     pub api_key: Option<String>,
     /// Names requests may use for the model in addition to its identifier.
     pub served_names: Vec<String>,
@@ -73,7 +71,6 @@ impl Default for ServerConfig {
             event_capacity: 128,
             frontend_workers: 2,
             max_body_bytes: 32 * 1024 * 1024,
-            qualification_token_trace: false,
             api_key: None,
             served_names: Vec::new(),
             context_hint: String::new(),
@@ -90,6 +87,7 @@ struct HttpState<M: ModelContract> {
     grammar: Arc<crate::grammar::GrammarCompiler>,
     frontend_slots: Arc<Semaphore>,
     ingress_slots: Arc<Semaphore>,
+    max_body_bytes: usize,
     frontend_capacity: usize,
     ingress_capacity: usize,
     ids: AtomicU64,
@@ -118,19 +116,6 @@ impl<M: ModelContract> HttpState<M> {
             (Some(first), Some(last)) => last.1.saturating_sub(first.1),
             _ => 0,
         }
-    }
-
-    /// Reports an admission failure, naming the setting that raises an exceeded capacity.
-    fn rejection(&self, failure: Error) -> Response {
-        let hint = match &failure {
-            Error::Admission(AdmissionError::Context(_)) => &self.context_hint,
-            Error::Admission(AdmissionError::Capacity(_)) => &self.capacity_hint,
-            _ => return typed_error(failure),
-        };
-        if hint.is_empty() {
-            return typed_error(failure);
-        }
-        error(status(&failure), format!("{failure}; {hint}"))
     }
 }
 
@@ -178,9 +163,6 @@ impl<M: ModelContract> Server<M> {
         if model.contract.vision.enabled() != images.is_some() {
             return Err("image processor must match prepared vision capabilities".into());
         }
-        if config.qualification_token_trace && !config.bind.ip().is_loopback() {
-            return Err("token qualification requires a loopback listener".into());
-        }
         if !(1..=64).contains(&config.frontend_workers)
             || config.max_body_bytes == 0
             || config.max_body_bytes > 256 * 1024 * 1024
@@ -217,6 +199,7 @@ impl<M: ModelContract> Server<M> {
             grammar,
             frontend_slots: Arc::new(Semaphore::new(config.frontend_workers)),
             ingress_slots: Arc::new(Semaphore::new(ingress_capacity)),
+            max_body_bytes: config.max_body_bytes,
             frontend_capacity: config.frontend_workers,
             ingress_capacity,
             ids: AtomicU64::new(1),
@@ -248,14 +231,14 @@ impl<M: ModelContract> Server<M> {
                             sampler.sample_generated();
                         }
                     });
-                    let mut router = Router::new()
+                    let router = Router::new()
                         .route("/metrics", get(metrics::<M>))
                         .route("/v1/models", get(models::<M>))
-                        .route("/v1/chat/completions", post(chat::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
-                    if config.qualification_token_trace {
-                        router = router.route("/__qualify/generate", post(qualification::generate::<M>)
-                            .layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
-                    }
+                        .route("/v1/chat/completions", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
+                        .route("/v1/completions", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
+                        .route("/v1/messages", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
+                        .route("/v1/messages/count_tokens", post(http::generate::<M>).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)))
+                        .route("/v1/responses", post(http::generate::<M>).get(http::no_websocket).layer(middleware::from_fn_with_state(state.clone(), admit_http::<M>)));
                     let router = router
                         .route_layer(middleware::from_fn_with_state(state.clone(), authorize::<M>))
                         .route("/health", get(health::<M>))
@@ -426,12 +409,12 @@ async fn metrics<M: ModelContract>(State(state): State<Arc<HttpState<M>>>) -> Re
     for (name, help, value) in [
         (
             "http_inflight_requests",
-            "HTTP requests holding admission capacity, including streamed responses.",
+            "Reserved HTTP admission slots; a batch holds one slot per generation.",
             state.ingress_capacity - state.ingress_slots.available_permits(),
         ),
         (
             "http_request_capacity",
-            "Maximum simultaneous admitted HTTP requests.",
+            "Maximum simultaneous reserved HTTP generation slots.",
             state.ingress_capacity,
         ),
         (
@@ -485,10 +468,6 @@ fn status(failure: &Error) -> StatusCode {
     }
 }
 
-fn typed_error(failure: Error) -> Response {
-    error(status(&failure), failure)
-}
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len()
         && left
@@ -503,17 +482,28 @@ async fn authorize<M: ModelContract>(
     request: Request,
     next: Next,
 ) -> Response {
+    let protocol = protocol::Protocol::from_path(request.uri().path());
     if let Some(key) = &state.api_key {
-        let presented = request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
-        if !presented.is_some_and(|presented| constant_time_eq(presented, key.as_bytes())) {
-            return (
+        let authorization = request.headers().get(axum::http::header::AUTHORIZATION);
+        let bearer = authorization.and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
+        let anthropic = (protocol == protocol::Protocol::Messages)
+            .then(|| request.headers().get("x-api-key"))
+            .flatten()
+            .map(|v| v.as_bytes());
+        let valid = (authorization.is_none() || bearer.is_some())
+            && bearer
+                .or(anthropic)
+                .is_some_and(|v| constant_time_eq(v, key.as_bytes()))
+            && bearer
+                .into_iter()
+                .chain(anthropic)
+                .all(|v| constant_time_eq(v, key.as_bytes()));
+        if !valid {
+            return http::error(
+                protocol,
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"error":{"message":"missing or invalid API key","type":"authentication_error"}})),
-            )
-                .into_response();
+                "missing or invalid API key",
+            );
         }
     }
     next.run(request).await
@@ -532,8 +522,10 @@ async fn admit_http<M: ModelContract>(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let protocol = protocol::Protocol::from_path(request.uri().path());
     if !state.model.healthy() {
-        return error(
+        return http::error(
+            protocol,
             StatusCode::SERVICE_UNAVAILABLE,
             "prepared model runtime is unavailable",
         );
@@ -548,210 +540,11 @@ async fn admit_http<M: ModelContract>(
             if !state.capacity_hint.is_empty() {
                 message = format!("{message}; {}", state.capacity_hint);
             }
-            return error(StatusCode::TOO_MANY_REQUESTS, message);
+            return http::error(protocol, StatusCode::TOO_MANY_REQUESTS, message);
         }
     };
     request.extensions_mut().insert(ingress);
     next.run(request).await
-}
-
-async fn chat<M: ModelContract>(
-    State(state): State<Arc<HttpState<M>>>,
-    Extension(ingress): Extension<Arc<OwnedSemaphorePermit>>,
-    Json(mut body): Json<Value>,
-) -> Response {
-    let ingress_ns = (body.get("return_token_timestamps") == Some(&Value::Bool(true)))
-        .then(observation::monotonic_ns);
-    // One model is loaded: requests naming it, an alias, another model, an empty name or no
-    // model at all are served by it, so preparation always sees the model's identifier.
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "model".into(),
-            Value::String(state.model.config().model_id.clone()),
-        );
-    }
-    let permit = match state.frontend_slots.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "native frontend is shutting down",
-            );
-        }
-    };
-    let prepare_state = state.clone();
-    let preparation_ingress = ingress.clone();
-    let prepared = match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let _ingress = preparation_ingress;
-        request::prepare::<M>(
-            &prepare_state.frontend,
-            prepare_state.images.as_deref(),
-            &prepare_state.grammar,
-            prepare_state.model.config(),
-            body,
-        )
-    })
-    .await
-    {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(message)) => return state.rejection(message),
-        Err(error_value) => {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, error_value.to_string());
-        }
-    };
-    drop(prepared.rendered_prompt);
-    let observation = prepared.observation;
-    let prompt_token_ids = observation
-        .token_ids
-        .then(|| prepared.prompt.tokens.clone());
-    let submitted = if observation.token_ids {
-        state
-            .model
-            .generate_observed(prepared.prompt, observation.timestamps)
-    } else {
-        state.model.generate(prepared.prompt)
-    };
-    let generation = match submitted {
-        Ok(generation) => generation,
-        Err(message) => return state.rejection(message),
-    };
-    let enqueue_ns = generation.enqueue_ns;
-    let id = format!("chatcmpl-{}", state.ids.fetch_add(1, Ordering::Relaxed));
-    let created = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if prepared.stream {
-        let stream = async_stream::stream! {
-            let _ingress=ingress;
-            let mut generation=generation;
-            let mut presentation=output::Presentation::<M::Output>::new(&state.frontend, &state.model.config().eos_token_ids, prepared.output, id.clone());
-            let mut first=chunk(&id,created,&state.model.config().model_id,json!({"role":"assistant"}),Value::Null,observation.include_usage);
-            if let Some(ids)=&prompt_token_ids{first["prompt_token_ids"]=json!(ids);}
-            yield Ok::<_,Infallible>(Event::default().data(first.to_string()));
-            let mut terminal=false;
-            while let Some(event)=generation.events.recv().await{
-                match event{
-                    GenerationEvent::ObservedToken{token,timestamp_ns}=>{
-                        yield Ok(Event::default().data(observed_chunk(&id,created,&state.model.config().model_id,token,timestamp_ns,observation.include_usage).to_string()));
-                    },
-                    GenerationEvent::Token(token)=>{
-                        match presentation.push(token){
-                            Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},
-                            Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
-                        }
-                    },
-                    GenerationEvent::Protocol(pieces)=>{
-                        match presentation.push_protocol(pieces){
-                            Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},
-                            Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
-                        }
-                    },
-                    GenerationEvent::Finished{prompt_tokens,generated_tokens,reused_prompt_tokens,reason,termination}=>{
-                        let deltas=presentation.finish(termination);
-                        match deltas{Ok(deltas)=>for delta in deltas{yield Ok(Event::default().data(chunk(&id,created,&state.model.config().model_id,delta,Value::Null,observation.include_usage).to_string()));},Err(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}}
-                        let reason=if termination != crate::output::Termination::UserStop && presentation.has_tools(){"tool_calls"}else{reason};
-                        let mut last=chunk(&id,created,&state.model.config().model_id,json!({}),json!(reason),observation.include_usage);
-                        observation.finish(&mut last,prompt_tokens,generated_tokens,reused_prompt_tokens,(ingress_ns,enqueue_ns),true);
-                        yield Ok(Event::default().data(last.to_string()));
-                        if observation.include_usage{
-                            let mut usage=chunk(&id,created,&state.model.config().model_id,json!({}),Value::Null,true);
-                            usage["choices"]=json!([]);
-                            usage["usage"]=observation::usage(prompt_tokens,generated_tokens);
-                            yield Ok(Event::default().data(usage.to_string()));
-                        }
-                        yield Ok(Event::default().data("[DONE]"));terminal=true;break;
-                    },
-                    GenerationEvent::AdmissionRejected(message)|GenerationEvent::Error(message)=>{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":message}}).to_string()));terminal=true;break;}
-                }
-            }
-            if !terminal{presentation.abort(crate::output::Termination::ExecutionError);yield Ok(Event::default().data(json!({"error":{"message":generation.failure()}}).to_string()));}
-        };
-        Sse::new(stream)
-            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response()
-    } else {
-        let mut generation = generation;
-        let mut presentation = output::Presentation::<M::Output>::new(
-            &state.frontend,
-            &state.model.config().eos_token_ids,
-            prepared.output,
-            id.clone(),
-        );
-        let mut raw_tokens = Vec::new();
-        let mut token_timestamps = Vec::new();
-        while let Some(event) = generation.events.recv().await {
-            match event {
-                GenerationEvent::ObservedToken {
-                    token,
-                    timestamp_ns,
-                } => {
-                    raw_tokens.push(token);
-                    if let Some(timestamp) = timestamp_ns {
-                        token_timestamps.push(timestamp);
-                    }
-                }
-                GenerationEvent::Token(token) => {
-                    if let Err(message) = presentation.push(token) {
-                        presentation.abort(crate::output::Termination::ExecutionError);
-                        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
-                    }
-                }
-                GenerationEvent::Protocol(pieces) => {
-                    if let Err(message) = presentation.push_protocol(pieces) {
-                        presentation.abort(crate::output::Termination::ExecutionError);
-                        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
-                    }
-                }
-                GenerationEvent::Error(message) => {
-                    presentation.abort(crate::output::Termination::ExecutionError);
-                    return error(StatusCode::INTERNAL_SERVER_ERROR, message);
-                }
-                GenerationEvent::AdmissionRejected(message) => {
-                    presentation.abort(crate::output::Termination::ExecutionError);
-                    return state.rejection(message);
-                }
-                GenerationEvent::Finished {
-                    prompt_tokens,
-                    generated_tokens,
-                    reason,
-                    reused_prompt_tokens,
-                    termination,
-                } => {
-                    if let Err(message) = presentation.finish(termination) {
-                        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
-                    }
-                    let reason = if termination != crate::output::Termination::UserStop
-                        && presentation.has_tools()
-                    {
-                        "tool_calls"
-                    } else {
-                        reason
-                    };
-                    let mut response = json!({"id":id,"object":"chat.completion","created":created,"model":state.model.config().model_id,"choices":[{"index":0,"message":presentation.message(),"finish_reason":reason}],"usage":observation::usage(prompt_tokens,generated_tokens)});
-                    if let Some(ids) = &prompt_token_ids {
-                        response["prompt_token_ids"] = json!(ids);
-                        response["choices"][0]["token_ids"] = json!(raw_tokens);
-                    }
-                    if observation.timestamps {
-                        response["choices"][0]["token_timestamps_ns"] = json!(token_timestamps);
-                    }
-                    observation.finish(
-                        &mut response,
-                        prompt_tokens,
-                        generated_tokens,
-                        reused_prompt_tokens,
-                        (ingress_ns, enqueue_ns),
-                        false,
-                    );
-                    return Json(response).into_response();
-                }
-            }
-        }
-        presentation.abort(crate::output::Termination::ExecutionError);
-        error(StatusCode::INTERNAL_SERVER_ERROR, generation.failure())
-    }
 }
 
 fn chunk(
@@ -866,7 +659,7 @@ mod observation_tests {
         ];
         for (failure, status) in cases {
             let message = failure.to_string();
-            let response = typed_error(failure);
+            let response = error(super::status(&failure), failure);
             assert_eq!(response.status(), status);
             let bytes = axum::body::to_bytes(response.into_body(), 4096)
                 .await

@@ -1,4 +1,4 @@
-//! OpenAI response accumulation over model-independent output events.
+//! Native token decoding and protocol-neutral output, with a Chat formatter.
 
 use crate::{
     Result,
@@ -29,6 +29,7 @@ impl Accumulator {
             calls: Vec::new(),
         }
     }
+    #[cfg(test)]
     pub(crate) fn has_tools(&self) -> bool {
         !self.calls.is_empty()
     }
@@ -135,28 +136,26 @@ impl Accumulator {
     }
 }
 
-pub(super) struct Presentation<'a, P: ModelOutput> {
+pub(super) struct Decoder<'a, P: ModelOutput> {
     decoder: IncrementalDecoder<'a>,
-    parser: P,
-    output: Accumulator,
+    parser: Option<P>,
     eos: &'a [u32],
     finished: bool,
     worker_decoded: bool,
     local_decoded: bool,
 }
-impl<'a, P: ModelOutput> Presentation<'a, P> {
-    pub fn new(frontend: &'a Frontend, eos: &'a [u32], config: P::Config, id: String) -> Self {
+impl<'a, P: ModelOutput> Decoder<'a, P> {
+    pub fn new(frontend: &'a Frontend, eos: &'a [u32], config: Option<P::Config>) -> Self {
         Self {
             decoder: frontend.incremental_decoder(false),
-            parser: P::new(config),
-            output: Accumulator::new(id),
+            parser: config.map(P::new),
             eos,
             finished: false,
             worker_decoded: false,
             local_decoded: false,
         }
     }
-    pub fn push(&mut self, token: u32) -> Result<Vec<Value>> {
+    pub fn push(&mut self, token: u32) -> Result<Vec<Event>> {
         if self.finished {
             return Err("output presentation is finished".into());
         }
@@ -164,15 +163,15 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
             return Err("cannot mix worker-decoded protocol pieces with token decoding".into());
         }
         self.local_decoded = true;
-        let mut events = self.parser.push(Input::Token(token))?;
+        let mut events = self.parse(Input::Token(token))?;
         if !self.eos.contains(&token) {
             if let Some(text) = self.decoder.push(&[token])? {
-                events.extend(self.parser.push(Input::Text(&text))?);
+                events.extend(self.parse(Input::Text(&text))?);
             }
         }
-        self.output.apply(events)
+        Ok(events)
     }
-    pub fn push_protocol(&mut self, pieces: Vec<crate::output::Piece>) -> Result<Vec<Value>> {
+    pub fn push_protocol(&mut self, pieces: Vec<crate::output::Piece>) -> Result<Vec<Event>> {
         if self.finished {
             return Err("output presentation is finished".into());
         }
@@ -183,13 +182,13 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
         let mut events = Vec::new();
         for piece in pieces {
             events.extend(match piece {
-                crate::output::Piece::Token(token) => self.parser.push(Input::Token(token))?,
-                crate::output::Piece::Text(text) => self.parser.push(Input::Text(&text))?,
+                crate::output::Piece::Token(token) => self.parse(Input::Token(token))?,
+                crate::output::Piece::Text(text) => self.parse(Input::Text(&text))?,
             });
         }
-        self.output.apply(events)
+        Ok(events)
     }
-    pub fn finish(&mut self, cause: Termination) -> Result<Vec<Value>> {
+    pub fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
         if self.finished {
             return Err("output presentation is finished".into());
         }
@@ -202,7 +201,7 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
         } else {
             self.decoder
                 .finish()
-                .and_then(|text| self.parser.push(Input::Text(&text)))
+                .and_then(|text| self.parse(Input::Text(&text)))
         };
         let mut events = match final_text {
             Ok(events) => events,
@@ -212,10 +211,10 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
             }
         };
         self.finished = true;
-        events.extend(self.parser.finish(cause)?);
-        let deltas = self.output.apply(events)?;
-        self.output.finish()?;
-        Ok(deltas)
+        if let Some(parser) = &mut self.parser {
+            events.extend(parser.finish(cause)?);
+        }
+        Ok(events)
     }
     pub fn abort(&mut self, cause: Termination) {
         debug_assert!(matches!(
@@ -225,20 +224,58 @@ impl<'a, P: ModelOutput> Presentation<'a, P> {
         if !self.finished {
             self.finished = true;
             // Failed or dropped responses cannot publish additional output.
-            let _ = self.parser.finish(cause);
+            if let Some(parser) = &mut self.parser {
+                let _ = parser.finish(cause);
+            }
         }
     }
-    pub fn has_tools(&self) -> bool {
-        self.output.has_tools()
-    }
-    pub fn message(&self) -> Value {
-        self.output.message()
+    fn parse(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+        if let Some(parser) = &mut self.parser {
+            parser.push(input)
+        } else {
+            Ok(match input {
+                Input::Text(text) if !text.is_empty() => vec![Event::Content(text.into())],
+                _ => vec![],
+            })
+        }
     }
 }
 
-impl<P: ModelOutput> Drop for Presentation<'_, P> {
+impl<P: ModelOutput> Drop for Decoder<'_, P> {
     fn drop(&mut self) {
         self.abort(Termination::Cancelled);
+    }
+}
+
+#[cfg(test)]
+struct Presentation<'a, P: ModelOutput> {
+    decoder: Decoder<'a, P>,
+    output: Accumulator,
+}
+#[cfg(test)]
+impl<'a, P: ModelOutput> Presentation<'a, P> {
+    fn new(frontend: &'a Frontend, eos: &'a [u32], config: P::Config, id: String) -> Self {
+        Self {
+            decoder: Decoder::new(frontend, eos, Some(config)),
+            output: Accumulator::new(id),
+        }
+    }
+    fn push(&mut self, token: u32) -> Result<Vec<Value>> {
+        self.output.apply(self.decoder.push(token)?)
+    }
+    fn push_protocol(&mut self, pieces: Vec<crate::output::Piece>) -> Result<Vec<Value>> {
+        self.output.apply(self.decoder.push_protocol(pieces)?)
+    }
+    fn finish(&mut self, cause: Termination) -> Result<Vec<Value>> {
+        let deltas = self.output.apply(self.decoder.finish(cause)?)?;
+        self.output.finish()?;
+        Ok(deltas)
+    }
+    fn abort(&mut self, cause: Termination) {
+        self.decoder.abort(cause)
+    }
+    fn message(&self) -> Value {
+        self.output.message()
     }
 }
 
@@ -673,7 +710,12 @@ pub(crate) mod tests {
                     "<tool_call><function=lookup>".into(),
                 )])
                 .unwrap();
-            assert!(presentation.finish(cause).is_err());
+            if cause == Termination::Eos {
+                assert!(presentation.finish(cause).is_err());
+            } else {
+                assert!(presentation.finish(cause).unwrap().is_empty());
+                assert!(presentation.message().get("tool_calls").is_none());
+            }
         }
     }
 
@@ -747,5 +789,165 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Block {
+    Text(String),
+    Reasoning(String),
+    Tool {
+        index: usize,
+        id: String,
+        name: String,
+        arguments: String,
+        ended: bool,
+    },
+}
+#[derive(Clone, Debug)]
+pub(super) enum Change {
+    Start(usize),
+    Delta(usize, String),
+    End(usize),
+}
+#[derive(Default)]
+pub(super) struct ResponseOutput {
+    pub blocks: Vec<Block>,
+    open: Option<usize>,
+    calls: Vec<usize>,
+}
+impl ResponseOutput {
+    pub fn has_tools(&self) -> bool {
+        !self.calls.is_empty()
+    }
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|b| {
+                if let Block::Text(text) = b {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    fn close(&mut self, changes: &mut Vec<Change>) -> Result<()> {
+        if let Some(index) = self.open.take() {
+            if let Block::Tool { ended: false, .. } = &self.blocks[index] {
+                return Err("incomplete emitted tool call".into());
+            }
+            changes.push(Change::End(index));
+        }
+        Ok(())
+    }
+    pub fn finish(&mut self) -> Result<Vec<Change>> {
+        let mut changes = vec![];
+        self.close(&mut changes)?;
+        Ok(changes)
+    }
+    pub fn apply(&mut self, event: Event, request_id: &str) -> Result<Vec<Change>> {
+        let mut changes = vec![];
+        match event {
+            Event::Content(text) | Event::Reasoning(text) if text.is_empty() => {}
+            event @ (Event::Content(_) | Event::Reasoning(_)) => {
+                let reasoning = matches!(event, Event::Reasoning(_));
+                let text = match event {
+                    Event::Content(t) | Event::Reasoning(t) => t,
+                    _ => unreachable!(),
+                };
+                let same = self.open.is_some_and(|i| {
+                    matches!(
+                        (&self.blocks[i], reasoning),
+                        (Block::Text(_), false) | (Block::Reasoning(_), true)
+                    )
+                });
+                if !same {
+                    self.close(&mut changes)?;
+                    let i = self.blocks.len();
+                    self.blocks.push(if reasoning {
+                        Block::Reasoning(String::new())
+                    } else {
+                        Block::Text(String::new())
+                    });
+                    self.open = Some(i);
+                    changes.push(Change::Start(i));
+                }
+                let i = self.open.unwrap();
+                match &mut self.blocks[i] {
+                    Block::Text(t) | Block::Reasoning(t) => t.push_str(&text),
+                    _ => unreachable!(),
+                }
+                changes.push(Change::Delta(i, text));
+            }
+            Event::ToolBegin { index, name, id } => {
+                if index != self.calls.len() || name.is_empty() {
+                    return Err("tool calls require sequential indices and names".into());
+                }
+                self.close(&mut changes)?;
+                let id = id.unwrap_or_else(|| format!("call_{request_id}_{index}"));
+                if id.is_empty()
+                    || self
+                        .blocks
+                        .iter()
+                        .any(|b| matches!(b,Block::Tool{id:existing,..} if existing==&id))
+                {
+                    return Err("tool IDs must be unique and nonempty".into());
+                }
+                let i = self.blocks.len();
+                self.blocks.push(Block::Tool {
+                    index,
+                    id,
+                    name,
+                    arguments: String::new(),
+                    ended: false,
+                });
+                self.calls.push(i);
+                self.open = Some(i);
+                changes.push(Change::Start(i));
+            }
+            Event::ToolArguments { index, text } => {
+                let i = *self
+                    .calls
+                    .get(index)
+                    .ok_or("tool arguments require an open call")?;
+                let Block::Tool {
+                    arguments,
+                    ended: false,
+                    ..
+                } = &mut self.blocks[i]
+                else {
+                    return Err("tool arguments require an open call".into());
+                };
+                if arguments.len().saturating_add(text.len()) > 8 * 1024 * 1024 {
+                    return Err("tool arguments exceed the 8 MiB response bound".into());
+                }
+                arguments.push_str(&text);
+                changes.push(Change::Delta(i, text));
+            }
+            Event::ToolEnd { index } => {
+                let i = *self
+                    .calls
+                    .get(index)
+                    .ok_or("tool end requires an open call")?;
+                let Block::Tool {
+                    arguments, ended, ..
+                } = &mut self.blocks[i]
+                else {
+                    unreachable!()
+                };
+                if *ended {
+                    return Err("tool already ended".into());
+                }
+                let value: Value = serde_json::from_str(arguments)
+                    .map_err(|e| format!("invalid tool arguments: {e}"))?;
+                if !value.is_object() {
+                    return Err("tool arguments must encode a JSON object".into());
+                }
+                *ended = true;
+                self.close(&mut changes)?;
+            }
+        }
+        Ok(changes)
     }
 }

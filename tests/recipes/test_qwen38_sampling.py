@@ -39,7 +39,7 @@ def test_philox_random123_zero_vector_and_uniform_distribution():
 
 @pytest.mark.parametrize("changes", [
     {"seed": -1}, {"seed": 2**64}, {"generation": 0}, {"generation": True},
-    {"temperature": -1}, {"temperature": float("nan")}, {"top_p": 0},
+    {"temperature": 0.}, {"temperature": -0.}, {"temperature": -1}, {"temperature": float("nan")}, {"top_p": 0},
     {"temperature": 1e-100}, {"repetition_penalty": 1e100},
     {"min_p": 1.1}, {"repetition_penalty": 0}, {"top_k": 248321},
     {"max_new_tokens": -1}, {"eos_token_ids": tuple(range(9))},
@@ -94,8 +94,6 @@ def _reference(logits, counts, params, seed, counter, grammar=None):
     scores -= params.frequency_penalty * counts
     if grammar is not None:
         scores[~grammar] = -torch.inf
-    if params.temperature == 0:
-        return scores.argmax().item()
     scores /= params.temperature
     values, ids = torch.sort(scores, descending=True, stable=True)
     if params.top_k > 0:
@@ -205,7 +203,7 @@ def test_native_categorical_distribution_and_exact_seed_progression():
 
 
 @CUDA
-@pytest.mark.parametrize("temperature", [0., .8])
+@pytest.mark.parametrize("temperature", [1., .8])
 @pytest.mark.parametrize("fields", [8, 24])
 def test_native_sampling_full_vocabulary_batch_reordering_and_pending_consumption(temperature, fields):
     state = DeviceRequestState.allocate("cuda")
@@ -270,7 +268,7 @@ def test_terminal_grammar_errors_stale_epochs_and_inactive_lanes():
     slots, epochs, live, records, frame, sequence = _metadata()
     logits = torch.zeros((4, 32), device="cuda")
     for slot in range(4):
-        state.admit(slot, RequestAdmission(1, slot, temperature=0., eos_token_ids=(7,),
+        state.admit(slot, RequestAdmission(1, slot, temperature=1., eos_token_ids=(7,),
                     max_new_tokens=1 if slot == 1 else 10), [1, 2], consumed_tokens=2, ple_history=(1, 2))
     state.grammar_enabled.fill_(1)
     state.grammar_mask.zero_()
@@ -363,7 +361,7 @@ def test_native_admission_scatter_preserves_restored_state_and_gates_final_sampl
     order = [3, 1, 0, 2]
     for row, slot in enumerate(order[:capacity]):
         buffers.stage(row, slot, RequestAdmission(17 + slot, 2**64 - 1 - slot,
-            temperature=0., eos_token_ids=()), [4, 4, 5, 6])
+            temperature=1., eos_token_ids=()), [4, 4, 5, 6])
         state.ple_history[slot].copy_(torch.tensor([4, 5]))
     buffers.admission_count.fill_(capacity)
     metadata = _metadata()
@@ -374,6 +372,7 @@ def test_native_admission_scatter_preserves_restored_state_and_gates_final_sampl
     admission = PreparedAdmission(state, buffers, records, frame, sequence, capacity=capacity)
     admission.prepare()
     logits = torch.zeros((4, 32), device="cuda")
+    logits.fill_(-torch.inf)
     logits[:, 8] = 2
     enabled = torch.zeros(4, dtype=torch.int32, device="cuda")
     sampler = PreparedSampling(logits, state, *metadata, sample_enabled=enabled)
@@ -416,7 +415,7 @@ def test_native_admission_scatter_preserves_restored_state_and_gates_final_sampl
 
 
 @CUDA
-@pytest.mark.parametrize("fault", ["duplicate", "negative_histogram", "stale_epoch", "invalid_parameters"])
+@pytest.mark.parametrize("fault", ["duplicate", "negative_histogram", "stale_epoch", "invalid_parameters", "zero_temperature", "negative_zero_temperature"])
 def test_native_admission_errors_do_not_partially_mutate_resident_slots(fault):
     state = DeviceRequestState.allocate("cuda", vocab_size=32)
     state.admit(2, RequestAdmission(3, 71, eos_token_ids=()), [2, 2, 7], consumed_tokens=3, ple_history=(2, 7))
@@ -431,6 +430,10 @@ def test_native_admission_errors_do_not_partially_mutate_resident_slots(fault):
         buffers.admission_histogram[0, 31] = -1
     elif fault == "stale_epoch":
         buffers.admission_generations[0] = 3
+    elif fault == "zero_temperature":
+        buffers.admission_parameters[0, 0] = 0.
+    elif fault == "negative_zero_temperature":
+        buffers.admission_parameters[0, 0] = -0.
     else:
         buffers.admission_parameters[0, 0] = float("nan")
     _, _, _, records, frame, sequence = _metadata()

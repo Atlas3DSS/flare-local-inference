@@ -134,8 +134,19 @@ impl SamplingParameters {
         ]
     }
     pub fn validate(&self) -> Result<()> {
+        if self.temperature == 0. {
+            return Err(crate::Error::admission(
+                crate::AdmissionError::Invalid,
+                "temperature=0 is unsupported because greedy decoding incorrectly collapses the model’s probability distribution, and is not appropriate for most use cases",
+            ));
+        }
+        if !self.temperature.is_finite() || self.temperature < f32::MIN_POSITIVE {
+            return Err(crate::Error::admission(
+                crate::AdmissionError::Invalid,
+                "temperature must be a positive normal FP32 value",
+            ));
+        }
         if self.values().iter().any(|value| !value.is_finite())
-            || self.temperature < 0.
             || !(0. < self.top_p && self.top_p <= 1.)
             || !(0. ..=1.).contains(&self.min_p)
             || self.repetition_penalty <= 0.

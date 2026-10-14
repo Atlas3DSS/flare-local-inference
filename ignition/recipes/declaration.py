@@ -32,7 +32,7 @@ class SamplingDefaults:
     def __post_init__(self):
         values = (self.temperature, self.top_p, self.min_p, self.repetition_penalty,
                   self.presence_penalty, self.frequency_penalty)
-        if (any(not math.isfinite(v) for v in values) or self.temperature < 0
+        if (any(not math.isfinite(v) for v in values) or self.temperature <= 0
                 or not 0 < self.top_p <= 1 or not 0 <= self.min_p <= 1
                 or self.repetition_penalty <= 0 or type(self.top_k) is not int or self.top_k < -1
                 or type(self.seed) is not int or not 0 <= self.seed < 2**64):

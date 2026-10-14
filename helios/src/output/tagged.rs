@@ -124,7 +124,10 @@ impl<D: ToolDialect> ToolCallParser for TaggedTools<D> {
     fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
         if matches!(
             cause,
-            Termination::Cancelled | Termination::ExecutionError | Termination::UserStop
+            Termination::Cancelled
+                | Termination::ExecutionError
+                | Termination::UserStop
+                | Termination::OutputLimit
         ) {
             self.buffer.clear();
             return Ok(vec![]);

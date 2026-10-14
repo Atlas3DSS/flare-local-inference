@@ -6,6 +6,9 @@ capacities. The command line selects models, GPUs, concurrency, storage, and
 listeners. The engine derives memory and execution geometry from those choices;
 advanced preparation flags expose the explicit overrides listed below.
 
+See [native inference APIs](api.md) for Chat Completions, raw Completions,
+Anthropic Messages, stateless Responses, authentication, and client configuration.
+
 ## 1. Principles
 
 - **Intent, not mechanism.** A parameter names a decision only the user can

@@ -12,7 +12,6 @@ pub struct PreparedRequest<M: ModelContract> {
     pub stream: bool,
     pub output: M::OutputConfig,
     pub rendered_prompt: String,
-    pub(crate) observation: super::observation::ObservationOptions,
 }
 
 pub fn prepare<M: ModelContract>(
@@ -38,64 +37,68 @@ fn prepare_inner<M: ModelContract>(
     config: &ModelConfig,
     body: Value,
 ) -> Result<PreparedRequest<M>> {
-    let object = body.as_object().ok_or("request must be a JSON object")?;
-    let observation = super::observation::ObservationOptions::parse(object)?;
-    let model = object
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or("model must be a string")?;
-    if model != config.model_id {
-        return Err(format!("model {model:?} is not loaded").into());
+    if body.get("model").and_then(Value::as_str) != Some(config.model_id.as_str()) {
+        return Err("requested model is not loaded".into());
     }
-    for name in ["logprobs", "top_logprobs", "logit_bias", "guided_json"] {
-        if object
-            .get(name)
-            .is_some_and(|value| !value.is_null() && value != &Value::Bool(false))
-        {
-            return Err(Error::admission(
-                AdmissionError::Feature,
-                format!("request option {name} is not implemented"),
-            ));
-        }
+    let decoded = super::protocol::decode(super::protocol::Protocol::Chat, body, false)?;
+    let prepared = prepare_inference::<M>(
+        frontend,
+        processor,
+        compiler,
+        config,
+        &decoded.request,
+        0,
+        false,
+    )?;
+    Ok(PreparedRequest {
+        prompt: prepared.prompt,
+        output: prepared.output.ok_or("chat requires parsed output")?,
+        stream: decoded.stream,
+        rendered_prompt: prepared.rendered_prompt,
+    })
+}
+
+pub(super) struct PreparedInference<M: ModelContract> {
+    pub prompt: Prompt<M>,
+    pub output: Option<M::OutputConfig>,
+    pub rendered_prompt: String,
+    pub echo: String,
+}
+
+pub(super) fn prepare_inference<M: ModelContract>(
+    frontend: &Frontend,
+    processor: Option<&ImageProcessor>,
+    compiler: &crate::grammar::GrammarCompiler,
+    config: &ModelConfig,
+    request: &super::inference::Request,
+    index: usize,
+    count_only: bool,
+) -> Result<PreparedInference<M>> {
+    use super::inference::{Constraint, Input, RawPrompt};
+    let opts = &request.options;
+    let mut object = serde_json::to_value(&opts.sampling)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    if let Some(limit) = opts.output_limit {
+        object.insert("max_tokens".into(), limit.into());
     }
-    let tools_disabled = match object.get("tool_choice").filter(|value| !value.is_null()) {
-        None => false,
-        Some(Value::String(choice)) if choice == "auto" => false,
-        Some(Value::String(choice)) if choice == "none" => true,
-        _ => {
-            return Err(Error::admission(
-                AdmissionError::Feature,
-                "tool_choice supports auto or none; forced tool selection is not implemented",
-            ));
-        }
+    let object = &object;
+    let grammar = match &opts.constraint {
+        Some(Constraint::Json(schema)) => Some(compiler.compile_json_schema(schema)?),
+        Some(Constraint::Lark(source)) => Some(compiler.compile_lark(source)?),
+        None => None,
     };
-    if object
-        .get("parallel_tool_calls")
-        .is_some_and(|value| value != &Value::Bool(true))
-    {
-        return Err(Error::admission(
-            AdmissionError::Feature,
-            "parallel_tool_calls=false is not implemented",
-        ));
-    }
-    if object
-        .get("n")
-        .is_some_and(|value| value.as_u64() != Some(1))
-    {
-        return Err("n must be 1".into());
-    }
-    let stream = boolean(object, "stream", false)?;
-    let messages = object
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or("messages must be an array")?;
-    let mut normalized = messages.clone();
+    let (mut normalized, raw) = match &request.input {
+        Input::Conversation(messages) => (super::inference::template_messages(messages)?, None),
+        Input::Raw(prompts) => (vec![], Some(&prompts[index / request.choices])),
+    };
     let mut images = Vec::new();
     for message in &mut normalized {
         if !message.is_object() {
             return Err("messages must contain objects".into());
         }
-        normalize_tool_arguments(message)?;
         if let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) {
             for part in parts {
                 let kind = part
@@ -162,26 +165,31 @@ fn prepare_inner<M: ModelContract>(
             }
         }
     }
-    let mut options = match object.get("chat_template_kwargs") {
-        None | Some(Value::Null) => Map::new(),
-        Some(Value::Object(options)) => options.clone(),
-        _ => return Err("chat_template_kwargs must be an object".into()),
-    };
-    for name in [
-        "tools",
-        "documents",
-        "enable_thinking",
-        "reasoning_effort",
-        "continue_final_message",
-        "add_generation_prompt",
-    ] {
-        if let Some(value) = object.get(name) {
-            options.insert(name.into(), value.clone());
+    let mut options = opts.template.clone();
+    if !options.contains_key("reasoning_effort") {
+        if let Some(effort) = opts.effort {
+            use super::inference::Effort;
+            let candidates: &[&str] = match effort {
+                Effort::Low => &["low"],
+                Effort::High => &["high", "medium"],
+                Effort::Max => &["max", "xhigh", "high", "medium"],
+            };
+            options.insert(
+                "reasoning_effort".into(),
+                frontend.resolve_effort(candidates)?.into(),
+            );
         }
     }
-    let grammar = compile_grammar(compiler, object)?;
-    if tools_disabled {
+
+    if request.tools_disabled {
         options.insert("tools".into(), Value::Array(vec![]));
+    } else if !request.tools.is_empty() {
+        options.insert("tools".into(), Value::Array(request.tools.iter().map(|tool| {
+            let description = if let Some(grammar) = &tool.grammar {
+                format!("{}\nPut the complete tool input in the input string. It must match this {} grammar exactly:\n{}", tool.description, grammar.syntax, grammar.source)
+            } else { tool.description.clone() };
+            serde_json::json!({"type":"function", "function":{"name":tool.native_name(), "description":description, "parameters":tool.parameters}})
+        }).collect()));
     }
     if grammar.is_some() {
         if options
@@ -208,45 +216,64 @@ fn prepare_inner<M: ModelContract>(
     {
         options.insert("add_generation_prompt".into(), Value::Bool(false));
     }
-    let rendered = frontend.render_chat(&normalized, &options)?;
-    let output = M::prepare_output(
-        frontend,
-        &rendered,
-        &normalized,
-        &options,
-        grammar.is_some(),
-    )?;
+    let (rendered, echo) = if let Some(raw) = raw {
+        let (mut token_ids, echo) = match raw {
+            RawPrompt::Text(text) => (frontend.encode(text, true)?, text.clone()),
+            RawPrompt::Tokens(ids) => {
+                if ids.is_empty()
+                    || ids
+                        .iter()
+                        .any(|id| *id as usize >= config.contract.vocabulary)
+                {
+                    return Err("token prompt must contain valid vocabulary IDs".into());
+                }
+                (ids.clone(), frontend.decode(ids, false)?)
+            }
+        };
+        if token_ids.is_empty() {
+            token_ids.push(
+                frontend
+                    .bos_token_id()
+                    .ok_or("empty prompt requires a packaged BOS token")?,
+            );
+        }
+        (
+            crate::frontend::RenderedPrompt {
+                text: frontend.decode(&token_ids, false)?,
+                token_ids,
+            },
+            echo,
+        )
+    } else {
+        (frontend.render_chat(&normalized, &options)?, String::new())
+    };
+    let output = if raw.is_some() {
+        None
+    } else {
+        Some(M::prepare_output(
+            frontend,
+            &rendered,
+            &normalized,
+            &options,
+            grammar.is_some(),
+        )?)
+    };
     let crate::model::PreparedInput {
         tokens,
         data,
         conditioning,
         images,
     } = M::prepare_input(frontend, processor, &rendered, images)?;
-    let system_boundary = M::system_boundary(frontend, &tokens, &normalized, &options);
-    let sampling = sampling_parameters(object, &config.sampling_defaults)?;
-    let mut stop_sequences: Vec<Vec<u32>> = object
-        .get("stop_token_sequences")
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|error| {
-                Error::Admission(AdmissionError::Invalid(Failure::caused_by(
-                    format!("invalid stop_token_sequences: {error}"),
-                    error,
-                )))
-            })
-        })
-        .transpose()?
-        .unwrap_or_default();
-    if let Some(value) = object.get("stop_token_ids") {
-        let ids: Vec<u32> = serde_json::from_value(value.clone()).map_err(|error| {
-            Error::Admission(AdmissionError::Invalid(Failure::caused_by(
-                format!("invalid stop_token_ids: {error}"),
-                error,
-            )))
-        })?;
-        stop_sequences.extend(ids.into_iter().map(|id| vec![id]));
-    }
+    let system_boundary = if raw.is_some() {
+        None
+    } else {
+        M::system_boundary(frontend, &tokens, &normalized, &options)
+    };
+    let mut sampling = sampling_parameters(object, &config.sampling_defaults)?;
+    sampling.seed = sampling.seed.wrapping_add(index as u64);
+    let stop_sequences = opts.token_stops.clone();
     super::stops::TokenStops::new(stop_sequences.clone(), config.contract.vocabulary)?;
-    let stop_strings = string_stops(object.get("stop"))?;
+    let stop_strings = opts.stops.clone();
     super::stops::validate_strings(&stop_strings, !stop_sequences.is_empty(), grammar.is_some())?;
     if grammar.is_some() && !stop_sequences.is_empty() {
         return Err("structured output cannot be combined with custom token stops".into());
@@ -260,21 +287,27 @@ fn prepare_inner<M: ModelContract>(
     {
         return Err("structured output cannot continue an existing assistant message".into());
     }
-    let max_new_tokens = output_limit(
-        object,
-        config.max_new_tokens,
-        tokens.len(),
-        config.limits.max_sequence_tokens,
-    )?;
-    let ignore_eos = match object.get("ignore_eos") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => return Err("ignore_eos must be a boolean".into()),
+    let max_new_tokens = if count_only || (raw.is_some() && opts.output_limit == Some(0)) {
+        if tokens.len() > config.limits.max_sequence_tokens {
+            return Err(Error::admission(
+                AdmissionError::Context,
+                "prompt exceeds model context",
+            ));
+        }
+        0
+    } else {
+        output_limit(
+            object,
+            config.max_new_tokens,
+            tokens.len(),
+            config.limits.max_sequence_tokens,
+        )?
     };
+    let ignore_eos = opts.ignore_eos;
     if ignore_eos && grammar.is_some() {
         return Err("structured output cannot ignore end-of-sequence tokens".into());
     }
-    Ok(PreparedRequest {
+    Ok(PreparedInference {
         prompt: Prompt {
             tokens,
             system_boundary,
@@ -288,10 +321,9 @@ fn prepare_inner<M: ModelContract>(
             grammar,
             ignore_eos,
         },
-        stream,
         output,
         rendered_prompt: rendered.text,
-        observation,
+        echo,
     })
 }
 
@@ -335,97 +367,10 @@ fn output_limit(
     Ok(max_new_tokens)
 }
 
-fn string_stops(value: Option<&Value>) -> Result<Vec<String>> {
-    let strings = match value {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::String(text)) => vec![text.clone()],
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| Error::from("stop must be a string or an array of strings"))
-            })
-            .collect::<Result<Vec<_>>>()?,
-        _ => return Err("stop must be a string or an array of strings".into()),
-    };
-    super::stops::validate_strings(&strings, false, false)?;
-    Ok(strings)
-}
-
 fn requests_continuation(value: Option<&Value>) -> bool {
     value.is_some_and(|value| {
         value == &Value::Bool(true) || value.as_str().is_some_and(|field| !field.is_empty())
     })
-}
-
-fn normalize_tool_arguments(message: &mut Value) -> Result<()> {
-    let Some(calls) = message
-        .get_mut("tool_calls")
-        .filter(|value| !value.is_null())
-    else {
-        return Ok(());
-    };
-    for call in calls
-        .as_array_mut()
-        .ok_or("message tool_calls must be an array")?
-    {
-        let function = call
-            .get_mut("function")
-            .and_then(Value::as_object_mut)
-            .ok_or("tool call function must be an object")?;
-        let arguments = function
-            .get_mut("arguments")
-            .ok_or("tool call function.arguments is required")?;
-        if let Some(encoded) = arguments.as_str() {
-            *arguments = serde_json::from_str(encoded).map_err(|error| {
-                Error::Admission(AdmissionError::Invalid(Failure::caused_by(
-                    format!("invalid tool call arguments JSON: {error}"),
-                    error,
-                )))
-            })?;
-        }
-        if !arguments.is_object() {
-            return Err("tool call function.arguments must encode a JSON object".into());
-        }
-    }
-    Ok(())
-}
-
-fn compile_grammar(
-    compiler: &crate::grammar::GrammarCompiler,
-    object: &Map<String, Value>,
-) -> Result<Option<crate::grammar::RequestGrammar>> {
-    let response = object
-        .get("response_format")
-        .filter(|value| !value.is_null());
-    let lark = object.get("grammar").filter(|value| !value.is_null());
-    if response.is_some() && lark.is_some() {
-        return Err("response_format and grammar are mutually exclusive".into());
-    }
-    if let Some(lark) = lark {
-        return compiler
-            .compile_lark(lark.as_str().ok_or("grammar must be a Lark string")?)
-            .map(Some);
-    }
-    let Some(response) = response else {
-        return Ok(None);
-    };
-    match response.get("type").and_then(Value::as_str) {
-        Some("text") => Ok(None),
-        Some("json_object") => compiler
-            .compile_json_schema(&serde_json::json!({"type":"object"}))
-            .map(Some),
-        Some("json_schema") => {
-            let schema = response
-                .get("json_schema")
-                .and_then(|value| value.get("schema"))
-                .ok_or("response_format.json_schema.schema is required")?;
-            compiler.compile_json_schema(schema).map(Some)
-        }
-        _ => Err("response_format.type must be text, json_object or json_schema".into()),
-    }
 }
 
 pub(super) fn sampling_parameters(
@@ -455,6 +400,7 @@ pub(super) fn sampling_parameters(
     Ok(sampling)
 }
 
+#[cfg(test)]
 fn boolean(object: &Map<String, Value>, name: &str, default: bool) -> Result<bool> {
     object
         .get(name)
@@ -544,42 +490,6 @@ mod tests {
         assert!(limit(serde_json::json!({}), 262144, 262145).is_err());
     }
     #[test]
-    fn standard_string_stop_values_are_validated_without_coercion() {
-        assert!(string_stops(None).unwrap().is_empty());
-        assert!(string_stops(Some(&Value::Null)).unwrap().is_empty());
-        assert_eq!(
-            string_stops(Some(&serde_json::json!("\nEND_EDIT"))).unwrap(),
-            vec!["\nEND_EDIT"]
-        );
-        assert_eq!(
-            string_stops(Some(&serde_json::json!(["a", "世界"]))).unwrap(),
-            vec!["a", "世界"]
-        );
-        for value in [
-            serde_json::json!(false),
-            serde_json::json!(1),
-            serde_json::json!(["ok", 2]),
-            serde_json::json!(""),
-            serde_json::json!(["a", "b", "c", "d", "e"]),
-        ] {
-            assert!(string_stops(Some(&value)).is_err(), "{value}");
-        }
-    }
-    #[test]
-    fn response_tool_arguments_round_trip_without_changing_json_types() {
-        let expected = serde_json::json!({"query":"café 世界","options":{"count":2,"enabled":true,"none":null,"items":[1,"✓"]}});
-        let mut message = serde_json::json!({"role":"assistant","tool_calls":[{"type":"function","id":"call_1","function":{"name":"search","arguments":expected.to_string()}}]});
-        normalize_tool_arguments(&mut message).unwrap();
-        assert_eq!(message["tool_calls"][0]["function"]["arguments"], expected);
-        assert_eq!(message["tool_calls"][0]["id"], "call_1");
-        normalize_tool_arguments(&mut message).unwrap();
-        for invalid in ["{", "null", "[]", "\"text\"", "1"] {
-            let mut message =
-                serde_json::json!({"tool_calls":[{"function":{"arguments":invalid}}]});
-            assert!(normalize_tool_arguments(&mut message).is_err());
-        }
-    }
-    #[test]
     fn explicit_zero_values_survive_defaults_and_nonfinite_casts_fail() {
         let values = serde_json::json!({"temperature":0,"seed":0,"stream":false,"large":1e100});
         let object = values.as_object().unwrap();
@@ -601,14 +511,31 @@ mod tests {
         let empty = sampling_parameters(&Map::new(), &defaults).unwrap();
         assert_eq!(empty.top_k, -1);
         assert_eq!(empty.temperature, 1.);
-        let values = serde_json::json!({"seed":0,"temperature":0,"top_p":1,"top_k":0});
+        let values = serde_json::json!({"seed":0,"temperature":0.5,"top_p":1,"top_k":0});
         let explicit = sampling_parameters(values.as_object().unwrap(), &defaults).unwrap();
         assert_eq!(explicit.seed, 0);
-        assert_eq!(explicit.temperature, 0.);
+        assert_eq!(explicit.temperature, 0.5);
         assert_eq!(explicit.top_k, 0);
         assert_eq!(explicit.top_p, 1.);
         assert_eq!(explicit.repetition_penalty, 1.);
         assert_eq!(defaults.seed, 123);
         assert_eq!(defaults.temperature, 1.);
+    }
+
+    #[test]
+    fn zero_temperature_is_rejected_without_replacing_it_with_the_default() {
+        for temperature in [0., -0.] {
+            let values = serde_json::json!({"temperature": temperature});
+            let error =
+                sampling_parameters(values.as_object().unwrap(), &SamplingParameters::default())
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Admission(AdmissionError::Invalid(_))
+            ));
+            assert!(error.to_string().contains(
+                "greedy decoding incorrectly collapses the model’s probability distribution"
+            ));
+        }
     }
 }

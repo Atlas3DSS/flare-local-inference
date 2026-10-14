@@ -122,10 +122,52 @@ pub struct Frontend {
     tokenizer: Tokenizer,
     environment: Environment<'static>,
     template_source: String,
+    bos_token_id: Option<u32>,
+    effort_levels: std::sync::OnceLock<Vec<String>>,
     defaults: Map<String, Json>,
 }
 
 impl Frontend {
+    pub fn bos_token_id(&self) -> Option<u32> {
+        self.bos_token_id
+    }
+
+    /// Resolves advisory effort against the vocabulary accepted by the prepared template.
+    pub fn resolve_effort<'a>(&self, candidates: &'a [&str]) -> Result<&'a str> {
+        let accepted = self.effort_levels.get_or_init(|| {
+            let mut context = self.defaults.clone();
+            context.insert(
+                "messages".into(),
+                serde_json::json!([{"role":"user","content":"Hello"}]),
+            );
+            context.insert("enable_thinking".into(), true.into());
+            context.insert("thinking_mode".into(), "thinking".into());
+            context.insert("add_generation_prompt".into(), true.into());
+            context.insert("continue_final_message".into(), false.into());
+            ["low", "medium", "high", "xhigh", "max"]
+                .into_iter()
+                .filter(|effort| {
+                    context.insert("reasoning_effort".into(), (*effort).into());
+                    self.environment
+                        .get_template("chat")
+                        .and_then(|template| template.render(&context))
+                        .is_ok()
+                })
+                .map(str::to_owned)
+                .collect()
+        });
+        candidates
+            .iter()
+            .copied()
+            .find(|candidate| accepted.iter().any(|level| level == candidate))
+            .ok_or_else(|| {
+                Error::admission(
+                    crate::AdmissionError::Feature,
+                    "prepared chat template does not accept the requested reasoning effort",
+                )
+            })
+    }
+
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
@@ -179,6 +221,11 @@ impl Frontend {
                     error,
                 )))
             })?;
+        let bos_token_id = assets
+            .tokens
+            .bos_token
+            .as_deref()
+            .and_then(|token| tokenizer.token_to_id(token));
         let mut defaults = Map::new();
         for (name, value) in [
             ("bos_token", assets.tokens.bos_token),
@@ -204,6 +251,8 @@ impl Frontend {
         defaults.insert("documents".into(), Json::Null);
         defaults.extend(template_defaults);
         Ok(Self {
+            bos_token_id,
+            effort_levels: Default::default(),
             tokenizer,
             environment,
             template_source,
@@ -442,6 +491,47 @@ mod tests {
     }
 
     #[test]
+    fn advisory_effort_uses_the_prepared_templates_vocabulary() {
+        for (levels, expected) in [
+            ("['low','medium','xhigh']", ["low", "medium", "xhigh"]),
+            ("['low','high','max']", ["low", "high", "max"]),
+        ] {
+            let source = format!(
+                "{{% if reasoning_effort not in {levels} %}}{{{{ raise_exception() }}}}{{% endif %}}"
+            );
+            let mut environment = Environment::new();
+            environment.add_function(
+                "raise_exception",
+                || -> std::result::Result<(), TemplateError> {
+                    Err(TemplateError::new(
+                        ErrorKind::InvalidOperation,
+                        "unsupported effort",
+                    ))
+                },
+            );
+            environment
+                .add_template_owned("chat", source.clone())
+                .unwrap();
+            let frontend = Frontend {
+                tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
+                environment,
+                template_source: source,
+                bos_token_id: None,
+                effort_levels: Default::default(),
+                defaults: Map::new(),
+            };
+            for (candidates, expected) in [
+                (&["low"][..], expected[0]),
+                (&["high", "medium"][..], expected[1]),
+                (&["max", "xhigh", "high", "medium"][..], expected[2]),
+            ] {
+                assert_eq!(frontend.resolve_effort(candidates).unwrap(), expected);
+            }
+            assert!(frontend.resolve_effort(&["unsupported"]).is_err());
+        }
+    }
+
+    #[test]
     fn missing_asset_retains_io_failure() {
         use std::error::Error as _;
 
@@ -486,6 +576,8 @@ mod tests {
             .add_template_owned("chat", "{{ raise_exception() }}".to_owned())
             .unwrap();
         let frontend = Frontend {
+            bos_token_id: None,
+            effort_levels: Default::default(),
             tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
             environment,
             template_source: "{{ raise_exception() }}".to_owned(),

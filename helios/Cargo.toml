@@ -16,11 +16,15 @@ runtime-package = ["dep:serde", "dep:serde_json", "dep:prost", "dep:prost-types"
 frontend = ["dep:serde", "dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg"]
 grammar = ["frontend", "dep:llguidance"]
-server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm"]
+server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm", "dep:futures-util", "dep:flate2", "dep:zstd", "dep:brotli"]
 # RoCEnante's RDMA proxy for ranks on separate hosts; links libibverbs.
 roce = ["dep:cc", "runtime-package"]
 
 [dependencies]
+futures-util = { version = "0.3", optional = true }
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
+brotli = { version = "8", optional = true }
 ring = { version = "0.17.14", optional = true }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -82,13 +86,6 @@ bench = false
 [[bin]]
 name = "test_requests"
 path = "tests/tools/test_requests.rs"
-required-features = ["server", "test-tools"]
-test = false
-bench = false
-
-[[bin]]
-name = "test_generation_corpus"
-path = "tests/tools/test_generation_corpus.rs"
 required-features = ["server", "test-tools"]
 test = false
 bench = false

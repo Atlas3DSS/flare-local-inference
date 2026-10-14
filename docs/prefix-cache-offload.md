@@ -808,10 +808,8 @@ these scenarios, each with every store and transport that supports it:
 
 Every continuation asks for nine facts spread across the whole restored
 context and must answer each one correctly, after GPU-cache restores and host
-restores alike. Generated tokens are not compared verbatim: two GPU-cache
-restores of one checkpoint diverge after about ten tokens at temperature zero
-on Qwen, with or without speculation, so verbatim agreement does not
-distinguish a faithful restore from an unfaithful one. The memory scenario
+restores alike. Sampled continuations are evaluated by their factual answers;
+generated tokens are not compared verbatim. The memory scenario
 sizes its pool so that its row slabs outnumber the GPU's cached rows, because
 the filler prompts that evict the GPU cache publish a checkpoint each.
 

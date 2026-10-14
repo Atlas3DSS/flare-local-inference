@@ -464,7 +464,7 @@ fn mtp_copy_uploads_cover_zero_and_default_temperature_with_epoch_and_consumed_g
     admissions[0] = Some(Admission {
         handle,
         sampling: SamplingParameters {
-            temperature: 0.,
+            temperature: 1.,
             ..Default::default()
         },
         max_new_tokens: 16,
@@ -754,7 +754,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         handle,
         sampling: SamplingParameters {
             seed: u64::MAX,
-            temperature: 0.,
+            temperature: 1.,
             ..Default::default()
         },
         max_new_tokens: 4,
@@ -988,7 +988,7 @@ fn admission_rejects_nonfinite_parameters_and_inconsistent_positions() {
     );
     assert!(
         SamplingParameters {
-            temperature: 0.,
+            temperature: 1.,
             top_k: -1,
             ..Default::default()
         }

@@ -245,11 +245,11 @@ and tokens never mutate state or produce active completion records. Graphs
 share persistent input backing and execute on one model stream. Every variant
 finalizes all four physical completion lanes for its submission sequence.
 
-Every graph uses sampling mode `general`. Temperature zero remains a valid
-request value and produces a one-hot target distribution through the same
-stochastic sampling path. Positive-temperature and mixed-temperature batches
-use that path too; there is no separate greedy executable. Slot generations
-must match their admissions. Missing or duplicate graphs reject startup.
+Every graph uses sampling mode `general`. Temperature must be a positive normal
+FP32 value. Zero-temperature requests are rejected at admission because greedy
+decoding collapses the model's probability distribution. Mixed-temperature
+batches use the same stochastic sampling path. Slot generations must match their
+admissions. Missing or duplicate graphs reject startup.
 
 Capacities are sorted and deduplicated; a chunk size of 3072 requires 1, 16, 64,
 128, 256, 512, 1024, 2048 and 3072. With four slots and chunk size 4096, the
@@ -467,37 +467,3 @@ outlive the snapshot count while preserving their newest checkpoint. Branching
 ancestors and directly pinned checkpoints cannot be compacted. One snapshot
 slot cannot simultaneously retain a matched checkpoint and reserve another
 request's publication slot.
-
-## Raw token qualification
-
-Bootstrap configuration `qualification_token_trace=true` enables
-`POST /__qualify/generate` on a loopback listener. The default is false, and
-the route is absent when disabled. The handler uses the ordinary Rust chat
-preparation, request queue, scheduler, prepared graph catalog, and completion
-records. It bypasses text decoding and tool/reasoning presentation.
-
-The JSON envelope contains `schema_version: 1`, `id`, `ignore_eos: true`,
-`expected_prompt_tokens`, and `request` containing an ordinary chat request.
-The request must be nonstreaming text with temperature 0, a 64-token output
-budget, neutral repetition/presence/frequency penalties, and no grammar,
-custom stops, or images. Tool-bearing templates and assistant
-continuations retain their normal preparation semantics. Rendered token IDs
-must equal `expected_prompt_tokens` before model admission.
-
-Qualification admission skips prefix lookup and starts at consumed position 0.
-Allocation, eviction, generation stamps, terminal snapshot publication, and
-GPU retirement use the same scheduler as ordinary requests. Only that
-admission uploads `eos_count=0`; EOS tokens are consumed as ordinary subsequent
-model inputs until the output budget is reached. Ordinary chat retains its
-configured EOS behavior. Each validated completion token is emitted directly
-before token-stop processing, including EOS IDs.
-
-The JSON response contains `schema_version`, `id`, `model_id`, the 32-byte
-model/recipe identity as hexadecimal `model_identity`, `rendered_prompt`,
-`prompt_token_ids`, `generated_token_ids`, `ignore_eos: true`, `cold: true`,
-`reused_prompt_tokens`, `finish_reason`, and `usage`. Success requires exactly
-64 observed IDs, a length finish, matching prompt counts, and zero reused
-tokens reported by the admitted request. A qualification collector records
-the model revision, tokenizer/template fingerprints, prepared manifest,
-native binary, library sources, and request/response bytes alongside these
-observations.

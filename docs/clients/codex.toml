@@ -1,0 +1,14 @@
+model = "flare"
+model_provider = "flare"
+# Replace with the absolute path to your copy of codex-models.json.
+model_catalog_json = "/absolute/path/to/codex-models.json"
+web_search = "disabled"
+
+[model_providers.flare]
+name = "Flare"
+base_url = "http://127.0.0.1:8000/v1"
+wire_api = "responses"
+supports_websockets = false
+requires_openai_auth = false
+# Optional client-side variable containing the configured Flare serving key.
+# env_key = "FLARE_API_KEY"

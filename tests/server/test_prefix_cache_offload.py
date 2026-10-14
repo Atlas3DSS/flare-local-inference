@@ -54,7 +54,7 @@ class Service:
 
     def ask(self, messages):
         model = json.loads(self.get("/v1/models"))["data"][0]["id"]
-        body = {"model": model, "messages": messages, "temperature": 0,
+        body = {"model": model, "messages": messages, "temperature": 1,
                 "seed": 1234, "max_tokens": 24, "enable_thinking": False}
         request = urllib.request.Request(self.url + "/v1/chat/completions",
                                          json.dumps(body).encode(),
