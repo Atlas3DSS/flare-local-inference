@@ -458,7 +458,7 @@ class RuntimePackage:
                         "reservations": self.reservations, "execution": execution,
                         "context": {"flags": flags.value, "cache": cache.value, "limits": limits},
                         "events": list(self.events)}
-            index = ModelIndex(version=3, ranks=[bundle(document)])
+            index = ModelIndex(version=4, ranks=[bundle(document)])
             for transport in self.transports:
                 _roce_transport(index.ranks[0].roce, transport)
             asset_files = {}

@@ -21,6 +21,7 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
     CollectivePreparation,
@@ -449,6 +450,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             ("chat_template", frontend / "chat_template.jinja"),
         )
     }
+    buffers["request_pending_token"] = requests.pending_token
     server_config = {
         "identity": identity,
         "model_id": snapshot.name,
@@ -462,17 +464,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             preprocessor=frontend / "preprocessor_config.json"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,
-        "model_contract": {
-            "schema": "deepseek4.graph-inputs.v1",
-            "vocabulary": 129280,
-            "vision": {
-                "features_per_request": 1536,
-                "max_images": 4,
-                "patches_per_feature": 9,
-                "patch_capacities": list(PATCH_CAPACITIES),
-            },
-            "page_tokens": PAGE_TOKENS,
-        },
+        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None),
     }
     memory = {
         "rank": rank,

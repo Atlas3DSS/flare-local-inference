@@ -113,8 +113,8 @@ requests. Helios's clock is wall time, but its host work between rounds is
 small; the direct loop's Python packing, uploads and bookkeeping are not, and
 would otherwise age every request and expire estimates sooner than under Helios.
 
-**Packing.** Each step's uploads are the byte ranges Helios's `paged_text`
-contract writes for that graph kind: state-row indices, row slots and
+**Packing.** Each step's uploads follow the prepared graph's typed value bindings,
+as in Helios's shared packer: state-row indices, row slots and
 generations, page and draft page tables, token IDs, query lengths, sampling
 flags, state-transfer commands and admission rows. Bytes it does not write
 keep their resident values, as with native partial uploads. Completion records

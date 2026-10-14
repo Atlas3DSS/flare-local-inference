@@ -1,4 +1,4 @@
-use super::{IMAGE_TOKEN, PromptData};
+use crate::model::PromptData;
 use crate::{
     Result,
     cache::ConditioningEvent,
@@ -9,24 +9,25 @@ use crate::{
     model::PreparedInput,
 };
 
-pub(super) fn prepare_input(
+pub(crate) fn prepare_input(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
     images: Vec<RgbImage>,
-) -> Result<PreparedInput<PromptData>> {
-    if frontend.encode("<|image_pad|>", false)? != [IMAGE_TOKEN]
-        || rendered
-            .token_ids
-            .iter()
-            .filter(|id| **id == IMAGE_TOKEN)
-            .count()
-            != images.len()
+) -> Result<PreparedInput> {
+    let image_ids = frontend.encode("<|image_pad|>", false)?;
+    let [image_token] = image_ids.as_slice() else {
+        return Err("image placeholder must encode one token".into());
+    };
+    let image_token = *image_token;
+    if rendered
+        .token_ids
+        .iter()
+        .filter(|id| **id == image_token)
+        .count()
+        != images.len()
     {
         return Err("MiMo image placeholders do not match the tokenizer or input images".into());
-    }
-    if rendered.token_ids.contains(&151656) {
-        return Err("MiMo video inputs are not prepared".into());
     }
     let processed = if images.is_empty() {
         None
@@ -42,7 +43,7 @@ pub(super) fn prepare_input(
     let mut conditioning = Vec::new();
     let (mut image, mut offset) = (0, 0);
     for token in &rendered.token_ids {
-        if *token != IMAGE_TOKEN {
+        if *token != image_token {
             tokens.push(*token);
             data.vision_token_indices.push(-1);
             continue;
@@ -59,7 +60,7 @@ pub(super) fn prepare_input(
             position: tokens.len() as u64,
             identity: hash.finalize().into(),
         });
-        tokens.extend(std::iter::repeat_n(IMAGE_TOKEN, count));
+        tokens.extend(std::iter::repeat_n(image_token, count));
         data.vision_token_indices
             .extend((offset..offset + count).map(|i| i as i32));
         offset += count;

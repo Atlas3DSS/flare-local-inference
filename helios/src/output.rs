@@ -1,8 +1,14 @@
-//! Model-owned output protocols and transport-neutral incremental events.
+//! Reusable output syntax and transport-neutral incremental events.
 
 #[cfg(feature = "server")]
+mod argument_tags;
+#[cfg(feature = "server")]
 pub mod chatml;
+#[cfg(feature = "server")]
+mod pipeline;
 pub mod tagged;
+#[cfg(feature = "server")]
+pub use pipeline::{OutputConfig, OutputPipeline};
 
 use crate::Result;
 
@@ -72,8 +78,6 @@ pub trait ToolCallParser {
 /// Concrete associated types keep model selection outside the token loop.
 pub trait ModelOutput {
     type Config;
-    type Reasoning: ReasoningParser;
-    type Tools: ToolCallParser;
     fn new(config: Self::Config) -> Self;
     #[cfg(feature = "server")]
     fn grammar_envelope(_: &Self::Config) -> Option<crate::grammar::OutputEnvelope> {

@@ -228,14 +228,12 @@ impl NativeModel {
                 "a RoCE transport requires its rank's cluster identity",
             ));
         }
-        let mut server_config = protobuf::json(prost_types::Value {
-            kind: Some(prost_types::value::Kind::StructValue(
-                descriptor
-                    .server
-                    .take()
-                    .ok_or_else(|| invalid("model package lacks serving configuration"))?,
-            )),
-        })?;
+        let mut server_config = protobuf::serving_contract(
+            descriptor
+                .contract
+                .take()
+                .ok_or_else(|| invalid("model package lacks a typed serving contract"))?,
+        )?;
         server_config["sampling_defaults"] = protobuf::sampling_defaults(
             descriptor
                 .sampling_defaults
@@ -264,20 +262,25 @@ impl NativeModel {
         }
         server_config["assets"] = assets.into();
         let active = options.select(&mut packages, &mut server_config)?;
+        let table_count = descriptor
+            .engram
+            .as_ref()
+            .map_or(0, |catalog| catalog.tables.len());
         let engram = descriptor
             .engram
             .take()
             .map(|value| super::engram::decode(value, archive.start, &packages))
             .transpose()?;
-        if [
-            crate::model::deepseek41::INPUT_SCHEMA,
-            crate::model::qwen4exp::INPUT_SCHEMA,
-        ]
-        .iter()
-        .any(|schema| server_config["model_contract"]["schema"] == *schema)
-            && engram.is_none()
+        let prepared: crate::model::PreparedContract =
+            serde_json::from_value(server_config["model_contract"].clone())
+                .map_err(|error| invalid(format!("invalid prepared contract: {error}")))?;
+        if prepared
+            .graphs
+            .iter()
+            .flat_map(|g| &g.embedding_tables)
+            .any(|table| *table as usize >= table_count)
         {
-            return Err(invalid("model requires an n-gram table catalog"));
+            return Err(invalid("graph requires an absent embedding-table resource"));
         }
         let state_rows = server_config["state_rows"]
             .as_u64()

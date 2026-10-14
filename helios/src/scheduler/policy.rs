@@ -161,7 +161,7 @@ impl RequestScheduler {
         if request.pending > 0
             && !(request.phase == RequestPhase::Decode
                 && self.speculative_widths.is_empty()
-                && !self.capabilities.host_decode_tokens
+                && self.capabilities.completion_inputs.is_empty()
                 && request.pending < 2
                 && !request.grammar_constrained
                 && !request.host_stops)

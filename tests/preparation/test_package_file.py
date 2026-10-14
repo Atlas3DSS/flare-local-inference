@@ -14,7 +14,7 @@ from ignition.preparation.package_file import (
 
 
 def index():
-    return proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+    return proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
 
 
 def header(payload_size, index_size):
@@ -56,7 +56,7 @@ def test_metadata_growth_preserves_payload_bytes_and_offsets(tmp_path):
     packages = []
     for generation in range(2):
         path = tmp_path / f"model-{generation}.safetensors"
-        description.server.update({"description": "x" * (20000 * generation)})
+        description.contract.model_id = "x" * (20000 * generation)
         publish(path, description, [(4096, source, 0, source.stat().st_size)])
         packages.append(path)
     assert [read_index(path)[1] for path in packages] == [ALIGNMENT, ALIGNMENT]
@@ -221,7 +221,7 @@ def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path
         description = index()
         description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=len(data)))
         if rank == 0:
-            description.server.update({"model_id": "glm"})
+            description.contract.model_id = "glm"
         _roce_transport(description.ranks[0].roce, {
             "proxy_abi": 7, "world_size": 2, "rank": rank,
             "region": {"address": 0x100000000000, "nbytes": 1 << 20},
@@ -237,7 +237,7 @@ def test_multi_host_package_appends_every_rank_after_rank_zero_in_place(tmp_path
         extend_cluster(files[0], [peer], (2, "export-a"))
     result, start = read_index(files[0])
     assert (result.cluster.world, result.cluster.export_id) == (2, "export-a")
-    assert result.server["model_id"] == "glm"
+    assert result.contract.model_id == "glm"
     assert [bundle.roce.rank for bundle in result.ranks] == [0, 1]
     # A description from before the variable-length all-gather records none.
     assert [bundle.roce.varlen_bytes for bundle in result.ranks] == [0, 8 << 20]

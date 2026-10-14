@@ -1,4 +1,4 @@
-use super::PromptData;
+use crate::model::PromptData;
 use crate::{
     Result,
     cache::ConditioningEvent,
@@ -8,17 +8,22 @@ use crate::{
     },
     model::PreparedInput,
 };
-pub(super) fn prepare_input(
+pub(crate) fn prepare_input(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
     images: Vec<RgbImage>,
-) -> Result<PreparedInput<PromptData>> {
+) -> Result<PreparedInput> {
+    let placeholders = [
+        frontend.encode("<|image_pad|>", false)?,
+        frontend.encode("<|video_pad|>", false)?,
+    ]
+    .concat();
     let (tokens, positions, vision_token_indices, conditioning, images) = if images.is_empty() {
         if rendered
             .token_ids
             .iter()
-            .any(|id| *id == 248056 || *id == 248057)
+            .any(|id| placeholders.contains(id))
         {
             return Err("image/video placeholders require matching supported image inputs".into());
         }
@@ -94,42 +99,9 @@ pub(super) fn prepare_input(
         data: PromptData {
             positions,
             vision_token_indices,
+            spans: Vec::new(),
         },
         conditioning,
         images,
     })
-}
-
-/// Exact token prefix through the instruction segment and empty user header.
-pub(super) fn system_boundary(
-    frontend: &Frontend,
-    prompt_tokens: &[u32],
-    messages: &[serde_json::Value],
-    options: &serde_json::Map<String, serde_json::Value>,
-) -> Option<usize> {
-    use serde_json::{Value, json};
-    let count = messages
-        .iter()
-        .take_while(|message| {
-            matches!(
-                message.get("role").and_then(Value::as_str),
-                Some("system" | "developer")
-            )
-        })
-        .count();
-    let mut prefix_messages = messages[..count].to_vec();
-    prefix_messages.push(json!({"role": "user", "content": ""}));
-    let mut prefix_options = options.clone();
-    prefix_options.insert("add_generation_prompt".into(), Value::Bool(false));
-    prefix_options.insert("continue_final_message".into(), Value::Bool(true));
-    let prefix = frontend
-        .render_chat(&prefix_messages, &prefix_options)
-        .ok()?;
-    // Qwen can synthesize instructions from tools or reasoning defaults.
-    if !prefix.text.starts_with("<|im_start|>system\n") || !prefix.text.contains("<|im_end|>") {
-        return None;
-    }
-    let boundary = prefix.token_ids.len();
-    (0 < boundary && boundary < prompt_tokens.len() && prompt_tokens.starts_with(&prefix.token_ids))
-        .then_some(boundary)
 }

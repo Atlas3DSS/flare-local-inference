@@ -1,6 +1,5 @@
 syntax = "proto3";
 package flare.runtime;
-import "google/protobuf/struct.proto";
 
 // Signed bodies retain their exact wire bytes for verification. What every rank shares is signed
 // once and each rank's resources separately, so a host serving one rank verifies it alone.
@@ -46,7 +45,7 @@ message ModelIndex {
   uint32 version = 1;
   repeated BundleIndex ranks = 2;
   repeated PeerMemory peer_memory = 3;
-  google.protobuf.Struct server = 4;
+  reserved 4;
   repeated Asset assets = 5;
   Engram engram = 6;
   DefaultSamplingParameters sampling_defaults = 7;
@@ -54,6 +53,238 @@ message ModelIndex {
   // Present when the ranks run on separate hosts: the file holds every rank, and each host
   // loads the one it serves.
   Cluster cluster = 9;
+  ServingContract contract = 10;
+}
+
+// Prepared semantics shared by every rank. Physical bindings remain in each rank's bundle.
+message ServingContract {
+  string model_id = 1;
+  string identity = 2;
+  ModelContract model_contract = 3;
+  uint64 max_sequence_tokens = 4;
+  uint64 prefill_chunk_size = 5;
+  uint64 pages = 6;
+  uint64 state_rows = 7;
+  uint64 snapshots = 8;
+  uint64 page_tokens = 9;
+  reserved 10;
+  repeated uint64 speculative_widths = 11;
+  optional uint64 speculative_fixed_width = 12;
+  bool history_drafts = 13;
+  string speculative_proposal_source = 14;
+  optional uint64 max_new_tokens = 15;
+  optional uint64 max_active = 16;
+  repeated string served_names = 17;
+  optional uint64 reserve_bytes = 18;
+  optional uint64 queue_capacity = 19;
+  optional uint64 frontend_workers = 20;
+  optional uint64 max_body_bytes = 21;
+  string context_hint = 22;
+  string capacity_hint = 23;
+}
+message ModelContract {
+  uint32 version = 1;
+  uint64 vocabulary = 2;
+  uint64 input_vocabulary = 3;
+  VisionCapacity vision = 4;
+  CacheContract cache = 5;
+  repeated GraphContract graphs = 6;
+  FrontendContract frontend = 7;
+}
+message VisionCapacity {
+  uint64 features_per_request = 1;
+  uint64 max_images = 2;
+  uint64 patches_per_feature = 3;
+  repeated uint64 patch_capacities = 4;
+}
+enum HistoryKind {
+  HISTORY_UNSPECIFIED = 0;
+  PAGED_KEY_VALUE = 1;
+  PAGED_LATENT = 2;
+  SLIDING_WINDOW = 3;
+  RECURRENT_STATE = 4;
+  CONTINUATION_STATE = 5;
+}
+message CacheContract {
+  uint64 page_tokens = 1;
+  repeated HistoryRegion regions = 2;
+  repeated PageTableView page_tables = 3;
+}
+message HistoryRegion {
+  HistoryKind kind = 1;
+  StateView storage = 2;
+  uint64 tokens_per_record = 3;
+  uint64 window_tokens = 4;
+}
+message PageTableView {
+  string buffer = 1;
+  uint64 page_offset = 2;
+}
+enum ValueSource {
+  VALUE_UNSPECIFIED = 0;
+  CONSTANT = 1;
+  REQUEST_SLOT = 2;
+  REQUEST_GENERATION = 3;
+  LIVE_ROWS = 4;
+  QUERY_LENGTH = 5;
+  SAMPLE_ENABLED = 6;
+  PROMPT_TOKEN = 7;
+  PENDING_TOKEN = 8;
+  PROMPT_AND_PENDING_TOKEN = 9;
+  PROMPT_POSITION = 10;
+  IMAGE_FEATURE_INDEX = 11;
+  IMAGE_LEFT_CONTEXT = 12;
+  IMAGE_RIGHT_CONTEXT = 13;
+  PAGE_TABLE = 14;
+  LIVE_STATE_ROWS = 15;
+  LIVE_STATE_ROW = 16;
+  PREFIX_STATE_ROW = 17;
+  SNAPSHOT_STATE_ROW = 18;
+  CONSUMED_TOKENS = 19;
+  SNAPSHOT_CONSUMED_TOKENS = 20;
+  PREFILL_ROW = 21;
+  SAMPLING_SEED = 22;
+  SAMPLING_PARAMETERS = 23;
+  SAMPLING_TOP_K = 24;
+  MAX_NEW_TOKENS = 25;
+  EOS_TOKEN_IDS = 26;
+  EOS_COUNT = 27;
+  PROMPT_HISTOGRAM = 28;
+  GRAMMAR_MASK = 29;
+  GRAMMAR_ENABLED = 30;
+  COPY_TOKEN_IDS = 31;
+  COPY_TOKEN_COUNT = 32;
+  COPY_CONSUMED_TOKENS = 33;
+  COPY_GENERATION = 34;
+  COPY_GRAMMAR_MASK = 35;
+  COPY_GRAMMAR_COUNT = 36;
+  IMAGE_TENSOR = 37;
+}
+enum InputIndexing {
+  INDEXING_UNSPECIFIED = 0;
+  SCALAR = 1;
+  SUBMISSION_ROW = 2;
+  REQUEST_ROW = 3;
+  PACKED_TOKEN = 4;
+  ACTIVE_ROW = 5;
+}
+message ValueBinding {
+  string buffer = 1;
+  ValueSource source = 2;
+  InputIndexing indexing = 3;
+  sint64 value_offset = 4;
+  sint64 padding = 5;
+  string tensor = 6;
+}
+enum StateAccessKind {
+  STATE_ACCESS_UNSPECIFIED = 0;
+  READ = 1;
+  WRITE = 2;
+  READ_WRITE = 3;
+}
+message StateView {
+  string buffer = 1;
+  uint64 offset = 2;
+  uint64 stride = 3;
+  uint64 nbytes = 4;
+}
+message StateAccess {
+  StateView view = 1;
+  StateAccessKind access = 2;
+}
+message CompletionCursor {
+  StateView state = 1;
+  uint64 lag_tokens = 2;
+}
+enum GraphOperation {
+  GRAPH_OPERATION_UNSPECIFIED = 0;
+  INIT = 1;
+  RESTORE = 2;
+  SNAPSHOT = 3;
+  PREFILL = 4;
+  DECODE = 5;
+  RESUME = 6;
+  VISION = 7;
+  SPECULATIVE = 8;
+  MIXED = 9;
+}
+message GraphContract {
+  string graph = 1;
+  repeated ValueBinding inputs = 2;
+  repeated StateAccess state = 3;
+  uint64 state_rows_per_request = 4;
+  CompletionCursor draft_cursor = 5;
+  // References to table indices in the package's embedding table catalog.
+  repeated uint32 embedding_tables = 6;
+  // The graph consumes its pending input directly from this persistent device value.
+  StateView pending_token = 7;
+  GraphOperation kind = 8;
+}
+enum ToolParserKind {
+  TOOL_PARSER_UNSPECIFIED = 0;
+  QWEN_CODER = 1;
+  GLM_ARGUMENT_TAGS = 2;
+  DSML = 3;
+}
+enum ReasoningParserKind {
+  REASONING_PARSER_UNSPECIFIED = 0;
+  THINK_TAGS = 1;
+}
+enum ImagePreparationKind {
+  IMAGE_PREPARATION_UNSPECIFIED = 0;
+  QWEN_IMAGE_PREPARATION = 1;
+  MIMO_IMAGE_PREPARATION = 2;
+  DEEPSEEK_IMAGE_PREPARATION = 3;
+}
+enum ImageLayoutKind {
+  IMAGE_LAYOUT_UNSPECIFIED = 0;
+  QWEN_IMAGE_LAYOUT = 1;
+  MIMO_IMAGE_LAYOUT = 2;
+  DEEPSEEK_IMAGE_LAYOUT = 3;
+}
+message ToolParser {
+  ToolParserKind kind = 1;
+  uint32 wrapping_newlines = 2;
+  string tag_separator = 3;
+}
+message ReasoningParser {
+  ReasoningParserKind kind = 1;
+  string open = 2;
+  string close = 3;
+  uint32 wrapping_newlines = 4;
+  repeated string terminal_markers = 5;
+}
+message PrefixBoundary {
+  repeated string roles = 1;
+  optional string append_role = 2;
+  bool continue_final_message = 3;
+  uint64 minimum_messages = 4;
+  string required_start = 5;
+  string required_end = 6;
+  string required_marker = 7;
+}
+message ImageSpan {
+  uint32 start_token = 1;
+  uint32 end_token = 2;
+  uint64 max_tokens = 3;
+  repeated uint32 interior_tokens = 4;
+  repeated uint32 unscoped_tokens = 5;
+}
+message ImageTokenLayout {
+  uint32 feature_token = 1;
+  ImageSpan span = 2;
+}
+message FrontendContract {
+  ToolParser tools = 1;
+  ReasoningParser reasoning = 2;
+  optional ImagePreparationKind image_preparation = 3;
+  optional ImageLayoutKind image_layout = 4;
+  repeated uint32 rejected_tokens = 5;
+  uint32 position_dimensions = 6;
+  string assistant_marker = 7;
+  repeated string message_end_markers = 8;
+  PrefixBoundary prefix_boundary = 9;
+  ImageTokenLayout image_tokens = 10;
 }
 message Cluster {
   uint32 world = 1;

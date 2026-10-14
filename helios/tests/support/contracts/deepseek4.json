@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "vocabulary": 129280,
+  "input_vocabulary": 129285,
+  "vision": {
+    "features_per_request": 1536,
+    "max_images": 4,
+    "patches_per_feature": 9,
+    "patch_capacities": [
+      576,
+      1152,
+      2304,
+      3456
+    ]
+  },
+  "cache": {
+    "page_tokens": 128,
+    "page_tables": [],
+    "regions": []
+  },
+  "graphs": [],
+  "frontend": {
+    "tools": {
+      "kind": 3,
+      "wrapping_newlines": 0,
+      "tag_separator": ""
+    },
+    "reasoning": {
+      "kind": 1,
+      "open": "<think>",
+      "close": "</think>",
+      "wrapping_newlines": 0,
+      "terminal_markers": []
+    },
+    "image_preparation": 3,
+    "image_layout": 3,
+    "position_dimensions": 0,
+    "rejected_tokens": [],
+    "assistant_marker": "<｜Assistant｜>",
+    "message_end_markers": [
+      "<｜User｜>",
+      "<｜end▁of▁sentence｜>"
+    ],
+    "prefix_boundary": {
+      "roles": [
+        "system"
+      ],
+      "append_role": null,
+      "continue_final_message": false,
+      "minimum_messages": 1,
+      "required_start": "",
+      "required_end": "",
+      "required_marker": ""
+    },
+    "image_tokens": {
+      "feature_token": 129282,
+      "span": {
+        "start_token": 129280,
+        "end_token": 129284,
+        "max_tokens": 384,
+        "interior_tokens": [
+          129283
+        ],
+        "unscoped_tokens": [
+          129281
+        ]
+      }
+    }
+  }
+}

@@ -21,13 +21,13 @@ from ignition.preparation.package_file import read_index
 @pytest.mark.parametrize("resident_prompts", [False, True], ids=["reservations", "resident-prompts"])
 def test_concurrent_requests_reclaim_checkpoint_backing(tmp_path, resident_prompts):
     package, _ = read_index(os.environ["FLARE_OFFLOAD_TEST_PACKAGE"])
-    config = MessageToDict(package.server)
+    config = MessageToDict(package.contract, preserving_proto_field_name=True)
     concurrency = min(8, package.ranks[0].execution.max_active)
     assert concurrency >= 4
     flags = ("--max-concurrency", str(concurrency), "--mtp-adaptive-verification")
     with server(tmp_path, "shared-cache", drafts=3, flags=flags) as service:
         model = json.loads(service.get("/v1/models"))["data"][0]["id"]
-        page_tokens = config["model_contract"].get("page_tokens", config["page_tokens"])
+        page_tokens = int(config["model_contract"]["cache"]["page_tokens"])
         capacity = int(service.metrics()["flare_free_kv_pages"] * page_tokens)
 
         def ask(tag, copies=1, maximum=1024):

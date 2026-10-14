@@ -256,24 +256,24 @@ impl NativeModel {
         let page_tokens = self.server_config["page_tokens"]
             .as_u64()
             .ok_or_else(|| invalid("model requires physical page geometry"))?;
-        // Each active request holds one execution state row per verified position of the
-        // widest speculative graph, unless the model declares how many rows a request holds.
-        let width = match self.server_config.get("state_rows_per_request") {
-            Some(rows) => rows
-                .as_u64()
-                .filter(|rows| (1..=8).contains(rows))
-                .ok_or_else(|| invalid("state rows per request must be 1 through 8"))?,
-            None => packages[0]
-                .execution
-                .as_ref()
-                .unwrap()
-                .graphs
-                .iter()
-                .filter(|g| g.kind == "speculative")
-                .map(|g| g.token_capacity)
-                .max()
-                .unwrap_or(1),
-        };
+        let contract: crate::model::PreparedContract =
+            serde_json::from_value(self.server_config["model_contract"].clone())
+                .map_err(|error| invalid(format!("invalid prepared storage contract: {error}")))?;
+        let width = packages[0]
+            .execution
+            .as_ref()
+            .unwrap()
+            .graphs
+            .iter()
+            .map(|graph| {
+                contract
+                    .graph(&graph.name)
+                    .map(|g| g.state_rows_per_request as u64)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(1);
         let mut available = Vec::new();
         for rank in &self.ranks {
             let (free, total) = unsafe {
@@ -303,9 +303,7 @@ impl NativeModel {
         let snapshots = rows - execution;
         // Scheduler page ids count the model contract's tokens per page, which
         // exceeds the physical page when pages are sharded across ranks.
-        let logical_page_tokens = self.server_config["model_contract"]["page_tokens"]
-            .as_u64()
-            .unwrap_or(page_tokens);
+        let logical_page_tokens = contract.cache.page_tokens as u64;
         let mut geometry = packages
             .iter()
             .map(|package| cache_geometry(package, logical_page_tokens, rows, pages))
@@ -362,16 +360,38 @@ impl NativeModel {
                             * allocation.alignment;
                 }
             }
-            let pool = package
-                .execution
-                .as_mut()
-                .unwrap()
-                .buffers
-                .iter_mut()
-                .find(|b| b.name == "state_pool")
-                .ok_or_else(|| invalid("model lacks continuation storage binding"))?;
-            pool.shape[0] = rows;
-            pool.nbytes = rows * pool.shape[1];
+            for buffer in &mut package.execution.as_mut().unwrap().buffers {
+                let Some(reference) = &buffer.reference else {
+                    continue;
+                };
+                let allocation = package
+                    .allocations
+                    .iter()
+                    .find(|a| a.name == reference.allocation)
+                    .unwrap();
+                if buffer.name == "state_pool" {
+                    buffer.shape[0] = rows;
+                    buffer.nbytes = rows * buffer.shape[1];
+                } else if contract.cache.regions.iter().any(|r| {
+                    r.storage.buffer == buffer.name
+                        && matches!(
+                            r.kind,
+                            crate::model::contract::HistoryKind::PagedKeyValue
+                                | crate::model::contract::HistoryKind::PagedLatent
+                        )
+                }) {
+                    let unit = buffer.nbytes / buffer.shape[0];
+                    if reference.offset != 0
+                        || pages
+                            .checked_mul(unit)
+                            .is_none_or(|end| end > allocation.nbytes as u64)
+                    {
+                        return Err(invalid("paged history view exceeds physical cache backing"));
+                    }
+                    buffer.shape[0] = pages;
+                    buffer.nbytes = pages * unit;
+                }
+            }
         }
         let phase = progress.phase("Allocate cache", Some(gpu_bytes));
         for (((rank, package), geometry), layout) in self

@@ -25,6 +25,12 @@ pub(super) fn size(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid("resource size exceeds host address space"))
 }
 
+pub(super) fn serving_contract(value: wire::ServingContract) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(value).map_err(|e| invalid(e.to_string()))?;
+    value.as_object_mut().unwrap().retain(|_, v| !v.is_null());
+    Ok(value)
+}
+
 pub(super) fn sampling_defaults(
     value: wire::DefaultSamplingParameters,
 ) -> Result<serde_json::Value> {
@@ -241,36 +247,6 @@ pub(super) fn edge(value: wire::Edge) -> Result<Edge> {
         source: size(value.source)?,
         destination: size(value.destination)?,
         data: array(value.data, "edge data")?,
-    })
-}
-
-pub(super) fn json(value: prost_types::Value) -> Result<serde_json::Value> {
-    use prost_types::value::Kind;
-    Ok(match required(value.kind, "configuration value")? {
-        Kind::NullValue(_) => serde_json::Value::Null,
-        Kind::BoolValue(v) => v.into(),
-        Kind::StringValue(v) => v.into(),
-        Kind::NumberValue(v) => {
-            if !v.is_finite() {
-                return Err(invalid("nonfinite configuration number"));
-            }
-            if v >= 0.0 && v.fract() == 0.0 && v < u64::MAX as f64 {
-                (v as u64).into()
-            } else if v.fract() == 0.0 && v >= i64::MIN as f64 && v < 0.0 {
-                (v as i64).into()
-            } else {
-                v.into()
-            }
-        }
-        Kind::ListValue(v) => {
-            serde_json::Value::Array(v.values.into_iter().map(json).collect::<Result<_>>()?)
-        }
-        Kind::StructValue(v) => serde_json::Value::Object(
-            v.fields
-                .into_iter()
-                .map(|(k, v)| Ok((k, json(v)?)))
-                .collect::<Result<_>>()?,
-        ),
     })
 }
 

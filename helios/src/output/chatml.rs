@@ -3,7 +3,6 @@
 pub use crate::output::tagged::OutputConfig;
 use crate::{
     Result,
-    frontend::{Frontend, RenderedPrompt},
     output::tagged::{TaggedOutput, ToolDialect},
 };
 use serde_json::{Map, Value};
@@ -22,47 +21,6 @@ impl<const WRAPPING_NEWLINES: bool> ToolDialect for FunctionTags<WRAPPING_NEWLIN
 }
 pub type ChatMlOutput = TaggedOutput<FunctionTags<true>>;
 pub type CompactChatMlOutput = TaggedOutput<FunctionTags<false>>;
-
-/// Initialize from the open assistant envelope, never an earlier message body.
-pub fn prepare_output(
-    frontend: &Frontend,
-    rendered: &RenderedPrompt,
-    messages: &[Value],
-    options: &Map<String, Value>,
-    structured: bool,
-) -> OutputConfig {
-    let effective = |name: &str| {
-        options
-            .get(name)
-            .or_else(|| frontend.template_default(name))
-    };
-    let continuation = effective("continue_final_message")
-        .is_some_and(|v| v == &Value::Bool(true) || v.as_str().is_some_and(|s| !s.is_empty()));
-    let generation = effective("add_generation_prompt") == Some(&Value::Bool(true));
-    let assistant_continuation =
-        continuation && messages.last().is_some_and(|m| m["role"] == "assistant");
-    let prefix = if generation || assistant_continuation {
-        rendered
-            .text
-            .rsplit_once("<|im_start|>assistant\n")
-            .map(|(_, suffix)| suffix)
-            .filter(|suffix| !suffix.contains("<|im_end|>"))
-    } else {
-        None
-    };
-    let reasoning = prefix.is_some_and(|text| {
-        text.rfind("<think>")
-            .is_some_and(|open| text.rfind("</think>").is_none_or(|close| open > close))
-    });
-    OutputConfig {
-        structured,
-        reasoning,
-        tools: effective("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    }
-}
 
 fn parse_tool(body: &str, tools: &[Value], wrapped_parameters: bool) -> Result<(String, String)> {
     let body = body
@@ -615,89 +573,5 @@ mod tests {
                 .unwrap();
             assert!(parser.finish(cause).unwrap().is_empty());
         }
-    }
-
-    #[test]
-    fn initial_reasoning_uses_only_an_open_assistant_prefix() {
-        let frontend = crate::server::output::tests::frontend(&["x"]);
-        let fixture: Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../tests/frontend/qwen38.json"
-        )))
-        .unwrap();
-        for (name, reasoning) in [
-            ("generation_prompt", true),
-            ("thinking_disabled", false),
-            ("assistant_continuation", false),
-            ("reasoning_continuation", true),
-            ("continuation_trailing_spaces", false),
-            ("continuation_text_blocks", false),
-        ] {
-            let case = fixture["cases"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|case| case["name"] == name)
-                .unwrap();
-            let rendered = RenderedPrompt {
-                text: case["rendered"].as_str().unwrap().into(),
-                token_ids: vec![],
-            };
-            let output = prepare_output(
-                &frontend,
-                &rendered,
-                case["messages"].as_array().unwrap(),
-                case["options"].as_object().unwrap(),
-                false,
-            );
-            assert_eq!(output.reasoning, reasoning, "{name}");
-        }
-        for role in ["user", "tool"] {
-            let messages = vec![json!({"role":role,"content":"literal <think>"})];
-            for (options, suffix, expected) in [
-                (json!({}), "", false),
-                (
-                    json!({"add_generation_prompt":true}),
-                    "<|im_start|>assistant\n",
-                    false,
-                ),
-                (
-                    json!({"add_generation_prompt":true}),
-                    "<|im_start|>assistant\n<think>\n",
-                    true,
-                ),
-            ] {
-                let rendered = RenderedPrompt {
-                    text: format!("<|im_start|>{role}\nliteral <think><|im_end|>\n{suffix}"),
-                    token_ids: vec![],
-                };
-                assert_eq!(
-                    prepare_output(
-                        &frontend,
-                        &rendered,
-                        &messages,
-                        options.as_object().unwrap(),
-                        false
-                    )
-                    .reasoning,
-                    expected
-                );
-            }
-        }
-        let messages = vec![json!({"role":"user","content":"<think>"})];
-        let rendered = RenderedPrompt {
-            text: "<|im_start|>user\n<think>".into(),
-            token_ids: vec![],
-        };
-        assert!(
-            !prepare_output(
-                &frontend,
-                &rendered,
-                &messages,
-                json!({"continue_final_message":true}).as_object().unwrap(),
-                false
-            )
-            .reasoning
-        );
     }
 }
