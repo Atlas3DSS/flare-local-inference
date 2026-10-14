@@ -75,7 +75,28 @@ impl PrefixCacheOffload {
     pub fn enabled(&self) -> bool {
         self.memory_bytes.unwrap_or(0) != 0 || (self.disk.is_some() && self.disk_limit != Some(0))
     }
+
+    /// Device memory each GPU needs for the store beyond the caches: registering host
+    /// memory maps it into every device, about 2 MiB per GiB (126 MiB for 64 GiB on an
+    /// RTX PRO 6000), and transfer streams and their staging add a fixed margin.
+    pub fn device_headroom_bytes(&self) -> u64 {
+        if !self.enabled() {
+            return 0;
+        }
+        let staging = if self.disk.is_some() && self.disk_limit != Some(0) {
+            DISK_STAGING_REGISTRATION_BYTES
+        } else {
+            0
+        };
+        (self.memory_bytes.unwrap_or(0) + staging) / 512 + STORE_DEVICE_MARGIN_BYTES
+    }
 }
+
+/// An upper bound on the disk transport's registered staging pool.
+const DISK_STAGING_REGISTRATION_BYTES: u64 = 4 << 30;
+/// Transfer streams, events, and their driver allocations on each GPU; eight streams
+/// take 4 MiB.
+const STORE_DEVICE_MARGIN_BYTES: u64 = 16 << 20;
 
 /// Parse a byte count with an optional binary K, M, G, or T suffix, with or
 /// without a trailing `B` or `iB`, as the Ignition configuration does.

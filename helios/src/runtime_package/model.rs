@@ -516,7 +516,13 @@ impl NativeModel {
                 });
             }
             archive.release_page_cache();
-            model.allocate_caches(&mut packages, progress, active, agree)?;
+            model.allocate_caches(
+                &mut packages,
+                progress,
+                active,
+                agree,
+                options.prefix_cache.device_headroom_bytes(),
+            )?;
             model.grant_peer_access(&descriptor.peer_memory)?;
             model.prepare_offload(root, options, progress)?;
         }
