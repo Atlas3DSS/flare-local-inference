@@ -185,7 +185,13 @@ class Plan:
 
     @property
     def headroom_bytes(self) -> int:
-        return HEADROOM_BYTES + max(0, self.prefill_chunk - HEADROOM_CHUNK_TOKENS) * HEADROOM_CHUNK_TOKEN_BYTES
+        tokens = max(self.prefill_chunk,
+            max((p + (b - 1) * w for _, b, w, p in self.mixed_shapes), default=0))
+        return HEADROOM_BYTES + max(0, tokens - HEADROOM_CHUNK_TOKENS) * HEADROOM_CHUNK_TOKEN_BYTES
+
+    @property
+    def mixed_shapes(self):
+        return self.recipe.mixed_shapes(self.concurrency, self.prefill_chunk, self.speculation)
 
     @property
     def supply_bytes(self) -> int:
@@ -233,6 +239,7 @@ class Plan:
             "context": self.context, "checkpoint_context": self.recipe.context,
             "weights_bytes": self.weights_bytes, "mapped_host_bytes": self.checkpoint.mapped_host_bytes,
             "graph_bytes": self.graph_bytes,
+            "mixed_shapes": self.mixed_shapes,
             "live_bytes": self.live_bytes, "prefix_cache_states": self.cache_states,
             "prefix_cache_target": self.cache_target,
             "snapshot_virtual_bytes": self.snapshots * self.costs.state_row_bytes,

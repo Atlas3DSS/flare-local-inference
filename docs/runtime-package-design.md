@@ -378,13 +378,16 @@ compiled cubins; missing native GPU code fails instead of compiling PTX.
 `LoadOptions` selects runtime concurrency, MTP draft-token count, and adaptive
 or fixed verification before any CUDA context is initialized. Ignition captures
 every power-of-two batch capacity up to the concurrency maximum and every
-verification width up to the draft-token maximum plus one. Execution metadata
+verification width up to the draft-token maximum plus one for separate decode
+and verification graphs. Mixed graph coverage is sparse over prompt capacity
+and verification width; see [mixed execution](scheduling-runtime-design.md).
+Execution metadata
 identifies graph kind, sampling mode, batch capacity, token capacity, draft
 source, draft count, and verification count; the
 loader uses these fields rather than graph names to select variants. It checks
 required batch coverage and identical selected catalogs across TP ranks.
-The scheduler chooses the smallest declared prefill capacity that covers the
-live token count. A package must include its configured maximum prefill chunk;
+The scheduler compares declared prefill capacities by useful service and
+estimated graph duration. A package must include its configured maximum prefill chunk;
 intermediate capacities are optional and need not follow a generated sequence.
 Draft count and verification count are independent declaration fields.
 Verification count includes the pending input token. For a given selected
@@ -397,7 +400,7 @@ body reads. Selection does not infer semantics from graph names.
 `--mtp-adaptive-verification` or `--no-mtp-adaptive-verification`. Unspecified
 settings retain package defaults. Reductions must be supported by captured
 graphs; a concurrency limit of three still requires the batch-four bucket.
-Zero drafts selects ordinary prefill, decode, resume, and prefix-cache operations.
+Zero drafts selects ordinary prefill, decode, mixed, resume, and prefix-cache operations.
 The graph catalog's optional `speculation_enabled` field declares which serving
 mode an operation supports; absent means shared by both modes. Preparation includes
 ordinary operations alongside speculative operations, including width-one rounds

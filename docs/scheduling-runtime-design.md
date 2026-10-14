@@ -10,8 +10,8 @@ flow. Python experiments are in `scripts/scheduling_sim/`.
 The native catalog supports separate prefill, decode, speculative verification,
 state-management, and mixed prefill/decode graphs. Mixed shape selection, native
 uploads, completion accounting, package selection, and rank-layout validation
-are implemented. Ignition recipes do not yet capture mixed model forwards;
-existing runtime packages therefore expose separate inference graphs.
+are implemented. The Qwen recipe captures mixed target forwards alongside its
+separate inference graphs. Other recipes expose their declared graph catalogs.
 
 ## Useful service and selection
 
@@ -270,8 +270,45 @@ and sampling. Width one uses decode attention and direct updates while retaining
 the draft context required by its selected mode. Recurrent-state rollback and
 prompt absorption belong in the prepared model implementation. Helios executes
 only supplied captures; it does not synthesize a mixed graph from serial prefills
-and decodes. Recipe capture, scratch sizing, numerical validation, and GPU replay
-of this contract remain required before mixed serving is available.
+and decodes.
+
+Qwen shares target projections, hyperconnections, expert execution, and the
+vocabulary projection across packed prompt and verification tokens. QSA consumes
+per-row phase metadata. GDN and PLE gather their projected operands into fixed
+prompt and decode workspaces for phase-specific convolution and recurrent-state
+updates, then return the results to the packed target layout. Prompt consumption,
+accepted verification prefixes, and draft-context absorption retain separate
+state updates. Completion publication combines their disjoint physical slots.
+Prompt image features use the prompt's packed offset. Workspaces are shared
+across serial graph variants and allocated before capture.
+
+Qwen allocates sampling, target-distribution, proposal, verification, and MTP
+feedback buffers at the largest prepared capacity. Each variant binds contiguous
+views of those typed buffers before compilation. Sequential proposal positions
+reuse one workspace after copying their probabilities into the round's draft
+probability buffer. Target probabilities, saved draft probabilities, verification
+operands, and prompt residuals remain disjoint while simultaneously live. MTP
+feedback rows and raw-cache backups are shared across serialized calls. Persistent
+request state and overlapping b12x operations retain separate storage.
+
+`ignition/components/capacity.py::mixed_shapes` bounds the joint catalog before
+tuning and compilation. Each batch bucket of at least two rows has every prompt
+bucket at verification width one and one prompt bucket for each wider width.
+The latter bucket minimizes `max(P / P_min, P_max / P)`, balancing the worst
+multiplicative distance to short and long prompt chunks; ties choose the smaller
+bucket. This coverage policy provides a mixed option at every fixed verification
+depth without requiring every prompt/depth combination. Separate graphs retain
+all batch/width combinations. Graph durations measured by Helios determine which
+captured alternatives execute.
+
+For `B` mixed batch buckets, `P` prompt buckets, and `W` verification widths,
+speculative mixed capture adds `B * (P + W - 1)` graphs. Ordinary execution adds
+`B * P` width-one graphs without draft-state updates. Qwen concurrency four,
+4096-token chunks, and five draft tokens therefore add 30 speculative and 20
+ordinary mixed graphs, compared with 140 for both complete products. Adaptive
+speculative width one preserves draft state; loading with zero drafts selects
+the ordinary catalog. Planning reports the same catalog used by preparation and
+includes its maximum packed token extent in capture headroom.
 
 ## Verification
 

@@ -84,5 +84,5 @@ RECIPE = Recipe(
         2: _costs(58_776_320, 69_632, _GRAPH_BYTES[2], speculating=False),
         4: _costs(29_911_808, 69_632, _GRAPH_BYTES[4], speculating=False),
     }),
-    max_images=4, image_bytes=32 << 20,
+    max_images=4, image_bytes=32 << 20, mixed_prefill=True,
 )

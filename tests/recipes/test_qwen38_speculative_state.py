@@ -10,8 +10,11 @@ from ignition.recipes.qwen38.draft_state import DraftMetadata
 from ignition.recipes.qwen38.state import HybridStatePool
 
 
-def test_draft_rows_pack_unequal_lengths_and_inactive_lanes():
-    metadata = DraftMetadata(tokens=8, rows=4, context=256, device="cpu")
+@pytest.mark.parametrize("shared", [False, True])
+def test_draft_rows_pack_unequal_lengths_and_inactive_lanes(shared):
+    backing = torch.full((16, 10240), 123, dtype=torch.bfloat16) if shared else None
+    metadata = DraftMetadata(tokens=8, rows=4, context=256, device="cpu",
+                             hidden=None if backing is None else backing[:8])
     slots = torch.tensor([2, 0, 3, -1], dtype=torch.int32)
     lengths = torch.tensor([2, 0, 1, 0])
     starts = torch.tensor([62, 71, 128, 0])
@@ -30,6 +33,9 @@ def test_draft_rows_pack_unequal_lengths_and_inactive_lanes():
     assert metadata.qsa.raw_state_slot_ids.tolist() == [3, -1, 4, -1]
     assert metadata.qsa.sequence_lengths.tolist() == [64, 0, 129, 0]
     assert not metadata.hidden[3:].count_nonzero()
+    if shared:
+        assert metadata.hidden.data_ptr() == backing.data_ptr()
+        assert backing[8:].eq(123).all()
 
 
 def test_empty_draft_absorption_preserves_inactive_metadata():
@@ -153,8 +159,9 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     operation.raw_backup = {}
     operation.rows = torch.arange(batch)
     operation.target_residual = torch.zeros((batch * width, 10240), dtype=torch.bfloat16)
-    operation.draft_metadata = DraftMetadata(tokens=batch, rows=batch, context=256, device="cpu")
-    operation.absorb_metadata = DraftMetadata(tokens=batch * width, rows=batch, context=256, device="cpu")
+    feedback = torch.zeros((batch * width, 10240), dtype=torch.bfloat16)
+    operation.draft_metadata = DraftMetadata(tokens=batch, rows=batch, context=256, device="cpu", hidden=feedback[:batch])
+    operation.absorb_metadata = DraftMetadata(tokens=batch * width, rows=batch, context=256, device="cpu", hidden=feedback)
 
     class Draft:
         scratch = SimpleNamespace(residual=torch.zeros((batch, 10240), dtype=torch.bfloat16))

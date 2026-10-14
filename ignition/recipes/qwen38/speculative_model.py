@@ -6,6 +6,7 @@ import torch
 
 from ignition.components.draft_sampling import PreparedDraftDistribution
 from ignition.components.state import gather_rows
+from ignition.preparation.scratch import bind_scratch
 
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
@@ -24,7 +25,8 @@ class SpeculativePreparation:
     def __init__(self, *, weights, mtp_weights, pool, requests, inputs, scratch,
                  workspaces, rotary, cache, table, session, completion, frame, sequence,
                  context, prefill_capacity, max_cache_pages, proposal_source="mtp",
-                 runtime=None, vocabulary_runtime=None, coordinator=None):
+                 runtime=None, vocabulary_runtime=None, coordinator=None, verification_width=8,
+                 sampling_workspace=None):
         if proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
@@ -35,6 +37,23 @@ class SpeculativePreparation:
         self.completion, self.frame, self.sequence = completion, frame, sequence
         self.context, self.max_cache_pages = context, max_cache_pages
         device = pool.backing.device
+        if type(verification_width) is not int or not 1 <= verification_width <= 8:
+            raise ValueError("verification width must be between one and eight")
+        self.verification_width = verification_width
+        self.sampling_workspace = sampling_workspace
+        def workspace(layout):
+            return bind_scratch(layout, device=device)
+        b, w, v = requests.capacity, verification_width, requests.vocab_size
+        self.target_workspace = workspace(PreparedSpeculativeDistributions.scratch_layout(b, w, v))
+        self.proposal_workspace = workspace(PreparedDraftDistribution.scratch_layout(b, 1, v))
+        self.verification_workspace = workspace(PreparedStochasticVerification.scratch_layout(b, w, v))
+        self.draft_probabilities = torch.zeros(b * (w - 1) * v, dtype=torch.float32, device=device)
+        self.verification_residual = torch.zeros((b * w, 10240), dtype=torch.bfloat16, device=device)
+        self.feedback_hidden = (torch.zeros((prefill_capacity, 10240), dtype=torch.bfloat16, device=device)
+                                if proposal_source == "mtp" else None)
+        self.prefill_residual = torch.zeros_like(self.feedback_hidden) if self.feedback_hidden is not None else None
+        self.raw_backup = ({} if proposal_source == "copy" else
+            {name: torch.empty_like(getattr(cache[48], name)) for name in DRAFT_RAW_FIELDS})
         self.previous_accepted = torch.ones(requests.capacity, dtype=torch.int32, device=device)
         self.candidates = torch.zeros((requests.capacity, 8), dtype=torch.int64, device=device)
         self.draft_tables = (torch.full((requests.capacity, context // 64), -1, dtype=torch.int32, device=device)
@@ -56,6 +75,10 @@ class SpeculativePreparation:
                                                      key_heads=heads // 3, value_heads=heads)
                             if pool.gdn else None)
         self.owners, self.decoders, self.mtp_modules = [], [], []
+
+    def draft_metadata(self, tokens, rows):
+        return DraftMetadata(tokens=tokens, rows=rows, context=self.context, device=self.pool.backing.device,
+                             hidden=self.feedback_hidden[:tokens])
 
     def buffers(self):
         buffers = {"copy_token_ids": self.copy_ids, "copy_token_count": self.copy_count,
@@ -87,7 +110,7 @@ class SpeculativePreparation:
         return resume
 
     def round(self, batch, width, name):
-        operation = PreparedSpeculativeRound(self, batch, width, name)
+        operation = PreparedSpeculativeRound(self, batch, width, name, decoder_factory=PreparedDecoder)
         self.owners.append(operation)
         return operation
 
@@ -100,12 +123,13 @@ class SpeculativePreparation:
 class PreparedPrefillAbsorption:
     """Absorb exactly P-1 target-derived pairs before publishing a P-token prefix."""
 
-    def __init__(self, owner, decoder, name):
+    def __init__(self, owner, decoder, name, *, residual_output=None):
         self.owner, self.decoder = owner, decoder
         tokens, device = decoder.state.tokens, owner.pool.backing.device
-        self.metadata = DraftMetadata(tokens=tokens, rows=1, context=owner.context, device=device)
+        self.metadata = owner.draft_metadata(tokens, 1)
         self.mtp = owner.mtp(self.metadata, f"{name}.mtp_absorb", cache_only=True)
-        self.target_residual = torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
+        self.target_residual = (owner.prefill_residual[:tokens]
+                                if residual_output is None else residual_output)
         decoder.residual_output = self.target_residual
         self.previous = torch.zeros((1, 10240), dtype=torch.bfloat16, device=device)
         self.previous_rope = torch.zeros((1, 3), dtype=torch.int64, device=device)
@@ -113,13 +137,21 @@ class PreparedPrefillAbsorption:
         self.indices = torch.arange(tokens, device=device)
 
     def __call__(self):
-        o, state, m = self.owner, self.decoder.state, self.metadata
+        self.begin()
+        self.decoder()
+        self.finish()
+
+    def begin(self):
+        o = self.owner
         slots = o.inputs.row_slot_ids[:1]
         safe = slots.long().clamp(0, o.requests.capacity - 1)
         self.before.copy_(o.requests.consumed_tokens[safe])
         gather_rows(o.pool.region("target_residual"), o.inputs.request_state_rows[safe, 0], self.previous)
         gather_rows(o.pool.region("target_residual_position"), o.inputs.request_state_rows[safe, 0], self.previous_rope)
-        self.decoder()
+
+    def finish(self):
+        o, state, m = self.owner, self.decoder.state, self.metadata
+        slots = o.inputs.row_slot_ids[:1]
         active = state.token_state.active.bool()
         length = (state.gdn.query_start_loc[1:] - state.gdn.query_start_loc[:-1]).long()
         shift = (self.before == 0).long()
@@ -139,26 +171,29 @@ class PreparedPrefillAbsorption:
 class PreparedSpeculativeRound:
     """One graph contains every draft, all target rows, acceptance and state commit."""
 
-    def __init__(self, owner, batch, width, name):
+    def __init__(self, owner, batch, width, name, *, decoder_factory, residual_output=None):
         self.owner, self.batch, self.width = owner, batch, width
+        if not 1 <= width <= owner.verification_width:
+            raise ValueError("round exceeds prepared verification scratch capacity")
         device = owner.pool.backing.device
         self.token_limits = owner.inputs.query_lengths[:batch]
         self.state = PreparedVerificationState(owner.inputs, owner.requests, owner.pool,
             owner.candidates, owner.previous_accepted, width=width, rows=batch, token_limits=self.token_limits)
         scratch = owner.scratch.rows(batch * width, batch * width)
-        self.target_residual = torch.zeros((batch * width, 10240), dtype=torch.bfloat16, device=device)
-        self.decoder = PreparedDecoder(owner.weights, scratch, self.state, owner.cache, owner.rotary,
+        self.target_residual = (owner.verification_residual[:batch * width]
+                                if residual_output is None else residual_output)
+        self.decoder = decoder_factory(owner.weights, scratch, self.state, owner.cache, owner.rotary,
             owner.table, owner.workspaces, owner.completion, owner.frame, owner.sequence,
             session=owner.session, name=f"{name}.target", max_cache_pages=owner.max_cache_pages,
             residual_output=self.target_residual, verification=True,
             gdn_records=owner.gdn_records if width > 1 else None,
             gdn_in_place=width == 1 and owner.gdn_records is not None, **owner.collectives)
-        owner.decoders.append(self.decoder)
+        owner.decoders.append(getattr(self.decoder, "forward", self.decoder))
         self.copy_only = owner.proposal_source == "copy"
-        self.draft_metadata = (DraftMetadata(tokens=batch, rows=batch, context=owner.context, device=device)
+        self.draft_metadata = (owner.draft_metadata(batch, batch)
                                if not self.copy_only else None)
         self.draft = owner.mtp(self.draft_metadata, f"{name}.draft") if width > 1 and not self.copy_only else None
-        self.absorb_metadata = (DraftMetadata(tokens=batch * width, rows=batch, context=owner.context, device=device)
+        self.absorb_metadata = (owner.draft_metadata(batch * width, batch)
                                 if not self.copy_only else None)
         self.absorb = owner.mtp(self.absorb_metadata, f"{name}.absorb", cache_only=True) if not self.copy_only else None
         self.before = torch.zeros(batch, dtype=torch.int64, device=device)
@@ -168,12 +203,12 @@ class PreparedSpeculativeRound:
         self.rope_delta = torch.zeros(batch, dtype=torch.int64, device=device)
         self.active = torch.zeros(batch, dtype=torch.bool, device=device)
         self.drafts = torch.zeros((batch, width - 1), dtype=torch.int64, device=device)
-        self.draft_probabilities = torch.zeros((batch, width - 1, owner.requests.vocab_size), dtype=torch.float32, device=device)
+        self.draft_probabilities = owner.draft_probabilities[:batch * (width - 1) * owner.requests.vocab_size].view(
+            batch, width - 1, owner.requests.vocab_size)
         self.draft_valid = torch.zeros((batch, width - 1), dtype=torch.bool, device=device)
         self.offered = torch.full((batch,), width - 1, dtype=torch.int32, device=device)
         self.copy_mask = torch.zeros(batch, dtype=torch.int64, device=device)
-        self.raw_backup = ({} if self.copy_only else
-            {name: torch.empty_like(getattr(owner.cache[48], name)) for name in DRAFT_RAW_FIELDS})
+        self.raw_backup = owner.raw_backup
         self.rows = torch.arange(batch, device=device)
         self.columns = torch.arange(width, device=device)
         self.seed = torch.zeros(batch, dtype=torch.int64, device=device)
@@ -197,17 +232,19 @@ class PreparedSpeculativeRound:
         target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1),
             o.requests, slots, epochs, o.inputs.live_rows, self.drafts,
             grammar_masks=o.copy_grammar_mask if self.copy_only else None,
-            grammar_mask_count=o.copy_grammar_mask_count if self.copy_only else None)
+            grammar_mask_count=o.copy_grammar_mask_count if self.copy_only else None, workspace=o.target_workspace)
         proposals = (() if self.copy_only else
             tuple(PreparedDraftDistribution(self.draft.scratch.logits.view(b, 1, -1),
             o.requests, slots, epochs, o.inputs.live_rows, self.drafts, prefix_offset=index,
-            seed=self.seed, offset=self.offset, sampled=self.sampled) for index in range(w - 1)))
+            seed=self.seed, offset=self.offset, sampled=self.sampled,
+            workspace=o.proposal_workspace) for index in range(w - 1)))
         target.prepare()
         for proposal in proposals:
             proposal.prepare()
         verify = PreparedStochasticVerification(self.draft_probabilities, self.drafts, target.probabilities,
             o.requests, slots, epochs, o.inputs.live_rows, rng=o.rng,
-            draft_valid=self.draft_valid, target_valid=target.valid, token_limits=self.token_limits)
+            draft_valid=self.draft_valid, target_valid=target.valid, token_limits=self.token_limits,
+            workspace=o.verification_workspace)
         verify.prepare()
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,

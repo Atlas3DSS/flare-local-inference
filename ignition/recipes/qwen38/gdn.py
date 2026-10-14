@@ -144,6 +144,8 @@ class PreparedGDN:
         projection_workspace: torch.Tensor | None = None,
         records: GDNRecords | None = None,
         in_place: bool = False,
+        partitions=None,
+        prepare_projections: bool = True,
     ) -> None:
         self.world_size = 48 // module.num_v_heads
         self.key_heads, self.value_heads = module.num_k_heads, module.num_v_heads
@@ -231,37 +233,47 @@ class PreparedGDN:
         expected = {"in_proj_qkvz", "in_proj_ba", "out_proj"}
         if set(projections) != expected:
             raise ValueError("GDN requires packed QKV/Z, B/A, and output projection weights")
-        self.projections = {
-            projection: QuantizedProjection(
-                source,
-                projections[projection],
-                output,
+        if prepare_projections:
+            self.projections = {
+                projection: QuantizedProjection(
+                    source,
+                    projections[projection],
+                    output,
+                    session=session,
+                    name=f"{name}.{projection}",
+                    activation_mode="auto",
+                    workspace=projection_workspace,
+                )
+                for projection, output in (
+                    ("in_proj_qkvz", scratch.projected_qkvz),
+                    ("in_proj_ba", scratch.projected_ba),
+                )
+            }
+            self.projections["out_proj"] = QuantizedProjection(
+                scratch.gated,
+                projections["out_proj"],
+                scratch.output,
                 session=session,
-                name=f"{name}.{projection}",
+                name=f"{name}.out_proj",
                 activation_mode="auto",
                 workspace=projection_workspace,
             )
-            for projection, output in (
-                ("in_proj_qkvz", scratch.projected_qkvz),
-                ("in_proj_ba", scratch.projected_ba),
-            )
-        }
-        self.projections["out_proj"] = QuantizedProjection(
-            scratch.gated,
-            projections["out_proj"],
-            scratch.output,
-            session=session,
-            name=f"{name}.out_proj",
-            activation_mode="auto",
-            workspace=projection_workspace,
-        )
-        self.parallel_projections = None
-        if mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena):
-            from ignition.components.linear import ParallelProjections
+            self.parallel_projections = None
+            if mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena):
+                from ignition.components.linear import ParallelProjections
 
-            self.parallel_projections = ParallelProjections(
-                self.projections["in_proj_qkvz"], self.projections["in_proj_ba"],
-                session=session, workspace=projection_workspace)
+                self.parallel_projections = ParallelProjections(
+                    self.projections["in_proj_qkvz"], self.projections["in_proj_ba"],
+                    session=session, workspace=projection_workspace)
+        self.partitions = partitions
+        if partitions is not None:
+            self.sequences_by_role = tuple(
+                PreparedGDN(module, projections, part.scratch.output, part.scratch, state, part.metadata,
+                    mode=part.mode, session=session, name=f"{name}.{part.mode}", workspace=workspace,
+                    projection_workspace=projection_workspace, records=records if part.mode == "decode" else None,
+                    in_place=in_place if part.mode == "decode" else False, prepare_projections=False)
+                for part in partitions.parts)
+            return
         self.conv_weight = module.conv1d.weight.squeeze(1)
         conv_args = {
             "x": scratch.projected_qkv,
@@ -416,6 +428,18 @@ class PreparedGDN:
             self.projections["in_proj_ba"](source)
         else:
             self.parallel_projections(source)
+        if self.partitions is None:
+            self.run_sequence()
+        else:
+            for part, sequence in zip(self.partitions.parts, self.sequences_by_role):
+                part.gather(scratch.projected_qkvz, part.scratch.projected_qkvz)
+                part.gather(scratch.projected_ba, part.scratch.projected_ba)
+                sequence.run_sequence()
+            self.partitions.combine(tuple(part.scratch.gated for part in self.partitions.parts), scratch.gated)
+        return self.projections["out_proj"](scratch.gated)
+
+    def run_sequence(self):
+        scratch = self.scratch
         short_conv.run(self.conv_binding)
         if self.recovered is not None:
             self.recovered()
@@ -431,7 +455,6 @@ class PreparedGDN:
             else:
                 gdn_prefill.run(self.recurrent_binding)
             self.output_norm()
-        return self.projections["out_proj"](scratch.gated)
 
 
 __all__ = [ "GDNScratch", "GDNState", "PreparedGDN"]

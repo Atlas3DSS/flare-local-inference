@@ -201,6 +201,10 @@ Ignition captures power-of-two
 batch capacities through the concurrency limit
 and every verification width through the draft-token maximum. Flare can reduce
 concurrency and draft tokens at load time; prefill capacity stays prepared.
+Qwen also captures mixed prompt/decode graphs: every prompt bucket at width one
+and one balanced prompt bucket at each wider verification depth, for each batch
+capacity of at least two. The ordinary and draft-state-maintaining catalogs remain
+distinct. See [mixed graph coverage](docs/scheduling-runtime-design.md).
 
 Load an exported `.safetensors` package directly with the native CLI:
 
