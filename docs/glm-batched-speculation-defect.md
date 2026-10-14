@@ -1,6 +1,8 @@
 # GLM-5.3 Flash: batched speculative decoding corrupts answers on DGX Spark
 
-Status: open. The root cause is not yet identified.
+Status: open. The corruption follows the b12x DSA indexer's tiled route
+(section 3); why that route selects wrong records inside Flare's graphs, when it
+is correct standalone, is still being investigated.
 
 ## 1. Summary
 
@@ -65,6 +67,8 @@ how many of them were in graphs above 16 query rows.
 | Spark TP2, same diagnostic | cached 10K ×2 | 2/2 |
 | Spark TP2, package exported with `--no-compile`, adaptive MTP, concurrency 8 | cached 10K ×8, two seeds | 1/8, 0/8 |
 | Spark TP2, same package | cached 10K ×2 | 2/2 |
+| Spark TP2, `--no-compile`, DSA indexer forced to its fused route at every row count (diagnostic, see below), concurrency 8 | cached 10K ×8, three seeds | 7/8 (+1 neighbour), 8/8, 8/8; no corrupt replies |
+| Spark TP2, same diagnostic | cached 10K ×2 | 2/2 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 10K ×16 | 1/16 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 96K ×16 | 0/16 (13 reached the 16,384-token limit) |
 | Spark TP4, adaptive MTP | cached 10K ×2, ×4, ×8 | 2/2, 3/4, 1/8 |
@@ -91,9 +95,25 @@ fails when it runs in a larger graph (the post-prefill rounds above), so the
 graph's planned capacity matters, not the number of live requests. With the
 MTP draft removed, every round commits exactly one token per request, as plain
 decode does, and still fails, so the fault is in the target verification
-graph rather than in the draft model. Kernels that change their planned
-variant above 16 rows on SM12x include the b12x DSA indexer, which switches
-from its fused route to its tiled route there.
+graph rather than in the draft model.
+
+The b12x DSA indexer, which selects each query row's 512 index pools for sparse
+MLA, plans its fused route for GLM decode graphs of up to 16 query rows and its
+tiled route above (`_C4_B12X_FUSED_MAX_ROWS` in
+`flashinfer/experimental/b12x/attention/dsa_indexer/fused_indexer.py`). A
+diagnostic FlashInfer build that raises that limit to 128, so every graph in a
+concurrency-8 package uses the fused route, removes the corruption: 26 of 26
+replies correct or neighbouring, with 95 of the 303 speculative rounds at
+concurrency 8 in graphs of 24 to 48 rows. The same package without the change
+corrupts six to eight replies of eight. The corruption therefore follows the
+tiled route. The tiled route is nevertheless correct when called directly
+(section 6), so the fault lies in how it runs inside Flare's prepared graphs,
+not in its arithmetic.
+
+The fused kernel is not a drop-in replacement above 48 rows on GB10: its pack
+scratch holds `num_sms × topk` entries, and a 64-row graph stops with `fused
+indexer pack scratch too small`. Concurrency-16 packages, whose largest
+verification graph has 128 rows, cannot use it as a workaround unchanged.
 
 ## 4. Reproduce on DGX Spark
 
@@ -220,7 +240,7 @@ standalone against b12x or PyTorch references.
 | --- | --- | --- |
 | RoCEnante all-reduce and vocabulary all-gather | Four Sparks, 2–96 rows (up to 7.4 MB per rank), CUDA-graph replays with a new pattern each replay | No mismatched bytes |
 | b12x KDA verification recording and commit | TP4 geometry (16 heads), 1–16 sequences of mixed length, inactive rows, strided state indices as Flare passes them | Exact |
-| b12x DSA indexer (32 heads, top-512 pools) | Fused route (up to 16 query rows) and tiled route (more), graph replays with changing inputs, inactive rows, scratch overwritten between replays | True top-k on every row |
+| b12x DSA indexer (32 heads, top-512 pools) | Fused route (up to 16 query rows) and tiled route (32–128 rows) on SM120 and GB10, graph replays with changing inputs, inactive rows, scratch overwritten between replays, 1 MiB guard bands around scratch and output | True top-k on every row; no writes outside the declared buffers; inputs unchanged |
 | b12x sparse MLA decode | 16 heads, 2051 selected slots, 528-byte FP8 records, 16–96 rows with inactive rows (SM120) | Cosine ≥ 0.99998 |
 | b12x NVFP4 MoE | Inactive tokens routed to expert -1 with NaN inputs, which route top-k produces for NaN logits; 16–96 tokens (SM120) | Live tokens bit-identical |
 | b12x short convolution, speculative mode | 6144 and 24576 channels, 1–16 sequences, 7 draft columns (SM120) | Exact |
@@ -240,15 +260,17 @@ logs, so it does not cover this case.
 
 ## 7. Next steps
 
-1. Confirm the reproduction on Flare `main` with FlashInfer 64916e85 and the
+1. Find why the tiled indexer route selects wrong pools inside Flare's graphs.
+   It is correct when planned, bound and replayed directly, so the candidates
+   are Flare's lifecycle around it (preparation against benchmark operands and
+   a small preparation cache, `rebind_cache` before capture, scratch placed in
+   the shared arena) and state the route sets up outside the captured graph
+   that an exported package may not carry. Two checks are in progress: Flare's
+   own `PreparedSparseIndexer` lifecycle driven on one GPU against an exact
+   reference, and the same TP2 configuration served in process with
+   `ignition serve`, which captures and replays without exporting a package.
+2. Confirm the reproduction on Flare `main` with FlashInfer 64916e85 and the
    export fix in section 4 (in progress).
-2. Route every decode row count through the DSA indexer's fused kernel (a
-   diagnostic FlashInfer change raising the fused route's 16-row limit). The
-   tiled route is the only kernel change known to coincide with the 16-row
-   boundary; it is correct standalone, including with guard bands around its
-   scratch and output, so a pass would point at how its results are consumed
-   in the graph. In progress at TP2.
-3. Run the RTX PRO 6000 reproduction in section 5. Every failing run so far
-   has had more than one rank, and the only correct configuration (GB300) has
-   one, so tensor-parallel code paths are as much a suspect as SM121
-   kernels.
+3. Run the RTX PRO 6000 reproduction in section 5. The b12x indexer serves
+   SM120 too, so it should reproduce there if the cause is in Flare's
+   integration rather than in RoCE or GB10 specifics.
