@@ -16,7 +16,8 @@ use std::{
 };
 
 struct ModelCatalog {
-    cards: Vec<Value>,
+    card: Value,
+    names: HashSet<String>,
 }
 
 impl ModelCatalog {
@@ -26,54 +27,56 @@ impl ModelCatalog {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut seen = HashSet::new();
-        let cards = std::iter::once(&model.model_id)
+        let id = served_names
+            .iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or(&model.model_id);
+        let names = std::iter::once(&model.model_id)
             .chain(served_names)
-            .filter(|id| !id.is_empty() && seen.insert(id.as_str()))
-            .enumerate()
-            .map(|(index, id)| {
-                // Match vLLM's ModelCard / ModelPermission wire fields while
-                // advertising only features supported by this server.
-                json!({
-                    "id": id,
-                    "object": "model",
-                    "created": created,
-                    "owned_by": "local",
-                    "root": model.model_id,
-                    "parent": null,
-                    "max_model_len": model.limits.max_sequence_tokens,
-                    "permission": [{
-                        "id": format!("modelperm-{created}-{index}"),
-                        "object": "model_permission",
-                        "created": created,
-                        "allow_create_engine": false,
-                        "allow_sampling": true,
-                        "allow_logprobs": false,
-                        "allow_search_indices": false,
-                        "allow_view": true,
-                        "allow_fine_tuning": false,
-                        "organization": "*",
-                        "group": null,
-                        "is_blocking": false,
-                    }],
-                    "flare": {
-                        "vocab_size": model.contract.vocabulary,
-                        "max_concurrency": model.limits.max_active,
-                        "prefill_chunk_size": model.limits.prefill_chunk_size,
-                        "default_max_tokens": model.max_new_tokens,
-                        "sampling_defaults": model.sampling_defaults,
-                        "max_images_per_prompt": model.contract.vision.max_images,
-                        "input_modalities": if model.contract.vision.enabled() {
-                            vec!["text", "image"]
-                        } else {
-                            vec!["text"]
-                        },
-                        "output_modalities": ["text"],
-                    },
-                })
-            })
+            .filter(|name| !name.is_empty())
+            .cloned()
             .collect();
-        Self { cards }
+        // One card represents the loaded model; its other names only resolve lookups.
+        // Match vLLM's ModelCard / ModelPermission wire fields while
+        // advertising only features supported by this server.
+        let card = json!({
+            "id": id,
+            "object": "model",
+            "created": created,
+            "owned_by": "local",
+            "root": model.model_id,
+            "parent": null,
+            "max_model_len": model.limits.max_sequence_tokens,
+            "permission": [{
+                "id": format!("modelperm-{created}-0"),
+                "object": "model_permission",
+                "created": created,
+                "allow_create_engine": false,
+                "allow_sampling": true,
+                "allow_logprobs": false,
+                "allow_search_indices": false,
+                "allow_view": true,
+                "allow_fine_tuning": false,
+                "organization": "*",
+                "group": null,
+                "is_blocking": false,
+            }],
+            "flare": {
+                "vocab_size": model.contract.vocabulary,
+                "max_concurrency": model.limits.max_active,
+                "prefill_chunk_size": model.limits.prefill_chunk_size,
+                "default_max_tokens": model.max_new_tokens,
+                "sampling_defaults": model.sampling_defaults,
+                "max_images_per_prompt": model.contract.vision.max_images,
+                "input_modalities": if model.contract.vision.enabled() {
+                    vec!["text", "image"]
+                } else {
+                    vec!["text"]
+                },
+                "output_modalities": ["text"],
+            },
+        });
+        Self { card, names }
     }
 }
 
@@ -89,13 +92,14 @@ where
 }
 
 async fn list(State(catalog): State<Arc<ModelCatalog>>) -> Json<Value> {
-    Json(json!({"object": "list", "data": catalog.cards}))
+    Json(json!({"object": "list", "data": [&catalog.card]}))
 }
 
 async fn retrieve(State(catalog): State<Arc<ModelCatalog>>, Path(model): Path<String>) -> Response {
-    match catalog.cards.iter().find(|card| card["id"] == model) {
-        Some(card) => Json(card.clone()).into_response(),
-        None => (
+    if catalog.names.contains(&model) {
+        Json(catalog.card.clone()).into_response()
+    } else {
+        (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {
                 "message": format!("The model `{model}` does not exist."),
@@ -104,7 +108,7 @@ async fn retrieve(State(catalog): State<Arc<ModelCatalog>>, Path(model): Path<St
                 "code": "model_not_found",
             }})),
         )
-            .into_response(),
+            .into_response()
     }
 }
 
@@ -159,7 +163,7 @@ mod tests {
     #[test]
     fn metadata_reports_effective_limits_and_prepared_modalities() {
         let mut model = config();
-        let text = ModelCatalog::new(&model, &[]).cards.remove(0);
+        let text = ModelCatalog::new(&model, &[]).card;
         assert_eq!(text["max_model_len"], 8192);
         assert_eq!(text["flare"]["max_concurrency"], 3);
         assert_eq!(text["flare"]["prefill_chunk_size"], 512);
@@ -185,13 +189,36 @@ mod tests {
             patches_per_feature: 4,
             patch_capacities: vec![1024],
         };
-        let vision = ModelCatalog::new(&model, &[]).cards.remove(0);
+        let vision = ModelCatalog::new(&model, &[]).card;
         assert_eq!(vision["max_model_len"], 4096);
         assert_eq!(
             vision["flare"]["input_modalities"],
             json!(["text", "image"])
         );
         assert_eq!(vision["flare"]["max_images_per_prompt"], 4);
+    }
+
+    #[test]
+    fn discovery_uses_the_first_nonempty_alias_or_checkpoint_id() {
+        for (aliases, expected) in [
+            (vec![], "organization/model"),
+            (vec!["", ""], "organization/model"),
+            (vec!["", "alias", "alias", "other"], "alias"),
+            (vec!["organization/model", "alias"], "organization/model"),
+        ] {
+            let aliases = aliases.into_iter().map(String::from).collect::<Vec<_>>();
+            let catalog = ModelCatalog::new(&config(), &aliases);
+            assert_eq!(catalog.card["id"], expected);
+            assert_eq!(catalog.card["root"], "organization/model");
+            assert!(catalog.names.contains("organization/model"));
+            assert!(!catalog.names.contains(""));
+            assert!(
+                aliases
+                    .iter()
+                    .filter(|name| !name.is_empty())
+                    .all(|name| catalog.names.contains(name))
+            );
+        }
     }
 
     fn get(address: SocketAddr, path: &str) -> (u16, Value) {
@@ -231,30 +258,24 @@ mod tests {
             assert_eq!(status, 200);
             assert_eq!(list["object"], "list");
             let cards = list["data"].as_array().unwrap();
-            assert_eq!(cards.len(), 3);
-            for (card, id) in cards
-                .iter()
-                .zip(["organization/model", "alias", "alias with space"])
-            {
-                assert_eq!(card["id"], id);
-                assert_eq!(card["object"], "model");
-                assert_eq!(card["owned_by"], "local");
-                assert_eq!(card["root"], "organization/model");
-                assert_eq!(card.get("parent"), Some(&Value::Null));
-                assert_eq!(card["max_model_len"], 8192);
-                assert_eq!(card["created"], cards[0]["created"]);
-                assert_eq!(card["flare"], cards[0]["flare"]);
-                assert_eq!(card["permission"][0]["object"], "model_permission");
-            }
-            for (path, expected) in [
-                ("/v1/models/organization/model", &cards[0]),
-                ("/v1/models/organization%2Fmodel", &cards[0]),
-                ("/v1/models/alias", &cards[1]),
-                ("/v1/models/alias%20with%20space", &cards[2]),
+            assert_eq!(cards.len(), 1);
+            let card = &cards[0];
+            assert_eq!(card["id"], "alias");
+            assert_eq!(card["object"], "model");
+            assert_eq!(card["owned_by"], "local");
+            assert_eq!(card["root"], "organization/model");
+            assert_eq!(card.get("parent"), Some(&Value::Null));
+            assert_eq!(card["max_model_len"], 8192);
+            assert_eq!(card["permission"][0]["object"], "model_permission");
+            for path in [
+                "/v1/models/organization/model",
+                "/v1/models/organization%2Fmodel",
+                "/v1/models/alias",
+                "/v1/models/alias%20with%20space",
             ] {
                 let (status, retrieved) = get(address, path);
                 assert_eq!(status, 200, "{path}");
-                assert_eq!(&retrieved, expected);
+                assert_eq!(&retrieved, card);
             }
             assert_eq!(get(address, "/v1/models").1, list);
             for path in ["/v1/models/unknown", "/v1/models/organization/model/extra"] {

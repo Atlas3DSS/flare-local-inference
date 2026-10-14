@@ -57,13 +57,13 @@ def test_model_discovery_and_lookup(clients):
     listed.raise_for_status()
     assert listed.json()["object"] == "list"
     cards = listed.json()["data"]
-    assert cards and len({card["id"] for card in cards}) == len(cards)
+    assert len(cards) == 1
     assert [model.id for model in o.models.list()] == [card["id"] for card in cards]
     for card in cards:
         assert card["object"] == "model"
         assert card["created"] > 0
         assert card["max_model_len"] > 0
-        assert card["root"] == cards[0]["id"]
+        assert card["root"]
         assert card["parent"] is None
         assert card["flare"]["max_concurrency"] > 0
         assert card["flare"]["input_modalities"][0] == "text"
@@ -71,6 +71,7 @@ def test_model_discovery_and_lookup(clients):
         assert card["permission"][0]["allow_sampling"] is True
         assert card["permission"][0]["allow_logprobs"] is False
         assert o.models.retrieve(card["id"]).model_dump() == card
+        assert o.models.retrieve(card["root"]).model_dump() == card
         encoded = http.get("/v1/models/" + quote(card["id"], safe=""))
         encoded.raise_for_status()
         assert encoded.json() == card
