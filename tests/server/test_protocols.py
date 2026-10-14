@@ -47,6 +47,10 @@ FUNCTION = {
 }
 
 
+def message_input_tokens(usage):
+    return usage.input_tokens + (usage.cache_read_input_tokens or 0) + (usage.cache_creation_input_tokens or 0)
+
+
 def test_model_discovery_and_lookup(clients):
     o, _, http = clients
     listed = http.get("/v1/models")
@@ -97,7 +101,7 @@ def test_sdk_buffered_and_streaming_text(clients):
     assert message.stop_reason == "end_turn"
     buffered = a.messages.create(model="local", messages=USER, max_tokens=32, extra_body=EXTRA)
     assert [b.model_dump(exclude_none=True) for b in buffered.content] == [b.model_dump(exclude_none=True) for b in message.content]
-    assert buffered.usage.input_tokens == message.usage.input_tokens
+    assert message_input_tokens(buffered.usage) == message_input_tokens(message.usage)
     with o.responses.stream(model="local", input=USER, max_output_tokens=32, extra_body=EXTRA) as stream:
         events = list(stream)
         response = stream.get_final_response()
@@ -114,6 +118,7 @@ def test_raw_completion_batch_and_zero_tokens(clients):
     assert [c.text for c in zero.choices] == ["Hello", "Hello", "World", "World"]
     assert zero.usage.completion_tokens == 0
     assert zero.usage.prompt_tokens == 2
+    assert zero.usage.prompt_tokens_details.cached_tokens == 0
     result = o.completions.create(model="local", prompt=["The capital of France is", "One plus one equals"], n=2, max_tokens=4, temperature=1)
     assert [c.index for c in result.choices] == [0, 1, 2, 3]
     assert all(c.text for c in result.choices)
@@ -124,11 +129,77 @@ def test_raw_completion_batch_and_zero_tokens(clients):
     assert raw.usage.prompt_tokens == 3
 
 
+@pytest.mark.parametrize("protocol", ["chat", "completions", "messages", "responses"])
+def test_cached_usage_buffered_and_streaming(clients, protocol):
+    o, a, _ = clients
+    prompt = f"Usage test {time.time_ns()}. " + "A cached prefix avoids repeated computation. " * 40
+    prompt += "Reply with OK."
+    messages = [{"role": "user", "content": prompt}]
+    kwargs = {"model": "local", "extra_body": EXTRA}
+    if protocol == "chat":
+        create = o.chat.completions.create
+        kwargs.update(messages=messages, max_tokens=8)
+    elif protocol == "completions":
+        create = o.completions.create
+        kwargs.update(prompt=prompt, max_tokens=8)
+    elif protocol == "messages":
+        create = a.messages.create
+        kwargs.update(messages=messages, max_tokens=8)
+    else:
+        create = o.responses.create
+        kwargs.update(input=messages, max_output_tokens=8)
+
+    first = create(**kwargs)
+    buffered = create(**kwargs)
+    if protocol in {"chat", "completions"}:
+        chunks = list(create(**kwargs, stream=True, stream_options={"include_usage": True}))
+        assert not chunks[-1].choices
+        assert all(chunk.usage is None for chunk in chunks[:-1])
+        usages = [buffered.usage, chunks[-1].usage]
+        for usage in usages:
+            assert 0 < usage.prompt_tokens_details.cached_tokens <= usage.prompt_tokens
+            assert usage.prompt_tokens == first.usage.prompt_tokens
+            assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+            assert usage.completion_tokens > 0
+    elif protocol == "messages":
+        with a.messages.stream(**kwargs) as stream:
+            events = list(stream)
+            final = stream.get_final_message()
+        delta = next(event for event in events if event.type == "message_delta")
+        for usage in [buffered.usage, final.usage, delta.usage]:
+            assert 0 < usage.cache_read_input_tokens <= message_input_tokens(usage)
+            assert message_input_tokens(usage) == message_input_tokens(first.usage)
+            assert usage.output_tokens > 0
+    else:
+        events = list(create(**kwargs, stream=True))
+        assert events[-1].type in {"response.completed", "response.incomplete"}
+        for usage in [buffered.usage, events[-1].response.usage]:
+            assert 0 < usage.input_tokens_details.cached_tokens <= usage.input_tokens
+            assert usage.input_tokens == first.usage.input_tokens
+            assert usage.total_tokens == usage.input_tokens + usage.output_tokens
+            assert usage.output_tokens > 0
+
+
+def test_cached_batch_usage_counts_each_input_once(clients):
+    o, _, _ = clients
+    prompts = [f"Batch usage {time.time_ns()} {i}. " + "Count this prefix once. " * 40 for i in range(2)]
+    kwargs = {"model": "local", "prompt": prompts, "max_tokens": 2, "temperature": 1,
+              "extra_body": {"ignore_eos": True}}
+    first = o.completions.create(**kwargs)
+    buffered = o.completions.create(**kwargs, n=2)
+    chunks = list(o.completions.create(**kwargs, n=2, stream=True, stream_options={"include_usage": True}))
+    for usage in [buffered.usage, chunks[-1].usage]:
+        assert usage.prompt_tokens == first.usage.prompt_tokens
+        assert 0 < usage.prompt_tokens_details.cached_tokens <= usage.prompt_tokens
+        assert usage.completion_tokens == 8
+        assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+
+
 def test_token_count_and_compressed_requests(clients):
     _, a, http = clients
     counted = a.messages.count_tokens(model="local", messages=USER, extra_body=EXTRA)
     message = a.messages.create(model="local", messages=USER, max_tokens=16, extra_body=EXTRA)
-    assert counted.input_tokens == message.usage.input_tokens
+    assert counted.input_tokens == message_input_tokens(message.usage)
     body = json.dumps({"input": "Reply with exactly OK.", "max_output_tokens": 16, **EXTRA}).encode()
     result = http.post("/v1/responses", content=gzip.compress(body), headers={"Content-Encoding": "gzip", "Content-Type": "application/json"})
     result.raise_for_status()
@@ -247,7 +318,7 @@ def test_required_tool_choice_sdk_contracts(clients, streaming):
         message = a.messages.create(**kwargs)
     assert message.stop_reason == "tool_use"
     assert any(b.type == "tool_use" and b.name == "lookup" for b in message.content)
-    assert counted.input_tokens == message.usage.input_tokens
+    assert counted.input_tokens == message_input_tokens(message.usage)
     kwargs = dict(
         model="local", input=history, tools=[{"type": "function", **FUNCTION}],
         tool_choice="required", parallel_tool_calls=False,
@@ -377,7 +448,7 @@ def test_messages_inline_system_text_and_empty_controls(clients):
     with a.messages.stream(model="local", messages=history + [controls], max_tokens=32, extra_body=EXTRA) as stream:
         assert "".join(stream.text_stream) == "OK"
         result = stream.get_final_message()
-    assert result.usage.input_tokens == counted.input_tokens
+    assert message_input_tokens(result.usage) == counted.input_tokens
     assert result.stop_reason == "end_turn"
 
 
@@ -443,8 +514,19 @@ def test_stop_sequence_and_observations(clients):
     for _ in range(2):
         result = o.chat.completions.create(model="local", messages=USER, max_tokens=32, extra_body=extra).model_dump()
     assert result["reused_prompt_tokens"] > 0
+    assert result["usage"]["prompt_tokens_details"]["cached_tokens"] == result["reused_prompt_tokens"]
     assert len(result["choices"][0]["token_ids"]) == result["usage"]["completion_tokens"]
     assert len(result["choices"][0]["token_timestamps_ns"]) == result["usage"]["completion_tokens"]
+    for include_usage in [False, True]:
+        chunks = [c.model_dump() for c in o.chat.completions.create(
+            model="local", messages=USER, max_tokens=32, extra_body=extra,
+            stream=True, stream_options={"include_usage": include_usage},
+        )]
+        terminal = next(c for c in chunks if c["choices"] and c["choices"][0]["finish_reason"])
+        usage = chunks[-1]["usage"]
+        assert usage["prompt_tokens_details"]["cached_tokens"] == terminal["reused_prompt_tokens"]
+        assert terminal["reused_prompt_tokens"] > 0
+        assert sum(len(c["choices"][0].get("token_ids", [])) for c in chunks if c["choices"]) == usage["completion_tokens"]
 
 
 def test_unsupported_features_and_error_shapes(clients):
@@ -537,7 +619,22 @@ def test_authenticated_protocol_headers(clients):
 
 
 def test_image_input(clients):
-    _, a, _ = clients
+    o, a, _ = clients
     image = Path(__file__).parents[1] / "frontend/qwen38_images-inputs/RGB.png"
-    result = a.messages.create(model="local", max_tokens=48, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(image.read_bytes()).decode()}}, {"type": "text", "text": "Describe the image briefly."}]}], extra_body=EXTRA)
+    data = base64.b64encode(image.read_bytes()).decode()
+    result = a.messages.create(model="local", max_tokens=48, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}, {"type": "text", "text": "Describe the image briefly."}]}], extra_body=EXTRA)
     assert any(b.type == "text" and b.text for b in result.content)
+    messages = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{data}"}},
+        {"type": "text", "text": "Describe the image briefly."},
+    ]}]
+    extra = {**EXTRA, "return_token_ids": True}
+    buffered = o.chat.completions.create(model="local", messages=messages, max_tokens=8, extra_body=extra)
+    chunks = list(o.chat.completions.create(
+        model="local", messages=messages, max_tokens=8, extra_body=extra,
+        stream=True, stream_options={"include_usage": True},
+    ))
+    for usage in [buffered.usage, chunks[-1].usage]:
+        assert 0 < usage.prompt_tokens_details.multimodal_tokens["image"] <= usage.prompt_tokens
+        assert usage.prompt_tokens == message_input_tokens(result.usage)
+        assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens

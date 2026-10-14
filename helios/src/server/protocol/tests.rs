@@ -31,7 +31,10 @@ fn encoder_with_parallel(protocol: Protocol, tool_choice: ToolChoice, parallel: 
         "model".into(),
         1,
         1,
-        17,
+        vec![PromptUsage {
+            tokens: 17,
+            image_tokens: 0,
+        }],
         tools(),
         tool_choice,
         parallel,
@@ -570,7 +573,10 @@ fn custom_tool_input_requires_a_string_before_completion() {
             "model".into(),
             1,
             1,
-            1,
+            vec![PromptUsage {
+                tokens: 1,
+                image_tokens: 0,
+            }],
             tools,
             ToolChoice::Auto,
             true,
@@ -629,7 +635,8 @@ fn messages_stream_reconstructs_ordered_buffered_blocks() {
     frames.extend(encoder.finish(0, Termination::Eos, 12, 3, None).unwrap());
     let expected = encoder.response();
     assert_eq!(expected["stop_reason"], "tool_use");
-    assert_eq!(expected["usage"]["input_tokens"], 17);
+    assert_eq!(expected["usage"]["input_tokens"], 14);
+    assert_eq!(expected["usage"]["cache_read_input_tokens"], 3);
     assert_eq!(expected["usage"]["output_tokens"], 12);
     let mut blocks = vec![];
     for frame in &frames {
@@ -728,14 +735,133 @@ fn thinking_markers_round_trip_and_foreign_opaque_history_is_rejected() {
     );
 }
 #[test]
+fn usage_reports_uncached_partial_and_full_prefix_reuse() {
+    for protocol in [
+        Protocol::Chat,
+        Protocol::Completions,
+        Protocol::Messages,
+        Protocol::Responses,
+    ] {
+        for (generated, cached) in [(0, 0), (4, 0), (4, 9), (4, 17)] {
+            let mut enc = encoder(protocol);
+            let start = enc.start();
+            if protocol == Protocol::Messages {
+                assert_eq!(start[0].data["message"]["usage"]["input_tokens"], 17);
+                assert_eq!(
+                    start[0].data["message"]["usage"]["cache_read_input_tokens"],
+                    0
+                );
+            }
+            let frames = enc
+                .finish(0, Termination::OutputLimit, generated, cached, None)
+                .unwrap();
+            let response = enc.response();
+            let usage = &response["usage"];
+            match protocol {
+                Protocol::Chat | Protocol::Completions => {
+                    assert_eq!(
+                        usage,
+                        &json!({
+                            "prompt_tokens":17,"completion_tokens":generated,
+                            "total_tokens":17 + generated,
+                            "prompt_tokens_details":{"cached_tokens":cached},
+                        })
+                    );
+                    assert_eq!(frames[frames.len() - 2].data["usage"], *usage);
+                    assert_eq!(frames[frames.len() - 2].data["choices"], json!([]));
+                    assert!(frames.last().unwrap().done);
+                    assert!(
+                        frames[..frames.len() - 2]
+                            .iter()
+                            .all(|f| f.data["usage"].is_null())
+                    );
+                }
+                Protocol::Messages => {
+                    assert_eq!(
+                        usage,
+                        &json!({
+                            "input_tokens":17-cached,"output_tokens":generated,
+                            "cache_creation_input_tokens":0,"cache_read_input_tokens":cached,
+                        })
+                    );
+                    let delta = frames
+                        .iter()
+                        .find(|f| f.data["type"] == "message_delta")
+                        .unwrap();
+                    assert_eq!(delta.data["usage"], *usage);
+                }
+                Protocol::Responses => {
+                    assert_eq!(
+                        usage,
+                        &json!({
+                            "input_tokens":17,"output_tokens":generated,
+                            "total_tokens":17 + generated,
+                            "input_tokens_details":{"cached_tokens":cached},
+                        })
+                    );
+                    assert_eq!(frames.last().unwrap().data["response"]["usage"], *usage);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn image_usage_is_a_prompt_subset_and_stream_usage_remains_opt_in() {
+    for include_usage in [false, true] {
+        let mut enc = Encoder::new(
+            Protocol::Chat,
+            "c".into(),
+            "m".into(),
+            1,
+            1,
+            vec![PromptUsage {
+                tokens: 17,
+                image_tokens: 8,
+            }],
+            vec![],
+            ToolChoice::Auto,
+            true,
+            include_usage,
+            json!({}),
+        );
+        let mut frames = enc.start();
+        frames.extend(enc.apply(0, vec![Event::Content("answer".into())]).unwrap());
+        frames.extend(enc.finish(0, Termination::Eos, 4, 9, None).unwrap());
+        let expected = json!({"prompt_tokens":17,"completion_tokens":4,"total_tokens":21,
+            "prompt_tokens_details":{"cached_tokens":9,"multimodal_tokens":{"image":8}}});
+        assert_eq!(enc.response()["usage"], expected);
+        let usage_frames: Vec<_> = frames
+            .iter()
+            .filter(|f| f.data["usage"].is_object())
+            .collect();
+        if include_usage {
+            assert_eq!(usage_frames.len(), 1);
+            assert_eq!(usage_frames[0].data["usage"], expected);
+        } else {
+            assert!(frames.iter().all(|f| f.data.get("usage").is_none()));
+        }
+    }
+}
+
+#[test]
 fn batch_stream_indices_echo_and_totals() {
     let mut encoder = Encoder::new(
         Protocol::Completions,
         "c".into(),
         "m".into(),
         1,
-        4,
-        7,
+        2,
+        vec![
+            PromptUsage {
+                tokens: 3,
+                image_tokens: 0,
+            },
+            PromptUsage {
+                tokens: 4,
+                image_tokens: 0,
+            },
+        ],
         vec![],
         ToolChoice::Auto,
         true,
@@ -748,10 +874,14 @@ fn batch_stream_indices_echo_and_totals() {
             .unwrap();
         assert_eq!(frames[0].data["choices"][0]["index"], i);
         let frames = encoder
-            .finish(i, Termination::OutputLimit, 2, 0, None)
+            .finish(i, Termination::OutputLimit, 2, [1, 3, 2, 4][i], None)
             .unwrap();
         if i == 1 {
             assert!(frames.last().unwrap().done);
+            assert_eq!(
+                frames[frames.len() - 2].data["usage"],
+                encoder.response()["usage"]
+            );
         } else {
             assert!(!frames.last().unwrap().done);
         }
@@ -759,7 +889,7 @@ fn batch_stream_indices_echo_and_totals() {
     let response = encoder.response();
     assert_eq!(
         response["usage"],
-        json!({"prompt_tokens":7,"completion_tokens":8,"total_tokens":15})
+        json!({"prompt_tokens":7,"completion_tokens":8,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":3}})
     );
     for i in 0..4 {
         assert_eq!(response["choices"][i]["text"], format!("choice{i}"));

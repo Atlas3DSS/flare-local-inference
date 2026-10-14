@@ -196,12 +196,27 @@ text. This marker is a local round-trip consistency check, not provider
 authentication; readable thinking from other providers can be replayed.
 
 Usage counts native prompt and generated tokens, including model control tokens.
-Anthropic cache creation/read counters are zero because its billing cache
-contract differs from Helios prefix reuse. Responses exposes native reused
-prompt tokens through `input_tokens_details.cached_tokens`. Chat observation
-extensions (`return_token_ids`, `return_token_timestamps`, and prefix reuse)
-retain their existing behavior. Stop sequences report the exact matched string
-through Anthropic `stop_sequence`.
+Chat and Completions always include `prompt_tokens_details.cached_tokens`,
+equivalent to enabling vLLM's `--enable-prompt-tokens-details`. This counts the
+prompt tokens actually reused at admission, including restored prefixes; it is
+zero when no prefix is reused. Cached tokens remain part of `prompt_tokens`
+and `total_tokens`. Image requests also include
+`prompt_tokens_details.multimodal_tokens.image`, the image feature tokens already
+included in the prompt total. Responses reports reuse through
+`input_tokens_details.cached_tokens`.
+
+Anthropic reports reused tokens in `cache_read_input_tokens` and the remaining
+prompt tokens in `input_tokens`; their sum is the token-count endpoint's result.
+`cache_creation_input_tokens` remains zero because Flare does not separately
+account for cache writes. These are native reuse counts, independent of
+Anthropic cache-control billing policies. In streams, `message_start` initially
+reports the full prompt with zero cache reads; `message_delta` supplies the final
+input, output, and cache counts. Chat and Completions include final usage when
+`stream_options.include_usage` is true. Chat token observation extensions
+(`return_token_ids` and `return_token_timestamps`) preserve usage details,
+including the legacy terminal usage when token IDs are requested without a
+separate usage chunk. Stop sequences report the exact matched string through
+Anthropic `stop_sequence`.
 
 ## Raw completions
 
@@ -215,7 +230,10 @@ arrays are rejected. Raw prompts bypass chat templates and reasoning/tool parser
 interleave indices. The configured or explicit seed advances by choice index. `echo` prepends the
 original text or decoded token prompt. `max_tokens: 0` performs tokenization and
 optional echo without GPU submission. Prompt usage counts each input once;
-completion usage sums all generated choices. `best_of` must equal `n`; ranked
+cached usage uses the first choice's admission count for each input, independent
+of completion order. Zero-token requests report zero cached tokens because they
+do not perform a cache lookup. Completion usage sums all generated choices.
+`best_of` must equal `n`; ranked
 sampling, suffix insertion, prompt scoring, and log probabilities are rejected.
 
 ## Clients and tests
