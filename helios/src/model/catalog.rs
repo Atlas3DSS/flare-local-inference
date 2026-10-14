@@ -37,6 +37,10 @@ fn validate_inner<M: ModelContract>(
         || config.limits.max_active > manifest.max_active
         || config.limits.request_slots != manifest.request_capacity()
         || config.limits.max_sequence_tokens == 0
+        || config.limits.max_sequence_tokens > config.prepared_sequence_tokens
+        || !config
+            .prepared_sequence_tokens
+            .is_multiple_of(page_tokens.max(1))
         || page_tokens == 0
         || !config
             .limits
@@ -44,7 +48,6 @@ fn validate_inner<M: ModelContract>(
             .is_multiple_of(page_tokens)
         || config.limits.pages == 0
         || config.limits.pages > i32::MAX as u32
-        || config.limits.snapshots == 0
         || config.limits.snapshots > i32::MAX as u32 - (config.limits.request_capacity() + 1) as u32
         || config.max_new_tokens == 0
         || config.max_new_tokens > i32::MAX as u32

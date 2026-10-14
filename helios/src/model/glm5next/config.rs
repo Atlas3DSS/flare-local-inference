@@ -24,7 +24,7 @@ pub(super) fn validate_config(config: &ModelConfig, manifest: &ExecutionManifest
     {
         return Err("GLM speculation requires learned MTP proposals".into());
     }
-    if config.limits.max_sequence_tokens > 1048576 {
+    if config.prepared_sequence_tokens > 1048576 {
         return Err("invalid prepared GLM context capacity".into());
     }
     Ok(())

@@ -445,20 +445,53 @@ On integrated GPUs such as GB10, that budget is Linux `MemAvailable`, capped
 by CUDA's device total. CPU allocations, registered buffers, and GPU allocations
 share physical DRAM; reclaimable page cache contributes to available memory,
 while swap does not. Discrete GPUs use CUDA's free device-memory query.
-Rows comprise one null row, `concurrency * verification_width` execution rows,
-three admission checkpoint destinations per active request, and a prefix cache.
-The prefix cache targets eight rows per request, with an eight-row floor and a
-quarter-share memory limit. KV pages receive the remaining budget, within their
-virtual maximum. The planner accounts for each allocation's mapping alignment
-and requires at least 8,192 cached tokens per active request.
+Dedicated rows comprise one null row and the selected request capacity times
+the recipe's execution rows per request. KV pages receive the remaining budget,
+within their virtual maximum. The planner accounts for mapping alignment and
+requires at least 8,192 cached tokens per active request.
+
+Up to eight immutable snapshot slots per active request share physical backing
+with KV pages. At load, CUDA virtual mappings expose the same allocation chunks
+through the page planes and the snapshot part of the continuation range. Small
+interleaved runs of dense page planes keep each snapshot's conflicting page range
+close to its byte cost. Planes whose allocation granules span more pages than a
+row's byte cost remain dedicated to KV; the densest planes always participate.
+Across ranks, the scheduler uses the union of conflicting ranges.
+Ranks loaded in separate processes must report identical cache capacities and
+snapshot exclusions during the control-channel handshake; a mismatch rejects
+startup before replay. Independent hosts do not negotiate a common cache budget.
+An owned snapshot excludes all conflicting page ids; overlapping exclusions
+are reference-counted. A snapshot fitting entirely in execution-allocation
+alignment padding excludes no pages. Execution rows never alias KV pages.
+
+Admission reserves the request's KV pages. System, prompt, and terminal snapshots
+acquire backing at their capture boundaries, evicting unpinned checkpoints when
+needed. If active requests or transfers hold all suitable backing, optional
+retention is skipped. An inbound host restore reserves both its row and pages
+before transfer; if its snapshot prevents admission, the request recomputes its
+prompt. Snapshot and page ownership remain exclusive through graph
+and transfer completion, including cancellation and duplicate publication.
+Once generation drains, unused output-page reservations are released before
+retaining the final checkpoint.
 
 The loader writes the chosen physical row and page counts into `memory_capacity`.
 Maintenance kernels consume those device scalars; kernels preserve fixed row
 strides and base addresses. Request-to-row bindings separate transport slots
-from execution rows. Execution and prefix-cache partitions are fixed at load
-time, with no row leasing or steady-state remapping. Model recipes declare row
+from execution rows. Virtual addresses and all physical mappings are fixed at
+load; changing ownership requires no CUDA allocation or remapping. Model recipes declare row
 contents and KV geometry; the memory planner does not depend on recurrent or
 attention architecture.
+
+The prepared context extent determines page-table shapes and captured workspace
+sizes. The runtime sequence limit is the smaller of that extent and loaded KV
+capacity after the model's per-request draft-page allowance. Runtime input packing
+preserves the prepared strides. Existing packages retain their prepared ceiling;
+raising that ceiling requires export.
+
+The `flare_snapshot_backing_pages` metric counts page ids excluded by owned
+snapshots, including rows awaiting retirement. It counts overlapping exclusions
+once. `flare_free_snapshots` counts unowned virtual slots; their backing may be
+occupied by KV pages.
 
 The loading display separates allocation capacity from payload bytes.
 `Allocate model memory` reports GPU and host capacity. `Load weights` counts

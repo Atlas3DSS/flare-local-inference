@@ -156,7 +156,7 @@ impl<'a> Reader<'a> {
 pub(super) fn layout(manifest: &ExecutionManifest) -> Vec<u8> {
     let mut bytes = Vec::new();
     for value in [
-        2,
+        3,
         manifest.abi_version as usize,
         manifest.max_active,
         manifest.input_frame_bytes,
@@ -192,6 +192,17 @@ pub(super) fn layout(manifest: &ExecutionManifest) -> Vec<u8> {
             string(&mut bytes, &binding.buffer_name);
             number(&mut bytes, binding.host_offset);
             number(&mut bytes, binding.nbytes);
+        }
+    }
+    number(&mut bytes, usize::from(manifest.cache.is_some()));
+    if let Some(cache) = &manifest.cache {
+        for value in [cache.page_tokens, cache.page_capacity, cache.row_capacity] {
+            number(&mut bytes, value as usize);
+        }
+        number(&mut bytes, cache.snapshot_pages.len());
+        for range in &cache.snapshot_pages {
+            number(&mut bytes, range.start as usize);
+            number(&mut bytes, range.end as usize);
         }
     }
     bytes

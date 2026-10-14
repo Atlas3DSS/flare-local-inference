@@ -1,12 +1,9 @@
 """Derive a serving plan from a recipe's cost model and the host's free GPU memory.
 
-Weights, graphs and scratch, live state, and a prefix cache sized from the
-concurrency limit come first. KV pages take all remaining supply, the GPU's free
-memory minus engine headroom and the configured reserve: the pool holds active
-requests and every cached prefix. Active requests need at least 8,192 tokens
-each; when supply cannot provide that, the prefix cache shrinks to its floor. A
-plan that still does not fit is a capacity error naming the settings that would
-make it fit.
+Weights, graphs, scratch and execution rows have dedicated storage. KV pages
+take the remaining supply after headroom and the configured reserve. Immutable
+prefix snapshots borrow KV backing while retained; an idle snapshot slot costs
+no physical memory. Active requests need at least 8,192 tokens each.
 """
 
 from dataclasses import dataclass, replace
@@ -26,13 +23,9 @@ HEADROOM_BYTES = 1 << 30
 HEADROOM_CHUNK_TOKENS = 4096
 HEADROOM_CHUNK_TOKEN_BYTES = 128 << 10
 MINIMUM_REQUEST_TOKENS = 8192
-# The prefix cache keeps about four recent exchanges per concurrent request
-# resident; each exchange retains its prompt and terminal checkpoints.
+# Each exchange can retain prompt and terminal checkpoints; snapshot slots have
+# virtual capacity for about four recent exchanges per concurrent request.
 CACHE_STATES_PER_REQUEST = 8
-# The cache takes at most a quarter of the memory left after weights, graphs, and
-# live state, so KV pages for active requests keep the larger share.
-CACHE_SHARE = 4
-CACHE_FLOOR = 8
 SUPPORTED_CAPABILITIES = ((10, 3), (12, 0), (12, 1))
 SUPPORTED_ARCHITECTURES = "SM103, SM120, or SM121"
 _GIB = 1 << 30
@@ -171,10 +164,6 @@ class Plan:
         return self.live_rows * self.costs.state_row_bytes
 
     @property
-    def cache_bytes(self) -> int:
-        return self.cache_states * self.costs.state_row_bytes
-
-    @property
     def fixed_bytes(self) -> int:
         return self.weights_bytes + self.graph_bytes + self.live_bytes
 
@@ -222,12 +211,12 @@ class Plan:
 
     @property
     def snapshots(self) -> int:
-        return self.recipe.snapshot_rows(self.cache_states, self.concurrency)
+        return self.cache_states
 
     @property
     def fits(self) -> bool:
         return (self.pages >= self.minimum_pages
-                and self.fixed_bytes + self.cache_bytes + self.page_bytes <= self.supply_bytes)
+                and self.fixed_bytes + self.page_bytes <= self.supply_bytes)
 
     def to_dict(self) -> dict:
         return {
@@ -245,7 +234,8 @@ class Plan:
             "weights_bytes": self.weights_bytes, "mapped_host_bytes": self.checkpoint.mapped_host_bytes,
             "graph_bytes": self.graph_bytes,
             "live_bytes": self.live_bytes, "prefix_cache_states": self.cache_states,
-            "prefix_cache_target": self.cache_target, "prefix_cache_bytes": self.cache_bytes,
+            "prefix_cache_target": self.cache_target,
+            "snapshot_virtual_bytes": self.snapshots * self.costs.state_row_bytes,
             "snapshots": self.snapshots,
             "pages": self.pages, "demand_pages": self.demand_pages, "page_tokens": self.page_tokens,
             "page_bytes": self.page_bytes, "tokens": self.tokens, "guaranteed_tokens": self.guaranteed_tokens,
@@ -268,19 +258,12 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
                 recipe.weights_bytes(checkpoint, len(gpus), speculation), costs.graph_bytes,
                 context_parallel and costs.page_tokens is not None)
     available = plan.supply_bytes - plan.fixed_bytes
-    target = min(CACHE_STATES_PER_REQUEST * concurrency,
-                 max(CACHE_FLOOR, available // CACHE_SHARE // costs.state_row_bytes))
+    target = min(CACHE_STATES_PER_REQUEST * concurrency, max(1, available // costs.state_row_bytes))
     if cache_states is not None:
         target = cache_states
 
-    def pages(kept):
-        return (available - kept * costs.state_row_bytes) // costs.page_bytes
-
-    kept = target
-    if pages(kept) < plan.minimum_pages:
-        affordable = (available - plan.minimum_pages * costs.page_bytes) // costs.state_row_bytes
-        kept = min(target, max(CACHE_FLOOR, affordable))
-    return replace(plan, cache_target=target, cache_states=kept, pages=max(pages(kept), plan.minimum_pages))
+    return replace(plan, cache_target=target, cache_states=target,
+                   pages=max(available // costs.page_bytes, plan.minimum_pages))
 
 
 def _gib(value: int) -> str:
@@ -292,10 +275,10 @@ def _per_gpu(plan: Plan) -> str:
 
 
 def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
-    need = plan.fixed_bytes + plan.cache_bytes + plan.page_bytes
+    need = plan.fixed_bytes + plan.page_bytes
     lines = [
         f"needs {_gib(plan.weights_bytes)} GiB weights + {_gib(plan.graph_bytes)} GiB graphs"
-        f" + {_gib(plan.live_bytes)} GiB live state + {_gib(plan.cache_bytes)} GiB prefix cache",
+        f" + {_gib(plan.live_bytes)} GiB live state",
         f"+ {_gib(plan.page_bytes)} GiB minimum pages ({plan.concurrency} × {MINIMUM_REQUEST_TOKENS:,} tokens)"
         f" = {_gib(need)} GiB{_per_gpu(plan)};",
         f"has {_gib(plan.free_bytes)} GiB free − {_gib(plan.headroom_bytes)} GiB headroom"
@@ -371,7 +354,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
         return result
 
     closest = min(candidates(), key=lambda candidate: (
-        candidate.fixed_bytes + candidate.cache_bytes + candidate.page_bytes - candidate.supply_bytes))
+        candidate.fixed_bytes + candidate.page_bytes - candidate.supply_bytes))
     options = []
     if reserve_bytes > 0:
         for reserve in range((reserve_bytes - 1) // _GIB, -1, -1):

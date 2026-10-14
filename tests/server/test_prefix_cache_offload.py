@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("FLARE_RUN_CUDA_TESTS") != "1"
     or not os.environ.get("FLARE_OFFLOAD_TEST_PACKAGE")
     or not os.environ.get("CUDA_VISIBLE_DEVICES"),
-    reason="requires an assigned GPU and a Qwen TP1 ordinary/MTP5 runtime package",
+    reason="requires assigned GPUs and a compatible runtime package",
 )
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,9 +71,12 @@ def server(tmp_path, name, drafts=5, flags=()):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     log_path = tmp_path / f"{name}.log"
+    devices = ",".join(str(rank) for rank in range(len(os.environ["CUDA_VISIBLE_DEVICES"].split(","))))
     args = [str(ROOT / "flare/target/release/flare"), "run",
-            os.environ["FLARE_OFFLOAD_TEST_PACKAGE"], "--gpus", "0",
+            os.environ["FLARE_OFFLOAD_TEST_PACKAGE"], "--gpus", devices,
             "--bind", f"127.0.0.1:{port}", "--mtp-draft-tokens", str(drafts), *flags]
+    if publisher := os.environ.get("FLARE_TEST_PUBLISHER_KEYS"):
+        args.extend(("--publisher-keys", publisher))
     with log_path.open("w") as log:
         process = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
         service = Service(f"http://127.0.0.1:{port}", process)

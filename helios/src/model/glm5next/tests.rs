@@ -13,6 +13,7 @@ use crate::{
 
 pub(super) fn config() -> ModelConfig {
     ModelConfig {
+        prepared_sequence_tokens: 16384,
         contract: Glm5Next::metadata(),
         identity: [9; 32],
         model_id: "glm53".into(),
@@ -536,4 +537,19 @@ fn mtp_catalog_requires_shifted_draft_pages_and_verification_widths() {
     validate::<Glm5Next>(&config, &manifest(&config)).unwrap();
     config.history_drafts = true;
     assert!(validate::<Glm5Next>(&config, &manifest(&config)).is_err());
+}
+
+#[test]
+fn runtime_context_shrinks_without_changing_captured_page_table_geometry() {
+    let mut config = config();
+    let captured = manifest(&config);
+    let prepared = config.limits.max_sequence_tokens;
+    let page_tokens = Glm5Next::scheduler_capabilities(&config).page_tokens;
+    config.limits.pages = (prepared / page_tokens / 2) as u32;
+    config.fit_context::<Glm5Next>();
+    assert_eq!(config.limits.max_sequence_tokens, prepared / 2);
+    assert_eq!(config.prepared_sequence_tokens, prepared);
+    validate::<Glm5Next>(&config, &captured).unwrap();
+    config.prepared_sequence_tokens = config.limits.max_sequence_tokens;
+    assert!(validate::<Glm5Next>(&config, &captured).is_err());
 }

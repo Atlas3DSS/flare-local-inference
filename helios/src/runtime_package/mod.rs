@@ -1,6 +1,7 @@
 //! Native ownership and reconstruction of prepared CUDA graph packages.
 
 mod archive;
+mod cache_memory;
 pub mod driver;
 mod engram;
 #[cfg(test)]
@@ -42,6 +43,7 @@ struct Storage {
     nbytes: usize,
     memory: Memory,
     fixed: bool,
+    mappings: Vec<(u64, usize)>,
 }
 
 /// Owns a CUDA context and every allocation, module, and graph loaded into it.
@@ -255,6 +257,7 @@ impl NativeResources {
                             nbytes: 0,
                             memory: allocation.memory,
                             fixed: true,
+                            mappings: Vec::new(),
                         },
                     );
                     continue;
@@ -335,6 +338,13 @@ impl NativeResources {
                         nbytes: allocation.nbytes,
                         memory: allocation.memory,
                         fixed: allocation.address.is_some(),
+                        mappings: if allocation.address.is_some()
+                            && matches!(allocation.memory, Memory::Device)
+                        {
+                            vec![(address, allocation.nbytes)]
+                        } else {
+                            Vec::new()
+                        },
                     },
                 );
                 if allocation.address.is_some() {
@@ -827,7 +837,9 @@ impl Drop for NativeResources {
                         (self.driver.free)(allocation.base);
                     }
                     (Memory::Device, true) => {
-                        (self.driver.unmap)(allocation.address, allocation.nbytes);
+                        for &(address, bytes) in &allocation.mappings {
+                            (self.driver.unmap)(address, bytes);
+                        }
                     }
                     (Memory::MappedHost, _) => {
                         (self.driver.host_unregister)(allocation.address as Handle);

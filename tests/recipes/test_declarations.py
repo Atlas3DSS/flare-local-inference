@@ -72,10 +72,9 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     for speculation in (None, COPY):
         assert recipe.weights_bytes(checkpoint, world, speculation) == -(
             -(loaded - checkpoint.draft_bytes) // world)
-    # Qwen commits verified tokens into the live row; GLM keeps a row per verified position.
-    verification = 0 if model is QWEN else recipe.speculation.draft_tokens
-    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * (1 + verification) + 12
-    assert recipe.live_rows(4, None) == 1 + 4 + 12
+    # Both recipes commit verified tokens into one live recurrent row.
+    assert recipe.live_rows(4, recipe.speculation) == 1 + 4
+    assert recipe.live_rows(4, None) == 1 + 4
 
 
 def test_qwen_stored_bytes_match_the_cached_checkpoint():

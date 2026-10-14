@@ -51,6 +51,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ImageLimits::default(),
     )?;
     let config = ModelConfig {
+        prepared_sequence_tokens: 262144,
         contract: Qwen4Exp::metadata(),
         model_id: text["model_id"].as_str().unwrap().into(),
         identity: [0; 32],

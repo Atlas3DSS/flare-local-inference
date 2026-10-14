@@ -48,7 +48,7 @@ impl TensorParallelExecutor {
             let mut reader = Reader(&hello);
             if reader.number()? != index + 1 || reader.number()? != world || reader.0 != expected {
                 return Err(invalid(
-                    "tensor-parallel rank identity or graph I/O schema differs",
+                    "tensor-parallel rank identity, graph I/O schema, or cache ownership layout differs",
                 ));
             }
             peers.push(Peer {

@@ -236,6 +236,7 @@ fn serve<M: ModelContract>(
         bootstrap.model.contract.vocabulary
     ));
     let phase = progress.phase("Start server", None);
+    let context_tokens = bootstrap.model.limits.max_sequence_tokens;
     let server = match unsafe {
         Server::<M>::start(
             manifest,
@@ -255,7 +256,10 @@ fn serve<M: ModelContract>(
             return Err(error.message.into());
         }
     };
-    phase.finish(format!("http://{}", server.address()));
+    phase.finish(format!(
+        "http://{} · {context_tokens} tokens/request",
+        server.address()
+    ));
     unsafe {
         libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);

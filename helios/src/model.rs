@@ -77,6 +77,8 @@ pub struct ContractMetadata {
 
 #[derive(Clone, Debug)]
 pub struct ModelConfig {
+    /// Context extent of captured page tables and workspaces; serving may use a smaller limit.
+    pub prepared_sequence_tokens: usize,
     pub contract: ContractMetadata,
     pub identity: [u8; 32],
     pub model_id: String,
@@ -165,6 +167,20 @@ impl SamplingParameters {
 }
 
 impl ModelConfig {
+    pub fn fit_context<M: ModelContract>(&mut self) {
+        let capabilities = M::scheduler_capabilities(self);
+        let draft_pages = if self.has_learned_drafts() {
+            capabilities.draft_pages_per_request
+        } else {
+            0
+        };
+        self.limits.max_sequence_tokens = self.prepared_sequence_tokens.min(
+            (self.limits.pages as usize)
+                .saturating_sub(draft_pages)
+                .saturating_mul(capabilities.page_tokens),
+        );
+    }
+
     pub fn has_learned_drafts(&self) -> bool {
         !self.speculative_widths.is_empty()
             && self.speculative_proposal_source

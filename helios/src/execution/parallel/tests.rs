@@ -30,6 +30,31 @@ fn logical_layout_excludes_process_addresses_and_detects_contract_changes() {
 }
 
 #[test]
+fn rank_layout_requires_equal_cache_capacities_and_snapshot_exclusions() {
+    let mut manifest = super::super::tests::manifest();
+    let mut cache = crate::offload::geometry::tests::geometry(64, &[("kv", 4096)], 65536);
+    cache.snapshot_pages = vec![100..120, 115..135];
+    manifest.cache = Some(cache);
+    let expected = layout(&manifest);
+    let mut peer = manifest.clone();
+    let cache = peer.cache.as_mut().unwrap();
+    cache.row.address += 0x10000;
+    cache.planes[0].address += 0x20000;
+    assert_eq!(expected, layout(&peer));
+    peer.cache.as_mut().unwrap().snapshot_pages[0].start += 1;
+    assert_ne!(expected, layout(&peer));
+    peer = manifest.clone();
+    peer.cache.as_mut().unwrap().page_capacity -= 1;
+    assert_ne!(expected, layout(&peer));
+    peer = manifest.clone();
+    peer.cache.as_mut().unwrap().row_capacity -= 1;
+    assert_ne!(expected, layout(&peer));
+    peer = manifest;
+    peer.cache = None;
+    assert_ne!(expected, layout(&peer));
+}
+
+#[test]
 fn fragmented_completion_remains_pending_until_all_bytes_arrive() {
     let (mut sender, receiver) = UnixStream::pair().unwrap();
     let mut channel = Channel::new(receiver).unwrap();

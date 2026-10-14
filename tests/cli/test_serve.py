@@ -44,7 +44,7 @@ class Prepared:
 
     def usage(self):
         plan = self.plan
-        state = (plan.live_rows + plan.cache_states) * plan.costs.state_row_bytes
+        state = plan.live_rows * plan.costs.state_row_bytes
         held = plan.weights_bytes + plan.graph_bytes + self.extra + state + plan.page_bytes
         return (RankUsage(self.pages or plan.pages, FREE - held),)
 

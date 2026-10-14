@@ -41,6 +41,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     )
     .unwrap();
     let config = ModelConfig {
+        prepared_sequence_tokens: 1048576,
         contract: Glm5Next::metadata(),
         identity: [9; 32],
         model_id: "glm53".into(),

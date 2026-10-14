@@ -258,13 +258,13 @@ reserve.
 
 The GPU prefix cache is derived. It holds model states at instruction,
 prompt, and answer boundaries so that later requests repeating a prefix skip
-recomputing it. A finished exchange keeps its prompt and answer states, so the
-engine sizes the cache at eight states per concurrent request, about four
-recent exchanges each, and gives it at most a quarter of the memory left after
-weights, graphs, and live state. A state costs about 117 MiB on the Qwen3.8
-recipe. Each active request additionally holds three states while it runs,
-counted as live state. Under memory pressure, KV pages shrink first and the prefix cache has a
-floor of 8 states.
+recomputing it. A finished exchange can retain its prompt and answer states, so the
+engine exposes up to eight snapshot slots per concurrent request, about four
+recent exchanges each. Snapshot slots share physical backing with KV pages and
+acquire it only when retaining a checkpoint. Unpinned checkpoints are evicted
+to admit requests. If active requests or transfers own all suitable backing,
+the engine skips optional checkpoint retention. There is no dedicated snapshot
+memory fraction or minimum resident checkpoint count.
 
 ### 3.4 Configuration boundaries
 
@@ -305,10 +305,10 @@ disk settings require the implementation and measurements defined there.
 | Setting | Derived from |
 |---|---|
 | Tensor-parallel size | Count of `--gpus`, or the smallest recipe-supported size whose estimate fits the first GPUs with enough free memory |
-| Context limit | The checkpoint maximum |
-| KV pages | All remaining supply: free GPU memory minus engine headroom, `memory.reserve`, weights, graphs and scratch, live state, and the prefix cache; divided by the recipe's per-token page cost. Active requests are guaranteed an equal share, up to the checkpoint's maximum context; the rest holds cached prefixes |
-| Prefix cache | Eight states per `--max-concurrency` request, at most a quarter of the memory left after weights, graphs, and live state; floor 8 states under pressure |
-| Live state | The recipe's state rows for `--max-concurrency` requests: one row per request slot, the recipe's speculative rows per slot while speculating, and three checkpoint rows per active request |
+| Context limit | The smaller of the prepared context ceiling and loaded KV capacity after per-request draft-page storage; admission also checks available shared capacity |
+| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports KV capacity before checkpoint retention |
+| Prefix cache | Up to eight snapshot slots per `--max-concurrency` request, acquired on demand from shared KV backing and evicted under pressure |
+| Live state | One null row plus the recipe's execution rows per active request slot; GLM verification commits into one live row |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |
 | Prefill chunk | The recipe's chunk, 4,096 tokens for Qwen, GLM, and DeepSeek; `--prefill-chunk-size` overrides |
 | Speculative catalog and draft counts | Recipe, overridden by `--no-mtp` and the `--mtp-*` flags; the draft count adapts from measured rounds unless fixed |

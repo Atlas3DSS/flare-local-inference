@@ -11,11 +11,6 @@ from types import MappingProxyType
 
 from ignition.components.capacity import request_capacity
 
-# State rows one admitted request can hold while it runs: the terminal, system,
-# and prompt checkpoints that the scheduler reserves at admission.
-ADMISSION_SNAPSHOTS = 3
-
-
 @dataclass(frozen=True)
 class SamplingDefaults:
     """Complete serving parameters manually verified against the model card."""
@@ -173,12 +168,8 @@ class Recipe:
                    - (0 if learned else checkpoint.draft_bytes)) // world_size)
 
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:
-        """State rows held for running requests: null, live, speculative, and admission rows."""
+        """Permanently backed null, live, and speculative execution rows."""
         slots = request_capacity(concurrency)
         speculative = (0 if speculation is None else speculation.draft_tokens if self.verification_rows is None
                        else self.verification_rows)
-        return 1 + slots * (1 + speculative) + ADMISSION_SNAPSHOTS * concurrency
-
-    def snapshot_rows(self, cache_states: int, concurrency: int) -> int:
-        """Snapshot rows that keep `cache_states` cached states resident at full concurrency."""
-        return cache_states + ADMISSION_SNAPSHOTS * concurrency
+        return 1 + slots * (1 + speculative)
