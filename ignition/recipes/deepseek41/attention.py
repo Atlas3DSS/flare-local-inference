@@ -21,6 +21,10 @@ from ignition.components.rotary import CompressedRotary as Rotary
 from .pool import PAGE_TOKENS
 
 
+# Bound full-context score storage while amortizing prefill selection launches.
+INDEXER_QUERY_ROWS = 128
+
+
 def normalize(source, weight, out, eps):
     value = source.float()
     out.copy_((value * torch.rsqrt(value.square().mean(-1, keepdim=True) + eps)) * weight.float())
@@ -188,8 +192,8 @@ class PreparedAttention:
             self.index_weight = UnquantizedProjection(source, weights["index_weights"], scratch.index_weights,
                 session=session, name=f"{name}.index_weight")
             candidate_source = config.text["candidate_source_layer_id"]
-            for first in range(0, tokens, 32):
-                last = min(tokens, first + 32)
+            for first in range(0, tokens, INDEXER_QUERY_ROWS):
+                last = min(tokens, first + INDEXER_QUERY_ROWS)
                 candidates = {}
                 if layer == candidate_source:
                     candidates = dict(candidates_out=scratch.candidates[first:last], counts_out=scratch.candidate_counts[first:last])

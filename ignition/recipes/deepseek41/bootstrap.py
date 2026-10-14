@@ -28,6 +28,7 @@ from ignition.progress import phase
 
 from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
 from .recipe import RECIPE
+from .attention import INDEXER_QUERY_ROWS
 from .decoder import PreparedDecoder, Scratch
 from ignition.components.dspark import PreparedContext, PreparedMarkov
 from .dspark import PreparedDraft
@@ -281,6 +282,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "pages": pages, "page_bytes": bytes_per_page, "page_tokens": PAGE_TOKENS,
         "kv_bytes": pages * bytes_per_page, "operator_scratch_bytes": arena.nbytes,
         "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
+        "indexer_query_rows": INDEXER_QUERY_ROWS,
         "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes,
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
         "tuning": tuning, "compiled_decoder": config.compile_decoder}
