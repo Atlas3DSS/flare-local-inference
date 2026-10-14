@@ -1013,8 +1013,9 @@ impl Ring {
                         Ok(n) if n == chunk.length as usize => moved += n as u64,
                         Ok(n) => {
                             failure.get_or_insert_with(|| {
+                                let verb = if write { "write" } else { "read" };
                                 invalid(format!(
-                                    "short direct I/O of {n} bytes at {}; {} requested",
+                                    "short direct {verb} of {n} bytes at file offset {}; {} were requested",
                                     chunk.offset, chunk.length
                                 ))
                             });

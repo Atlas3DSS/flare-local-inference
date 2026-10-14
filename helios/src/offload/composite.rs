@@ -1511,6 +1511,7 @@ mod tests {
             (4, 2)
         );
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1543,6 +1544,7 @@ mod tests {
         store.memory.complete_record(&other, true).unwrap();
         assert!(store.retains_chain(&chain));
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1593,6 +1595,7 @@ mod tests {
             }
         );
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1666,6 +1669,7 @@ mod tests {
         assert!(store.store(&short).is_err());
         assert_eq!(store.stats().store_failed, 3);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1831,6 +1835,7 @@ mod tests {
         );
         assert!(stats.outbound_rate > 0.0);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -1904,6 +1909,7 @@ mod tests {
         assert!(store.outbound.is_empty());
         assert_eq!(store.stats().store_failed, 2);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2059,6 +2065,7 @@ mod tests {
         assert!(store.memory.index().nodes().all(|node| !node.pinned()));
         assert!(store.disk.index().nodes().all(|node| !node.pinned()));
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2133,6 +2140,7 @@ mod tests {
         }
         assert_eq!(store.stats().memory_records, 3);
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2223,6 +2231,7 @@ mod tests {
             (2, 2, 4)
         );
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2254,6 +2263,7 @@ mod tests {
         // The closed store still answers: the key is indexed, so it is skipped.
         assert!(!store.store(&root).unwrap());
         assert_eq!(store.stats().store_skipped, 1);
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -2581,6 +2591,7 @@ mod tests {
         assert_eq!(store.stats().fetched, 1);
         assert!(store.memory.record(&child.key).is_some());
         store.close().unwrap();
+        drop(store);
         fs::remove_dir_all(&directory).unwrap();
     }
 

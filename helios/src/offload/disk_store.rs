@@ -2282,7 +2282,7 @@ mod tests {
         drop(store);
         let reopened = record::DirectoryLock::acquire(&path).unwrap();
         drop(reopened);
-        fs::remove_dir(path).unwrap();
+        fs::remove_dir_all(path).unwrap();
     }
 
     fn complete(
