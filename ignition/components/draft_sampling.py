@@ -27,6 +27,8 @@ BLOCK = 4096
 def _orderable(scores):
     # Signed integers ordered like the scores; NaN orders above infinity and is rejected later.
     bits = scores.to(tl.int32, bitcast=True)
+    # IEEE signed zeros are equal scores and share the token-index tie order.
+    bits = tl.where(scores == 0., 0, bits)
     return tl.where(bits < 0, bits ^ 2147483647, bits)
 
 

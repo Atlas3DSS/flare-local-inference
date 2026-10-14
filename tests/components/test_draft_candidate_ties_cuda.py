@@ -1,5 +1,6 @@
 """Bounded proposals retain strictly better scores when cutoff ties fill a block."""
 
+from contextlib import contextmanager
 import os
 
 import pytest
@@ -14,15 +15,10 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="requires an explicitly assigned CUDA device")
 
 
-@pytest.mark.parametrize("higher_indices", [(4095,), (4096,), (127, 4095, 4096, 8191)])
-@pytest.mark.parametrize("top_k", [0, 3, 64])
-@torch.no_grad()
-def test_higher_score_survives_local_and_global_cutoff_ties(higher_indices, top_k):
-    device = torch.device("cuda", 0)
-    vocab = 8192
-    scores = torch.full((1, vocab), -torch.inf, device=device)
-    scores[0, :64] = 1.
-    scores[0, list(higher_indices)] = 2.
+@contextmanager
+def _captured_proposal(scores, top_k):
+    device = scores.device
+    vocab = scores.shape[1]
     probabilities = torch.zeros_like(scores)
     valid = torch.ones(1, dtype=torch.bool, device=device)
     packed_k = torch.tensor([top_k or vocab], dtype=torch.int32, device=device)
@@ -45,10 +41,29 @@ def test_higher_score_survives_local_and_global_cutoff_ties(higher_indices, top_
         resources=(operation, compiled, probabilities, valid, packed_k, packed_p,
                    parameters, slots, seed, offset, sampled))
     worker = bundle.start_worker()
-    try:
+    def replay():
+        torch.cuda.synchronize()
         ticket = worker.submit(bundle.graph_indices["proposal"], repetitions=2)
         completion = worker.poll(timeout_ms=120000)
         assert completion is not None and completion.ticket == ticket and completion.error is None
+    try:
+        yield probabilities, valid, sampled, replay
+    finally:
+        worker.close()
+        graph.reset()
+
+
+@pytest.mark.parametrize("higher_indices", [(4095,), (4096,), (127, 4095, 4096, 8191)])
+@pytest.mark.parametrize("top_k", [0, 3, 64])
+@torch.no_grad()
+def test_higher_score_survives_local_and_global_cutoff_ties(higher_indices, top_k):
+    device = torch.device("cuda", 0)
+    vocab = 8192
+    scores = torch.full((1, vocab), -torch.inf, device=device)
+    scores[0, :64] = 1.
+    scores[0, list(higher_indices)] = 2.
+    with _captured_proposal(scores, top_k) as (probabilities, valid, sampled, replay):
+        replay()
         # Top-k below the number of higher scores keeps their boundary tie.
         # Otherwise top-p reaches the lower tied group and retains all 64 candidates.
         low_count = 0 if 0 < top_k <= len(higher_indices) else 64 - len(higher_indices)
@@ -60,6 +75,20 @@ def test_higher_score_survives_local_and_global_cutoff_ties(higher_indices, top_
         torch.testing.assert_close(probabilities[0, expected_ids], expected, rtol=2e-6, atol=1e-8)
         assert (sampled[:, None] == expected_ids).any()
         assert valid.all()
-    finally:
-        worker.close()
-        graph.reset()
+
+
+@pytest.mark.parametrize("vocab", [17, 8192])
+@pytest.mark.parametrize("top_k", [0, 7, 64])
+@torch.no_grad()
+def test_signed_zero_scores_preserve_boundary_ties_and_draw_order(vocab, top_k):
+    scores = torch.zeros((1, vocab), device="cuda")
+    with _captured_proposal(scores, top_k) as (probabilities, valid, sampled, replay):
+        replay()
+        expected_probabilities, expected_sampled = probabilities.clone(), sampled.clone()
+        scores[:, 1::2] = -0.
+        replay()
+        # Signed zeros are equal scores, so their token-index tie order and the
+        # bounded support are identical to those of a row of positive zeros.
+        assert torch.equal(probabilities, expected_probabilities)
+        assert torch.equal(sampled, expected_sampled)
+        assert valid.all()
