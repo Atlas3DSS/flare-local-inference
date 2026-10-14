@@ -1,7 +1,7 @@
 # GLM-5.3 Flash: batched speculative decoding corrupts answers on DGX Spark
 
-Status: cause found and fix validated on Spark TP2 (section 7); the fix is not
-yet merged. Exporting a GLM package zeroes the DSA indexer's selection width,
+Status: cause found; the fix (section 7) is validated on Spark at TP2 and TP4
+and not yet merged. Exporting a GLM package zeroes the DSA indexer's selection width,
 which only the b12x indexer's tiled route reads, so every verification graph
 above 16 query rows attends to the wrong records.
 
@@ -16,7 +16,7 @@ wrong record. The same packages answer correctly with speculation disabled
 requests. On a GB300 (SM103, one GPU) the identical test is correct at 16
 concurrent requests.
 
-Two other symptoms follow from it:
+Two other symptoms were attributed to it:
 
 - **Long prompts without a cached prefix answer wrongly.** Right after its
   prefill, a request runs one speculative round at each larger batch capacity
@@ -26,7 +26,11 @@ Two other symptoms follow from it:
 - **Concurrent streams occasionally fail with device error 6
   (`INVALID_SPECULATION`).** An instrumented build that reports the failing
   check shows the verifier rejecting the target distribution (non-finite or
-  empty probabilities), often in several rows of the same round.
+  empty probabilities), often in several rows of the same round. This one
+  survives the fix: TP4 packages at concurrency 16 still fail about one
+  request in sixteen this way, as they did before it, while TP2 at
+  concurrency 8 and the GB300 have not shown it. It is being investigated as a
+  separate defect (section 7).
 
 The cause is in package export, not in a kernel. Each GLM indexer passes b12x a
 one-element `active_width` tensor that preparation fills once with the page
@@ -88,6 +92,9 @@ how many of them were in graphs above 16 query rows.
 | Spark TP2, same server | cached 10K ×2 | 2/2 |
 | Spark TP2, exported with the fix in section 7, compiled, adaptive MTP, concurrency 8 | cached 10K ×8, three seeds | 4/8 (+4 neighbour), 8/8, 7/8 (+1 neighbour); no corrupt replies |
 | Spark TP2, same package | cached 10K ×2; uncached 96K ×3 | 2/2; 3/3 |
+| Spark TP2, Flare `main` 7ba743d with the export fix and the fix in section 7, concurrency 8 | cached 10K ×8, three seeds; uncached 96K ×2 | 8/8, 8/8, 4/8 (+4 neighbour); 2/2 |
+| Spark TP4, exported with the fix in section 7, compiled, concurrency 16 | cached 10K ×16, two seeds | 15/16 (+1 device error 6), 15/16 (+1 neighbour); no corrupt replies |
+| Spark TP4, same package | cached 96K ×16; uncached 96K ×3 | 14/16 (+2 device error 6); 3/3 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 10K ×16 | 1/16 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 96K ×16 | 0/16 (13 reached the 16,384-token limit) |
 | Spark TP4, adaptive MTP | cached 10K ×2, ×4, ×8 | 2/2, 3/4, 1/8 |
@@ -309,14 +316,24 @@ rewrites the page table and pool lengths (`PreparedGlmIndexer.__call__` in
             s.active_width.fill_(s.page_table.shape[1] * 64)
 ```
 
-With this change and an unmodified FlashInfer, a compiled TP2 package at
-concurrency 8 returned no corrupt replies in three concurrency-8 runs, two
-requests, and three uncached 96K-token prompts (section 3).
+With this change and an unmodified FlashInfer, no exported package has
+returned a corrupt reply: a compiled TP2 package at concurrency 8 on the
+development branch and on `main`, and a compiled TP4 package at concurrency 16,
+the configuration in which the defect was first seen, including 96K-token
+cached and uncached prompts (section 3).
 
-1. Validate the fix on `main` with the section 4 export fix (in progress), and
-   at TP4 with concurrency 16, the configuration in which the defect was first
-   seen.
-2. Merge the fix and the export fix, with a regression test that zeroes the
-   export's disposable ranges before replaying a graph above 16 rows.
-3. Audit other recipes for prepared constants placed in storage that export
-   treats as disposable.
+1. Merge the fix and the export fix, with a regression test that overwrites
+   the export's disposable ranges after preparation and checks that every
+   captured graph still produces the same output, so any graph that depends on
+   preparation-time contents of disposable storage fails.
+2. Find the source of the remaining device error 6 at TP4, concurrency 16. A
+   TP4 package carrying the fix and a diagnostic that reports which part of the
+   target distribution is invalid (NaN or infinite logits by vocabulary
+   quarter, which at TP4 is the rank that projected them, or an empty filtered
+   distribution) is being tested.
+3. An audit of the other recipes (DeepSeek V4 and V4.1, Qwen 3.8, MiMo V2.6)
+   and of the b12x and FlashInfer bindings they serve found no other
+   preparation-time value that export zeroes and a graph reads. Two b12x
+   values follow the same pattern but are unread today: the compressed sparse
+   MLA split-control scalars written at binding, and the indexer's internal
+   width cap used only when a caller passes no `active_width`.
