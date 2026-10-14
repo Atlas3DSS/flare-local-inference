@@ -30,7 +30,7 @@ Two other symptoms follow from it:
 | Item | Value |
 | --- | --- |
 | Reproduced on | A development branch of Flare `main` carrying unmerged multi-host changes, with FlashInfer 64916e85 plus the RoCEnante variable-length all-gather from [local-inference-lab/flashinfer#12](https://github.com/local-inference-lab/flashinfer/pull/12) |
-| Flare `main` | Reproduction with `main` and its pinned FlashInfer (64916e85, `pyproject.toml`) is in progress; this section will record the result. Sections 4 and 5 use `main` |
+| Flare `main` | `main` (7ba743d) cannot yet export a multi-host package: each peer rank stops with `ValueError: runtime assets must contain only tokenizer and chat_template`. Section 4 gives the one-line fix. Reproduction with `main`, that fix and the pinned FlashInfer (64916e85, `pyproject.toml`) is in progress; this section will record the result. Sections 4 and 5 use `main` |
 | Checkpoint | `local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` (revision dec48abd) |
 | Packages | TP2: `--ranks 2 --max-concurrency 8`; TP4: `--ranks 4 --max-concurrency 16`; both `--gpus 0 --prefill-chunk-size 4096 --no-context-parallel` with the default adaptive MTP |
 | Hardware | DGX Spark, ConnectX-7 at 200G through one switch |
@@ -63,6 +63,8 @@ how many of them were in graphs above 16 query rows.
 | Spark TP2, speculation off, concurrency 8 | cached 10K ×8 | 8/8 |
 | Spark TP2, MTP draft removed from decode rounds (diagnostic, see section 6), fixed width 4, concurrency 8 | cached 10K ×8, two seeds | 0/8, 0/8 |
 | Spark TP2, same diagnostic | cached 10K ×2 | 2/2 |
+| Spark TP2, package exported with `--no-compile`, adaptive MTP, concurrency 8 | cached 10K ×8, two seeds | 1/8, 0/8 |
+| Spark TP2, same package | cached 10K ×2 | 2/2 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 10K ×16 | 1/16 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 96K ×16 | 0/16 (13 reached the 16,384-token limit) |
 | Spark TP4, adaptive MTP | cached 10K ×2, ×4, ×8 | 2/2, 3/4, 1/8 |
@@ -99,6 +101,27 @@ Build Flare `main` with its pinned FlashInfer (`git -C ../flashinfer checkout
 64916e85`) and set up multi-host serving as in [multi-host.md](multi-host.md):
 `flare agent` on every peer with the same token, and RoCE between the Sparks.
 Two Sparks suffice. Host names and addresses below are examples.
+
+On `main`, peer ranks fail at the end of the export with `ValueError: runtime
+assets must contain only tokenizer and chat_template`: a peer clears its assets
+but still encodes the shared serving contract. Until the fix lands, edit
+`export_model` in `ignition/preparation/runtime_package.py` on every host,
+replacing
+
+```python
+    server = {**prepared.server_config, **options}
+    if bundle_only:
+        server["assets"] = {}
+```
+
+with
+
+```python
+    server = None if bundle_only else {**prepared.server_config, **options}
+```
+
+Rank zero still writes the tokenizer, chat template and sampling defaults into
+the final package.
 
 1. Export a TP2 package. On rank zero:
 
@@ -204,6 +227,7 @@ standalone against b12x or PyTorch references.
 | Concurrent branches | Package with the MLA query chain and the MoE shared expert (`ConcurrentSharedExpert`) run serially | Still fails (0/16) |
 | KDA verification implementation | Package that records and replays KDA verification through the portable Triton path (`glm53/kda_recovery.py`) on SM121 | Still fails (0/16) |
 | Autotuned b12x tactics | Package prepared with b12x heuristic defaults (autotuning off) | Still fails (0/16) |
+| Compiled forwards | Package exported with `--no-compile`: each rank captures its own uncompiled forwards, so no compiled code or baked handles are shared between ranks, and no Inductor or Triton code is generated for the speculative shapes | Still fails at TP2 (1/8, 0/8; 2/2 at two requests) |
 | MTP draft model and draft-cache writes | Package whose decode rounds propose the pending token with certainty, with no draft forward or draft-cache writes (`glm53/speculative.py`), fixed width 4 | Still fails (0/8) |
 | Per-step inputs to peer ranks | Each upload is sent separately and copied before the graph launches | Correct by inspection |
 | Ranks disagreeing on tokens | The step validator compares every rank's pending token each round (error 32 on mismatch) | No mismatches |
@@ -216,11 +240,15 @@ logs, so it does not cover this case.
 
 ## 7. Next steps
 
-1. Confirm the reproduction on Flare `main` with FlashInfer 64916e85
-   (section 2).
-2. Test a package exported with `--no-compile`. Each rank then captures its
-   own uncompiled forwards, which removes both suspects that depend on the
-   speculative graph's shape: compiled forwards shared between ranks with
-   per-process integer handles baked in, and Inductor or Triton code generated
-   for those shapes on `sm_121`.
-3. Run the RTX PRO 6000 reproduction in section 5.
+1. Confirm the reproduction on Flare `main` with FlashInfer 64916e85 and the
+   export fix in section 4 (in progress).
+2. Route every decode row count through the DSA indexer's fused kernel (a
+   diagnostic FlashInfer change raising the fused route's 16-row limit). The
+   tiled route is the only kernel change known to coincide with the 16-row
+   boundary; it is correct standalone, including with guard bands around its
+   scratch and output, so a pass would point at how its results are consumed
+   in the graph. In progress at TP2.
+3. Run the RTX PRO 6000 reproduction in section 5. Every failing run so far
+   has had more than one rank, and the only correct configuration (GB300) has
+   one, so tensor-parallel code paths are as much a suspect as SM121
+   kernels.
