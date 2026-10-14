@@ -39,7 +39,7 @@ selects one of them or none:
 | Memory size | Disk limit | Store | Behavior |
 |---|---|---|---|
 | nonzero | nonzero | `CompositeStore` | Records are retained in registered memory and written through to disk; disk reads warm the memory store when capacity permits. |
-| nonzero | zero | `MemoryStore` | Records are retained in registered memory only. |
+| nonzero | zero | `MemoryStore` | Records are retained in pinned host memory only, each rank's part mapped by that rank's device alone. |
 | zero | nonzero | `DiskStore` | Records live on disk and stream through a bounded registered staging pool. |
 | zero | zero | none | The worker holds no store. |
 
@@ -287,6 +287,24 @@ regions in `helios/src/runtime_package/mod.rs`. Allocation never blocks: when
 no slab is free and nothing is evictable, the requesting job fails, which
 skips an outbound and fails an inbound.
 
+Registering host memory maps it into every device's page tables. On an RTX PRO
+6000 that costs each device about 2 MiB of device memory per GiB registered,
+126 MiB for 64 GiB, whichever ranks copy the bytes. A memory store without a
+disk tier never reads a record on the CPU, so its pool is split by rank
+instead. Each rank's part of every page slab, then of every row slab, is one
+`cuMemCreate` allocation of pinned memory on the host NUMA node closest to the
+rank's device, mapped into one reserved range and opened by `cuMemSetAccess`
+to that device and the host only. Each device then pays only for its own part:
+on two GPUs an 8 GiB pool costs each 8 MiB instead of 16 MiB. Slab addresses
+stay identities, where each slab would begin in a pool of whole cross-rank
+records inside the reserved range, so the memory store and its index are
+unchanged; each transfer thread holds its rank's `RankPart` and places a
+split slab's planes at their offsets relative to the rank's first plane.
+Composite and disk stores, whose disk threads read and write whole records,
+keep the registered mapping. Cache sizing leaves each device 1/512 of the
+host memory it maps, its share of a split pool or the whole registered pool
+and staging bound, plus 16 MiB for transfer streams.
+
 A record file lives at
 `<directory>/<identity prefix>-<layout fingerprint>/<consumed>-<digest>.ckpt`,
 with the consumed count as 16 hexadecimal digits and the digest as 32. The
@@ -335,8 +353,10 @@ signature (destinations, sources, sizes, count, attributes, attribute indices,
 attribute count, stream) and one attribute whose source access order is
 stream-ordered; `cuMemHostRegister_v2` with the portable flag;
 `cuMemHostUnregister`; `cuEventSynchronize`; `cuStreamCreateWithPriority`;
-and `cuDeviceGetAttribute` for the integrated-memory check, which the loader's
-driver binding already has. The installed driver 610.57.04 exports the
+`cuDeviceGetAttribute` for the integrated-memory check and the host NUMA node,
+which the loader's driver binding already has; and `cuMemAddressReserve`,
+`cuMemCreate`, `cuMemMap`, `cuMemSetAccess`, `cuMemUnmap`, `cuMemRelease`,
+`cuMemAddressFree`, and `cuMemGetAllocationGranularity` for split pools. The installed driver 610.57.04 exports the
 batched copy, and `/opt/cuda/include/cuda.h` declares it.
 
 ### 2.6 Deferred GPUDirect Storage transport
@@ -470,6 +490,7 @@ preparation entirely when memory and disk retention are disabled. Otherwise,
 after `allocate_caches`, the `Prepare host prefix cache` phase derives the
 storage namespace from the selected serving configuration, resolves settings,
 locks the record directory, maps and registers slab pools with rank zero's
+context current, or creates a memory-only store's split pool with each rank's
 context current, and scans the directory. Direct transport selection fails
 explicitly. `manifests` attaches a `Binding` to each rank's
 `ExecutionManifest`; the binding shares one prepared bundle, holding every
@@ -845,7 +866,5 @@ A correctness failure in any scenario blocks performance claims.
   compacted ancestor's row can be restored onto pages its child still holds
   without copying pages.
 - Page-granular matching in the GPU cache once rows are cheap to refetch.
-- Rebalancing the GPU row budget in `capacities` toward pages when rows
-  can be restored from the host.
 - A prepared GPU checksum over record planes for the direct transport.
 - Remote or shared stores, prefetch of likely continuations, and compression.

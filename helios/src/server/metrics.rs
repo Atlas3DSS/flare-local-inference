@@ -68,6 +68,7 @@ pub(super) struct Metrics {
     reused_tokens: AtomicU64,
     snapshot_publications: AtomicU64,
     snapshot_evictions: AtomicU64,
+    preemptions: AtomicU64,
     system_checkpoints: AtomicU64,
     prompt_checkpoints: AtomicU64,
     active_requests: AtomicU64,
@@ -75,6 +76,7 @@ pub(super) struct Metrics {
     retiring_slots: AtomicU64,
     free_pages: AtomicU64,
     free_snapshots: AtomicU64,
+    snapshot_backing_pages: AtomicU64,
     cached_checkpoints: AtomicU64,
     cached_pages: AtomicU64,
     pub pending: AtomicU64,
@@ -231,6 +233,7 @@ impl Metrics {
             (&self.reused_tokens, stats.reused_tokens),
             (&self.snapshot_publications, stats.snapshot_publications),
             (&self.snapshot_evictions, stats.snapshot_evictions),
+            (&self.preemptions, stats.preemptions),
             (&self.system_checkpoints, stats.system_checkpoints),
             (&self.prompt_checkpoints, stats.prompt_checkpoints),
             (&self.active_requests, stats.active_requests as u64),
@@ -238,6 +241,10 @@ impl Metrics {
             (&self.retiring_slots, stats.retiring_slots as u64),
             (&self.free_pages, stats.free_pages as u64),
             (&self.free_snapshots, stats.free_snapshots as u64),
+            (
+                &self.snapshot_backing_pages,
+                stats.snapshot_backing_pages as u64,
+            ),
             (&self.cached_checkpoints, stats.cached_checkpoints as u64),
             (&self.cached_pages, stats.cached_pages as u64),
         ] {
@@ -448,6 +455,11 @@ impl Metrics {
                 &self.snapshot_evictions,
             ),
             (
+                "preemptions_total",
+                "Requests that yielded their KV pages under pressure and were readmitted.",
+                &self.preemptions,
+            ),
+            (
                 "host_cache_lookups_total",
                 "Host prefix store lookups above the GPU checkpoint during admission.",
                 &self.host_lookups,
@@ -562,8 +574,13 @@ impl Metrics {
             ),
             (
                 "free_snapshots",
-                "Prefix-cache rows reusable after completed GPU fences.",
+                "Unowned snapshot slots; shared backing may be held by KV pages.",
                 &self.free_snapshots,
+            ),
+            (
+                "snapshot_backing_pages",
+                "KV page ids excluded by owned snapshots, including pending GPU retirement.",
+                &self.snapshot_backing_pages,
             ),
             (
                 "cached_checkpoints",

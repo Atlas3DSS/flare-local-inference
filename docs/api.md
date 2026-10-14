@@ -13,9 +13,37 @@ and return their results in subsequent requests.
 | `POST /v1/messages/count_tokens` | Anthropic message request without generation | Exact prepared input token count |
 | `POST /v1/responses` | Responses input items and instructions | Ordered output items or named SSE events |
 
-`GET /v1/models` lists the loaded model and configured aliases. As with Chat
-Completions, generation requests always use the loaded model, regardless of the
-request's `model` string. Returned objects identify the loaded model. `/health`
+`GET /v1/models` returns one card for the loaded model. Its `id` is the first
+nonempty configured alias, or the checkpoint identifier when no alias is set.
+`GET /v1/models/{model}` returns that same card for the checkpoint identifier or
+any configured alias; repository IDs containing slashes are supported. Unknown
+names return HTTP 404 with an OpenAI-style `model_not_found` error. Both routes
+use the configured bearer authentication.
+
+Model cards include the vLLM-compatible fields `id`, `object`, `created`,
+`owned_by`, `root`, `parent`, `max_model_len`, and `permission`. `max_model_len`
+is the effective serving context limit in tokens, including prompt and output.
+`root` is the loaded model's identifier, `parent` is null, and `owned_by` remains
+`local`. `created` is the serving instance's discovery initialization time in
+Unix seconds; cards and permission IDs stay stable until the server restarts.
+Permissions advertise sampling and viewing, with unsupported log probabilities,
+fine-tuning, engine creation, and search indices disabled.
+
+The additional `flare` object reports prepared and selected serving metadata:
+
+| Field | Meaning |
+| --- | --- |
+| `vocab_size` | Prepared output vocabulary size |
+| `max_concurrency` | Selected maximum active requests |
+| `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
+| `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
+| `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
+| `max_images_per_prompt` | Prepared image count limit; zero for text-only packages |
+| `input_modalities` | `text`, plus `image` when vision is prepared |
+| `output_modalities` | `text` |
+
+Generation requests always use the loaded model, regardless of the request's
+`model` string. Returned generation objects identify the loaded model. `/health`
 and `/metrics` retain their existing behavior.
 
 ## Transport and admission
@@ -169,12 +197,27 @@ text. This marker is a local round-trip consistency check, not provider
 authentication; readable thinking from other providers can be replayed.
 
 Usage counts native prompt and generated tokens, including model control tokens.
-Anthropic cache creation/read counters are zero because its billing cache
-contract differs from Helios prefix reuse. Responses exposes native reused
-prompt tokens through `input_tokens_details.cached_tokens`. Chat observation
-extensions (`return_token_ids`, `return_token_timestamps`, and prefix reuse)
-retain their existing behavior. Stop sequences report the exact matched string
-through Anthropic `stop_sequence`.
+Chat and Completions always include `prompt_tokens_details.cached_tokens`,
+equivalent to enabling vLLM's `--enable-prompt-tokens-details`. This counts the
+prompt tokens actually reused at admission, including restored prefixes; it is
+zero when no prefix is reused. Cached tokens remain part of `prompt_tokens`
+and `total_tokens`. Image requests also include
+`prompt_tokens_details.multimodal_tokens.image`, the image feature tokens already
+included in the prompt total. Responses reports reuse through
+`input_tokens_details.cached_tokens`.
+
+Anthropic reports reused tokens in `cache_read_input_tokens` and the remaining
+prompt tokens in `input_tokens`; their sum is the token-count endpoint's result.
+`cache_creation_input_tokens` remains zero because Flare does not separately
+account for cache writes. These are native reuse counts, independent of
+Anthropic cache-control billing policies. In streams, `message_start` initially
+reports the full prompt with zero cache reads; `message_delta` supplies the final
+input, output, and cache counts. Chat and Completions include final usage when
+`stream_options.include_usage` is true. Chat token observation extensions
+(`return_token_ids` and `return_token_timestamps`) preserve usage details,
+including the legacy terminal usage when token IDs are requested without a
+separate usage chunk. Stop sequences report the exact matched string through
+Anthropic `stop_sequence`.
 
 ## Raw completions
 
@@ -188,7 +231,10 @@ arrays are rejected. Raw prompts bypass chat templates and reasoning/tool parser
 interleave indices. The configured or explicit seed advances by choice index. `echo` prepends the
 original text or decoded token prompt. `max_tokens: 0` performs tokenization and
 optional echo without GPU submission. Prompt usage counts each input once;
-completion usage sums all generated choices. `best_of` must equal `n`; ranked
+cached usage uses the first choice's admission count for each input, independent
+of completion order. Zero-token requests report zero cached tokens because they
+do not perform a cache lookup. Completion usage sums all generated choices.
+`best_of` must equal `n`; ranked
 sampling, suffix insertion, prompt scoring, and log probabilities are rejected.
 
 ## Clients and tests

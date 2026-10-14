@@ -26,33 +26,6 @@ pub enum Storage {
     Ram,
 }
 
-impl Storage {
-    /// Storage when the launcher names none. A discrete GPU keeps tables in RAM when they
-    /// take at most half the available host memory: Qwen's 29 GB PLE table read from disk
-    /// lengthened 32-request GB300 rounds by a quarter, since rows are needed at layer 1. An
-    /// integrated GPU (GB10) would take resident tables from the memory its KV cache uses.
-    pub fn choose(integrated: bool, table_bytes: u64, available: Option<u64>) -> Self {
-        match available {
-            Some(available) if !integrated && table_bytes <= available / 2 => Self::Ram,
-            _ => Self::Disk,
-        }
-    }
-
-    /// `MemAvailable` from `/proc/meminfo`, in bytes.
-    pub fn available_host_bytes() -> Option<u64> {
-        std::fs::read_to_string("/proc/meminfo")
-            .ok()?
-            .lines()
-            .find_map(|line| line.strip_prefix("MemAvailable:"))?
-            .trim()
-            .strip_suffix("kB")?
-            .trim()
-            .parse::<u64>()
-            .ok()?
-            .checked_mul(1024)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct Table {
     pub(crate) planes: [Plane; 2],
@@ -66,7 +39,6 @@ pub(crate) struct Table {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Index {
-    pub(crate) vocabulary: usize,
     pub(crate) tables: Vec<Table>,
 }
 
@@ -321,12 +293,6 @@ impl std::fmt::Debug for Binding {
             .finish()
     }
 }
-impl Binding {
-    pub(crate) fn index(&self) -> Arc<Index> {
-        self.shared.index.clone()
-    }
-}
-
 struct Transfer {
     stream: Stream,
     flag: usize,
@@ -442,28 +408,4 @@ pub(crate) fn consumes(kind: GraphKind) -> bool {
         kind,
         GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative | GraphKind::Mixed
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Storage;
-
-    #[test]
-    fn discrete_gpus_keep_tables_in_ram_only_with_room_for_them() {
-        const GIB: u64 = 1 << 30;
-        assert_eq!(
-            Storage::choose(false, 29 * GIB, Some(415 * GIB)),
-            Storage::Ram
-        );
-        assert_eq!(
-            Storage::choose(false, 29 * GIB, Some(57 * GIB)),
-            Storage::Disk
-        );
-        assert_eq!(Storage::choose(false, 29 * GIB, None), Storage::Disk);
-        assert_eq!(
-            Storage::choose(true, 29 * GIB, Some(415 * GIB)),
-            Storage::Disk
-        );
-        assert!(Storage::available_host_bytes().is_some_and(|bytes| bytes > 0));
-    }
 }

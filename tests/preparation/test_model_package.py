@@ -20,7 +20,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     exported = []
     closed = []
     def export(prepared, images, storage, path, **kwargs):
-        publish(path, ModelIndex(version=3, ranks=[BundleIndex()]), [])
+        publish(path, ModelIndex(version=4, ranks=[BundleIndex()]), [])
         exported.append(path.name)
     monkeypatch.setattr(model_package, 'export_model', export)
     class Control:
@@ -42,7 +42,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     output = tmp_path / 'model'
     model_package.export_package(prepared, None, storage, output, options={}, publisher=publisher())
     descriptor, start = read_index(output)
-    assert descriptor.version == 3
+    assert descriptor.version == 4
     assert len(descriptor.ranks) == world
     assert sorted(exported) == [f'rank-{rank}.safetensors' for rank in range(world)]
     assert output.is_file()
@@ -66,11 +66,11 @@ def test_combined_file_preserves_rank_resources_and_frontend_ranges(tmp_path):
     for rank, data in enumerate([b'rank-zero-tokenizer', b'rank-one']):
         source = tmp_path / f'payload-{rank}'
         source.write_bytes(data)
-        index = ModelIndex(version=3, ranks=[BundleIndex(
+        index = ModelIndex(version=4, ranks=[BundleIndex(
             resources={'weights': Span(offset=3, nbytes=len(data))})])
         if rank == 0:
             index.assets.append(Asset(name='tokenizer', payload=Span(offset=13, nbytes=9)))
-            index.server.update({'model_id': 'test'})
+            index.contract.model_id = "test"
         path = tmp_path / f'rank-{rank}.safetensors'
         publish(path, index, [(3, source, 0, len(data))])
         ranks.append(path)
@@ -84,7 +84,7 @@ def test_combined_file_preserves_rank_resources_and_frontend_ranges(tmp_path):
             assert source.read(span.nbytes) == expected
         source.seek(start + index.assets[0].payload.offset)
         assert source.read(index.assets[0].payload.nbytes) == b'tokenizer'
-    assert index.server['model_id'] == 'test'
+    assert index.contract.model_id == 'test'
     with model.open('r+b') as source:
         source.truncate(model.stat().st_size - 1)
     with pytest.raises(ValueError, match='safetensors data length'):
@@ -96,7 +96,7 @@ def test_offloaded_engram_planes_are_stored_once_and_bounds_checked(tmp_path):
     source.write_bytes(b'weights-and-scales')
     ranks = []
     for rank in range(2):
-        index = ModelIndex(version=3, ranks=[BundleIndex(events=['engram_ready'])])
+        index = ModelIndex(version=4, ranks=[BundleIndex(events=['engram_ready'])])
         payload = []
         if rank == 0:
             table = index.engram.tables.add(layer=1)

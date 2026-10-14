@@ -35,10 +35,10 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
         hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
-        max_active=plan.concurrency,
-        context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk,
+        max_active=plan.concurrency, stream_overlap=plan.stream_overlap,
+        context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk, mixed_prefill=plan.mixed_prefill,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache, compile_devices=plan.compile_devices,
+        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
         mtp=speculation is not None, **drafting)
     if plan.world_size == 1:
         storage = {} if package_storage is None else {"package_storage": package_storage}
@@ -74,6 +74,9 @@ RECIPE = Recipe(
     # corrections and commits accepted tokens into the live state row, so it keeps
     # no extra rows.
     speculation=Speculation(draft_tokens=5), max_draft_tokens=7, verification_rows=0, history_copy=True,
+    # Shared experts, small-batch attention projections and selection, and GDN input projections run
+    # on an auxiliary stream.
+    stream_overlap=True,
     ranks=MappingProxyType({
         1: _costs(122_932_224, 135_168, _GRAPH_BYTES[1], speculating=True),
         2: _costs(61_705_216, 69_632, _GRAPH_BYTES[2], speculating=True),
@@ -84,5 +87,5 @@ RECIPE = Recipe(
         2: _costs(58_776_320, 69_632, _GRAPH_BYTES[2], speculating=False),
         4: _costs(29_911_808, 69_632, _GRAPH_BYTES[4], speculating=False),
     }),
-    max_images=4, image_bytes=32 << 20,
+    max_images=4, image_bytes=32 << 20, mixed_prefill=True,
 )

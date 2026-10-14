@@ -323,53 +323,73 @@ def _completed(pending):
         wait([item[-2].pending for item in pending], return_when=FIRST_COMPLETED)
 
 
-# Command-line, planning, and display sources do not change compiled forwards.
-_COMMAND_SOURCES = ('cli', 'errors.py', 'planning.py', 'progress.py')
+# Command-line, planning, display, and diagnostic direct-execution sources do not change compiled forwards.
+_COMMAND_SOURCES = ('cli', 'direct', 'errors.py', 'planning.py', 'progress.py')
 
 
-def _share_artifacts(paths, group, root, primary):
-    """Copy rank zero's compiled forwards to ranks on other hosts, which load them by the same path.
+def _variant_compilers(selections):
+    """Assign each selected forward variant to the least loaded rank that selects it.
 
-    Each rank keeps its own cache directory; a peer receives only artifacts it lacks
-    or whose contents differ from rank zero's.
+    `selections[i]` maps each forward name to the variant the group's rank `i` binds. Returns
+    {(name, variant): i}; ties go to the lowest rank, so every rank derives the same assignment.
+    """
+    assigned, compilers = [0] * len(selections), {}
+    for name in selections[0]:
+        for variant in dict.fromkeys(chosen[name] for chosen in selections):
+            compiler = min((index for index, chosen in enumerate(selections) if chosen[name] == variant),
+                           key=assigned.__getitem__)
+            assigned[compiler] += 1
+            compilers[name, variant] = compiler
+    return compilers
+
+
+def _share_artifacts(owned, group, ranks):
+    """Copy every rank's compiled forwards to ranks on other hosts, which load them by the same path.
+
+    `owned[i]` lists the artifacts rank `ranks[i]` compiled. Each rank keeps its own cache
+    directory; a rank receives only artifacts it lacks or whose contents differ from their
+    compiler's.
     """
     import torch.distributed as dist
 
-    digests = [None]
-    if primary:
-        digests[0] = {path: hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths}
-    dist.broadcast_object_list(digests, src=root, group=group)
+    me = ranks.index(dist.get_rank())
+    digests = [None] * len(ranks)
+    dist.all_gather_object(digests, {path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                                     for path in owned[me]}, group=group)
 
-    def current(path):
+    def current(path, digest):
         try:
-            return hashlib.sha256(Path(path).read_bytes()).hexdigest() == digests[0][path]
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
         except OSError:
             return False
 
-    missing = [] if primary else [path for path in paths if not current(path)]
-    wanted = [None] * dist.get_world_size(group)
-    dist.all_gather_object(wanted, missing, group=group)
-    for path in sorted(set().union(*wanted)):
-        payload = [Path(path).read_bytes() if primary else None]
-        dist.broadcast_object_list(payload, src=root, group=group)
-        if path in missing:
-            target = Path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".tmp", delete=False) as file:
-                file.write(payload[0])
-            os.replace(file.name, target)
+    missing = {path for index, compiled in enumerate(digests) if index != me
+               for path, digest in compiled.items() if not current(path, digest)}
+    wanted = [None] * len(ranks)
+    dist.all_gather_object(wanted, sorted(missing), group=group)
+    wanted = set().union(*wanted)
+    for index, compiled in enumerate(digests):
+        for path in sorted(wanted.intersection(compiled)):
+            payload = [Path(path).read_bytes() if index == me else None]
+            dist.broadcast_object_list(payload, src=ranks[index], group=group)
+            if path in missing:
+                target = Path(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".tmp", delete=False) as file:
+                    file.write(payload[0])
+                os.replace(file.name, target)
+                missing.discard(path)
 
 
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
-    def __init__(self, *, namespace, device, root=None, headroom_bytes=0, compile_devices=()):
+    def __init__(self, *, namespace, device, root=None, headroom_bytes=0):
         import flashinfer
         from torch._inductor.codecache import torch_key
 
         self.device = torch.device(device)
         self.headroom_bytes = headroom_bytes
-        self.compile_devices = tuple(compile_devices)
         properties = torch.cuda.get_device_properties(device)
         options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
         key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
@@ -392,21 +412,39 @@ class ForwardCache:
 
     @contextmanager
     def _publication_lock(self, coordinator=None):
+        """Hold this host's cache against other launches from compilation through binding.
+
+        Cached variants share filenames, so another launch must not replace a catalog still in
+        use. Ranks on one host share its cache directory: the host's first rank holds the lock for
+        all of them. No rank compiles before every host's lock is held, and no host releases it
+        before every rank has bound its forwards.
+        """
+        host, hosts, holder = None, [None], True
         if coordinator is not None:
             import torch.distributed as dist
 
-            if dist.get_rank() != coordinator.ranks[0]:
-                yield
-                return
-        self.root.mkdir(parents=True, exist_ok=True)
-        # Cached variants share filenames. Hold publication through binding on
-        # every rank so another launch cannot replace a catalog still in use.
-        with (self.root / 'publication.lock').open('a+b') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
+            index = coordinator.ranks.index(dist.get_rank())
+            host = coordinator.hosts[index]
+            holder = coordinator.hosts.index(host) == index
+            hosts = sorted(set(coordinator.hosts))
+        lock = None
+        try:
+            # Hosts lock in one order, so launches sharing hosts cannot each hold a lock the other awaits.
+            for turn in hosts:
+                if holder and turn == host:
+                    self.root.mkdir(parents=True, exist_ok=True)
+                    lock = (self.root / 'publication.lock').open('a+b')
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                if coordinator is not None:
+                    dist.barrier(group=coordinator.group)
+            yield
+            # A failure skips this barrier: the failing rank's peers learn of it collectively.
+            if coordinator is not None:
+                dist.barrier(group=coordinator.group)
+        finally:
+            if lock is not None:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+                lock.close()
 
     def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
         """Trace and compile in workers, then bind and warm on the owning rank."""
@@ -422,9 +460,7 @@ class ForwardCache:
         if coordinator is not None:
             return self._prepare_ranks(functions, signatures, coordinator, progress=progress, materialize=materialize)
         compiled, paths, pending = {}, {}, []
-        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(
-                self.device, headroom_bytes=self.headroom_bytes, devices=self.compile_devices,
-                jobs=len(functions)) as compiler:
+        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes) as compiler:
             def finish():
                 name, bound, path = _completed(pending)
                 try:
@@ -463,73 +499,84 @@ class ForwardCache:
         return compiled
 
     def _prepare_ranks(self, functions, signatures, coordinator, *, progress, materialize):
+        """Compile the catalog for a rank group, then bind and warm it on every rank.
+
+        Compiled forwards serve every rank, so the catalog compiles once: each forward variant a
+        rank selects through `compilation_variant` compiles on one rank that selects it, from that
+        rank's own forward, with a compiler pool budgeted for the host's ranks. Ranks on one host
+        share its cache directory; a rank on another host receives the artifacts it lacks from the
+        ranks that compiled them. Every rank then binds the same artifacts.
+        """
         import torch.distributed as dist
         from ignition.progress import phase
         from .compile_pool import CompilePool
 
-        group, root = coordinator.group, coordinator.ranks[0]
-        if coordinator.spans_hosts and self.compile_devices:
-            raise ValueError("external compiler GPUs are supported only for ranks on one host")
-        primary = dist.get_rank() == root
-        selected, publication = {}, [None]
-        if primary:
-            try:
-                variants = {name: function.compilation_variants() if hasattr(function, "compilation_variants")
-                            else {"shared": function} for name, function in functions.items()}
-                pending, paths = [], {}
-                jobs = sum(map(len, variants.values()))
-                with phase(progress, "Compile model forwards", total=jobs) as stage, CompilePool(
-                        self.device, headroom_bytes=self.headroom_bytes,
-                        devices=self.compile_devices, jobs=jobs) as compiler:
-                    def finish():
-                        name, variant, bound, path = _completed(pending)
-                        if bound.pending is not None:
-                            bound.pending.result()
-                            if materialize is None:
-                                with _guard_code_cache(self.root / 'guards'):
-                                    bound = self._load(bound.owner, path, required=True)
-                                bound.cache_hit = False
-                        paths[name, variant] = str(path)
-                        if variant == getattr(functions[name], "compilation_variant", "shared"):
-                            selected[name] = bound
-                        stage.update(advance=1)
+        group, ranks = coordinator.group, coordinator.ranks
+        share = ranks.index(dist.get_rank())
+        selections = [None] * len(ranks)
+        dist.all_gather_object(selections, {name: getattr(forward, "compilation_variant", "shared")
+                                            for name, forward in functions.items()}, group=group)
+        if any(chosen.keys() != selections[0].keys() for chosen in selections):
+            raise RuntimeError("ranks prepared different forward catalogs")
+        work = [(name, variant, functions[name]) for (name, variant), compiler in _variant_compilers(selections).items()
+                if compiler == share]
+        selected, outcome = {}, (None, None)
+        try:
+            pending, paths = [], {}
+            with phase(progress, "Compile model forwards", total=len(work)) as stage, CompilePool(
+                    self.device, headroom_bytes=self.headroom_bytes, pools=coordinator.local_ranks) as compiler:
+                def finish():
+                    name, variant, bound, path = _completed(pending)
+                    if bound.pending is not None:
+                        bound.pending.result()
+                    elif materialize is None:
+                        # Restored and bound to this rank's own forward already.
+                        selected[name] = bound
+                    # Each forward's path, and whether this launch compiled it rather than restoring it.
+                    paths[name, variant] = str(path), bound.pending is not None
+                    stage.update(advance=1)
 
-                    for name, choices in variants.items():
-                        for variant, forward in choices.items():
-                            with _guard_code_cache(self.root / 'guards'):
-                                bound, path = self._prepare(forward, name=f"{name}.{variant}",
-                                    signature=signatures[name], compiler=compiler, deferred=materialize is not None)
-                            pending.append((name, variant, bound, path))
-                            if len(pending) >= compiler.workers:
-                                finish()
-                    while pending:
+                for name, variant, forward in work:
+                    with _guard_code_cache(self.root / 'guards'):
+                        bound, path = self._prepare(forward, name=f"{name}.{variant}",
+                            signature=signatures[name], compiler=compiler, deferred=materialize is not None)
+                    pending.append((name, variant, bound, path))
+                    if len(pending) >= compiler.workers:
                         finish()
-                publication[0] = paths, None
-            except Exception as error:
-                publication[0] = None, f"{type(error).__name__}: {error}"
-        dist.broadcast_object_list(publication, src=root, group=group)
-        paths, failure = publication[0]
-        if failure is not None:
-            raise RuntimeError(f"rank-zero forward compilation failed: {failure}")
+                while pending:
+                    finish()
+            outcome = paths, None
+        except Exception as error:
+            outcome = None, f"{type(error).__name__}: {error}"
+        outcomes = [None] * len(ranks)
+        dist.all_gather_object(outcomes, outcome, group=group)
+        failures = [(index, failure) for index, (_, failure) in zip(ranks, outcomes) if failure is not None]
+        if failures:
+            raise RuntimeError(f"forward compilation failed: {failures}")
+        paths = {key: value for compiled, _ in outcomes for key, value in compiled.items()}
+        # Ranks on one host compiled into its cache directory; only other hosts lack their shares.
         if coordinator.spans_hosts:
-            _share_artifacts(sorted(set(paths.values())), group, root, primary)
+            _share_artifacts([sorted({path for path, _ in compiled.values()}) for compiled, _ in outcomes],
+                             group, ranks)
         error = None
         try:
             if materialize is not None:
                 materialize()
-            if not primary or materialize is not None:
-                with phase(progress, "Load compiled forwards", total=len(functions)) as stage:
-                    for name, forward in functions.items():
-                        path = paths[name, getattr(forward, "compilation_variant", "shared")]
-                        with _guard_code_cache(self.root / 'guards'):
-                            selected[name] = self._load(forward, Path(path), required=True)
-                        stage.update(advance=1)
+            with phase(progress, "Load compiled forwards", total=len(functions) - len(selected)) as stage:
+                for name, forward in functions.items():
+                    if name in selected:
+                        continue
+                    path, compiled = paths[name, getattr(forward, "compilation_variant", "shared")]
+                    with _guard_code_cache(self.root / 'guards'):
+                        selected[name] = self._load(forward, Path(path), required=True)
+                    selected[name].cache_hit = not compiled
+                    stage.update(advance=1)
         except Exception as failure:
             import traceback
 
             traceback.print_exc(limit=-40)
             error = f"{type(failure).__name__}: {failure}"
-        errors = [None] * len(coordinator.ranks)
+        errors = [None] * len(ranks)
         dist.all_gather_object(errors, error, group=group)
         if any(errors):
             raise RuntimeError(f"compiled forward binding failed: {errors}")

@@ -14,7 +14,6 @@ use std::{
 
 use clap::Parser;
 use flare_helios::{
-    model::{ModelContract, glm5next::Glm5Next, qwen4exp::Qwen4Exp},
     runtime_package::{NativeModel, VerifiedPackage},
     server::{Bootstrap, Server},
     startup::StartupProgress,
@@ -82,7 +81,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut progress = StartupProgress::stderr();
     let phase = progress.phase("Verify package", None);
-    let package = VerifiedPackage::open(&root, &trust::publishers(&args.publisher_keys)?)?;
+    // A peer of a multi-host package holds only its rank's bytes, so it verifies that rank alone.
+    let package = VerifiedPackage::open(
+        &root,
+        &trust::publishers(&args.publisher_keys)?,
+        args.rank.filter(|&rank| rank != 0),
+    )?;
     let publisher = package.publisher().clone();
     phase.finish("signatures");
     let authorized = trust::authorize(package, &args, &mut progress)?;
@@ -115,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(&agent::default_token_path()),
         )
         .map_err(|e| e.to_string())?;
+        // Peers keep only the bytes their rank reads, which verify that rank completely.
+        let shares = (1..world)
+            .map(|rank| flare_helios::runtime_package::rank_ranges(&authorized, rank))
+            .collect::<flare_helios::Result<Vec<_>>>()?;
         let phase = progress.phase("Start peer ranks", None);
         let peers = launch::start(
             &args.hosts,
@@ -124,15 +132,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &rank_options,
             &token,
             &publisher,
+            &shares,
         )
         .map_err(|e| e.to_string())?;
         phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));
         Some(peers)
     };
-    // SAFETY: The trusted package owners remain live until every rank drains.
-    let owner = unsafe { NativeModel::load(authorized, &local_devices, &options, &progress)? };
-    let cluster = match (owner.cluster().cloned(), rendezvous) {
-        (Some(cluster), Some(address)) => Some((cluster, address)),
+    // Ranks of a multi-host package join before loading, so every rank allocates the cache
+    // capacity they agree on.
+    let mut membership = match (
+        flare_helios::runtime_package::package_cluster(&authorized),
+        &rendezvous,
+    ) {
+        (Some((world, export_id)), Some(address)) => Some(cluster::join(
+            args.rank.unwrap_or(0),
+            world,
+            &export_id,
+            address,
+            &progress,
+        )?),
         (Some(_), None) => {
             return Err("a multi-host package requires --rendezvous HOST:PORT".into());
         }
@@ -141,34 +159,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (None, None) => None,
     };
-    if let Some((cluster, address)) = &cluster {
-        if cluster.rank != 0 {
-            return serve_peer(owner, cluster, address, progress);
+    // SAFETY: The trusted package owners remain live until every rank drains.
+    let owner = unsafe {
+        NativeModel::load_agreeing(
+            authorized,
+            &local_devices,
+            &options,
+            &progress,
+            &mut |local| match membership.as_mut() {
+                Some(membership) => membership.agree(local),
+                None => Ok(local),
+            },
+        )?
+    };
+    let cluster = match (owner.cluster().cloned(), membership, rendezvous) {
+        (Some(cluster), Some(membership), Some(address)) => Some((cluster, membership, address)),
+        (None, None, None) => None,
+        _ => return Err("the package's cluster differs from the rank that joined".into()),
+    };
+    let cluster = match cluster {
+        Some((cluster, cluster::Membership::Peer(stream), address)) => {
+            return serve_peer(owner, &cluster, stream, &address, progress);
         }
-    }
+        Some((cluster, cluster::Membership::Zero(streams), _)) => Some((cluster, streams)),
+        None => None,
+    };
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
     config["bind"] = args.bind.to_string().into();
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
-    match config["model_contract"]["schema"].as_str() {
-        Some(flare_helios::model::qwen4exp::INPUT_SCHEMA) => {
-            serve::<Qwen4Exp>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::glm5next::INPUT_SCHEMA) => {
-            serve::<Glm5Next>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::deepseek4::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek4::DeepSeek4>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::deepseek41::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::deepseek41::DeepSeek41>(owner, config, progress, cluster)
-        }
-        Some(flare_helios::model::mimo::INPUT_SCHEMA) => {
-            serve::<flare_helios::model::mimo::MiMo>(owner, config, progress, cluster)
-        }
-        _ => Err("unsupported model contract".into()),
-    }
+    serve(owner, config, progress, cluster)
 }
 
 /// Run a peer rank of a multi-host package: join rank zero and replay its coordinated steps until
@@ -176,11 +197,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn serve_peer(
     owner: NativeModel,
     cluster: &flare_helios::runtime_package::ClusterRank,
+    stream: flare_helios::execution::RankStream,
     address: &str,
     mut progress: StartupProgress,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = owner.manifests()?.remove(0);
-    let joined = cluster::peer(&owner, cluster, address, &progress)?;
+    let joined = cluster::peer(&owner, cluster, stream, &progress)?;
     manifest.collectives = Some(cluster::health(&joined.transport));
     progress.finish_animation();
     eprintln!(
@@ -206,11 +228,14 @@ fn serve_peer(
     }
 }
 
-fn serve<M: ModelContract>(
+fn serve(
     owner: NativeModel,
     config: serde_json::Value,
     mut progress: StartupProgress,
-    cluster: Option<(flare_helios::runtime_package::ClusterRank, String)>,
+    cluster: Option<(
+        flare_helios::runtime_package::ClusterRank,
+        Vec<flare_helios::execution::RankStream>,
+    )>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
@@ -218,9 +243,9 @@ fn serve<M: ModelContract>(
     let mut manifests = owner.manifests()?;
     let mut manifest = manifests.remove(0);
     let mut transport = None;
-    let peers = match &cluster {
-        Some((cluster, address)) => {
-            let joined = cluster::rank_zero(&owner, cluster, address, &progress)?;
+    let peers = match cluster {
+        Some((_, streams)) => {
+            let joined = cluster::rank_zero(&owner, streams, &progress)?;
             manifest.collectives = Some(cluster::health(&joined.transport));
             transport = Some(joined.transport);
             Some(flare_helios::execution::RankPeers::Processes(
@@ -230,14 +255,15 @@ fn serve<M: ModelContract>(
         None => (!manifests.is_empty())
             .then_some(flare_helios::execution::RankPeers::Threads(manifests)),
     };
-    let bootstrap = Bootstrap::load::<M>(&config.to_string(), &manifest)?;
+    let bootstrap = Bootstrap::load(&config.to_string(), &manifest)?;
     phase.finish(format!(
         "{} token vocabulary",
         bootstrap.model.contract.vocabulary
     ));
     let phase = progress.phase("Start server", None);
+    let context_tokens = bootstrap.model.limits.max_sequence_tokens;
     let server = match unsafe {
-        Server::<M>::start(
+        Server::start(
             manifest,
             bootstrap.model,
             bootstrap.frontend,
@@ -255,7 +281,10 @@ fn serve<M: ModelContract>(
             return Err(error.message.into());
         }
     };
-    phase.finish(format!("http://{}", server.address()));
+    phase.finish(format!(
+        "http://{} · {context_tokens} tokens/request",
+        server.address()
+    ));
     unsafe {
         libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);

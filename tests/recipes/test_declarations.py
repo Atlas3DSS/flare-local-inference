@@ -72,10 +72,9 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     for speculation in (None, COPY):
         assert recipe.weights_bytes(checkpoint, world, speculation) == -(
             -(loaded - checkpoint.draft_bytes) // world)
-    # Qwen commits verified tokens into the live row; GLM keeps a row per verified position.
-    verification = 0 if model is QWEN else recipe.speculation.draft_tokens
-    assert recipe.live_rows(4, recipe.speculation) == 1 + 4 * (1 + verification) + 12
-    assert recipe.live_rows(4, None) == 1 + 4 + 12
+    # Both recipes commit verified tokens into one live recurrent row.
+    assert recipe.live_rows(4, recipe.speculation) == 1 + 4
+    assert recipe.live_rows(4, None) == 1 + 4
 
 
 def test_qwen_stored_bytes_match_the_cached_checkpoint():
@@ -220,3 +219,24 @@ def test_tensor_parallel_adapters_prepare_a_rank_group(monkeypatch, tmp_path):
     GLM.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     config, *_ = seen.pop()
     assert config.mtp is False and config.page_capacity == plan.minimum_pages
+
+
+def test_recipes_declare_whether_they_overlap_branches():
+    overlapping = {alias: resolve(alias).recipe.stream_overlap for alias in (
+        "qwen3.8-flash", "glm-5.3-flash", "deepseek-v4-flash", "deepseek-v4.1-flash", "mimo-v2.6-pro-mopd")}
+    # MiMo composes every branch on the main stream; the others overlap shared experts or projection chains.
+    assert overlapping == {"qwen3.8-flash": True, "glm-5.3-flash": True, "deepseek-v4-flash": True,
+                           "deepseek-v4.1-flash": True, "mimo-v2.6-pro-mopd": False}
+
+
+@pytest.mark.parametrize("alias", ["qwen3.8-flash", "glm-5.3-flash", "deepseek-v4-flash", "deepseek-v4.1-flash"])
+def test_adapters_carry_stream_overlap_into_the_preparation_config(monkeypatch, tmp_path, alias):
+    seen = []
+    monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
+                        lambda snapshot, config, prepare, **options: seen.append(config) or "group")
+    model = resolve(alias)
+    for overlap in (True, False):
+        plan = fitted(model, 4, stream_overlap=overlap)
+        assert plan.stream_overlap is overlap
+        assert model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None) == "group"
+        assert seen.pop().stream_overlap is overlap

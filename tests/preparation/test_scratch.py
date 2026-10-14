@@ -8,13 +8,35 @@ import torch
 from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
 from b12x.preparation import PreparationSession
 
-from ignition.preparation.scratch import ScratchArena, planned_scratch, scratch_storage
+from ignition.preparation.scratch import ScratchArena, bind_scratch, planned_scratch, scratch_storage
 from ignition.preparation.tuning import register_finalizer
 
 
 def spec(nbytes, *, dtype=torch.uint8, shape=None, device="cpu"):
     return ScratchBufferSpec(name="workspace", shape=(nbytes,) if shape is None else shape,
                              dtype=dtype, device=torch.device(device))
+
+
+def test_named_operands_share_capacity_across_shapes_without_overlapping_within_a_call():
+    layout = dict(scores=((4, 6, 128), torch.float32), valid=((4, 6), torch.bool))
+    workspace = bind_scratch(layout, device="cpu")
+    large = bind_scratch(layout, device="cpu", workspace=workspace)
+    small = bind_scratch(dict(scores=((2, 1, 128), torch.float32), valid=((2, 1), torch.bool)),
+                         device="cpu", workspace=workspace)
+    for operands in (large, small):
+        for name, tensor in operands.items():
+            assert tensor.is_contiguous()
+            assert tensor.data_ptr() == workspace[name].data_ptr()
+        operands["scores"].fill_(2)
+        operands["valid"].fill_(True)
+        assert operands["scores"].eq(2).all()
+    assert large["scores"].data_ptr() == small["scores"].data_ptr()
+    with pytest.raises(ValueError, match="requires"):
+        bind_scratch(dict(scores=((8, 6, 128), torch.float32)), device="cpu", workspace=workspace)
+    with pytest.raises(ValueError, match="meta"):
+        bind_scratch(layout, device="meta", workspace=workspace)
+    with pytest.raises(ValueError, match="torch.int32"):
+        bind_scratch(dict(scores=((1,), torch.int32)), device="cpu", workspace=workspace)
 
 
 def test_rank_scratch_finalization_preserves_shared_offsets(monkeypatch):
@@ -62,6 +84,21 @@ def test_arena_owns_one_aligned_highwater_storage_across_operator_specs():
         assert view.shape == (requirement,)
         assert scratch_tensor(view, (spec(requirement),), owner="test").data_ptr() == second.data_ptr()
     assert arena.nbytes == 512
+
+
+def test_serial_arena_admits_no_auxiliary_stream_or_concurrent_plans():
+    plan = SimpleNamespace(memory_requirements=lambda: SimpleNamespace(scratch_nbytes=256))
+    assert ScratchArena("cpu").overlap
+    serial = ScratchArena("cpu", overlap=False)
+    assert serial.overlap is False
+    with pytest.raises(RuntimeError, match="stream overlap is disabled; compose this branch on the main stream"):
+        serial.auxiliary_stream
+    with pytest.raises(RuntimeError, match="stream overlap is disabled"):
+        serial.register_parallel(plan, plan)
+    # Serial work shares one region: nothing reserves concurrent storage.
+    assert serial.parallel_nbytes(lambda plan: plan.memory_requirements().scratch_nbytes) == 0
+    with pytest.raises(TypeError, match="overlap must be a boolean"):
+        ScratchArena("cpu", overlap=1)
 
 
 @pytest.mark.parametrize("nbytes", [-1, True, False, 1.5, "256", None])

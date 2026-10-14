@@ -29,6 +29,15 @@ type PriorityRange = unsafe extern "C" fn(*mut c_int, *mut c_int) -> c_int;
 type HostRegister = unsafe extern "C" fn(Handle, usize, c_uint) -> c_int;
 type HostUnregister = unsafe extern "C" fn(Handle) -> c_int;
 type DeviceAttribute = unsafe extern "C" fn(*mut c_int, c_int, c_int) -> c_int;
+type AddressReserve = unsafe extern "C" fn(*mut u64, usize, usize, u64, u64) -> c_int;
+type AddressFree = unsafe extern "C" fn(u64, usize) -> c_int;
+type MemoryCreate =
+    unsafe extern "C" fn(*mut u64, usize, *const AllocationProperties, u64) -> c_int;
+type MemoryRelease = unsafe extern "C" fn(u64) -> c_int;
+type MemoryMap = unsafe extern "C" fn(u64, usize, usize, u64, u64) -> c_int;
+type MemoryUnmap = unsafe extern "C" fn(u64, usize) -> c_int;
+type MemoryAccess = unsafe extern "C" fn(u64, usize, *const AccessDescriptor, usize) -> c_int;
+type Granularity = unsafe extern "C" fn(*mut usize, *const AllocationProperties, c_int) -> c_int;
 type MemcpyBatch = unsafe extern "C" fn(
     *const u64,
     *const u64,
@@ -50,12 +59,49 @@ struct CopyAttributes {
     flags: c_uint,
 }
 
+/// `CUmemLocation`: a location type and, for devices and host NUMA nodes, its id.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MemoryLocation {
+    kind: c_int,
+    id: c_int,
+}
+
+/// `CUmemAllocationProp`.
+#[repr(C)]
+struct AllocationProperties {
+    kind: c_int,
+    handle_types: c_int,
+    location: MemoryLocation,
+    windows_metadata: Handle,
+    flags: [u8; 8],
+}
+
+/// `CUmemAccessDesc`.
+#[repr(C)]
+struct AccessDescriptor {
+    location: MemoryLocation,
+    flags: c_int,
+}
+
 /// `CU_MEMCPY_SRC_ACCESS_ORDER_STREAM`: the source is read in stream order.
 const SOURCE_ORDER_STREAM: c_int = 1;
 /// `CU_MEMHOSTREGISTER_PORTABLE`: the registration is visible to every context.
 const HOST_REGISTER_PORTABLE: c_uint = 0x1;
 /// `CU_DEVICE_ATTRIBUTE_INTEGRATED`.
 const ATTRIBUTE_INTEGRATED: c_int = 18;
+/// `CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID`: the host NUMA node closest to the device, or -1.
+const ATTRIBUTE_HOST_NUMA_ID: c_int = 134;
+/// `CU_MEM_ALLOCATION_TYPE_PINNED`.
+const ALLOCATION_PINNED: c_int = 1;
+/// `CU_MEM_LOCATION_TYPE_DEVICE`.
+const LOCATION_DEVICE: c_int = 1;
+/// `CU_MEM_LOCATION_TYPE_HOST_NUMA`: host memory on the NUMA node named by the id.
+const LOCATION_HOST_NUMA: c_int = 3;
+/// `CU_MEM_ACCESS_FLAGS_PROT_READWRITE`.
+const ACCESS_READ_WRITE: c_int = 3;
+/// `CU_MEM_ALLOC_GRANULARITY_MINIMUM`.
+const GRANULARITY_MINIMUM: c_int = 0;
 /// `CU_STREAM_NON_BLOCKING`: the stream never synchronizes with the legacy default stream.
 const STREAM_NON_BLOCKING: c_uint = 0x1;
 /// `CU_EVENT_BLOCKING_SYNC`: a thread waiting on the event sleeps instead of spinning.
@@ -99,6 +145,14 @@ struct Driver {
     device_attribute: DeviceAttribute,
     event_synchronize: StreamOperation,
     memcpy_batch: MemcpyBatch,
+    address_reserve: AddressReserve,
+    address_free: AddressFree,
+    memory_create: MemoryCreate,
+    memory_release: MemoryRelease,
+    memory_map: MemoryMap,
+    memory_unmap: MemoryUnmap,
+    memory_access: MemoryAccess,
+    granularity: Granularity,
 }
 
 impl Driver {
@@ -152,6 +206,14 @@ impl Driver {
                 device_attribute: symbol!("cuDeviceGetAttribute"),
                 event_synchronize: symbol!("cuEventSynchronize"),
                 memcpy_batch: symbol!("cuMemcpyBatchAsync_v2"),
+                address_reserve: symbol!("cuMemAddressReserve"),
+                address_free: symbol!("cuMemAddressFree"),
+                memory_create: symbol!("cuMemCreate"),
+                memory_release: symbol!("cuMemRelease"),
+                memory_map: symbol!("cuMemMap"),
+                memory_unmap: symbol!("cuMemUnmap"),
+                memory_access: symbol!("cuMemSetAccess"),
+                granularity: symbol!("cuMemGetAllocationGranularity"),
                 _library: library,
             }))
         }
@@ -280,6 +342,174 @@ pub(crate) unsafe fn register_host(
         address,
         nbytes,
     })
+}
+
+/// Pinned host memory in one reserved address range, split into parts that
+/// each only one device and the host can access.
+///
+/// Registering host memory maps it into every device's page tables, which costs
+/// each device about 2 MiB per GiB however little of it the device copies. A
+/// part created through the virtual memory management API and opened to one
+/// device costs only that device.
+pub(crate) struct DeviceHostParts {
+    driver: Arc<Driver>,
+    address: u64,
+    nbytes: usize,
+    /// Every part created so far, in request order.
+    parts: Vec<HostPart>,
+}
+
+struct HostPart {
+    offset: usize,
+    nbytes: usize,
+    handle: u64,
+    mapped: bool,
+}
+
+impl DeviceHostParts {
+    pub(crate) fn address(&self) -> usize {
+        self.address as usize
+    }
+    /// Bytes of the reserved range, including each part's rounding.
+    pub(crate) fn nbytes(&self) -> usize {
+        self.nbytes
+    }
+    /// Address of the part made for request `index`.
+    pub(crate) fn part_address(&self, index: usize) -> usize {
+        self.address as usize + self.parts[index].offset
+    }
+}
+
+impl Drop for DeviceHostParts {
+    fn drop(&mut self) {
+        // SAFETY: The mappings, handles, and reservation were made by
+        // `map_device_host_parts`; each is released once, mappings first.
+        unsafe {
+            for part in &self.parts {
+                if part.mapped {
+                    (self.driver.memory_unmap)(self.address + part.offset as u64, part.nbytes);
+                }
+                (self.driver.memory_release)(part.handle);
+            }
+            (self.driver.address_free)(self.address, self.nbytes);
+        }
+    }
+}
+
+/// Reserve one range and back it with one pinned host part per `(context,
+/// device, bytes)` request, in request order. Each part is created on the host
+/// NUMA node closest to its device, rounded up to the allocation granularity,
+/// and made accessible to that device and the host only. Each request's
+/// context is made current on the calling thread while its part is planned
+/// and created.
+pub(crate) fn map_device_host_parts(requests: &[(usize, i32, usize)]) -> Result<DeviceHostParts> {
+    let invalid = |message: String| Error::execution(ExecutionError::State, message);
+    if requests.is_empty() || requests.iter().any(|(_, _, bytes)| *bytes == 0) {
+        return Err(invalid(
+            "device host memory requires at least one nonempty part".into(),
+        ));
+    }
+    let driver = Driver::load()?;
+    let mut planned = Vec::with_capacity(requests.len());
+    let (mut total, mut alignment) = (0usize, 1usize);
+    for &(context, device, bytes) in requests {
+        let mut node = -1;
+        let mut granularity = 0;
+        let mut properties = AllocationProperties {
+            kind: ALLOCATION_PINNED,
+            handle_types: 0,
+            location: MemoryLocation {
+                kind: LOCATION_HOST_NUMA,
+                id: 0,
+            },
+            windows_metadata: std::ptr::null_mut(),
+            flags: [0; 8],
+        };
+        // SAFETY: The context handle was produced by the driver and outlives
+        // this call; every output pointer is valid for its call.
+        unsafe {
+            driver.check("cuCtxSetCurrent", (driver.set_context)(context as Handle))?;
+            driver.check(
+                "cuDeviceGetAttribute",
+                (driver.device_attribute)(&mut node, ATTRIBUTE_HOST_NUMA_ID, device),
+            )?;
+            // A host without NUMA reports -1 and takes node 0.
+            properties.location.id = node.max(0);
+            driver.check(
+                "cuMemGetAllocationGranularity",
+                (driver.granularity)(&mut granularity, &properties, GRANULARITY_MINIMUM),
+            )?;
+        }
+        let granularity = granularity.max(1);
+        let offset = total.checked_next_multiple_of(granularity);
+        let rounded = bytes.checked_next_multiple_of(granularity);
+        let Some((offset, rounded, end)) = offset
+            .zip(rounded)
+            .and_then(|(offset, rounded)| Some((offset, rounded, offset.checked_add(rounded)?)))
+        else {
+            return Err(invalid(format!(
+                "{bytes} bytes of device host memory exceed the address space"
+            )));
+        };
+        total = end;
+        alignment = alignment.max(granularity);
+        planned.push((context, device, properties, offset, rounded));
+    }
+    let mut address = 0;
+    // SAFETY: `address` is a valid output pointer; the range is released on drop.
+    driver.check("cuMemAddressReserve", unsafe {
+        (driver.address_reserve)(&mut address, total, alignment, 0, 0)
+    })?;
+    let mut memory = DeviceHostParts {
+        driver: driver.clone(),
+        address,
+        nbytes: total,
+        parts: Vec::with_capacity(planned.len()),
+    };
+    for (context, device, properties, offset, nbytes) in planned {
+        let mut handle = 0;
+        let access = [
+            AccessDescriptor {
+                location: MemoryLocation {
+                    kind: LOCATION_DEVICE,
+                    id: device,
+                },
+                flags: ACCESS_READ_WRITE,
+            },
+            AccessDescriptor {
+                location: MemoryLocation {
+                    kind: LOCATION_HOST_NUMA,
+                    id: properties.location.id,
+                },
+                flags: ACCESS_READ_WRITE,
+            },
+        ];
+        let start = address + offset as u64;
+        // SAFETY: The context outlives this call, the part lies inside the
+        // reservation, and `memory` records each step so its drop undoes it.
+        unsafe {
+            driver.check("cuCtxSetCurrent", (driver.set_context)(context as Handle))?;
+            driver.check(
+                "cuMemCreate",
+                (driver.memory_create)(&mut handle, nbytes, &properties, 0),
+            )?;
+            memory.parts.push(HostPart {
+                offset,
+                nbytes,
+                handle,
+                mapped: false,
+            });
+            driver.check("cuMemMap", (driver.memory_map)(start, nbytes, 0, handle, 0))?;
+            if let Some(part) = memory.parts.last_mut() {
+                part.mapped = true;
+            }
+            driver.check(
+                "cuMemSetAccess",
+                (driver.memory_access)(start, nbytes, access.as_ptr(), access.len()),
+            )?;
+        }
+    }
+    Ok(memory)
 }
 
 pub(crate) struct Stream {

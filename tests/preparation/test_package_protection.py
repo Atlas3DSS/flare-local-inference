@@ -1,6 +1,7 @@
 """Publisher authentication across the Python exporter and native resource reader."""
 
 import hashlib
+from itertools import chain
 import json
 from pathlib import Path
 import struct
@@ -25,15 +26,17 @@ def native():
     return ROOT / 'helios/target/debug/test_package_protection'
 
 
-def read(native, path, namespace='flare-tests', weights=False, profile=None):
+def read(native, path, namespace='flare-tests', weights=False, profile=None, rank=None):
     args = [str(native), str(path), namespace, 'verify-weights' if weights else 'skip-weights']
+    if rank is not None:
+        args.append(f'rank={rank}')
     if profile is not None:
         args.append(str(profile))
     return subprocess.run(args, capture_output=True, text=True)
 
 
 def fixture(tmp_path, *, size=CHUNK + 39, signer=None):
-    index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
     rank = index.ranks[0]
     rank.allocations.add(name='weights', file='weights')
     module = rank.modules.add(name='kernel', file='kernel')
@@ -84,7 +87,7 @@ def resign(value, signer):
     del metadata.group_hashes[:]
     metadata.group_hashes.extend(hashlib.sha256(g.body).digest() for g in value.groups[1:])
     value.groups[0].body = metadata.SerializeToString(deterministic=True)
-    for group in value.groups:
+    for group in chain(value.groups, value.ranks):
         group.signature = signer.key.sign(signature_message(value.package_id, value.signer, group.kind, group.body))
 
 
@@ -110,12 +113,11 @@ def test_multichunk_export_is_read_and_authenticated_by_rust(native, tmp_path):
     assert kernel.nbytes == len(data['kernel']) + 32
 
 
-def test_multi_host_export_signs_cluster_metadata_and_each_ranks_resources(native, tmp_path, monkeypatch):
+def cluster_package(tmp_path, monkeypatch):
     from ignition.preparation import model_package
-    from ignition.preparation.package_file import extend_cluster
 
     def export(rank, path):
-        index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+        index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
         bundle = index.ranks[0]
         bundle.roce.world, bundle.roce.rank = 2, rank
         bundle.allocations.add(name='weights', file='weights')
@@ -136,6 +138,33 @@ def test_multi_host_export_signs_cluster_metadata_and_each_ranks_resources(nativ
     with peer.open('rb') as stream:
         model_package.export_cluster_package(None, None, None, path, peer_files=[stream], options={},
                                              export_id='cluster-test', world=2, publisher=publisher())
+    return path
+
+
+def rank_bytes(path, rank):
+    """File ranges holding `rank`'s signed stored data and its executable and supporting resources."""
+    value, _ = envelope(path)
+    index, start = read_index(path)
+    data = proto.RankProtection.FromString(value.ranks[rank].body).data
+    spans = [(data.offset, data.nbytes)] + [(span.offset, span.nbytes)
+                                            for name, span in index.ranks[rank].resources.items() if name != 'weights']
+    return [(start + offset, nbytes) for offset, nbytes in spans]
+
+
+def overwrite(path, ranges, value=None):
+    """Flip one byte of each range, or zero the ranges as a copy without them reads."""
+    with path.open('r+b') as output:
+        for offset, nbytes in ranges:
+            output.seek(offset)
+            contents = output.read(1 if value is None else nbytes)
+            output.seek(offset)
+            output.write(bytes([contents[0] ^ 1]) if value is None else bytes(nbytes))
+
+
+def test_multi_host_export_signs_cluster_metadata_and_each_ranks_resources(native, tmp_path, monkeypatch):
+    from ignition.preparation.package_file import extend_cluster
+
+    path = cluster_package(tmp_path, monkeypatch)
     result = read(native, path, weights=True)
     assert result.returncode == 0, result.stderr
     index, _ = read_index(path)
@@ -183,14 +212,60 @@ def test_optional_data_scan_covers_weights_and_alignment_padding(native, tmp_pat
     assert result.returncode != 0 and 'stored-data content verification failed' in result.stderr
 
 
+def test_a_rank_only_copy_verifies_that_rank_completely(native, tmp_path, monkeypatch):
+    path = cluster_package(tmp_path, monkeypatch)
+    # Rank one's host holds no byte of rank zero's.
+    overwrite(path, rank_bytes(path, 0), value=0)
+    result = read(native, path, weights=True, rank=1)
+    assert result.returncode == 0, result.stderr
+    index, _ = read_index(path)
+    assert dict(json.loads(result.stdout)) == {
+        index.ranks[1].resources['kernel'].offset: hashlib.sha256(b'kernel-1').hexdigest()}
+    assert 'verification failed' in read(native, path, weights=True).stderr
+
+
+def test_another_ranks_tampering_leaves_a_rank_verifiable(native, tmp_path, monkeypatch):
+    path = cluster_package(tmp_path, monkeypatch)
+    overwrite(path, rank_bytes(path, 0))
+    value, payload = envelope(path)
+    value.ranks[0].signature = bytes(64)
+    replace_envelope(path, value, payload)
+    result = read(native, path, weights=True, rank=1)
+    assert result.returncode == 0, result.stderr
+    assert 'signature failed for rank 0' in read(native, path, rank=0).stderr
+
+
+@pytest.mark.parametrize('target', ['data', 'kernel', 'signature'])
+def test_tampering_with_a_ranks_own_bytes_fails_its_verification(native, tmp_path, monkeypatch, target):
+    path = cluster_package(tmp_path, monkeypatch)
+    data, kernel = rank_bytes(path, 1)
+    if target == 'signature':
+        value, payload = envelope(path)
+        value.ranks[1].signature = bytes(64)
+        replace_envelope(path, value, payload)
+    else:
+        overwrite(path, [data if target == 'data' else kernel])
+    result = read(native, path, weights=True, rank=1)
+    expected = {'data': 'stored-data content verification failed', 'kernel': 'content verification failed',
+                'signature': 'signature failed for rank 1'}[target]
+    assert result.returncode != 0 and expected in result.stderr
+    assert read(native, path, weights=True, rank=0).returncode == 0
+
+
+def test_only_a_multi_host_package_verifies_one_rank(native, tmp_path):
+    path, _ = fixture(tmp_path, size=41)
+    assert 'not a separately served rank' in read(native, path, rank=0).stderr
+
+
 @pytest.mark.parametrize('group', range(4))
 def test_every_signature_group_is_verified_before_access(native, tmp_path, group):
     path, _ = fixture(tmp_path, size=41)
     value, payload = envelope(path)
-    value.groups[group].signature = bytes(64)
+    (value.groups[group] if group < 3 else value.ranks[0]).signature = bytes(64)
     replace_envelope(path, value, payload)
     result = read(native, path)
-    assert result.returncode != 0 and f'signature failed for group {group + 1}' in result.stderr
+    label = f'group {group + 1}' if group < 3 else 'rank 0'
+    assert result.returncode != 0 and f'signature failed for {label}' in result.stderr
 
 
 def test_acceptance_requires_the_exact_namespace(native, tmp_path):
@@ -227,15 +302,15 @@ def test_independently_prepared_publisher_is_supported(native, tmp_path):
 def test_authenticated_but_inconsistent_index_is_rejected(native, tmp_path, change):
     path, _ = fixture(tmp_path, size=41)
     value, payload = envelope(path)
-    metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
-    rank = metadata.index.ranks[0]
+    signed = proto.RankProtection.FromString(value.ranks[0].body)
+    rank = signed.bundle
     if change == 'overlap':
         rank.resources['graph'].CopyFrom(rank.resources['kernel'])
     elif change == 'unclassified':
         rank.resources['unused'].CopyFrom(rank.resources['kernel'])
     elif change == 'reclassify':
         rank.allocations[0].file = 'kernel'
-    value.groups[0].body = metadata.SerializeToString(deterministic=True)
+    value.ranks[0].body = signed.SerializeToString(deterministic=True)
     resign(value, publisher())
     if change == 'groups':
         value.groups[1].kind = 3
@@ -245,7 +320,7 @@ def test_authenticated_but_inconsistent_index_is_rejected(native, tmp_path, chan
 
 def test_native_loader_rejects_unsigned_staging(native, tmp_path):
     path = tmp_path / 'stage'
-    publish(path, proto.ModelIndex(version=3, ranks=[proto.BundleIndex()]), [])
+    publish(path, proto.ModelIndex(version=4, ranks=[proto.BundleIndex()]), [])
     result = read(native, path)
     assert result.returncode != 0 and 'not a Flare safetensors package' in result.stderr
 
@@ -376,7 +451,7 @@ def test_tensor_parallel_assembly_authenticates_all_ranks(native, tmp_path):
     from ignition.preparation.package_file import combine
     ranks = []
     for rank in range(2):
-        index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex()])
+        index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
         bundle = index.ranks[0]
         bundle.allocations.add(name='weight', file='weight')
         bundle.graphs.add(name='decode', resource='graph')
@@ -403,7 +478,7 @@ def test_native_record_reader_selects_independently_and_rejects_malformed_record
     valid = struct.pack('<I', len(node)) + node
     data = {'selected': valid, 'oversize': struct.pack('<I', (1 << 20) + 1),
             'truncated': struct.pack('<I', 100) + b'x', 'trailing': valid + b'x'}
-    index = proto.ModelIndex(version=3, ranks=[proto.BundleIndex(architecture=[12, 0], context=proto.Context())])
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex(architecture=[12, 0], context=proto.Context())])
     bundle = index.ranks[0]
     payload = []
     for ordinal, (name, contents) in enumerate(data.items()):

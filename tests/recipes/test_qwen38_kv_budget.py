@@ -33,3 +33,11 @@ def test_explicit_preparation_capacity_is_preserved():
     for pages in (0, -1, 1.5, True):
         with pytest.raises(ValueError, match='page capacity'):
             PreparationConfig(pages=pages)
+
+
+@pytest.mark.parametrize('concurrency', [1, 3, 4, 16, 64])
+def test_preparation_state_backing_covers_live_rows_and_snapshot_destinations(concurrency):
+    config = PreparationConfig(max_active=concurrency, mtp=True, mixed_prefill=True)
+    assert config.preparation_state_rows == 1 + 2 * config.request_capacity
+    assert config.preparation_state_rows == PreparationConfig(
+        max_active=concurrency, snapshot_budget_bytes=32 << 30).preparation_state_rows

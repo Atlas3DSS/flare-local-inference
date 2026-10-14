@@ -1,6 +1,7 @@
 #![cfg(feature = "server")]
 
 use flare_helios::frontend;
+use flare_helios::{model, scheduler};
 #[path = "support/frontend.rs"]
 mod support;
 
@@ -10,7 +11,7 @@ use flare_helios::{
         images::{ImageLimits, ImageProcessor},
     },
     grammar::GrammarCompiler,
-    model::{ModelConfig, ModelContract, SamplingParameters, qwen4exp::Qwen4Exp},
+    model::{ModelConfig, SamplingParameters},
     scheduler::SchedulerLimits,
     server::{PreparedRequest, prepare_request},
 };
@@ -57,7 +58,8 @@ impl Fixture {
         )
         .unwrap();
         let config = ModelConfig {
-            contract: Qwen4Exp::metadata(),
+            prepared_sequence_tokens: 262144,
+            contract: support::contract("qwen38"),
             model_id: "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD".into(),
             identity: [0; 32],
             limits: SchedulerLimits {
@@ -75,7 +77,6 @@ impl Fixture {
             speculative_fixed_width: None,
             history_drafts: false,
             speculative_proposal_source: Default::default(),
-            state_rows_per_request: None,
         };
         let compiler =
             GrammarCompiler::new(frontend.tokenizer(), 248320, &config.eos_token_ids).unwrap();
@@ -87,13 +88,13 @@ impl Fixture {
         }
     }
 
-    fn prepare(&self, messages: Value, options: Value) -> PreparedRequest<Qwen4Exp> {
+    fn prepare(&self, messages: Value, options: Value) -> PreparedRequest {
         let expected = self
             .frontend
             .render_chat(messages.as_array().unwrap(), options.as_object().unwrap())
             .unwrap();
         let request = json!({"model":self.config.model_id,"messages":messages,"chat_template_kwargs":options});
-        let prepared = prepare_request::<Qwen4Exp>(
+        let prepared = prepare_request(
             &self.frontend,
             Some(&self.processor),
             &self.compiler,
@@ -103,12 +104,11 @@ impl Fixture {
         .unwrap();
         assert_eq!(prepared.rendered_prompt, expected.text);
         assert_eq!(prepared.prompt.tokens, expected.token_ids);
-        flare_helios::model::admission::validate_prompt::<Qwen4Exp>(&self.config, &prepared.prompt)
-            .unwrap();
+        flare_helios::model::admission::validate_prompt(&self.config, &prepared.prompt).unwrap();
         prepared
     }
 
-    fn prefix(&self, prepared: &PreparedRequest<Qwen4Exp>) -> Vec<u32> {
+    fn prefix(&self, prepared: &PreparedRequest) -> Vec<u32> {
         let boundary = prepared
             .prompt
             .system_boundary
@@ -219,11 +219,8 @@ fn exact_short_instruction_boundary_survives_changed_user_content() {
     for boundary in [0, malformed.prompt.tokens.len(), usize::MAX] {
         malformed.prompt.system_boundary = Some(boundary);
         assert!(
-            flare_helios::model::admission::validate_prompt::<Qwen4Exp>(
-                &fixture.config,
-                &malformed.prompt
-            )
-            .is_err()
+            flare_helios::model::admission::validate_prompt(&fixture.config, &malformed.prompt)
+                .is_err()
         );
     }
     println!("exact short boundary: {} tokens", prefix.len());
@@ -252,7 +249,7 @@ fn tool_instructions_are_rendered_without_explicit_system_and_disable_with_none(
             .contains("\"name\": \"weather\"")
     );
     let request = json!({"model":fixture.config.model_id,"messages":messages,"tools":[tool("weather")],"tool_choice":"none","enable_thinking":false});
-    let disabled = prepare_request::<Qwen4Exp>(
+    let disabled = prepare_request(
         &fixture.frontend,
         Some(&fixture.processor),
         &fixture.compiler,
@@ -338,7 +335,8 @@ fn token_prefix_mismatch_or_complete_prompt_match_suppresses_boundary() {
     mismatch[boundary - 1] += 1;
     for tokens in [&mismatch[..], &a.prompt.tokens[..boundary], &[]] {
         assert_eq!(
-            Qwen4Exp::system_boundary(
+            flare_helios::model::system_boundary(
+                &fixture.config,
                 &fixture.frontend,
                 tokens,
                 messages.as_array().unwrap(),
@@ -350,7 +348,8 @@ fn token_prefix_mismatch_or_complete_prompt_match_suppresses_boundary() {
     let malformed =
         json!([{"role":"system","content":{"not":"valid"}},{"role":"user","content":"Hello"}]);
     assert_eq!(
-        Qwen4Exp::system_boundary(
+        flare_helios::model::system_boundary(
+            &fixture.config,
             &fixture.frontend,
             &a.prompt.tokens,
             malformed.as_array().unwrap(),

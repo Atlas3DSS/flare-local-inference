@@ -197,140 +197,14 @@ def test_compilation_preserves_configured_headroom(monkeypatch, integrated, work
         compile_pool.CompilePool("cuda:0", headroom_bytes=39 << 30)
 
 
-def external_devices(monkeypatch, *, owner_gib=0, other_gib=10, host_gib=128, cpus=16):
+@pytest.mark.parametrize("pools,workers", [(1, 8), (2, 4), (4, 2)])
+def test_ranks_sharing_a_host_split_its_compilers(monkeypatch, pools, workers):
     from ignition.preparation import compile_pool, host_memory
 
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
-    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (owner_gib << 30, 96 << 30))
-    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(
-        is_integrated=False, uuid="owner", major=12, minor=0, name="GPU model"))
-    monkeypatch.setattr(host_memory, "available_bytes", lambda: host_gib << 30)
-    monkeypatch.setattr(compile_pool.os, "sched_getaffinity", lambda pid: set(range(cpus)))
-    monkeypatch.setattr(compile_pool, "_free_device_bytes", lambda uuids: {
-        uuid: (other_gib << 30, (12, 0), "GPU model") for uuid in uuids})
-    return compile_pool
-
-
-def test_external_capacity_can_compile_when_the_owner_has_no_room(monkeypatch):
-    compile_pool = external_devices(monkeypatch)
-    pool = compile_pool.CompilePool("cuda:0", devices=("GPU-extra",), jobs=3)
-    assert pool.workers == 3
-    assert [(slot.mask, slot.workers) for slot in pool.slots] == [("GPU-extra", 3)]
-    assert pool.options["compile_threads"] == 5
-
-
-@pytest.mark.parametrize("num_threads,workers", [(1, 8), (4, 8), (16, 8)])
-def test_external_worker_budget_preserves_guarded_thread_count(monkeypatch, tmp_path, num_threads, workers):
-    from concurrent.futures import Future
-    from torch._inductor.compile_worker import subproc_pool
-
-    compile_pool = external_devices(monkeypatch, cpus=12, other_gib=96)
-    monkeypatch.setattr(torch, "get_num_threads", lambda: num_threads)
-    calls = []
-
-    class Executor:
-        def __init__(self, count, *, kind):
-            assert count == workers
-
-        def submit(self, function, *arguments):
-            calls.append(arguments)
-            return Future()
-
-        def shutdown(self):
-            pass
-
-    monkeypatch.setattr(subproc_pool, "SubprocPool", Executor)
-    with compile_pool.CompilePool("cuda:0", devices=("GPU-extra",), jobs=8) as pool:
-        pool.submit(SimpleNamespace(), tmp_path / "forward.bin")
-    assert calls[0][4] == num_threads
-    assert workers <= 12
-    assert pool.options["compile_threads"] * workers <= 12
-
-
-@pytest.mark.parametrize("host_gib,cpus,jobs,workers", [(128, 3, 8, 3), (24, 16, 8, 2), (128, 16, 1, 1)])
-def test_external_workers_respect_host_cpu_and_catalog_bounds(monkeypatch, host_gib, cpus, jobs, workers):
-    compile_pool = external_devices(monkeypatch, other_gib=96, host_gib=host_gib, cpus=cpus)
-    pool = compile_pool.CompilePool("cuda:0", devices=("GPU-extra",), jobs=jobs)
-    assert pool.workers == workers
-    assert pool.options["compile_threads"] * workers <= max(cpus, workers)
-
-
-@pytest.mark.parametrize("capability,name", [((12, 1), "GPU model"), ((12, 0), "Different GPU")])
-def test_external_gpu_must_match_the_owner(monkeypatch, capability, name):
-    compile_pool = external_devices(monkeypatch)
-    monkeypatch.setattr(compile_pool, "_free_device_bytes", lambda uuids: {
-        "GPU-extra": (10 << 30, capability, name)})
-    with pytest.raises(ValueError, match="must match"):
-        compile_pool.CompilePool("cuda:0", devices=("GPU-extra",), jobs=1)
-
-
-def test_external_ordinal_and_integrated_memory_contracts_are_explicit(monkeypatch):
-    compile_pool = external_devices(monkeypatch)
-    with pytest.raises(ValueError, match="logical device cuda:0"):
-        compile_pool.CompilePool("cuda:1", devices=("GPU-extra",))
-    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=True))
-    with pytest.raises(ValueError, match="discrete owning GPU"):
-        compile_pool.CompilePool("cuda:0", devices=("GPU-extra",))
-
-
-def test_external_spawn_failure_restores_mask_and_closes_existing_pools(monkeypatch, tmp_path):
-    import os
-    from concurrent.futures import Future
-    from torch._inductor.compile_worker import subproc_pool
-
-    compile_pool = external_devices(monkeypatch, other_gib=2)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-owner")
-    executors = []
-
-    class Executor:
-        def __init__(self, count, *, kind):
-            if os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-second":
-                raise RuntimeError("spawn failed")
-            assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-first"
-            self.closed = False
-            executors.append(self)
-
-        def submit(self, *args):
-            return Future()
-
-        def shutdown(self):
-            self.closed = True
-
-    monkeypatch.setattr(subproc_pool, "SubprocPool", Executor)
-    with pytest.raises(RuntimeError, match="spawn failed"):
-        with compile_pool.CompilePool("cuda:0", devices=("GPU-first", "GPU-second"), jobs=2) as pool:
-            pool.submit(SimpleNamespace(), tmp_path / "one.bin")
-            pool.submit(SimpleNamespace(), tmp_path / "two.bin")
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-owner"
-    assert len(executors) == 1 and executors[0].closed
-
-
-def test_all_external_pools_close_when_a_shutdown_raises(monkeypatch, tmp_path):
-    import os
-    from concurrent.futures import Future
-    from torch._inductor.compile_worker import subproc_pool
-
-    compile_pool = external_devices(monkeypatch, other_gib=2)
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    closed = []
-
-    class Executor:
-        def __init__(self, count, *, kind):
-            self.mask = os.environ["CUDA_VISIBLE_DEVICES"]
-
-        def submit(self, *args):
-            return Future()
-
-        def shutdown(self):
-            closed.append(self.mask)
-            if self.mask == "GPU-second":
-                raise RuntimeError("shutdown failed")
-
-    monkeypatch.setattr(subproc_pool, "SubprocPool", Executor)
-    with pytest.raises(RuntimeError, match="shutdown failed"):
-        with compile_pool.CompilePool("cuda:0", devices=("GPU-first", "GPU-second"), jobs=2) as pool:
-            pool.submit(SimpleNamespace(), tmp_path / "one.bin")
-            pool.submit(SimpleNamespace(), tmp_path / "two.bin")
-    assert closed == ["GPU-second", "GPU-first"]
-    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (40 << 30, 96 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
+    pool = compile_pool.CompilePool("cuda:0", pools=pools)
+    # Every rank's pool together stays within the host's threads and RAM.
+    assert pool.workers == workers and pools * pool.workers * pool.options["compile_threads"] == 16

@@ -1,7 +1,7 @@
 """Model resolution, memory planning, and downloads for preparation commands."""
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from ignition import planning
 from ignition.errors import FetchError, UsageError
@@ -40,46 +40,35 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
            concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
-           context_parallel: bool = True) -> planning.Plan:
+           context_parallel: bool = True, stream_overlap: bool = True,
+           mixed_prefill: bool = False) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     return planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
-        prefill_chunk=prefill_chunk, context_parallel=context_parallel)
+        prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap,
+        mixed_prefill=mixed_prefill)
 
 
-def context_parallel(args, model: ResolvedModel, *, spans_hosts: bool = False) -> bool:
-    """Whether a plan may shard attention context across its ranks, which ranks on separate hosts never do.
+def context_parallel(args, model: ResolvedModel) -> bool:
+    """Whether a plan may shard attention context across its ranks, on one host or several.
 
     Planning shards only recipes that declare context-parallel page costs, and
     --no-context-parallel applies only to those.
     """
     if args.no_context_parallel and not any(costs.page_tokens for costs in model.recipe.ranks.values()):
         raise UsageError(f"--no-context-parallel: {model.checkpoint.alias} does not shard attention context")
-    return not args.no_context_parallel and not spans_hosts
+    return not args.no_context_parallel
 
 
-def with_compiler_devices(host: Host, plan: planning.Plan, gpus: str | None, *, enabled=True):
-    """Resolve compiler GPUs before preparation narrows the CUDA device mask."""
-    if gpus is None:
-        return plan
-    if not enabled:
-        raise UsageError("--compile-gpus requires forward compilation; omit --no-compile")
-    by_index = {gpu.index: gpu for gpu in host.gpus}
-    indices = planning.parse_gpus(gpus)
-    missing = [index for index in indices if index not in by_index]
-    if missing:
-        raise UsageError(f"--compile-gpus names unavailable GPUs: {planning.format_gpus(missing)}")
-    selected = {gpu.uuid for gpu in plan.gpus}
-    devices = []
-    for index in indices:
-        gpu = by_index[index]
-        if (gpu.name, gpu.capability) != (plan.gpus[0].name, plan.gpus[0].capability):
-            raise UsageError(f"--compile-gpus GPU {index} must match {plan.gpus[0].name} "
-                             f"{plan.gpus[0].capability}; got {gpu.name} {gpu.capability}")
-        if gpu.uuid not in selected and gpu.uuid not in devices:
-            devices.append(gpu.uuid)
-    return replace(plan, compile_devices=tuple(devices))
+def stream_overlap(args, model: ResolvedModel) -> bool:
+    """Whether a plan may run independent branches on an auxiliary stream.
+
+    --no-stream-overlap applies only to recipes that declare stream overlap.
+    """
+    if args.no_stream_overlap and not model.recipe.stream_overlap:
+        raise UsageError(f"--no-stream-overlap: {model.checkpoint.alias} runs no branches concurrently")
+    return not args.no_stream_overlap
 
 
 def speculation(args, model: ResolvedModel) -> Speculation | None:

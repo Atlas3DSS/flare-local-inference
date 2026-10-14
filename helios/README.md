@@ -14,9 +14,8 @@ with `flare` through `execv`. See
 [runtime packages](../docs/runtime-package-design.md) for the resource contract.
 
 The `server` feature supplies HTTP/SSE and model scheduling. Native package
-serving supports the Qwen TP1 contract. The shared scheduler also supports
-Glm5Next, whose package export and tensor-parallel reconstruction remain
-unimplemented. Raw replay and two-frame graph execution are available through
+serving uses the typed prepared contract for single-rank and tensor-parallel
+execution. Raw replay and two-frame graph execution are available through
 Rust APIs and heliopause's diagnostic Python bindings. In-process HTTP
 bindings require heliopause's `qualification` feature; normal installations
 serve only through a package.
@@ -85,8 +84,13 @@ Execution and presentation failures return 500. SSE terminal failures and diagno
 messages. Failed CUDA drains retain prepared resources. Worker recovery is unsupported.
 
 The server exposes `/health`, `/v1/models`, `/v1/chat/completions`, and `/metrics`.
-`/v1/models` lists the model identifier and each configured `served_names` entry;
-requests may use any of them.
+`/v1/models` lists one card, using the first nonempty `served_names` entry as its
+`id`, or the checkpoint identifier when none is set. The card includes the
+effective context limit in `max_model_len` and prepared capabilities, with the
+checkpoint identifier in `root`. `/v1/models/{model}` returns the same card for
+the checkpoint identifier or any alias, including repository IDs with slashes.
+Unknown names return a JSON 404.
+See [the API reference](../docs/api.md) for discovery fields and generation routes.
 HTTP admission reserves at most `queue_capacity + max_active` requests before
 reading JSON bodies. Admitted requests await a bounded CPU preparation worker;
 the default two workers can prepare four simultaneous generation requests.
@@ -338,10 +342,10 @@ into private pages. Failed copies prevent publication. `cancel` stops scheduling
 immediately and retains slot/page/snapshot ownership through final GPU use.
 Generation reuse waits for that retirement.
 
-This scheduler operates on logical IDs and completion records. `model::ModelContract`
-selects model-owned admission, input storage, completion interpretation, and output
-protocol types. `model::qwen4exp::inputs::Inputs` packs Qwen4Exp admission, state,
-vision, and forward inputs. `server::ModelRuntime<M>`
+This scheduler operates on logical IDs and completion records. `model::PreparedContract`
+declares typed graph value sources, storage views, dependencies, and frontend syntax.
+Shared `model::Inputs` binds and packs admission, state, vision, and forward inputs.
+`server::ModelRuntime`
 owns the scheduler and executor on one native model thread. Its private `Worker`
 owns ingress, pending and active requests, model admissions, and reusable input
 storage. Admission precedes ordered completion processing, terminal publication,
@@ -359,9 +363,9 @@ and uploads only newly assigned page-table entries during decode.
 
 ## Native frontend
 
-The `frontend` Cargo feature provides `Frontend::load` over explicit tokenizer,
-tokenizer-config, and chat-template paths with expected SHA256 fingerprints. Each
-asset is hashed and parsed from the same bytes. No model lookup, downloading,
+The `frontend` Cargo feature provides `Frontend::load` over explicit tokenizer and
+chat-template assets with expected SHA256 fingerprints, plus typed token settings.
+Each asset is hashed and parsed from the same bytes. No model lookup, downloading,
 Python import, or Python callback occurs in this API.
 
 `Frontend::render_chat` preserves JSON message content and tool argument order,

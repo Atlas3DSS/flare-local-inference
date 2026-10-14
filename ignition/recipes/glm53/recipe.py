@@ -39,10 +39,10 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
         hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
-        max_active=plan.concurrency, context_parallel=plan.context_parallel,
-        context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
+        max_active=plan.concurrency, context_parallel=plan.context_parallel, stream_overlap=plan.stream_overlap,
+        context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache, compile_devices=plan.compile_devices,
+        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
         # SM103 runs routed experts through trtllm-gen with NVFP4 activations at every size.
         expert_activation="a4" if any(gpu.capability == (10, 3) for gpu in plan.gpus) else "a16",
         # Expanded scales take 2 x 288 x 4096 x 2048 / 16 bytes per routed layer over the ranks: about
@@ -73,7 +73,9 @@ RECIPE = Recipe(
         # Decoder layer 45, the MTP module.
         draft_bytes=4_301_658_112),),
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    speculation=Speculation(draft_tokens=5), max_draft_tokens=7,
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, verification_rows=0,
+    # Shared experts, KDA gate projections, and decode query chains run on an auxiliary stream.
+    stream_overlap=True,
     ranks=MappingProxyType({
         # One rank holds every head: twice TP2's recurrent rows less the replicated part.
         1: _costs(161_123_584, _GRAPH_BYTES, ranks=1, speculating=True),

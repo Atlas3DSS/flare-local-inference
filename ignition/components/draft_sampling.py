@@ -219,11 +219,18 @@ class PreparedDraftProposal:
     """Two captured launches over explicit request-policy inputs for one draft position."""
 
     def __init__(self, scores, probabilities, valid, top_k, top_p, params, slots, seed, offset, sampled,
-                 *, capacity):
+                 *, capacity, candidates=None, selected=None):
         rows, vocab = scores.shape[0], scores.shape[-1]
         self.blocks = triton.cdiv(vocab, BLOCK)
-        self.candidates = torch.empty((rows, self.blocks, DRAFT_CANDIDATES), dtype=torch.int64, device=scores.device)
-        self.selected = torch.empty((rows, DRAFT_CANDIDATES), dtype=torch.int64, device=scores.device)
+        self.candidates = (torch.empty((rows, self.blocks, DRAFT_CANDIDATES), dtype=torch.int64, device=scores.device)
+                           if candidates is None else candidates)
+        self.selected = (torch.empty((rows, DRAFT_CANDIDATES), dtype=torch.int64, device=scores.device)
+                         if selected is None else selected)
+        for tensor, shape in ((self.candidates, (rows, self.blocks, DRAFT_CANDIDATES)),
+                              (self.selected, (rows, DRAFT_CANDIDATES))):
+            if (tensor.shape != shape or tensor.dtype != torch.int64
+                    or tensor.device != scores.device or not tensor.is_contiguous()):
+                raise ValueError("draft proposal scratch requires contiguous Int64 tensors on the score device")
         pool = triton.next_power_of_2(self.blocks * DRAFT_CANDIDATES)
         self._block_args = (scores, probabilities, top_k, self.candidates, vocab, self.blocks, BLOCK, DRAFT_CANDIDATES)
         self._select_args = (self.candidates, self.selected, probabilities, valid, top_k, top_p,
@@ -252,20 +259,26 @@ class PreparedDraftProposal:
 class PreparedDraftDistribution(PreparedSpeculativeDistributions):
     """A one-position conditional proposal whose filtering and draw use PreparedDraftProposal."""
 
+    @staticmethod
+    def scratch_layout(batch, width, vocab):
+        return {**PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab),
+            "block_max": ((batch, triton.cdiv(vocab, _SCORE_BLOCK)), torch.float32),
+            "proposal_candidates": ((batch, triton.cdiv(vocab, BLOCK), DRAFT_CANDIDATES), torch.int64),
+            "proposal_selected": ((batch, DRAFT_CANDIDATES), torch.int64)}
+
     def __init__(self, logits, requests, slots, generations, live_rows, candidate_prefix_ids, *,
-                 seed, offset, sampled, prefix_offset=0):
+                 seed, offset, sampled, prefix_offset=0, workspace=None):
         super().__init__(logits, requests, slots, generations, live_rows, candidate_prefix_ids,
-                         prefix_offset=prefix_offset)
+                         prefix_offset=prefix_offset, workspace=workspace)
         if logits.shape[1] != 1:
             raise ValueError("draft proposals cover one position")
         # Fused scoring: per-block maxima of each row before the row reduction.
-        blocks = triton.cdiv(logits.shape[2], _SCORE_BLOCK)
-        self.block_max = torch.empty((logits.shape[0], blocks), dtype=torch.float32, device=logits.device)
         self._score_kernels = None
         # Contiguous [B,1,...] storage is addressed by row; kernels receive the base tensors.
         self.proposal = PreparedDraftProposal(
             self.scores, self.probabilities, self.valid, self.packed_top_k, self.packed_top_p,
-            requests.parameters, slots, seed, offset, sampled, capacity=requests.capacity)
+            requests.parameters, slots, seed, offset, sampled, capacity=requests.capacity,
+            candidates=self.proposal_candidates, selected=self.proposal_selected)
 
     def prepare(self):
         if self.logits.device.type != "cuda":

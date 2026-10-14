@@ -3,7 +3,7 @@ use crate::{
     cache::Fence,
     execution::{CompletionRecord, FrameCompletion},
     frontend::{Asset, Frontend, FrontendAssets},
-    model::qwen4exp::{PromptData, Qwen4Exp},
+    model::PromptData,
     scheduler::SchedulerLimits,
 };
 use sha2::{Digest, Sha256};
@@ -65,7 +65,8 @@ impl Fixture {
         std::fs::remove_dir_all(directory).unwrap();
         Self {
             config: ModelConfig {
-                contract: Qwen4Exp::metadata(),
+                prepared_sequence_tokens: 128,
+                contract: crate::model::testing::metadata(),
                 identity: [23; 32],
                 model_id: "qwen-worker-phases".into(),
                 limits: SchedulerLimits {
@@ -83,7 +84,6 @@ impl Fixture {
                 speculative_fixed_width: None,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
-                state_rows_per_request: None,
             },
             frontend,
             stop: AtomicBool::new(false),
@@ -91,11 +91,15 @@ impl Fixture {
         }
     }
 
-    fn worker(&self, receiver: mpsc::Receiver<Vec<Incoming<Qwen4Exp>>>) -> Worker<'_, Qwen4Exp> {
+    fn worker(&self, receiver: mpsc::Receiver<Vec<Incoming>>) -> Worker<'_> {
+        self.worker_for(receiver)
+    }
+
+    fn worker_for(&self, receiver: mpsc::Receiver<Vec<Incoming>>) -> Worker<'_> {
         let mut scheduler = RequestScheduler::new(
             self.config.identity,
             self.config.limits,
-            Qwen4Exp::scheduler_capabilities(&self.config),
+            crate::model::scheduler_capabilities(&self.config),
         )
         .unwrap();
         let mut graphs = Vec::new();
@@ -138,15 +142,35 @@ impl Fixture {
             receiver,
             4,
         );
-        worker.inputs = Some(Default::default());
+        worker.inputs = Some(
+            crate::model::Inputs::new(&self.config, &crate::model::testing::manifest(&self.config))
+                .unwrap(),
+        );
         worker
     }
 
-    fn incoming(&self, tokens: Vec<u32>, limit: u32) -> (Incoming<Qwen4Exp>, Generation) {
+    fn incoming(&self, tokens: Vec<u32>, limit: u32) -> (Incoming, Generation) {
+        let length = tokens.len();
+        self.incoming_for(
+            tokens,
+            limit,
+            PromptData {
+                positions: (0..length).map(|n| [n as i64; 3]).collect(),
+                vision_token_indices: vec![-1; length],
+                ..Default::default()
+            },
+        )
+    }
+
+    fn incoming_for(
+        &self,
+        tokens: Vec<u32>,
+        limit: u32,
+        data: crate::model::PromptData,
+    ) -> (Incoming, Generation) {
         let (events, receiver) = async_mpsc::channel(64);
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
-        let length = tokens.len();
         (
             Incoming {
                 _capacity: None,
@@ -155,10 +179,7 @@ impl Fixture {
                 prompt: Prompt {
                     tokens,
                     system_boundary: None,
-                    data: PromptData {
-                        positions: (0..length).map(|n| [n as i64; 3]).collect(),
-                        vision_token_indices: vec![-1; length],
-                    },
+                    data,
                     images: None,
                     conditioning: vec![],
                     sampling: SamplingParameters::default(),
@@ -186,7 +207,7 @@ impl Fixture {
     }
 }
 
-fn planned(worker: &mut Worker<'_, Qwen4Exp>, kind: GraphKind, sequence: u64) -> ScheduledPlan {
+fn planned(worker: &mut Worker<'_>, kind: GraphKind, sequence: u64) -> ScheduledPlan {
     let (step, _) = worker.plan(0).unwrap();
     let step = step.unwrap();
     assert_eq!(step.kind, kind);
@@ -195,7 +216,7 @@ fn planned(worker: &mut Worker<'_, Qwen4Exp>, kind: GraphKind, sequence: u64) ->
 }
 
 fn completion(
-    worker: &Worker<'_, Qwen4Exp>,
+    worker: &Worker<'_>,
     step: &ScheduledStep,
     sequence: u64,
     sampled: Option<u32>,
@@ -221,7 +242,7 @@ fn completion(
     }
 }
 
-fn advance(worker: &mut Worker<'_, Qwen4Exp>, kind: GraphKind, sequence: u64, token: Option<u32>) {
+fn advance(worker: &mut Worker<'_>, kind: GraphKind, sequence: u64, token: Option<u32>) {
     let step = planned(worker, kind, sequence);
     let frame = completion(worker, &step, sequence, token);
     worker.complete(kind, frame).unwrap();
@@ -475,7 +496,7 @@ fn packing_sees_reserved_pages_and_pack_failure_retains_submission_until_drain()
     let step = planned(&mut worker, GraphKind::Prefill, 2);
     let pages: Vec<_> = worker.scheduler.request(handle).unwrap().pages().collect();
     assert_eq!(pages.len(), 1);
-    let uploads = Qwen4Exp::uploads(worker.inputs.as_ref().unwrap());
+    let uploads = crate::model::Inputs::uploads(worker.inputs.as_ref().unwrap());
     let page_upload = uploads
         .iter()
         .find(|upload| upload.buffer == "page_tables")
@@ -533,7 +554,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
     assert_eq!(worker.scheduler.stats().system_checkpoints, 0);
     assert!(!worker.publish().unwrap());
     let snapshot = planned(&mut worker, GraphKind::Snapshot, 3);
-    let uploads = Qwen4Exp::uploads(worker.inputs.as_ref().unwrap());
+    let uploads = crate::model::Inputs::uploads(worker.inputs.as_ref().unwrap());
     let expected = uploads
         .iter()
         .find(|u| u.buffer == "state_expected_consumed")
@@ -694,6 +715,9 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
         if copy {
             fixture.config.speculative_proposal_source =
                 crate::scheduler::speculation::ProposalSource::Copy;
+            for graph in &mut fixture.config.contract.graphs {
+                graph.draft_cursor = None;
+            }
         }
         let (sender, receiver) = mpsc::channel();
         let (incoming, _generation) = fixture.incoming(vec![0; 13], 8);
@@ -1058,7 +1082,7 @@ fn host_hit(history: &crate::cache::PrefixHistory, consumed: u64) -> crate::offl
     }
 }
 
-fn fake_store<'w>(worker: &'w mut Worker<'_, Qwen4Exp>) -> &'w mut FakeStore {
+fn fake_store<'w>(worker: &'w mut Worker<'_>) -> &'w mut FakeStore {
     let store = worker.store.as_mut().unwrap().as_mut() as *mut dyn crate::offload::PrefixStore;
     // SAFETY: The worker holds the only store and it was constructed as a FakeStore.
     unsafe { &mut *(store as *mut FakeStore) }
@@ -1160,6 +1184,31 @@ fn host_hit_holds_the_request_inbound_until_the_restore_completes() {
 }
 
 #[test]
+fn host_hit_recomputes_when_snapshot_backing_would_prevent_admission() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
+    let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+    history.append(&incoming.prompt.tokens, &[]).unwrap();
+    sender.send(vec![incoming]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker
+        .scheduler
+        .share_snapshot_pages(&vec![0..16; 16])
+        .unwrap();
+    worker.attach_store(Some(Box::new(FakeStore::new(Some(host_hit(&history, 70))))));
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let handle = worker.active[0].as_ref().unwrap().request;
+    assert_eq!(
+        worker.scheduler.request(handle).unwrap().phase,
+        RequestPhase::Initialize
+    );
+    assert_eq!(worker.scheduler.free_page_count(), 14);
+    assert_eq!(worker.scheduler.free_snapshot_count(), 16);
+    assert!(fake_store(&mut worker).fetched.is_empty());
+}
+
+#[test]
 fn failed_restores_readmit_the_request_without_the_host_store() {
     for reject_at_fetch in [false, true] {
         let fixture = Fixture::new();
@@ -1229,10 +1278,7 @@ fn failed_restores_readmit_the_request_without_the_host_store() {
 fn group_runtime(
     fixture: &Fixture,
     capacity: usize,
-) -> (
-    ModelRuntime<Qwen4Exp>,
-    mpsc::Receiver<Vec<Incoming<Qwen4Exp>>>,
-) {
+) -> (ModelRuntime, mpsc::Receiver<Vec<Incoming>>) {
     let (sender, receiver) = mpsc::sync_channel(2);
     (
         ModelRuntime {
@@ -1282,4 +1328,196 @@ fn grouped_submission_validates_all_children_before_enqueue_and_releases_capacit
     assert!(group.iter().all(|r| r.cancelled.load(Ordering::Acquire)));
     drop(group);
     assert_eq!(runtime.capacity.available_permits(), 4);
+}
+
+fn exercise_text_preemption(
+    metadata: crate::model::PreparedContract,
+    data: impl Fn(usize) -> crate::model::PromptData,
+    evict_checkpoint: bool,
+) {
+    let mut fixture = Fixture::new();
+    fixture.config.contract = metadata;
+    fixture.config.prepared_sequence_tokens = 4096;
+    fixture.config.limits.max_sequence_tokens = 4096;
+    fixture.config.limits.pages = 6;
+    fixture.config.limits.max_active = 2;
+    let page_tokens = crate::model::scheduler_capabilities(&fixture.config).page_tokens;
+    let budget = (page_tokens * 4) as u32;
+    let (sender, receiver) = mpsc::channel();
+    let (first, mut first_generation) = fixture.incoming_for(vec![0; 60], budget, data(60));
+    let (second, mut second_generation) = fixture.incoming_for(vec![2; 60], budget, data(60));
+    sender.send(vec![first, second]).unwrap();
+    let mut worker = fixture.worker_for(receiver);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert_eq!(worker.active.iter().flatten().count(), 2);
+    assert_eq!(worker.scheduler.free_page_count(), 2);
+    let older = worker.active[0].as_ref().unwrap().request;
+    let mut sequence = 0;
+    while worker.parked.is_empty() {
+        sequence += 1;
+        assert!(sequence < (page_tokens * 8) as u64, "no request was parked");
+        let step = worker
+            .plan(0)
+            .unwrap()
+            .0
+            .expect("page pressure must make progress");
+        worker.reserve_and_pack(&step, Fence(sequence)).unwrap();
+        let sample = match step.kind {
+            GraphKind::Decode | GraphKind::Resume => Some(1),
+            GraphKind::Prefill => {
+                let lane = &step.lanes[0];
+                let live = worker.scheduler.request(lane.request).unwrap();
+                (lane.start_position as usize + lane.tokens == live.prompt_tokens).then_some(1)
+            }
+            _ => None,
+        };
+        let frame = completion(&worker, &step, sequence, sample);
+        worker.complete(step.kind, frame).unwrap();
+        worker.publish().unwrap();
+        for generation in [&mut first_generation, &mut second_generation] {
+            while let Ok(event) = generation.events.try_recv() {
+                assert!(!matches!(
+                    event,
+                    GenerationEvent::Error(_) | GenerationEvent::AdmissionRejected(_)
+                ));
+            }
+        }
+    }
+    assert!(worker.scheduler.stats().preemptions > 0);
+    let (incoming, parked) = worker.parked.front_mut().unwrap();
+    assert!(parked.carried.generated_tokens > 0);
+    let history_len = incoming.prompt.tokens.len();
+    assert_eq!(history_len, 60 + parked.carried.generated_tokens as usize);
+    assert_eq!(
+        incoming.prompt.max_new_tokens + parked.carried.generated_tokens,
+        budget
+    );
+    crate::model::validate_prompt_data(
+        &fixture.config,
+        &incoming.prompt.tokens,
+        &incoming.prompt.data,
+    )
+    .unwrap();
+    let metadata = crate::model::prompt_metadata(&mut incoming.prompt.data);
+    if let Some(positions) = metadata.positions {
+        assert_eq!(positions.last(), Some(&[history_len as i64 - 1; 3]));
+    }
+    if let Some(indices) = metadata.vision_token_indices {
+        assert_eq!(indices, &vec![-1; history_len]);
+    }
+    worker.retire(&[older]).unwrap();
+    if evict_checkpoint {
+        let pressure = worker
+            .scheduler
+            .admit(RequestSpec {
+                prompt: vec![3; page_tokens * 5],
+                max_new_tokens: 1,
+                growable_output: false,
+                system_boundary: None,
+                conditioning: vec![],
+                grammar_constrained: false,
+                host_stops: false,
+            })
+            .unwrap();
+        worker.scheduler.cancel(pressure).unwrap();
+    }
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert!(worker.parked.is_empty());
+    let resumed = worker.active.iter().flatten().next().unwrap().request;
+    let live = worker.scheduler.request(resumed).unwrap();
+    if evict_checkpoint {
+        assert!(live.consumed_tokens < history_len as u64 - 1);
+    } else {
+        assert_eq!(live.phase, RequestPhase::Restore);
+        assert_eq!(live.consumed_tokens, history_len as u64 - 1);
+    }
+    let mut recomputed = false;
+    for _ in 0..history_len / 64 + 8 {
+        sequence += 1;
+        let step = worker.plan(0).unwrap().0.unwrap();
+        recomputed |= step.kind == GraphKind::Prefill
+            && step.lanes[0].start_position < history_len as u64 - 1;
+        worker.reserve_and_pack(&step, Fence(sequence)).unwrap();
+        let sample = match step.kind {
+            GraphKind::Decode | GraphKind::Resume => Some(1),
+            GraphKind::Prefill => {
+                let lane = &step.lanes[0];
+                (lane.start_position as usize + lane.tokens == history_len).then_some(1)
+            }
+            _ => None,
+        };
+        let frame = completion(&worker, &step, sequence, sample);
+        worker.complete(step.kind, frame).unwrap();
+        worker.publish().unwrap();
+        if worker.scheduler.request(resumed).unwrap().generated_tokens > 0 {
+            assert_eq!(recomputed, evict_checkpoint);
+            assert!(
+                worker.active[resumed.slot as usize]
+                    .as_ref()
+                    .unwrap()
+                    .carried
+                    .generated_tokens
+                    > 0
+            );
+            return;
+        }
+    }
+    panic!("readmitted request did not generate output");
+}
+
+#[test]
+fn text_preemption_restores_or_recomputes_every_attention_contract() {
+    for page_tokens in [64, 128, 256] {
+        for evict in [false, true] {
+            let mut metadata = crate::model::testing::metadata();
+            metadata.cache.page_tokens = page_tokens;
+            exercise_text_preemption(
+                metadata,
+                |n| PromptData {
+                    positions: (0..n).map(|p| [p as i64; 3]).collect(),
+                    vision_token_indices: vec![-1; n],
+                    ..Default::default()
+                },
+                evict,
+            );
+        }
+    }
+}
+
+#[test]
+fn text_admission_waits_for_pages_and_conditioned_requests_reserve_their_limit() {
+    let mut fixture = Fixture::new();
+    fixture.config.prepared_sequence_tokens = 2048;
+    fixture.config.limits.max_sequence_tokens = 2048;
+    fixture.config.limits.pages = 4;
+    let (sender, receiver) = mpsc::channel();
+    let (first, _first_generation) = fixture.incoming(vec![0; 60], 1024);
+    let (second, _second_generation) = fixture.incoming(vec![1; 60], 1024);
+    let (third, mut third_generation) = fixture.incoming(vec![2; 60], 1024);
+    sender.send(vec![first, second, third]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert_eq!(worker.active.iter().flatten().count(), 2);
+    assert_eq!(worker.pending.len(), 1);
+    assert!(third_generation.events.try_recv().is_err());
+    let first = worker.active[0].as_ref().unwrap().request;
+    worker.retire(&[first]).unwrap();
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert!(worker.pending.is_empty());
+    assert_eq!(worker.active.iter().flatten().count(), 2);
+
+    let (sender, receiver) = mpsc::channel();
+    let (mut conditioned, mut generation) = fixture.incoming(vec![0; 60], 1024);
+    conditioned.prompt.conditioning.push(ConditioningEvent {
+        position: 0,
+        identity: [3; 32],
+    });
+    sender.send(vec![conditioned]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert!(worker.active.iter().all(Option::is_none));
+    assert!(matches!(
+        generation.events.try_recv().unwrap(),
+        GenerationEvent::AdmissionRejected(_)
+    ));
 }

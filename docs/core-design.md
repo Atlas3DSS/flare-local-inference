@@ -272,11 +272,18 @@ rank ownership and coordination.
 
 ### Design principles
 
+Helios's shared runtime policy and separation from model computation are
+non-negotiable architectural invariants. Correct output, performance gains,
+delivery pressure, and intended cleanup do not justify model-specific runtime
+policy or native model computation. Temporary implementations must obey the
+same boundary; violations must be resolved before committing.
+
 - **Helios stays minimal.** Model-specific execution behavior, composition,
   state-update computation, and optimization belong in Ignition and its captured
-  programs. Limit model-specific Helios support to K/V cache management and how
-  cache storage is exposed to captured graphs, through contracts kept as general
-  as possible. Introducing a captured-graph operation family requires
+  programs. Native specialization is limited to concrete cache storage
+  requirements and graph cache bindings. Cache schemes and prepared layout
+  metadata express those differences through contracts reusable by every model
+  with the same requirements. Introducing a captured-graph operation family requires
   prior explicit approval from project owner Luke Alonso <lalonso@gmail.com>.
   Shape and capacity variants preserve an existing family's operation contract;
   a new operation contract requires approval even when it reuses an existing
@@ -304,9 +311,27 @@ rank ownership and coordination.
   `ignition/components/`.
 - **One native lifecycle serves every model.** Transport, scheduling, cache
   ownership, input packing, frontend processing, and request handling stay shared.
-  Express model-dependent behavior through prepared metadata and frontend assets;
-  keep model-specific native execution contracts focused on cache management
-  and graph cache bindings.
+  Admission, page reservation and growth, eviction, preemption, readmission, and
+  offload use shared policy and mechanisms. Model or recipe identity must not
+  select those behaviors, including through capability flags that encode model
+  allowlists. Cache schemes supply concrete page geometry, state storage, and
+  restore constraints; shared policy consumes those contracts. Express other
+  model-dependent behavior through prepared metadata and frontend assets.
+- **Runtime fixes follow the affected contract.** Trace a defect through every
+  supported cache scheme and apply the fix to every compatible contract. For
+  example, incremental page reservation depends on cache growth and continuation
+  requirements. A GLM reproducer does not justify a GLM-only scheduler path.
+  Restrictions require concrete storage or execution constraints in the contract.
+  Validate affected cache schemes and request lifecycles; untested models remain
+  a validation limitation, not a reason for model-specific policy.
+- **Prepared contracts cannot select runtime policy by model identity.**
+  `PreparedContract` describes graph value sources, storage views, dependencies,
+  capacities, and frontend syntax. Per-model boolean policy flags, including
+  `supports_*`, `can_*`, and default-false opt-ins, are prohibited. Enums,
+  callbacks, schema names, and metadata fields must not disguise the same
+  allowlist. Shared code derives behavior from concrete geometry and dataflow.
+  Independent enum identifiers select reusable tool/reasoning parsers and image
+  preparation/layout implementations only. Review every field and all consumers.
 - **Numerical and performance requirements are separate.** State copies and
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine
@@ -325,13 +350,15 @@ portability are outside this design.
 
 ## 1. Target and execution contract
 
-The model recipes and their native contracts are:
+Recipes declare the data consumed by the shared native contract:
 
-| Recipe | Native contract | State and execution |
+| Recipe | Contract declaration | State and execution |
 |---|---|---|
-| [Qwen3.8 Flash](../ignition/recipes/qwen38/recipe.py) | [Qwen4Exp](../helios/src/model/qwen4exp.rs) | GDN recurrence, QSA sparse attention, PLE, vision, and learned or copied proposals |
-| [GLM 5.3 Flash](../ignition/recipes/glm53/recipe.py) | [Glm5Next](../helios/src/model/glm5next.rs) | KDA recurrence, indexed MLA, mHC, and learned MTP |
-| [DeepSeek V4.1 Flash](../ignition/recipes/deepseek41/recipe.py) | [DeepSeek41](../helios/src/model/deepseek41.rs) | Compressed latent attention, sliding windows, Engram tables, and DSpark proposal composition |
+| [Qwen3.8 Flash](../ignition/recipes/qwen38/recipe.py) | [Prepared data](../ignition/recipes/qwen38/contract.py) | GDN recurrence, QSA sparse attention, PLE, vision, and learned or copied proposals |
+| [GLM 5.3 Flash](../ignition/recipes/glm53/recipe.py) | [Prepared data](../ignition/recipes/glm53/contract.py) | KDA recurrence, indexed MLA, mHC, and learned MTP |
+| [DeepSeek V4.1 Flash](../ignition/recipes/deepseek41/recipe.py) | [Prepared data](../ignition/recipes/deepseek41/contract.py) | Compressed latent attention, sliding windows, Engram tables, and DSpark proposal composition |
+| [DeepSeek V4 Flash](../ignition/recipes/deepseek4/recipe.py) | [Prepared data](../ignition/recipes/deepseek4/contract.py) | Compressed latent attention, sliding windows, vision, and DSpark proposals |
+| [MiMo V2.6 Pro](../ignition/recipes/mimo_v2/recipe.py) | [Prepared data](../ignition/recipes/mimo_v2/contract.py) | Paged KV, sliding windows, vision, and DFlash proposals |
 
 Recipes declare supported GPU counts, checkpoint revisions, and feature
 capacities. Each architecture and tensor-parallel size requires independent
@@ -348,9 +375,9 @@ vision weights.
 
 [pyproject.toml](../pyproject.toml) and [uv.lock](../uv.lock) declare the
 preparation dependencies. Transformers supplies canonical architecture and
-processor semantics. FlashInfer is an editable sibling checkout at
-`../flashinfer`; its b12x operators and FlashInfer sampling supply the
-prepared GPU computation.
+processor semantics. FlashInfer targets `main` in
+`local-inference-lab/flashinfer`, with its resolved commit recorded in `uv.lock`;
+its b12x operators and FlashInfer sampling supply the prepared GPU computation.
 
 ### Runtime contract
 
@@ -374,9 +401,9 @@ prepared GPU computation.
 - Identical inputs to deterministic plans produce identical logits. Plans with
   atomic or otherwise variable reduction order use component tolerances derived
   from measured repeatability. State transfers and request metadata remain exact.
-- A statically selected `ModelContract` defines buffer schemas, admission and
-  graph input packing, state-operation metadata, and completion interpretation.
-  Vocabulary size and feature capacities come from the package configuration.
+- A typed `PreparedContract` defines semantic value bindings, state views,
+  graph dependencies, completion cursor relationships, and frontend syntax.
+  Shared admission and packing code binds these to each rank's buffer geometry.
 
 ### Capacities and memory
 
@@ -425,7 +452,38 @@ Every rank uses the same row and page counts, limited by the smallest rank
 budget. Weights and fixed transport buffers retain their prepared layouts.
 
 The context limit bounds one request; aggregate page capacity bounds all
-active and cached histories. Admission reserves prompt and output capacity.
+active and cached histories. Cache management follows attention storage:
+
+| Attention mechanism | Growing history | Continuation state |
+|---|---|---|
+| Causal full or sparse attention | Append logical KV or latent/index pages | Partial page and saved hidden state |
+| Compressed latent attention | Append pages at the declared compression geometry | Compression interval, overlap, partial pages, and sliding window |
+| Recurrent linear attention | No token-proportional pages for the recurrence | Recurrent matrices and convolution history |
+| Sliding-window attention | Fixed window in a continuation row | Window contents and position |
+
+A hybrid model combines these storage requirements. Every prepared model uses
+the same page-growth policy; page size, draft-page headroom, and continuation-row
+extent describe its storage. Model names and per-model support flags do not
+participate in the decision.
+
+For text requests, admission reserves the prompt and one page of output. The
+output limit bounds generation without reserving all of its potential history.
+Reservations grow a page ahead of decode rounds, evicting unpinned prefix pages
+first; admission waits while pages are short. When a running request still cannot
+continue, the newest eligible decoder publishes its terminal checkpoint when
+backing allows and is readmitted with its history and remaining output budget.
+The checkpoint restores all declared continuation state; eviction can instead
+require recomputing the history. Shared handling extends text-position and
+image-index metadata for generated tokens before readmission.
+
+The output stream, stop and grammar state, and penalty counts continue. Random
+streams restart on the device with a seed derived from the request's seed and
+the number of tokens generated before preemption. A request whose history
+exceeds the whole pool ends at that length. Requests with image inputs or
+conditioning retain full reservations because readmission does not reconstruct
+their image-feature execution. This restriction concerns retained frontend
+inputs, not the attention mechanism.
+
 For Qwen's target cache, BF16 KV and compressed selector keys cost 24.75 KiB
 per token; MTP pages, continuation rows, and graph resources add separate
 costs. The loader reports actual capacities. The [CLI design](cli-design.md)
@@ -613,8 +671,8 @@ if the requested capacities cannot fit.
 ### Gated DeltaNet convolution
 
 b12x's GDN packages treat convolution as external. The prepared
-`sequence.short_conv` operator comes from the editable sibling `../flashinfer`
-checkout. The PLE implementation in `sequence/ple` supplies
+`sequence.short_conv` operator comes from the LIL FlashInfer dependency.
+The PLE implementation in `sequence/ple` supplies
 reusable history and state machinery: caller-owned state sized by dilation and
 kernel width, state-slot ids, a fresh-state flag, accepted-token counts,
 device-resident sequence and token counts, and a mixed prefill-plus-decode mode.
@@ -758,6 +816,9 @@ forks, joins, input lifetimes, and tensor mutations through forward compilation.
 Every branch rejoins before dependent outputs or reused scratch are consumed.
 Python captures these dependencies inside one CUDA graph; Rust submits that
 graph without calling Python or managing the internal streams.
+Preparation with `--no-stream-overlap` creates no auxiliary stream: recipes
+compose each branch on the main stream with the same kernels and register no
+concurrent scratch, to test whether a fault depends on overlap.
 
 Startup compiles complete text forwards with Inductor before capture, including
 prefill absorption, ordinary decode, resume sampling, and speculative rounds.
@@ -870,15 +931,22 @@ sockets, and owns the server lifetime and request paths. The
 [runtime-package design](runtime-package-design.md) specifies storage, kernel,
 graph, and frontend reconstruction.
 
-`Server<M>` and `ModelRuntime<M>` statically select the
-[`ModelContract`](../helios/src/model.rs). Shared core code validates graph
-geometry, constructs admissions, schedules work, and retires completions. The
-contract supplies prepared-buffer declarations, model-specific constraints,
-input encoding, and completion checks. Its associated output protocol composes
-separate reasoning and tool parsers. The Flare command selects Qwen4Exp, Glm5Next, or DeepSeek41 once from the
-package's input schema. Each uses the shared native lifecycle.
-Unknown schema versions, fields, or capabilities fail before asset loading and
-CUDA worker construction.
+`Server` and `ModelRuntime` consume the package's
+[`PreparedContract`](../helios/src/model/contract.rs). Shared code validates
+vocabulary and capacities, resolves each graph's value sources and byte views
+into a `BoundContract`, packs uploads, and validates completion records.
+Neither Flare nor Heliopause dispatches on model identity or schema names.
+Tool and reasoning parsers and image preparation/layout functions are selected
+independently by typed frontend enums. Missing fields, unknown or unspecified
+enum values, invalid storage views, and incompatible input geometry reject loading.
+
+Pending-token input sources determine the scheduler's completion dependency.
+Host-fed decode waits for its preceding completion; device-fed decode declares a
+persistent state read and the admission and sampling graphs that produce it.
+Each selected graph declares its continuation-row requirement and embedding-table
+resource IDs. A speculative completion cursor references the graph's updated
+history storage and a token lag, or is absent when the graph maintains no draft
+history. These declarations preserve the existing completion ABI.
 
 Captured operators use b12x's default numerical policy and tuned execution plans.
 MoE reductions may use arrival-ordered atomic additions, so identical graph inputs
@@ -946,6 +1014,11 @@ ServerHandle.close()
 `ServerHandle` retains the runtime and resource owner until shutdown finishes.
 Request submission, cancellation, event consumption, and stats are internal
 Rust interfaces exposed through the native server, not Python methods.
+
+[Direct execution](direct-execution.md) is a separate diagnostic path,
+requested by the project owner, for reproducing model faults without Helios:
+Ignition schedules, packs and replays the prepared graphs from Python, or
+calls their captured forwards with `--eager`. It is never production serving.
 
 A normalized native request contains token IDs, generation parameters,
 positional/conditioning metadata, any preprocessed image inputs with their
@@ -1031,8 +1104,8 @@ Prepare these operations:
 - **Vision:** encode preprocessed patches and write fixed-capacity embedding
   storage.
 - **State maintenance:** initialize or restore a live slot, or freeze its exact
-  consumed state into an immutable snapshot. The model input schema
-  `qwen4exp.graph-inputs.v3` carries the expected consumed count and physical-slot
+  consumed state into an immutable snapshot. Semantic bindings carry the
+  expected consumed count, source and destination state rows, and physical-slot
   target/draft page tables for snapshot and restore.
 
 Padding changes capacity, never logical sequence length. Every padded row must

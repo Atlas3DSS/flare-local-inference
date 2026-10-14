@@ -42,6 +42,9 @@ pub struct CacheGeometry {
     pub row_capacity: u64,
     pub row: Plane,
     pub planes: Vec<Plane>,
+    /// KV ids sharing physical bytes with each snapshot row, excluding execution rows.
+    /// Ownership of a snapshot excludes every page in its range through GPU retirement.
+    pub snapshot_pages: Vec<std::ops::Range<u32>>,
 }
 
 impl CacheGeometry {
@@ -204,6 +207,7 @@ pub(crate) mod tests {
             })
             .collect();
         CacheGeometry {
+            snapshot_pages: Vec::new(),
             page_tokens,
             page_capacity: 4096,
             row_capacity: 64,

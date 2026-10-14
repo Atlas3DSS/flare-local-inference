@@ -24,10 +24,11 @@ def binary():
 
 
 def package_key(model, plan, no_compile):
-    inputs = {"version": 3, "checkpoint": model.checkpoint.revision,
+    inputs = {"version": 4, "checkpoint": model.checkpoint.revision,
               "repository": model.checkpoint.repository, "compile": not no_compile,
               "concurrency": plan.concurrency, "prefill_chunk": plan.prefill_chunk,
-              "context_parallel": plan.context_parallel,
+              "context_parallel": plan.context_parallel, "stream_overlap": plan.stream_overlap,
+              "mixed_prefill": plan.mixed_prefill,
               "cache_states": plan.cache_states, "reserve_bytes": plan.reserve_bytes,
               "gpus": [(gpu.name, gpu.total_bytes) for gpu in plan.gpus],
               "speculation": None if plan.speculation is None else asdict(plan.speculation)}

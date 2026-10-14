@@ -104,7 +104,7 @@ impl PreparedTables {
                 request: source.request.clone(),
             });
         }
-        Ok(Arc::new(Index { vocabulary, tables }))
+        Ok(Arc::new(Index { tables }))
     }
 
     /// Load checkpoint spans once into sealed RAM-backed files. Serving never

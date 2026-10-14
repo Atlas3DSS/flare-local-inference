@@ -140,7 +140,6 @@ pub(super) fn capacities(
         return Err(invalid("invalid cache planning geometry"));
     }
     let execution = 1 + active * width;
-    let admission = active * 3;
     let minimum_pages = active * 8192u64.div_ceil(page_tokens);
     let mut cached = active * 8;
     let mut maximum_pages = u64::MAX;
@@ -160,19 +159,19 @@ pub(super) fn capacities(
                 "model requires continuation-row and KV-page allocations",
             ));
         }
-        let fixed = bytes(package, 0, execution + admission)?;
+        let fixed = bytes(package, 0, execution)?;
         if fixed > budget {
             return Err(invalid(
                 "selected concurrency and verification width exceed available memory",
             ));
         }
-        cached = cached.min(((budget - fixed) / 4 / rows[0].unit_bytes).max(8));
-        if rows[0].maximum < execution + admission + 8 {
+        cached = cached.min((budget - fixed) / rows[0].unit_bytes);
+        if rows[0].maximum < execution {
             return Err(invalid(
                 "continuation virtual extent cannot hold execution state and prefix cache",
             ));
         }
-        cached = cached.min(rows[0].maximum - execution - admission);
+        cached = cached.min(rows[0].maximum - execution);
         maximum_pages = maximum_pages.min(pages.iter().map(|s| s.maximum).min().unwrap());
     }
     let fits = |rows, pages| {
@@ -185,29 +184,60 @@ pub(super) fn capacities(
                 .is_ok_and(|n| n <= budget)
         })
     };
-    loop {
-        let rows = execution + admission + cached;
-        if fits(rows, minimum_pages) {
-            break;
-        }
-        if cached <= 8 {
-            return Err(invalid(
-                "available memory cannot hold execution state, prefix cache, and minimum KV capacity",
-            ));
-        }
-        cached -= 1;
+    if !fits(execution, minimum_pages) {
+        return Err(invalid(
+            "available memory cannot hold execution state and minimum KV capacity",
+        ));
     }
-    let rows = execution + admission + cached;
     let (mut low, mut high) = (minimum_pages, maximum_pages);
     while low < high {
         let mid = low + (high - low).div_ceil(2);
-        if fits(rows, mid) {
+        if fits(execution, mid) {
             low = mid;
         } else {
             high = mid - 1;
         }
     }
-    Ok((rows, low, admission + cached))
+    // Snapshot virtual rows alias KV backing; they do not consume another physical budget.
+    for package in packages {
+        let row = package
+            .allocations
+            .iter()
+            .find(|a| a.sizing.as_ref().is_some_and(|s| s.capacity == 0))
+            .unwrap();
+        let unit = row.sizing.as_ref().unwrap().unit_bytes;
+        let planes: Vec<_> = package
+            .allocations
+            .iter()
+            .filter_map(|a| {
+                a.sizing
+                    .as_ref()
+                    .filter(|s| s.capacity == 1)
+                    .map(|s| (a, s))
+            })
+            .collect();
+        let largest = planes.iter().map(|(_, s)| s.unit_bytes).max().unwrap();
+        let page: u64 = planes.iter().map(|(_, s)| s.unit_bytes).sum();
+        let borrowed: u64 = planes
+            .iter()
+            .filter(|(a, s)| {
+                super::cache_memory::alias_plane(
+                    s.unit_bytes,
+                    largest,
+                    unit,
+                    page,
+                    a.alignment as u64,
+                )
+            })
+            .map(|(a, s)| (low * s.unit_bytes).div_ceil(a.alignment as u64) * a.alignment as u64)
+            .sum();
+        let mapped = bytes(package, 0, execution)? + borrowed;
+        cached = cached.min(mapped / unit - execution);
+        while cached > 0 && bytes(package, 0, execution + cached)? > mapped {
+            cached -= 1;
+        }
+    }
+    Ok((execution + cached, low, cached))
 }
 
 impl NativeModel {
@@ -216,29 +246,34 @@ impl NativeModel {
         packages: &mut [Package],
         progress: &StartupProgress,
         active: usize,
+        agree: super::model::CacheAgreement<'_>,
+        offload_bytes: u64,
     ) -> Result<()> {
-        let reserve = headroom(&self.server_config)?;
+        // The host prefix store registers and streams after the caches are backed.
+        let reserve = headroom(&self.server_config)?
+            .checked_add(offload_bytes)
+            .ok_or_else(|| invalid("prefix cache headroom overflows the device budget"))?;
         let page_tokens = self.server_config["page_tokens"]
             .as_u64()
             .ok_or_else(|| invalid("model requires physical page geometry"))?;
-        // Each active request holds one execution state row per verified position of the
-        // widest speculative graph, unless the model declares how many rows a request holds.
-        let width = match self.server_config.get("state_rows_per_request") {
-            Some(rows) => rows
-                .as_u64()
-                .filter(|rows| (1..=8).contains(rows))
-                .ok_or_else(|| invalid("state rows per request must be 1 through 8"))?,
-            None => packages[0]
-                .execution
-                .as_ref()
-                .unwrap()
-                .graphs
-                .iter()
-                .filter(|g| g.kind == "speculative")
-                .map(|g| g.token_capacity)
-                .max()
-                .unwrap_or(1),
-        };
+        let contract: crate::model::PreparedContract =
+            serde_json::from_value(self.server_config["model_contract"].clone())
+                .map_err(|error| invalid(format!("invalid prepared storage contract: {error}")))?;
+        let width = packages[0]
+            .execution
+            .as_ref()
+            .unwrap()
+            .graphs
+            .iter()
+            .map(|graph| {
+                contract
+                    .graph(&graph.name)
+                    .map(|g| g.state_rows_per_request as u64)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(1);
         let mut available = Vec::new();
         for rank in &self.ranks {
             let (free, total) = unsafe {
@@ -253,44 +288,122 @@ impl NativeModel {
             };
             available.push(budget(free, total, reserve, rank.integrated));
         }
-        let (rows, pages, snapshots) =
+        let (local_rows, local_pages, _) =
             capacities(packages, &available, active as u64, width, page_tokens)?;
+        // Fewer pages only shrink KV, and fewer rows only the snapshot slots aliased into it, so
+        // the smallest capacity any rank can back fits every rank. Snapshot rows need no
+        // dedicated backing; the alias layout below rejects rows the agreed pages cannot back.
+        let (rows, pages) = agree((local_rows, local_pages))?;
+        let execution = 1 + active as u64 * width;
+        if rows > local_rows || pages > local_pages || rows < execution {
+            return Err(invalid(
+                "ranks agreed on a cache capacity this rank cannot back",
+            ));
+        }
+        let snapshots = rows - execution;
         // Scheduler page ids count the model contract's tokens per page, which
         // exceeds the physical page when pages are sharded across ranks.
-        let logical_page_tokens = self.server_config["model_contract"]["page_tokens"]
-            .as_u64()
-            .unwrap_or(page_tokens);
-        let geometry = packages
+        let logical_page_tokens = contract.cache.page_tokens as u64;
+        let mut geometry = packages
             .iter()
             .map(|package| cache_geometry(package, logical_page_tokens, rows, pages))
             .collect::<Result<Vec<_>>>()?;
+        let layouts = packages
+            .iter()
+            .zip(&geometry)
+            .map(|(package, geometry)| {
+                let alignment = |name: &str| {
+                    package
+                        .allocations
+                        .iter()
+                        .find(|a| a.name == name)
+                        .unwrap()
+                        .alignment as u64
+                };
+                super::cache_memory::Layout::new(
+                    geometry,
+                    rows - snapshots,
+                    &geometry
+                        .planes
+                        .iter()
+                        .map(|p| alignment(&p.name))
+                        .collect::<Vec<_>>(),
+                    alignment(&geometry.row.name),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut aliases = vec![u32::MAX..0; snapshots as usize];
+        for layout in &layouts {
+            for (union, range) in aliases.iter_mut().zip(&layout.aliases) {
+                if !range.is_empty() {
+                    union.start = union.start.min(range.start);
+                    union.end = union.end.max(range.end);
+                }
+            }
+        }
+        for range in &mut aliases {
+            if range.start >= range.end {
+                *range = 0..0;
+            }
+        }
+        for geometry in &mut geometry {
+            geometry.snapshot_pages = aliases.clone();
+        }
         let mut gpu_bytes = 0;
         for package in packages.iter_mut() {
+            gpu_bytes += bytes(package, 0, rows - snapshots)? + bytes(package, 1, pages)?;
             for allocation in &mut package.allocations {
                 if let Some(sizing) = allocation.sizing.take() {
                     let units = if sizing.capacity == 0 { rows } else { pages };
                     allocation.nbytes =
                         (units * sizing.unit_bytes).div_ceil(allocation.alignment as u64) as usize
                             * allocation.alignment;
-                    gpu_bytes += allocation.nbytes as u64;
                 }
             }
-            let pool = package
-                .execution
-                .as_mut()
-                .unwrap()
-                .buffers
-                .iter_mut()
-                .find(|b| b.name == "state_pool")
-                .ok_or_else(|| invalid("model lacks continuation storage binding"))?;
-            pool.shape[0] = rows;
-            pool.nbytes = rows * pool.shape[1];
+            for buffer in &mut package.execution.as_mut().unwrap().buffers {
+                let Some(reference) = &buffer.reference else {
+                    continue;
+                };
+                let allocation = package
+                    .allocations
+                    .iter()
+                    .find(|a| a.name == reference.allocation)
+                    .unwrap();
+                if buffer.name == "state_pool" {
+                    buffer.shape[0] = rows;
+                    buffer.nbytes = rows * buffer.shape[1];
+                } else if contract.cache.regions.iter().any(|r| {
+                    r.storage.buffer == buffer.name
+                        && matches!(
+                            r.kind,
+                            crate::model::contract::HistoryKind::PagedKeyValue
+                                | crate::model::contract::HistoryKind::PagedLatent
+                        )
+                }) {
+                    let unit = buffer.nbytes / buffer.shape[0];
+                    if reference.offset != 0
+                        || pages
+                            .checked_mul(unit)
+                            .is_none_or(|end| end > allocation.nbytes as u64)
+                    {
+                        return Err(invalid("paged history view exceeds physical cache backing"));
+                    }
+                    buffer.shape[0] = pages;
+                    buffer.nbytes = pages * unit;
+                }
+            }
         }
         let phase = progress.phase("Allocate cache", Some(gpu_bytes));
-        for ((rank, package), geometry) in self.ranks.iter_mut().zip(packages).zip(geometry) {
-            rank.cache = Some(geometry);
+        for (((rank, package), geometry), layout) in self
+            .ranks
+            .iter_mut()
+            .zip(packages)
+            .zip(geometry)
+            .zip(layouts)
+        {
             unsafe {
-                rank.allocate(package, &phase)?;
+                rank.allocate_shared_cache(package, &geometry, &layout)?;
+                rank.cache = Some(geometry);
                 let binding = package
                     .execution
                     .as_ref()
@@ -317,9 +430,9 @@ impl NativeModel {
         self.server_config["snapshots"] = snapshots.into();
         self.server_config["pages"] = pages.into();
         phase.finish(format!(
-            "{:.1} GiB · {} cached tokens · {snapshots} state rows",
+            "{:.1} GiB · {} KV tokens before checkpoint retention · {snapshots} shared snapshot slots",
             gpu_bytes as f64 / (1u64 << 30) as f64,
-            pages * page_tokens
+            pages * logical_page_tokens
         ));
         Ok(())
     }
@@ -358,6 +471,7 @@ fn cache_geometry(
     }
     planes.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let geometry = CacheGeometry {
+        snapshot_pages: Vec::new(),
         page_tokens,
         page_capacity: pages,
         row_capacity: rows,
@@ -543,8 +657,8 @@ mod tests {
         assert!(full.0 > reduced.0 && reduced.0 > target_only.0);
         assert!(full.1 < reduced.1 && reduced.1 < target_only.1);
         assert_eq!(reduced.0, 1 + 4 * 6 + reduced.2);
-        for (rows, pages, _) in [full, reduced, target_only] {
-            let used = bytes(&p[0], 0, rows).unwrap() + bytes(&p[0], 1, pages).unwrap();
+        for (rows, pages, snapshots) in [full, reduced, target_only] {
+            let used = bytes(&p[0], 0, rows - snapshots).unwrap() + bytes(&p[0], 1, pages).unwrap();
             assert!(used <= budget[0] && budget[0] - used < 2 << 20);
         }
         // Capture concurrency is deliberately absent from the allocation policy.
@@ -554,10 +668,10 @@ mod tests {
     #[test]
     fn ranks_share_capacities_and_respect_alignment_and_virtual_extents() {
         let p = [package(123456, 45678, 1000), package(246912, 91356, 1000)];
-        let (rows, pages, _) = capacities(&p, &[256 << 20, 80 << 20], 4, 3, 256).unwrap();
+        let (rows, pages, snapshots) = capacities(&p, &[256 << 20, 80 << 20], 4, 3, 256).unwrap();
         assert!(pages <= 1000);
         for (p, budget) in p.iter().zip([256 << 20, 80 << 20]) {
-            assert!(bytes(p, 0, rows).unwrap() + bytes(p, 1, pages).unwrap() <= budget);
+            assert!(bytes(p, 0, rows - snapshots).unwrap() + bytes(p, 1, pages).unwrap() <= budget);
         }
         assert!(capacities(&p, &[256 << 20, 1 << 20], 4, 3, 256).is_err());
         let (_, pages, _) = capacities(&[package(1024, 1024, 1024)], &[1 << 30], 1, 1, 64).unwrap();

@@ -51,6 +51,11 @@ struct Usage {
     generated: u32,
     cached: u64,
 }
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PromptUsage {
+    pub tokens: usize,
+    pub image_tokens: usize,
+}
 pub(crate) struct Encoder {
     pub protocol: Protocol,
     pub id: String,
@@ -63,7 +68,8 @@ pub(crate) struct Encoder {
     tool_choice: ToolChoice,
     parallel_tool_calls: bool,
     tool_grammars: std::collections::HashMap<String, crate::grammar::TextGrammar>,
-    prompt_tokens: usize,
+    prompts: Vec<PromptUsage>,
+    choices_per_prompt: usize,
     usage: Vec<Usage>,
     reasons: Vec<Option<&'static str>>,
     stop: Option<String>,
@@ -77,14 +83,15 @@ impl Encoder {
         id: String,
         model: String,
         created: u64,
-        choices: usize,
-        prompt_tokens: usize,
+        choices_per_prompt: usize,
+        prompts: Vec<PromptUsage>,
         tools: Vec<Tool>,
         tool_choice: ToolChoice,
         parallel_tool_calls: bool,
         include_usage: bool,
         metadata: Value,
     ) -> Self {
+        let choices = prompts.len() * choices_per_prompt;
         Self {
             protocol,
             chats: (0..choices)
@@ -100,7 +107,8 @@ impl Encoder {
             tool_choice,
             parallel_tool_calls,
             tool_grammars: Default::default(),
-            prompt_tokens,
+            prompts,
+            choices_per_prompt,
             include_usage,
             stop: None,
             sequence: 0,
@@ -422,7 +430,7 @@ impl Encoder {
                 }
                 Protocol::Messages => {
                     let response = self.response();
-                    frames.push(self.named("message_delta",json!({"delta":{"stop_reason":response["stop_reason"],"stop_sequence":response["stop_sequence"]},"usage":{"output_tokens":generated}})));
+                    frames.push(self.named("message_delta",json!({"delta":{"stop_reason":response["stop_reason"],"stop_sequence":response["stop_sequence"]},"usage":self.usage_value()})));
                     frames.push(self.named("message_stop", json!({})));
                 }
                 Protocol::Responses => {
@@ -440,18 +448,32 @@ impl Encoder {
         }
         Ok(frames)
     }
-    fn usage_value(&self) -> Value {
+    pub fn usage_value(&self) -> Value {
+        let prompt_tokens: usize = self.prompts.iter().map(|p| p.tokens).sum();
+        let image_tokens: usize = self.prompts.iter().map(|p| p.image_tokens).sum();
         let generated: u64 = self.usage.iter().map(|u| u.generated as u64).sum();
-        let cached: u64 = self.usage.iter().map(|u| u.cached).sum();
+        // Prompt usage counts each input once even with n > 1. Use its first
+        // choice's admission lookup, independent of completion order or reuse
+        // by later siblings after that choice has published a checkpoint.
+        let cached: u64 = self
+            .usage
+            .iter()
+            .step_by(self.choices_per_prompt)
+            .map(|u| u.cached)
+            .sum();
         match self.protocol {
             Protocol::Chat | Protocol::Completions => {
-                json!({"prompt_tokens":self.prompt_tokens,"completion_tokens":generated,"total_tokens":self.prompt_tokens as u64+generated})
+                let mut details = json!({"cached_tokens":cached});
+                if image_tokens > 0 {
+                    details["multimodal_tokens"] = json!({"image":image_tokens});
+                }
+                json!({"prompt_tokens":prompt_tokens,"completion_tokens":generated,"total_tokens":prompt_tokens as u64+generated,"prompt_tokens_details":details})
             }
             Protocol::Messages => {
-                json!({"input_tokens":self.prompt_tokens,"output_tokens":generated,"cache_creation_input_tokens":0,"cache_read_input_tokens":0})
+                json!({"input_tokens":prompt_tokens as u64-cached,"output_tokens":generated,"cache_creation_input_tokens":0,"cache_read_input_tokens":cached})
             }
             Protocol::Responses => {
-                json!({"input_tokens":self.prompt_tokens,"output_tokens":generated,"total_tokens":self.prompt_tokens as u64+generated,"input_tokens_details":{"cached_tokens":cached}})
+                json!({"input_tokens":prompt_tokens,"output_tokens":generated,"total_tokens":prompt_tokens as u64+generated,"input_tokens_details":{"cached_tokens":cached}})
             }
         }
     }

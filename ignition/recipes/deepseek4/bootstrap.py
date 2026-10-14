@@ -21,6 +21,7 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
     CollectivePreparation,
@@ -59,12 +60,15 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
-    compile_devices: tuple[str, ...] = ()
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
+    stream_overlap: bool = True
 
     def __post_init__(self):
+        if type(self.stream_overlap) is not bool:
+            raise TypeError("stream_overlap must be a boolean")
         if (
             len(self.devices) not in (2, 4)
             or len(set(self.devices)) != len(self.devices)
@@ -191,7 +195,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device, blocks=blocks)
         decoder_storage = Scratch.allocate(
@@ -428,7 +432,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator=coordinator,
         compile_decoder=config.compile_decoder,
         progress=progress,
-        cache_root=config.kernel_cache, compile_devices=config.compile_devices,
+        cache_root=config.kernel_cache,
         retain_graphs=config.retain_graphs,
         materialize=materialize_cache,
         compile_kinds=("prefill", "decode", "resume", "speculative", "vision"),
@@ -449,6 +453,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             ("chat_template", frontend / "chat_template.jinja"),
         )
     }
+    buffers["request_pending_token"] = requests.pending_token
     server_config = {
         "identity": identity,
         "model_id": snapshot.name,
@@ -462,17 +467,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             preprocessor=frontend / "preprocessor_config.json"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,
-        "model_contract": {
-            "schema": "deepseek4.graph-inputs.v1",
-            "vocabulary": 129280,
-            "vision": {
-                "features_per_request": 1536,
-                "max_images": 4,
-                "patches_per_feature": 9,
-                "patch_capacities": list(PATCH_CAPACITIES),
-            },
-            "page_tokens": PAGE_TOKENS,
-        },
+        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None),
     }
     memory = {
         "rank": rank,

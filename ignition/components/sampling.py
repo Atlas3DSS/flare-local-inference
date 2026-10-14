@@ -15,6 +15,7 @@ import triton.language as tl
 
 from .capacity import BATCH_CAPACITIES
 from .flashinfer_sampling import filter_probabilities, sample_probabilities
+from ignition.preparation.scratch import bind_scratch
 
 EOS_CAPACITY = 8
 INACTIVE, RUNNING, FINISHED, ERROR = 0, 1, 2, 3
@@ -451,8 +452,18 @@ class PreparedSampling:
     enumerates mutable storage retained through graph replay.
     """
 
+    @staticmethod
+    def scratch_layout(rows, vocab):
+        return dict(scores=((rows, vocab), torch.float32), maximum=((rows,), torch.float32),
+            probabilities=((rows, vocab), torch.float32), probability_maximum=((rows,), torch.float32),
+            probability_mass=((rows, 1), torch.float32), packed_top_k=((rows,), torch.int32),
+            packed_top_p=((rows,), torch.float32), packed_min_p=((rows,), torch.float32),
+            packed_seed=((rows,), torch.uint64), packed_offset=((rows,), torch.uint64),
+            sampled_tokens=((rows,), torch.int32), sample_valid=((rows,), torch.bool))
+
     def __init__(self, logits, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
-                 completion_records, frame_index, submission_sequence, *, sample_enabled: torch.Tensor | None = None):
+                 completion_records, frame_index, submission_sequence, *, sample_enabled: torch.Tensor | None = None,
+                 workspace=None):
         rows, vocab = logits.shape
         if not 1 <= rows <= state.capacity or vocab != state.vocab_size or logits.dtype not in (torch.float32, torch.bfloat16):
             raise ValueError("sampling logits require rows within request capacity and the state vocabulary in FP32 or BF16")
@@ -467,14 +478,9 @@ class PreparedSampling:
         self.state, self.logits, self.slots = state, logits, row_slot_ids
         self.sample_enabled = torch.ones(rows, dtype=torch.int32, device=device) if sample_enabled is None else sample_enabled
         _check_tensor(self.sample_enabled, (rows,), torch.int32, device, "sample_enabled")
-        self.scratch_tensors = {}
-        def scratch(name, shape, dtype):
-            tensor = torch.empty(shape, dtype=dtype, device=device)
-            self.scratch_tensors[name] = tensor
+        self.scratch_tensors = bind_scratch(self.scratch_layout(rows, vocab), device=device, workspace=workspace)
+        for name, tensor in self.scratch_tensors.items():
             setattr(self, name, tensor)
-            return tensor
-        scratch("scores", (rows, vocab), torch.float32)
-        scratch("maximum", (rows,), torch.float32)
         self._rows = rows
         self._grid = (rows, triton.cdiv(vocab, 1024), 1)
         self._score_args = (logits, self.scores, row_slot_ids, row_generations, live_rows, state.generation,
@@ -482,13 +488,6 @@ class PreparedSampling:
             vocab, state.grammar_mask.shape[1], 1024, state.capacity)
         from flashinfer import sampling
         self._flashinfer = sampling
-        scratch("probabilities", (rows, vocab), torch.float32)
-        scratch("probability_maximum", (rows,), torch.float32)
-        scratch("probability_mass", (rows, 1), torch.float32)
-        for name, dtype in (("packed_top_k", torch.int32), ("packed_top_p", torch.float32),
-                ("packed_min_p", torch.float32), ("packed_seed", torch.uint64),
-                ("packed_offset", torch.uint64), ("sampled_tokens", torch.int32), ("sample_valid", torch.bool)):
-            scratch(name, (rows,), dtype)
         self._metadata_args = (row_slot_ids, row_generations, live_rows, state.generation, state.status,
             state.parameters, state.top_k, state.seed, state.rng_counter, self.packed_top_k,
             self.packed_top_p, self.packed_min_p, self.packed_seed, self.packed_offset, vocab, state.capacity)

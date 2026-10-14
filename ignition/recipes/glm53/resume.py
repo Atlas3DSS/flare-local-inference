@@ -1,7 +1,5 @@
 """Sample from GLM's cached final normalized hidden output without token consumption."""
 
-from copy import copy
-
 import torch
 
 from ignition.components.collectives import PreparedAllReduce
@@ -29,15 +27,6 @@ class PreparedResume:
         self.completion.prepare()
         self.compilation_variant = "sample" if weights.shard.rank == 0 or replicated_sampling else "consume"
         self.replicated_sampling = replicated_sampling
-        self.peer_completion = PreparedCompletion(*arguments)
-        self.peer_completion.prepare()
-
-    def compilation_variants(self):
-        if self.replicated_sampling:
-            return {"sample": self}
-        peer = copy(self)
-        peer.completion = self.peer_completion
-        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.validation(self.state.validate())

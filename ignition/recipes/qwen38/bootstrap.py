@@ -21,6 +21,9 @@ from ignition.components.capacity import batch_capacities, request_capacity
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
+from ignition.preparation.contract import history_region
+from ignition.preparation import runtime_package_pb2 as contract_proto
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.deferred import deferred_mode
@@ -33,7 +36,7 @@ from ignition.preparation.qwen38 import (
     MODEL_ID,
     REVISION,
 )
-from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.scratch import ScratchArena, bind_scratch
 from ignition.progress import phase
 
 from .recipe import RECIPE
@@ -63,16 +66,19 @@ class PreparationConfig:
     max_active: int = 4
     context: int = 262144
     prefill_chunk_size: int = 4096
+    mixed_prefill: bool = False
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     pages: int | None = None
     kernel_cache: Path | None = None
-    compile_devices: tuple[str, ...] = ()
     mtp: bool = False
     speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
     history_drafts: bool = False
+    # Run shared experts, small-batch attention projections and selection, and GDN input projections
+    # on an auxiliary stream; without overlap every branch runs serially on the main stream.
+    stream_overlap: bool = True
 
     def __post_init__(self):
         if self.devices is not None and (
@@ -93,8 +99,10 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
-        if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
-            raise TypeError("MTP and history draft switches must be booleans")
+        if type(self.mtp) is not bool or type(self.history_drafts) is not bool or type(self.stream_overlap) is not bool:
+            raise TypeError("MTP, history draft, and stream overlap switches must be booleans")
+        if type(self.mixed_prefill) is not bool:
+            raise TypeError("mixed_prefill must be a boolean")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
             world_size=1 if self.devices is None else len(self.devices)).row_bytes
         if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
@@ -116,6 +124,11 @@ class PreparationConfig:
         return self.pages if self.pages is not None else self.prefill_chunk_size // 64 + 2 * self.request_capacity
 
     @property
+    def preparation_state_rows(self):
+        # Null row, live request rows, and disjoint snapshot destinations for tuning and capture.
+        return 1 + 2 * self.request_capacity
+
+    @property
     def request_capacity(self):
         return request_capacity(self.max_active)
 
@@ -125,8 +138,20 @@ class PreparationConfig:
 
     @property
     def token_capacity(self):
-        return max(self.prefill_chunk_size, max((b * w for b, w in self.speculative_shapes), default=0)
-                   if self.mtp else self.request_capacity)
+        return max(self.prefill_chunk_size,
+                   max((b * w for b, w in self.speculative_shapes), default=0) if self.mtp else self.request_capacity,
+                   max((p + (b - 1) * w for _, b, w, p in self.mixed_shapes), default=0))
+
+    @property
+    def mixed_shapes(self):
+        from ignition.components.capacity import mixed_shapes
+
+        if not self.mixed_prefill:
+            return ()
+        modes = (True, False) if self.mtp else (False,)
+        return tuple((enabled, b, w, p) for enabled in modes
+            for b, w, p in mixed_shapes(self.max_active, self.prefill_chunk_size,
+                                        self.speculative_widths if enabled else (1,)))
 
     @property
     def speculative_shapes(self) -> tuple[tuple[int, int], ...]:
@@ -203,6 +228,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     host_storage = {} if package_storage is None else {"host_allocator": package_storage.host_allocate}
     table = PLETable.load(manifest, device, tokens=config.token_capacity, progress=progress, **host_storage)
     sample_rows = max(batch * width for batch, width in config.speculative_shapes) if config.mtp else config.request_capacity
+    sample_rows += bool(config.mixed_shapes)
     coordinator = CollectivePreparation(group) if group is not None else None
     ipc = None if package_storage is None else package_storage.peer_storage
     collective = vocabulary_collective = None
@@ -230,15 +256,19 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             # Verification commits into each request's live row, so a request holds one row.
             state_rows = snapshots + slots
             state = HybridStatePool.allocate(state_rows + 1, device,
-                                             speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage)
+                speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage,
+                backed_slots=(min(state_rows + 1, config.preparation_state_rows) if package_storage is not None else None))
             register_benchmark_state(
                 session, next(iter(state.gdn.values())).recurrent,
                 storage=state.backing, restore=state.reset_for_preparation,
             )
             requests = DeviceRequestState.allocate(device, capacity=slots)
-            inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size, capacity=slots)
+            from ignition.components.sampling import PreparedSampling
+
+            sampling_workspace = bind_scratch(PreparedSampling.scratch_layout(slots, requests.vocab_size), device=device)
+            inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.token_capacity, capacity=slots)
             scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=sample_rows, world_size=shard.world_size)
-            workspaces = ScratchArena(device)
+            workspaces = ScratchArena(device, overlap=config.stream_overlap)
             rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
             cache = {index: QSAState.allocate(pages=1, slots=slots + 1, device=device, draft_tokens=speculative_tokens, kv_heads=max(1, 2 // shard.world_size))
                      for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}
@@ -250,7 +280,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             frame = torch.zeros(1, dtype=torch.int32, device=device)
             sequence = torch.zeros(1, dtype=torch.int64, device=device)
             table.sequence = sequence
-            completion = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
+            completion = torch.zeros((2, slots, 24 if config.mtp or config.mixed_shapes else 8), dtype=torch.int64, device=device)
             features = VisionFeatureState.allocate(device, capacity=slots)
             vision_inputs = VisionInputs.allocate(device)
             vision_scratch = VisionScratch.allocate(16384, device)
@@ -269,15 +299,19 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     rotary=rotary, cache=cache, table=table, session=session, completion=completion,
                     frame=frame, sequence=sequence, context=config.context,
                     prefill_capacity=config.token_capacity, max_cache_pages=planned_pages,
-                    proposal_source=config.speculative_proposal_source, **collectives)
+                    proposal_source=config.speculative_proposal_source,
+                    sampling_workspace=sampling_workspace,
+                    verification_width=max(config.speculative_widths), **collectives)
                 buffers.update(speculation.buffers())
         serving_modes = (True, False) if config.mtp else (False,)
         graph_count = (4 + len(serving_modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
-                       + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0))
+                       + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0)
+                       + len(config.mixed_shapes))
         with phase(progress, "Construct graph catalog", total=graph_count) as stage:
-            def add(name, function, kind, batch, tokens, fields, *, enabled=None):
+            def add(name, function, kind, batch, tokens, fields, *, enabled=None, prefill_capacity=0):
                 functions[name] = function
-                signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields), speculation_enabled=enabled)
+                signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields), speculation_enabled=enabled,
+                                                  prefill_capacity=prefill_capacity)
                 stage.update(advance=1)
 
             vision_fields = tuple(vision_inputs.__dataclass_fields__)
@@ -320,7 +354,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                             injection.prepare()
                         decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
                             completion, frame, sequence, session=session, name=name,
-                            embedding_injection=injection, max_cache_pages=planned_pages, **collectives)
+                            embedding_injection=injection, max_cache_pages=planned_pages,
+                            sampling_workspace=sampling_workspace, **collectives)
                         forward = speculation.prefill(decoder, name) if enabled else decoder
                         add(name, forward, mode, rows,
                             capacity if mode == "prefill" else 1, forward_fields, enabled=enabled)
@@ -338,6 +373,29 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 decoders.extend(speculation.decoders)
                 owners.append(speculation)
 
+            if config.mixed_shapes:
+                from types import SimpleNamespace
+                from .mixed_model import PreparedMixedRound
+                from .mixed_state import MixedScratch
+
+                mixed_scratch = MixedScratch.allocate(config.prefill_chunk_size,
+                    max(b * w for _, b, w, _ in config.mixed_shapes), device, world_size=shard.world_size)
+                owners.append(mixed_scratch)
+                mixed_owner = speculation if speculation is not None else SimpleNamespace(
+                    weights=weights, pool=state, requests=requests, inputs=inputs, scratch=scratch,
+                    workspaces=workspaces, rotary=rotary, cache=cache, table=table, session=session,
+                    completion=completion, frame=frame, sequence=sequence, max_cache_pages=planned_pages,
+                    collectives=collectives, sampling_workspace=sampling_workspace)
+                for enabled, batch, width, prefill in config.mixed_shapes:
+                    name = f"mixed{batch}x{width}p{prefill}" + ("" if enabled else "-no-mtp")
+                    operation = PreparedMixedRound(mixed_owner, batch, width, prefill, name,
+                        scratch=mixed_scratch, features=features, enabled=enabled)
+                    fields = (*inputs.buffers(), "sampling_grammar_mask",
+                              *(speculation.buffers() if enabled else ()))
+                    add(name, operation, "mixed", batch, width, fields, enabled=enabled, prefill_capacity=prefill)
+                    decoders.append(operation.decoder)
+                    owners.append(operation)
+
             state_fields = tuple(f"state_{name}" for name in transfer.__dataclass_fields__ if name != "errors")
             admission_fields = tuple(admission.__dataclass_fields__)
             for enabled in serving_modes:
@@ -349,7 +407,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                     resume = PreparedResume(inputs, requests, state, scratch.sample_hidden[:capacity],
                         scratch.logits[:capacity], weights.tree.lm_head.weight, completion, frame, sequence,
                         session=session, name=name, vocabulary_runtime=vocabulary_collective,
-                        local_logits=None if scratch.local_logits is None else scratch.local_logits[:capacity], coordinator=coordinator)
+                        local_logits=None if scratch.local_logits is None else scratch.local_logits[:capacity],
+                        coordinator=coordinator, sampling_workspace=sampling_workspace)
                     forward = speculation.resume(resume) if enabled else resume
                     add(name, forward, "resume", capacity, 1, forward_fields, enabled=enabled)
                     owners.append(resume)
@@ -376,7 +435,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         def capture_catalog(*, compile_decoder, materialize=None, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
                 stream=stream, pool=graph_pool, compile_decoder=compile_decoder, materialize=materialize,
-                progress=progress, label=label, cache_root=config.kernel_cache, compile_devices=config.compile_devices,
+                progress=progress, label=label, cache_root=config.kernel_cache,
                 collective=collective, coordinator=coordinator, retain_graphs=config.retain_graphs)
             graphs.update(captured)
             compiled_functions.clear()
@@ -425,12 +484,16 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         free, total = device_memory_info(device)
         memory = {"weights_bytes": weights.allocated_bytes, "ngram_request_bytes": table.mailbox.host_view.nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "state_rows": state_rows,
+            "preparation_state_bytes": state.backed_slots * layout.row_bytes,
+            "preparation_state_rows": state.backed_slots,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
             "cached_token_capacity": page_capacity * 64, "headroom_bytes": config.headroom_bytes, "page_tokens": 64,
             "free_device_bytes": free, "total_device_bytes": total,
             "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
             "operator_scratch_bytes": workspaces.nbytes, "graphs": len(graphs), "tuning": tuning,
             "prefill_chunk_size": config.prefill_chunk_size, "prefill_capacities": config.prefill_capacities,
+            "mixed_shapes": config.mixed_shapes,
+            "mixed_prefill": config.mixed_prefill,
             "compiled_decoder": compile_decoder, "rank": rank, "world_size": shard.world_size}
         if speculation is not None:
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
@@ -442,16 +505,17 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                 history_drafts=config.history_drafts)
         hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
             "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"])}
+        cache_regions = [history_region(buffers, f"cache.{layer}.{name}", getattr(value, name), contract_proto.PAGED_KEY_VALUE,
+            tokens_per_record=4 if name == "compressed_k_cache" else 1)
+            for layer, value in (final_cache or cache).items()
+            for name in ("main_k_cache", "main_v_cache", "compressed_k_cache")]
+        buffers["request_pending_token"] = requests.pending_token
         server_config = {"model_id": MODEL_ID, "identity": _identity(manifest, shard.world_size),
             "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
             "pages": page_capacity, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 64,
-            # Verification commits accepted tokens into each request's live row.
-            "state_rows_per_request": 1,
             "frontend": prepare_frontend(manifest.snapshot, eos_token_ids=[248046, 248044], image_profile="qwen"),
             "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
-            "model_contract": {"schema": "qwen4exp.graph-inputs.v3", "vocabulary": 248320,
-                "vision": {"features_per_request": 16384, "max_images": 4,
-                    "patches_per_feature": 4, "patch_capacities": [256, 1024, 4096, 16384]}},
+            "model_contract": prepare_contract(signatures, buffers, state, page_tokens=64, draft_lag=1 if has_mtp else None, embedding_tables=(0,), regions=cache_regions),
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}
                        for name, (filename, digest) in hashes.items()}}
         if speculation is not None:

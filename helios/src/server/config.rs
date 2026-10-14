@@ -6,7 +6,7 @@ use crate::{
         Asset, Frontend, FrontendAssets, FrontendSettings,
         images::{ImageLimits, ImageProcessor},
     },
-    model::{ModelConfig, ModelContract},
+    model::ModelConfig,
     scheduler::SchedulerLimits,
 };
 use serde_json::Value;
@@ -18,8 +18,8 @@ pub struct Bootstrap {
     pub server: ServerConfig,
 }
 impl Bootstrap {
-    pub fn load<M: ModelContract>(json: &str, manifest: &ExecutionManifest) -> Result<Self> {
-        Self::load_inner::<M>(json, manifest).map_err(|error| match error {
+    pub fn load(json: &str, manifest: &ExecutionManifest) -> Result<Self> {
+        Self::load_inner(json, manifest).map_err(|error| match error {
             crate::Error::Execution(crate::ExecutionError::State(_)) => {
                 crate::ExecutionError::Manifest(crate::Failure::caused_by(error.to_string(), error))
                     .into()
@@ -28,7 +28,7 @@ impl Bootstrap {
         })
     }
 
-    fn load_inner<M: ModelContract>(json: &str, manifest: &ExecutionManifest) -> Result<Self> {
+    fn load_inner(json: &str, manifest: &ExecutionManifest) -> Result<Self> {
         let value: Value = serde_json::from_str(json).map_err(|error| {
             crate::ExecutionError::Manifest(crate::Failure::caused_by(
                 format!("invalid server configuration JSON: {error}"),
@@ -110,7 +110,10 @@ impl Bootstrap {
                 error,
             ))
         })?;
-        let model = ModelConfig {
+        let prepared_sequence_tokens = usize::try_from(integer("max_sequence_tokens", None)?)
+            .map_err(|_| "prepared context extent overflow")?;
+        let mut model = ModelConfig {
+            prepared_sequence_tokens,
             contract,
             model_id: text("model_id")?.into(),
             identity: digest,
@@ -121,13 +124,7 @@ impl Bootstrap {
                     Some(manifest.max_active as u64),
                 )?)
                 .map_err(|_| "runtime concurrency exceeds usize")?,
-                max_sequence_tokens: usize::try_from(integer("max_sequence_tokens", None)?)
-                    .map_err(|error| {
-                        crate::ExecutionError::Manifest(crate::Failure::caused_by(
-                            "context extent overflow",
-                            error,
-                        ))
-                    })?,
+                max_sequence_tokens: prepared_sequence_tokens,
                 prefill_chunk_size: usize::try_from(integer("prefill_chunk_size", Some(4096))?)
                     .map_err(|error| {
                         crate::ExecutionError::Manifest(crate::Failure::caused_by(
@@ -171,15 +168,6 @@ impl Bootstrap {
                     _ => return Err("speculative_proposal_source must be mtp or copy".into()),
                 },
             )?,
-            state_rows_per_request: object
-                .get("state_rows_per_request")
-                .map(|v| {
-                    v.as_u64()
-                        .and_then(|v| usize::try_from(v).ok())
-                        .filter(|v| (1..=8).contains(v))
-                        .ok_or("state_rows_per_request must be an integer from 1 through 8")
-                })
-                .transpose()?,
             speculative_widths: object
                 .get("speculative_widths")
                 .map(|v| {
@@ -206,7 +194,12 @@ impl Bootstrap {
                 ))
             })?,
         };
-        crate::model::catalog::validate::<M>(&model, manifest)?;
+        model
+            .contract
+            .graphs
+            .retain(|g| manifest.graphs.iter().any(|m| m.name == g.graph));
+        model.fit_context();
+        crate::model::catalog::validate(&model, manifest)?;
         let assets = object
             .get("assets")
             .and_then(Value::as_object)
@@ -260,6 +253,14 @@ impl Bootstrap {
             },
             defaults,
         )?;
+        if frontend_settings
+            .image
+            .as_ref()
+            .map(|settings| settings.preparation_kind())
+            != model.contract.frontend.image_preparation
+        {
+            return Err("image preparation identifier differs from its settings".into());
+        }
         let images = if model.contract.vision.enabled() {
             Some(ImageProcessor::load(
                 frontend_settings

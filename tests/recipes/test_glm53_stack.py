@@ -41,8 +41,7 @@ def test_serial_graph_variants_share_storage_with_exact_shapes(world, rank):
             assert tensor.dtype == expected[name].dtype, name
             backing = base.kda.projected_input[:, -128:] if name == "kda.forget_input" and tokens == 1 else storage[name]
             assert tensor.data_ptr() == backing.data_ptr(), name
-        assert view.mla.index.active_width is base.mla.index.active_width
-        assert view.mla.index.active_width.item() == 8 * 64
+        assert view.mla.index.page_table.shape == (tokens if mode == "decode" else 1, 8)
         view.residual.fill_(tokens)
         assert torch.all(base.residual[:tokens] == tokens)
         assert view.local_logits.shape == (rows, 154880 // world)

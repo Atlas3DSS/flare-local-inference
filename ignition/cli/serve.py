@@ -12,7 +12,7 @@ from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
 
 from . import display, environment
-from .preparation import Host, context_parallel, derive, fetch, resolve_model, speculation, with_compiler_devices
+from .preparation import Host, context_parallel, derive, fetch, resolve_model, speculation, stream_overlap
 from .config import Configuration
 
 # Request bytes allowed per context token: JSON-escaped text (a \uXXXX escape takes six bytes per
@@ -91,11 +91,10 @@ def run(args) -> int:
     model = resolve_model(configuration, args.model)
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
-    host = Host.discover()
-    plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
+    plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
                   speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                  context_parallel=context_parallel(args, model))
-    plan = with_compiler_devices(host, plan, args.compile_gpus, enabled=not args.no_compile)
+                  context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                  mixed_prefill=args.mixed_prefill)
     runtime = binary()
     bind = _address(configuration.get("server.host", args.host).value,
                     configuration.get("server.port", args.port).value)
@@ -131,8 +130,6 @@ def run(args) -> int:
 
 
 def export(args) -> int:
-    if args.ranks > 1 and args.compile_gpus is not None:
-        raise UsageError("--compile-gpus is supported only when all ranks run on one host")
     if args.output.suffix != ".safetensors":
         args.output = args.output.with_name(args.output.name + ".safetensors")
     if args.output.exists():
@@ -176,7 +173,8 @@ def _export_hosts(args, *, export_path) -> int:
     plan = planning.plan(model.recipe, model.checkpoint, gpus, selected=tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                         context_parallel=context_parallel(args, model, spans_hosts=True))
+                         context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                         mixed_prefill=args.mixed_prefill)
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
@@ -236,14 +234,15 @@ def _prepare(args, *, export_path) -> int:
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                      context_parallel=context_parallel(args, model))
-        plan = with_compiler_devices(host, plan, args.compile_gpus, enabled=not args.no_compile)
+                      context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                      mixed_prefill=args.mixed_prefill)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
+        serial = "" if plan.stream_overlap or not plan.recipe.stream_overlap else " · branches serialized"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
-                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}"
-                     + (f" · {len(plan.compile_devices)} compiler GPUs" if plan.compile_devices else ""))
+                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}{serial}"
+                     f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}")
     if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
     if not cached:
@@ -322,12 +321,17 @@ def _serving_progress(verbose):
 def serve(args) -> int:
     """Prepare in this process and serve over HTTP; with --ranks, one peer rank per other host joins.
 
-    Requires heliopause's qualification build, which embeds the HTTP server in Python.
+    Requires heliopause's qualification build, which embeds the HTTP server in Python. With
+    --direct, Ignition's diagnostic step loop serves instead, without Helios or that build.
     """
     from ignition.progress import phase
 
-    if args.ranks > 1 and args.compile_gpus is not None:
-        raise UsageError("--compile-gpus is supported only when all ranks run on one host")
+    if args.eager and not args.direct:
+        raise UsageError("--eager applies only to --direct execution")
+    if args.graph_times is not None and not args.direct:
+        raise UsageError("--graph-times applies only to --direct execution")
+    if args.eager and args.graph_times is not None and not args.graph_times.is_file():
+        raise UsageError(f"--graph-times {args.graph_times} does not exist; graph replay with --graph-times saves it")
     progress = _serving_progress(args.verbose)
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
@@ -361,24 +365,23 @@ def serve(args) -> int:
                          selected=None if args.ranks == 1 and args.gpus is None else tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
-                         context_parallel=context_parallel(args, model, spans_hosts=rendezvous is not None),
-                         cache_states=args.prefix_cache_states)
-    plan = with_compiler_devices(host, plan, args.compile_gpus, enabled=not args.no_compile)
+                         context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                         cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill)
     if rendezvous is None:
         local = plan.gpus
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
-    preparation_options = {"retain_graphs": True}
+    preparation_options = {} if args.direct else {"retain_graphs": True}
     storage = None
-    if rendezvous is None:
+    if rendezvous is None and not args.direct:
         import torch
         from ignition.preparation.package_storage import PackageStorage
 
         torch.cuda.set_device(0)
         storage = PackageStorage(world=plan.world_size)
         preparation_options["package_storage"] = storage
-    else:
+    elif rendezvous is not None:
         preparation_options["ranks"] = rendezvous
     from contextlib import nullcontext
 
@@ -387,8 +390,14 @@ def serve(args) -> int:
             model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
             kernel_cache=configuration.directory("kernel_cache"), progress=progress,
             **preparation_options)
-    code = _serve_prepared(prepared, bind, options)
-    # Successful shutdown confirms native drain before host mappings are released.
+    if args.direct:
+        from ignition.direct.server import serve_direct
+
+        code = serve_direct(prepared, bind=bind, eager=args.eager, verbose=args.verbose, graph_times=args.graph_times,
+                            served_names=(*options["served_names"], options["model_id"]))
+    else:
+        code = _serve_prepared(prepared, bind, options)
+    # Native replay has drained before package-backed host mappings are released.
     if storage is not None:
         for region in storage.host_regions:
             region.close()
@@ -425,7 +434,6 @@ def join(args) -> int:
     import time
 
     from ignition.preparation.host_ranks import knock, local_topology, serve_peer, source_identity
-    from ignition.recipes import resolve
 
     started = time.monotonic()
 
@@ -441,12 +449,5 @@ def join(args) -> int:
     environment.apply(configuration, (gpu,))
     control, executor = knock(args.rendezvous, args.rank, args.ranks, identity=source_identity(),
                               topology=local_topology(gpu), report=progress)
-
-    def resolve_snapshot(checkpoint):
-        model = resolve(checkpoint.alias, hub_cache)
-        if model.checkpoint.revision != checkpoint.revision or not model.cached(hub_cache):
-            raise UsageError(f"{checkpoint.repository} at {checkpoint.revision[:8]} is not cached on this host")
-        return model.snapshot(hub_cache)
-
-    serve_peer(control, executor, args.rank, args.ranks, resolve_snapshot=resolve_snapshot, progress=progress)
+    serve_peer(control, executor, args.rank, args.ranks, hub_cache=hub_cache, progress=progress)
     return 0

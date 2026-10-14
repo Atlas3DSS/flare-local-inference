@@ -2035,7 +2035,7 @@ mod tests {
         let mut pool = SlabPool::sized(&layout, SlabPool::minimum_bytes(&layout)).unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
         ));
         let mut store = MemoryStore::new(IDENTITY, pool, transfers.clone()).unwrap();
         let consumed = u64::from(pages) * pt;
@@ -2219,7 +2219,7 @@ mod tests {
         let mut pool = SlabPool::sized(&layout, SlabPool::minimum_bytes(&layout)).unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
         ));
         let mut store = MemoryStore::new(IDENTITY, pool, transfers.clone()).unwrap();
 
@@ -2391,7 +2391,7 @@ mod tests {
         .unwrap();
         small.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
         ));
         let mut store = MemoryStore::new(IDENTITY, small, transfers).unwrap();
         assert!(store.store(&checkpoint).unwrap());

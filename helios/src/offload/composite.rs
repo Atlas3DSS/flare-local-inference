@@ -1206,7 +1206,7 @@ mod tests {
         let mut pool = SlabPool::staging(&Layout::new(geometry).unwrap()).unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.to_vec()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.to_vec(), None).unwrap(),
         ));
         Staged::new(
             Some(pool),
@@ -2331,7 +2331,7 @@ mod tests {
         .unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
@@ -2525,7 +2525,7 @@ mod tests {
         .unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
@@ -2691,7 +2691,7 @@ mod tests {
         .unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
@@ -2966,7 +2966,7 @@ mod tests {
                 IDENTITY,
                 pool,
                 Arc::new(Mutex::new(
-                    Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+                    Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
                 )),
             )
             .unwrap();
@@ -2991,7 +2991,7 @@ mod tests {
                 Box::new(Staged::new(
                     Some(staging_pool),
                     Arc::new(Mutex::new(
-                        Transfers::start(&[(context, device)], geometry.clone()).unwrap(),
+                        Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
                     )),
                     DiskThread::start("flare-offload-disk").unwrap(),
                 )),

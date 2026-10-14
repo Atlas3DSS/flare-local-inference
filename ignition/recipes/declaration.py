@@ -11,11 +11,6 @@ from types import MappingProxyType
 
 from ignition.components.capacity import request_capacity
 
-# State rows one admitted request can hold while it runs: the terminal, system,
-# and prompt checkpoints that the scheduler reserves at admission.
-ADMISSION_SNAPSHOTS = 3
-
-
 @dataclass(frozen=True)
 class SamplingDefaults:
     """Complete serving parameters manually verified against the model card."""
@@ -128,6 +123,8 @@ class Recipe:
     speculation disabled. Each active request has one execution state row per
     selected verification position unless `verification_rows` gives another count
     of extra rows. `history_copy` states that drafts can be copied from request history.
+    `stream_overlap` states that captured graphs run independent branches on an
+    auxiliary stream, which a plan can serialize onto the main stream.
     """
 
     name: str
@@ -149,6 +146,17 @@ class Recipe:
     plain_ranks: Mapping[int, RankCosts] = field(default_factory=lambda: MappingProxyType({}))
     history_copy: bool = False
     verification_rows: int | None = None
+    stream_overlap: bool = False
+    mixed_prefill: bool = False
+
+    def mixed_shapes(self, concurrency, chunk, speculation):
+        from ignition.components.capacity import mixed_shapes
+
+        if not self.mixed_prefill:
+            return ()
+        modes = (True, False) if speculation is not None else (False,)
+        return tuple((enabled, b, w, p) for enabled in modes
+            for b, w, p in mixed_shapes(concurrency, chunk, speculation.widths if enabled else (1,)))
 
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):
@@ -173,12 +181,8 @@ class Recipe:
                    - (0 if learned else checkpoint.draft_bytes)) // world_size)
 
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:
-        """State rows held for running requests: null, live, speculative, and admission rows."""
+        """Permanently backed null, live, and speculative execution rows."""
         slots = request_capacity(concurrency)
         speculative = (0 if speculation is None else speculation.draft_tokens if self.verification_rows is None
                        else self.verification_rows)
-        return 1 + slots * (1 + speculative) + ADMISSION_SNAPSHOTS * concurrency
-
-    def snapshot_rows(self, cache_states: int, concurrency: int) -> int:
-        """Snapshot rows that keep `cache_states` cached states resident at full concurrency."""
-        return cache_states + ADMISSION_SNAPSHOTS * concurrency
+        return 1 + slots * (1 + speculative)

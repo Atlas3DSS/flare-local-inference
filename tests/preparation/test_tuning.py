@@ -196,6 +196,29 @@ def test_standalone_preparation_still_precedes_binding(backend):
 
 
 
+def test_benchmark_fixture_cache_releases_completed_shapes_but_keeps_live_owners(backend):
+    session = make_session(device=0, checkpoint="revision")
+
+    class Fixture:
+        nbytes = 16
+
+    registered = Fixture()
+    restored = []
+    session.register_benchmark_resource("state", registered, restore=lambda: restored.append(True))
+    session._tune_status = "tuning"
+    first = benchmark_resource(session, "shape-a", Fixture)
+    reference = weakref.ref(first)
+    second = benchmark_resource(session, "shape-b", Fixture)
+    assert reference() is first
+    assert benchmark_resource(session, "shape-b", Fixture) is second
+    assert benchmark_resource(session, "state", Fixture) is registered
+    del first
+    assert reference() is None
+    session._restore_benchmark_resources()
+    assert restored == [True]
+    session.close()
+
+
 def test_benchmark_resource_shared_across_requests_and_released_before_capture(backend):
     session = make_session(device=0, checkpoint="revision")
     observed = []
@@ -333,6 +356,33 @@ def test_worker_budget_accounts_for_all_preparing_ranks(backend, monkeypatch):
     assert report["compile_workers"] == 2
 
 
+
+
+@pytest.mark.parametrize("identical", [True, False])
+def test_ranks_on_separate_hosts_shard_tuning_only_across_identical_gpus(backend, monkeypatch, identical):
+    import torch.distributed as dist
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties",
+                        lambda device: SimpleNamespace(is_integrated=False, name="NVIDIA GB10"))
+    monkeypatch.setattr(dist, "get_rank", lambda: 1)
+    shards, shared, coordinated = [], [], []
+    monkeypatch.setattr(PreparationSession, "configure_tuning_shard",
+                        lambda self, rank, ranks: shards.append((rank, ranks)), raising=False)
+    monkeypatch.setattr(PreparationSession, "_selection_cache", lambda self: "rank cache", raising=False)
+
+    def prepare(session, requests, *, progress, autotune):
+        coordinated.append(tuple(request.name for request in requests))
+        return PreparationSession.prepare(session, requests, autotune=autotune)
+
+    coordinator = SimpleNamespace(ranks=(0, 1), barrier=lambda: None, local_ranks=1, spans_hosts=True,
+        same_on_every_rank=lambda value: identical and value == "NVIDIA GB10",
+        share_selections=shared.append, agree_selections=lambda selections: None, prepare=prepare)
+    session = make_session(device=0, checkpoint="revision", coordinator=coordinator)
+    session.declare((declaration("op"),))
+    session.tune()
+    # Sharded races exchange results through the coordinator even in jobs without collectives.
+    assert (shards, shared, coordinated) == (([(1, (0, 1))], [], [("op",)]) if identical
+                                             else ([], ["rank cache"], []))
 
 
 def test_helpers_preserve_ordinary_session_behavior():

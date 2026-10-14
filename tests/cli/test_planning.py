@@ -36,7 +36,7 @@ def recipe(name, device_gib, ranks, *, speculation=None, mapped_gib=0, draft_gib
 
 # While drafting, one rank holds 60 GiB of weights, 2 GiB of them the draft model, 4 GiB of graphs,
 # 100 MiB per state row, and 2 MiB per page, a quarter of it the draft model's. At concurrency 4 it
-# keeps 29 live rows, and its minimum of 512 pages costs 1 GiB. Without drafting it holds 3 GiB of
+# keeps 17 execution rows, and its minimum of 512 pages costs 1 GiB. Without drafting it holds 3 GiB of
 # graphs, 80 MiB per state row, and 1.5 MiB per page.
 SOLO = recipe("solo", 60, (1, 2, 4), speculation=DRAFTING, mapped_gib=4, draft_gib=2)
 PAIR = recipe("pair", 160, (2, 4))
@@ -66,88 +66,58 @@ def derive(model=SOLO, gpus=(gpu(0, 95),), *, selected=None, concurrency=4, rese
                          speculation=model.speculation if speculation is DEFAULT else speculation)
 
 
-def test_compiler_devices_follow_the_callers_visible_ordinals():
-    from ignition.cli.preparation import Host, with_compiler_devices
-
-    devices = planning.restrict_gpus((gpu(0, 95), gpu(1, 95), gpu(2, 95)), "2,0,1")
-    host = Host(devices, "2,0,1")
-    plan = derive(gpus=devices, selected=(0,))
-    selected = with_compiler_devices(host, plan, "0-2")
-    assert selected.gpus == plan.gpus
-    assert selected.compile_devices == ("GPU-0000", "GPU-0001")
-    assert selected.to_dict()["compile_devices"] == ["GPU-0000", "GPU-0001"]
-    assert plan.compile_devices == ()
-
-
-def test_compiler_selection_rejects_unavailable_or_incompatible_devices():
-    from ignition.cli.preparation import Host, with_compiler_devices
-
-    owner = gpu(0, 95)
-    host = Host((owner, gpu(1, 95, (12, 1)), replace(gpu(2, 95), name="Other GPU")), None)
-    plan = derive(gpus=(owner,))
-    with pytest.raises(UsageError, match="unavailable GPUs"):
-        with_compiler_devices(host, plan, "3")
-    for index in ("1", "2"):
-        with pytest.raises(UsageError, match="must match"):
-            with_compiler_devices(host, plan, index)
-    with pytest.raises(UsageError, match="requires forward compilation"):
-        with_compiler_devices(host, plan, "0", enabled=False)
-
-
 def test_pages_take_all_remaining_supply():
     limited = derive()
     assert limited.fits and limited.cache_states == limited.cache_target == 32
-    assert limited.supply_bytes == 91 * GIB and limited.live_bytes == 29 * 100 * MIB
-    # 91 GiB of supply less weights, graphs, 29 live rows, and 32 cached rows leaves 10,774 pages.
-    assert limited.pages == (91 * GIB - 64 * GIB - 61 * 100 * MIB) // (2 * MIB) == 10774
+    assert limited.supply_bytes == 91 * GIB and limited.live_bytes == 17 * 100 * MIB
+    # 91 GiB of supply less weights, graphs, 17 execution rows leaves 12,974 pages.
+    assert limited.pages == (91 * GIB - 64 * GIB - 17 * 100 * MIB) // (2 * MIB) == 12974
     assert limited.demand_pages == 16384 and limited.minimum_pages == 512
-    assert limited.context == 262144 and limited.guaranteed_tokens == 10774 // 4 * 64
-    assert limited.snapshots == 32 + 12
+    assert limited.context == 262144 and limited.guaranteed_tokens == 12974 // 4 * 64
+    assert limited.snapshots == 32
 
     assert derive(gpus=(gpu(0, 95), gpu(1, 95))).world_size == 1
 
     # One request needs 4,096 pages at full context; the rest of the supply holds cached prefixes.
     whole = derive(concurrency=1)
-    assert whole.demand_pages == 4096 and whole.pages == 13024 and whole.guaranteed_tokens == 262144
-    assert whole.supply_bytes - whole.page_bytes - whole.fixed_bytes - whole.cache_bytes < 2 * MIB
+    assert whole.demand_pages == 4096 and whole.pages == 13574 and whole.guaranteed_tokens == 262144
+    assert whole.supply_bytes - whole.page_bytes - whole.fixed_bytes < 2 * MIB
 
 
-def test_live_state_counts_null_live_speculative_and_admission_rows():
-    assert SOLO.live_rows(4, DRAFTING) == 1 + 4 * 4 + 12
-    assert SOLO.live_rows(5, DRAFTING) == 1 + 8 * 4 + 15
-    assert SOLO.live_rows(4, None) == PAIR.live_rows(4, None) == 1 + 4 + 12
-    assert SOLO.snapshot_rows(32, 4) == 44
+def test_live_state_counts_only_null_live_and_speculative_rows():
+    assert SOLO.live_rows(4, DRAFTING) == 1 + 4 * 4
+    assert SOLO.live_rows(5, DRAFTING) == 1 + 8 * 4
+    assert SOLO.live_rows(4, None) == PAIR.live_rows(4, None) == 1 + 4
 
 
-def test_prefix_cache_follows_concurrency_and_shrinks_under_pressure():
+def test_snapshot_slots_share_the_page_budget():
     assert derive(concurrency=1).cache_states == 8
     assert derive(concurrency=2).cache_states == 16
-    # 12.2 GiB remain for cache and pages; a quarter of that holds 31 states, fewer than 32.
     capped = derive(reserve=12)
-    assert capped.cache_target == capped.cache_states == 31 and capped.pages > capped.minimum_pages
-    # With 32 requests on two GPUs, the minimum pages leave room for 19 of the 25 targeted states.
-    two = (gpu(0, 95), gpu(1, 95))
-    tight = derive(gpus=two, selected=(0, 1), concurrency=32, reserve=41.05)
-    assert tight.fits and (tight.cache_target, tight.cache_states) == (25, 19)
-    assert tight.minimum_pages <= tight.pages < tight.minimum_pages + 50
-    floor = derive(reserve=21)
-    assert floor.fits and floor.cache_states == planning.CACHE_FLOOR
+    assert capped.cache_states == 32
+    assert capped.pages == (capped.supply_bytes - capped.fixed_bytes) // capped.costs.page_bytes
+    devices = (gpu(0, 95),)
+    common = dict(concurrency=4, reserve_bytes=0, speculation=DRAFTING)
+    small = planning.fit(SOLO, SOLO.checkpoints[0], devices, cache_states=1, **common)
+    large = planning.fit(SOLO, SOLO.checkpoints[0], devices, cache_states=64, **common)
+    assert small.pages == large.pages and small.live_rows == large.live_rows
+    assert (small.snapshots, large.snapshots) == (1, 64)
 
 
 def test_speculation_settings_select_weights_rows_and_pages():
     drafting = derive()
-    assert drafting.speculation == DRAFTING and drafting.live_rows == 29
+    assert drafting.speculation == DRAFTING and drafting.live_rows == 17
     assert (drafting.weights_bytes, drafting.graph_bytes, drafting.costs.page_bytes) == (60 * GIB, 4 * GIB, 2 * MIB)
     # Without drafting the draft model is not loaded, rows shrink, and each request keeps no verification rows.
     plain = derive(speculation=None)
-    assert (plain.weights_bytes, plain.graph_bytes, plain.live_rows) == (58 * GIB, 3 * GIB, 17)
-    assert plain.live_bytes == 17 * 80 * MIB and plain.cache_states == 32
-    assert plain.pages == (91 * GIB - 61 * GIB - 49 * 80 * MIB) * 2 // (3 * MIB) == 17866
+    assert (plain.weights_bytes, plain.graph_bytes, plain.live_rows) == (58 * GIB, 3 * GIB, 5)
+    assert plain.live_bytes == 5 * 80 * MIB and plain.cache_states == 32
+    assert plain.pages == (91 * GIB - 61 * GIB - 5 * 80 * MIB) * 2 // (3 * MIB) == 20213
     assert plain.to_dict()["speculation"] is None
     # Drafts copied from history keep the verification rows and load no draft model or draft pages.
     copied = derive(speculation=Speculation(3, proposal_source="copy"))
-    assert (copied.weights_bytes, copied.live_rows, copied.costs.page_bytes) == (58 * GIB, 29, 3 * MIB // 2)
-    assert copied.costs.state_row_bytes == drafting.costs.state_row_bytes and copied.pages == 15730
+    assert (copied.weights_bytes, copied.live_rows, copied.costs.page_bytes) == (58 * GIB, 17, 3 * MIB // 2)
+    assert copied.costs.state_row_bytes == drafting.costs.state_row_bytes and copied.pages == 18664
     split = derive(gpus=(gpu(0, 50), gpu(1, 50)), speculation=None)
     assert split.world_size == 2 and split.weights_bytes == 29 * GIB and split.costs.state_row_bytes == 40 * MIB
 
@@ -189,10 +159,10 @@ def test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override():
     for chunk in (0, 100, 262208):
         with pytest.raises(UsageError, match="multiple of 64 from 64 through 262,144"):
             derive(prefill_chunk=chunk)
-    # 14 GiB of reserve and the chunk's 11.5 GiB headroom leave pages for 61,824 tokens, the longest
+    # 16 GiB of reserve and the chunk's 11.5 GiB headroom leave pages for 60,288 tokens, the longest
     # sequence this plan allows.
-    with pytest.raises(UsageError, match="65,536 exceeds the 61,824-token context"):
-        derive(reserve=14, prefill_chunk=65536)
+    with pytest.raises(UsageError, match="65,536 exceeds the 60,288-token context"):
+        derive(reserve=16, prefill_chunk=65536)
 
 
 def test_context_parallel_pages_hold_every_rank_share_unless_disabled():
@@ -214,7 +184,7 @@ def test_context_parallel_pages_hold_every_rank_share_unless_disabled():
                                   speculation=None)
 
 
-def test_context_parallelism_follows_the_flag_and_never_spans_hosts():
+def test_context_parallelism_follows_the_flag():
     from types import SimpleNamespace
 
     from ignition.cli.preparation import context_parallel
@@ -225,11 +195,43 @@ def test_context_parallelism_follows_the_flag_and_never_spans_hosts():
     default = SimpleNamespace(no_context_parallel=False)
     model = SimpleNamespace(recipe=sharded, checkpoint=sharded.checkpoints[0])
     assert context_parallel(default, model) and not context_parallel(flag, model)
-    assert not context_parallel(default, model, spans_hosts=True)
     whole = SimpleNamespace(recipe=PAIR, checkpoint=PAIR.checkpoints[0])
-    assert context_parallel(default, whole) and not context_parallel(default, whole, spans_hosts=True)
+    assert context_parallel(default, whole)
     with pytest.raises(UsageError, match="does not shard attention context"):
         context_parallel(flag, whole)
+
+
+def test_serialized_branches_are_planned_and_recorded_without_changing_memory():
+    overlapping = replace(PAIR, stream_overlap=True)
+    pair = (gpu(0, 95), gpu(1, 95))
+
+    def planned(model, **settings):
+        return planning.plan(model, model.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                             speculation=None, **settings)
+
+    overlapped, serial = planned(overlapping), planned(overlapping, stream_overlap=False)
+    assert overlapped.stream_overlap and not serial.stream_overlap
+    assert overlapped.to_dict()["stream_overlap"] is True
+    assert json.loads(json.dumps(serial.to_dict()))["stream_overlap"] is False
+    # Serializing branches changes graph scheduling only; both plans size the same pages and state.
+    assert serial == replace(overlapped, stream_overlap=False)
+    # A recipe that runs no branches concurrently plans without overlap either way.
+    assert not planned(PAIR).stream_overlap and planned(PAIR) == planned(PAIR, stream_overlap=False)
+
+
+def test_stream_overlap_flag_applies_only_to_recipes_that_overlap_branches():
+    from types import SimpleNamespace
+
+    from ignition.cli.preparation import stream_overlap
+
+    flag, default = SimpleNamespace(no_stream_overlap=True), SimpleNamespace(no_stream_overlap=False)
+    overlapping = replace(PAIR, stream_overlap=True)
+    model = SimpleNamespace(recipe=overlapping, checkpoint=overlapping.checkpoints[0])
+    assert stream_overlap(default, model) and not stream_overlap(flag, model)
+    serial = SimpleNamespace(recipe=PAIR, checkpoint=PAIR.checkpoints[0])
+    assert stream_overlap(default, serial)
+    with pytest.raises(UsageError, match="--no-stream-overlap: pair runs no branches concurrently"):
+        stream_overlap(flag, serial)
 
 
 def test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size():
@@ -279,16 +281,16 @@ def option_arguments(option, arguments):
 
 
 @pytest.mark.parametrize("arguments, expected", [
-    (dict(gpus=(gpu(0, 95),), selected=(0,), reserve=24),
-     ['[memory] reserve = "22G"', "--max-concurrency 2", "--no-mtp"]),
-    (dict(gpus=(gpu(0, 95), gpu(1, 95)), selected=(0,), reserve=24),
-     ['[memory] reserve = "22G"', "--max-concurrency 2", "--no-mtp", "--gpus 0-1"]),
-    (dict(gpus=(gpu(0, 72.5),)), ["--max-concurrency 3", "--no-mtp"]),
-    (dict(gpus=(gpu(0, 74),), concurrency=8), ["--max-concurrency 4", "--no-mtp"]),
-    (dict(gpus=(gpu(0, 80), gpu(1, 80)), reserve=40),
-     ['[memory] reserve = "39G"', "--max-concurrency 2", "--no-mtp"]),
+    (dict(gpus=(gpu(0, 95),), selected=(0,), reserve=25),
+     ['[memory] reserve = "24G"', "--max-concurrency 2", "--no-mtp"]),
+    (dict(gpus=(gpu(0, 95), gpu(1, 95)), selected=(0,), reserve=25),
+     ['[memory] reserve = "24G"', "--max-concurrency 2", "--no-mtp", "--gpus 0-1"]),
+    (dict(gpus=(gpu(0, 70.5),)), ["--max-concurrency 3", "--no-mtp"]),
+    (dict(gpus=(gpu(0, 72),), concurrency=8), ["--max-concurrency 4", "--no-mtp"]),
+    (dict(gpus=(gpu(0, 80), gpu(1, 80)), reserve=41),
+     ['[memory] reserve = "40G"', "--max-concurrency 2", "--no-mtp"]),
     # Without speculation the plan has no drafting to give up.
-    (dict(gpus=(gpu(0, 95),), selected=(0,), reserve=30, speculation=None), ['[memory] reserve = "27G"']),
+    (dict(gpus=(gpu(0, 95),), selected=(0,), reserve=30, speculation=None), ['[memory] reserve = "28G"']),
 ])
 def test_every_capacity_error_option_fits_on_its_own(arguments, expected):
     with pytest.raises(CapacityError) as error:
@@ -303,11 +305,11 @@ def test_every_capacity_error_option_fits_on_its_own(arguments, expected):
 
 def test_capacity_error_states_requirement_and_supply():
     with pytest.raises(CapacityError) as error:
-        derive(gpus=(gpu(0, 95),), selected=(0,), reserve=24)
+        derive(gpus=(gpu(0, 95),), selected=(0,), reserve=25)
     assert str(error.value).splitlines()[:3] == [
-        "needs 60.0 GiB weights + 4.0 GiB graphs + 2.8 GiB live state + 0.8 GiB prefix cache",
-        "+ 1.0 GiB minimum pages (4 × 8,192 tokens) = 68.6 GiB;",
-        "has 95.0 GiB free − 4.0 GiB headroom − 24.0 GiB reserve = 67.0 GiB.",
+        "needs 60.0 GiB weights + 4.0 GiB graphs + 1.7 GiB live state",
+        "+ 1.0 GiB minimum pages (4 × 8,192 tokens) = 66.7 GiB;",
+        "has 95.0 GiB free − 4.0 GiB headroom − 25.0 GiB reserve = 66.0 GiB.",
     ]
 
 
@@ -320,14 +322,14 @@ def test_capacity_error_without_a_working_setting_says_so():
 
 def test_automatic_selection_explains_the_closest_tensor_parallel_size():
     with pytest.raises(CapacityError) as error:
-        derive(gpus=(gpu(0, 80), gpu(1, 80)), reserve=40)
-    assert "= 36.3 GiB per GPU;" in str(error.value)
+        derive(gpus=(gpu(0, 80), gpu(1, 80)), reserve=41)
+    assert "= 35.3 GiB per GPU;" in str(error.value)
 
 
 def test_estimate_record():
     plan = derive(reserve=2)
     record = json.loads(json.dumps(plan.to_dict()))
-    assert record["pages"] == plan.pages == 9750 and record["snapshots"] == 44
+    assert record["pages"] == plan.pages == 11950 and record["snapshots"] == 32
     assert record["reserve_bytes"] == 2 * GIB and "measured" not in record
 
 

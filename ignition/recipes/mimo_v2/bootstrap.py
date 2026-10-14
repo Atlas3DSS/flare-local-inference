@@ -21,6 +21,9 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
+from ignition.preparation.contract import history_region
+from ignition.preparation import runtime_package_pb2 as contract_proto
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
     CollectivePreparation,
@@ -60,7 +63,6 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
-    compile_devices: tuple[str, ...] = ()
     dflash: bool = True
     speculative_widths: tuple[int, ...] = tuple(range(1, 9))
     speculative_fixed_width: int | None = None
@@ -195,7 +197,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        # The recipe declares no stream overlap: every branch runs on the main stream.
+        arena = ScratchArena(device, overlap=False)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(weights.config, shard, config.prefill_chunk_size, 1, device)
         decoder_storage = Scratch.allocate(
@@ -427,7 +430,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator=coordinator,
         compile_decoder=config.compile_decoder,
         progress=progress,
-        cache_root=config.kernel_cache, compile_devices=config.compile_devices,
+        cache_root=config.kernel_cache,
         retain_graphs=config.retain_graphs,
         materialize=materialize_cache,
         compile_kinds=("prefill", "decode", "resume", "speculative", "vision"),
@@ -448,6 +451,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             ("chat_template", frontend / "chat_template.jinja"),
         )
     }
+    cache_regions = [history_region(buffers, "cache." + name, tensor, contract_proto.PAGED_KEY_VALUE)
+        for name, tensor in pool.pages.items()]
+    buffers["request_pending_token"] = requests.pending_token
     server_config = {
         "identity": identity,
         "model_id": snapshot.name,
@@ -461,19 +467,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             eos_token_ids=json.loads((snapshot / "generation_config.json").read_text())["eos_token_id"],
             image_profile="mimo"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
-        "state_rows_per_request": 1,
         "assets": assets,
-        "model_contract": {
-            "schema": "mimo_v2.graph-inputs.v1",
-            "vocabulary": 152576,
-            "vision": {
-                "features_per_request": 16384,
-                "max_images": 4,
-                "patches_per_feature": 4,
-                "patch_capacities": list(PATCH_CAPACITIES),
-            },
-            "page_tokens": PAGE_TOKENS,
-        },
+        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dflash else None, regions=cache_regions),
     }
     memory = {
         "rank": rank,

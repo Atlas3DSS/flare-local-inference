@@ -259,9 +259,10 @@ def test_footer_cache_attention_with_shuffled_pages_and_inactive_rows(ratio):
 
 
 @pytest.mark.parametrize("layer", (2, 3))
+@pytest.mark.parametrize("overlap", (False, True))
 @torch.no_grad()
 def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verification(
-    layer, tmp_path, monkeypatch
+    layer, overlap, tmp_path, monkeypatch
 ):
     from pathlib import Path
 
@@ -293,7 +294,7 @@ def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verificatio
     ) as loader:
         config, weights = loader.config, loader.load_attention(layer)
     pool = ContinuationPool.allocate(config, 3, 4, device)
-    arena, rotary = ScratchArena(device), Rotary(config, device)
+    arena, rotary = ScratchArena(device, overlap=overlap), Rotary(config, device)
     # The three graphs share their private buffers, as serving graphs on one rank do.
     buffers = GraphBufferPool(device)
     source = torch.randn((256, 4096), dtype=torch.bfloat16, device=device)
@@ -320,6 +321,9 @@ def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verificatio
                 workspace=arena,
                 buffers=buffers.cursor(),
             )
+            if not overlap:
+                assert attention.concurrent_compression is None
+                assert attention.concurrent_index is None
 
             def forward(attention=attention, inputs=inputs, mode=mode, counts=counts):
                 attention(inputs)

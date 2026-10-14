@@ -25,6 +25,7 @@ from ignition.components.sampling import (
 
 from ignition.components.sampling import DeviceRequestState
 from ignition.preparation.tensor_metadata import record_numeric_tensor
+from ignition.preparation.scratch import bind_scratch
 
 INVALID_SPECULATION = 6
 TARGET_RNG_DOMAIN = 0x4D54505F56455249
@@ -184,8 +185,16 @@ class PreparedSpeculativeDistributions:
     Optional physical-slot grammar masks describe each conditional prefix.
     """
 
+    @staticmethod
+    def scratch_layout(batch, width, vocab):
+        return dict(scores=((batch, width, vocab), torch.float32),
+            probabilities=((batch, width, vocab), torch.float32),
+            counts=((batch, width, vocab), torch.int32),
+            maximum=((batch, width), torch.float32), valid=((batch, width), torch.bool),
+            packed_top_k=((batch * width,), torch.int32), packed_top_p=((batch * width,), torch.float32))
+
     def __init__(self, logits, requests, slots, generations, live_rows, candidate_prefix_ids,
-                 *, prefix_offset=0, grammar_masks=None, grammar_mask_count=None):
+                 *, prefix_offset=0, grammar_masks=None, grammar_mask_count=None, workspace=None):
         batch, width, vocab = logits.shape
         _geometry(batch, width)
         device = logits.device
@@ -212,13 +221,9 @@ class PreparedSpeculativeDistributions:
         self.vocab_ids = torch.arange(vocab, device=device)
         for tensor in (self.rows, self.columns, self.vocab_ids):
             record_numeric_tensor(tensor)
-        self.scores = torch.empty((batch, width, vocab), dtype=torch.float32, device=device)
-        self.probabilities = torch.empty_like(self.scores)
-        self.counts = torch.empty((batch, width, vocab), dtype=torch.int32, device=device)
-        self.maximum = torch.empty((batch, width), dtype=torch.float32, device=device)
-        self.valid = torch.empty((batch, width), dtype=torch.bool, device=device)
-        self.packed_top_k = torch.empty(batch * width, dtype=torch.int32, device=device)
-        self.packed_top_p = torch.empty(batch * width, dtype=torch.float32, device=device)
+        for name, tensor in bind_scratch(self.scratch_layout(batch, width, vocab),
+                                        device=device, workspace=workspace).items():
+            setattr(self, name, tensor)
         from ignition.components.probability_normalization import PreparedProbabilityNormalization
         self.normalization = PreparedProbabilityNormalization(self.probabilities, self.valid)
         self._prepared = False
@@ -295,8 +300,17 @@ class PreparedStochasticVerification:
     graph-private and are copied into the persistent acceptance buffers.
     """
 
+    @staticmethod
+    def scratch_layout(batch, width, vocab):
+        return dict(safe_draft_probs=((batch, width - 1, vocab), torch.float32),
+            safe_target_probs=((batch, width, vocab), torch.float32),
+            safe_ids=((batch, width - 1), torch.int32), seed_bits=((batch,), torch.int64),
+            offset=((batch,), torch.int64), independent_accepted=((batch,), torch.int32),
+            emitted_drafts=((batch,), torch.int32))
+
     def __init__(self, draft_probs, draft_token_ids, target_probs, requests, slots, generations,
-                 live_rows, *, rng, draft_valid=None, target_valid=None, output=None, token_limits=None):
+                 live_rows, *, rng, draft_valid=None, target_valid=None, output=None, token_limits=None,
+                 workspace=None):
         batch, width, vocab = target_probs.shape
         _geometry(batch, width)
         device = target_probs.device
@@ -319,12 +333,9 @@ class PreparedStochasticVerification:
         self.output.validate(batch, width, device)
         self.rows, self.columns = torch.arange(batch, device=device), torch.arange(width, device=device)
         self.dummy = (torch.arange(vocab, device=device) == 0).float()
-        self.safe_draft_probs, self.safe_target_probs = torch.empty_like(draft_probs), torch.empty_like(target_probs)
-        self.safe_ids = torch.empty_like(draft_token_ids, dtype=torch.int32)
-        self.seed_bits = torch.empty(batch, dtype=torch.int64, device=device)
-        self.offset = torch.empty(batch, dtype=torch.int64, device=device)
-        self.independent_accepted = torch.zeros(batch, dtype=torch.int32, device=device)
-        self.emitted_drafts = torch.zeros(batch, dtype=torch.int32, device=device)
+        for name, tensor in bind_scratch(self.scratch_layout(batch, width, vocab),
+                                        device=device, workspace=workspace).items():
+            setattr(self, name, tensor)
         self.draw_reservation = 4 * ((width + 1 + 3) // 4)
         if token_limits is not None:
             _tensor(token_limits, (batch,), torch.int32, device, "token_limits")

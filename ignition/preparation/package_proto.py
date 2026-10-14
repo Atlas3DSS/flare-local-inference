@@ -18,8 +18,8 @@ def serving(index, server):
         raise ValueError("sampling defaults must explicitly declare every parameter")
     ParseDict(sampling, index.sampling_defaults)
     ParseDict(server["frontend"], index.frontend)
-    ParseDict({key: value for key, value in server.items()
-               if key not in ("assets", "sampling_defaults", "frontend")}, index.server)
+    ParseDict({"speculative_proposal_source": "mtp", **{key: value for key, value in server.items()
+               if key not in ("assets", "sampling_defaults", "frontend")}}, index.contract)
 
 
 def _relocations(values):

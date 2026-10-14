@@ -1,9 +1,9 @@
-use flare_helios::{
-    frontend::{
-        Asset, Frontend, FrontendAssets, RenderedPrompt,
-        images::{ImageLimits, ImageProcessor, RgbImage},
-    },
-    model::{ModelContract, deepseek4::DeepSeek4},
+use flare_helios::{frontend, model, scheduler};
+#[path = "../support/frontend.rs"]
+mod support;
+use flare_helios::frontend::{
+    Asset, Frontend, FrontendAssets, RenderedPrompt,
+    images::{ImageLimits, ImageProcessor, RgbImage},
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -66,7 +66,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         text: case["prompt"].as_str().unwrap().into(),
         token_ids: frontend.encode(case["prompt"].as_str().unwrap(), false)?,
     };
-    let input = DeepSeek4::prepare_input(&frontend, Some(&processor), &prompt, images)?;
+    let input = flare_helios::model::prepare_input(
+        &support::model_config(support::contract("deepseek4")),
+        &frontend,
+        Some(&processor),
+        &prompt,
+        images,
+    )?;
     let processed = input.images.unwrap();
     fs::write(
         output.join("pixels.f32"),

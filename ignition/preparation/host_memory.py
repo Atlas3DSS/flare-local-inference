@@ -12,8 +12,9 @@ _TUNING_GROWTH_BYTES = 1 << 30
 # One Inductor compile subprocess inside a forward compiler.
 _COMPILE_THREAD_BYTES = 512 << 20
 # Host memory a preparing process holds for each compiled forward it restores to warm and capture:
-# its generated module and kernel launchers. GLM's TP4 ranks peak at 9.3 GB with 65 restored forwards.
-COMPILED_FORWARD_BYTES = 128 << 20
+# its generated module and kernel launchers. On GB10, both GLM TP2 ranks grew 3.47-3.50 GB (62 MiB
+# per forward) from KV allocation through loading 56 forwards, warmup and capturing 80 graphs.
+COMPILED_FORWARD_BYTES = 80 << 20
 
 
 def release_unused():
@@ -42,14 +43,13 @@ def device_memory_info(device):
     return free, total
 
 
-def worker_limit(limit, *, pools=1, available=None, device_bytes=0, headroom_bytes=0,
-                 worker_bytes=_WORKER_BYTES):
+def worker_limit(limit, *, pools=1, available=None, device_bytes=0, headroom_bytes=0):
     """Bound worker RAM after the greater of system headroom and the requested reserve."""
-    if limit <= 0 or pools <= 0 or device_bytes < 0 or headroom_bytes < 0 or worker_bytes <= 0:
+    if limit <= 0 or pools <= 0 or device_bytes < 0 or headroom_bytes < 0:
         raise ValueError("compiler and pool limits must be positive; device bytes and headroom must be nonnegative")
     available = available_bytes() if available is None else available
     headroom = max(_HEADROOM_BYTES, headroom_bytes)
-    worker_bytes += device_bytes
+    worker_bytes = _WORKER_BYTES + device_bytes
     capacity = (available - headroom) // (pools * worker_bytes)
     if capacity < 1:
         raise MemoryError(f"preparation requires at least {(headroom + pools * worker_bytes) >> 20} MiB "

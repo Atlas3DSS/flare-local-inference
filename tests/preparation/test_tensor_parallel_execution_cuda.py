@@ -3,7 +3,6 @@
 import os
 import socket
 import time
-from copy import copy
 from datetime import timedelta
 
 import pytest
@@ -16,17 +15,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 
 
 class RankForward:
-    def __init__(self, batch, agreement, completion, peer_completion, rank):
+    def __init__(self, batch, agreement, completion, rank):
         self.batch, self.agreement, self.completion = batch, agreement, completion
-        self.peer_completion = peer_completion
         self.compilation_variant = "sample" if rank == 0 else "consume"
-
-    def compilation_variants(self):
-        peer = copy(self)
-        peer.batch = copy(self.batch)
-        peer.batch.accept_unsampled = True
-        peer.completion = self.peer_completion
-        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.batch.begin(self.agreement(self.batch.validate()))
@@ -102,9 +93,7 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
                 else:
                     completion = PreparedCompletion(*arguments)
                 completion.prepare()
-                peer_completion = PreparedCompletion(*arguments)
-                peer_completion.prepare()
-                forward = RankForward(batch, agreement, completion, peer_completion, rank)
+                forward = RankForward(batch, agreement, completion, rank)
                 operations[mode] = forward
                 owners.extend((batch, metadata, agreement, completion))
                 signatures[mode] = GraphSignature(mode, 1, capacity, tuple(inputs.buffers()))

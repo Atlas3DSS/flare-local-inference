@@ -9,10 +9,17 @@ import torch
 
 
 class ScratchArena:
-    """Grow during preparation, then retain one address for graph capture."""
+    """Grow during preparation, then retain one address for graph capture.
 
-    def __init__(self, device):
+    With ``overlap`` false, recipes compose every branch on the main stream:
+    the arena then creates no auxiliary stream and accepts no concurrent plans.
+    """
+
+    def __init__(self, device, *, overlap=True):
+        if type(overlap) is not bool:
+            raise TypeError("overlap must be a boolean")
         self.tensor = torch.empty(0, dtype=torch.uint8, device=device)
+        self.overlap = overlap
         self.frozen = False
         self._finalizers = []
         self._parallel_plans = []
@@ -30,6 +37,8 @@ class ScratchArena:
 
     @property
     def auxiliary_stream(self):
+        if not self.overlap:
+            raise RuntimeError("stream overlap is disabled; compose this branch on the main stream")
         if self._auxiliary_stream is None:
             from cuda.bindings import driver as cuda
 
@@ -45,6 +54,8 @@ class ScratchArena:
 
     def register_parallel(self, *plans):
         """Declare plans whose workspaces must coexist within a captured fork."""
+        if not self.overlap:
+            raise RuntimeError("stream overlap is disabled; serial plans share scratch")
         if self.frozen:
             raise RuntimeError("scratch declarations are frozen")
         if len(plans) < 2:
@@ -180,6 +191,22 @@ def scratch_storage(workspace, *, nbytes, device):
     if workspace.nbytes < nbytes:
         raise ValueError(f"planned scratch has {workspace.nbytes} bytes, requires {nbytes}")
     return workspace
+
+
+def bind_scratch(layout, *, device, workspace=None):
+    """Bind contiguous operand prefixes from caller-owned, typed capacity buffers."""
+    if workspace is None:
+        return {name: torch.empty(shape, dtype=dtype, device=device)
+                for name, (shape, dtype) in layout.items()}
+    result = {}
+    for name, (shape, dtype) in layout.items():
+        tensor = workspace[name]
+        if tensor.dtype != dtype or tensor.device != torch.device(device) or not tensor.is_contiguous():
+            raise ValueError(f"scratch {name} requires contiguous {dtype} storage on {device}")
+        if tensor.numel() < prod(shape):
+            raise ValueError(f"scratch {name} has {tensor.numel()} elements, requires {prod(shape)}")
+        result[name] = tensor.view(-1)[:prod(shape)].view(shape)
+    return result
 
 
 def planned_scratch(specs, workspace=None):

@@ -283,7 +283,7 @@ class PreparedLayer:
         self.concurrent_shared = None
         rows = s.ffn_hc.normalized.shape[0]
         overlap = rows >= 2048 if mode == "prefill" else rows <= 256
-        if overlap and self.router.text is not None:
+        if overlap and self.router.text is not None and workspace.overlap:
             parallel_plans = (self.router_projection.plan, self.router.text.plan, self.experts.plan)
             if self.router.vision is not None:
                 parallel_plans += (self.router.vision.plan,)

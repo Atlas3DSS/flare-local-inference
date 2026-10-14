@@ -66,3 +66,34 @@ pub fn image(
     };
     serde_json::from_value(settings).map_err(|e| e.to_string())
 }
+
+pub fn contract(name: &str) -> crate::model::PreparedContract {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/contracts")
+        .join(format!("{name}.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+pub fn model_config(contract: crate::model::PreparedContract) -> crate::model::ModelConfig {
+    crate::model::ModelConfig {
+        prepared_sequence_tokens: 1048576,
+        contract,
+        model_id: "frontend-fixture".into(),
+        identity: [0; 32],
+        limits: crate::scheduler::SchedulerLimits {
+            request_slots: 4,
+            max_active: 4,
+            max_sequence_tokens: 1048576,
+            prefill_chunk_size: 4096,
+            pages: 8192,
+            snapshots: 16,
+        },
+        eos_token_ids: vec![1],
+        sampling_defaults: Default::default(),
+        max_new_tokens: 2048,
+        speculative_widths: vec![],
+        speculative_fixed_width: None,
+        history_drafts: false,
+        speculative_proposal_source: Default::default(),
+    }
+}

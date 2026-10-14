@@ -10,7 +10,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
-    let publishers = match args.get(4) {
+    // Optional: `rank=N` verifies only that rank of a multi-host package, then a profile path.
+    let mut rest = args.iter().skip(4).peekable();
+    let rank = match rest.peek().and_then(|arg| arg.strip_prefix("rank=")) {
+        Some(rank) => {
+            let rank = rank.parse()?;
+            rest.next();
+            Some(rank)
+        }
+        None => None,
+    };
+    let publishers = match rest.next() {
         Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
         None => vec![flare_helios::runtime_package::test_support::publisher()],
     };
@@ -19,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         namespace,
         args.get(3).is_some_and(|s| s == "verify-weights"),
         &publishers,
+        rank,
     )?;
     println!("{}", serde_json::to_string(&contents)?);
     Ok(())

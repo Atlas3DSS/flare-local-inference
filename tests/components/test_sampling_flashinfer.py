@@ -29,7 +29,7 @@ def vocab_size(request):
 
 
 class CapturedSampler:
-    def __init__(self, rows, *, vocab_size, compile_forward=False):
+    def __init__(self, rows, *, vocab_size, compile_forward=False, workspace=None):
         assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
         self.rows = rows
         self.state = DeviceRequestState.allocate("cuda", vocab_size=vocab_size)
@@ -44,7 +44,7 @@ class CapturedSampler:
         for slot in range(4):
             self.admit(slot)
         self.sampler = PreparedSampling(self.logits, self.state, self.slots, self.epochs,
-            self.live, self.records, self.frame, self.sequence, sample_enabled=self.enabled)
+            self.live, self.records, self.frame, self.sequence, sample_enabled=self.enabled, workspace=workspace)
         self.sampler.prepare()
         self.call = self.sampler
         if compile_forward == 'aot':
@@ -101,6 +101,39 @@ def captured(rows, *, vocab_size, compile_forward=False):
 
 def snapshot(state):
     return {name: getattr(state, name).cpu().clone() for name in state.__dataclass_fields__}
+
+
+def test_native_sampling_reuses_operands_across_row_capacities():
+    from ignition.preparation.scratch import bind_scratch
+
+    workspace = bind_scratch(PreparedSampling.scratch_layout(4, 10000), device="cuda:0")
+    owners = [(CapturedSampler(rows, vocab_size=10000),
+               CapturedSampler(rows, vocab_size=10000, workspace=workspace)) for rows in (1, 4)]
+    try:
+        for pair in owners:
+            for owner in pair:
+                owner.worker = owner.bundle.start_worker()
+        for index in (1, 0, 1, 0):
+            results = []
+            for owner in owners[index]:
+                for slot in range(4):
+                    owner.admit(slot, top_k=20, top_p=.9, repetition_penalty=1.1)
+                owner.live.fill_(owner.rows)
+                owner.slots.copy_(torch.tensor([3, 0, 2, 1][:owner.rows], device="cuda", dtype=torch.int32))
+                owner.epochs[-1] = 99 if owner.rows > 1 else 1
+                owner.logits.copy_(torch.arange(10000, device="cuda").remainder(13).float()[None, :])
+                for tensor in workspace.values():
+                    tensor.fill_(True if tensor.dtype == torch.bool else 255)
+                records = owner.replay()
+                results.append((records, snapshot(owner.state)))
+            assert torch.equal(results[0][0], results[1][0])
+            for name, value in results[0][1].items():
+                assert torch.equal(value, results[1][1][name]), name
+    finally:
+        for pair in owners:
+            for owner in pair:
+                if hasattr(owner, "worker"):
+                    owner.worker.close()
 
 
 @pytest.mark.parametrize("compile_forward", [False, True, 'aot'])

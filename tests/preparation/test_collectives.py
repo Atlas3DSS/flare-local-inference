@@ -66,7 +66,7 @@ def test_finished_rank_keeps_participating_until_peers_finish(monkeypatch):
     done = SimpleNamespace(done=True, ready_cache=None, ready_tuning=(), ready_collectives=())
     job = SimpleNamespace(advance=lambda **kwargs: advances.append(kwargs) or done, result=lambda: result)
     session = SimpleNamespace(begin=lambda requests, **kwargs: job)
-    peers = [(False, (), None), (False, (), None), (True, (), None)]
+    peers = [(False, (), None, None, ()), (False, (), None, None, ()), (True, (), None, None, ())]
 
     def gather(states, local, *, group):
         exchanges.append(local)
@@ -83,18 +83,18 @@ def test_mixed_job_authorizes_collective_only_after_every_rank_is_ready(monkeypa
     ready.done = False
     done = SimpleNamespace(done=True, ready_cache=None, ready_tuning=(), ready_collectives=())
     local_states = [ready, ready, done]
-    peers = [(False, (), None), (False, (("reduce", (4, 7)),), None),
-             (False, (), None), (True, (), None)]
+    peers = [(False, (), None, None, ()), (False, (("reduce", (4, 7)),), None, None, ()),
+             (False, (), None, None, ()), (True, (), None, None, ())]
     keys = []
-    job = SimpleNamespace(advance=lambda collective_key: keys.append(collective_key) or local_states.pop(0),
+    job = SimpleNamespace(advance=lambda **kwargs: keys.append(kwargs["collective_key"]) or local_states.pop(0),
                           result=lambda: "prepared")
     monkeypatch.setattr(dist, "all_gather_object", lambda states, local, **kwargs: states.__setitem__(slice(None), [local, peers.pop(0)]))
     assert owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ()) == "prepared"
     assert keys == [None, None, "reduce"]
 
 
-@pytest.mark.parametrize("peer", [(False, (("reduce", (4, 7)),), None),
-                                  (False, (), "ValueError: bad weight geometry")])
+@pytest.mark.parametrize("peer", [(False, (("reduce", (4, 7)),), None, None, ()),
+                                  (False, (), "ValueError: bad weight geometry", None, ())])
 def test_finished_rank_releases_trial_resources_on_peer_failure(monkeypatch, peer):
     owner = coordinator(monkeypatch)
     closed = []
@@ -116,14 +116,14 @@ def test_local_preparation_failure_is_exchanged_before_cleanup(monkeypatch):
 
     def gather(states, local, **kwargs):
         exchanged.append(local)
-        states[:] = [local, (False, (), None)]
+        states[:] = [local, (False, (), None, None, ())]
 
     job = SimpleNamespace(advance=advance, close=lambda: closed.append(True))
     monkeypatch.setattr(dist, "all_gather_object", gather)
     with pytest.raises(RuntimeError, match="bad weight geometry") as failure:
         owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ())
     assert isinstance(failure.value.__cause__, ValueError)
-    assert exchanged == [(False, (), "ValueError: bad weight geometry")]
+    assert exchanged == [(False, (), "ValueError: bad weight geometry", None, ())]
     assert closed == [True]
 
 
@@ -153,3 +153,48 @@ def test_peers_adopt_rank_zero_selections_and_disagreement_fails(monkeypatch):
     owner.agree_selections(selection({"tile": 64}))
     with pytest.raises(RuntimeError, match="1 kernel selections differ"):
         owner.agree_selections(selection({"tile": 128}))
+
+
+def race(key, latency, index, assignment=True):
+    return SimpleNamespace(key=key, latency_us=None if not assignment else latency,
+                           candidate_index=None if not assignment else index,
+                           assignment={"index": index} if assignment else None)
+
+
+def test_sharded_tuning_reconciles_every_cache_and_adopts_each_race_fastest_result(monkeypatch):
+    owner = coordinator(monkeypatch)
+    mine, theirs = object(), object()
+    local, peer = race("gemm", 9.0, 0), race("gemm", 7.5, 3)
+    blank = dict(done=False, ready_collectives=(), ready_cache=None, ready_tuning=())
+    local_states = [SimpleNamespace(**{**blank, "ready_cache": mine}), SimpleNamespace(**{**blank, "ready_cache": mine}),
+                    SimpleNamespace(**{**blank, "ready_tuning": (local,)}),
+                    SimpleNamespace(**{**blank, "done": True})]
+    # The peer offers its cache one exchange late, then its share of the race.
+    peers = [(False, (), None, None, ()), (False, (), None, theirs, ()), (False, (), None, None, (peer,)),
+             (True, (), None, None, ())]
+    advances = []
+    job = SimpleNamespace(advance=lambda **kwargs: advances.append(kwargs) or local_states.pop(0),
+                          result=lambda: "prepared")
+    monkeypatch.setattr(dist, "all_gather_object",
+                        lambda states, value, **kwargs: states.__setitem__(slice(None), [value, peers.pop(0)]))
+    assert owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ()) == "prepared"
+    assert advances == [{"collective_key": None}, {"collective_key": None}, {"cache": (mine, theirs)},
+                        {"tuning": peer}]
+
+
+def test_race_winners_prefer_lower_latency_then_lower_candidate_index():
+    from ignition.preparation.collectives import _winners
+
+    winners = _winners([race("b", 5.0, 4), race("a", 2.0, 1), race("b", 5.0, 2), race("a", 3.0, 0),
+                        race("a", 0, 0, assignment=False)])
+    assert [(item.key, item.candidate_index) for item in winners] == [("a", 1), ("b", 2)]
+    with pytest.raises(RuntimeError, match="no rank completed"):
+        _winners([race("c", 0, 0, assignment=False), race("c", 0, 1, assignment=False)])
+
+
+def test_ranks_report_whether_a_value_matches_every_rank(monkeypatch):
+    owner = coordinator(monkeypatch)
+    assert owner.same_on_every_rank("NVIDIA GB10")
+    monkeypatch.setattr(dist, "all_gather_object",
+                        lambda states, value, **kwargs: states.__setitem__(slice(None), [value, "NVIDIA GB300"]))
+    assert not owner.same_on_every_rank("NVIDIA GB10")

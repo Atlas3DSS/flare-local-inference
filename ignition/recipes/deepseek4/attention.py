@@ -487,7 +487,7 @@ class PreparedAttention:
             }
         self.concurrent_compression = None
         self.concurrent_index = None
-        if self.overlap_compression:
+        if self.overlap_compression and workspace.overlap:
             self.concurrent_index = ConcurrentProjectionChain(
                 (self.index_query,), parallel_plans=(self.kvnorm.plan, self.qb.plan, self.window_writer.plan),
                 session=session, workspace=workspace)

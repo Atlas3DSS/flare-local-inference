@@ -192,7 +192,8 @@ class PreparedDecoder:
                  stage_outputs: dict[str, torch.Tensor] | None = None,
                  max_cache_pages: int | None = None,
                  residual_output: torch.Tensor | None = None, verification: bool = False,
-                 gdn_records=None, gdn_in_place: bool = False, runtime=None, vocabulary_runtime=None, coordinator=None):
+                 gdn_records=None, gdn_in_place: bool = False, runtime=None, vocabulary_runtime=None, coordinator=None,
+                 sampling_workspace=None):
         from ignition.components.embedding import PreparedEmbedding
         from ignition.components.linear import UnquantizedProjection
 
@@ -238,7 +239,8 @@ class PreparedDecoder:
                     scratch.gdn, state.pool.gdn[index], state.gdn, mode=state.mode,
                     session=session, name=f"{prefix}.gdn", checkpoint_export=False,
                     workspace=workspaces, projection_workspace=workspaces,
-                    records=None if gdn_records is None else gdn_records[index], in_place=gdn_in_place)
+                    records=None if gdn_records is None else gdn_records[index], in_place=gdn_in_place,
+                    partitions=getattr(state, "gdn_partitions", None))
             moe = PreparedQwenMoe(source, layer_weights.moe, session=session, name=f"{prefix}.moe",
                 scratch=scratch.moe, workspace=workspaces,
                 projection_workspace=workspaces)
@@ -255,7 +257,8 @@ class PreparedDecoder:
         self.ple = PreparedPLE(module,
             {key: getattr(module, key).weight for key in ("key_proj", "value_proj")},
             scratch.residual, scratch.ple, state.pool.ple_convolution, state.ple, ple_table,
-            mode=state.mode, session=session, name=f"{name}.ple", workspace=workspaces)
+            mode=state.mode, session=session, name=f"{name}.ple", workspace=workspaces,
+            partitions=getattr(state, "ple_partitions", None))
         self.final_mixer = PreparedHyperconnection(language.hyper_connection_mixer,
             scratch.hyperconnection, priming_state=scratch.residual,
             session=session, name=f"{name}.final_mixer")
@@ -285,7 +288,7 @@ class PreparedDecoder:
             self.sampler = PreparedSampling(self.scratch.logits, state.requests,
                 inputs.row_slot_ids[:state.rows], inputs.row_generations[:state.rows],
                 inputs.live_rows, completion_records, frame_index, submission_sequence,
-                sample_enabled=inputs.sample_enabled[:state.rows])
+                sample_enabled=inputs.sample_enabled[:state.rows], workspace=sampling_workspace)
             self.sampler.prepare()
 
     def __call__(self):

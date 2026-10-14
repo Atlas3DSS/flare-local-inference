@@ -14,6 +14,9 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
+from ignition.preparation.contract import history_region
+from ignition.preparation import runtime_package_pb2 as contract_proto
 from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (
@@ -67,7 +70,6 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
-    compile_devices: tuple[str, ...] = ()
     mtp: bool = False
     # Routed NVFP4-CSF experts: A16 activations with A4 prefill launches, or A4 throughout.
     expert_activation: str = "a16"
@@ -75,6 +77,9 @@ class PreparationConfig:
     context_parallel: bool = False
     # Expand routed experts' CSF block scales once at load instead of before every expert launch.
     expand_expert_scales: bool = False
+    # Run shared experts, KDA gate projections, and decode query chains on an auxiliary stream;
+    # without overlap every branch runs serially on the main stream.
+    stream_overlap: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
 
@@ -86,8 +91,8 @@ class PreparationConfig:
                 type(self.speculative_fixed_width) is not int
                 or self.speculative_fixed_width not in self.speculative_widths):
             raise ValueError("fixed speculative width must belong to the configured widths")
-        if type(self.compile_decoder) is not bool:
-            raise TypeError("compile_decoder must be a boolean")
+        if type(self.compile_decoder) is not bool or type(self.stream_overlap) is not bool:
+            raise TypeError("compile_decoder and stream_overlap must be booleans")
         placements = tuple(zip(self.hosts or ("",) * len(self.devices), self.devices))
         if (not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
                 or len(set(placements)) != len(self.devices)
@@ -275,14 +280,31 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         collective = prefill_collective = vocabulary_collective = None
         sample_rows = max(b * w for b, w in config.speculative_shapes) if config.mtp else config.request_capacity
         if coordinator is not None and coordinator.spans_hosts:
-            # Ranks on separate Sparks reduce and gather through one RoCEnante runtime.
-            if config.context_parallel:
-                raise ValueError("GLM decode context parallelism requires every rank on one host")
+            # Ranks on separate Sparks reduce and gather through one RoCEnante runtime, which also
+            # carries decode context parallelism's exchanges.
             # Decode rows reduce one-shot; prefill chunks through the pipelined two-shot path.
             decode_tokens = max(config.request_capacity, sample_rows)
+            gather_bytes = sample_rows * (154880 // shard.world_size) * 2
+            if config.context_parallel:
+                from ignition.components.head_exchange import pack_width
+
+                from .dcp import SLICE_ROWS
+
+                # Per-rank contributions: query heads and the merge's head shards for one exchange
+                # slice, and index candidates for one slice of rows.
+                exchange = min(SLICE_ROWS, decode_tokens)
+                gather_bytes = max(gather_bytes, exchange * (64 // shard.world_size) * 512 * 2,
+                                   exchange * pack_width(shard.world_size, 64, 512) * 2,
+                                   min(config.token_capacity, SLICE_ROWS) * 2048 * 2)
+            varlen_bytes = 0
+            if config.context_parallel:
+                from .dcp import WINDOW_RECORDS
+
+                # Prefill gathers each rank's latent records one window at a time.
+                varlen_bytes = min(WINDOW_RECORDS, blocks * 256) * 528
             collective = prefill_collective = vocabulary_collective = create_roce_runtime(
                 group, device, max_tokens=decode_tokens, pipe_tokens=config.token_capacity, hidden_size=4096,
-                gather_bytes=sample_rows * (154880 // shard.world_size) * 2, package_storage=package_storage)
+                gather_bytes=gather_bytes, package_storage=package_storage, varlen_bytes=varlen_bytes)
         elif group is not None:
             collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity,
                                                    hidden_size=4096, ipc=ipc)
@@ -299,7 +321,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         session.__enter__()
         register_benchmark_state(session, pool.decoder.layers[0].recurrent,
             storage=pool.backing, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         forwards, signatures, decoders, scratch, metadata = {}, {}, {}, {}, {}
         buffers = dict(inputs.buffers(), **commands.buffers(), **{
@@ -311,22 +333,30 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         if config.context_parallel and group is not None:
             from .dcp import SLICE_ROWS, ContextParallel, ContextShards
 
-            # Only decode exchanges heads; prefill gathers context blocks instead.
-            exchange_rows = min(SLICE_ROWS, max(config.request_capacity,
-                max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1))
-            context = ContextParallel(ContextShards.on(rank, shard.world_size, device),
-                heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512, ipc=ipc),
-                candidates=create_all_gather_runtime(group, device, max_rows=min(config.token_capacity, SLICE_ROWS),
-                                                     columns=2048 * shard.world_size, ipc=ipc),
-                coordinator=coordinator)
+            owned = ContextShards.on(rank, shard.world_size, device)
+            if coordinator.spans_hosts:
+                # The ranks' one RoCEnante runtime carries every context-parallel exchange.
+                context = ContextParallel(owned, heads=collective, candidates=collective, coordinator=coordinator,
+                                          remote=True)
+            else:
+                # Only decode exchanges heads; prefill gathers context blocks instead.
+                exchange_rows = min(SLICE_ROWS, max(config.request_capacity,
+                    max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1))
+                context = ContextParallel(owned,
+                    heads=create_head_exchange(group, device, max_rows=exchange_rows, heads=64, head_dim=512,
+                                               ipc=ipc),
+                    candidates=create_all_gather_runtime(group, device,
+                        max_rows=min(config.token_capacity, SLICE_ROWS), columns=2048 * shard.world_size, ipc=ipc),
+                    coordinator=coordinator)
         shards = None if context is None else context.shards
         # Prefill chunks overlay their layer intermediates; decode rows keep small separate scratch.
+        remote = context is not None and context.remote
         prefill_storage = DecoderScratch.allocate(config.prefill_chunk_size, blocks, "prefill", device,
-            shard=shard, sample_rows=1, context_ranks=context_ranks, overlay_layers=True)
+            shard=shard, sample_rows=1, context_ranks=context_ranks, overlay_layers=True, remote=remote)
         decode_rows = max(config.request_capacity,
                           max((b * w for b, w in config.speculative_shapes), default=1) if config.mtp else 1)
         decoder_storage = DecoderScratch.allocate(decode_rows, blocks, "decode", device,
-            shard=shard, sample_rows=sample_rows, context_ranks=context_ranks)
+            shard=shard, sample_rows=sample_rows, context_ranks=context_ranks, remote=remote)
 
         speculation = None
         if config.mtp:
@@ -463,7 +493,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         with phase(progress, "Allocate KV cache") as stage:
             if package_storage is not None:
                 package_storage.grow("KV_PAGES", pages)
-                if context_ranks > 1:
+                # Ranks on one host read each other's latent caches through CUDA IPC.
+                if context_ranks > 1 and not remote:
                     pool.share_pages(package_storage, group)
             elif virtual_pages is not None:
                 virtual_pages.grow("KV_PAGES", pages)
@@ -471,7 +502,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 from ignition.components.shared_pages import SharedPages
 
                 shared_pages.extend(pool.replace_pages(pages, ranks=context_ranks,
-                    share=lambda nbytes: SharedPages(group, device, nbytes)))
+                    share=None if remote else lambda nbytes: SharedPages(group, device, nbytes)))
                 rebind_pages()
             pool.memory_capacity[1] = pages
             stage.update(f"{pages * page_bytes / (1 << 30):.2f} GiB per GPU · {pages * config.page_tokens:,} tokens")
@@ -482,7 +513,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
-        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache, compile_devices=config.compile_devices,
+        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
         retain_graphs=config.retain_graphs, materialize=materialize_cache)
     kv_bytes = pages * page_bytes
     if integrated:
@@ -511,16 +542,23 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
         for role, filename in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
     generation = json.loads((snapshot / "generation_config.json").read_text())
+    from .mla import MLAState
+    cache_regions = []
+    for layer, value in enumerate((*pool.decoder.layers, *((pool.draft,) if pool.draft is not None else ()))):
+        if isinstance(value, MLAState):
+            cache_regions.append(history_region(buffers, f"cache.{layer}.latent", value.cache.view(-1, 4, 64, 528),
+                contract_proto.PAGED_LATENT, tokens_per_record=config.page_tokens // 256))
+            cache_regions.append(history_region(buffers, f"cache.{layer}.index", value.index.cache,
+                contract_proto.PAGED_LATENT, tokens_per_record=config.page_tokens // 64))
+    buffers["request_pending_token"] = requests.pending_token
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,
         "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": config.page_tokens,
         "frontend": prepare_frontend(snapshot, eos_token_ids=generation["eos_token_id"]),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
-        "model_contract": {"schema": "glm5next.graph-inputs.v2", "vocabulary": 154880,
-            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
-            "page_tokens": config.page_tokens}}
+        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=config.page_tokens, draft_lag=1 if config.mtp else None, regions=cache_regions)}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
-            speculative_fixed_width=config.speculative_fixed_width, state_rows_per_request=1)
+            speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
@@ -529,6 +567,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
+        forwards={name: compiled.get(name, forward) for name, forward in forwards.items()},
         export_zero_ranges=disposable_ranges((decoder_storage, prefill_storage), arena, forwards),
         close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
                          *(() if virtual_pages is None else (virtual_pages,)),

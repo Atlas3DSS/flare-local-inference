@@ -1,12 +1,9 @@
 """Derive a serving plan from a recipe's cost model and the host's free GPU memory.
 
-Weights, graphs and scratch, live state, and a prefix cache sized from the
-concurrency limit come first. KV pages take all remaining supply, the GPU's free
-memory minus engine headroom and the configured reserve: the pool holds active
-requests and every cached prefix. Active requests need at least 8,192 tokens
-each; when supply cannot provide that, the prefix cache shrinks to its floor. A
-plan that still does not fit is a capacity error naming the settings that would
-make it fit.
+Weights, graphs, scratch and execution rows have dedicated storage. KV pages
+take the remaining supply after headroom and the configured reserve. Immutable
+prefix snapshots borrow KV backing while retained; an idle snapshot slot costs
+no physical memory. Active requests need at least 8,192 tokens each.
 """
 
 from dataclasses import dataclass, replace
@@ -26,13 +23,9 @@ HEADROOM_BYTES = 1 << 30
 HEADROOM_CHUNK_TOKENS = 4096
 HEADROOM_CHUNK_TOKEN_BYTES = 128 << 10
 MINIMUM_REQUEST_TOKENS = 8192
-# The prefix cache keeps about four recent exchanges per concurrent request
-# resident; each exchange retains its prompt and terminal checkpoints.
+# Each exchange can retain prompt and terminal checkpoints; snapshot slots have
+# virtual capacity for about four recent exchanges per concurrent request.
 CACHE_STATES_PER_REQUEST = 8
-# The cache takes at most a quarter of the memory left after weights, graphs, and
-# live state, so KV pages for active requests keep the larger share.
-CACHE_SHARE = 4
-CACHE_FLOOR = 8
 SUPPORTED_CAPABILITIES = ((10, 3), (12, 0), (12, 1))
 SUPPORTED_ARCHITECTURES = "SM103, SM120, or SM121"
 _GIB = 1 << 30
@@ -153,8 +146,10 @@ class Plan:
     graph_bytes: int
     # Ranks shard each page's context when the recipe declares context-parallel page costs.
     context_parallel: bool = True
-    # Explicit local GPU UUIDs for forward compilation, separate from serving ranks.
-    compile_devices: tuple[str, ...] = ()
+    # Captured graphs run independent branches on an auxiliary stream when the recipe declares
+    # stream overlap; otherwise every branch runs serially on the main stream.
+    stream_overlap: bool = True
+    mixed_prefill: bool = False
 
     @property
     def world_size(self) -> int:
@@ -171,10 +166,6 @@ class Plan:
     @property
     def live_bytes(self) -> int:
         return self.live_rows * self.costs.state_row_bytes
-
-    @property
-    def cache_bytes(self) -> int:
-        return self.cache_states * self.costs.state_row_bytes
 
     @property
     def fixed_bytes(self) -> int:
@@ -198,7 +189,14 @@ class Plan:
 
     @property
     def headroom_bytes(self) -> int:
-        return HEADROOM_BYTES + max(0, self.prefill_chunk - HEADROOM_CHUNK_TOKENS) * HEADROOM_CHUNK_TOKEN_BYTES
+        tokens = max(self.prefill_chunk,
+            max((p + (b - 1) * w for _, b, w, p in self.mixed_shapes), default=0))
+        return HEADROOM_BYTES + max(0, tokens - HEADROOM_CHUNK_TOKENS) * HEADROOM_CHUNK_TOKEN_BYTES
+
+    @property
+    def mixed_shapes(self):
+        return (self.recipe.mixed_shapes(self.concurrency, self.prefill_chunk, self.speculation)
+                if self.mixed_prefill else ())
 
     @property
     def supply_bytes(self) -> int:
@@ -224,12 +222,12 @@ class Plan:
 
     @property
     def snapshots(self) -> int:
-        return self.recipe.snapshot_rows(self.cache_states, self.concurrency)
+        return self.cache_states
 
     @property
     def fits(self) -> bool:
         return (self.pages >= self.minimum_pages
-                and self.fixed_bytes + self.cache_bytes + self.page_bytes <= self.supply_bytes)
+                and self.fixed_bytes + self.page_bytes <= self.supply_bytes)
 
     def to_dict(self) -> dict:
         return {
@@ -239,7 +237,8 @@ class Plan:
                       "total_bytes": gpu.total_bytes} for gpu in self.gpus],
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
             "prefill_chunk": self.prefill_chunk, "context_parallel": self.context_parallel,
-            "compile_devices": list(self.compile_devices),
+            "stream_overlap": self.stream_overlap,
+            "mixed_prefill": self.mixed_prefill,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "proposal_source": self.speculation.proposal_source,
@@ -247,8 +246,10 @@ class Plan:
             "context": self.context, "checkpoint_context": self.recipe.context,
             "weights_bytes": self.weights_bytes, "mapped_host_bytes": self.checkpoint.mapped_host_bytes,
             "graph_bytes": self.graph_bytes,
+            "mixed_shapes": self.mixed_shapes,
             "live_bytes": self.live_bytes, "prefix_cache_states": self.cache_states,
-            "prefix_cache_target": self.cache_target, "prefix_cache_bytes": self.cache_bytes,
+            "prefix_cache_target": self.cache_target,
+            "snapshot_virtual_bytes": self.snapshots * self.costs.state_row_bytes,
             "snapshots": self.snapshots,
             "pages": self.pages, "demand_pages": self.demand_pages, "page_tokens": self.page_tokens,
             "page_bytes": self.page_bytes, "tokens": self.tokens, "guaranteed_tokens": self.guaranteed_tokens,
@@ -259,7 +260,8 @@ class Plan:
 
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
         speculation: Speculation | None, prefill_chunk: int | None = None,
-        context_parallel: bool = True, cache_states: int | None = None) -> Plan:
+        context_parallel: bool = True, stream_overlap: bool = True, cache_states: int | None = None,
+        mixed_prefill: bool = False) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
@@ -269,21 +271,15 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
     plan = Plan(recipe, checkpoint, gpus, concurrency, recipe.prefill_chunk if prefill_chunk is None else prefill_chunk,
                 speculation, 0, 0, 0, reserve_bytes,
                 recipe.weights_bytes(checkpoint, len(gpus), speculation), costs.graph_bytes,
-                context_parallel and costs.page_tokens is not None)
+                context_parallel=context_parallel and costs.page_tokens is not None,
+                stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill)
     available = plan.supply_bytes - plan.fixed_bytes
-    target = min(CACHE_STATES_PER_REQUEST * concurrency,
-                 max(CACHE_FLOOR, available // CACHE_SHARE // costs.state_row_bytes))
+    target = min(CACHE_STATES_PER_REQUEST * concurrency, max(1, available // costs.state_row_bytes))
     if cache_states is not None:
         target = cache_states
 
-    def pages(kept):
-        return (available - kept * costs.state_row_bytes) // costs.page_bytes
-
-    kept = target
-    if pages(kept) < plan.minimum_pages:
-        affordable = (available - plan.minimum_pages * costs.page_bytes) // costs.state_row_bytes
-        kept = min(target, max(CACHE_FLOOR, affordable))
-    return replace(plan, cache_target=target, cache_states=kept, pages=max(pages(kept), plan.minimum_pages))
+    return replace(plan, cache_target=target, cache_states=target,
+                   pages=max(available // costs.page_bytes, plan.minimum_pages))
 
 
 def _gib(value: int) -> str:
@@ -295,10 +291,10 @@ def _per_gpu(plan: Plan) -> str:
 
 
 def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
-    need = plan.fixed_bytes + plan.cache_bytes + plan.page_bytes
+    need = plan.fixed_bytes + plan.page_bytes
     lines = [
         f"needs {_gib(plan.weights_bytes)} GiB weights + {_gib(plan.graph_bytes)} GiB graphs"
-        f" + {_gib(plan.live_bytes)} GiB live state + {_gib(plan.cache_bytes)} GiB prefix cache",
+        f" + {_gib(plan.live_bytes)} GiB live state",
         f"+ {_gib(plan.page_bytes)} GiB minimum pages ({plan.concurrency} × {MINIMUM_REQUEST_TOKENS:,} tokens)"
         f" = {_gib(need)} GiB{_per_gpu(plan)};",
         f"has {_gib(plan.free_bytes)} GiB free − {_gib(plan.headroom_bytes)} GiB headroom"
@@ -311,15 +307,19 @@ def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
 
 def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selected: tuple[int, ...] | None,
          concurrency: int, reserve_bytes: int, speculation: Speculation | None,
-         prefill_chunk: int | None = None, context_parallel: bool = True, cache_states: int | None = None) -> Plan:
+         prefill_chunk: int | None = None, context_parallel: bool = True, stream_overlap: bool = True,
+         cache_states: int | None = None, mixed_prefill: bool = False) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
     for which enough GPUs fit, taking the first such GPUs in index order. Without
     `prefill_chunk`, the recipe's chunk applies. `speculation` is the drafting the
     plan prepares, or None for none. `context_parallel` shards each page's context
-    across the ranks of recipes that declare context-parallel page costs.
+    across the ranks of recipes that declare context-parallel page costs. Without
+    `stream_overlap`, recipes that declare stream overlap run every branch serially.
     """
+    if mixed_prefill and not recipe.mixed_prefill:
+        raise UsageError(f"--mixed-prefill: {checkpoint.alias} does not capture mixed prefill/decode graphs")
     if not 1 <= concurrency <= recipe.max_concurrency:
         raise UsageError(f"--max-concurrency for {checkpoint.alias} must be 1 through {recipe.max_concurrency}")
     chunk = recipe.prefill_chunk if prefill_chunk is None else prefill_chunk
@@ -348,7 +348,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes, speculation=speculation):
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,
                    speculation=speculation, prefill_chunk=chunk, context_parallel=context_parallel,
-                   cache_states=cache_states)
+                   stream_overlap=stream_overlap, cache_states=cache_states, mixed_prefill=mixed_prefill)
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""
@@ -374,7 +374,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
         return result
 
     closest = min(candidates(), key=lambda candidate: (
-        candidate.fixed_bytes + candidate.cache_bytes + candidate.page_bytes - candidate.supply_bytes))
+        candidate.fixed_bytes + candidate.page_bytes - candidate.supply_bytes))
     options = []
     if reserve_bytes > 0:
         for reserve in range((reserve_bytes - 1) // _GIB, -1, -1):

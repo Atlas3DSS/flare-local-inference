@@ -14,6 +14,7 @@ from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.capture import capture_forwards
+from .contract import prepare as prepare_contract
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (CollectivePreparation, create_all_gather_runtime,
     create_all_reduce_runtime, create_dma_all_reduce_runtime)
@@ -56,12 +57,15 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
-    compile_devices: tuple[str, ...] = ()
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
+    stream_overlap: bool = True
 
     def __post_init__(self):
+        if type(self.stream_overlap) is not bool:
+            raise TypeError("stream_overlap must be a boolean")
         if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
             raise ValueError("DeepSeek V4.1 Flash preparation requires four distinct GPUs")
         if not PAGE_TOKENS <= self.context <= 1048576 or self.context % PAGE_TOKENS:
@@ -156,7 +160,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             headroom_bytes=config.headroom_bytes)
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device)
         decoder_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, shard.world_size, device)
@@ -257,7 +261,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
         pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
-        progress=progress, cache_root=config.kernel_cache, compile_devices=config.compile_devices, retain_graphs=config.retain_graphs,
+        progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs,
         materialize=materialize_cache)
     session.freeze()
     pool.clear_for_preparation()
@@ -271,14 +275,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     assets = {role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for role, path in (("tokenizer", snapshot / "tokenizer.json"),
             ("chat_template", frontend / "chat_template.jinja"))}
+    buffers["request_pending_token"] = requests.pending_token
     server_config = {"identity": identity, "model_id": snapshot.name,
         "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
         "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": PAGE_TOKENS,
         "frontend": prepare_frontend(snapshot, eos_token_ids=[1]),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
-        "model_contract": {"schema": "deepseek41.graph-inputs.v1", "vocabulary": 129280,
-            "vision": {"features_per_request": 0, "max_images": 0, "patches_per_feature": 0, "patch_capacities": []},
-            "page_tokens": PAGE_TOKENS}}
+        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None, embedding_tables=range(len(tables.sources)))}
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),

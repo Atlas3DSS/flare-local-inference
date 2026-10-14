@@ -46,7 +46,8 @@ class IndexerBenchmarkInputs:
             a["page_table"][0].copy_(table)
         else:
             a["page_table"].copy_(table.expand_as(a["page_table"]))
-        a["active_width"].fill_(pages * 64)
+        if a["active_width"] is not None:
+            a["active_width"].fill_(pages * 64)
         counts = sorted({min(pages * 64, 512), pages * 64})
         self.producers = tuple(partial(a["cache_lengths"].fill_, count) for count in counts)
         self.producers[-1]()
