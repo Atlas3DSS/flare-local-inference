@@ -7,6 +7,11 @@
 //! step so CPU tests run without a driver. Allocation never blocks: when no
 //! slab is free the caller evicts or fails its job.
 //!
+//! A pool split by rank instead keeps each rank's part of every slab in pinned
+//! memory that only that rank's device maps, for stores whose records the CPU
+//! never reads. Its slab addresses are identities, and [`RankPart`] locates
+//! each rank's part of a slab for the transfer threads.
+//!
 //! Each sub-pool hands out slabs from a FIFO free list that starts in index
 //! order, and tracks which slabs are allocated so that releasing a slab that is
 //! free, released twice, or outside the pool is ignored instead of duplicating
@@ -14,7 +19,10 @@
 
 use std::collections::VecDeque;
 
-use crate::{Result, cuda::HostRegistration};
+use crate::{
+    Result,
+    cuda::{DeviceHostParts, HostRegistration},
+};
 
 use super::geometry::{BLOCK_BYTES, Layout, invalid};
 
@@ -108,7 +116,72 @@ fn region_bytes(kind: &str, slab_bytes: u64, count: usize) -> Result<usize> {
         })
 }
 
-/// Fixed pools of page and row slabs inside one registered mapping.
+/// Where one rank's part of every slab of a pool split by rank lives.
+///
+/// Such a pool keeps each rank's part of every page slab, then of every row
+/// slab, contiguously in that rank's memory. Slab addresses remain identities:
+/// where each slab would begin if the pool held whole cross-rank records. They
+/// lie inside the pool's reserved range, so they never name another pool's slab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RankPart {
+    /// The pool's reserved range.
+    range: std::ops::Range<usize>,
+    pages: PartRegion,
+    rows: PartRegion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PartRegion {
+    /// Identity of slab 0; identities advance by one cross-rank record.
+    identity: usize,
+    record_bytes: usize,
+    count: usize,
+    /// This rank's part of slab 0; parts advance by the rank's share of a record.
+    base: usize,
+    part_bytes: usize,
+}
+
+impl PartRegion {
+    fn locate(&self, slab: usize) -> Option<u64> {
+        let offset = slab.checked_sub(self.identity)?;
+        let index = offset / self.record_bytes;
+        (offset.is_multiple_of(self.record_bytes) && index < self.count)
+            .then(|| (self.base + index * self.part_bytes) as u64)
+    }
+}
+
+impl RankPart {
+    /// This rank's part of the page slab at `slab`, or `None` when `slab` lies
+    /// outside the pool. An address inside the pool that is not one of its page
+    /// slabs is rejected.
+    pub fn page(&self, slab: usize) -> Result<Option<u64>> {
+        self.locate(&self.pages, slab, "page")
+    }
+
+    /// This rank's part of the row slab at `slab`, as [`RankPart::page`] does for pages.
+    pub fn row(&self, slab: usize) -> Result<Option<u64>> {
+        self.locate(&self.rows, slab, "row")
+    }
+
+    fn locate(&self, region: &PartRegion, slab: usize, kind: &str) -> Result<Option<u64>> {
+        if !self.range.contains(&slab) {
+            return Ok(None);
+        }
+        region.locate(slab).map(Some).ok_or_else(|| {
+            invalid(format!(
+                "address {slab:#x} inside a pool split by rank is not one of its {kind} slabs"
+            ))
+        })
+    }
+}
+
+/// Each rank's parts of a pool split by rank and the memory holding them.
+struct Split {
+    parts: Vec<RankPart>,
+    _memory: DeviceHostParts,
+}
+
+/// Fixed pools of page and row slabs inside one registered mapping, or split by rank.
 pub struct SlabPool {
     mapping: usize,
     mapping_bytes: usize,
@@ -116,6 +189,7 @@ pub struct SlabPool {
     rows: SubPool,
     retain: bool,
     registration: Option<HostRegistration>,
+    split: Option<Split>,
 }
 
 // SAFETY: The mapping is plain process memory; the pool is used from one thread
@@ -175,6 +249,7 @@ impl SlabPool {
             rows: SubPool::new(base + page_region, row_bytes as usize, row_count),
             retain,
             registration: None,
+            split: None,
         })
     }
 
@@ -183,6 +258,102 @@ impl SlabPool {
     /// page minimum so the pool never exceeds `bytes`. A `bytes` below
     /// [`SlabPool::minimum_bytes`] fails with that minimum in the message.
     pub fn sized(layout: &Layout, bytes: u64) -> Result<Self> {
+        let (page_count, row_count) = Self::sized_counts(layout, bytes)?;
+        Self::new(
+            layout.page_record_bytes,
+            page_count,
+            layout.row_record_bytes,
+            row_count,
+            true,
+        )
+    }
+
+    /// A retaining pool with the slab counts of [`SlabPool::sized`], split by
+    /// rank: each rank's part of every slab is pinned host memory that only the
+    /// device of `contexts[rank]` and the host access. Registering one mapping
+    /// maps it into every device at about 2 MiB of device memory per GiB; a
+    /// split pool costs each device that for its own part only. The CPU cannot
+    /// address a slab's record, so the pool suits stores that move records only
+    /// between devices and slabs; [`SlabPool::rank_parts`] locates the parts.
+    pub fn sized_by_rank(layout: &Layout, bytes: u64, contexts: &[(usize, i32)]) -> Result<Self> {
+        if contexts.len() != layout.ranks.len() {
+            return Err(invalid(format!(
+                "a pool split by rank needs one context per rank: {} contexts for {} ranks",
+                contexts.len(),
+                layout.ranks.len()
+            )));
+        }
+        let (page_count, row_count) = Self::sized_counts(layout, bytes)?;
+        let page_region = region_bytes("page", layout.page_record_bytes, page_count)?;
+        let row_region = region_bytes("row", layout.row_record_bytes, row_count)?;
+        let shares: Vec<(usize, usize)> = (0..layout.ranks.len())
+            .map(|rank| {
+                let next = layout.ranks.get(rank + 1);
+                let this = &layout.ranks[rank];
+                (
+                    (next.map_or(layout.page_record_bytes, |next| next.page_offset)
+                        - this.page_offset) as usize,
+                    (next.map_or(layout.row_record_bytes, |next| next.row_offset) - this.row_offset)
+                        as usize,
+                )
+            })
+            .collect();
+        let requests: Vec<_> = contexts
+            .iter()
+            .zip(&shares)
+            .map(|(&(context, device), (page, row))| {
+                (context, device, page * page_count + row * row_count)
+            })
+            .collect();
+        let memory = crate::cuda::map_device_host_parts(&requests)?;
+        let base = memory.address();
+        if memory.nbytes() < page_region + row_region {
+            return Err(invalid(
+                "the reserved range of a pool split by rank is smaller than its records",
+            ));
+        }
+        let range = base..base + memory.nbytes();
+        let parts = shares
+            .iter()
+            .enumerate()
+            .map(|(rank, &(page, row))| RankPart {
+                range: range.clone(),
+                pages: PartRegion {
+                    identity: base,
+                    record_bytes: layout.page_record_bytes as usize,
+                    count: page_count,
+                    base: memory.part_address(rank),
+                    part_bytes: page,
+                },
+                rows: PartRegion {
+                    identity: base + page_region,
+                    record_bytes: layout.row_record_bytes as usize,
+                    count: row_count,
+                    base: memory.part_address(rank) + page * page_count,
+                    part_bytes: row,
+                },
+            })
+            .collect();
+        Ok(Self {
+            mapping: base,
+            mapping_bytes: memory.nbytes(),
+            pages: SubPool::new(base, layout.page_record_bytes as usize, page_count),
+            rows: SubPool::new(
+                base + page_region,
+                layout.row_record_bytes as usize,
+                row_count,
+            ),
+            retain: true,
+            registration: None,
+            split: Some(Split {
+                parts,
+                _memory: memory,
+            }),
+        })
+    }
+
+    /// Page and row slab counts of a retaining pool of at most `bytes`.
+    fn sized_counts(layout: &Layout, bytes: u64) -> Result<(usize, usize)> {
         let page_record = layout.page_record_bytes;
         let row_record = layout.row_record_bytes;
         if page_record == 0 || row_record == 0 {
@@ -202,13 +373,12 @@ impl SlabPool {
         let most_rows = (bytes - MINIMUM_PAGE_SLABS as u64 * page_record) / row_record;
         let row_count = quarter_rows.max(MINIMUM_ROW_SLABS as u64).min(most_rows);
         let page_count = (bytes - row_count * row_record) / page_record;
-        Self::new(
-            page_record,
-            page_count as usize,
-            row_record,
-            row_count as usize,
-            true,
-        )
+        Ok((page_count as usize, row_count as usize))
+    }
+
+    /// Each rank's part of the slabs, in rank order, for a pool split by rank.
+    pub fn rank_parts(&self) -> Option<Vec<RankPart>> {
+        self.split.as_ref().map(|split| split.parts.clone())
     }
 
     /// A non-retaining staging pool of [`STAGING_PAGE_SLABS`] and [`STAGING_ROW_SLABS`].
@@ -232,7 +402,7 @@ impl SlabPool {
     /// can address it, with `context` made current on the calling thread.
     /// A pool that is already registered is not registered again.
     pub fn register(&mut self, context: usize) -> Result<()> {
-        if self.registration.is_some() {
+        if self.registered() {
             return Err(invalid(
                 "slab pool is already registered with the CUDA driver",
             ));
@@ -251,8 +421,9 @@ impl SlabPool {
         Ok(())
     }
 
+    /// Whether the driver can copy the slabs: after `register`, and always for a pool split by rank.
     pub fn registered(&self) -> bool {
-        self.registration.is_some()
+        self.registration.is_some() || self.split.is_some()
     }
 
     pub fn retain(&self) -> bool {
@@ -303,13 +474,17 @@ impl SlabPool {
         self.rows.address(slab.0)
     }
 
+    /// The record bytes of a pool that is not split by rank; a split pool has
+    /// no contiguous record, so asking for one is a caller defect.
     pub fn page(&self, slab: PageSlab) -> &[u8] {
+        self.assert_contiguous();
         // SAFETY: The mapping outlives the pool and the slab lies inside it.
         unsafe {
             std::slice::from_raw_parts(self.page_address(slab) as *const u8, self.pages.slab_bytes)
         }
     }
     pub fn page_mut(&mut self, slab: PageSlab) -> &mut [u8] {
+        self.assert_contiguous();
         // SAFETY: As above, with exclusive access through `&mut self`.
         unsafe {
             std::slice::from_raw_parts_mut(
@@ -319,23 +494,33 @@ impl SlabPool {
         }
     }
     pub fn row(&self, slab: RowSlab) -> &[u8] {
+        self.assert_contiguous();
         // SAFETY: As for `page`.
         unsafe {
             std::slice::from_raw_parts(self.row_address(slab) as *const u8, self.rows.slab_bytes)
         }
     }
     pub fn row_mut(&mut self, slab: RowSlab) -> &mut [u8] {
+        self.assert_contiguous();
         // SAFETY: As for `page_mut`.
         unsafe {
             std::slice::from_raw_parts_mut(self.row_address(slab) as *mut u8, self.rows.slab_bytes)
         }
+    }
+
+    fn assert_contiguous(&self) {
+        assert!(
+            self.split.is_none(),
+            "the slabs of a pool split by rank hold no contiguous record"
+        );
     }
 }
 
 impl Drop for SlabPool {
     fn drop(&mut self) {
         self.registration.take();
-        if self.mapping != 0 {
+        // A split pool's memory releases its own mappings and reservation.
+        if self.split.take().is_none() && self.mapping != 0 {
             // SAFETY: The mapping was created by this pool and is no longer registered.
             unsafe {
                 libc::munmap(self.mapping as *mut libc::c_void, self.mapping_bytes);
@@ -345,12 +530,84 @@ impl Drop for SlabPool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::offload::geometry::tests::geometry;
 
     const PAGE: u64 = 8192;
     const ROW: u64 = 4096;
+
+    /// A rank's part of a pool split by rank reserved at `range`, whose page and
+    /// row identities begin at `range.start` and right after the page records.
+    /// `pages` and `rows` give this rank's part of slab 0 and its share of a record.
+    pub(crate) fn rank_part(
+        range: std::ops::Range<usize>,
+        (page_record, page_count, page_base, page_part): (usize, usize, usize, usize),
+        (row_record, row_count, row_base, row_part): (usize, usize, usize, usize),
+    ) -> RankPart {
+        let rows = range.start + page_record * page_count;
+        RankPart {
+            range: range.clone(),
+            pages: PartRegion {
+                identity: range.start,
+                record_bytes: page_record,
+                count: page_count,
+                base: page_base,
+                part_bytes: page_part,
+            },
+            rows: PartRegion {
+                identity: rows,
+                record_bytes: row_record,
+                count: row_count,
+                base: row_base,
+                part_bytes: row_part,
+            },
+        }
+    }
+
+    #[test]
+    fn rank_parts_locate_slabs_and_reject_other_addresses_inside_the_pool() {
+        // Two ranks' 8 KiB + 4 KiB page records and 4 KiB + 4 KiB row records:
+        // rank 1's part of each page slab is 4 KiB and of each row slab 4 KiB.
+        let start = 0x7f00_0000_0000usize;
+        let range = start..start + (1 << 20);
+        let part = rank_part(
+            range.clone(),
+            (12288, 10, 0x7f00_0008_0000, 4096),
+            (8192, 4, 0x7f00_000a_8000, 4096),
+        );
+        for index in 0..10 {
+            assert_eq!(
+                part.page(start + index * 12288).unwrap(),
+                Some(0x7f00_0008_0000 + index as u64 * 4096)
+            );
+        }
+        let rows = start + 10 * 12288;
+        for index in 0..4 {
+            assert_eq!(
+                part.row(rows + index * 8192).unwrap(),
+                Some(0x7f00_000a_8000 + index as u64 * 4096)
+            );
+        }
+        assert_eq!(part.page(start - 4096).unwrap(), None);
+        assert_eq!(part.page(range.end).unwrap(), None);
+        assert_eq!(part.row(0x1000).unwrap(), None);
+        for (address, kind) in [
+            (start + 4096, "page"),
+            (start + 10 * 12288, "page"),
+            (rows + 4096, "row"),
+            (start, "row"),
+            (rows + 4 * 8192, "row"),
+        ] {
+            let located = if kind == "page" {
+                part.page(address)
+            } else {
+                part.row(address)
+            };
+            let error = located.unwrap_err().to_string();
+            assert!(error.contains(&format!("{kind} slabs")), "{error}");
+        }
+    }
 
     /// One rank with two 4 KiB planes and a 4 KiB row: 8 KiB page records, 4 KiB row records.
     fn layout() -> Layout {

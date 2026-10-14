@@ -521,7 +521,7 @@ impl NativeModel {
                 progress,
                 active,
                 agree,
-                options.prefix_cache.device_headroom_bytes(),
+                options.prefix_cache.device_headroom_bytes(devices.len()),
             )?;
             model.grant_peer_access(&descriptor.peer_memory)?;
             model.prepare_offload(root, options, progress)?;

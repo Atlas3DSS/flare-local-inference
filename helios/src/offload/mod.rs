@@ -76,19 +76,23 @@ impl PrefixCacheOffload {
         self.memory_bytes.unwrap_or(0) != 0 || (self.disk.is_some() && self.disk_limit != Some(0))
     }
 
-    /// Device memory each GPU needs for the store beyond the caches: registering host
-    /// memory maps it into every device, about 2 MiB per GiB (126 MiB for 64 GiB on an
-    /// RTX PRO 6000), and transfer streams and their staging add a fixed margin.
-    pub fn device_headroom_bytes(&self) -> u64 {
+    /// Device memory each of `ranks` GPUs needs for the store beyond the caches.
+    /// Host memory a device maps costs it about 2 MiB per GiB (126 MiB for 64 GiB
+    /// on an RTX PRO 6000), and transfer streams and their staging add a fixed
+    /// margin. A registered pool maps into every device; without a disk tier the
+    /// memory store is split by rank and each device maps its own part, an equal
+    /// share when the ranks' records are alike.
+    pub fn device_headroom_bytes(&self, ranks: usize) -> u64 {
         if !self.enabled() {
             return 0;
         }
-        let staging = if self.disk.is_some() && self.disk_limit != Some(0) {
-            DISK_STAGING_REGISTRATION_BYTES
+        let memory = self.memory_bytes.unwrap_or(0);
+        let mapped = if self.disk.is_some() && self.disk_limit != Some(0) {
+            memory + DISK_STAGING_REGISTRATION_BYTES
         } else {
-            0
+            memory.div_ceil(ranks.max(1) as u64)
         };
-        (self.memory_bytes.unwrap_or(0) + staging) / 512 + STORE_DEVICE_MARGIN_BYTES
+        mapped / 512 + STORE_DEVICE_MARGIN_BYTES
     }
 }
 
@@ -187,10 +191,15 @@ impl Prepared {
         let mut parts = Vec::new();
         if let Some(pool) = &self.memory_pool {
             parts.push(format!(
-                "memory {} ({} pages + {} rows)",
+                "memory {} ({} pages + {} rows{})",
                 gibibytes(pool.bytes()),
                 pool.page_count(),
-                pool.row_count()
+                pool.row_count(),
+                if pool.rank_parts().is_some() {
+                    ", split by rank"
+                } else {
+                    ""
+                }
             ));
         }
         if let Some(pool) = &self.staging_pool {
@@ -269,6 +278,8 @@ impl std::fmt::Debug for Binding {
 
 /// Resolve the settings against the package and host, map and register the
 /// pools with rank zero's context current, and scan the record directory.
+/// Without a disk tier the CPU never reads a record, so the memory pool is
+/// split by rank and each device maps only its part.
 ///
 /// `package` is the package file, beside which the default record directory
 /// would be created once derived defaults are enabled.
@@ -340,6 +351,9 @@ pub fn prepare(
         .0;
     let memory_pool = (memory_bytes != 0)
         .then(|| {
+            if directory.is_none() {
+                return slab::SlabPool::sized_by_rank(&layout, memory_bytes, &contexts);
+            }
             let mut pool = slab::SlabPool::sized(&layout, memory_bytes)?;
             pool.register(context)?;
             Ok::<_, crate::Error>(pool)
@@ -411,6 +425,7 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
     let transfers = std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
         &contexts,
         geometry.clone(),
+        memory_pool.as_ref().and_then(slab::SlabPool::rank_parts),
     )?));
     let disk = directory_lock
         .map(|directory| {
@@ -418,6 +433,7 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
                 std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
                     &contexts,
                     geometry.clone(),
+                    None,
                 )?))
             } else {
                 transfers.clone()
