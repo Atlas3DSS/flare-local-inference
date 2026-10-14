@@ -25,6 +25,15 @@ class PreparedModel(PreparedExecution):
         self._startup_undrained = False
         self._preparation_thread = get_ident()
 
+    def manifest(self, *, all_variants=False):
+        """Expose the serving width to diagnostics and the complete catalog to export."""
+        manifest = super().manifest(all_variants=all_variants)
+        fixed = self.server_config.get("speculative_fixed_width")
+        if fixed is not None and not all_variants:
+            manifest["graphs"] = [graph for graph in manifest["graphs"]
+                if graph["kind"] != "speculative" or graph["token_capacity"] == fixed]
+        return manifest
+
     def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None, peers=None, options=None):
         """Start in-process HTTP diagnostics with a qualification build of heliopause."""
         import flare_heliopause

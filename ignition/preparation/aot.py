@@ -363,12 +363,13 @@ def _share_artifacts(paths, group, root, primary):
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
-    def __init__(self, *, namespace, device, root=None, headroom_bytes=0):
+    def __init__(self, *, namespace, device, root=None, headroom_bytes=0, compile_devices=()):
         import flashinfer
         from torch._inductor.codecache import torch_key
 
         self.device = torch.device(device)
         self.headroom_bytes = headroom_bytes
+        self.compile_devices = tuple(compile_devices)
         properties = torch.cuda.get_device_properties(device)
         options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
         key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
@@ -421,7 +422,9 @@ class ForwardCache:
         if coordinator is not None:
             return self._prepare_ranks(functions, signatures, coordinator, progress=progress, materialize=materialize)
         compiled, paths, pending = {}, {}, []
-        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes) as compiler:
+        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(
+                self.device, headroom_bytes=self.headroom_bytes, devices=self.compile_devices,
+                jobs=len(functions)) as compiler:
             def finish():
                 name, bound, path = _completed(pending)
                 try:
@@ -465,6 +468,8 @@ class ForwardCache:
         from .compile_pool import CompilePool
 
         group, root = coordinator.group, coordinator.ranks[0]
+        if coordinator.spans_hosts and self.compile_devices:
+            raise ValueError("external compiler GPUs are supported only for ranks on one host")
         primary = dist.get_rank() == root
         selected, publication = {}, [None]
         if primary:
@@ -472,7 +477,10 @@ class ForwardCache:
                 variants = {name: function.compilation_variants() if hasattr(function, "compilation_variants")
                             else {"shared": function} for name, function in functions.items()}
                 pending, paths = [], {}
-                with phase(progress, "Compile model forwards", total=sum(map(len, variants.values()))) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes) as compiler:
+                jobs = sum(map(len, variants.values()))
+                with phase(progress, "Compile model forwards", total=jobs) as stage, CompilePool(
+                        self.device, headroom_bytes=self.headroom_bytes,
+                        devices=self.compile_devices, jobs=jobs) as compiler:
                     def finish():
                         name, variant, bound, path = _completed(pending)
                         if bound.pending is not None:

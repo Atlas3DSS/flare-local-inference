@@ -153,6 +153,9 @@ class ModuleImages:
     Resource callbacks also collect modules loaded internally by CUDA libraries.
     """
 
+    # Recorders active in this process; tensor-parallel peers record exactly when their root does.
+    active = 0
+
     def __init__(self, library="libcupti.so"):
         self._library = C.CDLL(library)
         self._subscriber = C.c_void_p()
@@ -316,9 +319,11 @@ class ModuleImages:
             self._check("cuptiUnsubscribe", self._subscriber)
             self._subscriber = C.c_void_p()
             raise
+        ModuleImages.active += 1
         return self
 
     def __exit__(self, kind, value, traceback):
+        ModuleImages.active -= 1
         self._check("cuptiUnsubscribe", self._subscriber)
         self._subscriber = C.c_void_p()
         if kind is None and self._error is not None:

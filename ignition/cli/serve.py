@@ -12,7 +12,7 @@ from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
 
 from . import display, environment
-from .preparation import Host, context_parallel, derive, fetch, resolve_model, speculation
+from .preparation import Host, context_parallel, derive, fetch, resolve_model, speculation, with_compiler_devices
 from .config import Configuration
 
 # Request bytes allowed per context token: JSON-escaped text (a \uXXXX escape takes six bytes per
@@ -91,9 +91,11 @@ def run(args) -> int:
     model = resolve_model(configuration, args.model)
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
-    plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
+    host = Host.discover()
+    plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                   speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model))
+    plan = with_compiler_devices(host, plan, args.compile_gpus, enabled=not args.no_compile)
     runtime = binary()
     bind = _address(configuration.get("server.host", args.host).value,
                     configuration.get("server.port", args.port).value)
@@ -129,6 +131,8 @@ def run(args) -> int:
 
 
 def export(args) -> int:
+    if args.ranks > 1 and args.compile_gpus is not None:
+        raise UsageError("--compile-gpus is supported only when all ranks run on one host")
     if args.output.suffix != ".safetensors":
         args.output = args.output.with_name(args.output.name + ".safetensors")
     if args.output.exists():
@@ -233,11 +237,13 @@ def _prepare(args, *, export_path) -> int:
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model))
+        plan = with_compiler_devices(host, plan, args.compile_gpus, enabled=not args.no_compile)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
-                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}")
+                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}"
+                     + (f" · {len(plan.compile_devices)} compiler GPUs" if plan.compile_devices else ""))
     if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
     if not cached:
@@ -320,6 +326,8 @@ def serve(args) -> int:
     """
     from ignition.progress import phase
 
+    if args.ranks > 1 and args.compile_gpus is not None:
+        raise UsageError("--compile-gpus is supported only when all ranks run on one host")
     progress = _serving_progress(args.verbose)
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
@@ -355,16 +363,35 @@ def serve(args) -> int:
                          speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model, spans_hosts=rendezvous is not None),
                          cache_states=args.prefix_cache_states)
+    plan = with_compiler_devices(host, plan, args.compile_gpus, enabled=not args.no_compile)
     if rendezvous is None:
         local = plan.gpus
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
-    prepared = model.recipe.prepare(
-        model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
-        kernel_cache=configuration.directory("kernel_cache"), progress=progress,
-        **({} if rendezvous is None else {"ranks": rendezvous}))
+    preparation_options = {"retain_graphs": True}
+    storage = None
+    if rendezvous is None:
+        import torch
+        from ignition.preparation.package_storage import PackageStorage
+
+        torch.cuda.set_device(0)
+        storage = PackageStorage(world=plan.world_size)
+        preparation_options["package_storage"] = storage
+    else:
+        preparation_options["ranks"] = rendezvous
+    from contextlib import nullcontext
+
+    with storage if storage is not None else nullcontext():
+        prepared = model.recipe.prepare(
+            model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
+            kernel_cache=configuration.directory("kernel_cache"), progress=progress,
+            **preparation_options)
     code = _serve_prepared(prepared, bind, options)
+    # Successful shutdown confirms native drain before host mappings are released.
+    if storage is not None:
+        for region in storage.host_regions:
+            region.close()
     print("Stopped; every rank drained and released its resources.", flush=True)
     return code
 

@@ -86,6 +86,9 @@ def _preparation_arguments(running):
                                " tensor-parallel ranks; fewer cached tokens (default: the recipe's)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
+    advanced.add_argument("--compile-gpus", metavar="LIST",
+                          help="additional local GPUs for forward compilation, indexed as --gpus;"
+                               " use available GPUs of the same model and architecture (default: none)")
 
 
 def main(argv=None) -> int:

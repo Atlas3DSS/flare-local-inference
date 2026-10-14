@@ -538,6 +538,8 @@ mod binding_tests {
 enum ModelServer {
     Qwen(crate::server::Server<crate::model::qwen4exp::Qwen4Exp>),
     Glm(crate::server::Server<crate::model::glm5next::Glm5Next>),
+    DeepSeek4(crate::server::Server<crate::model::deepseek4::DeepSeek4>),
+    DeepSeek41(crate::server::Server<crate::model::deepseek41::DeepSeek41>),
 }
 
 #[cfg(all(feature = "server", feature = "qualification"))]
@@ -546,30 +548,40 @@ impl ModelServer {
         match self {
             Self::Qwen(s) => s.start_dashboard(),
             Self::Glm(s) => s.start_dashboard(),
+            Self::DeepSeek4(s) => s.start_dashboard(),
+            Self::DeepSeek41(s) => s.start_dashboard(),
         }
     }
     fn address(&self) -> std::net::SocketAddr {
         match self {
             Self::Qwen(s) => s.address(),
             Self::Glm(s) => s.address(),
+            Self::DeepSeek4(s) => s.address(),
+            Self::DeepSeek41(s) => s.address(),
         }
     }
     fn healthy(&self) -> bool {
         match self {
             Self::Qwen(s) => s.healthy(),
             Self::Glm(s) => s.healthy(),
+            Self::DeepSeek4(s) => s.healthy(),
+            Self::DeepSeek41(s) => s.healthy(),
         }
     }
     fn wait(&self, timeout: Duration) -> bool {
         match self {
             Self::Qwen(s) => s.wait(timeout),
             Self::Glm(s) => s.wait(timeout),
+            Self::DeepSeek4(s) => s.wait(timeout),
+            Self::DeepSeek41(s) => s.wait(timeout),
         }
     }
     fn close(&self) -> crate::Shutdown {
         match self {
             Self::Qwen(s) => s.close(),
             Self::Glm(s) => s.close(),
+            Self::DeepSeek4(s) => s.close(),
+            Self::DeepSeek41(s) => s.close(),
         }
     }
 }
@@ -628,6 +640,12 @@ impl NativeServer {
                 crate::model::glm5next::INPUT_SCHEMA => crate::server::Bootstrap::load::<
                     crate::model::glm5next::Glm5Next,
                 >(config_json, &manifest),
+                crate::model::deepseek4::INPUT_SCHEMA => crate::server::Bootstrap::load::<
+                    crate::model::deepseek4::DeepSeek4,
+                >(config_json, &manifest),
+                crate::model::deepseek41::INPUT_SCHEMA => crate::server::Bootstrap::load::<
+                    crate::model::deepseek41::DeepSeek41,
+                >(config_json, &manifest),
                 _ => Err(format!("unsupported prepared model contract {schema:?}").into()),
             })
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -659,6 +677,28 @@ impl NativeServer {
                             peers.map(crate::execution::RankPeers::Processes),
                         )
                         .map(ModelServer::Glm)
+                    }
+                    crate::model::deepseek4::INPUT_SCHEMA => {
+                        crate::server::Server::<crate::model::deepseek4::DeepSeek4>::start(
+                            manifest,
+                            bootstrap.model,
+                            bootstrap.frontend,
+                            bootstrap.images,
+                            bootstrap.server,
+                            peers.map(crate::execution::RankPeers::Processes),
+                        )
+                        .map(ModelServer::DeepSeek4)
+                    }
+                    crate::model::deepseek41::INPUT_SCHEMA => {
+                        crate::server::Server::<crate::model::deepseek41::DeepSeek41>::start(
+                            manifest,
+                            bootstrap.model,
+                            bootstrap.frontend,
+                            bootstrap.images,
+                            bootstrap.server,
+                            peers.map(crate::execution::RankPeers::Processes),
+                        )
+                        .map(ModelServer::DeepSeek41)
                     }
                     _ => unreachable!("bootstrap validated the model contract"),
                 }

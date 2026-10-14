@@ -67,6 +67,7 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
+    compile_devices: tuple[str, ...] = ()
     mtp: bool = False
     # Routed NVFP4-CSF experts: A16 activations with A4 prefill launches, or A4 throughout.
     expert_activation: str = "a16"
@@ -481,7 +482,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
-        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
+        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache, compile_devices=config.compile_devices,
         retain_graphs=config.retain_graphs, materialize=materialize_cache)
     kv_bytes = pages * page_bytes
     if integrated:

@@ -60,6 +60,7 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
+    compile_devices: tuple[str, ...] = ()
     dflash: bool = True
     speculative_widths: tuple[int, ...] = tuple(range(1, 9))
     speculative_fixed_width: int | None = None
@@ -426,7 +427,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator=coordinator,
         compile_decoder=config.compile_decoder,
         progress=progress,
-        cache_root=config.kernel_cache,
+        cache_root=config.kernel_cache, compile_devices=config.compile_devices,
         retain_graphs=config.retain_graphs,
         materialize=materialize_cache,
         compile_kinds=("prefill", "decode", "resume", "speculative", "vision"),

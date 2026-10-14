@@ -17,7 +17,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         retain_graphs=retain_graphs, max_active=plan.concurrency, context=plan.context,
         prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
+        headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache, compile_devices=plan.compile_devices,
         dflash=speculation is not None, **drafting)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 

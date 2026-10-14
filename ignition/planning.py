@@ -153,6 +153,8 @@ class Plan:
     graph_bytes: int
     # Ranks shard each page's context when the recipe declares context-parallel page costs.
     context_parallel: bool = True
+    # Explicit local GPU UUIDs for forward compilation, separate from serving ranks.
+    compile_devices: tuple[str, ...] = ()
 
     @property
     def world_size(self) -> int:
@@ -237,6 +239,7 @@ class Plan:
                       "total_bytes": gpu.total_bytes} for gpu in self.gpus],
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
             "prefill_chunk": self.prefill_chunk, "context_parallel": self.context_parallel,
+            "compile_devices": list(self.compile_devices),
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "proposal_source": self.speculation.proposal_source,

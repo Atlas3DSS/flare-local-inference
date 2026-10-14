@@ -42,13 +42,14 @@ def device_memory_info(device):
     return free, total
 
 
-def worker_limit(limit, *, pools=1, available=None, device_bytes=0, headroom_bytes=0):
+def worker_limit(limit, *, pools=1, available=None, device_bytes=0, headroom_bytes=0,
+                 worker_bytes=_WORKER_BYTES):
     """Bound worker RAM after the greater of system headroom and the requested reserve."""
-    if limit <= 0 or pools <= 0 or device_bytes < 0 or headroom_bytes < 0:
+    if limit <= 0 or pools <= 0 or device_bytes < 0 or headroom_bytes < 0 or worker_bytes <= 0:
         raise ValueError("compiler and pool limits must be positive; device bytes and headroom must be nonnegative")
     available = available_bytes() if available is None else available
     headroom = max(_HEADROOM_BYTES, headroom_bytes)
-    worker_bytes = _WORKER_BYTES + device_bytes
+    worker_bytes += device_bytes
     capacity = (available - headroom) // (pools * worker_bytes)
     if capacity < 1:
         raise MemoryError(f"preparation requires at least {(headroom + pools * worker_bytes) >> 20} MiB "

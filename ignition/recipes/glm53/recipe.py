@@ -42,7 +42,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         max_active=plan.concurrency, context_parallel=plan.context_parallel,
         context=plan.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
-        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
+        headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache, compile_devices=plan.compile_devices,
         # SM103 runs routed experts through trtllm-gen with NVFP4 activations at every size.
         expert_activation="a4" if any(gpu.capability == (10, 3) for gpu in plan.gpus) else "a16",
         # Expanded scales take 2 x 288 x 4096 x 2048 / 16 bytes per routed layer over the ranks: about

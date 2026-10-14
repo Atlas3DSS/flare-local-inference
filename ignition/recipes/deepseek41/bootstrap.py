@@ -51,6 +51,7 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
+    compile_devices: tuple[str, ...] = ()
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
@@ -251,7 +252,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
         pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
-        progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs,
+        progress=progress, cache_root=config.kernel_cache, compile_devices=config.compile_devices, retain_graphs=config.retain_graphs,
         materialize=materialize_cache)
     session.freeze()
     pool.clear_for_preparation()

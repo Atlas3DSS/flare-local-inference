@@ -66,6 +66,34 @@ def derive(model=SOLO, gpus=(gpu(0, 95),), *, selected=None, concurrency=4, rese
                          speculation=model.speculation if speculation is DEFAULT else speculation)
 
 
+def test_compiler_devices_follow_the_callers_visible_ordinals():
+    from ignition.cli.preparation import Host, with_compiler_devices
+
+    devices = planning.restrict_gpus((gpu(0, 95), gpu(1, 95), gpu(2, 95)), "2,0,1")
+    host = Host(devices, "2,0,1")
+    plan = derive(gpus=devices, selected=(0,))
+    selected = with_compiler_devices(host, plan, "0-2")
+    assert selected.gpus == plan.gpus
+    assert selected.compile_devices == ("GPU-0000", "GPU-0001")
+    assert selected.to_dict()["compile_devices"] == ["GPU-0000", "GPU-0001"]
+    assert plan.compile_devices == ()
+
+
+def test_compiler_selection_rejects_unavailable_or_incompatible_devices():
+    from ignition.cli.preparation import Host, with_compiler_devices
+
+    owner = gpu(0, 95)
+    host = Host((owner, gpu(1, 95, (12, 1)), replace(gpu(2, 95), name="Other GPU")), None)
+    plan = derive(gpus=(owner,))
+    with pytest.raises(UsageError, match="unavailable GPUs"):
+        with_compiler_devices(host, plan, "3")
+    for index in ("1", "2"):
+        with pytest.raises(UsageError, match="must match"):
+            with_compiler_devices(host, plan, index)
+    with pytest.raises(UsageError, match="requires forward compilation"):
+        with_compiler_devices(host, plan, "0", enabled=False)
+
+
 def test_pages_take_all_remaining_supply():
     limited = derive()
     assert limited.fits and limited.cache_states == limited.cache_target == 32

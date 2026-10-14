@@ -74,7 +74,7 @@ def host(monkeypatch, tmp_path):
 
     class Scope:
         def __init__(self, **kwargs):
-            pass
+            self.host_regions = []
         def __enter__(self):
             return self
         def __exit__(self, *exception):
@@ -91,7 +91,8 @@ def host(monkeypatch, tmp_path):
 
     def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs, package_storage):
         assert retain_graphs and isinstance(package_storage, Scope)
-        calls.update(snapshot=snapshot, plan=plan, compile_forwards=compile_forwards, kernel_cache=kernel_cache)
+        calls.update(snapshot=snapshot, plan=plan, compile_forwards=compile_forwards,
+                     kernel_cache=kernel_cache, storage=package_storage)
         behavior = dict(calls["behavior"])
         if "raises" in behavior:
             raise behavior["raises"]
@@ -150,6 +151,52 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert host["exports"] == 1
 
 
+def test_diagnostic_serving_retains_storage_until_native_shutdown(host, monkeypatch):
+    closed = []
+
+    def serve_prepared(prepared, bind, options):
+        assert prepared is host["prepared"] and not prepared.closed
+        assert host["exports"] == 0
+
+        def close_region():
+            assert prepared.closed
+            closed.append(True)
+
+        host["storage"].host_regions.append(types.SimpleNamespace(close=close_region))
+        with prepared:
+            return 0
+
+    monkeypatch.setattr(serve, "_serve_prepared", serve_prepared)
+    assert main(["serve", "qwen3.8-flash", "--gpus", "0", "--compile-gpus", "1",
+                 "--port", str(free_port())]) == 0
+    assert host["plan"].compile_devices == ("GPU-0001",)
+    assert host["exports"] == 0 and closed == [True]
+
+
+def test_diagnostic_startup_failure_retains_undrained_host_storage(host, monkeypatch):
+    from ignition.preparation.model import PreparedModel
+
+    original = RuntimeError("native startup retained resources")
+    original.resources_retained = True
+    released = []
+
+    def start_server(self, **options):
+        host["storage"].host_regions.append(types.SimpleNamespace(close=lambda: released.append(True)))
+        raise original
+
+    def close(self):
+        raise RuntimeError("native drain was not confirmed")
+
+    monkeypatch.setattr(Prepared, "memory_report", {}, raising=False)
+    monkeypatch.setattr(Prepared, "start_server", start_server)
+    monkeypatch.setattr(Prepared, "close", close, raising=False)
+    monkeypatch.setattr(Prepared, "__exit__", PreparedModel.__exit__)
+    with pytest.raises(RuntimeError, match="native startup retained resources") as caught:
+        main(["serve", "qwen3.8-flash", "--gpus", "0", "--port", str(free_port())])
+    assert caught.value is original and "native drain was not confirmed" in original.__notes__[0]
+    assert released == [] and not host["prepared"].closed
+
+
 def test_preparation_flags_select_distinct_packages(host):
     assert run("qwen3.8-flash", "--max-concurrency", "2", "--prefill-chunk-size", "1024",
                "--mtp-draft-tokens", "2", "--no-mtp-adaptive-verification", "--history-drafts") == 0
@@ -158,6 +205,22 @@ def test_preparation_flags_select_distinct_packages(host):
     assert (plan.speculation.draft_tokens, plan.speculation.adaptive, plan.speculation.history_drafts) == (2, False, True)
     assert run("qwen3.8-flash", "--no-mtp") == 0
     assert host["exports"] == 2 and host["plan"].speculation is None
+
+
+def test_export_records_explicit_compiler_devices_without_adding_serving_ranks(host, tmp_path):
+    assert main(["export", "qwen3.8-flash", "--gpus", "0", "--compile-gpus", "1",
+                 "--output", str(tmp_path / "compiled")]) == 0
+    assert host["plan"].world_size == 1
+    assert host["plan"].compile_devices == ("GPU-0001",)
+    assert [gpu.uuid for gpu in host["gpus"]] == ["GPU-0000"]
+
+
+@pytest.mark.parametrize("flags", [("--ranks", "2"), ("--no-compile",)])
+def test_compiler_devices_reject_incompatible_preparation_modes(host, tmp_path, capsys, flags):
+    assert main(["export", "qwen3.8-flash", "--gpus", "0", "--compile-gpus", "1",
+                 *flags, "--output", str(tmp_path / "invalid")]) == 2
+    assert "--compile-gpus" in capsys.readouterr().err
+    assert host["exports"] == 0
 
 
 @pytest.mark.parametrize("reserve", [0, 2 * GIB])

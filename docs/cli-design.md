@@ -124,6 +124,7 @@ Advanced flags appear in their own section of `--help`. Recipe values apply when
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
+| `--compile-gpus N[,N...]` | Additional GPUs for forward compiler workers. They must match the serving GPU's model and compute capability. Indices follow `CUDA_VISIBLE_DEVICES`. Single-host preparation only; incompatible with `--no-compile`. | Workers use rank zero's GPU |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
 others. The `Select GPUs.` startup line states the settings in effect: `up to
@@ -131,6 +132,37 @@ N draft tokens` while verification adapts, `exactly N draft tokens` when it is
 fixed.
 
 Both Ignition commands accept `--config`.
+
+#### Development without package export
+
+For development, `ignition serve` prepares graphs and hands them directly to
+Helios in the same process. It requires a cached checkpoint and a Heliopause
+build with the `qualification` feature. Requests execute in Rust without Python
+callbacks. This command skips package export and reload; weight loading, kernel
+tuning, compilation of missing forwards, and graph capture still run.
+Diagnostics retain the bounded cache backing allocated during preparation.
+Use an exported package for long-context capacity tests; native package loading
+sizes the serving cache from the memory available after loading the model.
+
+Select idle serving GPUs and, when available, matching compiler GPUs. Leaving
+`--compile-gpus` unset is recommended on shared hosts unless those additional
+devices have been reserved for preparation. Worker counts are bounded by device
+memory, host memory, CPU affinity, and the number of missing forwards. Workers
+release their CUDA contexts before preparation materializes cache storage.
+Build the extension once, then start a TP2 DeepSeek V4 development server:
+
+```sh
+uv pip install --python .venv/bin/python --no-deps ./heliopause \
+  --config-settings 'build-args=--features=qualification'
+.venv/bin/ignition serve deepseek-v4-flash --gpus 0,1 --compile-gpus 2,3 \
+  --max-concurrency 1 --mtp-draft-tokens 3 --no-mtp-adaptive-verification \
+  --prefill-chunk-size 4096 --host 127.0.0.1 --port 8001 --verbose
+```
+
+Rebuild the extension after changing its Rust code. Python recipe and component
+changes require preparation again but no Rust rebuild. Validate the chosen
+configuration through an exported package before publishing native-serving
+performance results.
 
 ### 3.2 Native serving flags
 

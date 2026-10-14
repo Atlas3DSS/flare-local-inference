@@ -1,5 +1,6 @@
 """Spawn preparation ranks and transfer their lifetime supervision to Rust."""
 
+import contextlib
 import os
 import signal
 import socket
@@ -29,7 +30,7 @@ def minimum_across_ranks(value, group):
     return result.item()
 
 
-def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare, packaged):
+def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepare, packaged, recording):
     import flare_heliopause
 
     flare_heliopause.bind_parent_lifetime(parent)
@@ -44,8 +45,9 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             from .package_storage import PackageStorage
             import torch
 
-            recorder = ModuleImages()
-            with recorder:
+            # Only an export needs module images; without one, a profiler may own CUPTI.
+            recorder = ModuleImages() if recording else None
+            with recorder if recording else contextlib.nullcontext():
                 torch.cuda.set_device(config.devices[rank])
                 storage = PackageStorage(rank=rank, world=len(config.devices), device=config.devices[rank])
                 with storage:
@@ -57,6 +59,9 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
         command = control.recv()
         if isinstance(command, tuple) and command[0] == "export":
             from .runtime_package import export_model
+
+            if recorder is None:
+                raise RuntimeError("export requires module images recorded during preparation")
 
             _, path, options = command
             dist.barrier()
@@ -156,6 +161,9 @@ def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=N
 
     if dist.is_initialized():
         raise RuntimeError("rank preparation requires exclusive ownership of the control group")
+    from .module_images import ModuleImages
+
+    recording = package_storage is not None and ModuleImages.active > 0
     rendezvous = TemporaryDirectory(prefix="flare-ranks-")
     address = Path(rendezvous.name, "gloo").as_uri()
     context = mp.get_context("spawn")
@@ -167,7 +175,8 @@ def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=N
             control, child_control = context.Pipe()
             controls.append(control)
             process = context.Process(target=_peer, args=(os.getpid(), snapshot, config, rank,
-                address, peer, child_control, prepare, package_storage is not None), name=f"flare-rank-{rank}")
+                address, peer, child_control, prepare, package_storage is not None, recording),
+                name=f"flare-rank-{rank}")
             try:
                 process.start()
             finally:

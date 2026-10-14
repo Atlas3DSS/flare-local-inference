@@ -67,6 +67,7 @@ class PreparationConfig:
     headroom_bytes: int = 4 << 30
     pages: int | None = None
     kernel_cache: Path | None = None
+    compile_devices: tuple[str, ...] = ()
     mtp: bool = False
     speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
@@ -375,7 +376,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         def capture_catalog(*, compile_decoder, materialize=None, label="Prepare serving graphs"):
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
                 stream=stream, pool=graph_pool, compile_decoder=compile_decoder, materialize=materialize,
-                progress=progress, label=label, cache_root=config.kernel_cache,
+                progress=progress, label=label, cache_root=config.kernel_cache, compile_devices=config.compile_devices,
                 collective=collective, coordinator=coordinator, retain_graphs=config.retain_graphs)
             graphs.update(captured)
             compiled_functions.clear()

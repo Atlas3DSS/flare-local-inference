@@ -1,7 +1,7 @@
 """Model resolution, memory planning, and downloads for preparation commands."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ignition import planning
 from ignition.errors import FetchError, UsageError
@@ -57,6 +57,29 @@ def context_parallel(args, model: ResolvedModel, *, spans_hosts: bool = False) -
     if args.no_context_parallel and not any(costs.page_tokens for costs in model.recipe.ranks.values()):
         raise UsageError(f"--no-context-parallel: {model.checkpoint.alias} does not shard attention context")
     return not args.no_context_parallel and not spans_hosts
+
+
+def with_compiler_devices(host: Host, plan: planning.Plan, gpus: str | None, *, enabled=True):
+    """Resolve compiler GPUs before preparation narrows the CUDA device mask."""
+    if gpus is None:
+        return plan
+    if not enabled:
+        raise UsageError("--compile-gpus requires forward compilation; omit --no-compile")
+    by_index = {gpu.index: gpu for gpu in host.gpus}
+    indices = planning.parse_gpus(gpus)
+    missing = [index for index in indices if index not in by_index]
+    if missing:
+        raise UsageError(f"--compile-gpus names unavailable GPUs: {planning.format_gpus(missing)}")
+    selected = {gpu.uuid for gpu in plan.gpus}
+    devices = []
+    for index in indices:
+        gpu = by_index[index]
+        if (gpu.name, gpu.capability) != (plan.gpus[0].name, plan.gpus[0].capability):
+            raise UsageError(f"--compile-gpus GPU {index} must match {plan.gpus[0].name} "
+                             f"{plan.gpus[0].capability}; got {gpu.name} {gpu.capability}")
+        if gpu.uuid not in selected and gpu.uuid not in devices:
+            devices.append(gpu.uuid)
+    return replace(plan, compile_devices=tuple(devices))
 
 
 def speculation(args, model: ResolvedModel) -> Speculation | None:

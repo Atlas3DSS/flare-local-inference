@@ -282,6 +282,13 @@ Use `.venv/bin/ignition export --help` and `.venv/bin/ignition run --help` for
 preparation flags. See [the runtime package design](docs/runtime-package-design.md)
 for resource ownership and [the CLI design](docs/cli-design.md) for configuration.
 
+For model development, `ignition serve` hands prepared graphs directly to Helios
+without exporting a package. It requires Heliopause's `qualification` Cargo
+feature. `--compile-gpus` selects additional matching GPUs for memory-bounded
+compiler workers during single-host preparation. Select idle devices explicitly;
+see [the development launch example](docs/cli-design.md#development-without-package-export)
+for the extension build and serving commands.
+
 ## Preserve canonical model implementations where they fit
 
 - Treat Transformers as the canonical source for model structure and semantics.

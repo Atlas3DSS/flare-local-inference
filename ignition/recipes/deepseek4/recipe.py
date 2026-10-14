@@ -38,7 +38,7 @@ def prepare(
         minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes,
-        kernel_cache=kernel_cache,
+        kernel_cache=kernel_cache, compile_devices=plan.compile_devices,
         dspark=speculation is not None,
         **drafting,
     )
