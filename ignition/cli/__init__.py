@@ -68,6 +68,9 @@ def _preparation_arguments(running):
     advanced.add_argument("--prefill-chunk-size", type=int, metavar="N",
                           help="most prompt tokens per prefill step; larger chunks reach a long prompt's first"
                                " token sooner and pause other requests longer (default: the recipe's)")
+    advanced.add_argument("--mixed-prefill", action="store_true",
+                          help="capture graphs combining prompt prefill with decode or verification"
+                               " (Qwen only; default: disabled)")
     advanced.add_argument("--no-mtp", action="store_true",
                           help="disable multi-token speculation: load no draft model and decode one token"
                                " per step")

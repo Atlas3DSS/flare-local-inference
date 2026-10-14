@@ -10,8 +10,9 @@ flow. Python experiments are in `scripts/scheduling_sim/`.
 The native catalog supports separate prefill, decode, speculative verification,
 state-management, and mixed prefill/decode graphs. Mixed shape selection, native
 uploads, completion accounting, package selection, and rank-layout validation
-are implemented. The Qwen recipe captures mixed target forwards alongside its
-separate inference graphs. Other recipes expose their declared graph catalogs.
+are implemented. With Ignition's `--mixed-prefill` flag, the Qwen recipe captures
+mixed target forwards alongside its separate inference graphs. Mixed capture is
+disabled by default. Other recipes expose their declared graph catalogs.
 
 ## Useful service and selection
 
@@ -292,8 +293,9 @@ feedback rows and raw-cache backups are shared across serialized calls. Persiste
 request state and overlapping b12x operations retain separate storage.
 
 `ignition/components/capacity.py::mixed_shapes` bounds the joint catalog before
-tuning and compilation. Each batch bucket of at least two rows has every prompt
-bucket at verification width one and one prompt bucket for each wider width.
+tuning and compilation when `--mixed-prefill` is enabled. Each batch bucket of at
+least two rows has every prompt bucket at verification width one and one prompt
+bucket for each wider width.
 The latter bucket minimizes `max(P / P_min, P_max / P)`, balancing the worst
 multiplicative distance to short and long prompt chunks; ties choose the smaller
 bucket. This coverage policy provides a mixed option at every fixed verification

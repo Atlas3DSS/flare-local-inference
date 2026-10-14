@@ -1,6 +1,7 @@
 """Joint catalog coverage and dense native-to-role packing for mixed Qwen graphs."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 import torch
@@ -25,18 +26,36 @@ def test_joint_catalog_covers_both_axes_without_cross_product(concurrency, width
         assert {(b, 1, p) for b in (batch,) for p in prompts} <= set(shapes)
         for width in widths:
             assert any(b == batch and w == width for b, w, _ in shapes)
-    config = PreparationConfig(max_active=concurrency, mtp=True, speculative_widths=widths)
+    config = PreparationConfig(max_active=concurrency, mtp=True, speculative_widths=widths, mixed_prefill=True)
     assert all(p + (b - 1) * w <= config.token_capacity for _, b, w, p in config.mixed_shapes)
     assert all(w == 1 for enabled, _, w, _ in config.mixed_shapes if not enabled)
 
 
-def test_plan_and_preparation_use_identical_catalogs():
+@pytest.mark.parametrize("mixed", [False, True])
+def test_plan_and_preparation_use_identical_catalogs(mixed, monkeypatch):
+    from ignition import planning
+    from ignition.recipes.qwen38 import bootstrap
+
+    gpu = planning.Gpu(0, "NVIDIA RTX PRO 6000 Blackwell", "GPU-test", 96 << 30, 95 << 30, (12, 0))
+    monkeypatch.setattr(bootstrap, "prepare_model", lambda snapshot, config, **kwargs: config)
     for speculation in (None, Speculation(0), Speculation(5), Speculation(3, adaptive=False)):
-        config = PreparationConfig(mtp=speculation is not None,
-            speculative_widths=(1,) if speculation is None else speculation.widths)
-        assert config.mixed_shapes == RECIPE.mixed_shapes(4, 4096, speculation)
-    assert len(PreparationConfig(mtp=True).mixed_shapes) == 50
-    assert PreparationConfig(max_active=1, mtp=True).mixed_shapes == ()
+        plan = planning.plan(RECIPE, RECIPE.checkpoints[0], (gpu,), selected=(0,),
+            concurrency=4, reserve_bytes=0, speculation=speculation, mixed_prefill=mixed)
+        config = RECIPE.prepare(Path("/checkpoint"), plan, compile_forwards=True, kernel_cache=None, progress=None)
+        expected = RECIPE.mixed_shapes(4, 4096, speculation) if mixed else ()
+        assert config.mixed_prefill == plan.to_dict()["mixed_prefill"] == mixed
+        assert config.mixed_shapes == plan.mixed_shapes == expected
+        assert plan.to_dict()["mixed_shapes"] == expected
+        assert config.mtp == (speculation is not None)
+    assert len(PreparationConfig(mtp=True, mixed_prefill=True).mixed_shapes) == 50
+    assert PreparationConfig(max_active=1, mtp=True, mixed_prefill=True).mixed_shapes == ()
+
+
+def test_mixed_capture_defaults_off_without_changing_speculation():
+    for mtp in (False, True):
+        config = PreparationConfig(mtp=mtp)
+        assert not config.mixed_prefill and config.mixed_shapes == ()
+        assert config.token_capacity == config.prefill_chunk_size
 
 
 @pytest.mark.parametrize("prompt_row", [-1, 0, 1, 2, 3])

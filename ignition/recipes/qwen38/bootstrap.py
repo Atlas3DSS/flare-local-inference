@@ -63,6 +63,7 @@ class PreparationConfig:
     max_active: int = 4
     context: int = 262144
     prefill_chunk_size: int = 4096
+    mixed_prefill: bool = False
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     pages: int | None = None
@@ -94,6 +95,8 @@ class PreparationConfig:
             raise ValueError("explicit page capacity must be a positive integer")
         if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
             raise TypeError("MTP and history draft switches must be booleans")
+        if type(self.mixed_prefill) is not bool:
+            raise TypeError("mixed_prefill must be a boolean")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
             world_size=1 if self.devices is None else len(self.devices)).row_bytes
         if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
@@ -132,6 +135,8 @@ class PreparationConfig:
     def mixed_shapes(self):
         from ignition.components.capacity import mixed_shapes
 
+        if not self.mixed_prefill:
+            return ()
         modes = (True, False) if self.mtp else (False,)
         return tuple((enabled, b, w, p) for enabled in modes
             for b, w, p in mixed_shapes(self.max_active, self.prefill_chunk_size,
@@ -474,6 +479,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             "operator_scratch_bytes": workspaces.nbytes, "graphs": len(graphs), "tuning": tuning,
             "prefill_chunk_size": config.prefill_chunk_size, "prefill_capacities": config.prefill_capacities,
             "mixed_shapes": config.mixed_shapes,
+            "mixed_prefill": config.mixed_prefill,
             "compiled_decoder": compile_decoder, "rank": rank, "world_size": shard.world_size}
         if speculation is not None:
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
