@@ -330,7 +330,17 @@ cached and uncached prompts (section 3).
    TP4 package carrying the fix and a diagnostic that reports which part of the
    target distribution is invalid (NaN or infinite logits by vocabulary
    quarter, which at TP4 is the rank that projected them, or an empty filtered
-   distribution) is being tested.
+   distribution) is prepared but not yet run. One candidate is known: b12x's
+   fused indexer, which serves every GLM decode graph of 16 rows or fewer on
+   SM12x, lets thread zero announce its CTA's arrival at the cooperative
+   merge's grid barrier (`_fused_group_barrier` in `fused_indexer.py`) without
+   first synchronizing the CTA, so peers can read a histogram before every
+   warp has published its bins. A test that delays one warp per CTA shows
+   peers passing the barrier early in 8 of 8 runs, and none with a
+   `cute.arch.sync_threads()` before the arrival. Without the artificial
+   delay, 3,000 graph replays of 16-row decode shapes on GB10, with and
+   without competing work on another stream, selected the exact top-k every
+   time, so the race is not yet tied to error 6.
 3. An audit of the other recipes (DeepSeek V4 and V4.1, Qwen 3.8, MiMo V2.6)
    and of the b12x and FlashInfer bindings they serve found no other
    preparation-time value that export zeroes and a graph reads. Two b12x
