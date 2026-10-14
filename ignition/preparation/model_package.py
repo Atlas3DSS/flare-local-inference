@@ -72,7 +72,7 @@ def export_cluster_package(prepared, images, storage, path, *, peer_files, optio
         extend_cluster(partial, peer_files, (world, export_id))
         index, start = read_index(partial)
         payload = sorted((span.offset, partial, start + span.offset, span.nbytes)
-                         for _, span in resource_roles(index))
+                         for _, _, span in resource_roles(index))
         publish(path, index, payload, publisher=publisher)
     finally:
         partial.unlink(missing_ok=True)

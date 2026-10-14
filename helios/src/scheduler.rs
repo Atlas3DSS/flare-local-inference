@@ -79,9 +79,14 @@ pub fn prefill_capacities(chunk_size: usize) -> impl Iterator<Item = usize> {
 #[derive(Clone, Debug)]
 pub struct SchedulerCapabilities {
     pub vocabulary: usize,
+    /// Logical history tokens per appendable page, including compressed or sharded storage.
+    /// Recurrent state and sliding windows occupy separately reserved continuation rows.
     pub page_tokens: usize,
     pub vision: crate::model::VisionCapabilities,
     pub draft_pages_per_request: usize,
+    /// Decode consumes a token uploaded from a host-visible completion rather than GPU-owned state.
+    /// The request cannot queue another decode before its preceding decode completes.
+    pub host_decode_tokens: bool,
     /// Execution state rows each active request holds; None, the widest speculative graph's width.
     pub state_rows_per_request: Option<usize>,
 }
@@ -108,6 +113,8 @@ pub struct SchedulerStats {
     pub host_reused_tokens: u64,
     /// Requests waiting in `Inbound` for a host restore; they count as active.
     pub inbound_waiting: usize,
+    /// Growable requests finished early to free KV pages and requeued by the runtime.
+    pub preemptions: u64,
 }
 
 #[derive(Clone)]
@@ -118,6 +125,10 @@ pub struct RequestSpec {
     pub max_new_tokens: u32,
     pub grammar_constrained: bool,
     pub host_stops: bool,
+    /// Reserve pages for the prompt and one page of output, then grow them while the
+    /// request decodes. When pages run out the scheduler may preempt such a request:
+    /// it finishes through its terminal checkpoint and the runtime readmits its history.
+    pub growable_output: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +194,10 @@ pub struct LiveRequest {
     vision_patches: VecDeque<usize>,
     prefill_spans: Vec<std::ops::Range<usize>>,
     copy_proposal: Option<speculation::CopyProposal>,
+    growable_output: bool,
+    /// Finishing to free its pages; the runtime readmits its history instead of completing it.
+    preempted: bool,
+    admission_order: u64,
 }
 
 impl LiveRequest {
@@ -215,6 +230,9 @@ impl LiveRequest {
     }
     pub fn last_use(&self) -> Fence {
         self.last_use
+    }
+    pub fn preempted(&self) -> bool {
+        self.preempted
     }
     pub fn tokens(&self) -> &[u32] {
         &self.tokens
@@ -445,6 +463,7 @@ pub struct RequestScheduler {
     tickets: HashMap<PrefixKey, Ticket>,
     track_publications: bool,
     publications: Vec<CheckpointId>,
+    admissions: u64,
 }
 
 impl RequestScheduler {
@@ -512,6 +531,7 @@ impl RequestScheduler {
             tickets: HashMap::new(),
             track_publications: false,
             publications: Vec::new(),
+            admissions: 0,
         })
     }
 
@@ -821,6 +841,154 @@ impl RequestScheduler {
         }
     }
 
+    fn draft_pages(&self) -> usize {
+        if !self.speculative_widths.is_empty()
+            && self.proposal_source == speculation::ProposalSource::Mtp
+        {
+            self.capabilities.draft_pages_per_request
+        } else {
+            0
+        }
+    }
+
+    /// Pages beyond its private ones that `request` needs to commit work ending at `through`.
+    fn pages_through(&self, request: &LiveRequest, through: u64) -> usize {
+        (through.min(request.execution_limit) as usize)
+            .div_ceil(self.capabilities.page_tokens)
+            .saturating_sub(request.prefix_tokens as usize / self.capabilities.page_tokens)
+            .saturating_add(self.draft_pages())
+            .saturating_sub(request.private_pages.len())
+    }
+
+    /// Tokens a decoding request may consume before its next completion: two rounds
+    /// at the widest verification, as two submissions may be in flight.
+    fn decode_horizon(&self) -> u64 {
+        2 * self.speculative_widths.last().copied().unwrap_or(1) as u64
+    }
+
+    /// Whether a request's reservation covers its next decode rounds; reservations of
+    /// requests that are not growable always cover their whole output.
+    pub(super) fn fits_next_rounds(&self, request: &LiveRequest) -> bool {
+        !request.growable_output
+            || self.pages_through(request, request.scheduled_consumed + self.decode_horizon())
+                <= request.reserved_pages.len()
+    }
+
+    fn has_starved_request(&self) -> bool {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.request.as_ref())
+            .any(|request| {
+                request.phase == RequestPhase::Decode
+                    && !request.preempted
+                    && !self.fits_next_rounds(request)
+            })
+    }
+
+    /// Grows each decoding growable reservation a page beyond its next rounds, evicting
+    /// unpinned prefix pages when the free list is short. If a request still cannot run,
+    /// the newest growable decoder without work in flight is preempted.
+    fn refill_reservations(&mut self) -> Result<()> {
+        let ahead = self.decode_horizon() + self.capabilities.page_tokens as u64;
+        let mut starved = false;
+        for slot in 0..self.slots.len() {
+            let want = match self.slots[slot].request.as_ref() {
+                Some(request)
+                    if request.growable_output
+                        && !request.preempted
+                        && request.phase == RequestPhase::Decode =>
+                {
+                    self.pages_through(request, request.scheduled_consumed + ahead)
+                        .saturating_sub(request.reserved_pages.len())
+                }
+                _ => continue,
+            };
+            if want == 0 {
+                continue;
+            }
+            if self.free_pages.len() < want {
+                let evicted = self.cache.evict(EvictionTarget {
+                    pages: want - self.free_pages.len(),
+                    snapshots: 0,
+                });
+                self.stats.snapshot_evictions += evicted.retired.len() as u64;
+                let update = self.cache.advance_completed(self.completed)?;
+                self.apply_completion(update);
+            }
+            let take = want.min(self.free_pages.len());
+            // Reserved pages are taken from the back, so new pages go behind the remaining ones.
+            let mut pages: Vec<_> = (0..take)
+                .map(|_| self.free_pages.pop_first().unwrap())
+                .rev()
+                .collect();
+            let request = self.slots[slot].request.as_mut().unwrap();
+            pages.append(&mut request.reserved_pages);
+            request.reserved_pages = pages;
+            let request = self.slots[slot].request.as_ref().unwrap();
+            if self.fits_next_rounds(request) {
+                continue;
+            }
+            let held = request.private_pages.len() + request.reserved_pages.len();
+            let missing = self
+                .pages_through(request, request.scheduled_consumed + self.decode_horizon())
+                - request.reserved_pages.len();
+            if held + missing <= self.limits.pages as usize {
+                starved = true;
+            } else if request.pending == 0 {
+                // No other request's pages would let it continue: finish it at this length.
+                let handle = request.handle;
+                self.finish_early(handle, false)?;
+            }
+        }
+        if starved {
+            self.preempt_newest()?;
+        }
+        Ok(())
+    }
+
+    /// Finishes the newest growable decoder without work in flight through its terminal
+    /// checkpoint, when backing allows one, so its pages return to the cache or the free
+    /// list. The runtime readmits the request's history instead of completing it.
+    fn preempt_newest(&mut self) -> Result<()> {
+        let victim = self
+            .slots
+            .iter()
+            .filter_map(|slot| slot.request.as_ref())
+            .filter(|request| {
+                request.growable_output
+                    && !request.preempted
+                    && request.phase == RequestPhase::Decode
+                    && request.pending == 0
+            })
+            .max_by_key(|request| request.admission_order)
+            .map(|request| request.handle);
+        let Some(handle) = victim else {
+            return Ok(());
+        };
+        self.stats.preemptions += 1;
+        self.finish_early(handle, true)
+    }
+
+    /// Ends a decoding request before its output limit. As a finished request does, it
+    /// returns its unused reservation and retains its state in a terminal checkpoint when
+    /// KV backing allows; a preempted request is readmitted by the runtime.
+    fn finish_early(&mut self, handle: RequestHandle, preempted: bool) -> Result<()> {
+        let request = self.request_mut(handle)?;
+        request.preempted = preempted;
+        request.phase = RequestPhase::Finishing;
+        if request.consumed_tokens <= request.prefix_tokens || request.error_code.is_some() {
+            return Ok(());
+        }
+        let unused = std::mem::take(&mut request.reserved_pages);
+        self.free_pages.extend(unused);
+        if let Some(snapshot) = self.retain_snapshot()? {
+            let request = self.request_mut(handle)?;
+            request.terminal_snapshot = Some(snapshot);
+            request.phase = RequestPhase::Snapshot;
+        }
+        Ok(())
+    }
+
     pub fn admit(&mut self, spec: RequestSpec) -> Result<RequestHandle> {
         let plan = self.plan_admission(&spec)?;
         Ok(self.admit_planned(spec, plan, None)?.handle)
@@ -849,9 +1017,6 @@ impl RequestScheduler {
         let mut history = PrefixHistory::new(self.identity);
         history.append(&spec.prompt, &spec.conditioning)?;
         let lookup = self.cache.lookup(&history)?;
-        self.stats.cache_lookups += 1;
-        self.stats.cache_hits += u64::from(lookup.checkpoint.is_some());
-        self.stats.reused_tokens += lookup.consumed_tokens;
         Ok(AdmissionPlan { history, lookup })
     }
 
@@ -886,6 +1051,8 @@ impl RequestScheduler {
         inbound: Option<InboundRequest>,
     ) -> Result<Admitted> {
         let AdmissionPlan { history, lookup } = plan;
+        // Lookups count once per admitted request, not per attempt of a waiting one.
+        let (hit, reused) = (lookup.checkpoint.is_some(), lookup.consumed_tokens);
         let page_tokens = self.capabilities.page_tokens as u64;
         if let Some(inbound) = &inbound {
             let consumed = inbound.consumed_tokens;
@@ -927,15 +1094,40 @@ impl RequestScheduler {
         } else {
             0
         };
-        let reserved_count = execution_limit.div_ceil(self.capabilities.page_tokens)
+        // A growable request reserves its prompt and one page of output; decoding grows it.
+        let admission_limit = if spec.growable_output {
+            execution_limit.min(spec.prompt.len() + self.capabilities.page_tokens)
+        } else {
+            execution_limit
+        };
+        let reserved_count = admission_limit.div_ceil(self.capabilities.page_tokens)
             - (consumed / page_tokens) as usize
             + draft_page;
+        if admission_limit.div_ceil(self.capabilities.page_tokens) + draft_page
+            > self.limits.pages as usize
+        {
+            if let Some(id) = pinned {
+                self.cache.unpin(id)?;
+            }
+            return Err(crate::Error::admission(
+                crate::AdmissionError::Context,
+                "request needs more KV pages than this server holds",
+            ));
+        }
         let (ticket_pages, ticket_snapshots) = match &inbound {
             Some(inbound) if creating => (inbound.pages, 1),
             _ => (0, 0),
         };
         let execution_rows = self.execution_rows();
-        if let Err(error) = self.ensure_resources(reserved_count + ticket_pages, ticket_snapshots) {
+        let starving = spec.growable_output && self.has_starved_request();
+        if let Err(error) = if starving {
+            Err(crate::Error::admission(
+                crate::AdmissionError::Capacity,
+                "running requests are waiting for KV pages",
+            ))
+        } else {
+            self.ensure_resources(reserved_count + ticket_pages, ticket_snapshots)
+        } {
             if let Some(id) = pinned {
                 self.cache.unpin(id)?;
             }
@@ -1033,7 +1225,14 @@ impl RequestScheduler {
             terminal_snapshot_ready: false,
             vision_patches: VecDeque::new(),
             prefill_spans: Vec::new(),
+            growable_output: spec.growable_output,
+            preempted: false,
+            admission_order: self.admissions,
         });
+        self.admissions += 1;
+        self.stats.cache_lookups += 1;
+        self.stats.cache_hits += u64::from(hit);
+        self.stats.reused_tokens += reused;
         Ok(Admitted { handle, ticket })
     }
 
@@ -1287,13 +1486,6 @@ impl RequestScheduler {
             }
         }
         let mut needed = Vec::new();
-        let draft_page = if !self.speculative_widths.is_empty()
-            && self.proposal_source == speculation::ProposalSource::Mtp
-        {
-            self.capabilities.draft_pages_per_request
-        } else {
-            0
-        };
         for lane in &step.lanes {
             let request = self.request(lane.request)?;
             let through = lane
@@ -1303,11 +1495,7 @@ impl RequestScheduler {
             if through > self.limits.max_sequence_tokens as u64 {
                 return Err("scheduled request exceeds sequence capacity".into());
             }
-            let pages = (through.min(request.execution_limit) as usize)
-                .div_ceil(self.capabilities.page_tokens)
-                .saturating_sub(request.prefix_tokens as usize / self.capabilities.page_tokens)
-                .saturating_add(draft_page)
-                .saturating_sub(request.private_pages.len());
+            let pages = self.pages_through(request, through);
             if pages > request.reserved_pages.len() {
                 return Err("scheduled step exceeds the request's reserved page budget".into());
             }
@@ -1615,6 +1803,7 @@ impl RequestScheduler {
             }
         }
         self.observe_service(fence, &submission.participants, &useful_tokens, timing);
+        self.refill_reservations()?;
         Ok(generated)
     }
 
@@ -1783,6 +1972,7 @@ impl RequestScheduler {
             through: request.last_use,
         });
         self.advance_retirement(self.completed)?;
+        self.refill_reservations()?;
         Ok(result.map(PublishResult::id).or(request.prefix))
     }
 }

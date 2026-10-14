@@ -38,7 +38,7 @@ class DecoderScratch:
 
     @classmethod
     def allocate(cls, tokens, blocks, mode, device, *, shard: TensorParallelShard, sample_rows, context_ranks=1,
-                 overlay_layers=False):
+                 overlay_layers=False, remote=False):
         """Allocate layer scratch; with overlay_layers, KDA, MLA and MLP intermediates share storage.
 
         A layer runs attention then its MLP, and layers run serially, so their intermediates are
@@ -49,7 +49,8 @@ class DecoderScratch:
         def buffer(*shape):
             return torch.zeros(shape, dtype=torch.bfloat16, device=device)
         layers = (KDAScratch.allocate(tokens, 64 // shard.world_size, device),
-            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device, context_ranks=context_ranks),
+            MLAScratch.allocate(tokens, 64 // shard.world_size, blocks, mode, device, context_ranks=context_ranks,
+                                remote=remote),
             MLPScratch.allocate(tokens, 4096, 12288 // shard.world_size, device),
             MoeScratch.allocate(tokens, shard.world_size, device))
         if overlay_layers:

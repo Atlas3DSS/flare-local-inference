@@ -28,7 +28,7 @@ into a **runtime package**: a single `.safetensors` file with two `U8` tensors.
 The protobuf describes independently addressed resources. Tensor-parallel
 packages contain one resource bundle per rank, with all ranks' storage before
 execution resources.
-Final packages use a format-3 signed envelope and encrypted cubins and graph
+Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
 is absent. `ignition run` passes the exact export key and publisher to Flare for
 unattended approval; direct `flare run` needs the corresponding publisher profile
@@ -318,12 +318,43 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 
 ## Flexible recipes, reusable components, shared native machinery
 
+Helios's shared runtime policy and separation from model computation are
+non-negotiable architectural invariants. Correct output, performance gains,
+delivery pressure, and intended cleanup do not justify violating them. A
+temporary model-specific policy path is still a violation. Resolve the
+architectural boundary before committing the change.
+
 - Keep Helios as simple as possible. Model-specific execution behavior,
   composition, and optimization belong in Ignition and its captured programs.
-  Limit model-specific Helios support to K/V cache management and how cache
-  storage is exposed to captured graphs, through contracts kept as general as
-  possible. Model state-update computation belongs in Ignition; native code
-  manages its declared storage without implementing per-model algorithms.
+  Limit native specialization to concrete cache storage requirements and how
+  that storage is exposed to captured graphs. Express differences through cache
+  schemes and prepared layout metadata, with contracts reusable by every model
+  that has those requirements. Model state-update computation belongs in
+  Ignition; native code manages its declared storage without implementing
+  per-model algorithms.
+- Admission, page reservation and growth, eviction, preemption, readmission,
+  and offload are shared runtime policy and mechanisms. Do not select them by
+  model or recipe identity, duplicate them in model contracts, or hide model
+  allowlists behind capability flags. A cache scheme may require different page
+  geometry, state storage, or restore constraints; keep those differences in
+  its storage contract and let shared policy consume that contract.
+- `ModelContract` is a prepared-data adapter, never a runtime policy extension
+  point. Its members may validate and bind graph inputs, expose concrete storage
+  layouts, and adapt frontend metadata. Never add per-model boolean flags,
+  including `supports_*`, `can_*`, or default-false opt-ins, to enable or disable
+  runtime behavior. Enum values, callbacks, schema names, and metadata fields
+  must not encode the same model allowlist. Every member must have a meaning
+  independent of model identity, and its consumers must implement shared behavior
+  from actual data, geometry, and dependencies. Review both declarations and all
+  call sites; moving a model branch behind the trait does not make it acceptable.
+- A runtime defect reproduced on one model must be traced through every
+  supported cache scheme before choosing the implementation boundary. Apply
+  the fix to every compatible contract. Any restriction must follow from a
+  concrete storage or execution constraint expressed in the contract. For
+  example, incremental page reservation must depend on the cache's growth and
+  continuation requirements; testing it with GLM does not justify a GLM-only
+  scheduler path. Validate affected cache schemes and request lifecycles, and
+  report untested models separately from implementation restrictions.
 - Introducing a captured-graph operation family requires prior explicit approval
   from project owner Luke Alonso <lalonso@gmail.com>. Shape and capacity variants
   of an existing family do not constitute a new type when its operation contract
@@ -339,8 +370,8 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   are examples of mechanisms that should not be copied between recipes.
 - Keep native input packing, frontend processing, transport, scheduling, cache
   machinery, and request handling shared. Express model-dependent behavior through
-  prepared metadata and frontend assets; keep native model-specific execution
-  contracts focused on cache management and graph cache bindings.
+  prepared metadata and frontend assets; keep native specialization focused on
+  cache storage contracts and graph cache bindings.
 
 ## Python prepares; Helios serves
 
@@ -360,6 +391,11 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 - Keep graph executables, captured buffers, resource owners, and the CUDA
   context alive for their full native use. Model state and metadata must be
   explicit storage that Helios can manage without Python execution.
+- `ignition serve --direct [--eager]` is the one Python execution path, a
+  diagnostic and qualification tool requested by the project owner for
+  reproducing model faults without Helios ([direct execution](docs/direct-execution.md)).
+  It is never production serving or a fallback, and only its explicit flags
+  select it.
 
 ## No environment-variable switches
 
@@ -525,14 +561,17 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   available system RAM. Recipes pass byte headroom, not hardware flags. Forward
   compilation uses memory-bounded parallel workers on both integrated and discrete
   GPUs; artifact binding starts no additional compiler pool.
-- **Compile tensor-parallel forwards on rank zero.** Pass the preparation
-  coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
-  tensors and native handles, and participate in ordered warmup and local capture.
-  Keep shard offsets and native handles in runtime bindings when they do not
-  change the computation. For distinct rank behavior, expose
-  `compilation_variants()` on the rank-zero forward and select its key through
-  `compilation_variant` on each rank. Rank zero must supply every selected variant
-  before collective warmup; peers must not retrace or compile on a binding mismatch.
+- **Compile tensor-parallel forwards once, sharded across ranks.** Pass the
+  preparation coordinator to `capture_forwards`. Each forward variant compiles on
+  one rank that selects it, from that rank's own forward, with a compiler pool
+  budgeted for its host's ranks. Ranks on one host share its cache directory;
+  ranks on other hosts receive the artifacts they lack. Every rank loads the same
+  artifacts, binds its tensors and native handles, and participates in ordered
+  warmup and local capture. Keep shard offsets and native handles in runtime
+  bindings when they do not change the computation. For distinct rank behavior,
+  select a variant key through `compilation_variant` on each rank. Every
+  selected variant must compile before collective warmup; ranks must not retrace
+  or compile on a binding mismatch.
 - **Capture zero-draft rounds as decode.** Verification width one contains only
   the pending target token. Use ordinary decode attention and direct cache updates;
   do not inherit prefill kernels, speculative staging, or draft rollback work

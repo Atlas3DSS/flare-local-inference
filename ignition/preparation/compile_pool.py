@@ -36,25 +36,29 @@ def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
 
 
 class CompilePool:
-    def __init__(self, device, *, headroom_bytes=0):
+    def __init__(self, device, *, headroom_bytes=0, pools=1):
+        """Size workers for `device`, beside `pools - 1` other ranks' pools compiling on this host."""
         self.device = torch.device(device)
         self.pool = None
         if type(headroom_bytes) is not int or headroom_bytes < 0:
             raise ValueError("headroom_bytes must be a nonnegative byte count")
-        budget = max(1, _OPTIONS['compile_threads'])
+        if type(pools) is not int or pools < 1:
+            raise ValueError("pools must be a positive count")
+        # Ranks sharing this host share its compile threads.
+        budget = max(1, _OPTIONS['compile_threads'] // pools)
         # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
         free = device_memory_info(self.device)[0]
         shared = torch.cuda.get_device_properties(self.device).is_integrated
         capacity = (free - headroom_bytes) // _WORKER_DEVICE_BYTES
         if capacity < 1:
             raise MemoryError("forward compilation requires memory for a CUDA worker beyond preparation headroom")
-        self.workers = worker_limit(min(8, budget, capacity), available=free if shared else None,
+        self.workers = worker_limit(min(8, budget, capacity), pools=pools, available=free if shared else None,
                                    device_bytes=_WORKER_DEVICE_BYTES if shared else 0,
                                    headroom_bytes=headroom_bytes if shared else 0)
         threads = max(1, budget // self.workers)
         if shared:
             # Each compile thread is an Inductor subprocess in the worker's shared memory.
-            threads = min(threads, compile_threads(threads, workers=self.workers, available=free,
+            threads = min(threads, compile_threads(threads, workers=pools * self.workers, available=free,
                                                    device_bytes=_WORKER_DEVICE_BYTES, headroom_bytes=headroom_bytes))
         self.options = dict(_OPTIONS, compile_threads=threads)
 

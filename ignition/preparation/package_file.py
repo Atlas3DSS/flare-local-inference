@@ -1,7 +1,6 @@
 """Safetensors containers with an opaque payload and an authoritative protobuf index."""
 
 import json
-import hashlib
 import os
 from itertools import chain
 from pathlib import Path
@@ -85,9 +84,12 @@ def read_index(path):
             raise ValueError("truncated model index")
     if header["__metadata__"]["format"] == "flare":
         envelope = proto.ProtectedIndex.FromString(index)
-        if envelope.version != 3 or len(envelope.groups) != 4 or envelope.groups[0].kind != 1:
+        if (envelope.version != 4 or len(envelope.groups) != 3 or envelope.groups[0].kind != 1
+                or not envelope.ranks):
             raise ValueError("invalid protected package envelope")
         result = proto.PublisherMetadata.FromString(envelope.groups[0].body).index
+        for group in envelope.ranks:
+            result.ranks.add().CopyFrom(proto.RankProtection.FromString(group.body).bundle)
     else:
         result = proto.ModelIndex.FromString(index)
     _validate_spans(result, length)
@@ -113,7 +115,7 @@ def _publish(path, index, payload, protection=None):
     if path.exists():
         raise FileExistsError(path)
     encoded = (index.SerializeToString(deterministic=True) if protection is None
-               else protection.envelope(bytes(32)))
+               else protection.envelope())
     if not 0 < len(encoded) <= MAX_INDEX_BYTES:
         raise ValueError(f"model index is {len(encoded)} bytes; metadata limit is {MAX_INDEX_BYTES} bytes")
     payload = list(payload)
@@ -135,16 +137,15 @@ def _publish(path, index, payload, protection=None):
     try:
         with os.fdopen(descriptor, "wb") as output:
             output.write(struct.pack("<Q", len(header)) + header)
-            data_hash = hashlib.sha256()
             written = 0
             zeros = bytes(4 << 20)
             for destination, source, offset, size in payload:
                 if protection is not None:
-                    gap = max(0, min(destination, protection.data_end) - written)
-                    while gap:
-                        block = zeros[:min(gap, len(zeros))]
-                        data_hash.update(block)
-                        gap -= len(block)
+                    # Stored-data hashes cover the zero padding between ranges.
+                    while written < min(destination, protection.data_end):
+                        block = zeros[:min(destination, protection.data_end) - written]
+                        protection.absorb(written, block)
+                        written += len(block)
                 output.seek(data_start + destination)
                 with Path(source).open("rb") as contents:
                     contents.seek(offset)
@@ -155,13 +156,11 @@ def _publish(path, index, payload, protection=None):
                             raise ValueError(f"truncated package resource: {source}")
                         output.write(block)
                         if protection is not None:
-                            begin = destination + size - remaining
-                            count = max(0, min(len(block), protection.data_end - begin))
-                            data_hash.update(block[:count])
+                            protection.absorb(destination + size - remaining, block)
                         remaining -= len(block)
                 written = destination + size
             if protection is not None:
-                signed = protection.envelope(data_hash.digest())
+                signed = protection.envelope(final=True)
                 if len(signed) != len(encoded):
                     raise ValueError("signed envelope size changed during publication")
                 encoded = signed

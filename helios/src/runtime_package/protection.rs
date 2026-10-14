@@ -69,8 +69,8 @@ fn fields(values: &[&[u8]]) -> Vec<u8> {
 }
 fn signature_message(package: &[u8], signer: &[u8], kind: u32, body: &[u8]) -> Vec<u8> {
     fields(&[
-        b"flare-package-signature-v3",
-        &3u32.to_le_bytes(),
+        b"flare-package-signature-v4",
+        &4u32.to_le_bytes(),
         package,
         signer,
         &kind.to_le_bytes(),
@@ -128,7 +128,9 @@ pub struct AuthorizedPackage {
     pub(super) index: wire::ModelIndex,
 }
 impl VerifiedPackage {
-    pub fn open(path: &Path, publishers: &[Publisher]) -> Result<Self> {
+    /// Authenticate the package's index and publisher binding, for every rank or only `rank` of
+    /// a multi-host package, which a copy holding that rank's bytes alone verifies completely.
+    pub fn open(path: &Path, publishers: &[Publisher], rank: Option<usize>) -> Result<Self> {
         let embedded = super::publishers::embedded()?;
         let mut profiles = embedded.clone();
         for publisher in publishers {
@@ -144,7 +146,7 @@ impl VerifiedPackage {
                 profiles.push(publisher.clone());
             }
         }
-        let (archive, index) = Archive::open(path, &profiles)?;
+        let (archive, index) = Archive::open(path, &profiles, rank)?;
         let publisher = archive.protection.publisher.clone();
         let official_source = archive.protection.official_source.clone();
         let identity_verified = embedded
@@ -196,23 +198,75 @@ pub(super) struct Protection {
     official_source: String,
     package_id: Vec<u8>,
     resources: BTreeMap<u64, (bool, wire::ProtectedResource)>,
-    data: wire::StoredData,
+    /// Stored-data ranges: what every rank shares, then each verified rank's in index order.
+    data: Vec<wire::StoredData>,
+    /// The one rank of a multi-host package verified, whose bundle alone the index then holds.
+    rank: Option<usize>,
+}
+fn add_catalog(
+    resources: &mut BTreeMap<u64, (bool, wire::ProtectedResource)>,
+    catalog: wire::ResourceCatalog,
+    encrypted: bool,
+    payload_size: u64,
+) -> Result<()> {
+    for entry in catalog.resources {
+        let count = if encrypted {
+            entry.plain_bytes.div_ceil(CHUNK as u64)
+        } else {
+            1
+        };
+        let expected = entry.plain_bytes.checked_add(if encrypted {
+            count
+                .checked_mul(16)
+                .ok_or_else(|| invalid("resource size overflow"))?
+        } else {
+            0
+        });
+        if entry.plain_bytes == 0
+            || expected != Some(entry.stored_bytes)
+            || count != entry.sha256.len() as u64
+            || entry.sha256.iter().any(|h| h.len() != 32)
+            || entry
+                .offset
+                .checked_add(entry.stored_bytes)
+                .is_none_or(|end| end > payload_size)
+            || resources.insert(entry.offset, (encrypted, entry)).is_some()
+        {
+            return Err(invalid("invalid protected resource catalog"));
+        }
+    }
+    Ok(())
+}
+fn stored_data(data: wire::StoredData, payload_size: u64) -> Result<wire::StoredData> {
+    if data.sha256.len() != 32
+        || data
+            .offset
+            .checked_add(data.nbytes)
+            .is_none_or(|end| end > payload_size)
+    {
+        return Err(invalid("invalid stored-data signature group"));
+    }
+    Ok(data)
 }
 impl Protection {
+    /// Authenticate the envelope: what every rank shares, then every rank, or only `rank` of a
+    /// multi-host package, whose host holds that rank's bytes alone.
     pub fn verify(
         bytes: &[u8],
         publishers: &[Publisher],
         payload_size: u64,
+        rank: Option<usize>,
     ) -> Result<(Self, wire::ModelIndex)> {
         let envelope = wire::ProtectedIndex::decode(bytes)
             .map_err(|e| invalid(format!("invalid signed envelope: {e}")))?;
-        if envelope.version != 3
+        if envelope.version != 4
             || envelope.package_id.len() != 32
             || envelope.signer.len() != 32
-            || envelope.groups.len() != 4
+            || envelope.groups.len() != 3
+            || envelope.ranks.is_empty()
         {
             return Err(invalid(
-                "signed format-3 package required; re-export the checkpoint",
+                "signed format-4 package required; re-export the checkpoint",
             ));
         }
         let publisher = publishers
@@ -225,8 +279,8 @@ impl Protection {
             })?
             .clone();
         publisher.validate()?;
-        for (i, group) in envelope.groups.iter().enumerate() {
-            if group.kind != i as u32 + 1 {
+        let authenticate = |kind: u32, group: &wire::SignedGroup, label: String| -> Result<()> {
+            if group.kind != kind {
                 return Err(invalid("missing, duplicate, or unordered signature group"));
             }
             signature::UnparsedPublicKey::new(&signature::ED25519, publisher.public_key)
@@ -239,16 +293,14 @@ impl Protection {
                     ),
                     &group.signature,
                 )
-                .map_err(|_| {
-                    invalid(format!(
-                        "publisher signature failed for group {}",
-                        group.kind
-                    ))
-                })?;
+                .map_err(|_| invalid(format!("publisher signature failed for {label}")))
+        };
+        for (i, group) in envelope.groups.iter().enumerate() {
+            authenticate(i as u32 + 1, group, format!("group {}", i + 1))?;
         }
         let metadata = wire::PublisherMetadata::decode(envelope.groups[0].body.as_slice())
             .map_err(|e| invalid(format!("invalid signed metadata: {e}")))?;
-        if metadata.group_hashes.len() != 3
+        if metadata.group_hashes.len() != 2
             || metadata
                 .group_hashes
                 .iter()
@@ -278,49 +330,61 @@ impl Protection {
                 "package publisher namespace or official source mismatch",
             ));
         }
-        let index = metadata
+        let mut index = metadata
             .index
             .ok_or_else(|| invalid("missing signed model index"))?;
-        if index.version != 3 || index.ranks.is_empty() {
+        let count = metadata.ranks as usize;
+        if index.version != 3
+            || !index.ranks.is_empty()
+            || envelope.ranks.len() != count
+            || index
+                .cluster
+                .as_ref()
+                .is_some_and(|c| c.world as usize != count)
+        {
             return Err(invalid("unsupported model index"));
         }
-        let data = wire::StoredData::decode(envelope.groups[3].body.as_slice())
-            .map_err(|e| invalid(e.to_string()))?;
-        if data.nbytes > payload_size || data.sha256.len() != 32 {
-            return Err(invalid("invalid stored-data signature group"));
-        }
-        let mut resources = BTreeMap::new();
-        for group in &envelope.groups[1..3] {
-            let catalog = wire::ResourceCatalog::decode(group.body.as_slice())
-                .map_err(|e| invalid(e.to_string()))?;
-            let encrypted = group.kind == 2;
-            for entry in catalog.resources {
-                let count = if encrypted {
-                    entry.plain_bytes.div_ceil(CHUNK as u64)
-                } else {
-                    1
-                };
-                let expected = entry.plain_bytes.checked_add(if encrypted {
-                    count
-                        .checked_mul(16)
-                        .ok_or_else(|| invalid("resource size overflow"))?
-                } else {
-                    0
-                });
-                if entry.plain_bytes == 0
-                    || expected != Some(entry.stored_bytes)
-                    || count != entry.sha256.len() as u64
-                    || entry.sha256.iter().any(|h| h.len() != 32)
-                    || entry.offset < data.nbytes
-                    || entry
-                        .offset
-                        .checked_add(entry.stored_bytes)
-                        .is_none_or(|end| end > payload_size)
-                    || resources.insert(entry.offset, (encrypted, entry)).is_some()
-                {
-                    return Err(invalid("invalid protected resource catalog"));
-                }
+        let verified = match rank {
+            None => 0..count,
+            Some(rank) if index.cluster.is_some() && rank < count => rank..rank + 1,
+            Some(rank) => {
+                return Err(invalid(format!(
+                    "rank {rank} is not a separately served rank of this package"
+                )));
             }
+        };
+        let mut resources = BTreeMap::new();
+        let shared = wire::ResourceCatalog::decode(envelope.groups[1].body.as_slice())
+            .map_err(|e| invalid(e.to_string()))?;
+        add_catalog(&mut resources, shared, false, payload_size)?;
+        let shared = wire::StoredData::decode(envelope.groups[2].body.as_slice())
+            .map_err(|e| invalid(e.to_string()))?;
+        let mut data = vec![stored_data(shared, payload_size)?];
+        for rank in verified {
+            let group = &envelope.ranks[rank];
+            authenticate(4, group, format!("rank {rank}"))?;
+            let signed = wire::RankProtection::decode(group.body.as_slice())
+                .map_err(|e| invalid(format!("invalid signed rank: {e}")))?;
+            let (Some(bundle), Some(stored)) = (signed.bundle, signed.data) else {
+                return Err(invalid("incomplete signed rank"));
+            };
+            if signed.rank as usize != rank {
+                return Err(invalid("signed ranks out of order"));
+            }
+            add_catalog(
+                &mut resources,
+                signed.executables.unwrap_or_default(),
+                true,
+                payload_size,
+            )?;
+            add_catalog(
+                &mut resources,
+                signed.support.unwrap_or_default(),
+                false,
+                payload_size,
+            )?;
+            data.push(stored_data(stored, payload_size)?);
+            index.ranks.push(bundle);
         }
         let protection = Self {
             publisher,
@@ -328,13 +392,44 @@ impl Protection {
             package_id: envelope.package_id,
             resources,
             data,
+            rank,
         };
         protection.validate_membership(&index, payload_size)?;
         Ok((protection, index))
     }
+    /// The index position of `rank`'s bundle: the rank itself, or the only one held when a host
+    /// verified its rank alone.
+    pub fn position(&self, rank: usize) -> Result<usize> {
+        match self.rank {
+            None => Ok(rank),
+            Some(only) if only == rank => Ok(0),
+            Some(only) => Err(invalid(format!(
+                "only rank {only} of this package was verified"
+            ))),
+        }
+    }
+    /// Payload ranges of the stored data that serving the bundle at `position` reads: what every
+    /// rank shares, then that rank's.
+    pub fn stored_ranges(&self, position: usize) -> Vec<(u64, u64)> {
+        [&self.data[0], &self.data[position + 1]]
+            .into_iter()
+            .map(|range| (range.offset, range.nbytes))
+            .collect()
+    }
     fn validate_membership(&self, index: &wire::ModelIndex, payload_size: u64) -> Result<()> {
+        let ranges: Vec<&wire::StoredData> =
+            self.data.iter().filter(|range| range.nbytes > 0).collect();
+        // Each stored allocation or table lies in its own part's signed range.
+        let within = |range: &wire::StoredData, span: &wire::Span| -> Result<()> {
+            if span.offset < range.offset
+                || span.offset.saturating_add(span.nbytes) > range.offset + range.nbytes
+            {
+                return Err(invalid("stored allocation outside its data range"));
+            }
+            Ok(())
+        };
         let mut spans: Vec<(u32, &wire::Span)> = Vec::new();
-        for rank in &index.ranks {
+        for (position, rank) in index.ranks.iter().enumerate() {
             let mut roles = HashMap::new();
             let mut add = |name: &str, kind: u32| -> Result<()> {
                 if !rank.resources.contains_key(name)
@@ -364,6 +459,9 @@ impl Protection {
                 return Err(invalid("unclassified package resource"));
             }
             for (name, span) in &rank.resources {
+                if roles[name] == 4 {
+                    within(&self.data[position + 1], span)?;
+                }
                 spans.push((roles[name], span));
             }
         }
@@ -384,11 +482,11 @@ impl Protection {
         if let Some(engram) = &index.engram {
             for table in &engram.tables {
                 for span in [&table.weights, &table.scales] {
-                    spans.push((
-                        4,
-                        span.as_ref()
-                            .ok_or_else(|| invalid("missing table plane"))?,
-                    ));
+                    let span = span
+                        .as_ref()
+                        .ok_or_else(|| invalid("missing table plane"))?;
+                    within(&self.data[0], span)?;
+                    spans.push((4, span));
                 }
             }
         }
@@ -404,11 +502,7 @@ impl Protection {
                 .checked_add(span.nbytes)
                 .filter(|n| *n <= payload_size)
                 .ok_or_else(|| invalid("resource exceeds package"))?;
-            if kind == 4 {
-                if end > self.data.nbytes {
-                    return Err(invalid("stored allocation outside data group"));
-                }
-            } else {
+            if kind != 4 {
                 let (encrypted, entry) = self
                     .resources
                     .get(&span.offset)
@@ -416,27 +510,46 @@ impl Protection {
                 if *encrypted != (kind == 2) || entry.stored_bytes != span.nbytes {
                     return Err(invalid("resource signature classification mismatch"));
                 }
+                if ranges
+                    .iter()
+                    .any(|range| span.offset < range.offset + range.nbytes && range.offset < end)
+                {
+                    return Err(invalid(
+                        "executable or supporting resource inside stored data",
+                    ));
+                }
                 protected += 1;
             }
         }
-        if protected != self.resources.len() || end != payload_size {
+        let mut ordered = ranges.clone();
+        ordered.sort_by_key(|range| range.offset);
+        if ordered
+            .windows(2)
+            .any(|pair| pair[1].offset < pair[0].offset + pair[0].nbytes)
+        {
+            return Err(invalid("overlapping stored-data ranges"));
+        }
+        // A host verifying one rank cannot see the others' resources, which complete the payload.
+        if protected != self.resources.len() || (self.rank.is_none() && end != payload_size) {
             return Err(invalid("unreferenced package resources"));
         }
         Ok(())
     }
     fn verify_data(&self, file: &File, start: u64) -> Result<()> {
-        let mut hash = digest::Context::new(&digest::SHA256);
         let mut block = vec![0; CHUNK];
-        let mut pos = 0;
-        while pos < self.data.nbytes {
-            let count = block.len().min((self.data.nbytes - pos) as usize);
-            file.read_exact_at(&mut block[..count], start + pos)
-                .map_err(|e| e.to_string())?;
-            hash.update(&block[..count]);
-            pos += count as u64;
-        }
-        if hash.finish().as_ref() != self.data.sha256 {
-            return Err(invalid("stored-data content verification failed"));
+        for range in &self.data {
+            let mut hash = digest::Context::new(&digest::SHA256);
+            let mut pos = 0;
+            while pos < range.nbytes {
+                let count = block.len().min((range.nbytes - pos) as usize);
+                file.read_exact_at(&mut block[..count], start + range.offset + pos)
+                    .map_err(|e| e.to_string())?;
+                hash.update(&block[..count]);
+                pos += count as u64;
+            }
+            if hash.finish().as_ref() != range.sha256 {
+                return Err(invalid("stored-data content verification failed"));
+            }
         }
         Ok(())
     }

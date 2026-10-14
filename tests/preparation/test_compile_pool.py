@@ -195,3 +195,16 @@ def test_compilation_preserves_configured_headroom(monkeypatch, integrated, work
     assert compile_pool.CompilePool("cuda:0", headroom_bytes=16 << 30).workers == workers
     with pytest.raises(MemoryError, match="headroom"):
         compile_pool.CompilePool("cuda:0", headroom_bytes=39 << 30)
+
+
+@pytest.mark.parametrize("pools,workers", [(1, 8), (2, 4), (4, 2)])
+def test_ranks_sharing_a_host_split_its_compilers(monkeypatch, pools, workers):
+    from ignition.preparation import compile_pool, host_memory
+
+    monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (40 << 30, 96 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
+    pool = compile_pool.CompilePool("cuda:0", pools=pools)
+    # Every rank's pool together stays within the host's threads and RAM.
+    assert pool.workers == workers and pools * pool.workers * pool.options["compile_threads"] == 16

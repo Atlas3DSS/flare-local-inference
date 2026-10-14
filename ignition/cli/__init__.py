@@ -45,6 +45,17 @@ def _parser() -> argparse.ArgumentParser:
     serving.add_argument("--prefix-cache-states", type=int, metavar="N",
                          help="advanced: cached request states kept resident for prefix reuse; fewer leave more"
                               " memory for KV pages (default: sized from free memory)")
+    diagnostics = serving.add_argument_group(
+        "diagnostics", "Ignition's direct execution reproduces model-level faults without Helios. It is a"
+                       " diagnostic and qualification path, not production serving.")
+    diagnostics.add_argument("--direct", action="store_true",
+                             help="schedule and pack each step in Python and replay its captured graph on every"
+                                  " rank, with no Helios scheduler or native server; non-streaming chat only")
+    diagnostics.add_argument("--eager", action="store_true",
+                             help="with --direct: call the forward each graph captured instead of replaying it")
+    diagnostics.add_argument("--graph-times", type=Path, metavar="PATH",
+                             help="with --direct: graph replay saves its estimate of each graph's time here; with"
+                                  " --eager, decode rounds are chosen from the times saved here")
     joining = command("join", serve.join, "run a peer rank for rank zero's rendezvous on another host")
     joining.add_argument("rendezvous", metavar="ADDR:PORT", help="rank zero's rendezvous address")
     joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")
@@ -87,6 +98,10 @@ def _preparation_arguments(running):
     advanced.add_argument("--no-context-parallel", action="store_true",
                           help="keep each rank's attention context whole instead of sharding it across"
                                " tensor-parallel ranks; fewer cached tokens (default: the recipe's)")
+    advanced.add_argument("--no-stream-overlap", action="store_true",
+                          help="run every concurrent branch (shared experts, projection chains, query chains)"
+                               " serially on the main stream, to diagnose scheduling-dependent faults; slower"
+                               " (default: overlap)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
 

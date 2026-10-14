@@ -98,6 +98,7 @@ impl ModelContract for DeepSeek41 {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }
@@ -142,8 +143,8 @@ impl ModelContract for DeepSeek41 {
         Ok(())
     }
     #[cfg(feature = "server")]
-    fn text_only(_: &()) -> bool {
-        true
+    fn prompt_metadata(_: &mut ()) -> crate::model::admission::PromptMetadataMut<'_> {
+        Default::default()
     }
     #[cfg(feature = "server")]
     type OutputConfig = output::OutputConfig;

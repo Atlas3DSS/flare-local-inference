@@ -1,6 +1,6 @@
 """Concurrent model launches retain their compiled variant until binding finishes."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from threading import Event
 from types import SimpleNamespace
 
@@ -41,12 +41,27 @@ def test_catalog_publication_waits_for_all_bindings(tmp_path, monkeypatch):
         assert right.result(timeout=5) == 64
 
 
-def test_peer_binding_does_not_wait_for_its_root_publication_lock(tmp_path, monkeypatch):
+def test_a_hosts_first_rank_holds_its_cache_lock_for_every_rank_there(tmp_path, monkeypatch):
     import torch.distributed as dist
 
     cache = object.__new__(ForwardCache)
     cache.root = tmp_path
+    barriers = []
     monkeypatch.setattr(dist, 'get_rank', lambda: 1)
+    monkeypatch.setattr(dist, 'barrier', lambda group: barriers.append(group))
     monkeypatch.setattr(ForwardCache, '_prepare_many', lambda *args, **kwargs: 'bound')
+    # Rank one shares rank zero's host and cache, so rank zero's lock covers it.
+    local = SimpleNamespace(ranks=(0, 1), hosts=('a', 'a'), group='ranks')
     with cache._publication_lock():
-        assert cache.prepare_many({}, {}, coordinator=SimpleNamespace(ranks=(0, 1))) == 'bound'
+        assert cache.prepare_many({}, {}, coordinator=local) == 'bound'
+    # Ranks hold every host's lock before compiling and until every rank has bound.
+    assert barriers == ['ranks', 'ranks']
+    # Alone on its host, rank one holds that host's lock itself, after host a's turn to lock.
+    barriers.clear()
+    remote = SimpleNamespace(ranks=(0, 1), hosts=('a', 'b'), group='ranks')
+    with ThreadPoolExecutor(1) as pool:
+        with cache._publication_lock():
+            binding = pool.submit(cache.prepare_many, {}, {}, coordinator=remote)
+            wait([binding], timeout=.1)
+            assert not binding.done() and barriers == ['ranks']
+        assert binding.result(timeout=5) == 'bound' and barriers == ['ranks'] * 3

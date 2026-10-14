@@ -50,9 +50,16 @@ class MLAScratch:
     partial: torch.Tensor
     lse: torch.Tensor
     slab: torch.Tensor
+    # Ranks on separate hosts stage the head shards each peer combines, and every rank's packs.
+    exchange_send: torch.Tensor
+    exchange_received: torch.Tensor
+    # Prefill across hosts gathers one window of every rank's latent records at a time, [world, window * 528]
+    # bytes, with each rank's byte count in the window.
+    records: torch.Tensor
+    record_counts: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1):
+    def allocate(cls, tokens, heads, blocks, mode, device, *, context_ranks=1, remote=False):
         if heads not in (16, 32, 64):
             raise ValueError("GLM MLA scratch requires TP1, TP2 or TP4 head partitions")
         from .dcp import PREFILL_SLICE_ROWS, SLICE_ROWS
@@ -70,11 +77,20 @@ class MLAScratch:
         absorbed = exchange or (min(tokens, PREFILL_SLICE_ROWS) if prefill else tokens)
         # One 528-byte record per global position: `blocks` pages of 256 records on every rank.
         positions = blocks * 256 * context_ranks if prefill else 0
+        from ignition.components.head_exchange import pack_width
+
+        width = pack_width(context_ranks, heads * context_ranks, 512) if remote and exchange else 0
+        from .dcp import WINDOW_RECORDS
+
+        window = min(WINDOW_RECORDS, blocks * 256) if remote and prefill else 0
         return cls(projected, projected[:, :1536], buffer(1536), projected[:, 1536:2048], buffer(512),
             buffer(heads, 256), zeros(absorbed, heads, 512), zeros(absorbed, heads, 512), buffer(heads, 256),
             buffer(4096), zeros(tokens, dtype=torch.int32), index,
             zeros(exchange, heads * context_ranks, 512), zeros(exchange, heads * context_ranks, 512),
-            zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8))
+            zeros(exchange, heads * context_ranks, dtype=torch.float32), zeros(positions, 528, dtype=torch.uint8),
+            zeros(exchange if width else 0, width), zeros(exchange if width else 0, width * context_ranks),
+            zeros(context_ranks if window else 0, window * 528, dtype=torch.uint8),
+            zeros(context_ranks if window else 0, dtype=torch.int64))
 
     def rows(self, tokens, mode):
         if type(tokens) is not int or not 0 < tokens <= self.output.shape[0]:
@@ -83,7 +99,8 @@ class MLAScratch:
             self.query_residual[:tokens], self.latent_input[:tokens],
             self.latent[:tokens], self.query[:tokens], self.absorbed_query[:tokens], self.attended[:tokens],
             self.expanded[:tokens], self.output[:tokens], self.visible[:tokens], self.index.rows(tokens, mode),
-            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab)
+            self.gathered[:tokens], self.partial[:tokens], self.lse[:tokens], self.slab,
+            self.exchange_send[:tokens], self.exchange_received[:tokens], self.records, self.record_counts)
 
 
 _CHAINS = weakref.WeakValueDictionary()
@@ -193,6 +210,7 @@ class PreparedGlmMLA:
             raise ValueError("GLM MLA cache or head partition geometry mismatch")
         self.module, self.scratch, self.state, self.metadata = module, scratch, state, metadata
         # Decode projects, absorbs and gathers queries on an auxiliary stream while records are selected.
+        # Without stream overlap, the main stream projects, absorbs and gathers them before attention.
         self.query_chain = None
         for key in ("q_a_layernorm", "kv_a_layernorm"):
             module.get_submodule(key).weight = torch.nn.Parameter(weights[f"{key}.weight"], requires_grad=False)
@@ -245,7 +263,7 @@ class PreparedGlmMLA:
             self.attention = attend(scratch.absorbed_query, state.cache, scratch.index.physical,
                 scratch.visible, scratch.index.selected_lengths, scratch.attended, caps=caps,
                 session=session, name=f"{name}.attention", workspace=workspace)
-            if mode != "prefill":
+            if mode != "prefill" and workspace.overlap:
                 self.query_chain = QueryChain(self.projections["q_b_proj"], self.query_absorption,
                     scratch.query_residual, scratch.query, scratch.absorbed_query, session=session,
                     workspace=workspace, parallel_plans=self.indexer.scratch_plans)
@@ -262,6 +280,17 @@ class PreparedGlmMLA:
                 model_type=sparse_mla.ModelType.GLM_NEXT, cache_record_bytes=528, mode="extend")
             if scratch.slab.shape[0] != metadata.block_table.shape[1] * context.shards.page_tokens:
                 raise ValueError("GLM prefill slab must hold every position of the prepared context")
+            self.windows = ()
+            if context.remote:
+                # Ranks on separate hosts gather their records window by window instead of reading peers'
+                # caches through CUDA IPC; windows past the context's end carry no bytes.
+                from ignition.components.collectives import PreparedVarlenGather
+
+                window = scratch.records.shape[1] // 528
+                self.windows = tuple((first, PreparedVarlenGather(scratch.records, scratch.record_counts,
+                    runtime=context.heads, session=session, coordinator=context.coordinator,
+                    name=f"{name}.gather_records{first}"))
+                    for first in range(0, scratch.slab.shape[0] // context.shards.world, window))
             self.slices = []
             for start in range(0, rows, step):
                 end = min(start + step, rows)
@@ -297,10 +326,12 @@ class PreparedGlmMLA:
             attention = PreparedSparseMLA(gathered, state.cache, scratch.index.physical[start:end],
                 scratch.visible[start:end], scratch.index.selected_lengths[start:end], partial, caps=caps,
                 session=session, name=f"{name}.attention{start}", workspace=workspace, lse=lse)
+            remote = {} if not context.remote else {"rank": context.shards.index,
+                "staging": (scratch.exchange_send[:count], scratch.exchange_received[:count])}
             combine = PreparedLseReduceScatter(partial, lse, attended, runtime=context.heads,
-                session=session, coordinator=context.coordinator, name=f"{name}.combine{start}")
+                session=session, coordinator=context.coordinator, name=f"{name}.combine{start}", **remote)
             self.slices.append((start, end, absorb, gather, attention, combine, expand))
-        if len(self.slices) == 1:
+        if len(self.slices) == 1 and workspace.overlap:
             start, end, absorb, gather = self.slices[0][:4]
             self.query_chain = QueryChain(self.projections["q_b_proj"], absorb, scratch.query_residual,
                 scratch.query, scratch.absorbed_query[:end - start], gather, scratch.gathered[:end - start],
@@ -311,9 +342,21 @@ class PreparedGlmMLA:
         from .dcp import pull_context
 
         s, m = self.scratch, self.metadata
-        # The indexer's candidate gather orders this layer's peer cache writes before these reads.
-        pull_context(self.state.peers, m.block_table[0], (m.positions.max() + 1).reshape(1),
-                     s.slab.view(torch.int32), self.context.shards)
+        end = (m.positions.max() + 1).reshape(1)
+        shards = self.context.shards
+        if self.windows:
+            from .dcp import pack_records, scatter_records, window_counts
+
+            cache = self.state.cache.view(torch.int32).view(-1, 132)
+            window = s.records.shape[1] // 528
+            for first, gather in self.windows:
+                pack_records(cache, m.block_table[0], end, s.records, shards, first)
+                s.record_counts.copy_(window_counts(end, shards.world, first, window))
+                gather()
+                scatter_records(s.records, end, s.slab.view(torch.int32), shards, first)
+        else:
+            # The indexer's candidate gather orders this layer's peer cache writes before these reads.
+            pull_context(self.state.peers, m.block_table[0], end, s.slab.view(torch.int32), shards)
         # Selected indices are global positions, which index the slab directly.
         s.visible.copy_(m.positions + 1)
         for start, end, absorb, attention, expand in self.slices:

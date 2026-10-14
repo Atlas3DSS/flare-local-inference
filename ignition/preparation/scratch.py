@@ -9,10 +9,17 @@ import torch
 
 
 class ScratchArena:
-    """Grow during preparation, then retain one address for graph capture."""
+    """Grow during preparation, then retain one address for graph capture.
 
-    def __init__(self, device):
+    With ``overlap`` false, recipes compose every branch on the main stream:
+    the arena then creates no auxiliary stream and accepts no concurrent plans.
+    """
+
+    def __init__(self, device, *, overlap=True):
+        if type(overlap) is not bool:
+            raise TypeError("overlap must be a boolean")
         self.tensor = torch.empty(0, dtype=torch.uint8, device=device)
+        self.overlap = overlap
         self.frozen = False
         self._finalizers = []
         self._parallel_plans = []
@@ -30,6 +37,8 @@ class ScratchArena:
 
     @property
     def auxiliary_stream(self):
+        if not self.overlap:
+            raise RuntimeError("stream overlap is disabled; compose this branch on the main stream")
         if self._auxiliary_stream is None:
             from cuda.bindings import driver as cuda
 
@@ -45,6 +54,8 @@ class ScratchArena:
 
     def register_parallel(self, *plans):
         """Declare plans whose workspaces must coexist within a captured fork."""
+        if not self.overlap:
+            raise RuntimeError("stream overlap is disabled; serial plans share scratch")
         if self.frozen:
             raise RuntimeError("scratch declarations are frozen")
         if len(plans) < 2:

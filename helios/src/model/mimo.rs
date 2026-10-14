@@ -117,6 +117,7 @@ impl ModelContract for MiMo {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }
@@ -173,8 +174,11 @@ impl ModelContract for MiMo {
         Ok(())
     }
     #[cfg(feature = "server")]
-    fn text_only(data: &PromptData) -> bool {
-        data.vision_token_indices.iter().all(|index| *index < 0)
+    fn prompt_metadata(data: &mut PromptData) -> crate::model::admission::PromptMetadataMut<'_> {
+        crate::model::admission::PromptMetadataMut {
+            positions: None,
+            vision_token_indices: Some(&mut data.vision_token_indices),
+        }
     }
     #[cfg(feature = "server")]
     type OutputConfig = crate::output::chatml::OutputConfig;

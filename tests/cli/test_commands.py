@@ -1,6 +1,7 @@
 """Command output and exit codes with injected GPUs and hub cache."""
 
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +93,40 @@ def test_multi_host_ranks_parse_for_rank_zero_and_its_peers():
     assert (rank_zero.model, rank_zero.ranks, rank_zero.rendezvous) == ("glm-5.3-flash", 4, "10.0.0.1:29600")
     peer = _parser().parse_args(["join", "10.0.0.1:29600", "--rank", "3", "--ranks", "4"])
     assert (peer.rendezvous, peer.rank, peer.ranks, peer.gpu) == ("10.0.0.1:29600", 3, 4, 0)
+
+
+def test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_accept(host, tmp_path, capsys):
+    for command in (["run"], ["export", "--output", str(tmp_path / "package")], ["serve"]):
+        assert _parser().parse_args([*command, "glm-5.3-flash", "--no-stream-overlap"]).no_stream_overlap
+        assert not _parser().parse_args([*command, "glm-5.3-flash"]).no_stream_overlap
+    for model in ("qwen3.8-flash", "glm-5.3-flash", "deepseek-v4-flash", "deepseek-v4.1-flash"):
+        serial = _parser().parse_args(["run", model, "--no-stream-overlap"])
+        assert not preparation.stream_overlap(serial, resolve(model))
+        assert preparation.stream_overlap(_parser().parse_args(["run", model]), resolve(model))
+    # MiMo composes no concurrent branches, so serializing them is rejected rather than ignored.
+    assert run("mimo-v2.6-pro-mopd", "--no-stream-overlap") == 2
+    assert "--no-stream-overlap: mimo-v2.6-pro-mopd runs no branches concurrently" in failure(capsys)[0]
+
+
+def test_direct_execution_is_an_explicit_serve_diagnostic(host, capsys):
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash", "--direct", "--eager"])
+    assert arguments.direct and arguments.eager
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash"])
+    assert not arguments.direct and not arguments.eager
+    assert main(["serve", "glm-5.3-flash", "--eager"]) == 2
+    assert "--eager applies only to --direct" in failure(capsys)[0]
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash", "--direct", "--graph-times", "times.json"])
+    assert arguments.graph_times == Path("times.json")
+    assert main(["serve", "glm-5.3-flash", "--graph-times", "times.json"]) == 2
+    assert "--graph-times applies only to --direct" in failure(capsys)[0]
+    assert main(["serve", "glm-5.3-flash", "--direct", "--eager", "--graph-times", "/nonexistent/times.json"]) == 2
+    assert "graph replay with --graph-times saves it" in failure(capsys)[0]
+    for arguments in (["run", "glm-5.3-flash", "--direct"], ["export", "glm-5.3-flash", "--output", "x", "--eager"],
+                      ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "2", "--direct"]):
+        with pytest.raises(SystemExit) as exit:
+            main(arguments)
+        assert exit.value.code == 2
+    capsys.readouterr()
 
 
 def speculation(*arguments, model="qwen3.8-flash"):

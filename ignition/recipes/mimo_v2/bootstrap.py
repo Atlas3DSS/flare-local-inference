@@ -194,7 +194,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        # The recipe declares no stream overlap: every branch runs on the main stream.
+        arena = ScratchArena(device, overlap=False)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(weights.config, shard, config.prefill_chunk_size, 1, device)
         decoder_storage = Scratch.allocate(

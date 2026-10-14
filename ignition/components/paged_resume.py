@@ -1,7 +1,5 @@
 """Sample from a cached normalized hidden state without consuming a token."""
 
-from copy import copy
-
 import torch
 
 from ignition.components.collectives import PreparedAllReduce
@@ -79,18 +77,9 @@ class PreparedResume:
             else PreparedCompletion(*args)
         )
         self.completion.prepare()
-        self.peer_completion = PreparedCompletion(*args)
-        self.peer_completion.prepare()
         self.compilation_variant = (
             "sample" if weights.shard.rank == 0 or self.replicated_sampling else "consume"
         )
-
-    def compilation_variants(self):
-        if self.replicated_sampling:
-            return {"sample": self}
-        peer = copy(self)
-        peer.completion = self.peer_completion
-        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.validation(self.state.validate())

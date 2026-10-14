@@ -61,7 +61,7 @@ pub struct Run {
     /// Additional publisher verification profiles (JSON); does not grant execution trust.
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     pub publisher_keys: Vec<PathBuf>,
-    /// Verify the complete stored allocation and table region before CUDA initialization.
+    /// Verify the stored allocation and table ranges of the ranks served before CUDA initialization.
     #[arg(long)]
     pub verify_weights: bool,
     /// Permanently accept this exact signing key together with --dangerously-accept-publisher.

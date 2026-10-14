@@ -64,6 +64,7 @@ impl ModelContract for Glm5Next {
             vision: config.contract.vision.clone(),
 
             draft_pages_per_request: usize::from(config.has_learned_drafts()),
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }
@@ -165,7 +166,7 @@ impl ModelContract for Glm5Next {
         Ok(())
     }
     #[cfg(feature = "server")]
-    fn text_only(_: &()) -> bool {
-        true
+    fn prompt_metadata(_: &mut ()) -> crate::model::admission::PromptMetadataMut<'_> {
+        Default::default()
     }
 }

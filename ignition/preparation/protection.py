@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from . import runtime_package_pb2 as proto
 
 CHUNK = 4 << 20
-VERSION = 3
+VERSION = 4
 
 
 def fields(*values):
@@ -23,7 +23,7 @@ def fields(*values):
 
 
 def signature_message(package_id, signer, kind, body):
-    return fields(b'flare-package-signature-v3', struct.pack('<I', VERSION),
+    return fields(b'flare-package-signature-v4', struct.pack('<I', VERSION),
                   package_id, signer, struct.pack('<I', kind), body)
 
 
@@ -85,9 +85,12 @@ class Publisher:
 
 
 def resource_roles(index):
-    """Classify every payload span from its actual consumer, rejecting ambiguity."""
+    """Classify every payload span from its actual consumer, rejecting ambiguity.
+
+    Returns (kind, owner, span) for each span: owner is its rank, or None for what every rank shares.
+    """
     resources = []
-    for rank in index.ranks:
+    for owner, rank in enumerate(index.ranks):
         roles = {}
         for kind, names in (
             (2, [m.file for m in rank.modules] + [g.resource for g in rank.graphs]),
@@ -100,10 +103,10 @@ def resource_roles(index):
                 roles[name] = kind
         if set(roles) != set(rank.resources):
             raise ValueError('unclassified package resource')
-        resources.extend((roles[name], span) for name, span in rank.resources.items())
-    resources.extend((3, asset.payload) for asset in index.assets)
-    resources.extend((4, span) for table in index.engram.tables for span in (table.weights, table.scales))
-    ranges = sorted((s.offset, s.nbytes) for _, s in resources)
+        resources.extend((roles[name], owner, span) for name, span in rank.resources.items())
+    resources.extend((3, None, asset.payload) for asset in index.assets)
+    resources.extend((4, None, span) for table in index.engram.tables for span in (table.weights, table.scales))
+    ranges = sorted((s.offset, s.nbytes) for _, _, s in resources)
     end = 0
     for offset, size in ranges:
         if size <= 0 or offset < end:
@@ -113,31 +116,47 @@ def resource_roles(index):
 
 
 class Protection:
-    """Transform a final rank assembly and build its signed envelope."""
+    """Transform a final rank assembly and build its signed envelope.
+
+    What every rank shares (the index without its bundles, assets and tables) is signed once, and
+    each rank's bundle, executables, supporting resources and stored data separately, so a host
+    holding one rank's bytes verifies that rank completely.
+    """
 
     def __init__(self, index, payload, publisher, stage):
         from .package_file import align
         self.publisher = publisher
         self.package_id = os.urandom(32)
         self.index = index
-        self.code, self.support = proto.ResourceCatalog(), proto.ResourceCatalog()
+        # Parts in stored-data order: what every rank shares, then each rank.
+        parts = [None, *range(len(index.ranks))]
+        self.code = {owner: proto.ResourceCatalog() for owner in parts[1:]}
+        self.support = {owner: proto.ResourceCatalog() for owner in parts}
         roles = resource_roles(index)
-        by_offset = {span.offset: (kind, span) for kind, span in roles}
+        by_offset = {span.offset: (kind, owner, span) for kind, owner, span in roles}
         if set(by_offset) != {entry[0] for entry in payload}:
             raise ValueError('publication ranges differ from classified resources')
+
+        def order(entry):
+            kind, owner, _ = by_offset[entry[0]]
+            return (kind != 4, parts.index(owner) if kind == 4 else 0, entry[0])
+
         self.payload = []
         cursor = 0
         data_end = 0
-        # Stored data precedes execution and frontend resources, including under TP.
-        for destination, source, source_offset, size in sorted(payload, key=lambda p: (by_offset[p[0]][0] != 4, p[0])):
-            kind, span = by_offset[destination]
+        firsts = {}
+        # Stored data precedes execution and frontend resources, each part's contiguous.
+        for destination, source, source_offset, size in sorted(payload, key=order):
+            kind, owner, span = by_offset[destination]
             if size != span.nbytes:
                 raise ValueError('resource length differs from publication range')
             cursor = align(cursor)
             span.offset = cursor
+            if kind == 4:
+                firsts.setdefault(owner, cursor)
             if kind == 2:
                 encrypted = Path(stage) / f'executable-{cursor}'
-                resource = self.code.resources.add(offset=cursor, plain_bytes=size)
+                resource = self.code[owner].resources.add(offset=cursor, plain_bytes=size)
                 cipher = AESGCM(resource_key(publisher.public_key, self.package_id, cursor, publisher.namespace))
                 with Path(source).open('rb') as contents, encrypted.open('xb') as output:
                     contents.seek(source_offset)
@@ -168,25 +187,53 @@ class Protection:
                             raise ValueError('truncated supporting resource')
                         digest.update(block)
                         remaining -= len(block)
-                self.support.resources.add(offset=cursor, plain_bytes=size,
-                                           stored_bytes=size, sha256=[digest.digest()])
+                self.support[owner].resources.add(offset=cursor, plain_bytes=size,
+                                                  stored_bytes=size, sha256=[digest.digest()])
             self.payload.append((cursor, source, source_offset, size))
             cursor += size
             if kind == 4:
                 data_end = cursor
         # Include alignment padding up to the first non-data resource.
-        self.data_end = min((s.offset for k, s in roles if k != 4), default=data_end)
+        self.data_end = min((s.offset for k, _, s in roles if k != 4), default=data_end)
+        # Each part's stored data runs from its first byte to the next part's, or the end of stored data.
+        self.ranges = dict.fromkeys(parts, (0, 0))
+        starts = sorted((start, owner) for owner, start in firsts.items())
+        for (start, owner), (end, _) in zip(starts, starts[1:] + [(self.data_end, None)]):
+            self.ranges[owner] = (start, end - start)
+        self.hashes = {owner: hashlib.sha256() for owner in parts}
 
-    def envelope(self, data_digest):
-        bodies = [self.code.SerializeToString(deterministic=True),
-                  self.support.SerializeToString(deterministic=True),
-                  proto.StoredData(nbytes=self.data_end, sha256=data_digest).SerializeToString(deterministic=True)]
-        metadata = proto.PublisherMetadata(index=self.index, namespace=self.publisher.namespace,
-            official_source=self.publisher.official_source, development=self.publisher.development,
-            group_hashes=[hashlib.sha256(body).digest() for body in bodies])
-        bodies.insert(0, metadata.SerializeToString(deterministic=True))
+    def absorb(self, position, block):
+        """Hash payload bytes written at `position`, in order, into the stored-data part holding them."""
+        for owner, (start, nbytes) in self.ranges.items():
+            low, high = max(start, position), min(start + nbytes, position + len(block))
+            if low < high:
+                self.hashes[owner].update(block[low - position:high - position])
+
+    def envelope(self, final=False):
+        """The signed envelope; before every payload byte is absorbed, one of the same size."""
+        def stored(owner):
+            offset, nbytes = self.ranges[owner]
+            digest = self.hashes[owner].digest() if final else bytes(32)
+            return proto.StoredData(offset=offset, nbytes=nbytes, sha256=digest)
+
         result = proto.ProtectedIndex(version=VERSION, package_id=self.package_id, signer=self.publisher.fingerprint)
-        for kind, body in enumerate(bodies, 1):
+
+        def sign(group, kind, body):
             signature = self.publisher.key.sign(signature_message(self.package_id, result.signer, kind, body))
-            result.groups.add(kind=kind, body=body, signature=signature)
+            group.add(kind=kind, body=body, signature=signature)
+
+        shared = proto.ModelIndex()
+        shared.CopyFrom(self.index)
+        del shared.ranks[:]
+        bodies = [self.support[None].SerializeToString(deterministic=True),
+                  stored(None).SerializeToString(deterministic=True)]
+        metadata = proto.PublisherMetadata(index=shared, namespace=self.publisher.namespace,
+            official_source=self.publisher.official_source, development=self.publisher.development,
+            group_hashes=[hashlib.sha256(body).digest() for body in bodies], ranks=len(self.index.ranks))
+        bodies.insert(0, metadata.SerializeToString(deterministic=True))
+        for kind, body in enumerate(bodies, 1):
+            sign(result.groups, kind, body)
+        for rank, bundle in enumerate(self.index.ranks):
+            sign(result.ranks, 4, proto.RankProtection(rank=rank, bundle=bundle, executables=self.code[rank],
+                support=self.support[rank], data=stored(rank)).SerializeToString(deterministic=True))
         return result.SerializeToString(deterministic=True)

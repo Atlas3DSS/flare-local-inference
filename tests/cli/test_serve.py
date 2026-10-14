@@ -103,7 +103,7 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setattr(serve, "resolve_model", lambda configuration, name: ResolvedModel(recipe, model.checkpoint))
     monkeypatch.setattr(runtime, "binary", lambda: Path("/native/flare"))
     monkeypatch.setattr(runtime, "package_key", lambda model, plan, no_compile:
-        str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.mixed_prefill, no_compile)))
+        str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap, plan.mixed_prefill, no_compile)))
 
     def export_model(prepared, images, storage, path, *, options, publisher, progress):
         assert prepared is calls["prepared"] and not prepared.closed
@@ -184,6 +184,27 @@ def test_package_cache_key_includes_mixed_capture():
                         reserve_bytes=0, speculation=model.recipe.speculation)
     assert runtime.package_key(model, plan, False) != runtime.package_key(
         model, replace(plan, mixed_prefill=True), False)
+
+
+def test_serialized_branches_reach_the_plan_and_the_startup_line(host, capsys):
+    assert run("qwen3.8-flash") == 0
+    assert host["plan"].stream_overlap and "branches serialized" not in capsys.readouterr().err
+    assert run("qwen3.8-flash", "--no-stream-overlap") == 0
+    assert host["plan"].stream_overlap is False
+    assert "branches serialized" in capsys.readouterr().err
+
+
+def test_package_cache_keys_distinguish_serialized_branches():
+    model = resolve("glm-5.3-flash")
+    sparks = tuple(planning.Gpu(index, "NVIDIA GB10", f"GPU-{index}", 121 * GIB, 110 * GIB, (12, 1))
+                   for index in range(2))
+    settings = dict(concurrency=4, reserve_bytes=0, speculation=model.recipe.speculation)
+    overlapped = planning.fit(model.recipe, model.checkpoint, sparks, **settings)
+    serial = planning.fit(model.recipe, model.checkpoint, sparks, stream_overlap=False, **settings)
+    assert overlapped.stream_overlap and not serial.stream_overlap
+    assert runtime.package_key(model, overlapped, False) != runtime.package_key(model, serial, False)
+    assert runtime.package_key(model, overlapped, False) == runtime.package_key(
+        model, replace(serial, stream_overlap=True), False)
 
 
 @pytest.mark.parametrize("reserve", [0, 2 * GIB])

@@ -648,14 +648,8 @@ def _roce_transport(message, transport):
     message.counters_address = transport["counters"]["address"]
     message.counters_bytes = transport["counters"]["nbytes"]
     message.slot_bytes, message.pipe_bytes = transport["slot_bytes"], transport["pipe_bytes"]
+    message.varlen_bytes = transport.get("varlen_bytes", 0)
     message.ctrl_offset = transport["ctrl_offset"]
-    message.hcas.extend(transport["hca_names"])
-    message.gid_index, message.traffic_class = transport["gid_index"], transport["traffic_class"]
-    message.rails = transport["rails"]
-    for links in transport["routes"]:
-        route = message.routes.add()
-        for local, remote in links:
-            route.links.add(local=local, remote=remote)
 
 
 def export_model(prepared, images, storage, path, *, options, progress=None, publisher=None, bundle_only=False):
@@ -717,6 +711,12 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
                      f"serving context {current.value}")
         if memory.value != 2 or context.value != current.value:
             raise ValueError(f"external allocation {address:#x}+{nbytes} is not device memory in the serving context")
+    # A serving process's own CUDA context occupies these addresses on an integrated GPU, so it could
+    # not restore an allocation there.
+    if low := storage.low_allocations(dict(outside)):
+        raise RuntimeError("external device allocations lie below "
+                           f"{storage.EXTERNAL_FLOOR:#x}, where a serving context's storage lies: "
+                           + ", ".join(f"{address:#x}+{size}" for address, size in low))
     allocations = [Allocation(f"device-{index}", mapping.address, mapping.nbytes,
                              alignment=storage.granularity, preserve_address=True)
                    for index, mapping in enumerate(sorted(mappings.values(), key=lambda m: m.address))]

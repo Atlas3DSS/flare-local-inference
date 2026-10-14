@@ -252,7 +252,12 @@ class PreparedLayer:
             activation_mode="auto",
         )
         self.concurrent_shared = None
-        if mode == "decode" and s.ffn_hc.normalized.shape[0] == 1 and self.router.text is not None:
+        if (
+            mode == "decode"
+            and s.ffn_hc.normalized.shape[0] == 1
+            and self.router.text is not None
+            and workspace.overlap
+        ):
             self.concurrent_shared = ConcurrentSharedExpert(
                 self.shared,
                 parallel_plans=(self.router_projection.plan, self.router.text.plan, self.experts.plan),

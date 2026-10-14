@@ -19,6 +19,7 @@ fn engine(active: usize, speculative: bool) -> RequestScheduler {
             page_tokens: 64,
             vision: crate::model::VisionCapabilities::disabled(),
             draft_pages_per_request: 0,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )
@@ -49,6 +50,7 @@ fn add(s: &mut RequestScheduler, id: u32, prompt: usize, output: u32) -> Request
         max_new_tokens: output,
         grammar_constrained: false,
         host_stops: false,
+        growable_output: false,
     })
     .unwrap()
 }
@@ -998,6 +1000,7 @@ fn interactive_engine(active: usize, speculative: bool) -> RequestScheduler {
             page_tokens: 64,
             vision: crate::model::VisionCapabilities::disabled(),
             draft_pages_per_request: 0,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )
@@ -1525,6 +1528,7 @@ fn prerequisite_cohort_accounts_for_ready_batch_mates() {
             max_new_tokens: 128,
             grammar_constrained: false,
             host_stops: false,
+            growable_output: false,
         })
         .unwrap();
     for handle in [decode, prefill] {
@@ -2036,7 +2040,8 @@ fn mixed_cancellation_keeps_other_rows_live_and_retires_pages_only_after_complet
             conditioning: vec![],
             max_new_tokens: 128,
             grammar_constrained: false,
-            host_stops: false
+            host_stops: false,
+            growable_output: false,
         })
         .is_err()
     );

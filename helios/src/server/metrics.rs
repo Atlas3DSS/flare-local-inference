@@ -68,6 +68,7 @@ pub(super) struct Metrics {
     reused_tokens: AtomicU64,
     snapshot_publications: AtomicU64,
     snapshot_evictions: AtomicU64,
+    preemptions: AtomicU64,
     system_checkpoints: AtomicU64,
     prompt_checkpoints: AtomicU64,
     active_requests: AtomicU64,
@@ -232,6 +233,7 @@ impl Metrics {
             (&self.reused_tokens, stats.reused_tokens),
             (&self.snapshot_publications, stats.snapshot_publications),
             (&self.snapshot_evictions, stats.snapshot_evictions),
+            (&self.preemptions, stats.preemptions),
             (&self.system_checkpoints, stats.system_checkpoints),
             (&self.prompt_checkpoints, stats.prompt_checkpoints),
             (&self.active_requests, stats.active_requests as u64),
@@ -451,6 +453,11 @@ impl Metrics {
                 "snapshot_evictions_total",
                 "Checkpoints logically evicted; GPU retirement may still be pending.",
                 &self.snapshot_evictions,
+            ),
+            (
+                "preemptions_total",
+                "Requests without an output limit that yielded their KV pages and were readmitted.",
+                &self.preemptions,
             ),
             (
                 "host_cache_lookups_total",

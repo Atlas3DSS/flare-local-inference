@@ -259,7 +259,8 @@ class PreparedGDN:
                 workspace=projection_workspace,
             )
             self.parallel_projections = None
-            if mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena):
+            if (mode == "decode" and self.tokens <= 16 and isinstance(projection_workspace, ScratchArena)
+                    and projection_workspace.overlap):
                 from ignition.components.linear import ParallelProjections
 
                 self.parallel_projections = ParallelProjections(

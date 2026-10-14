@@ -2,20 +2,27 @@ syntax = "proto3";
 package flare.runtime;
 import "google/protobuf/struct.proto";
 
-// Signed bodies retain their exact wire bytes for verification.
+// Signed bodies retain their exact wire bytes for verification. What every rank shares is signed
+// once and each rank's resources separately, so a host serving one rank verifies it alone.
 message ProtectedIndex {
   uint32 version = 1;
   bytes package_id = 2;
   bytes signer = 3;
+  // Kinds 1 to 3 in order: PublisherMetadata, the shared supporting ResourceCatalog, and the
+  // shared StoredData.
   repeated SignedGroup groups = 4;
+  // Kind 4, one per rank in rank order: that rank's RankProtection.
+  repeated SignedGroup ranks = 5;
 }
 message SignedGroup { uint32 kind = 1; bytes body = 2; bytes signature = 3; }
 message PublisherMetadata {
+  // What every rank shares; each rank's bundle is in its RankProtection, so `ranks` is empty.
   ModelIndex index = 1;
   string namespace = 2;
   string official_source = 3;
   repeated bytes group_hashes = 4;
   bool development = 5;
+  uint32 ranks = 6;
 }
 message ResourceCatalog { repeated ProtectedResource resources = 1; }
 message ProtectedResource {
@@ -24,7 +31,16 @@ message ProtectedResource {
   uint64 plain_bytes = 3;
   repeated bytes sha256 = 4;
 }
-message StoredData { uint64 nbytes = 1; bytes sha256 = 2; }
+// One contiguous payload range of stored allocations or tables, alignment padding included.
+message StoredData { uint64 nbytes = 1; bytes sha256 = 2; uint64 offset = 3; }
+// One rank's bundle, its encrypted executables, its supporting resources and its stored data.
+message RankProtection {
+  uint32 rank = 1;
+  BundleIndex bundle = 2;
+  ResourceCatalog executables = 3;
+  ResourceCatalog support = 4;
+  StoredData data = 5;
+}
 
 message ModelIndex {
   uint32 version = 1;
@@ -155,15 +171,12 @@ message RoceTransport {
   uint64 slot_bytes = 8;
   uint64 pipe_bytes = 9;
   uint64 ctrl_offset = 10;
-  repeated string hcas = 11;
-  uint32 gid_index = 12;
-  uint32 traffic_class = 13;
-  uint32 rails = 14;
-  // One entry per rank, empty for this rank: the (local, remote) HCA indexes of each rail.
-  repeated RoceRoute routes = 15;
+  // Formerly the preparing hosts' devices, GID index, traffic class, rails and routes. Each
+  // serving host discovers its own fabric instead.
+  reserved 11 to 15;
+  // Per-rank capacity of the variable-length all-gather area; 0 without one (proxy ABI 7).
+  uint64 varlen_bytes = 16;
 }
-message RoceRoute { repeated RoceLink links = 1; }
-message RoceLink { uint32 local = 1; uint32 remote = 2; }
 message GraphIndex {
   string name = 1;
   uint64 flags = 2;

@@ -161,6 +161,7 @@ impl RequestScheduler {
         if request.pending > 0
             && !(request.phase == RequestPhase::Decode
                 && self.speculative_widths.is_empty()
+                && !self.capabilities.host_decode_tokens
                 && request.pending < 2
                 && !request.grammar_constrained
                 && !request.host_stops)
@@ -171,6 +172,7 @@ impl RequestScheduler {
             request.scheduled_consumed < self.limits.max_sequence_tokens as u64
                 && request.generated_tokens as usize + request.pending
                     < request.max_new_tokens as usize
+                && self.fits_next_rounds(request)
         } else {
             true
         }

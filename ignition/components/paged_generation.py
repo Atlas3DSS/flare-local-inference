@@ -1,7 +1,5 @@
 """Collective text execution and request completion."""
 
-from copy import copy
-
 from ignition.components.collectives import PreparedAllReduce
 from ignition.components.sampling import PreparedCompletion, PreparedSampling
 from ignition.components.state import save_hidden
@@ -49,8 +47,6 @@ class PreparedGeneration:
             else PreparedCompletion(*args)
         )
         self.completion.prepare()
-        self.peer_completion = PreparedCompletion(*args)
-        self.peer_completion.prepare()
         self.compilation_variant = (
             "sample" if batch.shard.rank == 0 or self.replicated_sampling else "consume"
         )
@@ -67,15 +63,6 @@ class PreparedGeneration:
                 name=name + ".context",
                 workspace=workspace,
             )
-
-    def compilation_variants(self):
-        if self.replicated_sampling:
-            return {"sample": self}
-        peer = copy(self)
-        peer.batch = copy(self.batch)
-        peer.batch.accept_unsampled = True
-        peer.completion = self.peer_completion
-        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.batch.begin(self.validation(self.batch.validate()))

@@ -246,8 +246,13 @@ impl NativeModel {
         packages: &mut [Package],
         progress: &StartupProgress,
         active: usize,
+        agree: super::model::CacheAgreement<'_>,
+        offload_bytes: u64,
     ) -> Result<()> {
-        let reserve = headroom(&self.server_config)?;
+        // The host prefix store registers and streams after the caches are backed.
+        let reserve = headroom(&self.server_config)?
+            .checked_add(offload_bytes)
+            .ok_or_else(|| invalid("prefix cache headroom overflows the device budget"))?;
         let page_tokens = self.server_config["page_tokens"]
             .as_u64()
             .ok_or_else(|| invalid("model requires physical page geometry"))?;
@@ -283,8 +288,19 @@ impl NativeModel {
             };
             available.push(budget(free, total, reserve, rank.integrated));
         }
-        let (rows, pages, snapshots) =
+        let (local_rows, local_pages, _) =
             capacities(packages, &available, active as u64, width, page_tokens)?;
+        // Fewer pages only shrink KV, and fewer rows only the snapshot slots aliased into it, so
+        // the smallest capacity any rank can back fits every rank. Snapshot rows need no
+        // dedicated backing; the alias layout below rejects rows the agreed pages cannot back.
+        let (rows, pages) = agree((local_rows, local_pages))?;
+        let execution = 1 + active as u64 * width;
+        if rows > local_rows || pages > local_pages || rows < execution {
+            return Err(invalid(
+                "ranks agreed on a cache capacity this rank cannot back",
+            ));
+        }
+        let snapshots = rows - execution;
         // Scheduler page ids count the model contract's tokens per page, which
         // exceeds the physical page when pages are sharded across ranks.
         let logical_page_tokens = self.server_config["model_contract"]["page_tokens"]

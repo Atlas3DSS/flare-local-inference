@@ -111,7 +111,7 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Check the complete stored allocation/table region; `run` only | off |
+| `--verify-weights` | Check the stored allocation and table ranges of the ranks served; `run` only | off |
 
 Advanced flags appear in their own section of `--help`. Recipe values apply when flags are omitted; explicit flags take precedence.
 
@@ -124,12 +124,15 @@ Advanced flags appear in their own section of `--help`. Recipe values apply when
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
+| `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
 others. The `Select GPUs.` startup line states the settings in effect: `up to
 N draft tokens` while verification adapts, `exactly N draft tokens` when it is
-fixed.
+fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
+recorded in the plan and the package cache key; it changes graph scheduling,
+not kernel selection, so its packages share tuned kernels with overlapped ones.
 
 Both Ignition commands accept `--config`.
 
@@ -149,7 +152,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Verify the complete stored allocation/table region before CUDA initialization | off |
+| `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before CUDA initialization | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
 | `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
@@ -284,6 +287,7 @@ Configuration assigns each decision to one owner:
 | Serving driver margin | 64 MiB after graph upload |
 | Prefill chunk | Recipe default, overridden by `--prefill-chunk-size` |
 | Speculation | Recipe default, overridden by `--no-mtp` and the advanced speculation flags |
+| Branch overlap | Recipe declaration, serialized by `--no-stream-overlap` |
 | Weight format, KV precision, page geometry, kernel plans | Checkpoint metadata and recipe preparation |
 | Queue, frontend workers, event capacity, body limit | Concurrency and recipe image limits |
 | Compiler workers | Host CPU capacity |

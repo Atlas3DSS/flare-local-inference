@@ -69,6 +69,10 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
         control.close()
         if command == "serve":
             model.serve_rank(connection, rank=rank, world=len(config.devices))
+        elif isinstance(command, tuple) and command[0] == "direct":
+            from ignition.direct.executor import serve_peer
+
+            serve_peer(model, connection, **command[1])
         elif command != "close":
             raise RuntimeError("invalid prepared rank handoff")
         connection.close()
@@ -107,6 +111,21 @@ class PreparedRankGroup:
         except BaseException:  # noqa: BLE001 - Startup failure can strand peer collectives.
             traceback.print_exc()
             self.supervisor.abort("native rank-group startup failed")
+
+    def start_direct(self, *, eager):
+        """Hand every peer to Ignition's diagnostic step loop; returns the sockets that carry its steps.
+
+        Rank zero then sends each step it decides over these sockets, and every
+        rank executes the same steps in order. Rank zero sends the loop's stop
+        message before closing the group.
+        """
+        if self._started or self._closed:
+            raise RuntimeError("prepared rank group has already been consumed or closed")
+        for control in self.controls:
+            control.send(("direct", {"eager": eager}))
+            control.close()
+        self._started = True
+        return list(self.connections)
 
     def close(self):
         if self._closed:

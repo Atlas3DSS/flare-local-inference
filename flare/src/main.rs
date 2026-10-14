@@ -82,7 +82,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut progress = StartupProgress::stderr();
     let phase = progress.phase("Verify package", None);
-    let package = VerifiedPackage::open(&root, &trust::publishers(&args.publisher_keys)?)?;
+    // A peer of a multi-host package holds only its rank's bytes, so it verifies that rank alone.
+    let package = VerifiedPackage::open(
+        &root,
+        &trust::publishers(&args.publisher_keys)?,
+        args.rank.filter(|&rank| rank != 0),
+    )?;
     let publisher = package.publisher().clone();
     phase.finish("signatures");
     let authorized = trust::authorize(package, &args, &mut progress)?;
@@ -115,6 +120,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(&agent::default_token_path()),
         )
         .map_err(|e| e.to_string())?;
+        // Peers keep only the bytes their rank reads, which verify that rank completely.
+        let shares = (1..world)
+            .map(|rank| flare_helios::runtime_package::rank_ranges(&authorized, rank))
+            .collect::<flare_helios::Result<Vec<_>>>()?;
         let phase = progress.phase("Start peer ranks", None);
         let peers = launch::start(
             &args.hosts,
@@ -124,15 +133,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &rank_options,
             &token,
             &publisher,
+            &shares,
         )
         .map_err(|e| e.to_string())?;
         phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));
         Some(peers)
     };
-    // SAFETY: The trusted package owners remain live until every rank drains.
-    let owner = unsafe { NativeModel::load(authorized, &local_devices, &options, &progress)? };
-    let cluster = match (owner.cluster().cloned(), rendezvous) {
-        (Some(cluster), Some(address)) => Some((cluster, address)),
+    // Ranks of a multi-host package join before loading, so every rank allocates the cache
+    // capacity they agree on.
+    let mut membership = match (
+        flare_helios::runtime_package::package_cluster(&authorized),
+        &rendezvous,
+    ) {
+        (Some((world, export_id)), Some(address)) => Some(cluster::join(
+            args.rank.unwrap_or(0),
+            world,
+            &export_id,
+            address,
+            &progress,
+        )?),
         (Some(_), None) => {
             return Err("a multi-host package requires --rendezvous HOST:PORT".into());
         }
@@ -141,11 +160,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (None, None) => None,
     };
-    if let Some((cluster, address)) = &cluster {
-        if cluster.rank != 0 {
-            return serve_peer(owner, cluster, address, progress);
+    // SAFETY: The trusted package owners remain live until every rank drains.
+    let owner = unsafe {
+        NativeModel::load_agreeing(
+            authorized,
+            &local_devices,
+            &options,
+            &progress,
+            &mut |local| match membership.as_mut() {
+                Some(membership) => membership.agree(local),
+                None => Ok(local),
+            },
+        )?
+    };
+    let cluster = match (owner.cluster().cloned(), membership, rendezvous) {
+        (Some(cluster), Some(membership), Some(address)) => Some((cluster, membership, address)),
+        (None, None, None) => None,
+        _ => return Err("the package's cluster differs from the rank that joined".into()),
+    };
+    let cluster = match cluster {
+        Some((cluster, cluster::Membership::Peer(stream), address)) => {
+            return serve_peer(owner, &cluster, stream, &address, progress);
         }
-    }
+        Some((cluster, cluster::Membership::Zero(streams), _)) => Some((cluster, streams)),
+        None => None,
+    };
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
     config["bind"] = args.bind.to_string().into();
@@ -176,11 +215,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn serve_peer(
     owner: NativeModel,
     cluster: &flare_helios::runtime_package::ClusterRank,
+    stream: flare_helios::execution::RankStream,
     address: &str,
     mut progress: StartupProgress,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = owner.manifests()?.remove(0);
-    let joined = cluster::peer(&owner, cluster, address, &progress)?;
+    let joined = cluster::peer(&owner, cluster, stream, &progress)?;
     manifest.collectives = Some(cluster::health(&joined.transport));
     progress.finish_animation();
     eprintln!(
@@ -210,7 +250,10 @@ fn serve<M: ModelContract>(
     owner: NativeModel,
     config: serde_json::Value,
     mut progress: StartupProgress,
-    cluster: Option<(flare_helios::runtime_package::ClusterRank, String)>,
+    cluster: Option<(
+        flare_helios::runtime_package::ClusterRank,
+        Vec<flare_helios::execution::RankStream>,
+    )>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
@@ -218,9 +261,9 @@ fn serve<M: ModelContract>(
     let mut manifests = owner.manifests()?;
     let mut manifest = manifests.remove(0);
     let mut transport = None;
-    let peers = match &cluster {
-        Some((cluster, address)) => {
-            let joined = cluster::rank_zero(&owner, cluster, address, &progress)?;
+    let peers = match cluster {
+        Some((_, streams)) => {
+            let joined = cluster::rank_zero(&owner, streams, &progress)?;
             manifest.collectives = Some(cluster::health(&joined.transport));
             transport = Some(joined.transport);
             Some(flare_helios::execution::RankPeers::Processes(

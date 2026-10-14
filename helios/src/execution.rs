@@ -7,6 +7,7 @@ mod ranks;
 pub mod rendezvous;
 #[cfg(feature = "roce")]
 pub mod roce;
+pub mod roce_fabric;
 mod threaded;
 pub use rank_stream::RankStream;
 pub use ranks::RankPeers;

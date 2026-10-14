@@ -122,6 +122,7 @@ impl ModelContract for DeepSeek4 {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }
@@ -197,8 +198,11 @@ impl ModelContract for DeepSeek4 {
         Ok(())
     }
     #[cfg(feature = "server")]
-    fn text_only(data: &PromptData) -> bool {
-        data.spans.is_empty()
+    fn prompt_metadata(data: &mut PromptData) -> crate::model::admission::PromptMetadataMut<'_> {
+        crate::model::admission::PromptMetadataMut {
+            positions: None,
+            vision_token_indices: Some(&mut data.vision_token_indices),
+        }
     }
     #[cfg(feature = "server")]
     type OutputConfig = output::OutputConfig;

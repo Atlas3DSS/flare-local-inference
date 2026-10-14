@@ -5,9 +5,14 @@
 //! into its flare cache, and asks it to run a rank; the agent streams the rank's output back and
 //! stops the rank when rank zero's connection closes. The agent runs only executables that arrived
 //! this way, verified against their SHA-256 names, and passes arguments without a shell.
+//!
+//! A host keeps only the package bytes its rank reads, at their offsets in a sparse file of the
+//! package's length, and only what rank zero last sent: receiving an executable or package removes
+//! the others of its kind that no connected rank zero uses.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -24,6 +29,9 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// The agent's default port on every host.
 pub const PORT: u16 = 29900;
 const PROTOCOL: &[u8] = b"flare-agent-1";
+/// Sent with the token check's OK. Version 2 accepts packages as byte ranges; version 1 agents
+/// send nothing there.
+const VERSION: u8 = 2;
 
 // Frame tags.
 const NONCE: u8 = 1;
@@ -166,15 +174,16 @@ fn serve_on(listener: TcpListener, token: Vec<u8>, cache: PathBuf) -> Result<(),
         cache.display()
     );
     let (token, cache) = (Arc::new(token), Arc::new(cache));
+    let pins = Pins::default();
     for connection in listener.incoming() {
         let Ok(stream) = connection else { continue };
-        let (token, cache) = (token.clone(), cache.clone());
+        let (token, cache, pins) = (token.clone(), cache.clone(), pins.clone());
         thread::spawn(move || {
             let peer = stream
                 .peer_addr()
                 .map(|a| a.to_string())
                 .unwrap_or_default();
-            if let Err(error) = session(stream, &token, &cache) {
+            if let Err(error) = session(stream, &token, &cache, &pins) {
                 eprintln!("{peer}: {error}");
             }
         });
@@ -182,7 +191,53 @@ fn serve_on(listener: TcpListener, token: Vec<u8>, cache: PathBuf) -> Result<(),
     Ok(())
 }
 
-fn session(mut stream: TcpStream, token: &[u8], cache: &Path) -> Result<(), Failure> {
+/// Cache entries that connected rank zeros hold or run, with their connection counts.
+type Pins = Arc<Mutex<HashMap<PathBuf, usize>>>;
+
+/// One connection's pinned entries, released when the connection ends.
+struct Pinned {
+    pins: Pins,
+    paths: Vec<PathBuf>,
+}
+
+impl Pinned {
+    fn pin(&mut self, path: PathBuf) {
+        *self.pins.lock().unwrap().entry(path.clone()).or_default() += 1;
+        self.paths.push(path);
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        let mut pins = self.pins.lock().unwrap();
+        for path in &self.paths {
+            if let Some(count) = pins.get_mut(path) {
+                *count -= 1;
+                if *count == 0 {
+                    pins.remove(path);
+                }
+            }
+        }
+    }
+}
+
+/// Remove a cache directory's entries that no connection pins, leaving transfers in progress.
+fn evict(directory: &Path, pins: &Pins) -> Result<(), Failure> {
+    let pins = pins.lock().unwrap();
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        let hidden = path
+            .file_name()
+            .is_none_or(|name| name.to_string_lossy().starts_with('.'));
+        if !hidden && !pins.contains_key(&path) {
+            fs::remove_file(&path)?;
+            eprintln!("removed superseded {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn session(mut stream: TcpStream, token: &[u8], cache: &Path, pins: &Pins) -> Result<(), Failure> {
     stream.set_nodelay(true)?;
     let mut nonce = [0u8; 32];
     File::open("/dev/urandom")?.read_exact(&mut nonce)?;
@@ -201,8 +256,12 @@ fn session(mut stream: TcpStream, token: &[u8], cache: &Path) -> Result<(), Fail
         let _ = write_frame(&mut stream, ERROR, b"agent token mismatch");
         return Err("refused a client without the cluster token".into());
     }
-    write_frame(&mut stream, OK, &[])?;
+    write_frame(&mut stream, OK, &[VERSION])?;
     stream.set_read_timeout(None)?;
+    let mut pinned = Pinned {
+        pins: pins.clone(),
+        paths: Vec::new(),
+    };
     loop {
         let (tag, body) = match read_frame(&mut stream) {
             Ok(frame) => frame,
@@ -210,8 +269,18 @@ fn session(mut stream: TcpStream, token: &[u8], cache: &Path) -> Result<(), Fail
         };
         let request: serde_json::Value = serde_json::from_slice(&body)?;
         let result = match tag {
-            HAVE => have(cache, &request).map(|present| vec![present as u8]),
-            PUT => put(cache, &mut stream, &request).map(|_| Vec::new()),
+            HAVE => have(cache, &request).map(|held| {
+                if let Some(path) = &held {
+                    pinned.pin(path.clone());
+                }
+                vec![held.is_some() as u8]
+            }),
+            PUT => put(cache, &mut stream, &request).and_then(|path| {
+                // The newest entry of its kind replaces those no connection uses.
+                let directory = path.parent().unwrap().to_owned();
+                pinned.pin(path);
+                evict(&directory, pins).map(|_| Vec::new())
+            }),
             RUN => return run(cache, stream, &request),
             _ => Err(format!("unknown agent request {tag}").into()),
         };
@@ -231,37 +300,78 @@ fn field<'a>(request: &'a serde_json::Value, name: &str) -> Result<&'a str, Fail
         .ok_or_else(|| format!("agent request lacks {name}").into())
 }
 
-fn have(cache: &Path, request: &serde_json::Value) -> Result<bool, Failure> {
+/// The entry's path when the cache holds it at the requested size.
+fn have(cache: &Path, request: &serde_json::Value) -> Result<Option<PathBuf>, Failure> {
     let path = entry(
         cache,
         kind_directory(field(request, "kind")?)?,
         field(request, "name")?,
     )?;
     let size = request["size"].as_u64().ok_or("agent request lacks size")?;
-    Ok(fs::metadata(path).is_ok_and(|m| m.len() == size))
+    Ok(fs::metadata(&path)
+        .is_ok_and(|m| m.len() == size)
+        .then_some(path))
 }
 
-fn put(cache: &Path, stream: &mut TcpStream, request: &serde_json::Value) -> Result<(), Failure> {
+/// The byte ranges a transfer carries: the whole entry, or a package's ranges in increasing,
+/// disjoint order within its size.
+fn transfer_ranges(
+    kind: &str,
+    size: u64,
+    request: &serde_json::Value,
+) -> Result<Vec<(u64, u64)>, Failure> {
+    let Some(listed) = request.get("ranges").filter(|r| !r.is_null()) else {
+        return Ok(vec![(0, size)]);
+    };
+    if kind != "package" {
+        return Err("only packages arrive as byte ranges".into());
+    }
+    let mut ranges = Vec::new();
+    let mut end = 0;
+    for range in listed.as_array().ok_or("ranges must be a list")? {
+        let (Some(offset), Some(nbytes)) = (range[0].as_u64(), range[1].as_u64()) else {
+            return Err("each range is [offset, bytes]".into());
+        };
+        if offset < end || nbytes == 0 || offset.checked_add(nbytes).is_none_or(|e| e > size) {
+            return Err("package ranges must increase, stay disjoint and fit its size".into());
+        }
+        end = offset + nbytes;
+        ranges.push((offset, nbytes));
+    }
+    Ok(ranges)
+}
+
+fn put(
+    cache: &Path,
+    stream: &mut TcpStream,
+    request: &serde_json::Value,
+) -> Result<PathBuf, Failure> {
     let kind = field(request, "kind")?;
     let name = field(request, "name")?;
     let path = entry(cache, kind_directory(kind)?, name)?;
     let size = request["size"].as_u64().ok_or("agent request lacks size")?;
+    let ranges = transfer_ranges(kind, size, request)?;
     let partial = path.with_file_name(format!(".{name}.partial"));
     let mut output = File::create(&partial)?;
+    // Bytes outside the ranges stay holes, which occupy no disk.
+    output.set_len(size)?;
     let mut digest = Sha256::new();
-    let mut remaining = size;
     let mut block = vec![0u8; 16 << 20];
-    while remaining > 0 {
-        let count = stream.read(&mut block[..remaining.min(16 << 20) as usize])?;
-        if count == 0 {
-            fs::remove_file(&partial)?;
-            return Err(format!("{name}: transfer ended {remaining} bytes early").into());
+    for (offset, nbytes) in ranges {
+        output.seek(SeekFrom::Start(offset))?;
+        let mut remaining = nbytes;
+        while remaining > 0 {
+            let count = stream.read(&mut block[..remaining.min(16 << 20) as usize])?;
+            if count == 0 {
+                fs::remove_file(&partial)?;
+                return Err(format!("{name}: transfer ended {remaining} bytes early").into());
+            }
+            if kind == "binary" {
+                digest.update(&block[..count]);
+            }
+            output.write_all(&block[..count])?;
+            remaining -= count as u64;
         }
-        if kind == "binary" {
-            digest.update(&block[..count]);
-        }
-        output.write_all(&block[..count])?;
-        remaining -= count as u64;
     }
     output.sync_all()?;
     if kind == "binary" {
@@ -273,7 +383,7 @@ fn put(cache: &Path, stream: &mut TcpStream, request: &serde_json::Value) -> Res
         fs::set_permissions(&partial, fs::Permissions::from_mode(0o700))?;
     }
     fs::rename(&partial, &path)?;
-    Ok(())
+    Ok(path)
 }
 
 fn binary_name_from_digest(digest: &[u8]) -> String {
@@ -367,6 +477,7 @@ fn run(cache: &Path, stream: TcpStream, request: &serde_json::Value) -> Result<(
 pub struct Agent {
     host: String,
     stream: TcpStream,
+    version: u8,
 }
 
 impl Agent {
@@ -381,11 +492,17 @@ impl Agent {
         stream.set_nodelay(true)?;
         let nonce = expect(&mut stream, NONCE)?;
         write_frame(&mut stream, PROOF, &proof(token, &nonce))?;
-        expect(&mut stream, OK).map_err(|e| format!("{host}: {e}"))?;
+        let accepted = expect(&mut stream, OK).map_err(|e| format!("{host}: {e}"))?;
         Ok(Self {
             host: host.to_owned(),
             stream,
+            version: accepted.first().copied().unwrap_or(1),
         })
+    }
+
+    /// Whether the agent stores a package as the byte ranges its rank reads.
+    pub fn holds_ranges(&self) -> bool {
+        self.version >= 2
     }
 
     fn request(&mut self, tag: u8, request: serde_json::Value) -> Result<Vec<u8>, Failure> {
@@ -394,14 +511,29 @@ impl Agent {
     }
 
     /// Send `source` as cache entry `name` unless the host already holds one of the same size.
-    pub fn ensure(&mut self, kind: &str, name: &str, source: &Path) -> Result<bool, Failure> {
+    /// With `ranges`, as from [`flare_helios::runtime_package::rank_ranges`], the host receives
+    /// only those bytes of a package, at their offsets in a file of its full size.
+    pub fn ensure(
+        &mut self,
+        kind: &str,
+        name: &str,
+        source: &Path,
+        ranges: Option<&[(u64, u64)]>,
+    ) -> Result<bool, Failure> {
         let size = fs::metadata(source)?.len();
-        let request = serde_json::json!({"kind": kind, "name": name, "size": size});
+        let mut request = serde_json::json!({"kind": kind, "name": name, "size": size});
         if self.request(HAVE, request.clone())? == [1] {
             return Ok(false);
         }
+        if let Some(ranges) = ranges {
+            request["ranges"] = serde_json::json!(ranges);
+        }
         write_frame(&mut self.stream, PUT, &serde_json::to_vec(&request)?)?;
-        std::io::copy(&mut File::open(source)?, &mut self.stream)?;
+        let mut file = File::open(source)?;
+        for &(offset, nbytes) in ranges.unwrap_or(&[(0, size)]) {
+            file.seek(SeekFrom::Start(offset))?;
+            std::io::copy(&mut (&file).take(nbytes), &mut self.stream)?;
+        }
         expect(&mut self.stream, OK).map_err(|e| format!("{}: {e}", self.host))?;
         Ok(true)
     }
@@ -475,17 +607,17 @@ mod tests {
         let package = cache.with_extension("pkg");
         fs::write(&package, b"package bytes").unwrap();
         let mut agent = Agent::connect(&address, &token).unwrap();
-        assert!(agent.ensure("binary", &name, &script).unwrap());
-        assert!(!agent.ensure("binary", &name, &script).unwrap());
+        assert!(agent.ensure("binary", &name, &script, None).unwrap());
+        assert!(!agent.ensure("binary", &name, &script, None).unwrap());
         assert!(
             agent
-                .ensure("package", "export-1.safetensors", &package)
+                .ensure("package", "export-1.safetensors", &package, None)
                 .unwrap()
         );
         // A payload that does not hash to its name is refused.
         let mut liar = Agent::connect(&address, &token).unwrap();
         assert!(
-            liar.ensure("binary", "flare-000000000000000000000000", &script)
+            liar.ensure("binary", "flare-000000000000000000000000", &script, None)
                 .is_err()
         );
 
@@ -534,6 +666,70 @@ mod tests {
         for path in [&script, &package] {
             let _ = fs::remove_file(path);
         }
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_host_keeps_its_rank_bytes_sparsely_and_only_the_newest_package() {
+        use std::os::unix::fs::MetadataExt;
+
+        let cache = std::env::temp_dir().join(format!("flare-agent-ranges-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let token = b"0123456789abcdef0123456789abcdef".to_vec();
+        {
+            let (token, cache) = (token.clone(), cache.clone());
+            thread::spawn(move || serve_on(listener, token, cache));
+        }
+        let package = cache.with_extension("pkg");
+        let bytes: Vec<u8> = (0..(64u32 << 20)).map(|i| (i % 251) as u8).collect();
+        fs::write(&package, &bytes).unwrap();
+        let ranges = [(0, 4096), (40 << 20, 1 << 20)];
+        let mut agent = Agent::connect(&address, &token).unwrap();
+        assert!(agent.holds_ranges());
+        assert!(
+            agent
+                .ensure("package", "a-rank1", &package, Some(&ranges))
+                .unwrap()
+        );
+        let held = cache.join("packages/a-rank1");
+        let copy = fs::read(&held).unwrap();
+        assert_eq!(copy.len(), bytes.len());
+        for &(offset, nbytes) in &ranges {
+            let span = offset as usize..(offset + nbytes) as usize;
+            assert_eq!(copy[span.clone()], bytes[span]);
+        }
+        assert!(copy[8192..1 << 20].iter().all(|&b| b == 0));
+        // Holes occupy no disk: the copy's blocks cover its ranges, not its length.
+        assert!(fs::metadata(&held).unwrap().blocks() * 512 < 4 << 20);
+        // Ranges for an executable, or that overlap, are refused.
+        let mut other = Agent::connect(&address, &token).unwrap();
+        assert!(
+            other
+                .ensure("package", "bad", &package, Some(&[(0, 8192), (4096, 1)]))
+                .is_err()
+        );
+
+        // A new package replaces those no connected rank zero uses; this connection still uses a-rank1.
+        let mut second = Agent::connect(&address, &token).unwrap();
+        assert!(
+            second
+                .ensure("package", "b-rank1", &package, Some(&ranges))
+                .unwrap()
+        );
+        assert!(held.exists());
+        drop(agent);
+        let mut third = Agent::connect(&address, &token).unwrap();
+        // Disconnects release their pins as the agent notices them.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            third
+                .ensure("package", "c-rank1", &package, Some(&ranges))
+                .unwrap()
+        );
+        assert!(!held.exists() && cache.join("packages/b-rank1").exists());
+        let _ = fs::remove_file(&package);
         let _ = fs::remove_dir_all(&cache);
     }
 

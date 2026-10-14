@@ -25,6 +25,7 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )
@@ -44,6 +45,7 @@ fn spec(system: Option<usize>, prompt: usize, output: u32) -> RequestSpec {
         max_new_tokens: output,
         grammar_constrained: false,
         host_stops: false,
+        growable_output: false,
     }
 }
 fn run_step(s: &mut RequestScheduler) -> ScheduledPlan {

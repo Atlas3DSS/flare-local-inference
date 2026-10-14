@@ -44,13 +44,9 @@ pub struct RoceSpec {
     pub counters_bytes: u64,
     pub slot_bytes: u64,
     pub pipe_bytes: u64,
+    /// Per-rank capacity of the variable-length all-gather area (0 without one).
+    pub varlen_bytes: u64,
     pub ctrl_offset: u64,
-    pub hcas: Vec<String>,
-    pub gid_index: u32,
-    pub traffic_class: u32,
-    pub rails: usize,
-    /// One entry per rank, empty for this rank: the (local, remote) HCA indexes of each rail.
-    pub routes: Vec<Vec<(u32, u32)>>,
 }
 
 fn roce_spec(
@@ -67,22 +63,8 @@ fn roce_spec(
         counters_bytes: wire.counters_bytes,
         slot_bytes: wire.slot_bytes,
         pipe_bytes: wire.pipe_bytes,
+        varlen_bytes: wire.varlen_bytes,
         ctrl_offset: wire.ctrl_offset,
-        hcas: wire.hcas,
-        gid_index: wire.gid_index,
-        traffic_class: wire.traffic_class,
-        rails: wire.rails as usize,
-        routes: wire
-            .routes
-            .into_iter()
-            .map(|route| {
-                route
-                    .links
-                    .into_iter()
-                    .map(|l| (l.local, l.remote))
-                    .collect()
-            })
-            .collect(),
     };
     let within = |address: u64, nbytes: u64, memory: super::format::Memory| {
         package.allocations.iter().any(|a| {
@@ -95,22 +77,7 @@ fn roce_spec(
                 })
         })
     };
-    if !(2..=16).contains(&spec.world)
-        || spec.rank >= spec.world
-        || spec.routes.len() != spec.world
-        || !(1..=2).contains(&spec.rails)
-        || spec.hcas.is_empty()
-        || spec.routes.iter().enumerate().any(|(peer, links)| {
-            if peer == spec.rank {
-                !links.is_empty()
-            } else {
-                links.len() != spec.rails
-                    || links
-                        .iter()
-                        .any(|(local, _)| *local as usize >= spec.hcas.len())
-            }
-        })
-    {
+    if !(2..=16).contains(&spec.world) || spec.rank >= spec.world {
         return Err(invalid("RoCE transport geometry is inconsistent"));
     }
     if spec.region_bytes == 0
@@ -146,6 +113,22 @@ pub fn package_cluster(package: &AuthorizedPackage) -> Option<(usize, String)> {
         .map(|c| (c.world as usize, c.export_id.clone()))
 }
 
+/// The byte ranges of an authorized multi-host package, in offset order, that the host serving
+/// `rank` reads. A copy holding only these, at the same offsets and length, verifies completely
+/// and loads as that rank.
+pub fn rank_ranges(package: &AuthorizedPackage, rank: usize) -> Result<Vec<(u64, u64)>> {
+    if package.index.cluster.is_none() {
+        return Err(invalid(
+            "only a multi-host package has ranks for separate hosts",
+        ));
+    }
+    package.archive.rank_ranges(&package.index, rank)
+}
+
+/// Turns the continuation rows and KV pages this process can back into those it allocates. Ranks on
+/// separate hosts agree on the smallest any of them can back; it must not exceed what it is given.
+pub type CacheAgreement<'a> = &'a mut dyn FnMut((u64, u64)) -> Result<(u64, u64)>;
+
 impl NativeModel {
     /// # Safety
     /// All rank bundles must be trusted and obey the CUDA execution contract.
@@ -154,6 +137,20 @@ impl NativeModel {
         devices: &[i32],
         options: &LoadOptions,
         progress: &StartupProgress,
+    ) -> Result<Self> {
+        unsafe { Self::load_agreeing(authorized, devices, options, progress, &mut Ok) }
+    }
+
+    /// Load as [`NativeModel::load`] does, sizing caches through `agree`.
+    ///
+    /// # Safety
+    /// All rank bundles must be trusted and obey the CUDA execution contract.
+    pub unsafe fn load_agreeing(
+        authorized: AuthorizedPackage,
+        devices: &[i32],
+        options: &LoadOptions,
+        progress: &StartupProgress,
+        agree: CacheAgreement<'_>,
     ) -> Result<Self> {
         let device_labels = options.device_labels.as_deref().unwrap_or(devices);
         if device_labels.len() != devices.len() {
@@ -170,21 +167,20 @@ impl NativeModel {
         let cluster = match (descriptor.cluster.take(), options.cluster_rank) {
             (Some(c), rank) => {
                 let rank = rank.unwrap_or(0);
-                if !(2..=16).contains(&(c.world as usize))
-                    || descriptor.ranks.len() != c.world as usize
-                    || c.export_id.is_empty()
-                {
+                // Verification checked that the package holds every rank of its cluster.
+                if !(2..=16).contains(&(c.world as usize)) || c.export_id.is_empty() {
                     return Err(invalid(
                         "a multi-host package must hold every rank of its cluster",
                     ));
                 }
-                if rank >= descriptor.ranks.len() {
+                let position = archive.protection.position(rank)?;
+                if rank >= c.world as usize || position >= descriptor.ranks.len() {
                     return Err(invalid(format!(
                         "rank {rank} is outside the package's {} ranks",
-                        descriptor.ranks.len()
+                        c.world
                     )));
                 }
-                let bundle = descriptor.ranks.swap_remove(rank);
+                let bundle = descriptor.ranks.swap_remove(position);
                 descriptor.ranks = vec![bundle];
                 Some(ClusterRank {
                     world: c.world as usize,
@@ -520,7 +516,13 @@ impl NativeModel {
                 });
             }
             archive.release_page_cache();
-            model.allocate_caches(&mut packages, progress, active)?;
+            model.allocate_caches(
+                &mut packages,
+                progress,
+                active,
+                agree,
+                options.prefix_cache.device_headroom_bytes(devices.len()),
+            )?;
             model.grant_peer_access(&descriptor.peer_memory)?;
             model.prepare_offload(root, options, progress)?;
         }

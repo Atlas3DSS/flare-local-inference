@@ -304,7 +304,10 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         assert tensors.keys() == ["flare.metadata", "flare.payload"]
         from ignition.preparation import runtime_package_pb2 as proto
         protected = proto.ProtectedIndex.FromString(tensors.get_tensor("flare.metadata").tobytes())
-        assert proto.PublisherMetadata.FromString(protected.groups[0].body).index == index
+        shared = proto.PublisherMetadata.FromString(protected.groups[0].body).index
+        signed = proto.RankProtection.FromString(protected.ranks[0].body)
+        shared.ranks.add().CopyFrom(signed.bundle)
+        assert shared == index
     document = index.ranks[0]
     storage = {allocation.file for allocation in document.allocations if allocation.HasField("file")}
     storage_end = max((document.resources[key].offset + document.resources[key].nbytes for key in storage), default=0)
@@ -314,8 +317,7 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         with package_path.open("rb") as source:
             source.seek(start + span.offset)
             stored = source.read(span.nbytes)
-        catalog = proto.ResourceCatalog.FromString(protected.groups[1].body)
-        resource = next((item for item in catalog.resources if item.offset == span.offset), None)
+        resource = next((item for item in signed.executables.resources if item.offset == span.offset), None)
         if resource is None:
             return stored
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM

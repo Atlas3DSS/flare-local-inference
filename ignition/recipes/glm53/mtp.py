@@ -34,11 +34,12 @@ class MTPScratch:
     moe: MoeScratch | None
 
     @classmethod
-    def allocate(cls, tokens, world_size, blocks, mode, device, *, moe=True, context_ranks=1):
+    def allocate(cls, tokens, world_size, blocks, mode, device, *, moe=True, context_ranks=1, remote=False):
         def buffer(width):
             return torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
         return cls(buffer(4096), buffer(8192), buffer(4096), buffer(4096), buffer(4096), buffer(4096), buffer(4096),
-                   MLAScratch.allocate(tokens, 64 // world_size, blocks, mode, device, context_ranks=context_ranks),
+                   MLAScratch.allocate(tokens, 64 // world_size, blocks, mode, device, context_ranks=context_ranks,
+                                       remote=remote),
                    MoeScratch.allocate(tokens, world_size, device) if moe else None)
 
     @classmethod
@@ -203,7 +204,8 @@ class PreparedMTP:
         if scratch is None:
             scratch = MTPScratch.allocate(rows, weights.shard.world_size, metadata.indexed.block_table.shape[1],
                                           mode, device, moe=not cache_only,
-                                          context_ranks=1 if context is None else context.shards.world)
+                                          context_ranks=1 if context is None else context.shards.world,
+                                          remote=context is not None and context.remote)
         self.embedded, self.joined = scratch.embedded, scratch.joined
         self.residual, self.normalized = scratch.residual, scratch.normalized
         self.attention_output, self.mlp_output = scratch.attention_output, scratch.mlp_output

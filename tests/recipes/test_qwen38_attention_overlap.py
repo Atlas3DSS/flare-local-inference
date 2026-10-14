@@ -27,6 +27,33 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="explicit CUDA assignment required")
 
 
+def runs_concurrently(graph):
+    """Whether two nodes of a retained captured graph can run at once: unordered by any dependency path.
+
+    Redundant dependencies, such as an event wait on the stream that recorded it, are not concurrency.
+    """
+    raw = cuda.CUgraph(graph.raw_cuda_graph())
+    status, _, _, _, count = cuda.cuGraphGetEdges(raw)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, parents, children, _, _ = cuda.cuGraphGetEdges(raw, count)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, nodes, _ = cuda.cuGraphGetNodes(raw, cuda.cuGraphGetNodes(raw)[2])
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    edges = [(int(parent), int(child)) for parent, child in zip(parents, children, strict=True)]
+    waiting = {int(node): 0 for node in nodes}
+    for _, child in edges:
+        waiting[child] += 1
+    ready = [node for node, count in waiting.items() if not count]
+    while len(ready) == 1:
+        node = ready.pop()
+        for parent, child in edges:
+            if parent == node:
+                waiting[child] -= 1
+                if not waiting[child]:
+                    ready.append(child)
+    return bool(ready)
+
+
 @pytest.fixture(scope="module")
 def weights():
     from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
@@ -51,8 +78,10 @@ def weights():
 
 @pytest.mark.parametrize("rows", [1, 8])
 @pytest.mark.parametrize("compiled", [False, True, "aot"])
+# Without stream overlap the projections and selection run serially with the same b12x attention.
+@pytest.mark.parametrize("overlap", [True, False])
 @torch.no_grad()
-def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
+def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled, overlap):
     def compile_call(fn):
         if compiled == "aot":
             import io
@@ -67,7 +96,7 @@ def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
 
     module, weights = weights
     device = torch.device("cuda:0")
-    arena = ScratchArena(device)
+    arena = ScratchArena(device, overlap=overlap)
     source = torch.randn(rows, 2560, dtype=torch.bfloat16, device=device) * .1
     input_copy, output_copy = torch.zeros_like(source), torch.empty_like(source)
     scratch = QSAScratch.allocate(rows, device)
@@ -82,9 +111,10 @@ def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
         session.freeze()
         state = state.resize_pages_for_preparation(2)
         attention.rebind_pages_for_preparation(state)
-        assert attention.concurrent is not None
-        views = [attention.concurrent.workspace, *attention.concurrent.projection_workspaces]
-        assert all(a.data_ptr() + a.nbytes <= b.data_ptr() for a, b in pairwise(views))
+        assert (attention.concurrent is not None) is overlap and attention.sparse is None
+        if overlap:
+            views = [attention.concurrent.workspace, *attention.concurrent.projection_workspaces]
+            assert all(a.data_ptr() + a.nbytes <= b.data_ptr() for a, b in pairwise(views))
         concurrent, attention.concurrent = attention.concurrent, None
         try:
             serial = compile_call(lambda: attention(input_copy)) if compiled else lambda: attention(input_copy)
@@ -112,8 +142,10 @@ def test_selector_qkv_fork_join_and_rebound_cache(weights, rows, compiled):
         status, parents, children, _, _ = cuda.cuGraphGetEdges(raw, count)
         assert status == cuda.CUresult.CUDA_SUCCESS
         edges = [(int(a), int(b)) for a, b in zip(parents, children, strict=True)]
-        assert any(sum(parent == node for parent, _ in edges) >= 2 for node, _ in edges)
-        assert any(sum(child == node for _, child in edges) >= 2 for _, node in edges)
+        if overlap:
+            assert any(sum(parent == node for parent, _ in edges) >= 2 for node, _ in edges)
+            assert any(sum(child == node for _, child in edges) >= 2 for _, node in edges)
+        assert runs_concurrently(graph) is overlap
         metadata.main_block_table.copy_(torch.tensor([[1, 0]], dtype=torch.int32, device=device))
         metadata.compressed_block_table.copy_(metadata.main_block_table)
         metadata.raw_state_slot_ids.zero_()
