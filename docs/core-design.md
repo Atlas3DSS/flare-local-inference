@@ -950,6 +950,11 @@ ServerHandle.close()
 Request submission, cancellation, event consumption, and stats are internal
 Rust interfaces exposed through the native server, not Python methods.
 
+[Direct execution](direct-execution.md) is a separate diagnostic path,
+requested by the project owner, for reproducing model faults without Helios:
+Ignition schedules, packs and replays the prepared graphs from Python. It is
+never production serving.
+
 A normalized native request contains token IDs, generation parameters,
 positional/conditioning metadata, any preprocessed image inputs with their
 position-embedding interpolation tables and per-image sequence offsets, and an

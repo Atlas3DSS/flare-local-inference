@@ -45,6 +45,12 @@ def _parser() -> argparse.ArgumentParser:
     serving.add_argument("--prefix-cache-states", type=int, metavar="N",
                          help="advanced: cached request states kept resident for prefix reuse; fewer leave more"
                               " memory for KV pages (default: sized from free memory)")
+    diagnostics = serving.add_argument_group(
+        "diagnostics", "Ignition's direct execution reproduces model-level faults without Helios. It is a"
+                       " diagnostic and qualification path, not production serving.")
+    diagnostics.add_argument("--direct", action="store_true",
+                             help="schedule and pack each step in Python and replay its captured graph on every"
+                                  " rank, with no Helios scheduler or native server; non-streaming chat only")
     joining = command("join", serve.join, "run a peer rank for rank zero's rendezvous on another host")
     joining.add_argument("rendezvous", metavar="ADDR:PORT", help="rank zero's rendezvous address")
     joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")

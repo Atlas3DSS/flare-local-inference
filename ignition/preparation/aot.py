@@ -323,8 +323,8 @@ def _completed(pending):
         wait([item[-2].pending for item in pending], return_when=FIRST_COMPLETED)
 
 
-# Command-line, planning, and display sources do not change compiled forwards.
-_COMMAND_SOURCES = ('cli', 'errors.py', 'planning.py', 'progress.py')
+# Command-line, planning, display, and diagnostic direct-execution sources do not change compiled forwards.
+_COMMAND_SOURCES = ('cli', 'direct', 'errors.py', 'planning.py', 'progress.py')
 
 
 def _variant_compilers(selections):

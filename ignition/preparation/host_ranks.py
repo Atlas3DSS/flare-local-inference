@@ -12,7 +12,8 @@ Every peer holds two TCP connections to rank zero. The control connection
 carries the handshake, the preparation assignment, memory reports and the serve
 command, and stays open for the group's lifetime: losing it ends the process on
 the other side, because a rank cannot complete collectives without its peers.
-The executor connection carries Helios's per-step coordination.
+The executor connection carries Helios's per-step coordination, or rank zero's
+steps under Ignition's diagnostic direct execution (`ignition serve --direct`).
 """
 
 import fcntl
@@ -603,6 +604,20 @@ class HostRankGroup:
             print("flare: terminating tensor-parallel rank group: native startup failed", flush=True)
             os._exit(1)
 
+    def start_direct(self):
+        """Hand every peer to Ignition's diagnostic step loop; returns the executor connections that carry its steps.
+
+        Rank zero then sends each step it decides over these connections, and
+        every rank executes the same steps in order. Rank zero sends the loop's
+        stop message before closing the group.
+        """
+        if self._started or self._closed:
+            raise RuntimeError("prepared rank group has already been consumed or closed")
+        for control in self.controls:
+            send_object(control, ("direct", {}))
+        self._started = True
+        return self.connections
+
     def close(self):
         if self._closed:
             return
@@ -728,6 +743,14 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
             if progress is not None:
                 progress("serving")
             model.serve_rank(executor, rank=rank, world=world)
+            if progress is not None:
+                progress("drained")
+        elif isinstance(command, tuple) and command[0] == "direct":
+            from ignition.direct.executor import serve_peer as serve_direct
+
+            if progress is not None:
+                progress("executing rank zero's direct diagnostic steps")
+            serve_direct(model, executor, **command[1])
             if progress is not None:
                 progress("drained")
         elif command != "close":

@@ -354,6 +354,11 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
 - Keep graph executables, captured buffers, resource owners, and the CUDA
   context alive for their full native use. Model state and metadata must be
   explicit storage that Helios can manage without Python execution.
+- `ignition serve --direct` is the one Python execution path, a
+  diagnostic and qualification tool requested by the project owner for
+  reproducing model faults without Helios ([direct execution](docs/direct-execution.md)).
+  It is never production serving or a fallback, and only its explicit flag
+  selects it.
 
 ## No environment-variable switches
 
