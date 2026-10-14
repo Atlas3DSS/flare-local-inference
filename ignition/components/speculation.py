@@ -219,6 +219,8 @@ class PreparedSpeculativeDistributions:
         self.valid = torch.empty((batch, width), dtype=torch.bool, device=device)
         self.packed_top_k = torch.empty(batch * width, dtype=torch.int32, device=device)
         self.packed_top_p = torch.empty(batch * width, dtype=torch.float32, device=device)
+        from ignition.components.probability_normalization import PreparedProbabilityNormalization
+        self.normalization = PreparedProbabilityNormalization(self.probabilities, self.valid)
         self._prepared = False
 
     def prepare_scores(self):
@@ -249,7 +251,7 @@ class PreparedSpeculativeDistributions:
             words = self.grammar_masks[safe][:, prefix][:, :, self.vocab_ids // 32]
         allowed = ((words >> (self.vocab_ids % 32)) & 1).bool() | ~state.grammar_enabled[safe, None, None].bool()
         self.scores.copy_(torch.where(allowed, scores, -torch.inf))
-        torch.amax(self.scores, -1, out=self.maximum)
+        self.maximum.copy_(_sliced(self.scores).amax(-1).amax(-1))
         self.valid.copy_(live[:, None] & prefix_valid & torch.isfinite(self.maximum))
         if self.grammar_masks is not None:
             count = self.grammar_mask_count[safe, None]
@@ -282,14 +284,7 @@ class PreparedSpeculativeDistributions:
         flat = self.scores.view(-1, self.state.vocab_size)
         probabilities = filter_probabilities(flat, self.packed_top_k, self.packed_top_p,
             *self.library_scratch).view_as(self.probabilities)
-        maximum = probabilities.amax(-1, keepdim=True)
-        eligible = (probabilities > 0) & (probabilities >= maximum * params[:, None, 2:3])
-        filtered = torch.where(eligible, probabilities, 0)
-        mass = filtered.sum(-1, keepdim=True)
-        self.valid.logical_and_(torch.isfinite(mass.squeeze(-1)) & (mass.squeeze(-1) > 0))
-        normalized = filtered / mass.clamp_min(torch.finfo(torch.float32).tiny)
-        self.probabilities.copy_(torch.where(self.valid[:, :, None], normalized, (self.vocab_ids == 0).float()))
-        return self.probabilities
+        return self.normalization(probabilities, params)
 
 
 class PreparedStochasticVerification:

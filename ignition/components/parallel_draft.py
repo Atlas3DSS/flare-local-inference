@@ -29,6 +29,7 @@ class PreparedParallelDraftRound:
             shard=o.weights.shard,
             pool=o.pool,
             verification_width=w,
+            page_tokens=o.page_tokens,
         )
         self.validator.accept_unsampled = False
         self.validation = PreparedAllReduce(
@@ -101,7 +102,6 @@ class PreparedParallelDraftRound:
             (b, w - 1, o.requests.vocab_size), dtype=torch.float32, device=device
         )
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
-        self.confidence = torch.zeros((b, w - 1), dtype=torch.float32, device=device)
         self.seed, self.offset, self.base_offset, self.sampled = (
             torch.zeros_like(self.before) for _ in range(4)
         )
@@ -191,9 +191,6 @@ class PreparedParallelDraftRound:
                 )
                 if self.markov is not None:
                     self.logits[:, 0].add_(self.markov())
-                    self.confidence[:, i].copy_(
-                        self.markov.confidence(self.draft.head_hidden.view(b, block, -1)[:, i])
-                    )
                 self.offset.copy_(self.base_offset + 4 * i)
                 proposal()
                 self.drafts[:, i].copy_(self.sampled)

@@ -65,13 +65,13 @@ class PreparationConfig:
 
     def __post_init__(self):
         if (
-            len(self.devices) != 4
+            len(self.devices) not in (2, 4)
             or len(set(self.devices)) != len(self.devices)
             or any(d < 0 for d in self.devices)
         ):
-            raise ValueError("DeepSeek V4 Flash Vision preparation requires four distinct GPUs")
+            raise ValueError("DeepSeek V4 Flash Vision preparation requires two or four distinct GPUs")
         if not PAGE_TOKENS <= self.context <= 1048576 or self.context % PAGE_TOKENS:
-            raise ValueError("DeepSeek context must be 128-aligned in [128,1048576]")
+            raise ValueError("DeepSeek context must be 256-aligned in [256,1048576]")
         if not 512 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
             raise ValueError("prefill chunk size must be 64-aligned in [512,context] to hold an image span")
         request_capacity(self.max_active)
@@ -236,6 +236,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 markov_runtime=markov_collective,
                 coordinator=coordinator,
                 forwards=FORWARDS,
+                page_tokens=PAGE_TOKENS,
             )
 
     del manifest
@@ -288,6 +289,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         mode=mode,
                         shard=shard,
                         pool=pool,
+                        page_tokens=PAGE_TOKENS,
                         input_vocabulary=129285,
                         validate_prefill=vision_state.validate_prefill if mode == "prefill" else None,
                     )
@@ -385,6 +387,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         capacity=capacity,
                         admission_buffers=admission,
                         draft_state=enabled,
+                        page_tokens=PAGE_TOKENS,
                     )
                     fields = (
                         row_inputs

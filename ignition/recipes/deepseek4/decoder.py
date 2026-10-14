@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from ignition.components.collectives import PreparedAllReduce
+from ignition.components.dspark import PreparedFeedbackCapture
 from ignition.components.embedding import PreparedEmbedding
 from ignition.components.expert_overlap import ConcurrentSharedExpert
 from ignition.components.linear import UnquantizedProjection
@@ -21,8 +22,9 @@ from ignition.components.moe import PreparedRoutedExperts, PreparedRouter, Route
 from ignition.components.rms_norm import PreparedRMSNorm
 from ignition.components.rotary import CompressedRotary as Rotary
 from ignition.components.vocabulary import PreparedVocabularyProjection
+from ignition.preparation.scratch import GraphBufferPool
 
-from .attention import AttentionScratch, PreparedAttention
+from .attention import AttentionIndices, AttentionScratch, PreparedAttention
 
 
 @dataclass(frozen=True)
@@ -44,18 +46,24 @@ class Scratch:
     hidden: torch.Tensor
     local_logits: torch.Tensor
     logits: torch.Tensor
+    # Values retained through a forward, including speculative state awaiting acceptance.
+    buffers: GraphBufferPool
+    # Prefill commits each layer's state before the following layer reuses these intermediates.
+    layer_buffers: GraphBufferPool
 
     def rows(self, tokens, samples):
         def select(value, count):
             if isinstance(value, torch.Tensor):
                 return value[:count]
+            if isinstance(value, GraphBufferPool):
+                return value.cursor()
             if is_dataclass(value):
                 return type(value)(*(select(getattr(value, f.name), count) for f in fields(value)))
             raise TypeError("decoder scratch must contain tensors and tensor dataclasses")
 
         return type(self)(
             *(
-                select(
+                getattr(self, f.name) if f.name == "layer_buffers" else select(
                     getattr(self, f.name),
                     samples
                     if f.name in ("head_residual", "collapsed", "hidden", "local_logits", "logits")
@@ -88,12 +96,17 @@ class Scratch:
             zeros(samples, 4096),
             zeros(samples, 129280 // world),
             zeros(samples, 129280),
+            GraphBufferPool(device, chunk_bytes=min(64 << 20, max(1 << 20, tokens << 14))),
+            GraphBufferPool(device, chunk_bytes=min(64 << 20, max(1 << 20, tokens << 14))),
         )
 
 
 class PreparedRouting:
-    def __init__(self, weights, scratch, metadata, *, mode, session, name):
+    def __init__(self, weights, scratch, metadata, *, mode, session, name, buffers):
         self.weights, self.scratch, self.metadata = weights, scratch, metadata
+        self.prefill = mode == "prefill"
+        self.image_mask = (buffers.zeros(metadata.token_ids.shape, torch.bool)
+                           if mode == "prefill" and weights.token_experts is None else None)
         self.text = (
             None
             if weights.token_experts is not None
@@ -106,12 +119,17 @@ class PreparedRouting:
                 renormalize=True,
                 routed_scaling_factor=1.5,
                 correction_bias=weights.correction,
+                image_correction_bias=weights.vision_correction if self.image_mask is not None else None,
+                image_mask=self.image_mask,
             )
         )
         self.vision, self.vision_scratch = None, None
-        if mode == "prefill":
-            self.vision_scratch = RouterScratch.allocate(
-                scratch.router_logits.shape[0], scratch.router_logits.device, experts=256, top_k=6
+        if mode == "prefill" and self.text is None:
+            tokens = scratch.router_logits.shape[0]
+            self.vision_scratch = RouterScratch(
+                buffers.zeros((tokens, 6), torch.float32),
+                buffers.zeros((tokens, 6), torch.int32),
+                buffers.full((tokens, 6), 1 / 6, torch.float32),
             )
             self.vision = PreparedRouter(
                 scratch.router_logits,
@@ -127,6 +145,8 @@ class PreparedRouting:
     def __call__(self, logits):
         r = self.scratch.router
         tokens = self.metadata.token_ids
+        if self.image_mask is not None:
+            self.image_mask.copy_(tokens >= 129280)
         if self.text is not None:
             self.text(logits)
         else:
@@ -138,6 +158,9 @@ class PreparedRouting:
             image = tokens[:, None] >= 129280
             r.ids.copy_(torch.where(image, self.vision_scratch.ids, r.ids))
             r.weights.copy_(torch.where(image, self.vision_scratch.weights, r.weights))
+        if self.prefill:
+            # b12x excludes negative expert IDs when constructing dynamic expert work.
+            r.ids.copy_(torch.where(self.metadata.positions[:, None] >= 0, r.ids, -1))
 
 
 class PreparedLayer:
@@ -160,9 +183,11 @@ class PreparedLayer:
         carry,
         defer_post,
         visible=None,
+        indices=None,
     ):
         s, text = scratch, pool.config.text
         self.scratch, self.carry = s, carry
+        buffers = s.layer_buffers.cursor() if mode == "prefill" else s.buffers
         options = {
             "rms_eps": text["rms_norm_eps"],
             "norm_eps": text["rms_norm_eps"],
@@ -184,6 +209,7 @@ class PreparedLayer:
             session=session,
             name=name + ".attn_hc",
             workspace=workspace,
+            max_rows_per_call=2048 if mode == "prefill" and carry else None,
             **options,
         )
         self.attention = PreparedAttention(
@@ -199,7 +225,9 @@ class PreparedLayer:
             session=session,
             name=name + ".attention",
             workspace=workspace,
+            buffers=buffers,
             visible=visible,
+            indices=indices,
         )
         self.attention_reduce = PreparedAllReduce(
             s.attention.output,
@@ -216,6 +244,7 @@ class PreparedLayer:
             session=session,
             name=name + ".ffn_hc",
             workspace=workspace,
+            max_rows_per_call=2048 if mode == "prefill" else None,
             **options,
         )
         self.router_projection = UnquantizedProjection(
@@ -226,7 +255,7 @@ class PreparedLayer:
             name=name + ".router",
         )
         self.router = PreparedRouting(
-            weights.experts, s, metadata, mode=mode, session=session, name=name + ".route"
+            weights.experts, s, metadata, mode=mode, session=session, name=name + ".route", buffers=buffers
         )
         self.experts = PreparedRoutedExperts(
             s.ffn_hc.normalized,
@@ -252,13 +281,18 @@ class PreparedLayer:
             activation_mode="auto",
         )
         self.concurrent_shared = None
-        if mode == "decode" and s.ffn_hc.normalized.shape[0] == 1 and self.router.text is not None:
+        rows = s.ffn_hc.normalized.shape[0]
+        overlap = rows >= 2048 if mode == "prefill" else rows <= 256
+        if overlap and self.router.text is not None:
+            parallel_plans = (self.router_projection.plan, self.router.text.plan, self.experts.plan)
+            if self.router.vision is not None:
+                parallel_plans += (self.router.vision.plan,)
             self.concurrent_shared = ConcurrentSharedExpert(
                 self.shared,
-                parallel_plans=(self.router_projection.plan, self.router.text.plan, self.experts.plan),
+                parallel_plans=parallel_plans,
                 session=session,
                 workspace=workspace,
-                defer_launch=True,
+                defer_launch=mode == "prefill" or rows <= 8,
             )
         self.mlp_reduce = PreparedAllReduce(
             s.mlp_partial,
@@ -324,12 +358,10 @@ class PreparedDecoder:
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode, self.vision = mode, vision
         self.aux_layers = () if weights.draft is None else weights.config.draft.target_layers
-        self.auxiliary = torch.zeros(
-            (metadata.token_ids.numel(), len(self.aux_layers) * 4096),
-            dtype=torch.bfloat16,
-            device=scratch.embedding.device,
-        )
-        self.safe_tokens = torch.zeros_like(metadata.token_ids)
+        self.feedback = PreparedFeedbackCapture(metadata, len(self.aux_layers) * 4096,
+            scratch.buffers, compact_prefill=mode == "prefill")
+        self.auxiliary = self.feedback.output
+        self.safe_tokens = scratch.buffers.zeros(metadata.token_ids.shape, metadata.token_ids.dtype)
         self.embedding = PreparedEmbedding(
             weights.embedding,
             self.safe_tokens,
@@ -341,6 +373,9 @@ class PreparedDecoder:
         self.rotary = Rotary(weights.config, scratch.embedding.device)
         self.layers, carry = [], False
         visible = None if vision is None or mode != "prefill" else vision.visible(metadata)
+        self.indices = AttentionIndices(
+            metadata, mode=mode, tokens=metadata.token_ids.numel(), visible=visible, buffers=scratch.buffers
+        )
         for index, layer in enumerate(weights.layers):
             defer = index + 1 < len(weights.layers) and index not in self.aux_layers
             self.layers.append(
@@ -361,6 +396,7 @@ class PreparedDecoder:
                     carry=carry,
                     defer_post=defer,
                     visible=visible,
+                    indices=self.indices,
                 )
             )
             carry = defer
@@ -399,11 +435,13 @@ class PreparedDecoder:
         if self.vision is not None and self.mode == "prefill":
             self.vision.inject(m, s.embedding)
         s.residual.copy_(s.embedding[:, None, :])
+        self.indices()
+        self.feedback.begin()
         for index, layer in enumerate(self.layers):
             layer()
             if index in self.aux_layers:
                 column = self.aux_layers.index(index)
-                self.auxiliary[:, column * 4096 : (column + 1) * 4096].copy_(s.residual.float().mean(1))
+                self.feedback(s.residual, column * 4096)
         s.head_residual.copy_(s.residual[m.sample_indices])
         self.norm(self.collapse(s.head_residual))
         self.head(s.hidden)

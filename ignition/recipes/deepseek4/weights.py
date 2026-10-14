@@ -36,7 +36,6 @@ class DSparkWeights:
     head_mix: dict
     markov_embedding: torch.Tensor
     markov_head: torch.Tensor
-    confidence: torch.Tensor
 
     @classmethod
     def load(cls, loader):
@@ -52,7 +51,6 @@ class DSparkWeights:
             loader.load_tensor(
                 last + ".markov_head.markov_w2.weight", extent=slice(*shard.partition(129280, alignment=64))
             ),
-            loader.load_tensor(last + ".confidence_head.proj.weight"),
         )
 
 
@@ -145,6 +143,16 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
                 # Replicated index heads avoid reducing a context-sized score matrix.
                 attention["index_q"] = self.load_linear(attn + ".indexer.wq_b")
                 attention["index_weights"] = self.load_tensor(attn + ".indexer.weights_proj.weight")
+            if ratio:
+                # Compressor value and gate projections share the attention input: pack them into one
+                # BF16 matrix, main compressor first, so one GEMV produces every FP32 output.
+                compressors = [attention[k] for k in ("compressor", "index_compressor") if k in attention]
+                parts = [part for c in compressors for part in (c.pop("values"), c.pop("gates"))]
+                if (parts[0].dtype not in (torch.bfloat16, torch.float32)
+                        or any(part.dtype != parts[0].dtype or part.shape[1:] != parts[0].shape[1:]
+                               for part in parts)):
+                    raise ValueError("compressor projections require matching unquantized weight formats")
+                attention["compression"] = torch.cat(parts)
         return attention
 
     def load_layer(self, layer, *, draft=False):

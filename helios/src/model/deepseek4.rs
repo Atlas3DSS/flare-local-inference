@@ -16,7 +16,7 @@ use crate::{
 pub struct DeepSeek4;
 pub const INPUT_SCHEMA: &str = "deepseek4.graph-inputs.v1";
 pub const VOCABULARY: usize = 129280;
-pub const PAGE_TOKENS: usize = 128;
+pub const PAGE_TOKENS: usize = 256;
 
 mod inputs;
 #[cfg(feature = "server")]

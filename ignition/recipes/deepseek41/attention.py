@@ -29,8 +29,6 @@ def normalize(source, weight, out, eps):
 @dataclass(frozen=True)
 class AttentionScratch:
     projected: torch.Tensor
-    query_norm_input: torch.Tensor
-    window_norm_input: torch.Tensor
     query_low: torch.Tensor
     query: torch.Tensor
     window_values: torch.Tensor
@@ -48,7 +46,7 @@ class AttentionScratch:
     def allocate(cls, tokens, world, device):
         def zeros(shape, dtype=torch.bfloat16):
             return torch.zeros(shape, dtype=dtype, device=device)
-        return cls(zeros((tokens, 1792)), zeros((tokens, 1280)), zeros((tokens, 512)),
+        return cls(zeros((tokens, 1792)),
             zeros((tokens, 1280)), zeros((tokens, 64 // world, 512)),
             zeros((tokens, 512)), zeros((tokens, 64 // world, 512)),
             zeros((tokens, 5120)), zeros((tokens, 512), torch.int32) - 1,
@@ -163,9 +161,9 @@ class PreparedAttention:
             self.projections[key] = QuantizedProjection(values, weights[key], out,
                 session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
         self.query_norm = PreparedRMSNorm(scratch.projected[:, :1280], weights["q_norm"], scratch.query_low,
-            eps=self.eps, session=session, name=name + ".q_norm", staging=scratch.query_norm_input)
+            eps=self.eps, session=session, name=name + ".q_norm")
         self.window_norm = PreparedRMSNorm(scratch.projected[:, 1280:], weights["kv_norm"], scratch.window_values,
-            eps=self.eps, session=session, name=name + ".kv_norm", staging=scratch.window_norm_input)
+            eps=self.eps, session=session, name=name + ".kv_norm")
         self.output_projection = PreparedGroupedOutputProjection(scratch.attended.view(tokens, 8 // world, 4096),
             weights["output"], scratch.output, session=session, name=name + ".output", workspace=workspace)
         self.window_writer = PreparedCompressedCacheWriter(scratch.window_values, self.window_cache,

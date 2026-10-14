@@ -8,9 +8,12 @@ from ignition.recipes.deepseek4.config import REVISION, ModelConfig
 from ignition.recipes.deepseek4.pool import (
     PAGE_TOKENS,
     ContinuationPool,
+    continuation_layout,
     latent_page_bytes,
+    page_bytes,
     page_specs,
 )
+from ignition.recipes.deepseek4.recipe import RECIPE
 
 
 def model():
@@ -34,12 +37,12 @@ def model():
     )
 
 
-def test_c128_has_one_record_per_logical_page_and_c4_has_its_own_index():
+def test_pages_hold_two_c128_records_or_sixty_four_c4_records():
     specs = dict(page_specs(model()))
-    assert PAGE_TOKENS == 128
-    assert specs["layer2.latent_page"] == (latent_page_bytes(32),)
-    assert specs["layer3.latent_page"] == (latent_page_bytes(1),)
-    assert specs["layer4.index_page"] == (32 * 68,)
+    assert PAGE_TOKENS == 256
+    assert specs["layer2.latent_page"] == (latent_page_bytes(64),)
+    assert specs["layer3.latent_page"] == (latent_page_bytes(2),)
+    assert specs["layer4.index_page"] == (64 * 132,)
     assert "layer3.index_page" not in specs
     assert "layer0.latent_page" not in specs
     for records in (1, 2, 32, 64, 128, 4096):
@@ -95,6 +98,10 @@ def test_cached_vision_checkpoint_declares_integrated_dspark_and_both_compressor
     assert (config.draft.experts, config.draft.top_k) == (256, 6)
     assert sum(c.ratio == 128 for c in config.compressors) == 20
     assert sum(c.ratio == 4 and not c.index for c in config.compressors) == 21
+    for drafts, ranks in ((True, RECIPE.ranks), (False, RECIPE.plain_ranks)):
+        for costs in ranks.values():
+            assert costs.state_row_bytes == continuation_layout(config, dspark=drafts).row_bytes
+            assert costs.page_bytes == page_bytes(config)
     for changes, expected in (
         ({"vision_n_layers": 0}, "vision_n_layers"),
         ({"dspark_block_size": 0}, "DSpark metadata"),

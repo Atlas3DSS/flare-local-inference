@@ -105,6 +105,7 @@ def backend(monkeypatch):
 
     monkeypatch.setattr(PreparationSession, "close", close_session)
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (24 << 30, 32 << 30))
     monkeypatch.setattr(torch.cuda, "device", lambda device: nullcontext())
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append(("empty_cache",)))
     return events, controls
@@ -1092,11 +1093,12 @@ def test_integrated_tuning_fails_before_using_headroom(backend, monkeypatch):
 
 
 @pytest.mark.parametrize("race_budget", [None, GIB])
-def test_discrete_gpu_tuning_keeps_b12x_race_budget(backend, monkeypatch, race_budget):
+def test_discrete_gpu_tuning_bounds_races_without_reducing_compiler_pool(backend, monkeypatch, race_budget):
     events, _ = backend
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: pytest.fail("VRAM sizing belongs to b12x"))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (12 * GIB, 32 * GIB))
     session = make_session(device=0, checkpoint="revision", headroom_bytes=6 * GIB, race_budget=race_budget)
     declare(session, (declaration("projection"),))
     report = session.tune()
-    assert session.race_budget == report["race_budget_bytes"] == race_budget
+    expected = 5 * GIB // 4 if race_budget is None else race_budget
+    assert session.race_budget == report["race_budget_bytes"] == expected
     assert [event for event in events if event[0] == "workers"] == [("workers", None)]

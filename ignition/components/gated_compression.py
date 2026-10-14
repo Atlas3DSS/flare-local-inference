@@ -139,27 +139,58 @@ def commit_gated(values, scores, state_values, state_scores, metadata, counts):
 
 
 class PreparedGatedCompressor:
-    def __init__(self, spec, weights, source, metadata, pool, slots, *, session, name, deferred=False):
+    """Gate and pool C4/C128 compression windows.
+
+    `buffers`, when given, supplies the per-launch intermediates (a graph's
+    `GraphBuffers`); every call rewrites them before reading them.
+    """
+
+    def __init__(self, spec, weights, source, metadata, pool, slots, *, session, name, deferred=False,
+                 buffers=None, emitted=None, emitted_slots=None, projected=None):
         if spec.ratio not in (4, 128) or spec.head_dim not in (128, 512):
             raise ValueError("gated compression requires C4/C128 and a 128/512-dimensional head")
         self.spec, self.metadata, self.deferred = spec, metadata, deferred
         self.state_values = pool.reserved_region(f"{spec.prefix}.values")
         self.state_scores = pool.reserved_region(f"{spec.prefix}.scores")
         self.ape = weights["ape"]
-        tokens = source.shape[0]
-        self.values = torch.zeros((tokens, spec.state_shape[1]), dtype=torch.float32, device=source.device)
-        self.scores = torch.zeros_like(self.values)
-        self.pooled = torch.zeros((tokens, spec.head_dim), dtype=torch.bfloat16, device=source.device)
-        self.output = torch.zeros_like(self.pooled)
-        self.emitted = torch.zeros(tokens, dtype=torch.bool, device=source.device)
-        self.slots = torch.full_like(slots, -1)
+        tokens, device = source.shape[0], source.device
+
+        def zeros(shape, dtype):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+
+        # A caller projecting several compressors' values and gates in one GEMM passes their outputs.
+        self.projected = projected is not None
+        if self.projected:
+            self.values, self.scores = projected
+            if any(t.shape != (tokens, spec.state_shape[1]) or t.dtype != torch.float32
+                   or t.device != source.device or t.stride(1) != 1 for t in projected):
+                raise ValueError("projected compressor values and scores require FP32 rows on the input device")
+            if self.values.stride() != self.scores.stride():
+                raise ValueError("projected compressor values and scores require matching strides")
+        else:
+            self.values = zeros((tokens, spec.state_shape[1]), torch.float32)
+            self.scores = zeros((tokens, spec.state_shape[1]), torch.float32)
+        self.pooled = zeros((tokens, spec.head_dim), torch.bfloat16)
+        self.output = zeros((tokens, spec.head_dim), torch.bfloat16)
+        # A caller computing emission flags and slots once for several compressors passes them in.
+        self.shared_slots = emitted is not None
+        if self.shared_slots:
+            if emitted_slots is None or emitted.shape != (tokens,) or emitted_slots.shape != slots.shape:
+                raise ValueError("shared emission flags and slots must cover every source row")
+            self.emitted, self.slots = emitted, emitted_slots
+        else:
+            self.emitted = zeros((tokens,), torch.bool)
+            self.slots = (torch.full_like(slots, -1) if buffers is None
+                          else buffers.full(slots.shape, -1, slots.dtype))
         self.destinations = slots
-        self.project_values = UnquantizedProjection(
-            source, weights["values"], self.values, session=session, name=name + ".values"
-        )
-        self.project_scores = UnquantizedProjection(
-            source, weights["gates"], self.scores, session=session, name=name + ".gates"
-        )
+        self.project_values = self.project_scores = None
+        if not self.projected:
+            self.project_values = UnquantizedProjection(
+                source, weights["values"], self.values, session=session, name=name + ".values"
+            )
+            self.project_scores = UnquantizedProjection(
+                source, weights["gates"], self.scores, session=session, name=name + ".gates"
+            )
         self.normalize = PreparedRMSNorm(
             self.pooled,
             weights["norm"],
@@ -170,8 +201,9 @@ class PreparedGatedCompressor:
         )
 
     def __call__(self, source):
-        self.project_values(source)
-        self.project_scores(source)
+        if not self.projected:
+            self.project_values(source)
+            self.project_scores(source)
         pool_gated(
             self.values,
             self.scores,
@@ -183,9 +215,10 @@ class PreparedGatedCompressor:
             ratio=self.spec.ratio,
         )
         self.normalize(self.pooled)
-        positions = self.metadata.positions
-        self.emitted.copy_((positions >= 0) & ((positions + 1) % self.spec.ratio == 0))
-        self.slots.copy_(torch.where(self.emitted, self.destinations, -1))
+        if not self.shared_slots:
+            positions = self.metadata.positions
+            self.emitted.copy_((positions >= 0) & ((positions + 1) % self.spec.ratio == 0))
+            self.slots.copy_(torch.where(self.emitted, self.destinations, -1))
         if not self.deferred:
             self.commit(self.metadata.lengths)
         return self.output

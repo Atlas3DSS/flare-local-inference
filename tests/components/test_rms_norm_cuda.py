@@ -30,7 +30,7 @@ def test_rms_norm_compiles_in_metadata_worker(tmp_path):
     output = torch.empty((4, 1280), dtype=source.dtype, device=device)
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
         operation = PreparedRMSNorm(source, weight, output, eps=1e-6, session=session,
-            name="worker_rms", staging=torch.empty_like(output))
+            name="worker_rms")
         forward = NormalizationForward(source, operation)
         path = tmp_path / "rms.bin"
         with CompilePool(device) as pool:
@@ -57,10 +57,9 @@ def test_strided_rms_norm_compiled_replay(tokens, width):
     parent = torch.randn((tokens, 1792), dtype=torch.bfloat16, device=device, generator=generator)
     source = parent[:, 1792 - width:]
     output = torch.empty((tokens, width), dtype=source.dtype, device=device)
-    staging = torch.empty_like(output)
     weight = torch.linspace(.5, 1.5, width, device=device).bfloat16()
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
-        operation = PreparedRMSNorm(source, weight, output, eps=1e-6, session=session, name="rms", staging=staging)
+        operation = PreparedRMSNorm(source, weight, output, eps=1e-6, session=session, name="rms")
         forward = torch.compile(lambda: operation(source), fullgraph=True)
         forward()
         graph = torch.cuda.CUDAGraph()
@@ -71,8 +70,6 @@ def test_strided_rms_norm_compiled_replay(tokens, width):
         for gain in (1, -.5, 2):
             parent.mul_(gain)
             output.fill_(float("nan"))
-            if operation.staging is not None:
-                operation.staging.fill_(float("nan"))
             graph.replay()
             torch.cuda.synchronize()
             assert torch.cuda.memory_allocated() == allocated

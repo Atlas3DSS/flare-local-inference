@@ -111,3 +111,82 @@ def test_tuned_sparse_indexer_native_replay(mode, rows):
             if worker is not None:
                 worker.close()
             graph.reset()
+
+
+@torch.no_grad()
+def test_prefill_candidate_windows_preserve_full_context_native_selection():
+    device = torch.device("cuda", 0)
+    torch.manual_seed(6817)
+    rows, records, heads = 4096, 262144, 64
+    query = torch.randn((rows, heads, 128), device=device).to(torch.float8_e4m3fn)
+    weights = torch.randn((rows, heads), device=device) / heads
+    cache = pack_index_k_cache_reference(torch.randn((records, 128), device=device).bfloat16())
+    table = torch.arange(records // 64, device=device, dtype=torch.int32)[None].expand(rows, -1)
+    lengths = torch.full((rows,), 2048, device=device, dtype=torch.int32)
+    active = torch.tensor([2048], device=device, dtype=torch.int32)
+    arena = ScratchArena(device)
+    outputs, scores, graphs, owners, operations = {}, {}, {}, [], {}
+    worker = None
+    with RecordedPreparationSession(device=device, checkpoint="fp8-full-context",
+            workload_schema="prefill-candidate-windows-v1", numerical_policy="fp8") as session:
+        session.register_scratch(arena)
+        try:
+            for width in (32768, 131072):
+                outputs[width] = torch.empty((rows, 512), device=device, dtype=torch.int32)
+                scores[width] = torch.empty((rows, 512), device=device)
+                caps = dsa_indexer.Caps(device=device, num_q_heads=heads, max_q_rows=rows,
+                    max_page_table_width=records // 64, topk=512, mode="prefill", supertile_k=width)
+                operations[width] = PreparedSparseIndexer(query, weights, cache, table, lengths,
+                    active, outputs[width], caps=caps, session=session, name=f"window{width}",
+                    workspace=arena, scores=scores[width])
+            session.tune()
+            for width, operation in operations.items():
+                def forward(operation=operation):
+                    operation()
+                    arena.tensor.fill_(255)
+
+                compiled = compile_forward(forward)
+                compiled()
+                graph = torch.cuda.CUDAGraph()
+                with session.capture(), torch.cuda.graph(graph):
+                    compiled()
+                graphs[str(width)] = graph
+                owners.append(compiled)
+            session.freeze()
+            bundle = PreparedGraphBundle(device=0, graphs=graphs,
+                buffers={"query": query, "cache": cache},
+                resources=(operations, outputs, scores, arena, owners))
+            worker = bundle.start_worker()
+            for count in (1024, 32768, 131073, records, 2048):
+                lengths.copy_((torch.arange(rows, device=device, dtype=torch.int32) // 4
+                               + count - rows // 4).clamp(min=0, max=records))
+                lengths[0] = 0
+                lengths[1] = 127
+                lengths[-1] = count
+                active.fill_(count)
+                # Rotate physical pages between launches while retaining logical index space.
+                table[0].copy_(torch.roll(table[0], shifts=17))
+                for width in operations:
+                    outputs[width].fill_(-42)
+                    scores[width].fill_(float("nan"))
+                    arena.tensor.fill_(90)
+                    torch.cuda.synchronize()
+                    before = torch.cuda.memory_stats()
+                    ticket = worker.submit(bundle.graph_indices[str(width)], repetitions=3)
+                    completion = worker.poll(timeout_ms=120000)
+                    assert completion is not None and completion.ticket == ticket and completion.error is None
+                    after = torch.cuda.memory_stats()
+                    for key in ("allocation.all.allocated", "allocation.all.freed",
+                                "segment.all.allocated", "segment.all.freed"):
+                        assert before[key] == after[key]
+                    assert (arena.tensor == 255).all()
+                    selected = outputs[width]
+                    assert ((selected == -1) | ((selected >= 0) & (selected < lengths[:, None]))).all()
+                    assert (selected[0] == -1).all()
+                    assert (selected[1] >= 0).sum() == 127
+                _assert_selection(outputs[131072], scores[131072], outputs[32768], scores[32768])
+        finally:
+            if worker is not None:
+                worker.close()
+            for graph in graphs.values():
+                graph.reset()

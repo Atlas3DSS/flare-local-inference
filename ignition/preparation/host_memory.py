@@ -73,7 +73,14 @@ def tuning_limits(device, workers, *, pools=1, headroom_bytes=0, race_budget=Non
     import torch
 
     if not torch.cuda.get_device_properties(device).is_integrated:
-        return worker_limit(workers, pools=pools) if workers else 0, race_budget
+        free = device_memory_info(device)[0]
+        # Candidate fixtures and loaded modules grow after reserving the kernel scratch arena.
+        # Bound each device independently; compiler processes still share the host RAM budget.
+        usable = free - headroom_bytes - _TUNING_GROWTH_BYTES
+        race = max(1, usable // 4)
+        if race_budget is not None:
+            race = min(race, race_budget)
+        return worker_limit(workers, pools=pools) if workers else 0, race
     available = device_memory_info(device)[0]
     headroom = max(_HEADROOM_BYTES, headroom_bytes)
     usable = (available - headroom) // pools - _TUNING_GROWTH_BYTES

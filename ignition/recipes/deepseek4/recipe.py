@@ -69,7 +69,7 @@ RECIPE = Recipe(
         ),
     ),
     context=1048576,
-    page_tokens=128,
+    page_tokens=256,
     concurrency=4,
     max_concurrency=64,
     prefill_chunk=4096,
@@ -77,6 +77,13 @@ RECIPE = Recipe(
     max_draft_tokens=5,
     max_images=4,
     image_bytes=32 << 20,
-    ranks=MappingProxyType({4: RankCosts(16_142_080, 467_904, 24 << 30)}),
-    plain_ranks=MappingProxyType({4: RankCosts(15_917_056, 467_904, 24 << 30)}),
+    # Continuation rows and latent pages are replicated, so their costs do not depend on the rank count.
+    ranks=MappingProxyType({
+        2: RankCosts(16_668_416, 998_208, 11 << 30),
+        4: RankCosts(16_668_416, 998_208, 24 << 30),
+    }),
+    plain_ranks=MappingProxyType({
+        2: RankCosts(16_443_392, 998_208, 12 << 30),
+        4: RankCosts(16_443_392, 998_208, 24 << 30),
+    }),
 )

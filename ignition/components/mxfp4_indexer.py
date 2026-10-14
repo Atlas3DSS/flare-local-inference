@@ -51,10 +51,17 @@ def _select_fake(query, scales, weights, cache, pages, lengths, active, output, 
 
 class PreparedMXFP4Indexer:
     def __init__(self, query, weights, cache, pages, lengths, active, output, *, page_size,
-                 session, name, workspace, candidates=None, counts=None, candidates_out=None, counts_out=None):
+                 session, name, workspace, candidates=None, counts=None, candidates_out=None, counts_out=None,
+                 buffers=None):
         self.query, self.cache, self.output = query, cache, output
-        self.packed = torch.zeros((*query.shape[:-1], 64), dtype=torch.uint8, device=query.device)
-        self.scales = torch.full((*query.shape[:-1], 4), 127, dtype=torch.uint8, device=query.device)
+        # Each call quantizes the query into these before selecting, so a graph's `buffers` may hold them.
+        packed, scales = (*query.shape[:-1], 64), (*query.shape[:-1], 4)
+        if buffers is None:
+            self.packed = torch.zeros(packed, dtype=torch.uint8, device=query.device)
+            self.scales = torch.full(scales, 127, dtype=torch.uint8, device=query.device)
+        else:
+            self.packed = buffers.zeros(packed, torch.uint8)
+            self.scales = buffers.full(scales, 127, torch.uint8)
         caps = dsa.Caps(device=query.device, num_q_heads=query.shape[1], max_q_rows=query.shape[0],
             max_page_table_width=pages.shape[1], topk=512, page_size=page_size, cache_format="mxfp4",
             max_candidates=0 if candidates is None else candidates.shape[1],

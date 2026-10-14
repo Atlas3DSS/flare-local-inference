@@ -255,3 +255,63 @@ def overlay(objects, *, keep=()):
         return value
 
     return tuple(rebase(value, offsets) for value, (offsets, _) in zip(objects, layouts, strict=True))
+
+
+
+class GraphBufferPool:
+    """Chunks shared by private execution buffers with disjoint lifetimes.
+
+    A rank replays one captured graph at a time, so a buffer that each launch writes
+    before reading it need not outlive the launch. Every graph allocates through its
+    own `cursor()`: cursors walk the same chunks from the start, so different graphs
+    share memory while one graph's buffers stay disjoint. Graphs constructed largest
+    first leave later cursors within the chunks the first one created. Each dtype has
+    its own chunks because compiled graphs cannot reinterpret aliased inputs across
+    element sizes.
+
+    Sequential layers can take separate cursors from a dedicated pool when every
+    layer consumes and commits its intermediates before the following layer starts.
+    Values retained across layers or until speculative acceptance need separate storage.
+    """
+
+    def __init__(self, device, *, chunk_bytes=64 << 20):
+        if type(chunk_bytes) is not int or chunk_bytes <= 0 or chunk_bytes % 256:
+            raise ValueError("graph buffer chunks must be a positive multiple of 256 bytes")
+        self.device, self.chunk_bytes = torch.device(device), chunk_bytes
+        self.chunks = {}
+
+    @property
+    def nbytes(self):
+        return sum(chunk.nbytes for chunks in self.chunks.values() for chunk in chunks)
+
+    def cursor(self):
+        return GraphBuffers(self)
+
+
+class GraphBuffers:
+    """One graph's disjoint views into a `GraphBufferPool`."""
+
+    def __init__(self, pool):
+        self.pool, self.positions = pool, {}
+
+    def zeros(self, shape, dtype):
+        return self._take(shape, dtype).zero_()
+
+    def full(self, shape, value, dtype):
+        return self._take(shape, dtype).fill_(value)
+
+    def _take(self, shape, dtype):
+        shape = tuple(shape)
+        if any(type(dim) is not int or dim < 0 for dim in shape):
+            raise ValueError("graph buffer dimensions must be nonnegative integers")
+        count = prod(shape)
+        aligned = (count * dtype.itemsize + 255) // 256 * 256
+        chunks = self.pool.chunks.setdefault(dtype, [])
+        index, offset = self.positions.get(dtype, (0, 0))
+        while index < len(chunks) and offset + aligned > chunks[index].nbytes:
+            index, offset = index + 1, 0
+        if index == len(chunks):
+            chunks.append(torch.empty(max(aligned, self.pool.chunk_bytes) // dtype.itemsize, dtype=dtype,
+                                      device=self.pool.device))
+        self.positions[dtype] = index, offset + aligned
+        return chunks[index].narrow(0, offset // dtype.itemsize, count).view(shape)

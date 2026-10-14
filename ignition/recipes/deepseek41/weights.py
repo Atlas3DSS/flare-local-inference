@@ -34,7 +34,6 @@ class DSparkWeights:
     norm: torch.Tensor
     markov_embedding: torch.Tensor
     markov_head: torch.Tensor
-    confidence: torch.Tensor
 
     @classmethod
     def load(cls, loader):
@@ -44,8 +43,7 @@ class DSparkWeights:
             loader.load_linear("mtp.0.main_proj"), loader.load_tensor("mtp.0.main_norm.weight"),
             loader.load_tensor(last + ".norm.weight"), loader.load_tensor(last + ".markov_head.embed.weight"),
             loader.load_tensor(last + ".markov_head.head.weight",
-                extent=slice(*shard.partition(129280, alignment=64))),
-            loader.load_tensor(last + ".confidence_head.proj.weight"))
+                extent=slice(*shard.partition(129280, alignment=64))))
 
 
 @dataclass(frozen=True)

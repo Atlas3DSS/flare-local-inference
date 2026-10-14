@@ -117,6 +117,7 @@ class PreparedBatch:
         verification_width=1,
         input_vocabulary=None,
         validate_prefill=None,
+        page_tokens=PAGE_TOKENS,
     ):
         self.inputs, self.requests, self.metadata, self.shard = inputs, requests, metadata, shard
         self.rows, self.tokens, self.mode = metadata.starts.numel(), metadata.token_ids.numel(), mode
@@ -124,6 +125,7 @@ class PreparedBatch:
             raise ValueError("Paged prefill requires one packed sequence")
         self.accept_unsampled = shard.rank != 0
         self.pool = pool
+        self.page_tokens = page_tokens
         self.verification_width = verification_width
         self.input_vocabulary = requests.vocab_size if input_vocabulary is None else input_vocabulary
         self.validate_prefill = validate_prefill
@@ -161,11 +163,11 @@ class PreparedBatch:
         end = position + lengths
         capacity = self.tokens if self.mode == "prefill" else self.verification_width
         valid = ~duplicate & (b.live_rows <= self.rows) & (lengths > 0) & (lengths <= capacity)
-        valid &= (position >= 0) & (end <= b.page_tables.shape[1] * PAGE_TOKENS)
+        valid &= (position >= 0) & (end <= b.page_tables.shape[1] * self.page_tokens)
         pages = b.page_tables[safe]
         valid &= (
             ((pages >= 0) & (pages < self.pool.memory_capacity[1]))
-            | (self.block_ids >= (end[:, None] + PAGE_TOKENS - 1) // PAGE_TOKENS)
+            | (self.block_ids >= (end[:, None] + self.page_tokens - 1) // self.page_tokens)
         ).all(1)
         state = b.request_state_rows[safe, 0]
         valid &= (state > 0) & (state < self.pool.memory_capacity[0])
