@@ -604,7 +604,7 @@ class HostRankGroup:
             print("flare: terminating tensor-parallel rank group: native startup failed", flush=True)
             os._exit(1)
 
-    def start_direct(self):
+    def start_direct(self, *, eager):
         """Hand every peer to Ignition's diagnostic step loop; returns the executor connections that carry its steps.
 
         Rank zero then sends each step it decides over these connections, and
@@ -614,7 +614,7 @@ class HostRankGroup:
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         for control in self.controls:
-            send_object(control, ("direct", {}))
+            send_object(control, ("direct", {"eager": eager}))
         self._started = True
         return self.connections
 

@@ -10,14 +10,23 @@ from .execution import PreparedExecution
 
 
 class PreparedModel(PreparedExecution):
-    """Own frozen resources until export or diagnostic execution has finished."""
+    """Own frozen resources until export or diagnostic execution has finished.
 
-    def __init__(self, *, server_config, memory_report, session, close_resources=(), package_data=None, **kwargs):
+    ``forwards`` maps each graph name to the callable its graph captured, compiled
+    where preparation compiled it. Only Ignition's diagnostic eager execution calls
+    them; it is None for recipes that do not retain them.
+    """
+
+    def __init__(self, *, server_config, memory_report, session, close_resources=(), package_data=None,
+                 forwards=None, **kwargs):
         super().__init__(**kwargs)
+        if forwards is not None and set(forwards) != set(self.graphs):
+            raise ValueError("retained forwards must cover exactly the captured graphs")
         self.server_config = server_config
         self.memory_report = memory_report
         self.session = session
         self.package_data = package_data
+        self.forwards = None if forwards is None else MappingProxyType(dict(forwards))
         self._close_resources = tuple(close_resources)
         self._rank_drained = False
         self.runtime = None
@@ -87,6 +96,7 @@ class PreparedModel(PreparedExecution):
         self._resources = ()
         self._buffers = MappingProxyType({})
         self._graphs = MappingProxyType({})
+        self.forwards = None
         self.session = None
         self._close_resources = ()
         self.runtime = None

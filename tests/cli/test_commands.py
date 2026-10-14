@@ -106,9 +106,13 @@ def test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_acce
 
 
 def test_direct_execution_is_an_explicit_serve_diagnostic(host, capsys):
-    assert _parser().parse_args(["serve", "glm-5.3-flash", "--direct"]).direct
-    assert not _parser().parse_args(["serve", "glm-5.3-flash"]).direct
-    for arguments in (["run", "glm-5.3-flash", "--direct"], ["export", "glm-5.3-flash", "--output", "x", "--direct"],
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash", "--direct", "--eager"])
+    assert arguments.direct and arguments.eager
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash"])
+    assert not arguments.direct and not arguments.eager
+    assert main(["serve", "glm-5.3-flash", "--eager"]) == 2
+    assert "--eager applies only to --direct" in failure(capsys)[0]
+    for arguments in (["run", "glm-5.3-flash", "--direct"], ["export", "glm-5.3-flash", "--output", "x", "--eager"],
                       ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "2", "--direct"]):
         with pytest.raises(SystemExit) as exit:
             main(arguments)

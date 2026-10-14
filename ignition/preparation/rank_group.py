@@ -112,7 +112,7 @@ class PreparedRankGroup:
             traceback.print_exc()
             self.supervisor.abort("native rank-group startup failed")
 
-    def start_direct(self):
+    def start_direct(self, *, eager):
         """Hand every peer to Ignition's diagnostic step loop; returns the sockets that carry its steps.
 
         Rank zero then sends each step it decides over these sockets, and every
@@ -122,7 +122,7 @@ class PreparedRankGroup:
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         for control in self.controls:
-            control.send(("direct", {}))
+            control.send(("direct", {"eager": eager}))
             control.close()
         self._started = True
         return list(self.connections)

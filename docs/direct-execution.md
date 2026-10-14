@@ -8,13 +8,17 @@ and output without Python ([AGENTS.md](../AGENTS.md), "Python prepares; Helios
 serves"). Direct execution prepares the model in the Ignition process, then
 drives the prepared graphs from Python: a small fixed scheduler decides each
 step, packs the same graph inputs Helios packs, and replays the captured graph
-on every rank. Nothing selects it implicitly: `--direct` must be given, and
-neither `run`, `export` nor Flare accepts it.
+on every rank. With `--eager` it calls the forward each graph captured instead.
+Nothing selects either implicitly: `--direct`, and `--eager` with it, must be
+given, and neither `run`, `export` nor Flare accepts them.
 
 A fault that reproduces through direct graph replay does not depend on Helios's
-scheduler, transport frames or native replay. Preparing with `--no-compile` additionally
-separates compiled forwards from the recipe's Python forwards. Every run
-prepares from the checkpoint; there is no package.
+scheduler, transport frames or native replay. A fault that reproduces under
+`--eager` does not depend on CUDA graph capture or replay; one that disappears
+under `--eager` points at what replay does differently (see "Eager forwards"
+below). Preparing with `--no-compile` additionally separates compiled forwards
+from the recipe's Python forwards. Every run prepares from the checkpoint;
+there is no package.
 
 ## Usage
 
@@ -23,6 +27,8 @@ On one host, GLM-5.3 Flash at TP1 on a GB300:
 ```sh
 CUDA_VISIBLE_DEVICES=1 .venv/bin/ignition serve glm-5.3-flash --gpus 0 \
   --max-concurrency 8 --port 8000 --direct
+CUDA_VISIBLE_DEVICES=1 .venv/bin/ignition serve glm-5.3-flash --gpus 0 \
+  --max-concurrency 8 --port 8000 --direct --eager
 ```
 
 Across DGX Sparks, rank zero adds `--ranks N --rendezvous ADDR:PORT` and each
@@ -86,13 +92,39 @@ replays the graph, and waits for it before the next step. It checks any
 collective runtime that reports transport failures only when asked, as Helios
 does after each frame.
 
+**Eager forwards.** With `--eager`, every rank releases its captured graphs
+and, for each step, calls the forward that step's graph captured, compiled
+where preparation compiled it, on the same buffers after the same uploads.
+Scheduling, packing and completion handling do not change. The forwards are
+built for capture and make no per-step host decisions, so they launch the
+kernels the graph recorded, with the same arguments except for the addresses
+of temporaries. Eager steps are bound by the host: on a GB300, GLM-5.3 Flash's
+compiled forwards took 0.26 to 0.34 s per prefill chunk or speculative round
+at every capacity exercised. What graph replay does and eager execution does
+not reproduce:
+
+- Replay runs the recorded launches from fixed addresses in the graph pool;
+  eager forwards run their Python each step and take temporaries from the
+  caching allocator, at other addresses. A fault that reads stale or
+  uninitialized temporary storage can therefore behave differently.
+- Replay schedules captured branches by their recorded dependencies, without
+  launch gaps; eager execution orders them by stream and event as the Python
+  launches them, so the timing of any race differs.
+- A collective that orders itself across streams or checks transport health
+  per call does so in eager execution; under replay its stream order is the
+  graph's and health is checked after the step.
+- Step times include Python launch time. The adaptive verification width is
+  chosen from them, so it can differ from graph replay's choice; preparing
+  with `--no-mtp-adaptive-verification` fixes the width in both modes.
+
 **Ranks.** Rank zero decides every step and sends it to each peer as one
 message over that peer's executor connection, the connection Helios uses for
 per-step coordination, then executes it. Every rank therefore runs the same
-graphs in the same order with the same inputs, and the collectives inside each
-graph join their GPU work. Rank zero alone reads completion records. Stopping
-rank zero (SIGINT or SIGTERM) takes effect between steps; it ends every peer's
-loop, then the group closes as after in-process serving.
+steps in the same order with the same inputs and the same execution mode, and
+the collectives inside each graph or forward join their GPU work. Rank zero
+alone reads completion records. Stopping rank zero (SIGINT or SIGTERM) takes
+effect between steps; it ends every peer's loop, then the group closes as after
+in-process serving.
 
 ## Limits
 
@@ -102,3 +134,8 @@ loop, then the group closes as after in-process serving.
   graphs.
 - No streaming, grammar masks, tool-call parsing, raw completions, Responses or
   Messages APIs, images or copied proposals.
+- Eager forwards allocate their temporaries from the caching allocator after
+  the graphs release their pool; preparation leaves only its headroom free
+  beyond that, so `[memory] reserve` may need raising for large prefill chunks.
+- GLM-5.3 Flash retains its forwards for `--eager`; other recipes support graph
+  replay only, and `--eager` with them fails once preparation has finished.

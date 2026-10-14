@@ -5,8 +5,9 @@ input packing and graph replay without Python (see AGENTS.md, "Python
 prepares; Helios serves"). At the project owner's request, `ignition serve
 --direct` instead prepares a model in process and drives its prepared
 execution from Python: a small fixed scheduler packs the same graph inputs
-Helios packs, and every rank replays the captured graphs in lockstep, with rank
-zero deciding each step. It exists to reproduce and bisect model-level faults
+Helios packs, and rank zero replays the captured graphs, or with `--eager`
+calls the forwards those graphs captured, while every other rank executes the
+same steps in lockstep. It exists to reproduce and bisect model-level faults
 without Helios, never as a fallback; nothing selects it implicitly.
 
 `scheduler` holds the CPU-only scheduling, cache bookkeeping and input packing,

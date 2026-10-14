@@ -92,8 +92,8 @@ def _sampling(body, defaults):
 class DirectServer:
     """Own the scheduler, the rank-zero step runner and the HTTP listener for one prepared model."""
 
-    def __init__(self, model, peers, *, bind, served_names, verbose):
-        self.model, self.verbose = model, verbose
+    def __init__(self, model, peers, *, bind, eager, served_names, verbose):
+        self.model, self.eager, self.verbose = model, eager, verbose
         self.layout = Layout.of(model)
         self.scheduler = Scheduler(self.layout)
         self.frontend = _Frontend(model.server_config)
@@ -105,7 +105,7 @@ class DirectServer:
         self.outcomes = {}
         self.failure = None
         self.started = time.time()
-        self.steps = RankSteps(model, peers)
+        self.steps = RankSteps(model, peers, eager=eager)
         host, _, port = bind.rpartition(":")
         listener = type("Listener", (ThreadingHTTPServer,), {
             "address_family": socket.AF_INET6 if host.startswith("[") else socket.AF_INET})
@@ -183,7 +183,7 @@ class DirectServer:
         usage = {"prompt_tokens": len(prompt), "completion_tokens": len(request.generated),
                  "total_tokens": len(prompt) + len(request.generated),
                  "prompt_tokens_details": {"cached_tokens": request.reused}}
-        diagnostics = {"execution": "graph replay", "request": request.ident,
+        diagnostics = {"execution": "eager" if self.eager else "graph replay", "request": request.ident,
                        "speculative_rounds": request.rounds, "reused_tokens": request.reused}
         if request.error is not None:
             if isinstance(request.error, int):
@@ -308,19 +308,19 @@ class DirectServer:
             self.steps.stop()
 
 
-def serve_direct(prepared, *, bind, served_names, verbose=False):
+def serve_direct(prepared, *, bind, eager, served_names, verbose=False):
     """Serve a prepared model, or a rank group's rank zero, through Ignition's direct step loop."""
     model = getattr(prepared, "model", prepared)
     with prepared:
         ranks = [{key: value for key, value in rank.items() if key not in ("tuning", "breakdown")}
                  for rank in prepared.memory_report.get("ranks", (prepared.memory_report,))]
         print(json.dumps({"memory": ranks}, default=str), file=sys.stderr, flush=True)
-        peers = prepared.start_direct() if prepared is not model else ()
-        server = DirectServer(model, peers, bind=bind, served_names=served_names, verbose=verbose)
+        peers = prepared.start_direct(eager=eager) if prepared is not model else ()
+        server = DirectServer(model, peers, bind=bind, eager=eager, served_names=served_names, verbose=verbose)
         layout = server.layout
         widths = ("exactly " + str(layout.fixed_width - 1) if layout.fixed_width else
                   "up to " + str(layout.max_width - 1)) + " draft tokens" if layout.speculative else "speculation off"
-        print(f"Direct diagnostic execution (graph replay; not production serving): "
+        print(f"Direct diagnostic execution ({'eager forwards' if eager else 'graph replay'}; not production serving): "
               f"KV {layout.pages:,} pages · {layout.pages * layout.page_tokens:,} tokens"
               f" · {model.memory_report.get('state_rows')} state rows ({layout.snapshots} for snapshots)"
               f" · concurrency {layout.max_active} · {widths}", flush=True)

@@ -9,6 +9,11 @@ so every rank executes the same graphs in the same order; the collectives
 inside each graph join the ranks' GPU work. A rank finishes each step before
 taking the next, which keeps its pinned staging and the next step's uploads
 ordered without events.
+
+With `eager`, a rank calls the forward each graph captured, compiled where
+preparation compiled it, on the same buffers instead of replaying the graph.
+Eager execution releases the captured graphs first so their memory pool can
+hold the forwards' temporaries.
 """
 
 import struct
@@ -23,8 +28,10 @@ _RESERVED = ("frame_index", "submission_sequence")
 class StepRunner:
     """Execute steps on one rank's prepared model."""
 
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, model, *, eager):
+        if eager and model.forwards is None:
+            raise RuntimeError("this recipe retains no prepared forwards; --eager requires them")
+        self.model, self.eager = model, eager
         self.device = torch.device("cuda", model.device)
         self.inputs = {name: frozenset((*signature.inputs, *_RESERVED))
                        for name, signature in model.signatures.items()}
@@ -38,6 +45,10 @@ class StepRunner:
         self.health = tuple(health)
         torch.cuda.set_device(self.device)
         torch.cuda.synchronize(self.device)
+        if eager:
+            for graph in model.graphs.values():
+                graph.reset()
+            torch.cuda.empty_cache()
         self.stream = torch.cuda.Stream(self.device)
         self.started = torch.cuda.Event(enable_timing=True)
         self.finished = torch.cuda.Event(enable_timing=True)
@@ -68,7 +79,10 @@ class StepRunner:
                 self._upload(buffer, offset, data)
             self._upload("frame_index", 0, struct.pack("<i", step["frame"]))
             self._upload("submission_sequence", 0, struct.pack("<q", step["sequence"]))
-            self.model.graphs[name].replay()
+            if self.eager:
+                self.model.forwards[name]()
+            else:
+                self.model.graphs[name].replay()
             self.finished.record(self.stream)
         self.finished.synchronize()
         for runtime in self.health:
@@ -86,8 +100,8 @@ class StepRunner:
 class RankSteps:
     """Rank zero's side: send every step to each peer, then run it here."""
 
-    def __init__(self, model, peers):
-        self.runner = StepRunner(model)
+    def __init__(self, model, peers, *, eager):
+        self.runner = StepRunner(model, eager=eager)
         self.peers = tuple(peers)
         self.stopped = False
 
@@ -109,9 +123,9 @@ class RankSteps:
         self.runner.close()
 
 
-def serve_peer(model, connection):
+def serve_peer(model, connection, *, eager):
     """Execute rank zero's steps, in order, until it sends the stop message."""
-    runner = StepRunner(model)
+    runner = StepRunner(model, eager=eager)
     while (step := receive_object(connection)) is not None:
         runner.run(step)
     runner.close()
