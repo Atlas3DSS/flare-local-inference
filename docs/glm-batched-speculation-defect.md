@@ -312,11 +312,20 @@ cached and uncached prompts (section 3).
    it fails with 95.8% of selections wrong without the fix. A broader check
    that zeroes every export-disposable range before replaying each captured
    graph would catch this class of defect in any recipe.
-2. Find the source of the remaining device error 6 at TP4, concurrency 16. A
-   TP4 package carrying the fix and a diagnostic that reports which part of the
-   target distribution is invalid (NaN or infinite logits by vocabulary
-   quarter, which at TP4 is the rank that projected them, or an empty filtered
-   distribution) is prepared but not yet run. One candidate is known: b12x's
+2. Find the source of the remaining device error 6 at TP4, concurrency 16.
+   It concentrates in long prompts: a fixed package failed 3 of 48 cached 96K
+   requests and 1 of 128 cached 10K requests, and none of 48 at concurrency 8.
+   A TP4 package carrying the fix and a diagnostic that replaces error 6 with
+   the failing check (`ignition/components/speculation.py`) failed 6 of 160
+   cached 96K requests, every one with code 115: NaN raw target logits in all
+   four vocabulary quarters, each the slice one TP4 rank projects. The hidden
+   state is therefore already NaN, identically on every rank, before the
+   vocabulary projection; the projection, the logit gather, sampling and the
+   verifier only report it. Failures arrive together (4 and 2 replies in two
+   of ten batches of 16), with no batch × width mix distinguishing the
+   failing batches. Locating the layer that first produces NaN is next.
+
+   One candidate is known: b12x's
    fused indexer, which serves every GLM decode graph of 16 rows or fewer on
    SM12x, lets thread zero announce its CTA's arrival at the cooperative
    merge's grid barrier (`_fused_group_barrier` in `fused_indexer.py`) without
