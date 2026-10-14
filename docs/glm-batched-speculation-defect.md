@@ -1,8 +1,9 @@
 # GLM-5.3 Flash: batched speculative decoding corrupts answers on DGX Spark
 
-Status: open. The corruption follows the b12x DSA indexer's tiled route
-(section 3); why that route selects wrong records inside Flare's graphs, when it
-is correct standalone, is still being investigated.
+Status: cause found and fix validated on Spark TP2 (section 7); the fix is not
+yet merged. Exporting a GLM package zeroes the DSA indexer's selection width,
+which only the b12x indexer's tiled route reads, so every verification graph
+above 16 query rows attends to the wrong records.
 
 ## 1. Summary
 
@@ -27,12 +28,25 @@ Two other symptoms follow from it:
   check shows the verifier rejecting the target distribution (non-finite or
   empty probabilities), often in several rows of the same round.
 
+The cause is in package export, not in a kernel. Each GLM indexer passes b12x a
+one-element `active_width` tensor that preparation fills once with the page
+table's width in index pools. The tensor lives in the decoder's scratch, and
+export treats all decoder scratch as disposable and zeroes it in the package.
+b12x's tiled indexer route, which GLM decode graphs use above 16 query rows,
+caps every row's candidate length at `active_width`, so in an exported package
+it scores no candidates and returns indices left in its scratch from earlier
+work. Sparse MLA then attends to unrelated records, and the model loses facts
+from the prompt while staying fluent. The fused route used at 16 rows or fewer,
+prefill and the GB300's SM103 indexer never read the tensor, and a model
+prepared and served in one process is never exported, which is why each of
+those is correct.
+
 ## 2. Environment
 
 | Item | Value |
 | --- | --- |
 | Reproduced on | A development branch of Flare `main` carrying unmerged multi-host changes, with FlashInfer 64916e85 plus the RoCEnante variable-length all-gather from [local-inference-lab/flashinfer#12](https://github.com/local-inference-lab/flashinfer/pull/12) |
-| Flare `main` | `main` (7ba743d) cannot yet export a multi-host package: each peer rank stops with `ValueError: runtime assets must contain only tokenizer and chat_template`. Section 4 gives the one-line fix. Reproduction with `main`, that fix and the pinned FlashInfer (64916e85, `pyproject.toml`) is in progress; this section will record the result. Sections 4 and 5 use `main` |
+| Flare `main` | Reproduced at 7ba743d with its pinned FlashInfer (64916e85, `pyproject.toml`) at TP2: 2 correct and 6 corrupt of 8. `main` cannot export a multi-host package without the one-line export fix in section 4. Sections 4 and 5 use `main` |
 | Checkpoint | `local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD` (revision dec48abd) |
 | Packages | TP2: `--ranks 2 --max-concurrency 8`; TP4: `--ranks 4 --max-concurrency 16`; both `--gpus 0 --prefill-chunk-size 4096 --no-context-parallel` with the default adaptive MTP |
 | Hardware | DGX Spark, ConnectX-7 at 200G through one switch |
@@ -61,6 +75,7 @@ how many of them were in graphs above 16 query rows.
 | GB300, adaptive MTP | cached 96K ×16 | 16/16 |
 | GB300, adaptive MTP | uncached 133K–260K | 14/14 |
 | Spark TP2, adaptive MTP, concurrency 8 | cached 10K ×8, two seeds | 1/8, 0/8 |
+| Spark TP2, Flare `main` 7ba743d with the section 4 export fix, adaptive MTP, concurrency 8 | cached 10K ×8 | 2/8 (6 corrupt) |
 | Spark TP2, adaptive MTP | cached 10K ×2 | 2/2 |
 | Spark TP2, speculation off, concurrency 8 | cached 10K ×8 | 8/8 |
 | Spark TP2, MTP draft removed from decode rounds (diagnostic, see section 6), fixed width 4, concurrency 8 | cached 10K ×8, two seeds | 0/8, 0/8 |
@@ -69,6 +84,10 @@ how many of them were in graphs above 16 query rows.
 | Spark TP2, same package | cached 10K ×2 | 2/2 |
 | Spark TP2, `--no-compile`, DSA indexer forced to its fused route at every row count (diagnostic, see below), concurrency 8 | cached 10K ×8, three seeds | 7/8 (+1 neighbour), 8/8, 8/8; no corrupt replies |
 | Spark TP2, same diagnostic | cached 10K ×2 | 2/2 |
+| Spark TP2, prepared and served in one process (`ignition serve --no-compile`), concurrency 8 | cached 10K ×8, three seeds | 8/8, 6/8 (+2 neighbour), 6/8 (+1 neighbour, 1 misplaced); no corrupt replies |
+| Spark TP2, same server | cached 10K ×2 | 2/2 |
+| Spark TP2, exported with the fix in section 7, compiled, adaptive MTP, concurrency 8 | cached 10K ×8, three seeds | 4/8 (+4 neighbour), 8/8, 7/8 (+1 neighbour); no corrupt replies |
+| Spark TP2, same package | cached 10K ×2; uncached 96K ×3 | 2/2; 3/3 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 10K ×16 | 1/16 |
 | Spark TP4, adaptive MTP, concurrency 16 | cached 96K ×16 | 0/16 (13 reached the 16,384-token limit) |
 | Spark TP4, adaptive MTP | cached 10K ×2, ×4, ×8 | 2/2, 3/4, 1/8 |
@@ -107,8 +126,25 @@ replies correct or neighbouring, with 95 of the 303 speculative rounds at
 concurrency 8 in graphs of 24 to 48 rows. The same package without the change
 corrupts six to eight replies of eight. The corruption therefore follows the
 tiled route. The tiled route is nevertheless correct when called directly
-(section 6), so the fault lies in how it runs inside Flare's prepared graphs,
-not in its arithmetic.
+(section 6), and the same TP2 configuration prepared and served in one process
+with `ignition serve` is also correct, so the fault lies in what an exported
+package carries rather than in the kernel's arithmetic.
+
+GLM's `IndexScratch` holds the `active_width` tensor that every indexer layer
+passes to b12x, initialised once to the page table's width times 64 index pools
+(`ignition/recipes/glm53/indexer.py`). No graph writes it. The recipe's
+`disposable_ranges` (`ignition/recipes/glm53/export.py`) walks every field of the
+decoder and prefill scratch, so the tensor is among the ranges that
+`export_model` zeroes and omits from the package. b12x's tiled decode scorer
+reads `active_width[0]` as the live width and caps each row's candidate count
+by it; at zero it computes no logits, and the tiled top-k then selects from
+whatever its reused scratch holds. A single-GPU harness that drives Flare's own
+`PreparedSparseIndexer` lifecycle (tuning, finalisation, a cache rebind and
+graph capture on a shared scratch arena) selects the exact top-k as prepared,
+returns wrong selections for every live row of 32- and 48-row graphs once the
+tensor is zeroed as export does, and is exact again when the graph rewrites it.
+The DeepSeek recipes write their own `active_width` inside the graph, which is
+why they are unaffected.
 
 The fused kernel is not a drop-in replacement above 48 rows on GB10: its pack
 scratch holds `num_sms × topk` entries, and a 64-row graph stops with `fused
@@ -167,6 +203,10 @@ the final package.
      --hosts spark2 --gpus 0 --bind 0.0.0.0:8000
    ```
 
+   Each peer caches a complete copy of the package under
+   `~/.cache/flare/packages` (about 181 GB at TP2), so leave that much free on
+   every peer; copies of older packages are not removed automatically.
+
    Accept the development publisher on first use, or pass `--publisher-keys`,
    `--dangerously-approve-key` and `--dangerously-accept-publisher` for an
    unattended start.
@@ -200,9 +240,10 @@ MLA, KDA verification recording and commit, NVFP4 MoE, blockscaled GEMMs and
 short convolution. Three things differ: b12x compiles for `sm_120a`; autotuning
 measures tactics on the local GPU (188 SMs against GB10's 48); and
 tensor-parallel collectives use b12x's PCIe transport instead of RoCEnante.
-A reproduction on SM120 therefore separates a defect in Flare's SM12x
-speculative path from one that needs GB10 tactics or RoCE. GLM has not yet
-been run this way.
+None of these differences matter to the cause, which is in package export, so
+an SM120 package exported without the fix in section 7 should corrupt answers
+the same way and one exported with it should not. GLM has not yet been run
+this way.
 
 The checkpoint holds about 166 GB of weights, so use four 96 GB cards in one
 host at tensor parallel 4 (about 44 GB of weights per rank). Two cards leave no
@@ -226,10 +267,8 @@ is a fair test.
    (and 2 for the control). Report the counts and the GPU model (Workstation or
    Max-Q).
 
-If it fails like Spark while the controls pass, the defect lies in Flare's
-SM12x speculative path or the b12x kernels it uses, independent of RoCE and of
-GB10 tuning, and SM120 becomes the quicker place to bisect. If it passes, the
-defect needs GB10 tactics, RoCEnante, or ranks on separate hosts.
+A result that differs from Spark, either corruption with the fix or none
+without it, would point to a second defect and is worth reporting.
 
 ## 6. What has been ruled out
 
@@ -258,19 +297,26 @@ Sparks that we inspected uses the same b12x kernel families, but with b12x
 tuning off, PyNCCL collectives and at most two concurrent requests in its
 logs, so it does not cover this case.
 
-## 7. Next steps
+## 7. Fix and next steps
 
-1. Find why the tiled indexer route selects wrong pools inside Flare's graphs.
-   It is correct when planned, bound and replayed directly, so the candidates
-   are Flare's lifecycle around it (preparation against benchmark operands and
-   a small preparation cache, `rebind_cache` before capture, scratch placed in
-   the shared arena) and state the route sets up outside the captured graph
-   that an exported package may not carry. Two checks are in progress: Flare's
-   own `PreparedSparseIndexer` lifecycle driven on one GPU against an exact
-   reference, and the same TP2 configuration served in process with
-   `ignition serve`, which captures and replays without exporting a package.
-2. Confirm the reproduction on Flare `main` with FlashInfer 64916e85 and the
-   export fix in section 4 (in progress).
-3. Run the RTX PRO 6000 reproduction in section 5. The b12x indexer serves
-   SM120 too, so it should reproduce there if the cause is in Flare's
-   integration rather than in RoCE or GB10 specifics.
+Rewrite the width inside every graph, where the first indexer layer already
+rewrites the page table and pool lengths (`PreparedGlmIndexer.__call__` in
+`ignition/recipes/glm53/indexer.py`):
+
+```python
+        if self.prepares_tables:
+            # Packages zero this scratch, so every graph restores the selection width b12x reads.
+            s.active_width.fill_(s.page_table.shape[1] * 64)
+```
+
+With this change and an unmodified FlashInfer, a compiled TP2 package at
+concurrency 8 returned no corrupt replies in three concurrency-8 runs, two
+requests, and three uncached 96K-token prompts (section 3).
+
+1. Validate the fix on `main` with the section 4 export fix (in progress), and
+   at TP4 with concurrency 16, the configuration in which the defect was first
+   seen.
+2. Merge the fix and the export fix, with a regression test that zeroes the
+   export's disposable ranges before replaying a graph above 16 rows.
+3. Audit other recipes for prepared constants placed in storage that export
+   treats as disposable.
