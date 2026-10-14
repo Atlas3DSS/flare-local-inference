@@ -40,7 +40,14 @@ impl Queue {
         })
     }
 
-    /// The caller retains the file and buffer until this slot completes, including on failure.
+    pub(crate) fn attach(&self, file: &File) -> io::Result<()> {
+        if unsafe { CreateIoCompletionPort(file.as_raw_handle(), self.port, 0, 1) }.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The file must be attached to this queue. Retain it and the buffer until completion.
     pub(crate) unsafe fn submit(
         &mut self,
         slot: usize,
@@ -61,9 +68,6 @@ impl Queue {
             ));
         }
         let handle = file.as_raw_handle();
-        if unsafe { CreateIoCompletionPort(handle, self.port, 0, 1) }.is_null() {
-            return Err(io::Error::last_os_error());
-        }
         entry.operation = unsafe { std::mem::zeroed() };
         entry.operation.Anonymous.Anonymous.Offset = offset as u32;
         entry.operation.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;

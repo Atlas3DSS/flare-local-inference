@@ -359,6 +359,7 @@ mod tests {
         }
         let file = direct_file(&path, true).unwrap();
         let mut queue = Queue::new(2).unwrap();
+        queue.attach(&file).unwrap();
         for slot in 0..2 {
             unsafe {
                 queue
@@ -382,6 +383,7 @@ mod tests {
         let source = File::open(&path).unwrap();
         let file = direct_reopen(&source).unwrap();
         let mut queue = Queue::new(2).unwrap();
+        queue.attach(&file).unwrap();
         for slot in 0..2 {
             unsafe {
                 queue

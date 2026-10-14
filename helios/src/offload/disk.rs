@@ -377,6 +377,11 @@ impl Worker {
         check_tail_pages(&header)?;
         let file = crate::os::direct_file(&temporary, true)
             .map_err(|error| direct_open_failure("create record file", &temporary, error))?;
+        #[cfg(windows)]
+        self.ring
+            .queue
+            .attach(&file)
+            .map_err(|e| io_failure("attach record writer", e))?;
         let tail = header.tail_pages as usize;
         self.records.insert(
             id,
@@ -541,6 +546,11 @@ impl Worker {
         }
         let file = crate::os::direct_file(&path, false)
             .map_err(|error| direct_open_failure("open record file", &path, error))?;
+        #[cfg(windows)]
+        self.ring
+            .queue
+            .attach(&file)
+            .map_err(|e| io_failure("attach record reader", e))?;
         let header_span = Span {
             address: self.scratch.address(),
             offset: 0,

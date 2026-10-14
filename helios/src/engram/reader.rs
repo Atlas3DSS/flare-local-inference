@@ -166,6 +166,9 @@ impl DiskReader {
         #[cfg(windows)]
         let ring = crate::os::completion::Queue::new(DEPTH)
             .map_err(|e| format!("Engram completion port: {e}"))?;
+        #[cfg(windows)]
+        ring.attach(&file)
+            .map_err(|e| format!("attach Engram reader: {e}"))?;
         Ok(Self {
             ring,
             staging,

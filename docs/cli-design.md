@@ -80,6 +80,9 @@ cargo build --release --manifest-path flare/Cargo.toml
 flare/target/release/flare run PACKAGE --gpus 0 --bind 127.0.0.1:8000
 ```
 
+For MSVC cross-compilation, native Windows builds, and GPU compatibility
+requirements, see [Windows serving](windows.md).
+
 The native device ordinal follows CUDA's visible device enumeration. Optional
 `--api-key-file PATH` supplies authentication at launch. Loading requires
 the package's GPU architecture and sufficient GPU and mapped host memory.
