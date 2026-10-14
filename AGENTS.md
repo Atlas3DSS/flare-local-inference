@@ -101,9 +101,9 @@ Changing this default does not change an already exported package.
 
 N-gram tables use indirect delivery exclusively: every graph consumes compact
 GPU row buffers filled by Helios. Qwen PLE tables are stored once in the package.
-Without the flag, a discrete GPU keeps the 26.8 GiB table in resident host memory
-when it takes at most half of available memory (an integrated GPU reads it from
-disk); `flare run --embedding-table-storage disk|ram` overrides that. The graph publishes GPU-produced lookup IDs before layer
+Helios reads the 26.8 GiB table from disk by default on every GPU;
+`flare run --embedding-table-storage ram` keeps it in resident host memory.
+The graph publishes GPU-produced lookup IDs before layer
 0 and waits for row delivery at the layer-1 consumer. Disk and RAM delivery
 use the same prepared model graphs; the flag selects table storage only.
 
@@ -112,9 +112,9 @@ DSpark is its learned draft method, defaulting to five draft tokens per round
 with adaptive verification based on observed acceptance and GPU round cost;
 vision graphs are not prepared. Its 188.8 GiB of Engram tables are
 stored once in the package and read on demand through bounded direct-I/O
-staging unless at least twice their size is available, in which case they load into
-ordinary RAM by default (`flare run --embedding-table-storage disk|ram` overrides);
-both modes gather compact rows into shared pinned buffers, copy them to each
+staging by default; `flare run --embedding-table-storage ram` loads them into
+ordinary resident memory instead.
+Both modes gather compact rows into shared pinned buffers, copy them to each
 rank, and signal captured consumer events. Preparation appends the immutable
 checkpoint slices without materializing the tables. Select four available
 GPUs explicitly:

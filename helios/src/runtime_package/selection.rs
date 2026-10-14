@@ -9,7 +9,7 @@ use crate::{Result, execution::BATCH_CAPACITIES};
 
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
-    /// Absent, [`crate::engram::Storage::choose`] picks RAM or disk at load.
+    /// Auxiliary embedding-table storage; defaults to disk when absent.
     pub embedding_table_storage: Option<crate::engram::Storage>,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,

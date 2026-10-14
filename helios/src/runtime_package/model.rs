@@ -504,19 +504,7 @@ impl NativeModel {
                     .map(|g| (g.packed_tokens()) as usize)
                     .max()
                     .unwrap();
-                let storage = options.embedding_table_storage.unwrap_or_else(|| {
-                    let table_bytes = index
-                        .tables
-                        .iter()
-                        .flat_map(|table| &table.planes)
-                        .map(|plane| plane.nbytes as u64)
-                        .sum();
-                    crate::engram::Storage::choose(
-                        model.ranks.iter().any(|rank| rank.integrated),
-                        table_bytes,
-                        crate::engram::Storage::available_host_bytes(),
-                    )
-                });
+                let storage = options.embedding_table_storage.unwrap_or_default();
                 model.engram = Some(crate::engram::Shared::new(
                     index,
                     root,

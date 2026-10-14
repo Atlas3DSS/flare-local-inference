@@ -194,7 +194,7 @@ sequence with an acquire operation before accessing the IDs. Both models publish
 after input-state preparation, before target layer 0. Qwen consumes rows at
 layer 1; DeepSeek V4.1 consumes its two tables at layers 1 and 14.
 
-A shared reader gathers each step's rows once. `--embedding-table-storage disk` uses
+A shared reader gathers each step's rows once. The default, `--embedding-table-storage disk`, uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
 registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
 resident memory and gathers the same rows; on GB300, Qwen's disk reads lengthened
