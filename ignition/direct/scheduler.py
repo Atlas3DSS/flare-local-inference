@@ -12,10 +12,12 @@ only what reproducing model-level faults needs:
   is exactly the prompt, batched across the requests admitted together, then
   resume sampling after a restore.
 - One prefill chunk per step, padded to the smallest prepared capacity.
-- Every decoding request in one batched round: a speculative graph of the
-  smallest prepared batch at a fixed width or one chosen from measured graph
-  time and each request's observed acceptance, or ordinary decode without
-  speculation. Decode rounds and prefill chunks alternate while both have work.
+- Decode rounds chosen as Helios chooses them (`policy.py`): every prepared
+  batch capacity and verification width competes, carrying its highest-valued
+  decoding requests, and the graph with the best expected value per graph time
+  wins, from each request's observed acceptance, Helios's service prices and
+  output ages, and Helios's expiring estimates of each graph's time. Decode
+  rounds and prefill chunks alternate while both have work.
 - A snapshot at the prompt endpoint of every prompt not yet cached, published as
   a checkpoint that later identical prompts restore, sharing its complete pages.
 
@@ -32,6 +34,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 import numpy as np
+
+from .policy import Accounting, Policy
 
 INACTIVE, RUNNING, FINISHED, ERROR = 0, 1, 2, 3
 _MAINTENANCE = ("init", "restore", "snapshot")
@@ -192,6 +196,15 @@ class Acceptance:
             total += chain
         return total
 
+    def expectations(self, maximum):
+        """`expected(width)` for every width through `maximum`, computed in one pass."""
+        chain, total, values = 1., 1., [0., 1.]
+        for probability, _ in self.depths[:min(max(maximum - 1, 0), 7)]:
+            chain *= probability
+            total += chain
+            values.append(total)
+        return values
+
 
 @dataclass
 class Checkpoint:
@@ -218,6 +231,9 @@ class Request:
         self.phase = "queued"
         self.finished_early = False
         self.acceptance = Acceptance()
+        self.accounting = Accounting()
+        # Sequence of the last step that carried the request; Helios's `last_use` fence.
+        self.last_use = 0
 
     @property
     def pending_token(self):
@@ -243,6 +259,7 @@ class Step:
     width: int
     lanes: list
     sequence: int
+    participants: object = None
 
     @property
     def frame(self):
@@ -318,7 +335,7 @@ class Scheduler:
         self.clock = 0
         self.sequence = 0
         self.last_kind = None
-        self.costs = {}
+        self.policy = Policy(layout)
         self.rounds = Counter()
         self.steps = Counter()
         self.device_errors = Counter()
@@ -340,7 +357,23 @@ class Scheduler:
 
     def submit(self, request):
         self.validate(request)
+        request.accounting = Accounting(arrival_ns=self.now_ns, last_progress_ns=self.now_ns)
         self.queue.append(request)
+
+    @property
+    def now_ns(self):
+        """The scheduling clock, which the caller advances; see `advance_to`."""
+        return self.policy.now_ns
+
+    def advance_to(self, now_ns):
+        """Set the scheduling clock, in nanoseconds; it must not go back.
+
+        Helios's clock is wall time. The direct server advances this one by each
+        step's graph time, and by wall time only while it waits for requests,
+        so Python's host work between steps ages no request and expires no
+        graph estimate, and an eager step counts as its graph time.
+        """
+        self.policy.advance_to(now_ns)
 
     @property
     def active(self):
@@ -437,8 +470,19 @@ class Scheduler:
 
     def _step(self, kind, size, lanes, width=1):
         graph, batch, tokens = self.layout.graph(kind, size, width)
+        return self._commit(Step(kind, graph, batch, tokens, lanes, 0))
+
+    def _commit(self, step, rates=None):
+        """Number the step and record what Helios's `commit` records: last use and service participants."""
+        active = self.active
+        if rates is None:
+            rates = self.policy.rates(active)[0]
+        step.participants = self.policy.participants(active, rates)
         self.sequence += 1
-        return Step(kind, graph, batch, tokens, lanes, self.sequence)
+        step.sequence = self.sequence
+        for lane in step.lanes:
+            lane.request.last_use = self.sequence
+        return step
 
     def _phase(self, phase):
         return [request for request in self.active if request.phase == phase]
@@ -459,12 +503,14 @@ class Scheduler:
             return self._step("resume", len(resuming), [Lane(r, r.consumed, 0) for r in resuming])
         decoding, prefilling = self._phase("decode"), self._phase("prefill")
         if decoding and (not prefilling or self.last_kind not in ("decode", "speculative")):
-            if not self.layout.speculative:
-                return self._step("decode", len(decoding), [Lane(r, r.consumed, 1) for r in decoding])
-            batch = self.layout.graph("speculative", len(decoding), self.layout.max_width)[1]
-            width = self._width(batch, decoding)
-            return self._step("speculative", len(decoding),
-                              [Lane(r, r.consumed, self._round_tokens(r, width)) for r in decoding], width)
+            rates, expected = self.policy.rates(self.active)
+            chosen = self.policy.decode_round(decoding, self.active, rates, expected)
+            if chosen is not None:
+                kind = "speculative" if self.layout.speculative else "decode"
+                lanes = [Lane(r, r.consumed, self._round_tokens(r, chosen.width)) for r in chosen.requests]
+                step = Step(kind, self.layout.graphs[(kind, chosen.batch, chosen.width)], chosen.batch,
+                            chosen.width, lanes, 0)
+                return self._commit(step, rates)
         if prefilling:
             request = min(prefilling, key=lambda r: r.ident)
             tokens = min(len(request.prompt) - request.consumed, self.layout.prefill_chunk)
@@ -474,29 +520,6 @@ class Scheduler:
     def _round_tokens(self, request, width):
         return max(1, min(width, self.layout.context - request.consumed,
                           request.max_new_tokens - len(request.generated)))
-
-    def _width(self, batch, rows):
-        """A fixed width, or the width with the most expected tokens per measured graph nanosecond."""
-        layout = self.layout
-        if layout.fixed_width is not None:
-            return layout.fixed_width
-        widths = [w for w in layout.widths if ("speculative", batch, w) in layout.graphs]
-        measured = {w: self.costs[("speculative", batch, w)] for w in widths if ("speculative", batch, w) in self.costs}
-        if not measured:
-            return max(widths)
-        best, best_rate = None, -1.
-        for width in widths:
-            if width in measured:
-                cost = measured[width]
-            else:
-                # An unmeasured width is estimated from the nearest measured one, scaled by its token count.
-                nearest = min(measured, key=lambda w: (abs(w - width), w))
-                cost = measured[nearest] * width / nearest
-            value = sum(r.acceptance.expected(self._round_tokens(r, width)) for r in rows)
-            rate = value / max(cost, 1.)
-            if rate > best_rate:
-                best, best_rate = width, rate
-        return best
 
     # Input packing, as Helios's paged_text contract packs each graph kind.
 
@@ -572,8 +595,12 @@ class Scheduler:
 
     # Completion.
 
-    def complete(self, step, records, elapsed_ms=None):
-        """Apply one step's completion records; returns the requests it retired."""
+    def complete(self, step, records, graph_ns=None):
+        """Apply one step's completion records; returns the requests it retired.
+
+        `graph_ns` is the step's graph time, which Helios's estimates and service
+        prices observe; None observes nothing, as Helios does without GPU timing.
+        """
         layout = self.layout
         records = np.asarray(records)
         if records.shape != (layout.capacity, layout.record_fields):
@@ -582,15 +609,13 @@ class Scheduler:
         for slot, record in enumerate(records):
             if record[5] != INACTIVE and slot not in lanes:
                 raise CompletionError(f"slot {slot} reported status {record[5]} outside step {step.sequence}")
-        if elapsed_ms is not None:
-            key = (step.kind, step.batch, step.width)
-            nanos = elapsed_ms * 1e6
-            self.costs[key] = nanos if key not in self.costs else .8 * self.costs[key] + .2 * nanos
+        self.policy.costs.observe((step.kind, step.batch, step.width), graph_ns)
         self.steps[step.kind] += 1
         if step.kind == "speculative":
             self.rounds[(step.batch, step.width)] += 1
         self.last_kind = step.kind
-        retired = []
+        retired, useful, published = [], {}, []
+        live = list(self.active)
         for lane in step.lanes:
             request = lane.request
             record = records[request.slot]
@@ -639,6 +664,13 @@ class Scheduler:
                 accepted = min(int(record[10]), offered)
                 request.acceptance.observe(offered, accepted, int(record[8]) > int(record[10]))
                 request.rounds += 1
+            if emitted or (step.kind == "prefill" and consumed > request.consumed):
+                # Helios's `credit`: committed prompt and output tokens are this step's useful service.
+                useful[request.slot] = (consumed - request.consumed if step.kind == "prefill" else 0) + emitted
+                request.accounting.last_progress_ns = self.now_ns
+            if emitted:
+                request.accounting.pending_publication_fence = step.sequence
+                published.append(request)
             request.consumed = consumed
             request.generated.extend(tokens)
             finished = status == FINISHED or len(request.generated) >= request.max_new_tokens
@@ -652,6 +684,9 @@ class Scheduler:
                 request.phase = "prefill"
             else:
                 request.phase = "decode" if request.generated else "resume"
+        self.policy.observe_service(step.sequence, step.participants, useful, live, graph_ns)
+        for request in published:
+            self.policy.published(request, step.sequence)
         return retired
 
     def _capture(self, request):

@@ -53,6 +53,9 @@ def _parser() -> argparse.ArgumentParser:
                                   " rank, with no Helios scheduler or native server; non-streaming chat only")
     diagnostics.add_argument("--eager", action="store_true",
                              help="with --direct: call the forward each graph captured instead of replaying it")
+    diagnostics.add_argument("--graph-times", type=Path, metavar="PATH",
+                             help="with --direct: graph replay saves its estimate of each graph's time here; with"
+                                  " --eager, decode rounds are chosen from the times saved here")
     joining = command("join", serve.join, "run a peer rank for rank zero's rendezvous on another host")
     joining.add_argument("rendezvous", metavar="ADDR:PORT", help="rank zero's rendezvous address")
     joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")

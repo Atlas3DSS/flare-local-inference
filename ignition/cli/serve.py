@@ -324,6 +324,10 @@ def serve(args) -> int:
 
     if args.eager and not args.direct:
         raise UsageError("--eager applies only to --direct execution")
+    if args.graph_times is not None and not args.direct:
+        raise UsageError("--graph-times applies only to --direct execution")
+    if args.eager and args.graph_times is not None and not args.graph_times.is_file():
+        raise UsageError(f"--graph-times {args.graph_times} does not exist; graph replay with --graph-times saves it")
     progress = _serving_progress(args.verbose)
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
@@ -371,7 +375,7 @@ def serve(args) -> int:
     if args.direct:
         from ignition.direct.server import serve_direct
 
-        code = serve_direct(prepared, bind=bind, eager=args.eager, verbose=args.verbose,
+        code = serve_direct(prepared, bind=bind, eager=args.eager, verbose=args.verbose, graph_times=args.graph_times,
                             served_names=(*options["served_names"], options["model_id"]))
     else:
         code = _serve_prepared(prepared, bind, options)

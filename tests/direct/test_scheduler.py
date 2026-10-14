@@ -276,19 +276,58 @@ def test_requests_wait_for_slots_and_pages_and_rounds_alternate_with_prefill():
     assert requests[1].phase == "decode"
 
 
-def test_adaptive_width_starts_widest_and_follows_measured_cost_and_acceptance():
+def decoding(scheduler, count, limit=1000):
+    """`count` requests decoding from the first round, as Helios's policy tests set them up."""
+    requests = [request(index, [1, 2, 3], limit=limit) for index in range(count)]
+    for current in requests:
+        scheduler.submit(current)
+    scheduler._admit()
+    for current in requests:
+        current.phase, current.consumed, current.generated = "decode", 3, [5]
+    return requests
+
+
+def decode_round(scheduler, nanos, accepted):
+    """Plan, time and complete one round; each row accepts up to `accepted` drafts."""
+    step = scheduler.plan()
+    scheduler.advance_to(scheduler.now_ns + nanos(step))
+    results = {}
+    for lane in step.lanes:
+        offered = lane.tokens - 1
+        emitted = min(accepted, offered) + 1
+        results[lane.request] = (1, lane.request.consumed + emitted, [8] * emitted, 0, offered, emitted - 1)
+    scheduler.complete(step, records(scheduler, step, results), nanos(step))
+    return step.batch, step.width, len(step.lanes)
+
+
+def test_decode_rounds_explore_unmeasured_graphs_then_follow_graph_time_and_acceptance():
     scheduler = Scheduler(layout())
-    rows = [request(1, [1, 2, 3])]
-    assert scheduler._width(1, rows) == 3
-    scheduler.costs[("speculative", 1, 3)] = 3e6
-    # Unmeasured narrower widths scale from the measured one, so a cheaper estimate is explored.
-    assert scheduler._width(1, rows) == 1
-    scheduler.costs[("speculative", 1, 1)] = 2.5e6
-    scheduler.costs[("speculative", 1, 2)] = 2.6e6
-    for _ in range(40):
-        rows[0].acceptance.observe(2, 2, False)
-    assert scheduler._width(1, rows) == 3
-    assert Scheduler(layout(fixed_width=2))._width(1, rows) == 2
+    decoding(scheduler, 2)
+    cost = lambda step: (2 + step.width + step.batch) * 1_000_000
+    # Every unmeasured graph is explored once before any measured one runs, the most valuable first:
+    # both rows at the widest verification in the smallest batch that holds them.
+    explored = [decode_round(scheduler, cost, 2) for _ in range(9)]
+    assert explored[0] == (2, 3, 2)
+    assert sorted(shape[:2] for shape in explored) == [(batch, width) for batch in (1, 2, 4) for width in (1, 2, 3)]
+    # Then the measured graph with the best expected value per graph time serves both rows.
+    assert decode_round(scheduler, cost, 2) == (2, 3, 2)
+    # Rejected drafts lower the expected tokens until the narrowest round is worth the most per time.
+    assert [decode_round(scheduler, cost, 0) for _ in range(40)][-1] == (2, 1, 2)
+    # Estimates expire after 30 s without an observation, and expired graphs are explored again.
+    scheduler.advance_to(scheduler.now_ns + 31_000_000_000)
+    assert decode_round(scheduler, cost, 0) == (2, 3, 2)
+
+
+def test_a_fixed_width_still_chooses_batch_capacity_and_rows_by_value():
+    scheduler = Scheduler(layout(fixed_width=2))
+    requests = decoding(scheduler, 3)
+    # Three rows need batch four; a two-row graph costing a quarter as much carries the two most valuable rows.
+    cost = lambda step: {1: 10, 2: 10, 4: 40}[step.batch] * 1_000_000
+    shapes = [decode_round(scheduler, cost, 1) for _ in range(12)]
+    assert {width for _, width, _ in shapes} == {2} and scheduler.rounds[(4, 2)] == 1
+    assert shapes[3:] == [(2, 2, 2)] * 9
+    # Fairness prices and output age rotate the rows, so no request waits indefinitely.
+    assert all(len(current.generated) > 4 for current in requests)
 
 
 def test_acceptance_follows_helios_depth_estimates():

@@ -35,3 +35,28 @@ def test_replies_split_reasoning_when_the_prompt_opens_a_think_block():
     assert frontend().reply(text, "<|user|>q<|assistant|><think>") == ("The code is 2U2GYCZF, 198.", "plan")
     assert frontend().reply([ord(c) for c in "still thinking"], "<|assistant|><think>") == ("", "still thinking")
     assert frontend().reply([ord(c) for c in "plain"], "<|assistant|>") == ("plain", None)
+
+
+def test_graph_replay_saves_graph_times_that_eager_execution_reads(tmp_path):
+    import threading
+
+    from ignition.direct.scheduler import Layout, Scheduler
+    from ignition.direct.server import DirectServer, load_graph_times
+
+    graphs = {("speculative", 1, 1): "speculative1x1", ("speculative", 1, 2): "speculative1x2",
+              ("prefill", 1, 128): "prefill128"}
+    layout = Layout(capacity=1, max_active=1, context=1024, page_tokens=64, table_width=16, pages=16, snapshots=0,
+                    prefill_chunk=128, vocabulary=16, eos=(1,), graphs=graphs, widths=(1, 2), record_fields=24)
+    server = object.__new__(DirectServer)
+    server.layout, server.scheduler, server.lock = layout, Scheduler(layout), threading.Lock()
+    server.graph_times = tmp_path / "times.json"
+    server.scheduler.policy.costs.observe(("speculative", 1, 2), 9_000_000)
+    server.scheduler.policy.costs.observe(("prefill", 1, 128), 30_000_000)
+    server._save_graph_times()
+    assert load_graph_times(server.graph_times, layout) == {"speculative1x2": 9_000_000, "prefill128": 30_000_000}
+    # Graphs another preparation named are ignored.
+    server.graph_times.write_text('{"graph_ns": {"speculative1x1": 4000000, "decode64": 5}}')
+    assert load_graph_times(server.graph_times, layout) == {"speculative1x1": 4_000_000}
+    server.graph_times.write_text("{}")
+    with pytest.raises(AdmissionError, match="cannot read graph times"):
+        load_graph_times(server.graph_times, layout)

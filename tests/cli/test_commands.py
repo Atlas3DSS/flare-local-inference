@@ -1,6 +1,7 @@
 """Command output and exit codes with injected GPUs and hub cache."""
 
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -112,6 +113,12 @@ def test_direct_execution_is_an_explicit_serve_diagnostic(host, capsys):
     assert not arguments.direct and not arguments.eager
     assert main(["serve", "glm-5.3-flash", "--eager"]) == 2
     assert "--eager applies only to --direct" in failure(capsys)[0]
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash", "--direct", "--graph-times", "times.json"])
+    assert arguments.graph_times == Path("times.json")
+    assert main(["serve", "glm-5.3-flash", "--graph-times", "times.json"]) == 2
+    assert "--graph-times applies only to --direct" in failure(capsys)[0]
+    assert main(["serve", "glm-5.3-flash", "--direct", "--eager", "--graph-times", "/nonexistent/times.json"]) == 2
+    assert "graph replay with --graph-times saves it" in failure(capsys)[0]
     for arguments in (["run", "glm-5.3-flash", "--direct"], ["export", "glm-5.3-flash", "--output", "x", "--eager"],
                       ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "2", "--direct"]):
         with pytest.raises(SystemExit) as exit:
