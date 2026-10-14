@@ -45,6 +45,20 @@ def _kth_largest(ordered, k):
 
 
 @triton.jit
+def _candidate_positions(ordered, pivot, present, K: tl.constexpr):
+    # Cutoff ties may exceed the bounded buffer. Every strictly higher score
+    # must survive before ties consume its remaining slots.
+    above = present & (ordered.to(tl.int64) > pivot)
+    tied = present & (ordered.to(tl.int64) == pivot)
+    higher_count = tl.sum(above.to(tl.int32), 0)
+    position = tl.where(above, tl.cumsum(above.to(tl.int32), 0) - 1,
+                        higher_count + tl.cumsum(tied.to(tl.int32), 0) - 1)
+    take = (above | tied) & (position < K)
+    count = tl.minimum(higher_count + tl.sum(tied.to(tl.int32), 0), K)
+    return position, take, count
+
+
+@triton.jit
 def _block_candidates(Scores, Probabilities, TopK, Candidates, V: tl.constexpr, BLOCKS: tl.constexpr,
                       BLOCK: tl.constexpr, K: tl.constexpr):
     row, block = tl.program_id(0), tl.program_id(1)
@@ -54,14 +68,12 @@ def _block_candidates(Scores, Probabilities, TopK, Candidates, V: tl.constexpr, 
     tl.store(Probabilities + row * V + tokens, tl.zeros((BLOCK,), tl.float32), inside)
     k = tl.minimum(tl.maximum(tl.load(TopK + row), 1), K)
     ordered = tl.where(inside, _orderable(scores), -2147483648)
-    take = inside & (ordered.to(tl.int64) >= _kth_largest(ordered, k))
-    position = tl.cumsum(take.to(tl.int32), 0) - 1
+    position, take, count = _candidate_positions(ordered, _kth_largest(ordered, k), inside, K)
     keys = (ordered.to(tl.int64) << 32) | (2147483647 - tokens).to(tl.int64)
     base = Candidates + (row * BLOCKS + block) * K
     slots = tl.arange(0, K)
-    count = tl.minimum(tl.sum(take.to(tl.int32), 0), K)
     tl.store(base + slots, tl.full((K,), -9223372036854775808, tl.int64), slots >= count)
-    tl.store(base + position, keys, take & (position < K))
+    tl.store(base + position, keys, take)
 
 
 @triton.jit
@@ -74,12 +86,11 @@ def _select_and_sample(Candidates, Selected, Probabilities, Valid, TopK, TopP, P
     top_k = tl.minimum(tl.maximum(tl.load(TopK + row), 1), K)
     present = pool != -9223372036854775808
     ordered = (pool >> 32).to(tl.int32)
-    take = present & (ordered.to(tl.int64) >= _kth_largest(ordered, top_k))
-    position = tl.cumsum(take.to(tl.int32), 0) - 1
+    position, take, _ = _candidate_positions(ordered, _kth_largest(ordered, top_k), present, K)
     rank = tl.arange(0, K)
     tl.store(Selected + row * K + rank, tl.full((K,), -9223372036854775808, tl.int64))
     tl.debug_barrier()
-    tl.store(Selected + row * K + position, pool, take & (position < K))
+    tl.store(Selected + row * K + position, pool, take)
     tl.debug_barrier()
     keys = tl.sort(tl.load(Selected + row * K + rank), descending=True)
     ordered = (keys >> 32).to(tl.int32)
