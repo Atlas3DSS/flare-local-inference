@@ -12,7 +12,7 @@ def request_capacity(concurrency: int) -> int:
 
 
 def prefill_capacities(chunk_size: int) -> tuple[int, ...]:
-    """Token capacities of prepared prefill graphs; Helios pads a chunk to the smallest that holds it.
+    """Token capacities offered to Helios for prompt chunk scheduling.
 
     Capacities double from 128 tokens to a step of at least 512 tokens and about an eighth of the
     chunk, then grow by that step, so a partial chunk pads by less than one step; the chunk size
@@ -42,3 +42,21 @@ def speculative_shapes(concurrency, widths):
             or any(type(w) is not int or not 1 <= w <= 8 for w in widths)):
         raise ValueError("speculative widths must increase from one through at most eight")
     return tuple((batch, width) for batch in batches for width in reversed(widths))
+
+
+def mixed_shapes(concurrency, chunk_size, widths=(1,)):
+    """Cover prompt lengths and verification depths without their Cartesian product.
+
+    Each batch retains every prompt bucket at width one and every other width
+    at a common prompt bucket. The anchor minimizes the worst multiplicative
+    distance to the shortest and longest chunks, balancing padding of short
+    prompts against subdivision of long prompts. Pure graphs retain complete
+    batch/width coverage. This is a bounded coverage policy, not a latency model.
+    """
+    speculative_shapes(concurrency, widths)
+    prompts = prefill_capacities(chunk_size)
+    anchor = min(prompts, key=lambda p: (max(p / prompts[0], prompts[-1] / p), p))
+    return tuple((batch, width, prompt)
+        for batch in reversed(batch_capacities(concurrency)) if batch > 1
+        for width in reversed(widths)
+        for prompt in reversed(prompts) if width == 1 or prompt == anchor)

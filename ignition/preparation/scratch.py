@@ -193,6 +193,22 @@ def scratch_storage(workspace, *, nbytes, device):
     return workspace
 
 
+def bind_scratch(layout, *, device, workspace=None):
+    """Bind contiguous operand prefixes from caller-owned, typed capacity buffers."""
+    if workspace is None:
+        return {name: torch.empty(shape, dtype=dtype, device=device)
+                for name, (shape, dtype) in layout.items()}
+    result = {}
+    for name, (shape, dtype) in layout.items():
+        tensor = workspace[name]
+        if tensor.dtype != dtype or tensor.device != torch.device(device) or not tensor.is_contiguous():
+            raise ValueError(f"scratch {name} requires contiguous {dtype} storage on {device}")
+        if tensor.numel() < prod(shape):
+            raise ValueError(f"scratch {name} has {tensor.numel()} elements, requires {prod(shape)}")
+        result[name] = tensor.view(-1)[:prod(shape)].view(shape)
+    return result
+
+
 def planned_scratch(specs, workspace=None):
     specs = tuple(specs)
     if isinstance(workspace, ScratchArena):

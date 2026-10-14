@@ -188,12 +188,15 @@ impl ModelConfig {
     }
 }
 
+/// Adapts prepared graph inputs, storage layouts, and frontend metadata.
+///
+/// Runtime policy belongs in shared code. Members must describe concrete data or
+/// binding requirements independently of model identity. Per-model boolean policy
+/// flags, default-false opt-ins, and equivalent enum or callback allowlists are
+/// prohibited. Review every consumer when adding or changing a member.
 pub trait ModelContract: Send + Sync + Sized + 'static {
     type PromptData: Clone + Send;
     type Inputs: Default;
-    /// Whether a text prompt can be extended by its generated tokens, so requests
-    /// without an output limit may grow their pages and be preempted and readmitted.
-    const GROWABLE_OUTPUT: bool = false;
     fn create_inputs(_: &ExecutionManifest) -> Result<Self::Inputs> {
         Ok(Self::Inputs::default())
     }
@@ -255,7 +258,7 @@ pub trait ModelContract: Send + Sync + Sized + 'static {
         data: &Self::PromptData,
     ) -> Result<()>;
     #[cfg(feature = "server")]
-    fn text_only(data: &Self::PromptData) -> bool;
+    fn prompt_metadata(data: &mut Self::PromptData) -> admission::PromptMetadataMut<'_>;
 }
 
 #[cfg(feature = "server")]

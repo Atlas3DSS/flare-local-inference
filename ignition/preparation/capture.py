@@ -15,7 +15,7 @@ from .compilation import _defer_full_collection
 def capture_forwards(functions, signatures, *, session, device, stream, pool,
                      collective=None, coordinator=None, compile_decoder=True, materialize=None,
                      progress=None, label="Prepare serving graphs", cache_root=None, retain_graphs=False,
-                     compile_kinds=("prefill", "decode", "resume", "speculative")):
+                     compile_kinds=("prefill", "decode", "resume", "speculative", "mixed")):
     """Retain compiled callables and capture with an optional b12x IPC runtime.
 
     Persistent state and graph outputs must live in caller-owned storage.

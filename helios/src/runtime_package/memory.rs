@@ -247,8 +247,12 @@ impl NativeModel {
         progress: &StartupProgress,
         active: usize,
         agree: super::model::CacheAgreement<'_>,
+        offload_bytes: u64,
     ) -> Result<()> {
-        let reserve = headroom(&self.server_config)?;
+        // The host prefix store registers and streams after the caches are backed.
+        let reserve = headroom(&self.server_config)?
+            .checked_add(offload_bytes)
+            .ok_or_else(|| invalid("prefix cache headroom overflows the device budget"))?;
         let page_tokens = self.server_config["page_tokens"]
             .as_u64()
             .ok_or_else(|| invalid("model requires physical page geometry"))?;

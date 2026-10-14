@@ -78,11 +78,15 @@ DRAFT_RAW_FIELDS = ("raw_k_ring", "raw_logical_positions", "raw_rope_positions",
 class DraftMetadata:
     """Caller-owned feedback rows and QSA metadata for one prepared MTP shape."""
 
-    def __init__(self, *, tokens, rows, context, device):
+    def __init__(self, *, tokens, rows, context, device, hidden=None):
         self.tokens, self.rows = tokens, rows
         self.qsa = QSAMetadata.allocate(tokens=tokens, batch=rows, context=context, device=device)
         self.token_ids = torch.zeros(tokens, dtype=torch.int64, device=device)
-        self.hidden = torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
+        self.hidden = (torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
+                       if hidden is None else hidden)
+        if (self.hidden.shape != (tokens, HIDDEN) or self.hidden.dtype != torch.bfloat16
+                or self.hidden.device != self.token_ids.device or not self.hidden.is_contiguous()):
+            raise ValueError("MTP feedback requires contiguous BF16 [tokens, 10240] storage on the model device")
         self.output_indices = torch.zeros(rows, dtype=torch.int64, device=device)
         self.indices = torch.arange(tokens, device=device)
         self.row_indices = torch.arange(rows, device=device)

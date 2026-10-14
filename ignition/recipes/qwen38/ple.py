@@ -293,6 +293,7 @@ class PreparedPLE:
         session: PreparationSession,
         name: str,
         workspace=None,
+        partitions=None,
     ):
         _validate_geometry(module)
         if mode not in ("decode", "prefill"):
@@ -369,42 +370,48 @@ class PreparedPLE:
             session=session,
             name=f"{name}.value",
         )
-        args = {
-            "x": scratch.normalized,
-            "conv_weight": module.conv1d.weight.squeeze(1),
-            "query_start_loc": metadata.query_start_loc,
-            "state_slot_ids": metadata.convolution_slots,
-            "state_is_fresh": metadata.fresh,
-            "num_accepted_tokens": metadata.accepted_tokens,
-            "num_seqs": metadata.num_seqs,
-            "num_tokens": metadata.num_tokens,
-            "conv_state": convolution_state,
-            "out": scratch.convolved,
-        }
-        self.convolution_plan = short_conv.plan(
-            short_conv.Caps(
-                device=self.device,
-                mode=mode,
-                channels=10240,
-                kernel_size=4,
-                dilation=3,
-                max_tokens=self.tokens,
-                max_seqs=sequences,
-                max_state_slots=convolution_state.shape[0],
-                max_speculative_tokens=convolution_state.shape[2] - 9,
-            ),
-            invocation=short_conv.invocation_from_tensors(**args),
-        )
-        self.convolution_binding = self._prepare_binding(
-            self.convolution_plan,
-            args,
-            session,
-            f"{name}.convolution",
-            short_conv.bind,
-            bind_plan=True,
-            attribute="convolution_binding",
-            workspace=workspace,
-        )
+        self.partitions = partitions
+        if partitions is None:
+            args = {
+                "x": scratch.normalized,
+                "conv_weight": module.conv1d.weight.squeeze(1),
+                "query_start_loc": metadata.query_start_loc,
+                "state_slot_ids": metadata.convolution_slots,
+                "state_is_fresh": metadata.fresh,
+                "num_accepted_tokens": metadata.accepted_tokens,
+                "num_seqs": metadata.num_seqs,
+                "num_tokens": metadata.num_tokens,
+                "conv_state": convolution_state,
+                "out": scratch.convolved,
+            }
+            self.convolution_plan = short_conv.plan(
+                short_conv.Caps(
+                    device=self.device,
+                    mode=mode,
+                    channels=10240,
+                    kernel_size=4,
+                    dilation=3,
+                    max_tokens=self.tokens,
+                    max_seqs=sequences,
+                    max_state_slots=convolution_state.shape[0],
+                    max_speculative_tokens=convolution_state.shape[2] - 9,
+                ),
+                invocation=short_conv.invocation_from_tensors(**args),
+            )
+            self.convolution_binding = self._prepare_binding(
+                self.convolution_plan,
+                args,
+                session,
+                f"{name}.convolution",
+                short_conv.bind,
+                bind_plan=True,
+                attribute="convolution_binding",
+                workspace=workspace,
+            )
+        else:
+            self.convolutions = tuple(PreparedPLEConvolution(module, part.scratch, convolution_state,
+                part.metadata, mode=part.mode, session=session, name=f"{name}.{part.mode}", workspace=workspace)
+                for part in partitions.parts)
         self.token_rows = torch.arange(
             self.tokens, dtype=torch.int32, device=self.device
         ).view(-1, 1)
@@ -462,9 +469,39 @@ class PreparedPLE:
         ).any(dim=1, keepdim=True)
         scratch.gated.masked_fill_(~live, 0)
         scratch.normalized.masked_fill_(~live, 0)
-        short_conv.run(self.convolution_binding)
+        if self.partitions is None:
+            short_conv.run(self.convolution_binding)
+        else:
+            for part, convolution in zip(self.partitions.parts, self.convolutions):
+                part.gather(scratch.normalized, part.scratch.normalized)
+                convolution()
+            self.partitions.combine(tuple(part.scratch.convolved for part in self.partitions.parts), scratch.convolved)
         torch.add(scratch.gated, scratch.convolved, out=scratch.output)
         return scratch.output
+
+
+class PreparedPLEConvolution:
+    """Phase-specific history update after the shared PLE projections and gates."""
+
+    def __init__(self, module, scratch, state, metadata, *, mode, session, name, workspace):
+        from ignition.components.recurrent import prepare_sequence_binding
+
+        caps = short_conv.Caps(device=scratch.normalized.device, mode=mode, channels=10240,
+            kernel_size=4, dilation=3, max_tokens=scratch.normalized.shape[0],
+            max_seqs=metadata.query_start_loc.numel() - 1, max_state_slots=state.shape[0],
+            max_speculative_tokens=state.shape[2] - 9)
+        args = dict(x=scratch.normalized, conv_weight=module.conv1d.weight.squeeze(1),
+            query_start_loc=metadata.query_start_loc, state_slot_ids=metadata.convolution_slots,
+            state_is_fresh=metadata.fresh, num_accepted_tokens=metadata.accepted_tokens,
+            num_seqs=metadata.num_seqs, num_tokens=metadata.num_tokens, conv_state=state,
+            out=scratch.convolved)
+        plan = short_conv.plan(caps, invocation=short_conv.invocation_from_tensors(**args))
+        self.binding = prepare_sequence_binding(plan, args, session=session, name=name,
+            public_bind=short_conv.bind, mode=mode, bind_plan=True, workspace=workspace,
+            set_binding=lambda binding: setattr(self, "binding", binding))
+
+    def __call__(self):
+        short_conv.run(self.binding)
 
 
 __all__ = [

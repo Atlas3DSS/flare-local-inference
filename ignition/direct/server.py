@@ -6,9 +6,15 @@ work, schedules, packs and executes steps one at a time. Replies split GLM-style
 `<think>` reasoning from content. A request the model fails reports the device
 error code as Helios does: HTTP 500 with "prepared model reported device error N".
 `/metrics` exposes Helios's speculative round counters and the direct loop's own.
+
+The scheduling clock counts each step as its graph time, and wall time only while
+the loop waits for requests. Graph replay times every step's graph; with a graph
+times file it also saves its estimates there, from which eager execution, whose
+steps take Python's time rather than the graph's, schedules instead.
 """
 
 import json
+import os
 import queue
 import signal
 import socket
@@ -23,6 +29,7 @@ from .executor import RankSteps
 from .scheduler import AdmissionError, CompletionError, Layout, Request, SamplingParameters, Scheduler
 
 _DEFAULT_OUTPUT_LIMIT = 32768
+_SAVE_SECONDS = 10.
 
 
 class _Submission:
@@ -92,10 +99,14 @@ def _sampling(body, defaults):
 class DirectServer:
     """Own the scheduler, the rank-zero step runner and the HTTP listener for one prepared model."""
 
-    def __init__(self, model, peers, *, bind, eager, served_names, verbose):
+    def __init__(self, model, peers, *, bind, eager, served_names, verbose, graph_times=None):
         self.model, self.eager, self.verbose = model, eager, verbose
         self.layout = Layout.of(model)
         self.scheduler = Scheduler(self.layout)
+        self.graph_times = None if graph_times is None else Path(graph_times)
+        self.recorded = load_graph_times(self.graph_times, self.layout) if eager and graph_times is not None else {}
+        self.clock_ns = 0
+        self.saved = time.monotonic()
         self.frontend = _Frontend(model.server_config)
         self.defaults = model.server_config.get("sampling_defaults", {})
         self.served_names = tuple(served_names)
@@ -236,10 +247,16 @@ class DirectServer:
         self.pending.pop(request.ident).done.set()
 
     def _take(self, block):
+        started = time.monotonic_ns()
         try:
             submission = self.inbox.get(timeout=.5) if block else self.inbox.get_nowait()
         except queue.Empty:
             return False
+        finally:
+            if block:
+                # Waiting for requests is the only wall time the scheduling clock counts.
+                self.clock_ns += time.monotonic_ns() - started
+        self.scheduler.advance_to(self.clock_ns)
         while True:
             self.pending[submission.request.ident] = submission
             try:
@@ -268,21 +285,28 @@ class DirectServer:
             while not stopping.is_set():
                 self._take(block=self.scheduler.idle)
                 with self.lock:
+                    self.scheduler.advance_to(self.clock_ns)
                     step = self.scheduler.plan()
                     uploads = None if step is None else self.scheduler.pack(step)
                 if step is None:
                     self._take(block=True)
                     continue
-                elapsed = self.steps.run({"graph": step.graph, "uploads": uploads, "frame": step.frame,
-                                          "sequence": step.sequence})
+                measured = self.steps.run({"graph": step.graph, "uploads": uploads, "frame": step.frame,
+                                           "sequence": step.sequence})
+                graph_ns = self.recorded.get(step.graph) if self.eager else measured
+                self.clock_ns += graph_ns or 0
                 records = self.steps.records(step.frame)
                 with self.lock:
-                    retired = self.scheduler.complete(step, records, elapsed)
+                    self.scheduler.advance_to(self.clock_ns)
+                    retired = self.scheduler.complete(step, records, graph_ns)
                 if self.verbose:
-                    print(f"step {step.sequence} {step.graph} rows {len(step.lanes)} {elapsed:.2f} ms",
-                          file=sys.stderr, flush=True)
+                    scheduled = f" (scheduled as {graph_ns / 1e6:.2f} ms)" if self.eager and graph_ns else ""
+                    print(f"step {step.sequence} {step.graph} rows {len(step.lanes)} {measured / 1e6:.2f} ms"
+                          f"{scheduled}", file=sys.stderr, flush=True)
                 for request in retired:
                     self._deliver(request)
+                if self.graph_times is not None and not self.eager and time.monotonic() - self.saved > _SAVE_SECONDS:
+                    self._save_graph_times()
             return 0
         except (CompletionError, RuntimeError) as error:
             traceback.print_exc()
@@ -292,6 +316,8 @@ class DirectServer:
         finally:
             for number, handler in previous.items():
                 signal.signal(number, handler)
+            if self.graph_times is not None and not self.eager:
+                self._save_graph_times()
             with self.lock:
                 retired = self.scheduler.fail_all(self.failure or "direct execution stopped")
             for request in retired:
@@ -307,8 +333,32 @@ class DirectServer:
             self.http.server_close()
             self.steps.stop()
 
+    def _save_graph_times(self):
+        """Write graph replay's current estimate of each graph's time, by graph name, replacing the file."""
+        with self.lock:
+            estimates = self.scheduler.policy.costs.estimates()
+        names = {name: estimates[shape] for shape, name in self.layout.graphs.items() if shape in estimates}
+        temporary = self.graph_times.with_name(self.graph_times.name + ".tmp")
+        self.saved = time.monotonic()
+        try:
+            temporary.write_text(json.dumps({"graph_ns": dict(sorted(names.items()))}, indent=1) + "\n")
+            os.replace(temporary, self.graph_times)
+        except OSError as error:
+            print(f"cannot save graph times to {self.graph_times}: {error}", file=sys.stderr, flush=True)
 
-def serve_direct(prepared, *, bind, eager, served_names, verbose=False):
+
+def load_graph_times(path, layout):
+    """Graph times a graph replay run saved, for this model's graphs; unknown names are ignored."""
+    try:
+        saved = json.loads(Path(path).read_text())["graph_ns"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise AdmissionError(f"cannot read graph times from {path}: {error}") from error
+    names = set(layout.graphs.values())
+    return {name: int(nanos) for name, nanos in saved.items()
+            if name in names and isinstance(nanos, int) and nanos > 0}
+
+
+def serve_direct(prepared, *, bind, eager, served_names, verbose=False, graph_times=None):
     """Serve a prepared model, or a rank group's rank zero, through Ignition's direct step loop."""
     model = getattr(prepared, "model", prepared)
     with prepared:
@@ -316,7 +366,8 @@ def serve_direct(prepared, *, bind, eager, served_names, verbose=False):
                  for rank in prepared.memory_report.get("ranks", (prepared.memory_report,))]
         print(json.dumps({"memory": ranks}, default=str), file=sys.stderr, flush=True)
         peers = prepared.start_direct(eager=eager) if prepared is not model else ()
-        server = DirectServer(model, peers, bind=bind, eager=eager, served_names=served_names, verbose=verbose)
+        server = DirectServer(model, peers, bind=bind, eager=eager, served_names=served_names, verbose=verbose,
+                              graph_times=graph_times)
         layout = server.layout
         widths = ("exactly " + str(layout.fixed_width - 1) if layout.fixed_width else
                   "up to " + str(layout.max_width - 1)) + " draft tokens" if layout.speculative else "speculation off"
@@ -324,5 +375,11 @@ def serve_direct(prepared, *, bind, eager, served_names, verbose=False):
               f"KV {layout.pages:,} pages · {layout.pages * layout.page_tokens:,} tokens"
               f" · {model.memory_report.get('state_rows')} state rows ({layout.snapshots} for snapshots)"
               f" · concurrency {layout.max_active} · {widths}", flush=True)
+        if eager:
+            print(f"Eager steps are scheduled as {len(server.recorded)} graph times from {graph_times}" if graph_times
+                  else "Eager steps have no graph times (--graph-times): every decode round carries every decoding"
+                       " request at the widest verification, as Helios chooses among unmeasured graphs", flush=True)
+        elif graph_times is not None:
+            print(f"Graph times are saved to {graph_times}", flush=True)
         print(f"Listening on {server.address}", flush=True)
         return server.serve()

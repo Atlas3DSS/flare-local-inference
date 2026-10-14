@@ -103,7 +103,7 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setattr(serve, "resolve_model", lambda configuration, name: ResolvedModel(recipe, model.checkpoint))
     monkeypatch.setattr(runtime, "binary", lambda: Path("/native/flare"))
     monkeypatch.setattr(runtime, "package_key", lambda model, plan, no_compile:
-        str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap, no_compile)))
+        str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap, plan.mixed_prefill, no_compile)))
 
     def export_model(prepared, images, storage, path, *, options, publisher, progress):
         assert prepared is calls["prepared"] and not prepared.closed
@@ -144,6 +144,7 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert host["compile_forwards"] is False and host["exports"] == 1
     assert [gpu.index for gpu in host["gpus"]] == [0]
     assert host["plan"].speculation == host["plan"].recipe.speculation
+    assert not host["plan"].mixed_prefill and host["plan"].mixed_shapes == ()
     assert host["exec"][3:5] == ["--gpus", "0"]
     assert host["prepared"].closed and host["prepared"].started is None
     assert run("qwen3.8-flash", "--no-compile") == 0
@@ -158,6 +159,31 @@ def test_preparation_flags_select_distinct_packages(host):
     assert (plan.speculation.draft_tokens, plan.speculation.adaptive, plan.speculation.history_drafts) == (2, False, True)
     assert run("qwen3.8-flash", "--no-mtp") == 0
     assert host["exports"] == 2 and host["plan"].speculation is None
+
+
+def test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package(host, capsys):
+    assert run("qwen3.8-flash") == 0
+    ordinary_package = host["exec"][2]
+    assert run("qwen3.8-flash", "--mixed-prefill") == 0
+    mixed_package = host["exec"][2]
+    assert mixed_package != ordinary_package and host["exports"] == 2
+    assert host["plan"].mixed_prefill and len(host["plan"].mixed_shapes) == 50
+    assert "mixed prefill on" in capsys.readouterr().err
+    assert run("qwen3.8-flash", "--mixed-prefill") == 0
+    assert host["exec"][2] == mixed_package and host["exports"] == 2
+    assert run("qwen3.8-flash", "--mixed-prefill", "--no-mtp") == 0
+    assert host["exports"] == 3 and host["plan"].speculation is None
+    assert len(host["plan"].mixed_shapes) == 20
+    assert all(not enabled for enabled, _, _, _ in host["plan"].mixed_shapes)
+
+
+def test_package_cache_key_includes_mixed_capture():
+    model = resolve("qwen3.8-flash")
+    gpu = planning.Gpu(0, "NVIDIA RTX PRO 6000 Blackwell", "GPU-test", 96 * GIB, FREE, (12, 0))
+    plan = planning.fit(model.recipe, model.checkpoint, (gpu,), concurrency=4,
+                        reserve_bytes=0, speculation=model.recipe.speculation)
+    assert runtime.package_key(model, plan, False) != runtime.package_key(
+        model, replace(plan, mixed_prefill=True), False)
 
 
 def test_serialized_branches_reach_the_plan_and_the_startup_line(host, capsys):
@@ -182,13 +208,16 @@ def test_package_cache_keys_distinguish_serialized_branches():
 
 
 @pytest.mark.parametrize("reserve", [0, 2 * GIB])
-def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tmp_path, reserve):
+@pytest.mark.parametrize("mixed", [False, True])
+def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tmp_path, reserve, mixed):
     output = tmp_path / "package"
     config = tmp_path / "config.toml"
     config.write_text(f'[memory]\nreserve = "{reserve}"\n')
-    assert main(["export", "qwen3.8-flash", "--output", str(output), "--config", str(config)]) == 0
+    assert main(["export", "qwen3.8-flash", "--output", str(output), "--config", str(config),
+                 *(["--mixed-prefill"] if mixed else [])]) == 0
     assert host["exports"] == 1 and "exec" not in host
     assert host["plan"].prefill_chunk == 4096 and host["compile_forwards"]
+    assert host["plan"].mixed_prefill == mixed
     assert host["options"]["queue_capacity"] == 16
     assert host["options"]["served_names"] == ["qwen3.8-flash"]
     assert host["options"]["reserve_bytes"] == reserve

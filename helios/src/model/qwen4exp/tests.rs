@@ -1922,6 +1922,65 @@ fn mixed_catalog_selects_both_capacities_and_rejects_missing_role_bindings() {
 }
 
 #[test]
+fn selected_catalog_accepts_retained_packed_capacity_and_rejects_insufficient_inputs() {
+    fn bind_inputs(m: &mut ExecutionManifest) {
+        let mut offset = 0usize;
+        for buffer in &m.buffers {
+            if buffer.name == "completion_records" {
+                continue;
+            }
+            for graph in &mut m.graphs {
+                for binding in &mut graph.input_bindings {
+                    if binding.buffer_name == buffer.name {
+                        binding.nbytes = buffer.nbytes;
+                        binding.host_offset = offset;
+                    }
+                }
+            }
+            offset += buffer.nbytes.next_multiple_of(8);
+        }
+        m.input_frame_bytes = offset;
+    }
+    let config = config();
+    let mut m = mixed_manifest(&config, 1);
+    let mut address = m
+        .buffers
+        .iter()
+        .map(|b| b.address + b.nbytes)
+        .max()
+        .unwrap();
+    for buffer in &mut m.buffers {
+        if matches!(
+            buffer.name.as_str(),
+            "token_ids" | "prefill_positions" | "vision_token_indices"
+        ) {
+            buffer.shape[0] += 3;
+            buffer.nbytes = buffer.shape.iter().product::<usize>() * buffer.dtype.size();
+            buffer.address = address.next_multiple_of(8);
+            address = buffer.address + buffer.nbytes;
+        }
+    }
+    bind_inputs(&mut m);
+    validate::<Qwen4Exp>(&config, &m).unwrap();
+    m.graphs.retain(|g| g.kind != GraphKind::Mixed);
+    validate::<Qwen4Exp>(&config, &m).unwrap();
+    let tokens = m
+        .buffers
+        .iter_mut()
+        .find(|b| b.name == "token_ids")
+        .unwrap();
+    tokens.shape[0] = config.limits.prefill_chunk_size - 1;
+    tokens.nbytes = tokens.shape[0] * tokens.dtype.size();
+    bind_inputs(&mut m);
+    assert!(
+        validate::<Qwen4Exp>(&config, &m)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid semantic buffer token_ids")
+    );
+}
+
+#[test]
 fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_eligible_rows() {
     for width in [1, 3] {
         let mut config = config();

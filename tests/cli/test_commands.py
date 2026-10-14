@@ -1,6 +1,7 @@
 """Command output and exit codes with injected GPUs and hub cache."""
 
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,8 @@ def test_run_uses_the_configured_model(host, tmp_path, capsys):
     (["run", "qwen3.8-flash", "--gpus", "9"], 2, "does not have"),
     (["run", "qwen3.8-flash", "--max-concurrency", "65"], 2, "1 through 64"),
     (["run", "glm-5.3-flash", "--gpus", "0-2"], 4, "needs 1 or 2 or 4 GPUs; 3 selected; use --gpus 0-3"),
+    (["run", "glm-5.3-flash", "--mixed-prefill"], 2,
+     "--mixed-prefill: glm-5.3-flash does not capture mixed prefill/decode graphs"),
 ])
 def test_failures_use_the_documented_exit_codes(host, capsys, arguments, code, message):
     assert (run(*arguments[1:]) if arguments[0] == "run" else main(arguments)) == code
@@ -112,6 +115,12 @@ def test_direct_execution_is_an_explicit_serve_diagnostic(host, capsys):
     assert not arguments.direct and not arguments.eager
     assert main(["serve", "glm-5.3-flash", "--eager"]) == 2
     assert "--eager applies only to --direct" in failure(capsys)[0]
+    arguments = _parser().parse_args(["serve", "glm-5.3-flash", "--direct", "--graph-times", "times.json"])
+    assert arguments.graph_times == Path("times.json")
+    assert main(["serve", "glm-5.3-flash", "--graph-times", "times.json"]) == 2
+    assert "--graph-times applies only to --direct" in failure(capsys)[0]
+    assert main(["serve", "glm-5.3-flash", "--direct", "--eager", "--graph-times", "/nonexistent/times.json"]) == 2
+    assert "graph replay with --graph-times saves it" in failure(capsys)[0]
     for arguments in (["run", "glm-5.3-flash", "--direct"], ["export", "glm-5.3-flash", "--output", "x", "--eager"],
                       ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "2", "--direct"]):
         with pytest.raises(SystemExit) as exit:

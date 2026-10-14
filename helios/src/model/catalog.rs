@@ -84,18 +84,26 @@ fn validate_inner<M: ModelContract>(
         .max()
         .unwrap_or(0);
     for (name, dtype, mut shape) in M::required_buffers(config) {
-        if matches!(
+        let packed_input = matches!(
             name,
             "token_ids"
                 | "prefill_positions"
                 | "vision_token_indices"
                 | "vision_left"
                 | "vision_right"
-        ) {
+        );
+        if packed_input {
             shape[0] = shape[0].max(packed);
         }
         let buffer = manifest.buffer(name)?;
-        if buffer.dtype != dtype || buffer.shape != shape {
+        let valid_shape = if packed_input {
+            buffer.shape.len() == shape.len()
+                && buffer.shape[0] >= shape[0]
+                && buffer.shape[1..] == shape[1..]
+        } else {
+            buffer.shape == shape
+        };
+        if buffer.dtype != dtype || !valid_shape {
             return Err(
                 format!("invalid semantic buffer {name}: expected {dtype:?}{shape:?}").into(),
             );

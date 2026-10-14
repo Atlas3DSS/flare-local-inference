@@ -199,7 +199,12 @@ impl ModelContract for Qwen4Exp {
         Ok(())
     }
     #[cfg(feature = "server")]
-    fn text_only(data: &Self::PromptData) -> bool {
-        data.vision_token_indices.iter().all(|i| *i == -1)
+    fn prompt_metadata(
+        data: &mut Self::PromptData,
+    ) -> crate::model::admission::PromptMetadataMut<'_> {
+        crate::model::admission::PromptMetadataMut {
+            positions: Some(&mut data.positions),
+            vision_token_indices: Some(&mut data.vision_token_indices),
+        }
     }
 }

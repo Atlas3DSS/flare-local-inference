@@ -3,7 +3,8 @@
 //! Each thread makes its rank's context current, owns one stream at the lowest
 //! priority and one blocking event, and receives jobs naming page ids, a state
 //! slot, and slab addresses. The thread expands ids into device and host
-//! addresses from its rank's geometry and the cross-rank [`Layout`], issues
+//! addresses from its rank's geometry and the cross-rank [`Layout`], or from
+//! its [`RankPart`] for slabs of a pool split by rank, issues
 //! batched copies of at most [`BATCH_BYTES`] and [`BATCH_ENTRIES`] per call,
 //! records its event, sleeps until the event completes, and replies. A failure
 //! is reported only after the stream has drained, so destination ids are
@@ -36,7 +37,7 @@ use crate::{
 use super::{
     CacheGeometry, JobId, Layout,
     geometry::{RankLayout, invalid},
-    slab::WINDOW_PAGES,
+    slab::{RankPart, WINDOW_PAGES},
 };
 
 pub use crate::cuda::{BATCH_BYTES, BATCH_ENTRIES};
@@ -122,9 +123,14 @@ pub(crate) struct Descriptor {
 /// [`BATCH_BYTES`] becomes several descriptors. Ids outside the rank's
 /// capacities, a null slab address, a page id or slab address named twice, or
 /// more than [`WINDOW_PAGES`] pages are rejected without touching the driver.
+///
+/// A slab of the pool split by rank that `split` describes holds this rank's
+/// part where `split` locates it, with the planes at their offsets relative to
+/// the rank's first plane; any other slab holds a cross-rank record.
 pub(crate) fn expand(
     geometry: &CacheGeometry,
     rank: &RankLayout,
+    split: Option<&RankPart>,
     job: &Job,
     descriptors: &mut Vec<Descriptor>,
 ) -> Result<()> {
@@ -151,7 +157,14 @@ pub(crate) fn expand(
                 geometry.page_capacity
             )));
         }
-        let record = slab_address(*slab)? + rank.page_offset;
+        let part = match split {
+            Some(split) => split.page(*slab)?,
+            None => None,
+        };
+        let record = match part {
+            Some(address) => address,
+            None => slab_address(*slab)? + rank.page_offset,
+        };
         for (plane, offset) in geometry.planes.iter().zip(&rank.plane_offsets) {
             push_unit(
                 job.direction,
@@ -170,10 +183,18 @@ pub(crate) fn expand(
                 geometry.row_capacity
             )));
         }
+        let part = match split {
+            Some(split) => split.row(slab)?,
+            None => None,
+        };
+        let row = match part {
+            Some(address) => address,
+            None => slab_address(slab)? + rank.row_offset,
+        };
         push_unit(
             job.direction,
             geometry.row.unit_address(index),
-            slab_address(slab)? + rank.row_offset,
+            row,
             geometry.row.unit_bytes,
             descriptors,
         );
@@ -274,6 +295,7 @@ struct RankWorker {
     rank: usize,
     geometry: CacheGeometry,
     layout: RankLayout,
+    split: Option<RankPart>,
     stream: Stream,
     event: Event,
     descriptors: Vec<Descriptor>,
@@ -291,6 +313,7 @@ impl RankWorker {
         device: i32,
         geometry: CacheGeometry,
         layout: RankLayout,
+        split: Option<RankPart>,
     ) -> Result<Self> {
         let stream = Stream::open_lowest_priority(context, device)?;
         let event = stream.blocking_event()?;
@@ -306,6 +329,7 @@ impl RankWorker {
             rank,
             geometry,
             layout,
+            split,
             stream,
             event,
             descriptors: Vec::with_capacity(window),
@@ -317,7 +341,13 @@ impl RankWorker {
 
     /// Issue every batch of the job, then wait for the last one; returns the bytes copied.
     fn run(&mut self, job: &Job) -> Result<u64> {
-        expand(&self.geometry, &self.layout, job, &mut self.descriptors)?;
+        expand(
+            &self.geometry,
+            &self.layout,
+            self.split.as_ref(),
+            job,
+            &mut self.descriptors,
+        )?;
         let mut start = 0;
         let mut bytes = 0u64;
         while start < self.descriptors.len() {
@@ -384,8 +414,13 @@ impl RankWorker {
 
 impl Transfers {
     /// Start one thread per rank. `contexts` pairs each rank's CUDA context with
-    /// its device ordinal, in rank order matching `geometry`.
-    pub fn start(contexts: &[(usize, i32)], geometry: Vec<CacheGeometry>) -> Result<Self> {
+    /// its device ordinal, in rank order matching `geometry`. `split` holds each
+    /// rank's part of a pool split by rank whose slabs the jobs may name.
+    pub fn start(
+        contexts: &[(usize, i32)],
+        geometry: Vec<CacheGeometry>,
+        split: Option<Vec<RankPart>>,
+    ) -> Result<Self> {
         if contexts.is_empty() || contexts.len() != geometry.len() {
             return Err(invalid(format!(
                 "transfer threads need one context per rank: {} contexts for {} ranks",
@@ -393,6 +428,15 @@ impl Transfers {
                 geometry.len()
             )));
         }
+        if split
+            .as_ref()
+            .is_some_and(|parts| parts.len() != contexts.len())
+        {
+            return Err(invalid(
+                "a pool split by rank must have one part per transfer rank",
+            ));
+        }
+        let mut split = split.map(Vec::into_iter);
         let layout = Layout::new(&geometry)?;
         let (reply_sender, receiver) = mpsc::channel();
         let mut transfers = Self {
@@ -403,19 +447,21 @@ impl Transfers {
         };
         for (rank, (&(context, device), geometry)) in contexts.iter().zip(geometry).enumerate() {
             let layout = transfers.layout.ranks[rank].clone();
+            let part = split.as_mut().and_then(Iterator::next);
             let (sender, jobs) = mpsc::sync_channel(QUEUE_DEPTH);
             let (ready_sender, ready) = mpsc::channel();
             let replies = reply_sender.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("flare-offload-{rank}"))
                 .spawn(move || {
-                    let worker = match RankWorker::open(rank, context, device, geometry, layout) {
-                        Ok(worker) => worker,
-                        Err(error) => {
-                            let _ = ready_sender.send(Err(error));
-                            return;
-                        }
-                    };
+                    let worker =
+                        match RankWorker::open(rank, context, device, geometry, layout, part) {
+                            Ok(worker) => worker,
+                            Err(error) => {
+                                let _ = ready_sender.send(Err(error));
+                                return;
+                            }
+                        };
                     lower_priority();
                     if ready_sender.send(Ok(())).is_err() {
                         return;
@@ -665,6 +711,7 @@ mod tests {
         expand(
             &ranks[1],
             &layout.ranks[1],
+            None,
             &job(Direction::Out),
             &mut descriptors,
         )
@@ -695,6 +742,7 @@ mod tests {
         expand(
             &ranks[1],
             &layout.ranks[1],
+            None,
             &job(Direction::In),
             &mut descriptors,
         )
@@ -709,31 +757,127 @@ mod tests {
     }
 
     #[test]
+    fn expansion_places_split_slabs_in_the_rank_part_and_others_in_the_record() {
+        let ranks = [
+            geometry(64, &[("k", 8192), ("v", 8192), ("sel", 100)], 10_000),
+            geometry(64, &[("k", 8192), ("v", 8192), ("sel", 100)], 10_000),
+        ];
+        let layout = Layout::new(&ranks).unwrap();
+        let rank = &layout.ranks[1];
+        let (page_part, row_part) = (20480usize, 12288usize);
+        let (page_record, row_record) = (
+            layout.page_record_bytes as usize,
+            layout.row_record_bytes as usize,
+        );
+        let start = 0x7e00_0000_0000usize;
+        let (page_base, row_base) = (0x7e00_0100_0000usize, 0x7e00_0200_0000usize);
+        let part = super::super::slab::tests::rank_part(
+            start..start + (8 << 20),
+            (page_record, 8, page_base, page_part),
+            (row_record, 2, row_base, row_part),
+        );
+        let rows = start + 8 * page_record;
+        let job = Job {
+            id: JobId(4),
+            window: 0,
+            direction: Direction::Out,
+            pages: vec![(PageId(5), start + 3 * page_record), (PageId(7), 0x10000)],
+            row: Some((StateSlotId(3), rows + row_record)),
+        };
+        let mut descriptors = Vec::new();
+        expand(&ranks[1], rank, Some(&part), &job, &mut descriptors).unwrap();
+        assert_eq!(descriptors.len(), 7);
+        let records = [
+            (5u64, (page_base + 3 * page_part) as u64),
+            (7, 0x10000 + rank.page_offset),
+        ];
+        for (page, (id, record)) in records.into_iter().enumerate() {
+            for (plane, geometry) in ranks[1].planes.iter().enumerate() {
+                assert_eq!(
+                    descriptors[page * 3 + plane],
+                    Descriptor {
+                        destination: record + rank.plane_offsets[plane],
+                        source: geometry.unit_address(id),
+                        bytes: geometry.unit_bytes as usize,
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            descriptors[6],
+            Descriptor {
+                destination: (row_base + row_part) as u64,
+                source: ranks[1].row.unit_address(3),
+                bytes: 10_000,
+            }
+        );
+        let mut inside = job.clone();
+        inside.pages[1].1 = start + 4096;
+        let error = expand(&ranks[1], rank, Some(&part), &inside, &mut descriptors)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("page slabs"), "{error}");
+        let mut crossed = job.clone();
+        crossed.row = Some((StateSlotId(3), start));
+        let error = expand(&ranks[1], rank, Some(&part), &crossed, &mut descriptors)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("row slabs"), "{error}");
+    }
+
+    #[test]
     fn expansion_rejects_bad_ids_null_slabs_and_oversize_windows() {
         let ranks = [geometry(64, &[("k", 8192)], 4096)];
         let layout = Layout::new(&ranks).unwrap();
         let mut descriptors = Vec::new();
         let mut bad_page = job(Direction::Out);
         bad_page.pages[1].0 = PageId(ranks[0].page_capacity as u32);
-        assert!(expand(&ranks[0], &layout.ranks[0], &bad_page, &mut descriptors).is_err());
+        assert!(
+            expand(
+                &ranks[0],
+                &layout.ranks[0],
+                None,
+                &bad_page,
+                &mut descriptors
+            )
+            .is_err()
+        );
         let mut bad_slot = job(Direction::Out);
         bad_slot.row = Some((StateSlotId(ranks[0].row_capacity as u32), 0x30000));
-        assert!(expand(&ranks[0], &layout.ranks[0], &bad_slot, &mut descriptors).is_err());
+        assert!(
+            expand(
+                &ranks[0],
+                &layout.ranks[0],
+                None,
+                &bad_slot,
+                &mut descriptors
+            )
+            .is_err()
+        );
         let mut null_slab = job(Direction::In);
         null_slab.pages[0].1 = 0;
-        assert!(expand(&ranks[0], &layout.ranks[0], &null_slab, &mut descriptors).is_err());
+        assert!(
+            expand(
+                &ranks[0],
+                &layout.ranks[0],
+                None,
+                &null_slab,
+                &mut descriptors
+            )
+            .is_err()
+        );
         let mut wide = job(Direction::Out);
         wide.pages = (0..=WINDOW_PAGES as u32)
             .map(|id| (PageId(id), 0x100000 + id as usize * 0x10000))
             .collect();
-        assert!(expand(&ranks[0], &layout.ranks[0], &wide, &mut descriptors).is_err());
+        assert!(expand(&ranks[0], &layout.ranks[0], None, &wide, &mut descriptors).is_err());
         wide.pages.pop();
-        expand(&ranks[0], &layout.ranks[0], &wide, &mut descriptors).unwrap();
+        expand(&ranks[0], &layout.ranks[0], None, &wide, &mut descriptors).unwrap();
         assert_eq!(descriptors.len(), WINDOW_PAGES + 1);
         let mut empty = job(Direction::Out);
         empty.pages.clear();
         empty.row = None;
-        expand(&ranks[0], &layout.ranks[0], &empty, &mut descriptors).unwrap();
+        expand(&ranks[0], &layout.ranks[0], None, &empty, &mut descriptors).unwrap();
         assert!(descriptors.is_empty());
     }
 
@@ -743,7 +887,7 @@ mod tests {
         let layout = Layout::new(&ranks).unwrap();
         let mut descriptors = Vec::new();
         let mut check = |job: &Job| {
-            expand(&ranks[0], &layout.ranks[0], job, &mut descriptors)
+            expand(&ranks[0], &layout.ranks[0], None, job, &mut descriptors)
                 .map_err(|error| error.to_string())
         };
         for direction in [Direction::Out, Direction::In] {
@@ -771,7 +915,14 @@ mod tests {
         let mut descriptors = Vec::new();
         let mut only_row = job(Direction::Out);
         only_row.pages.clear();
-        expand(&ranks[0], &layout.ranks[0], &only_row, &mut descriptors).unwrap();
+        expand(
+            &ranks[0],
+            &layout.ranks[0],
+            None,
+            &only_row,
+            &mut descriptors,
+        )
+        .unwrap();
         let base = ranks[0].row.unit_address(3);
         assert_eq!(
             descriptors
@@ -1100,7 +1251,7 @@ mod tests {
             .collect();
         let row_slab = host + (pages * layout.page_record_bytes) as usize;
 
-        let mut transfers = Transfers::start(&[(context, device)], geometry.clone()).unwrap();
+        let mut transfers = Transfers::start(&[(context, device)], geometry.clone(), None).unwrap();
         let wait = |transfers: &mut Transfers| -> Reply {
             let deadline = Instant::now() + Duration::from_secs(60);
             let mut replies = Vec::new();
@@ -1245,5 +1396,321 @@ mod tests {
         drop(staging);
         drop(stream);
         drop(model);
+    }
+
+    /// Two contexts on the first two devices, each with `k` and `v` page planes
+    /// and a row plane; a split pool must cost each device only its part and
+    /// carry each rank's units in that rank's part.
+    #[cfg(feature = "runtime-package")]
+    #[test]
+    #[ignore = "requires two CUDA devices"]
+    fn split_pools_cost_each_device_its_part_and_round_trip_units() {
+        use super::super::{Plane, slab::SlabPool};
+        use crate::runtime_package::driver::Driver as Loader;
+        const PAGES: u64 = 80;
+        const ROWS: u64 = 4;
+        const ROW_BYTES: u64 = 10_000;
+        const POOL_BYTES: u64 = 8 << 30;
+        let loader = Loader::load().unwrap();
+        let mut contexts = Vec::new();
+        let mut geometry = Vec::new();
+        let mut allocations = Vec::new();
+        // SAFETY: Driver signatures match cuda.h and every output pointer is valid.
+        unsafe {
+            loader.check("cuInit", (loader.init)(0)).unwrap();
+            for ordinal in 0..2 {
+                let mut device = 0;
+                loader
+                    .check("cuDeviceGet", (loader.device)(&mut device, ordinal))
+                    .unwrap();
+                let mut context = std::ptr::null_mut();
+                loader
+                    .check(
+                        "cuCtxCreate_v2",
+                        (loader.context_create)(&mut context, 0, device),
+                    )
+                    .unwrap();
+                let mut allocate = |bytes: u64| {
+                    let mut address = 0;
+                    loader
+                        .check(
+                            "cuMemAlloc_v2",
+                            (loader.allocate)(&mut address, bytes as usize),
+                        )
+                        .unwrap();
+                    allocations.push((context, address));
+                    address
+                };
+                let planes = [("k", 8192u64), ("v", 4196)]
+                    .into_iter()
+                    .map(|(name, unit_bytes)| Plane {
+                        name: name.into(),
+                        address: allocate(unit_bytes * PAGES),
+                        unit_bytes,
+                    })
+                    .collect();
+                geometry.push(CacheGeometry {
+                    snapshot_pages: Vec::new(),
+                    page_tokens: 64,
+                    page_capacity: PAGES,
+                    row_capacity: ROWS,
+                    row: Plane {
+                        name: "state".into(),
+                        address: allocate(ROW_BYTES * ROWS),
+                        unit_bytes: ROW_BYTES,
+                    },
+                    planes,
+                });
+                contexts.push((context as usize, device));
+            }
+        }
+        let free = || -> Vec<i64> {
+            contexts
+                .iter()
+                .map(|&(context, _)| {
+                    let (mut free, mut total) = (0, 0);
+                    // SAFETY: The context outlives the call and both outputs are valid.
+                    unsafe {
+                        loader
+                            .check("cuCtxSetCurrent", (loader.context_set)(context as _))
+                            .unwrap();
+                        loader
+                            .check(
+                                "cuMemGetInfo_v2",
+                                (loader.memory_info)(&mut free, &mut total),
+                            )
+                            .unwrap();
+                    }
+                    free as i64
+                })
+                .collect()
+        };
+        let layout = Layout::new(&geometry).unwrap();
+        let before = free();
+        let mut registered = SlabPool::sized(&layout, POOL_BYTES).unwrap();
+        registered.register(contexts[0].0).unwrap();
+        let with_registered = free();
+        drop(registered);
+        let between = free();
+        let pool = SlabPool::sized_by_rank(&layout, POOL_BYTES, &contexts).unwrap();
+        let with_split = free();
+        let mib = |bytes: i64| bytes as f64 / (1 << 20) as f64;
+        for rank in 0..2 {
+            let registered = before[rank] - with_registered[rank];
+            let split = between[rank] - with_split[rank];
+            eprintln!(
+                "rank {rank}: registering {:.1} GiB costs {:.1} MiB, its split part {:.1} MiB",
+                POOL_BYTES as f64 / (1u64 << 30) as f64,
+                mib(registered),
+                mib(split)
+            );
+            assert!(registered > 0, "registration cost rank {rank} nothing");
+            assert!(
+                split * 4 <= registered * 3,
+                "rank {rank}'s split part costs {split} bytes against {registered} registered"
+            );
+        }
+        assert!(pool.registered());
+        assert_eq!(pool.page_bytes() as u64, layout.page_record_bytes);
+        let parts = pool.rank_parts().unwrap();
+        assert_eq!(parts.len(), 2);
+
+        fn fill(bytes: &mut [u8], seed: u64) {
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                let index = index as u64;
+                *byte = (index.wrapping_mul(29) ^ seed.wrapping_mul(7907) ^ (index >> 7)) as u8;
+            }
+        }
+        let seed = |rank: usize, plane: usize, unit: u32| {
+            (rank as u64 + 1) * 1_000_000_007 + (plane as u64 + 1) * 1_000_003 + u64::from(unit)
+        };
+        let write = |context: usize, address: u64, bytes: &[u8]| unsafe {
+            loader
+                .check("cuCtxSetCurrent", (loader.context_set)(context as _))
+                .unwrap();
+            loader
+                .check(
+                    "cuMemcpyHtoD_v2",
+                    (loader.upload)(address, bytes.as_ptr().cast(), bytes.len()),
+                )
+                .unwrap();
+        };
+        let read = |context: usize, address: u64, length: usize| -> Vec<u8> {
+            let mut bytes = vec![0u8; length];
+            unsafe {
+                loader
+                    .check("cuCtxSetCurrent", (loader.context_set)(context as _))
+                    .unwrap();
+                loader
+                    .check(
+                        "cuMemcpyDtoH_v2",
+                        (loader.download)(bytes.as_mut_ptr().cast(), address, length),
+                    )
+                    .unwrap();
+            }
+            bytes
+        };
+        let sources: Vec<u32> = (1..=WINDOW_PAGES as u32 / 2).collect();
+        let targets: Vec<u32> = sources
+            .iter()
+            .map(|id| id + WINDOW_PAGES as u32 / 2)
+            .collect();
+        let row_plane = 2;
+        for (rank, (rank_geometry, &(context, _))) in geometry.iter().zip(&contexts).enumerate() {
+            for (plane, unit) in rank_geometry.planes.iter().enumerate() {
+                for &id in &sources {
+                    let mut bytes = vec![0u8; unit.unit_bytes as usize];
+                    fill(&mut bytes, seed(rank, plane, id));
+                    write(context, unit.unit_address(u64::from(id)), &bytes);
+                }
+            }
+            let mut bytes = vec![0u8; ROW_BYTES as usize];
+            fill(&mut bytes, seed(rank, row_plane, 1));
+            write(context, rank_geometry.row.unit_address(1), &bytes);
+        }
+        let mut pool = pool;
+        let slabs: Vec<usize> = sources
+            .iter()
+            .map(|_| {
+                let slab = pool.allocate_page().unwrap();
+                pool.page_address(slab)
+            })
+            .collect();
+        let row = pool.allocate_row().unwrap();
+        let row_slab = pool.row_address(row);
+        let mut transfers =
+            Transfers::start(&contexts, geometry.clone(), Some(parts.clone())).unwrap();
+        let wait = |transfers: &mut Transfers| -> Reply {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut replies = Vec::new();
+            while replies.is_empty() {
+                assert!(Instant::now() < deadline, "no transfer reply within 60 s");
+                transfers.poll(&mut replies);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            replies.pop().unwrap()
+        };
+        let unit_bytes: u64 = geometry
+            .iter()
+            .map(|rank| sources.len() as u64 * rank.page_bytes() + ROW_BYTES)
+            .sum();
+        transfers
+            .submit(Job {
+                id: JobId(1),
+                window: 0,
+                direction: Direction::Out,
+                pages: sources
+                    .iter()
+                    .zip(&slabs)
+                    .map(|(id, slab)| (PageId(*id), *slab))
+                    .collect(),
+                row: Some((StateSlotId(1), row_slab)),
+            })
+            .unwrap();
+        let reply = wait(&mut transfers);
+        assert!(reply.result.is_ok(), "{:?}", reply.result);
+        assert_eq!(reply.bytes, unit_bytes);
+
+        // Each rank's units must sit in its own part, which the host can read.
+        for (rank, part) in parts.iter().enumerate() {
+            let offsets = &layout.ranks[rank].plane_offsets;
+            for (index, &id) in sources.iter().enumerate() {
+                let record = part.page(slabs[index]).unwrap().unwrap() as usize;
+                for (plane, unit) in geometry[rank].planes.iter().enumerate() {
+                    let mut wanted = vec![0u8; unit.unit_bytes as usize];
+                    fill(&mut wanted, seed(rank, plane, id));
+                    // SAFETY: The part is mapped for the host and no copy is in flight.
+                    let actual = unsafe {
+                        std::slice::from_raw_parts(
+                            (record + offsets[plane] as usize) as *const u8,
+                            unit.unit_bytes as usize,
+                        )
+                    };
+                    assert!(
+                        actual == &wanted[..],
+                        "rank {rank} plane {plane} page {id} differs in its host part"
+                    );
+                }
+            }
+            let row = part.row(row_slab).unwrap().unwrap() as usize;
+            let mut wanted = vec![0u8; ROW_BYTES as usize];
+            fill(&mut wanted, seed(rank, row_plane, 1));
+            // SAFETY: As above.
+            let actual =
+                unsafe { std::slice::from_raw_parts(row as *const u8, ROW_BYTES as usize) };
+            assert!(
+                actual == &wanted[..],
+                "rank {rank} row differs in its host part"
+            );
+        }
+
+        transfers
+            .submit(Job {
+                id: JobId(2),
+                window: 0,
+                direction: Direction::In,
+                pages: targets
+                    .iter()
+                    .zip(&slabs)
+                    .map(|(id, slab)| (PageId(*id), *slab))
+                    .collect(),
+                row: Some((StateSlotId(2), row_slab)),
+            })
+            .unwrap();
+        let reply = wait(&mut transfers);
+        assert!(reply.result.is_ok(), "{:?}", reply.result);
+        assert_eq!(reply.bytes, unit_bytes);
+        for (rank, (rank_geometry, &(context, _))) in geometry.iter().zip(&contexts).enumerate() {
+            for (plane, unit) in rank_geometry.planes.iter().enumerate() {
+                for (source, target) in sources.iter().zip(&targets) {
+                    let mut wanted = vec![0u8; unit.unit_bytes as usize];
+                    fill(&mut wanted, seed(rank, plane, *source));
+                    let actual = read(
+                        context,
+                        unit.unit_address(u64::from(*target)),
+                        unit.unit_bytes as usize,
+                    );
+                    assert!(
+                        actual == wanted,
+                        "rank {rank} plane {plane} page {target} differs from page {source}"
+                    );
+                }
+            }
+            let mut wanted = vec![0u8; ROW_BYTES as usize];
+            fill(&mut wanted, seed(rank, row_plane, 1));
+            let actual = read(
+                context,
+                rank_geometry.row.unit_address(2),
+                ROW_BYTES as usize,
+            );
+            assert!(actual == wanted, "rank {rank} row 2 differs from row 1");
+        }
+        transfers.close().unwrap();
+        drop(transfers);
+        drop(pool);
+        let released = free();
+        for rank in 0..2 {
+            assert!(
+                released[rank] + (4 << 20) >= between[rank],
+                "rank {rank} kept {} MiB after the split pool was dropped",
+                mib(between[rank] - released[rank])
+            );
+        }
+        // SAFETY: Every allocation belongs to its context and nothing uses it.
+        unsafe {
+            for (context, address) in allocations {
+                loader
+                    .check("cuCtxSetCurrent", (loader.context_set)(context))
+                    .unwrap();
+                loader
+                    .check("cuMemFree_v2", (loader.free)(address))
+                    .unwrap();
+            }
+            for (context, _) in contexts {
+                loader
+                    .check("cuCtxDestroy_v2", (loader.context_destroy)(context as _))
+                    .unwrap();
+            }
+        }
     }
 }

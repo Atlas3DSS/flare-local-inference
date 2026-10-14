@@ -143,8 +143,8 @@ impl ModelContract for DeepSeek41 {
         Ok(())
     }
     #[cfg(feature = "server")]
-    fn text_only(_: &()) -> bool {
-        true
+    fn prompt_metadata(_: &mut ()) -> crate::model::admission::PromptMetadataMut<'_> {
+        Default::default()
     }
     #[cfg(feature = "server")]
     type OutputConfig = output::OutputConfig;

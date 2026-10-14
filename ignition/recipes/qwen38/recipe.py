@@ -36,7 +36,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
         hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
         max_active=plan.concurrency, stream_overlap=plan.stream_overlap,
-        context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk,
+        context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk, mixed_prefill=plan.mixed_prefill,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, kernel_cache=kernel_cache,
         mtp=speculation is not None, **drafting)
@@ -87,5 +87,5 @@ RECIPE = Recipe(
         2: _costs(58_776_320, 69_632, _GRAPH_BYTES[2], speculating=False),
         4: _costs(29_911_808, 69_632, _GRAPH_BYTES[4], speculating=False),
     }),
-    max_images=4, image_bytes=32 << 20,
+    max_images=4, image_bytes=32 << 20, mixed_prefill=True,
 )

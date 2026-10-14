@@ -8,7 +8,9 @@ it to each peer over the rank's executor connection before running it itself,
 so every rank executes the same graphs in the same order; the collectives
 inside each graph join the ranks' GPU work. A rank finishes each step before
 taking the next, which keeps its pinned staging and the next step's uploads
-ordered without events.
+ordered without events, then reports the step's graph time to rank zero.
+Graph time spans the graph alone, from after its uploads until it completes,
+as Helios's frame events do, and a step's time is its slowest rank's.
 
 With `eager`, a rank calls the forward each graph captured, compiled where
 preparation compiled it, on the same buffers instead of replaying the graph.
@@ -16,11 +18,12 @@ Eager execution releases the captured graphs first so their memory pool can
 hold the forwards' temporaries.
 """
 
+import math
 import struct
 
 import torch
 
-from ignition.preparation.host_ranks import receive_object, send_object
+from ignition.preparation.host_ranks import receive_json, receive_object, send_json, send_object
 
 _RESERVED = ("frame_index", "submission_sequence")
 
@@ -66,19 +69,24 @@ class StepRunner:
         target[start:start + count].copy_(staging[start:start + count], non_blocking=True)
 
     def run(self, step):
-        """Execute one step and return its GPU milliseconds, from the first upload through the graph."""
+        """Execute one step and return its graph nanoseconds, from after its uploads through the graph.
+
+        The interval starts where Helios's frame `started` event does, so input
+        staging is not graph time. An eager step's interval is its forward's,
+        Python launches included.
+        """
         name = step["graph"]
         allowed = self.inputs.get(name)
         if allowed is None:
             raise ValueError(f"step names unknown graph {name!r}")
         with torch.cuda.stream(self.stream), torch.no_grad():
-            self.started.record(self.stream)
             for buffer, offset, data in step["uploads"]:
                 if buffer not in allowed or buffer in _RESERVED:
                     raise ValueError(f"graph {name} does not bind input {buffer}")
                 self._upload(buffer, offset, data)
             self._upload("frame_index", 0, struct.pack("<i", step["frame"]))
             self._upload("submission_sequence", 0, struct.pack("<q", step["sequence"]))
+            self.started.record(self.stream)
             if self.eager:
                 self.model.forwards[name]()
             else:
@@ -87,7 +95,8 @@ class StepRunner:
         self.finished.synchronize()
         for runtime in self.health:
             runtime.check_health()
-        return self.started.elapsed_time(self.finished)
+        # Helios rounds the event interval to nanoseconds half away from zero.
+        return int(math.floor(self.started.elapsed_time(self.finished) * 1e6 + .5))
 
     def records(self, frame):
         """The completion records the last step wrote to `frame`, one row per request slot."""
@@ -106,9 +115,17 @@ class RankSteps:
         self.stopped = False
 
     def run(self, step):
+        """Execute a step on every rank; returns its graph nanoseconds on the slowest rank, as Helios takes them."""
         for peer in self.peers:
             send_object(peer, step)
-        return self.runner.run(step)
+        nanos = self.runner.run(step)
+        for rank, peer in enumerate(self.peers, 1):
+            try:
+                reply = receive_json(peer)
+            except ConnectionError as error:
+                raise RuntimeError(f"rank {rank} stopped during direct step {step['sequence']}") from error
+            nanos = max(nanos, int(reply["graph_ns"]))
+        return nanos
 
     def records(self, frame):
         return self.runner.records(frame)
@@ -124,8 +141,8 @@ class RankSteps:
 
 
 def serve_peer(model, connection, *, eager):
-    """Execute rank zero's steps, in order, until it sends the stop message."""
+    """Execute rank zero's steps, in order, reporting each one's graph time, until it sends the stop message."""
     runner = StepRunner(model, eager=eager)
     while (step := receive_object(connection)) is not None:
-        runner.run(step)
+        send_json(connection, {"graph_ns": runner.run(step)})
     runner.close()

@@ -147,6 +147,16 @@ class Recipe:
     history_copy: bool = False
     verification_rows: int | None = None
     stream_overlap: bool = False
+    mixed_prefill: bool = False
+
+    def mixed_shapes(self, concurrency, chunk, speculation):
+        from ignition.components.capacity import mixed_shapes
+
+        if not self.mixed_prefill:
+            return ()
+        modes = (True, False) if speculation is not None else (False,)
+        return tuple((enabled, b, w, p) for enabled in modes
+            for b, w, p in mixed_shapes(concurrency, chunk, speculation.widths if enabled else (1,)))
 
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):

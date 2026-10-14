@@ -60,6 +60,7 @@ class DecoderInputs:
     page_tables: torch.Tensor
     sample_enabled: torch.Tensor
     vision_token_indices: torch.Tensor
+    prefill_row: torch.Tensor
 
     @classmethod
     def allocate(cls, device, *, context: int, tokens: int = 512, capacity: int = 4):
@@ -78,6 +79,7 @@ class DecoderInputs:
             torch.full((capacity, context // 64), -1, dtype=torch.int32, device=device),
             torch.zeros(capacity, dtype=torch.int32, device=device),
             torch.full((tokens,), -1, dtype=torch.int32, device=device),
+            torch.full((1,), -1, dtype=torch.int32, device=device),
         )
 
     def buffers(self):
@@ -292,7 +294,7 @@ class PreparedResume:
 
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
                  completion_records, frame_index, submission_sequence, *, session, name,
-                 local_logits=None, vocabulary_runtime=None, coordinator=None):
+                 local_logits=None, vocabulary_runtime=None, coordinator=None, sampling_workspace=None):
         from ignition.components.linear import UnquantizedProjection
         from ignition.components.sampling import PreparedSampling
 
@@ -314,7 +316,7 @@ class PreparedResume:
                 runtime=vocabulary_runtime, session=session, coordinator=coordinator, name=name)
         self.sampler = PreparedSampling(logits, requests, inputs.row_slot_ids[:rows],
             inputs.row_generations[:rows], inputs.live_rows, completion_records, frame_index, submission_sequence,
-            sample_enabled=inputs.sample_enabled[:rows])
+            sample_enabled=inputs.sample_enabled[:rows], workspace=sampling_workspace)
         self.sampler.prepare()
 
     def __call__(self):

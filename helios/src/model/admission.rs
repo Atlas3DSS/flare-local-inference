@@ -6,6 +6,50 @@ use crate::{
     scheduler::RequestHandle,
 };
 
+/// Per-token frontend arrays extended by shared text continuation handling.
+#[cfg(feature = "server")]
+#[derive(Default)]
+pub struct PromptMetadataMut<'a> {
+    pub positions: Option<&'a mut Vec<[i64; 3]>>,
+    pub vision_token_indices: Option<&'a mut Vec<i32>>,
+}
+
+#[cfg(feature = "server")]
+impl PromptMetadataMut<'_> {
+    pub(crate) fn extend_text(self, before: usize, after: usize) -> Result<()> {
+        if after < before
+            || self.positions.as_ref().is_some_and(|p| p.len() != before)
+            || self
+                .vision_token_indices
+                .as_ref()
+                .is_some_and(|v| v.len() != before || v.iter().any(|index| *index != -1))
+        {
+            return Err("text continuation metadata does not match its token history".into());
+        }
+        let next = self
+            .positions
+            .as_ref()
+            .and_then(|positions| positions.last())
+            .and_then(|position| position.iter().max().copied())
+            .unwrap_or(-1)
+            .checked_add(1)
+            .ok_or("text continuation position overflow")?;
+        let end = next
+            .checked_add(
+                i64::try_from(after - before)
+                    .map_err(|_| "text continuation length exceeds position range")?,
+            )
+            .ok_or("text continuation position overflow")?;
+        if let Some(positions) = self.positions {
+            positions.extend((next..end).map(|position| [position; 3]));
+        }
+        if let Some(indices) = self.vision_token_indices {
+            indices.resize(after, -1);
+        }
+        Ok(())
+    }
+}
+
 pub struct Admission<M: ModelContract> {
     pub handle: RequestHandle,
     pub sampling: SamplingParameters,

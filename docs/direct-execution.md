@@ -47,6 +47,16 @@ multi-host preparation. Preparation flags (`--max-concurrency`,
 `--no-mtp`, `--no-context-parallel`, `--no-stream-overlap`, `--no-compile`)
 apply as they do to `ignition serve`; direct execution runs what they prepared.
 `--verbose` also prints every step's graph, row count and GPU time.
+`--graph-times PATH` makes graph replay save its estimate of every graph's time
+to `PATH` every 10 s and when it stops; `--eager` with the same file chooses
+decode rounds from those times (see "Eager forwards"):
+
+```sh
+CUDA_VISIBLE_DEVICES=1 .venv/bin/ignition serve glm-5.3-flash --gpus 0 \
+  --max-concurrency 8 --port 8000 --direct --graph-times glm-tp1-c8.json
+CUDA_VISIBLE_DEVICES=1 .venv/bin/ignition serve glm-5.3-flash --gpus 0 \
+  --max-concurrency 8 --port 8000 --direct --eager --graph-times glm-tp1-c8.json
+```
 
 The listener answers non-streaming `POST /v1/chat/completions`, `GET
 /v1/models`, `GET /health` and `GET /metrics`, so
@@ -69,14 +79,39 @@ Helios reserves them. Pages are reference counted and handed out smallest
 first. Admitted requests are initialized together, or restored together when a
 cached checkpoint's consumed prefix is exactly their prompt, then a restored
 request runs the resume graph. Prompts prefill one chunk per step, padded to
-the smallest prepared capacity. Every decoding request joins one round: the
-smallest prepared speculative batch at the fixed width, or at the width with
-the most expected tokens per measured graph time, from each request's
-acceptance estimate as Helios keeps it. Decode rounds and prefill chunks
-alternate while both have work. A prompt not yet cached is snapshotted at its
+the smallest prepared capacity. Decode rounds and prefill chunks alternate
+while both have work. A prompt not yet cached is snapshotted at its
 endpoint and published as a checkpoint that owns the prompt's complete pages;
 later identical prompts share those pages and restore the partial page into a
 private one, as in Helios.
+
+**Decode rounds** (`ignition/direct/policy.py`) are chosen as Helios chooses
+among its decode candidates (`select_plan` in `helios/src/scheduler/policy.rs`,
+described in [scheduling-runtime-design.md](scheduling-runtime-design.md)),
+so a fault that depends on particular graphs meets them as often as under
+Helios. Every prepared batch capacity up to the concurrency's power of two
+competes at every loaded verification width, or at the fixed width without
+adaptive verification. Each carries its highest-valued decoding requests, so a
+round can leave requests out or run in a larger, padded batch when that graph is
+faster. A request's value is its expected tokens, from Helios's per-depth
+acceptance estimate, priced by its token and delivery fairness, plus its output
+age; the graph with the best value per graph time wins, with Helios's tie
+breaks. Graph times are Helios's estimates: unknown until a step of that shape
+runs, then a 7/8 moving average of observed graph time, forgotten after 30 s
+without an observation. Unknown and forgotten graphs are explored before any
+measured one, the most valuable first, so every batch and width runs at
+startup, and a neglected one, such as a wide verification that lost to a
+narrower one, runs again every 30 s. Service prices are initialized when a
+step is planned, charged each completed step's graph time and credited with
+its committed tokens and deliveries, as in `helios/src/scheduler/service.rs`.
+`tests/direct/test_helios_decode_rounds.py` checks every round against the
+rounds Helios chose for the same requests, graph times and acceptance.
+
+The scheduling clock, which ages requests and expires estimates, advances by
+each step's graph time, and by wall time only while the loop waits for
+requests. Helios's clock is wall time, but its host work between rounds is
+small; the direct loop's Python packing, uploads and bookkeeping are not, and
+would otherwise age every request and expire estimates sooner than under Helios.
 
 **Packing.** Each step's uploads are the byte ranges Helios's `paged_text`
 contract writes for that graph kind: state-row indices, row slots and
@@ -90,7 +125,9 @@ contradicts it stops execution.
 pinned staging on one stream, writes the frame index and submission sequence,
 replays the graph, and waits for it before the next step. It checks any
 collective runtime that reports transport failures only when asked, as Helios
-does after each frame.
+does after each frame. Each rank times the graph with CUDA events from after its
+uploads through the graph, as Helios's frame events do, and peers report their
+time to rank zero; a step's graph time is its slowest rank's, as Helios takes it.
 
 **Eager forwards.** With `--eager`, every rank releases its captured graphs
 and, for each step, calls the forward that step's graph captured, compiled
@@ -113,9 +150,17 @@ not reproduce:
 - A collective that orders itself across streams or checks transport health
   per call does so in eager execution; under replay its stream order is the
   graph's and health is checked after the step.
-- Step times include Python launch time. The adaptive verification width is
-  chosen from them, so it can differ from graph replay's choice; preparing
-  with `--no-mtp-adaptive-verification` fixes the width in both modes.
+- An eager step's time is Python's launch time, 0.3 s where its graph takes a
+  few milliseconds, and says nothing about the graph's cost. Eager execution
+  therefore never schedules from it. With `--graph-times`, each eager step
+  counts as the time graph replay saved for its graph, both as the observation
+  Helios's estimates take and on the scheduling clock, so eager execution
+  explores, expires and chooses graphs as graph replay did with those times.
+  Choices still diverge when acceptance does, and graph replay's times follow
+  its context lengths while saved ones are fixed. Without `--graph-times` no
+  graph is ever measured, and every decode round carries every decoding request
+  at the widest verification, which is Helios's choice among unmeasured graphs.
+  Preparing with `--no-mtp-adaptive-verification` fixes the width in both modes.
 
 **Ranks.** Rank zero decides every step and sends it to each peer as one
 message over that peer's executor connection, the connection Helios uses for
@@ -132,6 +177,9 @@ in-process serving.
   boundaries and terminal checkpoints are not captured.
 - One step at a time: no pipelined submission, and no mixed prefill and decode
   graphs.
+- Step kinds follow the fixed order above, not Helios's value comparison across
+  kinds; only the choice among decode-round graphs is Helios's. Prefill chunks,
+  admission, restore, resume and snapshot steps keep their fixed shapes.
 - No streaming, grammar masks, tool-call parsing, raw completions, Responses or
   Messages APIs, images or copied proposals.
 - Eager forwards allocate their temporaries from the caching allocator after
