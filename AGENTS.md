@@ -194,9 +194,11 @@ Both Ignition commands accept `--config PATH`; the default configuration is
 leaves GPU memory available for other processes during preparation and serving.
 Ignition additionally keeps 1 GiB for warm-up and capture. Qwen preparation backs
 only a prefill chunk plus two KV pages per captured request row, unless an
-explicit preparation page count is supplied programmatically. It reserves the
-full virtual extent in the package. Helios sizes its caches
-after uploading the selected graphs, keeping a separate 64 MiB driver margin.
+explicit preparation page count is supplied programmatically. Continuation
+storage backs a null row, live request rows, and disjoint snapshot destinations
+during preparation. Both retain their full virtual extents in the package. Helios
+sizes its caches after uploading the selected graphs, keeping a separate 64 MiB
+driver margin.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
 and every verification width through the draft-token maximum. Flare can reduce

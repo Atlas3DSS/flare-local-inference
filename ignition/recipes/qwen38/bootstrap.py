@@ -121,6 +121,11 @@ class PreparationConfig:
         return self.pages if self.pages is not None else self.prefill_chunk_size // 64 + 2 * self.request_capacity
 
     @property
+    def preparation_state_rows(self):
+        # Null row, live request rows, and disjoint snapshot destinations for tuning and capture.
+        return 1 + 2 * self.request_capacity
+
+    @property
     def request_capacity(self):
         return request_capacity(self.max_active)
 
@@ -248,7 +253,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             # Verification commits into each request's live row, so a request holds one row.
             state_rows = snapshots + slots
             state = HybridStatePool.allocate(state_rows + 1, device,
-                                             speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage)
+                speculative_tokens=speculative_tokens, world_size=shard.world_size, storage=package_storage,
+                backed_slots=(min(state_rows + 1, config.preparation_state_rows) if package_storage is not None else None))
             register_benchmark_state(
                 session, next(iter(state.gdn.values())).recurrent,
                 storage=state.backing, restore=state.reset_for_preparation,
@@ -475,6 +481,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         free, total = device_memory_info(device)
         memory = {"weights_bytes": weights.allocated_bytes, "ngram_request_bytes": table.mailbox.host_view.nbytes,
             "hybrid_state_bytes": state.backing.nbytes, "state_rows": state_rows,
+            "preparation_state_bytes": state.backed_slots * layout.row_bytes,
+            "preparation_state_rows": state.backed_slots,
             "pages": page_capacity, "page_bytes": page_bytes, "kv_bytes": page_capacity * page_bytes,
             "cached_token_capacity": page_capacity * 64, "headroom_bytes": config.headroom_bytes, "page_tokens": 64,
             "free_device_bytes": free, "total_device_bytes": total,

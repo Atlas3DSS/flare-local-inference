@@ -101,15 +101,22 @@ class HybridStatePool(StateStorage):
     consumed_tokens: torch.Tensor
     ple_history: torch.Tensor
     rope_delta: torch.Tensor
+    backed_slots: int | None = None
 
     @classmethod
-    def allocate(cls, slots: int, device, *, speculative_tokens: int = 0, world_size: int = 1, storage=None) -> HybridStatePool:
+    def allocate(cls, slots: int, device, *, speculative_tokens: int = 0, world_size: int = 1,
+                 storage=None, backed_slots: int | None = None) -> HybridStatePool:
         if type(slots) is not int or slots < 2:
             raise ValueError("hybrid state requires null and live slots")
+        backed_slots = slots if backed_slots is None else backed_slots
+        if type(backed_slots) is not int or not 2 <= backed_slots <= slots:
+            raise ValueError("backed state slots must include null and live slots within the virtual extent")
+        if backed_slots != slots and storage is None:
+            raise ValueError("partial state backing requires package storage")
         layout = HybridStateLayout.build(speculative_tokens=speculative_tokens, world_size=world_size)
         backing = (torch.zeros((slots, layout.row_bytes), dtype=torch.uint8, device=device) if storage is None else
             storage.device_allocate("continuations", (slots, layout.row_bytes), torch.uint8, group="STATE_ROWS",
-                                    maximum=torch.cuda.mem_get_info(device)[1] // layout.row_bytes))
+                                    maximum=torch.cuda.mem_get_info(device)[1] // layout.row_bytes, units=backed_slots))
 
         def view(name):
             region = layout.region(name)
@@ -128,23 +135,24 @@ class HybridStatePool(StateStorage):
             }
         )
         history = view("ple_history")
-        history[1:].fill_(EOS_TOKEN_ID)
+        history[1:backed_slots].fill_(EOS_TOKEN_ID)
         return cls(
             backing,
             layout,
-            torch.tensor([slots, 0], dtype=torch.int64, device=device),
+            torch.tensor([backed_slots, 0], dtype=torch.int64, device=device),
             gdn,
             view("ple_convolution"),
             view("last_hidden"),
             view("consumed_tokens"),
             history,
             view("rope_delta"),
+            backed_slots,
         )
 
     def reset_for_preparation(self):
         """Restore empty unpublished model state after serialized benchmark use."""
-        self.backing.zero_()
-        self.ple_history[1:].fill_(EOS_TOKEN_ID)
+        self.backing[:self.backed_slots].zero_()
+        self.ple_history[1:self.backed_slots].fill_(EOS_TOKEN_ID)
 
 
 @dataclass(frozen=True)
