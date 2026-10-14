@@ -701,8 +701,8 @@ mod tests {
             assert_eq!(copy[span.clone()], bytes[span]);
         }
         assert!(copy[8192..1 << 20].iter().all(|&b| b == 0));
-        // Holes occupy no disk: the copy's blocks cover its ranges, not its length.
-        assert!(fs::metadata(&held).unwrap().blocks() * 512 < 4 << 20);
+        // Each written extent may occupy a 2 MiB tmpfs hugepage; the rest stays sparse.
+        assert!(fs::metadata(&held).unwrap().blocks() * 512 <= 4 << 20);
         // Ranges for an executable, or that overlap, are refused.
         let mut other = Agent::connect(&address, &token).unwrap();
         assert!(

@@ -456,7 +456,7 @@ impl Metrics {
             ),
             (
                 "preemptions_total",
-                "Requests without an output limit that yielded their KV pages and were readmitted.",
+                "Requests that yielded their KV pages under pressure and were readmitted.",
                 &self.preemptions,
             ),
             (

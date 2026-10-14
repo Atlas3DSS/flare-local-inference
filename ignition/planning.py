@@ -271,8 +271,8 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
     plan = Plan(recipe, checkpoint, gpus, concurrency, recipe.prefill_chunk if prefill_chunk is None else prefill_chunk,
                 speculation, 0, 0, 0, reserve_bytes,
                 recipe.weights_bytes(checkpoint, len(gpus), speculation), costs.graph_bytes,
-                context_parallel and costs.page_tokens is not None, stream_overlap=stream_overlap and recipe.stream_overlap,
-                mixed_prefill=mixed_prefill)
+                context_parallel=context_parallel and costs.page_tokens is not None,
+                stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill)
     available = plan.supply_bytes - plan.fixed_bytes
     target = min(CACHE_STATES_PER_REQUEST * concurrency, max(1, available // costs.state_row_bytes))
     if cache_states is not None:
