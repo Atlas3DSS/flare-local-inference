@@ -58,15 +58,23 @@ def test_codex(project):
     verify(project)
 
 
-def test_claude_code(project):
+@pytest.mark.parametrize("bare", [False, True], ids=["normal", "bare"])
+def test_claude_code(project, bare):
     assert shutil.which("claude"), "Claude Code must be installed"
     settings = project / "client-settings.json"
     settings.write_text(json.dumps({"env": {
         "ANTHROPIC_BASE_URL": os.environ["FLARE_API_TEST_URL"].rstrip("/"),
         "ANTHROPIC_API_KEY": os.environ.get("FLARE_API_TEST_KEY", "local"),
-        "ANTHROPIC_MODEL": "flare",
+        "ANTHROPIC_MODEL": "fable",
     }}))
-    command = ["claude", "--bare", "--setting-sources", "", "--settings", str(settings), "--model", "flare", "--allowedTools", "Read,Edit,Write,Bash", "--output-format", "json", "-p", TASK]
+    command = [
+        "claude", *(["--bare"] if bare else []),
+        "--setting-sources", "", "--settings", str(settings),
+        "--model", "fable", "--effort", "xhigh",
+        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--no-session-persistence", "--tools", "Read,Edit,Write,Bash",
+        "--allowedTools", "Read,Edit,Write,Bash", "--output-format", "json", "-p", TASK,
+    ]
     result = subprocess.run(command, cwd=project, capture_output=True, text=True, timeout=240)
     assert result.returncode == 0, result.stdout + result.stderr
     response = json.loads(result.stdout)

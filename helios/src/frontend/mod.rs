@@ -124,6 +124,7 @@ pub struct Frontend {
     template_source: String,
     bos_token_id: Option<u32>,
     effort_levels: std::sync::OnceLock<Vec<String>>,
+    inline_system_messages: std::sync::OnceLock<bool>,
     defaults: Map<String, Json>,
 }
 
@@ -173,6 +174,61 @@ impl Frontend {
     }
     pub fn template_default(&self, name: &str) -> Option<&Json> {
         self.defaults.get(name)
+    }
+
+    pub fn normalize_inline_system_messages(&self, messages: &mut [Json]) -> Result<()> {
+        if !messages.iter().skip(1).any(|m| m["role"] == "system") {
+            return Ok(());
+        }
+        let supported = self.inline_system_messages.get_or_init(|| {
+            let marker = "FLARE_INLINE_SYSTEM_PROBE";
+            let mut context = self.defaults.clone();
+            context.insert(
+                "messages".into(),
+                serde_json::json!([
+                    {"role":"system","content":"Instructions"},
+                    {"role":"user","content":"Hello"},
+                    {"role":"system","content":marker},
+                    {"role":"user","content":"Continue"}
+                ]),
+            );
+            context.insert("add_generation_prompt".into(), false.into());
+            context.insert("continue_final_message".into(), false.into());
+            self.environment
+                .get_template("chat")
+                .and_then(|template| template.render(&context))
+                .is_ok_and(|text| text.contains(marker))
+        });
+        if *supported {
+            return Ok(());
+        }
+        for message in messages.iter_mut().skip(1) {
+            if message["role"] != "system" {
+                continue;
+            }
+            let invalid = || {
+                Error::frontend(FrontendError::Input(Failure::new(
+                    "inline system messages require text content",
+                )))
+            };
+            let text = match &message["content"] {
+                Json::String(text) => text.clone(),
+                Json::Array(parts) => parts
+                    .iter()
+                    .map(|part| {
+                        if part["type"] != "text" {
+                            return Err(invalid());
+                        }
+                        part["text"].as_str().ok_or_else(invalid)
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .join("\n\n"),
+                _ => return Err(invalid()),
+            };
+            message["role"] = "user".into();
+            message["content"] = format!("<system>{text}</system>").into();
+        }
+        Ok(())
     }
 
     pub fn load(assets: FrontendAssets, template_defaults: Map<String, Json>) -> Result<Self> {
@@ -253,6 +309,7 @@ impl Frontend {
         Ok(Self {
             bos_token_id,
             effort_levels: Default::default(),
+            inline_system_messages: Default::default(),
             tokenizer,
             environment,
             template_source,
@@ -490,6 +547,105 @@ mod tests {
         require_send_sync::<Frontend>();
     }
 
+    fn role_frontend(guard: &str) -> Frontend {
+        let source = format!(
+            "{{% for message in messages %}}{guard}{{{{ message.role }}}}:{{{{ message.content }}}}\n{{% endfor %}}"
+        );
+        let mut environment = Environment::new();
+        environment.add_function(
+            "raise_exception",
+            |message: String| -> std::result::Result<(), TemplateError> {
+                Err(TemplateError::new(ErrorKind::InvalidOperation, message))
+            },
+        );
+        environment
+            .add_template_owned("chat", source.clone())
+            .unwrap();
+        Frontend {
+            tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
+            environment,
+            template_source: source,
+            bos_token_id: None,
+            effort_levels: Default::default(),
+            inline_system_messages: Default::default(),
+            defaults: Map::new(),
+        }
+    }
+
+    #[test]
+    fn inline_system_roles_follow_template_capability() {
+        let source = serde_json::json!([
+            {"role":"system","content":"Initial instructions"},
+            {"role":"user","content":"Hello"},
+            {"role":"system","content":[
+                {"type":"text","text":"Environment"},
+                {"type":"text","text":"Use the repository"}
+            ]},
+            {"role":"assistant","content":"Ready"},
+            {"role":"user","content":"Continue"}
+        ]);
+        let original = source.as_array().unwrap();
+        for (guard, supported) in [
+            ("", true),
+            (
+                "{% if message.role == 'system' and not loop.first %}{{ raise_exception('system must be first') }}{% endif %}",
+                false,
+            ),
+            (
+                "{% if message.role == 'system' and not loop.first %}{% continue %}{% endif %}",
+                false,
+            ),
+        ] {
+            let frontend = role_frontend(guard);
+            let mut messages = original.clone();
+            frontend
+                .normalize_inline_system_messages(&mut messages)
+                .unwrap();
+            assert_eq!(&messages[..2], &original[..2]);
+            assert_eq!(&messages[3..], &original[3..]);
+            if supported {
+                assert_eq!(messages, *original);
+            } else {
+                assert_eq!(
+                    messages[2],
+                    serde_json::json!({
+                        "role":"user","content":"<system>Environment\n\nUse the repository</system>"
+                    })
+                );
+                frontend.render_chat(&messages, &Map::new()).unwrap();
+            }
+            let once = messages.clone();
+            frontend
+                .normalize_inline_system_messages(&mut messages)
+                .unwrap();
+            assert_eq!(messages, once);
+        }
+    }
+
+    #[test]
+    fn inline_system_conversion_preserves_text_and_rejects_nontext() {
+        let frontend = role_frontend(
+            "{% if message.role == 'system' and not loop.first %}{{ raise_exception('system must be first') }}{% endif %}",
+        );
+        let mut messages = vec![
+            serde_json::json!({"role":"user","content":"Hello"}),
+            serde_json::json!({"role":"system","content":"\nUse <tag> & café.\n"}),
+        ];
+        frontend
+            .normalize_inline_system_messages(&mut messages)
+            .unwrap();
+        assert_eq!(
+            messages[1]["content"],
+            "<system>\nUse <tag> & café.\n</system>"
+        );
+        messages[1] = serde_json::json!({"role":"system","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]});
+        assert!(
+            frontend
+                .normalize_inline_system_messages(&mut messages)
+                .is_err()
+        );
+    }
+
     #[test]
     fn advisory_effort_uses_the_prepared_templates_vocabulary() {
         for (levels, expected) in [
@@ -518,6 +674,7 @@ mod tests {
                 template_source: source,
                 bos_token_id: None,
                 effort_levels: Default::default(),
+                inline_system_messages: Default::default(),
                 defaults: Map::new(),
             };
             for (candidates, expected) in [
@@ -578,6 +735,7 @@ mod tests {
         let frontend = Frontend {
             bos_token_id: None,
             effort_levels: Default::default(),
+            inline_system_messages: Default::default(),
             tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
             environment,
             template_source: "{{ raise_exception() }}".to_owned(),

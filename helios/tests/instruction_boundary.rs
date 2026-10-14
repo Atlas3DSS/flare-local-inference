@@ -124,6 +124,61 @@ fn tool(name: &str) -> Value {
 
 #[test]
 #[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
+fn inline_system_messages_render_in_place_without_changing_the_prefix() {
+    let snapshot = PathBuf::from(std::env::var_os("FLARE_TEST_SNAPSHOT").unwrap());
+    let fixture: Value = serde_json::from_slice(
+        &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/frontend/qwen38.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let asset = |name: &str| Asset {
+        range: None,
+        path: snapshot.join(name),
+        sha256: fixture["assets"][name].as_str().unwrap().into(),
+    };
+    let frontend = Frontend::load(
+        FrontendAssets {
+            tokenizer: asset("tokenizer.json"),
+            tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
+            chat_template: asset("chat_template.jinja"),
+        },
+        Map::new(),
+    )
+    .unwrap();
+    let prefix = json!([
+        {"role":"system","content":"Be concise."},
+        {"role":"user","content":"Hello"}
+    ]);
+    let options = json!({"enable_thinking":false,"add_generation_prompt":true});
+    let mut messages = prefix.as_array().unwrap().clone();
+    messages.push(json!({"role":"system","content":[
+        {"type":"text","text":"Environment"},
+        {"type":"text","text":"Use the repository."}
+    ]}));
+    frontend
+        .normalize_inline_system_messages(&mut messages)
+        .unwrap();
+    let rendered = frontend
+        .render_chat(&messages, options.as_object().unwrap())
+        .unwrap();
+    messages[2] =
+        json!({"role":"user","content":"<system>Environment\n\nUse the repository.</system>"});
+    let expected = frontend
+        .render_chat(&messages, options.as_object().unwrap())
+        .unwrap();
+    assert_eq!(rendered.text, expected.text);
+    assert_eq!(rendered.token_ids, expected.token_ids);
+    let mut prefix_options = options.as_object().unwrap().clone();
+    prefix_options.insert("add_generation_prompt".into(), false.into());
+    let prefix_text = frontend
+        .render_chat(prefix.as_array().unwrap(), &prefix_options)
+        .unwrap();
+    assert!(rendered.text.starts_with(&prefix_text.text));
+    assert!(rendered.token_ids.starts_with(&prefix_text.token_ids));
+}
+
+#[test]
+#[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
 fn omitted_output_limit_fills_context_after_chat_tokenization() {
     let mut fixture = Fixture::load(Map::new());
     fixture.config.max_new_tokens = fixture.config.limits.max_sequence_tokens as u32;

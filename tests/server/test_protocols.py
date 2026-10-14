@@ -115,6 +115,237 @@ def test_messages_tool_history(clients):
     assert "42" in "".join(b.text for b in final.content if b.type == "text")
 
 
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_structured_answer_with_reasoning_and_tools(clients, thinking, streaming):
+    _, _, http = clients
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "integer"}},
+        "required": ["value"], "additionalProperties": False,
+    }
+    history = [{"role": "user", "content": (
+        'Call lookup with exactly {"query":"alpha"} to retrieve the stored integer. '
+        'Then return JSON with "value" set to that integer.'
+    )}]
+    for turn in range(3):
+        response = http.post("/v1/chat/completions", json={
+            "model": "local", "messages": history,
+            "tools": [{"type": "function", "function": FUNCTION}],
+            "tool_choice": "auto", "temperature": 1, "top_p": .95,
+            "max_tokens": 2048, "stream": streaming,
+            "chat_template_kwargs": {"enable_thinking": thinking},
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "answer", "strict": True, "schema": schema,
+            }},
+        })
+        response.raise_for_status()
+        if streaming:
+            assert "data: [DONE]" in response.text, response.text
+            message = {"role": "assistant", "content": "", "reasoning_content": ""}
+            calls = {}
+            for line in response.text.splitlines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                chunk = json.loads(line[6:])
+                assert "error" not in chunk, chunk
+                for choice in chunk.get("choices", []):
+                    delta = choice["delta"]
+                    for key in ("content", "reasoning_content"):
+                        message[key] += delta.get(key) or ""
+                    for call in delta.get("tool_calls", []):
+                        dest = calls.setdefault(call["index"], {
+                            "id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                        if call.get("id"):
+                            dest["id"] = call["id"]
+                        for key in ("name", "arguments"):
+                            dest["function"][key] += call.get("function", {}).get(key) or ""
+            if calls:
+                message["tool_calls"] = list(calls.values())
+        else:
+            message = response.json()["choices"][0]["message"]
+        history.append(message)
+        if message.get("tool_calls"):
+            for call in message["tool_calls"]:
+                assert call["function"]["name"] == "lookup"
+                assert json.loads(call["function"]["arguments"]) == {"query": "alpha"}
+                history.append({"role": "tool", "tool_call_id": call["id"],
+                                "content": '{"value":7391}'})
+        else:
+            assert turn > 0, message
+            assert json.loads(message["content"]) == {"value": 7391}
+            return
+    pytest.fail("Model did not finish after receiving the lookup result")
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_required_tool_choice_sdk_contracts(clients, streaming):
+    o, a, _ = clients
+    history = [{"role": "user", "content": "Find the stored value for alpha."}]
+    chat = o.chat.completions.create(
+        model="local", messages=history, tools=[{"type": "function", "function": FUNCTION}],
+        tool_choice="required", parallel_tool_calls=False,
+        max_tokens=256, stream=streaming, extra_body=EXTRA,
+    )
+    if streaming:
+        chunks = list(chat)
+        assert any(c.choices[0].delta.tool_calls for c in chunks if c.choices)
+        assert chunks[-1].choices[0].finish_reason == "tool_calls"
+    else:
+        assert chat.choices[0].message.tool_calls[0].function.name == "lookup"
+        assert chat.choices[0].finish_reason == "tool_calls"
+    kwargs = dict(
+        model="local", messages=history,
+        tools=[{"name": FUNCTION["name"], "description": FUNCTION["description"],
+                "input_schema": FUNCTION["parameters"]}],
+        tool_choice={"type": "any", "disable_parallel_tool_use": True},
+        max_tokens=256, extra_body=EXTRA,
+    )
+    counted = a.messages.count_tokens(**{k: v for k, v in kwargs.items() if k != "max_tokens"})
+    if streaming:
+        with a.messages.stream(**kwargs) as stream:
+            list(stream)
+            message = stream.get_final_message()
+    else:
+        message = a.messages.create(**kwargs)
+    assert message.stop_reason == "tool_use"
+    assert any(b.type == "tool_use" and b.name == "lookup" for b in message.content)
+    assert counted.input_tokens == message.usage.input_tokens
+    kwargs = dict(
+        model="local", input=history, tools=[{"type": "function", **FUNCTION}],
+        tool_choice="required", parallel_tool_calls=False,
+        max_output_tokens=256, extra_body=EXTRA,
+    )
+    if streaming:
+        with o.responses.stream(**kwargs) as stream:
+            events = list(stream)
+            response = stream.get_final_response()
+        assert events[-1].type == "response.completed"
+    else:
+        response = o.responses.create(**kwargs)
+    assert response.tool_choice == "required"
+    assert response.parallel_tool_calls is False
+    assert response.status == "completed"
+    assert any(item.type == "function_call" and item.name == "lookup" for item in response.output)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("path,body", [
+    ("/v1/chat/completions", {"messages": USER, "max_tokens": 1, "tool_choice": "required",
+                              "tools": [{"type": "function", "function": FUNCTION}]}),
+    ("/v1/messages", {"messages": USER, "max_tokens": 1, "tool_choice": {"type": "any"},
+                      "tools": [{"name": FUNCTION["name"], "input_schema": FUNCTION["parameters"]}]}),
+    ("/v1/responses", {"input": USER, "max_output_tokens": 1, "tool_choice": "required",
+                       "tools": [{"type": "function", **FUNCTION}]}),
+])
+def test_required_tool_choice_missing_call_is_a_terminal_error(clients, streaming, path, body):
+    _, _, http = clients
+    headers = {"anthropic-version": "2023-06-01"}
+    response = http.post(path, json={**body, **EXTRA, "stream": streaming}, headers=headers)
+    message = "required tool choice was not satisfied"
+    if not streaming:
+        assert response.status_code == 500
+        assert message in response.json()["error"]["message"]
+    else:
+        response.raise_for_status()
+        assert "[DONE]" not in response.text
+        data = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        terminal = data[-1]
+        if path == "/v1/responses":
+            assert terminal["type"] == "response.failed"
+            assert terminal["response"]["status"] == "failed"
+            assert message in terminal["response"]["error"]["message"]
+            assert not any(e["type"] in {"response.completed", "response.incomplete"} for e in data)
+        else:
+            assert message in terminal["error"]["message"]
+            assert not any(e.get("type") == "message_stop" for e in data)
+            assert not any(c.get("finish_reason") for e in data for c in e.get("choices", []))
+    invalid = http.post(path, json={**body, **EXTRA, "tools": []}, headers=headers)
+    assert invalid.status_code == 400
+    assert "needs at least one tool" in invalid.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("protocol", ["chat/completions", "messages", "responses"])
+def test_multiple_tool_calls_fail_when_parallel_calls_are_disabled(clients, protocol, streaming):
+    _, _, http = clients
+    history = [{"role": "user", "content": (
+        "The queries alpha and beta are independent. Call lookup for BOTH queries in parallel "
+        "in this single response. Do not wait for a result before issuing the second call."
+    )}]
+    body = {**EXTRA, "seed": 42, "max_tokens": 256, "messages": history,
+            "tools": [{"type": "function", "function": FUNCTION}]}
+    if protocol == "messages":
+        body["tools"] = [{"name": FUNCTION["name"], "description": FUNCTION["description"],
+                          "input_schema": FUNCTION["parameters"]}]
+    elif protocol == "responses":
+        body["input"] = body.pop("messages")
+        body["max_output_tokens"] = body.pop("max_tokens")
+        body["tools"] = [{"type": "function", **FUNCTION}]
+    headers = {"anthropic-version": "2023-06-01"}
+    allowed = http.post("/v1/" + protocol, json=body, headers=headers)
+    allowed.raise_for_status()
+    output = allowed.json()
+    if protocol == "chat/completions":
+        calls = output["choices"][0]["message"]["tool_calls"]
+    elif protocol == "messages":
+        calls = [b for b in output["content"] if b["type"] == "tool_use"]
+    else:
+        calls = [b for b in output["output"] if b["type"] == "function_call"]
+    assert len(calls) == 2
+    if protocol == "messages":
+        body["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+    else:
+        body["parallel_tool_calls"] = False
+    response = http.post("/v1/" + protocol, json={**body, "stream": streaming}, headers=headers)
+    if not streaming:
+        assert response.status_code == 500
+        assert "more than one tool call" in response.json()["error"]["message"]
+    else:
+        response.raise_for_status()
+        assert "[DONE]" not in response.text
+        data = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        terminal = data[-1]
+        if protocol == "responses":
+            assert terminal["type"] == "response.failed"
+            error = terminal["response"]["error"]
+            assert not any(e["type"] in {"response.completed", "response.incomplete"} for e in data)
+            calls = [e for e in data if e["type"] == "response.output_item.added"
+                     and e["item"]["type"] == "function_call"]
+        elif protocol == "messages":
+            error = terminal["error"]
+            assert not any(e.get("type") == "message_stop" for e in data)
+            calls = [e for e in data if e.get("type") == "content_block_start"
+                     and e["content_block"]["type"] == "tool_use"]
+        else:
+            error = terminal["error"]
+            assert not any(c.get("finish_reason") for e in data for c in e.get("choices", []))
+            calls = [call for e in data for c in e.get("choices", [])
+                     for call in c.get("delta", {}).get("tool_calls", []) if call.get("id")]
+        assert "more than one tool call" in error["message"]
+        assert len(calls) <= 1
+
+
+def test_messages_inline_system_text_and_empty_controls(clients):
+    _, a, _ = clients
+    history = [
+        {"role": "user", "content": "Hello"},
+        {"role": "system", "content": [{"type": "text", "text": "Reply with exactly OK.",
+         "cache_control": {"type": "ephemeral"}}], "output_config": {"effort": "xhigh"}},
+    ]
+    controls = {"role": "system", "content": [], "output_config": {"effort": "high"}}
+    counted = a.messages.count_tokens(model="local", messages=history, extra_body=EXTRA)
+    empty = a.messages.count_tokens(model="local", messages=history + [controls], extra_body=EXTRA)
+    assert counted.input_tokens == empty.input_tokens
+    with a.messages.stream(model="local", messages=history + [controls], max_tokens=32, extra_body=EXTRA) as stream:
+        assert "".join(stream.text_stream) == "OK"
+        result = stream.get_final_message()
+    assert result.usage.input_tokens == counted.input_tokens
+    assert result.stop_reason == "end_turn"
+
+
 def test_responses_tool_history(clients):
     o, _, _ = clients
     tools = [{"type": "function", **FUNCTION, "strict": False}]
@@ -183,7 +414,7 @@ def test_stop_sequence_and_observations(clients):
 
 def test_unsupported_features_and_error_shapes(clients):
     _, _, http = clients
-    for extra in [{"store": True}, {"previous_response_id": "r"}, {"parallel_tool_calls": False}, {"tool_choice": "required"}, {"tools": [{"type": "function", **FUNCTION, "strict": True}]}]:
+    for extra in [{"store": True}, {"previous_response_id": "r"}, {"tool_choice": {"type": "function", "name": "lookup"}}, {"tools": [{"type": "function", **FUNCTION, "strict": True}]}]:
         response = http.post("/v1/responses", json={"input": "x", **extra})
         assert response.status_code == 400 and response.json()["error"]["type"] == "invalid_request_error"
     response = http.post("/v1/messages", content=b"{", headers={"anthropic-version": "2023-06-01"})

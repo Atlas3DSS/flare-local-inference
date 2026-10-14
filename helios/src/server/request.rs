@@ -74,7 +74,7 @@ pub(super) fn prepare_inference<M: ModelContract>(
     index: usize,
     count_only: bool,
 ) -> Result<PreparedInference<M>> {
-    use super::inference::{Constraint, Input, RawPrompt};
+    use super::inference::{Constraint, Input, RawPrompt, ToolChoice};
     let opts = &request.options;
     let mut object = serde_json::to_value(&opts.sampling)
         .unwrap()
@@ -85,15 +85,25 @@ pub(super) fn prepare_inference<M: ModelContract>(
         object.insert("max_tokens".into(), limit.into());
     }
     let object = &object;
-    let grammar = match &opts.constraint {
-        Some(Constraint::Json(schema)) => Some(compiler.compile_json_schema(schema)?),
-        Some(Constraint::Lark(source)) => Some(compiler.compile_lark(source)?),
-        None => None,
-    };
+    let structured = opts.constraint.is_some();
     let (mut normalized, raw) = match &request.input {
-        Input::Conversation(messages) => (super::inference::template_messages(messages)?, None),
+        Input::Conversation(messages) => (
+            super::inference::template_messages(messages, request.tool_choice)?,
+            None,
+        ),
         Input::Raw(prompts) => (vec![], Some(&prompts[index / request.choices])),
     };
+    frontend.normalize_inline_system_messages(&mut normalized)?;
+    if raw.is_none() {
+        if let Some(Constraint::Json(schema)) = &opts.constraint {
+            super::inference::append_system_instruction(
+                &mut normalized,
+                &format!(
+                    "Return the final answer as a JSON value matching this schema. Do not wrap it in Markdown fences or add text outside the JSON value. Tool calls may precede the final answer.\nJSON schema:\n{schema}"
+                ),
+            )?;
+        }
+    }
     let mut images = Vec::new();
     for message in &mut normalized {
         if !message.is_object() {
@@ -181,7 +191,7 @@ pub(super) fn prepare_inference<M: ModelContract>(
         }
     }
 
-    if request.tools_disabled {
+    if request.tool_choice == ToolChoice::None {
         options.insert("tools".into(), Value::Array(vec![]));
     } else if !request.tools.is_empty() {
         options.insert("tools".into(), Value::Array(request.tools.iter().map(|tool| {
@@ -190,26 +200,6 @@ pub(super) fn prepare_inference<M: ModelContract>(
             } else { tool.description.clone() };
             serde_json::json!({"type":"function", "function":{"name":tool.native_name(), "description":description, "parameters":tool.parameters}})
         }).collect()));
-    }
-    if grammar.is_some() {
-        if options
-            .get("tools")
-            .or_else(|| frontend.template_default("tools"))
-            .and_then(Value::as_array)
-            .is_some_and(|tools| !tools.is_empty())
-        {
-            return Err(Error::admission(
-                AdmissionError::Feature,
-                "structured output cannot be combined with tool-call generation",
-            ));
-        }
-        if options.get("enable_thinking") == Some(&Value::Bool(true)) {
-            return Err(Error::admission(
-                AdmissionError::Feature,
-                "structured output requires enable_thinking=false",
-            ));
-        }
-        options.insert("enable_thinking".into(), Value::Bool(false));
     }
     if !options.contains_key("add_generation_prompt")
         && requests_continuation(options.get("continue_final_message"))
@@ -255,8 +245,19 @@ pub(super) fn prepare_inference<M: ModelContract>(
             &rendered,
             &normalized,
             &options,
-            grammar.is_some(),
+            structured,
         )?)
+    };
+    use crate::output::ModelOutput;
+    let envelope = output.as_ref().and_then(M::Output::grammar_envelope);
+    let grammar = match &opts.constraint {
+        Some(Constraint::Json(schema)) => {
+            Some(compiler.compile_json_schema_in(schema, envelope.as_ref())?)
+        }
+        Some(Constraint::Lark(source)) => {
+            Some(compiler.compile_lark_in(source, envelope.as_ref())?)
+        }
+        None => None,
     };
     let crate::model::PreparedInput {
         tokens,

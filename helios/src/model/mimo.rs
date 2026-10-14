@@ -179,7 +179,7 @@ impl ModelContract for MiMo {
     #[cfg(feature = "server")]
     type OutputConfig = crate::output::chatml::OutputConfig;
     #[cfg(feature = "server")]
-    type Output = crate::output::chatml::ChatMlOutput;
+    type Output = crate::output::chatml::CompactChatMlOutput;
     #[cfg(feature = "server")]
     fn prepare_input(
         frontend: &crate::frontend::Frontend,

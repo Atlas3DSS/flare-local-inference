@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use llguidance::api::{ParserLimits, TopLevelGrammar};
+use llguidance::api::{GrammarWithLexer, ParserLimits, TopLevelGrammar};
 use llguidance::toktrie::{TokEnv, TokRxInfo, TokTrie, TokenId, TokenizerEnv};
 use llguidance::{Matcher, ParserFactory, token_bytes_from_tokenizer_json};
 use serde_json::Value;
@@ -13,6 +13,14 @@ use crate::{AdmissionError, Error, Failure, Result};
 const MAX_GRAMMAR_BYTES: usize = 262_144;
 const MAX_SCHEMA_NODES: usize = 8_192;
 const MAX_SCHEMA_DEPTH: usize = 64;
+
+/// Delimiters supplied by the same protocol that parses generated output.
+pub struct OutputEnvelope {
+    pub reasoning_end: Option<&'static str>,
+    pub tool: Option<(&'static str, &'static str)>,
+    pub function: Option<(&'static str, &'static str)>,
+    pub tool_ends_reasoning: bool,
+}
 
 struct CheckpointTokenizer {
     tokenizer: Tokenizer,
@@ -135,6 +143,14 @@ impl GrammarCompiler {
     /// Compile supported JSON-schema assertions strictly; external references and
     /// compiler option extensions are rejected before compilation.
     pub fn compile_json_schema(&self, schema: &Value) -> Result<RequestGrammar> {
+        self.compile_json_schema_in(schema, None)
+    }
+
+    pub(crate) fn compile_json_schema_in(
+        &self,
+        schema: &Value,
+        envelope: Option<&OutputEnvelope>,
+    ) -> Result<RequestGrammar> {
         if schema.to_string().len() > MAX_GRAMMAR_BYTES {
             return Err(Error::admission(
                 AdmissionError::Grammar,
@@ -142,14 +158,148 @@ impl GrammarCompiler {
             ));
         }
         validate_schema_nodes(schema, "$", 0, &mut 0)?;
-        self.compile(TopLevelGrammar::from_json_schema(schema.clone()))
+        self.compile_envelope(TopLevelGrammar::from_json_schema(schema.clone()), envelope)
     }
 
     /// Compile the llguidance Lark dialect. Embedded JSON and compiler directives
     /// use separate APIs so they cannot override strict JSON-schema validation.
     pub fn compile_lark(&self, grammar: &str) -> Result<RequestGrammar> {
+        self.compile_lark_in(grammar, None)
+    }
+
+    pub(crate) fn compile_lark_in(
+        &self,
+        grammar: &str,
+        envelope: Option<&OutputEnvelope>,
+    ) -> Result<RequestGrammar> {
         validate_lark(grammar)?;
-        self.compile(TopLevelGrammar::from_lark(grammar.to_owned()))
+        self.compile_envelope(TopLevelGrammar::from_lark(grammar.to_owned()), envelope)
+    }
+
+    fn compile_envelope(
+        &self,
+        mut grammar: TopLevelGrammar,
+        envelope: Option<&OutputEnvelope>,
+    ) -> Result<RequestGrammar> {
+        let Some(envelope) = envelope else {
+            return self.compile(grammar);
+        };
+        if envelope.reasoning_end.is_none() && envelope.tool.is_none() {
+            return self.compile(grammar);
+        }
+        let mut rules = String::from("ws: /[ \\t\\r\\n]*/\n");
+        let branches = if let Some((open, close)) = envelope.tool {
+            if let Some((function_open, function_close)) = envelope.function {
+                rules.push_str(&format!(
+                    "tool_after_open: ws {} tool_body (ws {})?\ntool: {} tool_after_open | tool_after_open\n",
+                    self.marker(function_open), self.marker(close), self.marker(open)
+                ));
+                rules.push_str(&self.region("tool_body", function_close));
+            } else {
+                rules.push_str(&format!(
+                    "tool_after_open: tool_body\ntool: {} tool_after_open\n",
+                    self.marker(open)
+                ));
+                rules.push_str(&self.region("tool_body", close));
+            }
+            rules.push_str("tools_suffix: (ws tool)* (ws @answer)?\ntools: tool tools_suffix\n");
+            "(@answer | tools)"
+        } else {
+            "@answer"
+        };
+        if let Some(end) = envelope.reasoning_end {
+            if let Some((open, _)) = envelope.tool.filter(|_| envelope.tool_ends_reasoning) {
+                rules.push_str(&self.delimited_region("reasoning_done", end, &[end, open]));
+                rules.push_str(&self.delimited_region("reasoning_tool", open, &[end, open]));
+                // Only the outer tool opener implicitly ends reasoning.
+                rules.push_str(&format!(
+                    "start: (reasoning_done ws {branches} | reasoning_tool tool_after_open tools_suffix) ws\n",
+                ));
+            } else {
+                rules.push_str(&self.region("reasoning", end));
+                rules.push_str(&format!("start: reasoning ws {branches} ws\n"));
+            }
+        } else {
+            rules.push_str(&format!("start: ws {branches} ws\n"));
+        }
+        grammar.grammars[0].name = Some("answer".into());
+        grammar
+            .grammars
+            .insert(0, GrammarWithLexer::from_lark(rules));
+        self.compile(grammar)
+    }
+
+    fn marker(&self, text: &str) -> String {
+        match self.factory.tok_env().tok_trie().get_special_token(text) {
+            Some(id) => format!("<[{id}]>"),
+            None => serde_json::to_string(text).unwrap(),
+        }
+    }
+
+    fn region(&self, name: &str, close: &str) -> String {
+        let trie = self.factory.tok_env().tok_trie();
+        if let Some(end) = trie.get_special_token(close) {
+            let specials: Vec<_> = trie
+                .get_special_tokens()
+                .into_iter()
+                .filter(|id| *id != end && !self.eos_ids.contains(id))
+                .map(|id| id.to_string())
+                .collect();
+            let body = if specials.is_empty() {
+                "/(?s:.*)/".into()
+            } else {
+                format!("(/(?s:.+)/ | <[{}]>)*", specials.join(","))
+            };
+            format!("{name}: {body} <[{end}]>\n")
+        } else {
+            // Lazy suffixes consume the delimiter without token backtracking.
+            format!(
+                "{name}[suffix={}]: /(?s:.*)/\n",
+                serde_json::to_string(close).unwrap()
+            )
+        }
+    }
+
+    fn delimited_region(&self, name: &str, close: &str, ends: &[&str]) -> String {
+        let trie = self.factory.tok_env().tok_trie();
+        let literals: Vec<_> = ends
+            .iter()
+            .filter(|end| trie.get_special_token(end).is_none())
+            .map(|end| serde_json::to_string(end).unwrap())
+            .collect();
+        let text = if literals.is_empty() {
+            "/(?s:.*)/".to_owned()
+        } else {
+            format!(
+                "(/(?s:.*)/ & ~(/(?s:.*)/ ({}) /(?s:.*)/))",
+                literals.join(" | ")
+            )
+        };
+        let excluded: Vec<_> = ends
+            .iter()
+            .filter_map(|end| trie.get_special_token(end))
+            .collect();
+        let specials: Vec<_> = trie
+            .get_special_tokens()
+            .into_iter()
+            .filter(|id| !excluded.contains(id) && !self.eos_ids.contains(id))
+            .map(|id| id.to_string())
+            .collect();
+        let terminal = format!("{}_TEXT", name.to_uppercase());
+        let ending = if let Some(id) = trie.get_special_token(close) {
+            format!("{name}_end: {terminal} <[{id}]>\n")
+        } else {
+            format!(
+                "{name}_end[suffix={}]: {terminal}\n",
+                serde_json::to_string(close).unwrap()
+            )
+        };
+        let prefix = if specials.is_empty() {
+            String::new()
+        } else {
+            format!("({terminal} <[{}]>)* ", specials.join(","))
+        };
+        format!("{terminal}: {text}\n{ending}{name}: {prefix}{name}_end\n")
     }
 
     /// Compile a complete custom-tool input contract without sampling masks.
@@ -582,6 +732,178 @@ mod tests {
         assert!(request.is_stopped());
         assert!(request.mask().iter().all(|&word| word == 0));
         assert!(request.advance(257).is_err());
+    }
+
+    #[test]
+    fn output_envelope_constrains_only_the_answer() {
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        let schema = json!({"const":{"ok":true}});
+        for reasoning in [false, true] {
+            let envelope = OutputEnvelope {
+                reasoning_end: reasoning.then_some("</think>"),
+                tool: Some(("<tool_call>", "</tool_call>")),
+                function: None,
+                tool_ends_reasoning: false,
+            };
+            for (text, expected) in [
+                (r#"{"ok":true}"#, true),
+                (r#"{"ok":false}"#, false),
+                ("<tool_call>arbitrary arguments</tool_call>", true),
+                (
+                    "<tool_call>one</tool_call>\n<tool_call>two</tool_call>",
+                    true,
+                ),
+                ("<tool_call>one</tool_call>\n{\"ok\":true}", true),
+                ("<tool_call>one</tool_call>\n{\"ok\":false}", false),
+                ("<tool_call>one</tool_call>junk", false),
+                ("<tool_call>unterminated", false),
+                ("plain text", false),
+                ("", false),
+            ] {
+                let text = if reasoning {
+                    format!("Think about {{nonsense}} and <tool_call> literally.</think>\n\n{text}")
+                } else {
+                    text.into()
+                };
+                let mut grammar = compiler
+                    .compile_json_schema_in(&schema, Some(&envelope))
+                    .unwrap();
+                let accepted = text
+                    .bytes()
+                    .map(u32::from)
+                    .chain([256])
+                    .all(|token| grammar.advance(token).is_ok());
+                assert_eq!(accepted, expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn qwen_envelope_preserves_implicit_reasoning_and_function_boundaries() {
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        let envelope = OutputEnvelope {
+            reasoning_end: Some("</think>"),
+            tool: Some(("<tool_call>", "</tool_call>")),
+            function: Some(("<function=", "</function>")),
+            tool_ends_reasoning: true,
+        };
+        for (text, accepted) in [
+            ("thought</think>{\"ok\":true}", true),
+            ("thought<tool_call><function=f></function>", true),
+            (
+                "thought<tool_call><function=f></function></tool_call>",
+                true,
+            ),
+            ("thought</think><function=f></function>{\"ok\":true}", true),
+            (
+                "thought<tool_call><function=f></function><function=f></function>",
+                true,
+            ),
+            (
+                "thought<tool_call>literal</tool_call></think>{\"ok\":true}",
+                false,
+            ),
+            ("thought</think>{\"ok\":false}", false),
+            (
+                "thought<tool_call><function=f></function>junk</tool_call>",
+                false,
+            ),
+        ] {
+            let mut grammar = compiler
+                .compile_json_schema_in(&json!({"const":{"ok":true}}), Some(&envelope))
+                .unwrap();
+            let result = text
+                .bytes()
+                .map(u32::from)
+                .chain([256])
+                .all(|id| grammar.advance(id).is_ok());
+            assert_eq!(result, accepted, "{text}");
+        }
+    }
+
+    #[test]
+    fn output_envelope_copy_masks_cross_reasoning_and_tool_boundaries() {
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        let envelope = OutputEnvelope {
+            reasoning_end: Some("</think>"),
+            tool: Some(("<tool_call>", "</tool_call>")),
+            function: Some(("<function=", "</function>")),
+            tool_ends_reasoning: true,
+        };
+        let schema = json!({"const":7});
+        let text = "thought<tool_call><function=f></function></tool_call>7";
+        let tokens: Vec<_> = text.bytes().map(u32::from).collect();
+        let mut grammar = compiler
+            .compile_json_schema_in(&schema, Some(&envelope))
+            .unwrap();
+        for start in 0..tokens.len() {
+            let end = (start + 7).min(tokens.len());
+            let mask = grammar.mask().to_vec();
+            let (count, masks) = grammar.copy_masks(&tokens[start..end]).unwrap();
+            assert_eq!(count, end - start);
+            assert_eq!(grammar.mask(), mask);
+            assert_eq!(&masks[..mask.len()], mask);
+            grammar.advance(tokens[start]).unwrap();
+            assert_eq!(&masks[mask.len()..2 * mask.len()], grammar.mask());
+        }
+        grammar.advance(256).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires FLARE_TEST_SNAPSHOT with the Qwen tokenizer"]
+    fn qwen_output_envelope_uses_checkpoint_token_bytes() {
+        let path = std::path::PathBuf::from(std::env::var_os("FLARE_TEST_SNAPSHOT").unwrap());
+        let tokenizer = Tokenizer::from_file(path.join("tokenizer.json")).unwrap();
+        let eos = tokenizer.token_to_id("<|im_end|>").unwrap();
+        let compiler = GrammarCompiler::new(&tokenizer, 248320, &[eos]).unwrap();
+        for reasoning in [false, true] {
+            let envelope = OutputEnvelope {
+                reasoning_end: reasoning.then_some("</think>"),
+                tool: Some(("<tool_call>", "</tool_call>")),
+                function: Some(("<function=", "</function>")),
+                tool_ends_reasoning: true,
+            };
+            for text in [
+                r#"{"literal":"<think>東京</think><tool_call>literal</tool_call>"}"#,
+                "<tool_call><function=lookup><parameter=query>東京</parameter></function></tool_call>",
+            ] {
+                let text = if reasoning {
+                    format!("Consider the request.</think>\n\n{text}")
+                } else {
+                    text.into()
+                };
+                let schema = json!({"type":"object","properties":{"literal":{"type":"string"}},"required":["literal"],"additionalProperties":false});
+                let canonical = tokenizer
+                    .encode(text.as_str(), false)
+                    .unwrap()
+                    .get_ids()
+                    .to_vec();
+                let fragmented: Vec<_> = text
+                    .chars()
+                    .flat_map(|ch| {
+                        tokenizer
+                            .encode(ch.to_string(), false)
+                            .unwrap()
+                            .get_ids()
+                            .to_vec()
+                    })
+                    .collect();
+                for tokens in [canonical, fragmented] {
+                    let mut grammar = compiler
+                        .compile_json_schema_in(&schema, Some(&envelope))
+                        .unwrap();
+                    for (at, &token) in tokens.iter().enumerate() {
+                        let (count, _) = grammar
+                            .copy_masks(&tokens[at..(at + 6).min(tokens.len())])
+                            .unwrap();
+                        assert_eq!(count, (tokens.len() - at).min(6), "at {at} in {text}");
+                        grammar.advance(token).unwrap();
+                    }
+                    grammar.advance(eos).unwrap();
+                    assert!(grammar.is_stopped());
+                }
+            }
+        }
     }
 
     #[test]

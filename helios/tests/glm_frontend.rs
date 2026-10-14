@@ -98,7 +98,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
             case["reasoning"].as_bool().unwrap(),
             "{name}"
         );
-        assert!(!prepared.output.verbatim, "{name}");
+        assert!(!prepared.output.structured, "{name}");
         assert!(prepared.prompt.grammar.is_none(), "{name}");
         let reasoning = prepared.output.reasoning;
         let mut output = <Glm5Next as ModelContract>::Output::new(prepared.output);
@@ -134,7 +134,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
                 .clone();
             let mut output = <Glm5Next as ModelContract>::Output::new(
                 flare_helios::model::glm5next::output::OutputConfig {
-                    verbatim: false,
+                    structured: false,
                     reasoning: false,
                     tools,
                 },

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     output::{Event, Termination},
-    server::inference::{Input, Part, RawPrompt, template_messages},
+    server::inference::{Input, Part, RawPrompt, ToolChoice, template_messages},
 };
 use serde_json::{Value, json};
 
@@ -19,6 +19,12 @@ fn tools() -> Vec<inference::Tool> {
     }]
 }
 fn encoder(protocol: Protocol) -> Encoder {
+    encoder_with_choice(protocol, ToolChoice::Auto)
+}
+fn encoder_with_choice(protocol: Protocol, tool_choice: ToolChoice) -> Encoder {
+    encoder_with_parallel(protocol, tool_choice, true)
+}
+fn encoder_with_parallel(protocol: Protocol, tool_choice: ToolChoice, parallel: bool) -> Encoder {
     Encoder::new(
         protocol,
         "test".into(),
@@ -27,6 +33,8 @@ fn encoder(protocol: Protocol) -> Encoder {
         1,
         17,
         tools(),
+        tool_choice,
+        parallel,
         true,
         json!({}),
     )
@@ -71,6 +79,281 @@ fn protocols_decode_to_equivalent_conversations() {
 }
 
 #[test]
+fn required_tool_choice_is_shared_and_requires_declared_tools() {
+    let mut requests = vec![];
+    for (protocol, mut body) in [
+        (
+            Protocol::Chat,
+            json!({"messages":[{"role":"user","content":"Hello"}],
+            "tool_choice":"required","tools":[{"type":"function","function":{"name":"lookup"}}]}),
+        ),
+        (
+            Protocol::Messages,
+            json!({"messages":[{"role":"user","content":"Hello"}],
+            "tool_choice":{"type":"any"},"tools":[{"name":"lookup"}]}),
+        ),
+        (
+            Protocol::Responses,
+            json!({"input":"Hello",
+            "tool_choice":"required","tools":[{"type":"function","name":"lookup"}]}),
+        ),
+    ] {
+        // Token counting and generation use the same tool-choice contract.
+        for count in [false, true] {
+            body[if protocol == Protocol::Responses {
+                "max_output_tokens"
+            } else {
+                "max_tokens"
+            }] = json!(128);
+            let req = decode(protocol, body.clone(), count).unwrap().request;
+            assert_eq!(req.tool_choice, ToolChoice::Required);
+            requests.push(req);
+        }
+        body["tools"] = json!([]);
+        let error = decode(protocol, body, false).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "required tool choice needs at least one tool"
+        );
+    }
+    assert!(requests.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+fn required_tool_instruction_preserves_history_and_sampling() {
+    for messages in [
+        json!([{"role":"user","content":"Hello"}]),
+        json!([{"role":"system","content":"Policy"},{"role":"user","content":"Hello"}]),
+        json!([{"role":"system","content":[{"type":"text","text":"Policy"},{"type":"text","text":"More policy"}]},
+            {"role":"user","content":"Hello"}]),
+        json!([{"role":"developer","content":"Policy"},{"role":"user","content":"Hello"},
+            {"role":"assistant","content":"Let me"}]),
+    ] {
+        let body = json!({"messages":messages,"tools":[{"type":"function","function":{"name":"lookup"}}],
+            "temperature":0.7,"top_p":0.95,"seed":123});
+        let auto = request(Protocol::Chat, body.clone());
+        let mut required_body = body;
+        required_body["tool_choice"] = json!("required");
+        let required = request(Protocol::Chat, required_body);
+        assert_eq!(auto.input, required.input);
+        assert_eq!(auto.options, required.options);
+        let Input::Conversation(messages) = &required.input else {
+            panic!()
+        };
+        let baseline = template_messages(messages, ToolChoice::Auto).unwrap();
+        let native = template_messages(messages, ToolChoice::Required).unwrap();
+        assert_eq!(native[0]["role"], "system");
+        assert!(
+            native[0]["content"]
+                .to_string()
+                .contains("must call at least one")
+        );
+        let offset = usize::from(baseline[0]["role"] == "system");
+        assert_eq!(native[1..], baseline[offset..]);
+        if offset == 1 {
+            assert!(native[0]["content"].to_string().contains("Policy"));
+        }
+    }
+}
+
+#[test]
+fn required_tool_choice_fails_without_a_completed_call_for_every_termination() {
+    for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+        for cause in [
+            Termination::Eos,
+            Termination::UserStop,
+            Termination::OutputLimit,
+        ] {
+            for events in [
+                vec![],
+                vec![Event::Content("No tool needed".into())],
+                vec![Event::Reasoning("Thinking".into())],
+            ] {
+                let mut enc = encoder_with_choice(protocol, ToolChoice::Required);
+                enc.start();
+                enc.apply(0, events).unwrap();
+                let error = enc.finish(0, cause, 1, 0, None).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("did not produce a completed tool call")
+                );
+                let failure = enc.failure(error);
+                assert!(!failure.done);
+                match protocol {
+                    Protocol::Chat => {
+                        assert_eq!(failure.data["error"]["type"], "server_error");
+                        assert!(enc.response()["choices"][0]["finish_reason"].is_null());
+                    }
+                    Protocol::Messages => {
+                        assert_eq!(failure.event.as_deref(), Some("error"));
+                        assert!(enc.response()["stop_reason"].is_null());
+                    }
+                    Protocol::Responses => {
+                        assert_eq!(failure.event.as_deref(), Some("response.failed"));
+                        assert_eq!(failure.data["response"]["status"], "failed");
+                        assert_eq!(failure.data["response"]["tool_choice"], "required");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn required_tool_choice_accepts_complete_calls_and_rejects_unknown_or_unfinished_calls() {
+    for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+        let mut enc = encoder_with_choice(protocol, ToolChoice::Required);
+        let mut frames = enc.start();
+        frames.extend(enc.apply(0, events()).unwrap());
+        frames.extend(enc.finish(0, Termination::Eos, 12, 0, None).unwrap());
+        match protocol {
+            Protocol::Chat => {
+                assert_eq!(enc.response()["choices"][0]["finish_reason"], "tool_calls")
+            }
+            Protocol::Messages => assert_eq!(frames.last().unwrap().data["type"], "message_stop"),
+            Protocol::Responses => {
+                assert_eq!(frames.last().unwrap().data["type"], "response.completed");
+                assert_eq!(enc.response()["tool_choice"], "required");
+            }
+            _ => unreachable!(),
+        }
+        let mut enc = encoder_with_choice(protocol, ToolChoice::Required);
+        let mut unfinished = events();
+        unfinished.pop();
+        enc.apply(0, unfinished).unwrap();
+        assert!(
+            enc.finish(0, Termination::OutputLimit, 12, 0, None)
+                .is_err()
+        );
+        let mut enc = encoder_with_choice(protocol, ToolChoice::Required);
+        let error = enc
+            .apply(
+                0,
+                vec![Event::ToolBegin {
+                    index: 0,
+                    name: "undeclared".into(),
+                    id: None,
+                }],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("undeclared tool"));
+    }
+}
+
+#[test]
+fn parallel_tool_controls_decode_to_the_same_limit() {
+    for (protocol, body) in [
+        (
+            Protocol::Chat,
+            json!({"messages":[{"role":"user","content":"Hello"}]}),
+        ),
+        (
+            Protocol::Messages,
+            json!({"messages":[{"role":"user","content":"Hello"}],"max_tokens":32}),
+        ),
+        (Protocol::Responses, json!({"input":"Hello"})),
+    ] {
+        assert!(request(protocol, body.clone()).parallel_tool_calls);
+        let mut disabled = body.clone();
+        disabled["parallel_tool_calls"] = json!(false);
+        assert!(!request(protocol, disabled).parallel_tool_calls);
+        let mut enabled = body;
+        enabled["parallel_tool_calls"] = json!(true);
+        assert!(request(protocol, enabled).parallel_tool_calls);
+    }
+    for disabled in [false, true] {
+        let req = request(
+            Protocol::Messages,
+            json!({"messages":[{"role":"user","content":"Hello"}],
+            "max_tokens":32,"tool_choice":{"type":"auto","disable_parallel_tool_use":disabled}}),
+        );
+        assert_eq!(req.parallel_tool_calls, !disabled);
+    }
+    assert!(
+        decode(
+            Protocol::Messages,
+            json!({"messages":[{"role":"user","content":"Hello"}],
+        "max_tokens":32,"parallel_tool_calls":false,
+        "tool_choice":{"type":"auto","disable_parallel_tool_use":"invalid"}}),
+            false
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn disabled_parallel_calls_fail_before_the_second_call_is_emitted() {
+    for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+        for choice in [ToolChoice::Auto, ToolChoice::Required] {
+            for parallel in [false, true] {
+                let mut enc = encoder_with_parallel(protocol, choice, parallel);
+                enc.start();
+                enc.apply(0, events()).unwrap();
+                let first = enc.outputs[0].blocks.clone();
+                let second = enc.apply(
+                    0,
+                    vec![
+                        Event::ToolBegin {
+                            index: 1,
+                            name: "lookup".into(),
+                            id: None,
+                        },
+                        Event::ToolArguments {
+                            index: 1,
+                            text: "{}".into(),
+                        },
+                        Event::ToolEnd { index: 1 },
+                    ],
+                );
+                if parallel {
+                    second.unwrap();
+                    enc.finish(0, Termination::Eos, 12, 0, None).unwrap();
+                } else {
+                    let error = second.unwrap_err();
+                    assert!(error.to_string().contains("more than one tool call"));
+                    assert_eq!(enc.outputs[0].blocks, first);
+                    let failed = enc.failure(error);
+                    assert!(!failed.done);
+                    if protocol == Protocol::Responses {
+                        assert_eq!(failed.data["type"], "response.failed");
+                        assert_eq!(failed.data["response"]["parallel_tool_calls"], false);
+                    } else {
+                        assert!(failed.data["error"]["message"].is_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn disabled_parallel_calls_allow_zero_or_one_and_combine_with_required() {
+    for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+        for choice in [ToolChoice::Auto, ToolChoice::Required] {
+            for count in [0, 1] {
+                let mut enc = encoder_with_parallel(protocol, choice, false);
+                enc.apply(
+                    0,
+                    if count == 1 {
+                        events()
+                    } else {
+                        vec![Event::Content("OK".into())]
+                    },
+                )
+                .unwrap();
+                let result = enc.finish(0, Termination::Eos, 12, 0, None);
+                assert_eq!(result.is_ok(), count == 1 || choice == ToolChoice::Auto);
+                if protocol == Protocol::Responses {
+                    assert_eq!(enc.response()["parallel_tool_calls"], false);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn developer_and_system_instructions_lower_to_one_template_preamble() {
     let req = request(
         Protocol::Responses,
@@ -83,7 +366,7 @@ fn developer_and_system_instructions_lower_to_one_template_preamble() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto).unwrap();
     assert_eq!(native.len(), 2);
     assert_eq!(
         native[0],
@@ -104,7 +387,7 @@ fn response_history_retains_reasoning_calls_results_and_namespaces() {
     assert!(
         matches!(&messages[0].parts[..],[Part::Reasoning(_),Part::ToolCall{name,..}] if name=="shell__run")
     );
-    let native = template_messages(&messages).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto).unwrap();
     assert_eq!(native[0]["reasoning_content"], "Think");
     assert_eq!(native[0]["tool_calls"][0]["id"], "c");
     assert_eq!(native[1]["tool_call_id"], "c");
@@ -118,7 +401,7 @@ fn messages_preserve_mixed_tool_results_and_images() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto).unwrap();
     assert_eq!(native.len(), 3);
     assert_eq!(native[0]["content"], "before");
     assert_eq!(native[1]["is_error"], true);
@@ -126,6 +409,58 @@ fn messages_preserve_mixed_tool_results_and_images() {
         native[2]["content"][0]["image_url"]["url"],
         "data:image/png;base64,AA=="
     );
+}
+
+#[test]
+fn messages_preserve_inline_system_text_and_discard_message_controls() {
+    let body = json!({"max_tokens":32,"system":"Initial instructions",
+    "output_config":{"effort":"low"},"messages":[
+        {"role":"user","content":"Hello"},
+        {"role":"system","content":[{"type":"text","text":"Environment","cache_control":{"type":"ephemeral"}}],
+            "output_config":{"effort":"xhigh"}},
+        {"role":"assistant","content":"Ready"},
+        {"role":"user","content":"Continue"},
+        {"role":"system","content":[],"output_config":{"effort":"high"}}
+    ]});
+    for count in [false, true] {
+        let req = decode(Protocol::Messages, body.clone(), count)
+            .unwrap()
+            .request;
+        assert_eq!(req.options.effort, Some(inference::Effort::Low));
+        let Input::Conversation(messages) = req.input else {
+            panic!()
+        };
+        assert_eq!(
+            template_messages(&messages, ToolChoice::Auto).unwrap(),
+            vec![
+                json!({"role":"system","content":"Initial instructions"}),
+                json!({"role":"user","content":"Hello"}),
+                json!({"role":"system","content":"Environment"}),
+                json!({"role":"assistant","content":"Ready"}),
+                json!({"role":"user","content":"Continue"}),
+            ]
+        );
+    }
+}
+
+#[test]
+fn messages_empty_system_controls_do_not_break_assistant_continuation() {
+    let req = request(
+        Protocol::Messages,
+        json!({"max_tokens":32,"messages":[
+            {"role":"user","content":"Finish the sentence"},
+            {"role":"assistant","content":"The answer is"},
+            {"role":"system","content":[],"output_config":{"effort":"xhigh"}},
+            {"role":"system","content":"","thinking":{"type":"disabled"}}
+        ]}),
+    );
+    assert_eq!(req.options.effort, None);
+    assert_eq!(req.options.template.get("enable_thinking"), None);
+    assert_eq!(req.options.template["continue_final_message"], true);
+    let Input::Conversation(messages) = req.input else {
+        panic!()
+    };
+    assert_eq!(messages.len(), 2);
 }
 #[test]
 fn all_completion_prompt_forms_and_choice_counts() {
@@ -164,8 +499,7 @@ fn unsupported_controls_are_rejected_before_generation() {
         json!({"previous_response_id":"r"}),
         json!({"conversation":"c"}),
         json!({"background":true}),
-        json!({"parallel_tool_calls":false}),
-        json!({"tool_choice":"required"}),
+        json!({"tool_choice":{"type":"function","name":"lookup"}}),
         json!({"truncation":"auto"}),
         json!({"tools":[{"type":"function","name":"f","strict":true}]}),
         json!({"tools":[{"type":"web_search"}]}),
@@ -238,6 +572,8 @@ fn custom_tool_input_requires_a_string_before_completion() {
             1,
             1,
             tools,
+            ToolChoice::Auto,
+            true,
             false,
             json!({}),
         );
@@ -401,6 +737,8 @@ fn batch_stream_indices_echo_and_totals() {
         4,
         7,
         vec![],
+        ToolChoice::Auto,
+        true,
         true,
         json!({}),
     );
@@ -485,7 +823,7 @@ fn chat_history_without_call_ids_retains_template_semantics() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto).unwrap();
     assert_eq!(native.len(), 3);
     assert!(native[1]["tool_calls"][0].get("id").is_none());
     assert!(native[2].get("tool_call_id").is_none());
@@ -504,7 +842,7 @@ fn empty_text_messages_preserve_conversation_roles() {
         panic!()
     };
     assert_eq!(
-        template_messages(&messages).unwrap(),
+        template_messages(&messages, ToolChoice::Auto).unwrap(),
         vec![
             json!({"role":"system","content":""}),
             json!({"role":"user","content":""}),

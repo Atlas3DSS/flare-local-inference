@@ -124,7 +124,7 @@ GPUs explicitly:
   --gpus 0,4,6,8 --bind 127.0.0.1:8001
 ```
 
-DeepSeek's logical cache pages cover 128 tokens across compressed latent and
+DeepSeek V4.1's logical cache pages cover 128 tokens across compressed latent and
 index regions with different byte sizes. Continuation rows retain sliding
 windows, pending compression state, partial pages, DSpark context windows, and the
 last hidden state. Both use runtime-sized virtual ranges; exported packages
@@ -138,7 +138,7 @@ DeepSeek V4 Flash uses `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`, including its
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
 accepts up to four images per request and has no offloaded embedding tables.
-Use four available GPUs for preparation and serving:
+Use two or four available GPUs for preparation and serving:
 
 ```sh
 .venv/bin/python -m ignition export deepseek-v4-flash --gpus 3,4,5,6 \
@@ -150,14 +150,15 @@ Use four available GPUs for preparation and serving:
   --gpus 3,4,5,6 --bind 127.0.0.1:8001
 ```
 
-V4 uses 128-token logical pages containing 32 C4 latent records with a retrieval
-index, or one C128 latent record with dense history attention. Each latent page
+V4 uses 256-token logical pages containing 64 C4 latent records with an FP8
+retrieval index, or two C128 latent records with dense history attention. Each latent page
 stores FP8/BF16 payloads followed by its own scale footer. Continuation rows
 preserve the complete 128-token compression interval, C4 overlap, sliding
 windows, partial pages, and DSpark context. Only accepted tokens update the
 continuation state. Bidirectional image spans stay within one prefill chunk;
 the scheduler shortens a preceding text chunk when necessary. Image preprocessing,
 feature delivery, text execution, and output parsing all run natively in Helios.
+Packages with 128-token V4 pages are incompatible and must be re-exported.
 
 MiMo V2.6 Pro MOPD uses `XiaomiMiMo/MiMo-V2.6-Pro-MOPD` with checkpoint
 MXFP4 experts, block-FP8 dense projections, and BF16 draft and vision weights.

@@ -171,7 +171,8 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>> {
         let role = match field(v, "role")? {
             "user" => Role::User,
             "assistant" => Role::Assistant,
-            _ => return Err("Messages roles must be user or assistant".into()),
+            "system" => Role::System,
+            _ => return Err("Messages roles must be user, assistant, or system".into()),
         };
         let mut parts = vec![];
         if let Some(blocks) = v["content"].as_array() {
@@ -196,6 +197,15 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>> {
             }
         } else {
             parts = plain_parts(&v["content"], Protocol::Messages)?;
+        }
+        if role == Role::System {
+            if parts.iter().any(|part| !matches!(part, Part::Text(_))) {
+                return Err("system messages require text content".into());
+            }
+            parts.retain(|part| matches!(part, Part::Text(text) if !text.is_empty()));
+            if parts.is_empty() {
+                continue;
+            }
         }
         messages.push(Message {
             role,
@@ -577,23 +587,21 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
             "best_of must equal n; ranked sampling is not supported",
         ));
     }
-    let tools_disabled = match body.get("tool_choice").filter(|v| !v.is_null()) {
-        None => false,
-        Some(v) if v == "auto" || v["type"] == "auto" => false,
-        Some(v) if v == "none" || v["type"] == "none" => true,
+    let tool_choice = match body.get("tool_choice").filter(|v| !v.is_null()) {
+        None => ToolChoice::Auto,
+        Some(v) if v == "auto" || v["type"] == "auto" => ToolChoice::Auto,
+        Some(v) if v == "none" || v["type"] == "none" => ToolChoice::None,
+        Some(v) if v == "required" => ToolChoice::Required,
+        Some(v) if protocol == Protocol::Messages && v["type"] == "any" => ToolChoice::Required,
         _ => {
             return Err(unsupported(
-                "tool_choice supports auto or none; forced tool selection is not implemented",
+                "tool_choice supports auto, none, or required (Anthropic any); named tool selection is not implemented",
             ));
         }
     };
-    if !flag(&body, "parallel_tool_calls", true)?
-        || flag(&body["tool_choice"], "disable_parallel_tool_use", false)?
-    {
-        return Err(unsupported(
-            "disabling parallel tool calls requires constrained tool generation",
-        ));
-    }
+    let parallel_tool_calls = flag(&body, "parallel_tool_calls", true)?;
+    let disable_parallel_tool_use = flag(&body["tool_choice"], "disable_parallel_tool_use", false)?;
+    let parallel_tool_calls = parallel_tool_calls && !disable_parallel_tool_use;
     reject(
         &body,
         &[
@@ -662,7 +670,8 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         input,
         options,
         tools,
-        tools_disabled,
+        tool_choice,
+        parallel_tool_calls,
         choices,
     };
     request.validate()?;
@@ -695,7 +704,7 @@ mod tests {
     }
     fn normalize_tool_arguments(message: &mut Value) -> Result<()> {
         let decoded = chat_messages(&json!({"messages":[message]}))?;
-        *message = template_messages(&decoded)?.remove(0);
+        *message = template_messages(&decoded, ToolChoice::Auto)?.remove(0);
         Ok(())
     }
     #[test]

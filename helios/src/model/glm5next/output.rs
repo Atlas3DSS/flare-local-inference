@@ -97,7 +97,7 @@ pub fn prepare_output(
         None
     };
     OutputConfig {
-        verbatim: structured,
+        structured,
         reasoning: prefix.is_some_and(|text| {
             text.rfind("<think>")
                 .is_some_and(|open| text.rfind("</think>").is_none_or(|close| open > close))
@@ -120,7 +120,7 @@ mod tests {
 
     fn config() -> OutputConfig {
         OutputConfig {
-            verbatim: false,
+            structured: false,
             reasoning: true,
             tools: vec![json!({"type":"function", "function": {
             "name":"run", "parameters":{"type":"object", "properties":{
@@ -191,7 +191,8 @@ mod tests {
             .unwrap();
         assert!(parser.finish(Termination::OutputLimit).unwrap().is_empty());
         let mut parser = GlmOutput::new(OutputConfig {
-            verbatim: true,
+            structured: true,
+            reasoning: false,
             ..config()
         });
         assert_eq!(
