@@ -425,17 +425,18 @@ Every rank uses the same row and page counts, limited by the smallest rank
 budget. Weights and fixed transport buffers retain their prepared layouts.
 
 The context limit bounds one request; aggregate page capacity bounds all
-active and cached histories. Admission reserves prompt and output capacity
-for a request that names its output limit. On models whose prompts can grow
-by their output (GLM), a request without one reserves its prompt and one page
-of output and takes further pages a page ahead of its decode rounds, evicting
-unpinned prefix pages first; it waits for admission while pages are short.
-When a running request still cannot continue, the newest such request
-finishes through its terminal checkpoint and is readmitted with its history
-as the prompt and the rest of its output limit, restoring that checkpoint
-unless it was evicted. Its output stream and stop state continue, but its
-sampling restarts from the request's seed. A request whose history exceeds
-the whole pool ends at that length instead.
+active and cached histories. On models whose prompts can grow by their
+output (GLM), the output limit only bounds a text request: admission reserves
+its prompt and one page of output, and the request takes further pages a page
+ahead of its decode rounds, evicting unpinned prefix pages first; admission
+waits while pages are short. When a running request still cannot continue, the
+newest one finishes through its terminal checkpoint and is readmitted with its
+history as the prompt and the rest of its output limit, restoring that
+checkpoint from the GPU or the host prefix store unless both evicted it. Its
+output stream, stop and grammar state, and penalty counts continue, but its
+sampling restarts from the request's seed. A request whose history exceeds the
+whole pool ends at that length instead. Other models, and requests with
+images, reserve prompt and output capacity at admission.
 For Qwen's target cache, BF16 KV and compressed selector keys cost 24.75 KiB
 per token; MTP pages, continuation rows, and graph resources add separate
 costs. The loader reports actual capacities. The [CLI design](cli-design.md)

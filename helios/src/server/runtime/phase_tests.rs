@@ -168,7 +168,6 @@ impl Fixture {
                     stop_strings: vec![],
                     ignore_eos: false,
                     grammar: None,
-                    explicit_output_limit: true,
                 },
                 events,
                 cancelled: cancelled.clone(),

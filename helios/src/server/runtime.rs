@@ -34,8 +34,6 @@ pub struct Prompt<M: ModelContract> {
     pub grammar: Option<crate::grammar::RequestGrammar>,
     /// Generate through end-of-sequence tokens until the output limit, as vLLM's `ignore_eos`.
     pub ignore_eos: bool,
-    /// The request named its output limit, so admission reserves pages for all of it.
-    pub explicit_output_limit: bool,
 }
 
 impl<M: ModelContract> Prompt<M> {
@@ -812,9 +810,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
                 self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
+            // The output limit only bounds a request; pages follow what it generates.
             let growable = M::GROWABLE_OUTPUT
-                && !incoming.prompt.explicit_output_limit
-                && incoming.prompt.grammar.is_none()
                 && incoming.prompt.images.is_none()
                 && incoming.prompt.conditioning.is_empty();
             let stats = self.scheduler.stats();
@@ -1498,12 +1495,14 @@ fn admit_with_host_store(
     prefill_rate: f64,
 ) -> Result<RequestHandle> {
     let plan = scheduler.plan_admission(&spec)?;
-    scheduler.record_host_lookup();
     let hit = store
         .lookup(plan.history(), plan.resident_tokens())
         .filter(|hit| crate::offload::worth_fetching(hit, prefill_rate));
     let Some(hit) = hit else {
-        return Ok(scheduler.admit_planned(spec, plan, None)?.handle);
+        let handle = scheduler.admit_planned(spec, plan, None)?.handle;
+        // Lookups count once per admitted request, not per attempt of a waiting one.
+        scheduler.record_host_lookup();
+        return Ok(handle);
     };
     let inbound = crate::scheduler::InboundRequest {
         key: hit.key,
@@ -1512,9 +1511,14 @@ fn admit_with_host_store(
     };
     let admitted = match scheduler.admit_planned(spec.clone(), plan, Some(inbound)) {
         Ok(admitted) => admitted,
-        Err(Error::Admission(AdmissionError::Capacity(_))) => return scheduler.admit(spec),
+        Err(Error::Admission(AdmissionError::Capacity(_))) => {
+            let handle = scheduler.admit(spec)?;
+            scheduler.record_host_lookup();
+            return Ok(handle);
+        }
         Err(error) => return Err(error),
     };
+    scheduler.record_host_lookup();
     let Some(ticket) = admitted.ticket else {
         return Ok(admitted.handle);
     };
@@ -1896,7 +1900,6 @@ mod tests {
                 stop_strings: vec![],
                 ignore_eos: false,
                 grammar: None,
-                explicit_output_limit: true,
             },
             events,
             cancelled: cancelled.clone(),

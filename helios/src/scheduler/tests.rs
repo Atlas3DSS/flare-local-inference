@@ -3047,7 +3047,7 @@ fn growable_request_longer_than_the_pool_finishes_instead_of_yielding() {
 }
 
 #[test]
-fn requests_with_an_output_limit_keep_their_reservation_and_are_never_preempted() {
+fn requests_that_cannot_grow_keep_their_reservation_and_are_never_preempted() {
     let mut scheduler = scheduler(2, 8, 4);
     let reserved = scheduler.admit(spec(60, 190)).unwrap();
     assert_eq!(scheduler.free_page_count(), 8 - 4);
