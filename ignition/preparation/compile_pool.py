@@ -125,9 +125,9 @@ class CompilePool:
             budget = min(budget, cpus)
             # Prefer the explicitly selected devices for small compilation catalogs.
             self.slots = self.slots[1:] + self.slots[:1]
-            # Dynamo guards include the owner's intra-op thread count. Bound
-            # worker multiplicity rather than changing that guarded global state.
-            limit = min(max(1, cpus // self.num_threads), total_capacity)
+            # Workers trace tensor metadata. The inherited intra-op setting is a
+            # Dynamo guard, not a reservation of that many active compiler CPUs.
+            limit = min(cpus, total_capacity)
             self.workers = worker_limit(limit if jobs is None else min(limit, jobs),
                                         worker_bytes=_WORKER_HOST_BYTES)
         else:

@@ -220,7 +220,7 @@ def test_external_capacity_can_compile_when_the_owner_has_no_room(monkeypatch):
     assert pool.options["compile_threads"] == 5
 
 
-@pytest.mark.parametrize("num_threads,workers", [(1, 8), (4, 3), (16, 1)])
+@pytest.mark.parametrize("num_threads,workers", [(1, 8), (4, 8), (16, 8)])
 def test_external_worker_budget_preserves_guarded_thread_count(monkeypatch, tmp_path, num_threads, workers):
     from concurrent.futures import Future
     from torch._inductor.compile_worker import subproc_pool
@@ -244,7 +244,8 @@ def test_external_worker_budget_preserves_guarded_thread_count(monkeypatch, tmp_
     with compile_pool.CompilePool("cuda:0", devices=("GPU-extra",), jobs=8) as pool:
         pool.submit(SimpleNamespace(), tmp_path / "forward.bin")
     assert calls[0][4] == num_threads
-    assert workers * num_threads <= max(12, num_threads)
+    assert workers <= 12
+    assert pool.options["compile_threads"] * workers <= 12
 
 
 @pytest.mark.parametrize("host_gib,cpus,jobs,workers", [(128, 3, 8, 3), (24, 16, 8, 2), (128, 16, 1, 1)])
