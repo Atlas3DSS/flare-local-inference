@@ -341,19 +341,38 @@ rerun on Spark. Packages prepared before the fix require re-export.
    gathering are required to locate the first non-finite values. Failures
    arrive together (4 and 2 replies in two
    of ten batches of 16), with no batch × width mix distinguishing the
-   failing batches. Locating the layer that first produces NaN is next.
+   failing batches.
 
-   One candidate is known: b12x's
-   fused indexer, which serves every GLM decode graph of 16 rows or fewer on
-   SM12x, lets thread zero announce its CTA's arrival at the cooperative
-   merge's grid barrier (`_fused_group_barrier` in `fused_indexer.py`) without
-   first synchronizing the CTA, so peers can read a histogram before every
-   warp has published its bins. A test that delays one warp per CTA shows
-   peers passing the barrier early in 8 of 8 runs, and none with a
-   `cute.arch.sync_threads()` before the arrival. Without the artificial
-   delay, 3,000 graph replays of 16-row decode shapes on GB10, with and
-   without competing work on another stream, selected the exact top-k every
-   time, so the race is not yet tied to error 6.
+   A package that also records, for each token row, the first decoder point
+   whose output holds NaN (each layer's attention input and output before and
+   after the all-reduce, and its MLP input and output before and after the
+   all-reduce) placed all 3 failures in 160 such requests inside KDA layers
+   29, 40 and 44: in each failing row, every earlier point and that layer's
+   input were finite, and the layer's own output on the reporting rank, before
+   its all-reduce, was NaN. Each failing request turned NaN in a different
+   KDA layer.
+
+   The failure is timing-sensitive. A package that additionally checks each
+   KDA layer's recurrent and convolution state on entry and its projections,
+   short convolution and recurrent output failed no requests in 480 (30
+   batches), against 13 failures in 5 of 30 batches for the packages without
+   those checks; the checks change no data, only the work around each KDA
+   layer. The KDA output-gate projections run on an auxiliary stream beside
+   the input projections (`ConcurrentProjectionChain` in
+   `ignition/recipes/glm53/kda.py`). Their GEMMs stay within their declared
+   workspace and output at every GLM decode shape from 8 to 96 rows at TP2
+   and TP4 shards (guard-band test, SM120), so an overrun of the shared arena
+   by those plans is not the cause.
+
+   b12x's fused indexer, which serves every GLM decode graph of 16 rows or
+   fewer on SM12x, lets thread zero announce its CTA's arrival at the
+   cooperative merge's grid barrier (`_fused_group_barrier` in
+   `fused_indexer.py`) without first synchronizing the CTA, so peers can read
+   a histogram before every warp has published its bins. A test that delays
+   one warp per CTA shows peers passing the barrier early in 8 of 8 runs, and
+   none with a `cute.arch.sync_threads()` before the arrival. A package with
+   that synchronization still failed 4 of 160 requests with the same code, so
+   the race is real but is not the source of error 6.
 3. An audit of the other recipes (DeepSeek V4 and V4.1, Qwen 3.8, MiMo V2.6)
    and of the b12x and FlashInfer bindings they serve found no other
    preparation-time value that export zeroes and a graph reads. b12x's
