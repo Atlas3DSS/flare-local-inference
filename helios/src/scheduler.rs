@@ -82,6 +82,9 @@ pub struct SchedulerCapabilities {
     pub page_tokens: usize,
     pub vision: crate::model::VisionCapabilities,
     pub draft_pages_per_request: usize,
+    /// Decode consumes a token uploaded from a host-visible completion rather than GPU-owned state.
+    /// The request cannot queue another decode before its preceding decode completes.
+    pub host_decode_tokens: bool,
     /// Execution state rows each active request holds; None, the widest speculative graph's width.
     pub state_rows_per_request: Option<usize>,
 }
@@ -100,6 +103,7 @@ pub struct SchedulerStats {
     pub retiring_slots: usize,
     pub free_pages: usize,
     pub free_snapshots: usize,
+    pub snapshot_backing_pages: usize,
     pub cached_checkpoints: usize,
     pub cached_pages: usize,
     pub host_lookups: u64,
@@ -152,7 +156,7 @@ pub struct LiveRequest {
     accounting: RequestAccounting,
     pub handle: RequestHandle,
     pub state_slot: StateSlotId,
-    pub terminal_snapshot: SnapshotId,
+    pub terminal_snapshot: Option<SnapshotId>,
     pub phase: RequestPhase,
     pub consumed_tokens: u64,
     pub generated_tokens: u32,
@@ -204,7 +208,9 @@ impl LiveRequest {
     }
     pub fn snapshot_destination(&self) -> SnapshotId {
         self.boundary_capture
-            .map_or(self.terminal_snapshot, |c| c.snapshot)
+            .map(|c| c.snapshot)
+            .or(self.terminal_snapshot)
+            .expect("scheduled snapshot owns a destination")
     }
     pub fn snapshot_consumed(&self) -> u64 {
         self.boundary_capture
@@ -422,6 +428,8 @@ pub struct RequestScheduler {
     slots: Vec<Slot>,
     free_pages: BTreeSet<PageId>,
     free_snapshots: BTreeSet<SnapshotId>,
+    snapshot_pages: Vec<std::ops::Range<u32>>,
+    page_snapshot_refs: Vec<u32>,
     retired: Vec<RetiredRequest>,
     submissions: BTreeMap<Fence, Submission>,
     completed: Fence,
@@ -462,7 +470,6 @@ impl RequestScheduler {
             || !(1..=REQUEST_LANES).contains(&limits.max_active)
             || limits.max_sequence_tokens == 0
             || limits.pages == 0
-            || limits.snapshots == 0
             || limits.max_sequence_tokens > i64::MAX as usize
         {
             return Err("invalid live request capacities".into());
@@ -488,6 +495,8 @@ impl RequestScheduler {
                 .collect(),
             free_pages: (0..limits.pages).map(PageId).collect(),
             free_snapshots: (0..limits.snapshots).map(SnapshotId).collect(),
+            snapshot_pages: Vec::new(),
+            page_snapshot_refs: vec![0; limits.pages as usize],
             retired: Vec::new(),
             submissions: BTreeMap::new(),
             completed: Fence(0),
@@ -788,24 +797,31 @@ impl RequestScheduler {
     }
 
     fn ensure_resources(&mut self, pages: usize, snapshots: usize) -> Result<()> {
-        let need_pages = pages.saturating_sub(self.free_pages.len());
-        let need_snapshots = snapshots.saturating_sub(self.free_snapshots.len());
-        if need_pages > 0 || need_snapshots > 0 {
+        loop {
+            let need_pages = pages.saturating_sub(self.free_pages.len());
+            let need_snapshots =
+                snapshots
+                    .saturating_sub(self.free_snapshots.len())
+                    .max(usize::from(
+                        snapshots > 0 && self.available_snapshot(pages).is_none(),
+                    ));
+            if need_pages == 0 && need_snapshots == 0 {
+                return Ok(());
+            }
             let evicted = self.cache.evict(EvictionTarget {
-                pages: need_pages,
-                snapshots: need_snapshots,
+                pages: 0,
+                snapshots: 1,
             });
             self.stats.snapshot_evictions += evicted.retired.len() as u64;
             let update = self.cache.advance_completed(self.completed)?;
             self.apply_completion(update);
+            if evicted.retired.is_empty() {
+                return Err(crate::Error::admission(
+                    crate::AdmissionError::Capacity,
+                    "live request resources are exhausted or awaiting GPU retirement",
+                ));
+            }
         }
-        if self.free_pages.len() < pages || self.free_snapshots.len() < snapshots {
-            return Err(crate::Error::admission(
-                crate::AdmissionError::Capacity,
-                "live request resources are exhausted or awaiting GPU retirement",
-            ));
-        }
-        Ok(())
     }
 
     pub fn admit(&mut self, spec: RequestSpec) -> Result<RequestHandle> {
@@ -917,19 +933,12 @@ impl RequestScheduler {
         let reserved_count = execution_limit.div_ceil(self.capabilities.page_tokens)
             - (consumed / page_tokens) as usize
             + draft_page;
-        let need_system = spec.system_boundary.is_some_and(|n| n as u64 > consumed);
-        let need_prompt = spec.prompt.len() as u64 > consumed
-            && spec.system_boundary != Some(spec.prompt.len())
-            && spec.max_new_tokens > 1;
         let (ticket_pages, ticket_snapshots) = match &inbound {
             Some(inbound) if creating => (inbound.pages, 1),
             _ => (0, 0),
         };
         let execution_rows = self.execution_rows();
-        if let Err(error) = self.ensure_resources(
-            reserved_count + ticket_pages,
-            1 + usize::from(need_system) + usize::from(need_prompt) + ticket_snapshots,
-        ) {
+        if let Err(error) = self.ensure_resources(reserved_count + ticket_pages, ticket_snapshots) {
             if let Some(id) = pinned {
                 self.cache.unpin(id)?;
             }
@@ -943,10 +952,12 @@ impl RequestScheduler {
         let mut ticket = None;
         if let Some(inbound) = &inbound {
             if creating {
+                let snapshot = self
+                    .reserve_snapshot(reserved_count + ticket_pages)
+                    .unwrap();
                 let pages: Vec<_> = (0..inbound.pages)
                     .map(|_| self.free_pages.pop_first().unwrap())
                     .collect();
-                let snapshot = self.free_snapshots.pop_first().unwrap();
                 self.tickets.insert(
                     inbound.key,
                     Ticket {
@@ -972,13 +983,10 @@ impl RequestScheduler {
             self.stats.host_hits += 1;
             self.stats.host_reused_tokens += consumed - lookup.consumed_tokens;
         }
-        let terminal_snapshot = self.free_snapshots.pop_first().unwrap();
-        let system_snapshot = need_system.then(|| self.free_snapshots.pop_first().unwrap());
-        let prompt_snapshot = need_prompt.then(|| self.free_snapshots.pop_first().unwrap());
-        let reserved_pages = (0..reserved_count)
+        let mut reserved_pages: Vec<_> = (0..reserved_count)
             .map(|_| self.free_pages.pop_first().unwrap())
-            .rev()
             .collect();
+        reserved_pages.reverse();
         let (phase, prefix, prefix_snapshot, shared_pages) = if inbound.is_some() {
             (RequestPhase::Inbound, None, None, Vec::new())
         } else if lookup.checkpoint.is_some() {
@@ -998,7 +1006,7 @@ impl RequestScheduler {
             accounting: self.accounting(),
             handle,
             state_slot: StateSlotId((1 + slot * execution_rows) as u32),
-            terminal_snapshot,
+            terminal_snapshot: None,
             phase,
             consumed_tokens: consumed,
             generated_tokens: 0,
@@ -1014,8 +1022,8 @@ impl RequestScheduler {
             prefix_tokens: consumed,
             admission_reused_tokens: consumed,
             system_boundary: spec.system_boundary,
-            system_snapshot,
-            prompt_snapshot,
+            system_snapshot: None,
+            prompt_snapshot: None,
             boundary_capture: None,
             prefix_snapshot,
             shared_pages,
@@ -1071,7 +1079,7 @@ impl RequestScheduler {
             PublishResult::Created { id, ready } => (id, ready),
             PublishResult::Existing { id, ready } => {
                 self.free_pages.extend(ticket.pages.iter().copied());
-                self.free_snapshots.insert(ticket.snapshot);
+                self.release_snapshot(ticket.snapshot);
                 (id, ready)
             }
         };
@@ -1107,7 +1115,7 @@ impl RequestScheduler {
 
     fn fail_ticket(&mut self, ticket: Ticket) -> Result<Vec<RequestHandle>> {
         self.free_pages.extend(ticket.pages);
-        self.free_snapshots.insert(ticket.snapshot);
+        self.release_snapshot(ticket.snapshot);
         if let Some(parent) = ticket.parent {
             self.cache.unpin(parent)?;
         }
@@ -1166,7 +1174,9 @@ impl RequestScheduler {
             self.record_publication(id);
         }
         self.free_pages.extend(update.reusable.pages);
-        self.free_snapshots.extend(update.reusable.snapshots);
+        for snapshot in update.reusable.snapshots {
+            self.release_snapshot(snapshot);
+        }
     }
 
     /// Pins a GPU-ready checkpoint for the worker's copy-out; eviction and
@@ -1443,6 +1453,7 @@ impl RequestScheduler {
         let mut useful_tokens = [0u64; REQUEST_LANES];
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
+        let mut captures = Vec::new();
         for (row, lane) in step.lanes.iter().enumerate() {
             let kind = step.lane_kind(row);
             let Ok(request) = self.request_mut(lane.request) else {
@@ -1538,28 +1549,35 @@ impl RequestScheduler {
             };
             if kind == GraphKind::Prefill && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
-                let capture = if request.system_boundary == Some(endpoint as usize) {
-                    request
-                        .system_snapshot
-                        .map(|snapshot| (BoundaryKind::System, snapshot))
+                let capture = if request.system_boundary == Some(endpoint as usize)
+                    && endpoint > request.prefix_tokens
+                {
+                    Some(BoundaryKind::System)
                 } else {
                     None
                 }
                 .or_else(|| {
-                    (endpoint == request.prompt_tokens as u64)
-                        .then_some(request.prompt_snapshot)
-                        .flatten()
-                        .map(|snapshot| (BoundaryKind::Prompt, snapshot))
+                    (endpoint == request.prompt_tokens as u64
+                        && endpoint > request.prefix_tokens
+                        && request.system_boundary != Some(request.prompt_tokens)
+                        && request.max_new_tokens > 1)
+                        .then_some(BoundaryKind::Prompt)
                 });
-                if let Some((kind, snapshot)) = capture {
-                    request.boundary_capture = Some(BoundaryCapture {
-                        kind,
-                        snapshot,
-                        consumed_tokens: endpoint,
-                        resume: request.phase,
-                    });
-                    request.phase = RequestPhase::Snapshot;
+                if let Some(kind) = capture {
+                    captures.push((lane.request, Some(kind), endpoint, request.phase));
                 }
+            }
+            if request.phase == RequestPhase::Snapshot
+                && request.pending == 0
+                && request.terminal_snapshot.is_none()
+                && captures.last().is_none_or(|c| c.0 != lane.request)
+            {
+                captures.push((
+                    lane.request,
+                    None,
+                    request.consumed_tokens,
+                    RequestPhase::Finishing,
+                ));
             }
             if request.pending == 0 {
                 request.scheduled_consumed = request.consumed_tokens;
@@ -1568,6 +1586,36 @@ impl RequestScheduler {
         self.advance_retirement(fence)?;
         for handle in boundaries {
             self.publish_boundary(handle)?;
+        }
+        for (handle, kind, endpoint, resume) in captures {
+            if matches!(resume, RequestPhase::Snapshot | RequestPhase::Finishing) {
+                let request = self.request_mut(handle)?;
+                if request.pending == 0 {
+                    let unused = std::mem::take(&mut request.reserved_pages);
+                    self.free_pages.extend(unused);
+                }
+            }
+            let snapshot = self.retain_snapshot()?;
+            let request = self.request_mut(handle)?;
+            if let Some(snapshot) = snapshot {
+                if let Some(kind) = kind {
+                    match kind {
+                        BoundaryKind::System => request.system_snapshot = Some(snapshot),
+                        BoundaryKind::Prompt => request.prompt_snapshot = Some(snapshot),
+                    }
+                    request.boundary_capture = Some(BoundaryCapture {
+                        kind,
+                        snapshot,
+                        consumed_tokens: endpoint,
+                        resume,
+                    });
+                } else {
+                    request.terminal_snapshot = Some(snapshot);
+                }
+                request.phase = RequestPhase::Snapshot;
+            } else if request.phase == RequestPhase::Snapshot {
+                request.phase = RequestPhase::Finishing;
+            }
         }
         self.observe_service(fence, &submission.participants, &useful_tokens, timing);
         Ok(generated)
@@ -1608,7 +1656,7 @@ impl RequestScheduler {
             request.prefix_snapshot = Some(capture.snapshot);
             self.stats.snapshot_publications += 1;
         } else {
-            self.free_snapshots.insert(capture.snapshot);
+            self.release_snapshot(capture.snapshot);
         }
         match capture.kind {
             BoundaryKind::System => self.stats.system_checkpoints += 1,
@@ -1620,9 +1668,7 @@ impl RequestScheduler {
             BoundaryKind::Prompt => request.prompt_snapshot = None,
         }
         request.boundary_capture = None;
-        request.phase = if capture.resume == RequestPhase::Snapshot
-            && request.prefix_tokens == request.consumed_tokens
-        {
+        request.phase = if capture.resume == RequestPhase::Snapshot {
             RequestPhase::Finishing
         } else {
             capture.resume
@@ -1635,11 +1681,12 @@ impl RequestScheduler {
         self.apply_completion(update);
         self.completed = fence;
         let mut waiting = Vec::new();
-        for retired in self.retired.drain(..) {
+        for retired in std::mem::take(&mut self.retired) {
             if retired.through <= fence {
                 self.free_pages.extend(retired.pages);
-                self.free_snapshots
-                    .extend(retired.snapshots.into_iter().flatten());
+                for snapshot in retired.snapshots.into_iter().flatten() {
+                    self.release_snapshot(snapshot);
+                }
                 self.slots[retired.slot].retiring = false;
             } else {
                 waiting.push(retired);
@@ -1701,7 +1748,9 @@ impl RequestScheduler {
                 - request.prefix_tokens as usize / self.capabilities.page_tokens)]
                 .to_vec(),
             snapshot: StateSnapshot {
-                id: request.terminal_snapshot,
+                id: request
+                    .terminal_snapshot
+                    .expect("completed terminal snapshot owns a destination"),
                 consumed_tokens: request.consumed_tokens,
             },
             ready_after: request.last_use,
@@ -1714,7 +1763,7 @@ impl RequestScheduler {
             None => None,
         };
         let mut request = self.slots[handle.slot as usize].request.take().unwrap();
-        let mut snapshot = Some(request.terminal_snapshot);
+        let mut snapshot = request.terminal_snapshot;
         if matches!(result, Some(PublishResult::Created { .. })) {
             if let Some(PublishResult::Created { id, ready: true }) = result {
                 self.stats.snapshot_publications += 1;
@@ -1740,6 +1789,8 @@ impl RequestScheduler {
         Ok(result.map(PublishResult::id).or(request.prefix))
     }
 }
+
+mod cache_memory;
 
 #[cfg(test)]
 mod boundary_tests;

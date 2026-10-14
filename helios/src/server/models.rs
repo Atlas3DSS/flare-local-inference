@@ -123,6 +123,7 @@ mod tests {
 
     fn config() -> ModelConfig {
         ModelConfig {
+            prepared_sequence_tokens: 16384,
             contract: ContractMetadata {
                 schema: "test".into(),
                 vocabulary: 1024,

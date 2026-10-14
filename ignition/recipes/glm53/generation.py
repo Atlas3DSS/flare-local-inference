@@ -1,7 +1,5 @@
 """Compose a GLM rank's text forward, request consumption, and completion."""
 
-from copy import copy
-
 from ignition.components.collectives import PreparedAllReduce
 from ignition.components.sampling import PreparedCompletion, PreparedSampling
 from ignition.components.state import save_hidden
@@ -34,21 +32,10 @@ class PreparedGeneration:
         self.completion.prepare()
         self.compilation_variant = "sample" if decoder.weights.shard.rank == 0 or replicated_sampling else "consume"
         self.replicated_sampling = replicated_sampling
-        self.peer_completion = PreparedCompletion(*arguments)
-        self.peer_completion.prepare()
 
     def rebind_pages(self, pages):
         self.decoder.rebind_pages()
         self.batch.pages = self.pool.memory_capacity[1:]
-
-    def compilation_variants(self):
-        if self.replicated_sampling:
-            return {"sample": self}
-        peer = copy(self)
-        peer.batch = copy(self.batch)
-        peer.batch.accept_unsampled = True
-        peer.completion = self.peer_completion
-        return {"sample": self, "consume": peer}
 
     def __call__(self):
         self.batch.begin(self.validation(self.batch.validate()))

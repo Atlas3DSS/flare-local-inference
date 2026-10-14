@@ -63,7 +63,7 @@ impl ModelContract for DeepSeek4 {
         {
             return Err("DeepSeek V4 Flash speculation requires DSpark proposals".into());
         }
-        if config.limits.max_sequence_tokens > 1048576 {
+        if config.prepared_sequence_tokens > 1048576 {
             return Err("DeepSeek V4 Flash context exceeds 1048576 tokens".into());
         }
         if manifest.engram.is_some() || config.limits.prefill_chunk_size < 512 {
@@ -122,6 +122,7 @@ impl ModelContract for DeepSeek4 {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }
@@ -277,6 +278,7 @@ mod tests {
 
     fn config() -> ModelConfig {
         ModelConfig {
+            prepared_sequence_tokens: 4096,
             contract: DeepSeek4::metadata(),
             identity: [0; 32],
             model_id: "deepseek-v4-flash".into(),

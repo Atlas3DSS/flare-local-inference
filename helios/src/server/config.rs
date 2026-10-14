@@ -110,7 +110,10 @@ impl Bootstrap {
                 error,
             ))
         })?;
-        let model = ModelConfig {
+        let prepared_sequence_tokens = usize::try_from(integer("max_sequence_tokens", None)?)
+            .map_err(|_| "prepared context extent overflow")?;
+        let mut model = ModelConfig {
+            prepared_sequence_tokens,
             contract,
             model_id: text("model_id")?.into(),
             identity: digest,
@@ -121,13 +124,7 @@ impl Bootstrap {
                     Some(manifest.max_active as u64),
                 )?)
                 .map_err(|_| "runtime concurrency exceeds usize")?,
-                max_sequence_tokens: usize::try_from(integer("max_sequence_tokens", None)?)
-                    .map_err(|error| {
-                        crate::ExecutionError::Manifest(crate::Failure::caused_by(
-                            "context extent overflow",
-                            error,
-                        ))
-                    })?,
+                max_sequence_tokens: prepared_sequence_tokens,
                 prefill_chunk_size: usize::try_from(integer("prefill_chunk_size", Some(4096))?)
                     .map_err(|error| {
                         crate::ExecutionError::Manifest(crate::Failure::caused_by(
@@ -206,6 +203,7 @@ impl Bootstrap {
                 ))
             })?,
         };
+        model.fit_context::<M>();
         crate::model::catalog::validate::<M>(&model, manifest)?;
         let assets = object
             .get("assets")

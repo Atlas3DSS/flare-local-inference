@@ -75,6 +75,7 @@ pub(super) struct Metrics {
     retiring_slots: AtomicU64,
     free_pages: AtomicU64,
     free_snapshots: AtomicU64,
+    snapshot_backing_pages: AtomicU64,
     cached_checkpoints: AtomicU64,
     cached_pages: AtomicU64,
     pub pending: AtomicU64,
@@ -238,6 +239,10 @@ impl Metrics {
             (&self.retiring_slots, stats.retiring_slots as u64),
             (&self.free_pages, stats.free_pages as u64),
             (&self.free_snapshots, stats.free_snapshots as u64),
+            (
+                &self.snapshot_backing_pages,
+                stats.snapshot_backing_pages as u64,
+            ),
             (&self.cached_checkpoints, stats.cached_checkpoints as u64),
             (&self.cached_pages, stats.cached_pages as u64),
         ] {
@@ -562,8 +567,13 @@ impl Metrics {
             ),
             (
                 "free_snapshots",
-                "Prefix-cache rows reusable after completed GPU fences.",
+                "Unowned snapshot slots; shared backing may be held by KV pages.",
                 &self.free_snapshots,
+            ),
+            (
+                "snapshot_backing_pages",
+                "KV page ids excluded by owned snapshots, including pending GPU retirement.",
+                &self.snapshot_backing_pages,
             ),
             (
                 "cached_checkpoints",

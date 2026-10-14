@@ -74,7 +74,7 @@ impl Inputs {
         }
         if step.kind != GraphKind::Resume {
             let capacity =
-                config.limits.max_sequence_tokens / M::scheduler_capabilities(config).page_tokens;
+                config.prepared_sequence_tokens / M::scheduler_capabilities(config).page_tokens;
             for lane in &step.lanes {
                 let live = scheduler.request(lane.request)?;
                 append_pages(
@@ -287,7 +287,7 @@ pub(crate) fn required_buffers<M: ModelContract>(
         (
             "page_tables",
             I32,
-            vec![slots, config.limits.max_sequence_tokens / page_tokens],
+            vec![slots, config.prepared_sequence_tokens / page_tokens],
         ),
         ("sample_enabled", I32, vec![slots]),
         (
@@ -321,7 +321,7 @@ pub(crate) fn required_buffers<M: ModelContract>(
         buffers.push((
             "draft_page_tables",
             I32,
-            vec![slots, config.limits.max_sequence_tokens / page_tokens],
+            vec![slots, config.prepared_sequence_tokens / page_tokens],
         ));
     }
     buffers

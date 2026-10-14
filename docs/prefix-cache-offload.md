@@ -845,7 +845,5 @@ A correctness failure in any scenario blocks performance claims.
   compacted ancestor's row can be restored onto pages its child still holds
   without copying pages.
 - Page-granular matching in the GPU cache once rows are cheap to refetch.
-- Rebalancing the GPU row budget in `capacities` toward pages when rows
-  can be restored from the host.
 - A prepared GPU checksum over record planes for the direct transport.
 - Remote or shared stores, prefetch of likely continuations, and compression.

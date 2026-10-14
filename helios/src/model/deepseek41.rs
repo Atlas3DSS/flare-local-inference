@@ -49,7 +49,7 @@ impl ModelContract for DeepSeek41 {
         {
             return Err("DeepSeek V4.1 speculation requires DSpark proposals".into());
         }
-        if config.limits.max_sequence_tokens > 1048576 {
+        if config.prepared_sequence_tokens > 1048576 {
             return Err("DeepSeek V4.1 context exceeds 1048576 tokens".into());
         }
         let index = manifest
@@ -98,6 +98,7 @@ impl ModelContract for DeepSeek41 {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }
@@ -224,6 +225,7 @@ mod contract_tests {
 
     fn config() -> ModelConfig {
         ModelConfig {
+            prepared_sequence_tokens: 4096,
             contract: DeepSeek41::metadata(),
             identity: [0; 32],
             model_id: "deepseek".into(),

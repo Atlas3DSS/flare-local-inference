@@ -65,6 +65,7 @@ impl Fixture {
         std::fs::remove_dir_all(directory).unwrap();
         Self {
             config: ModelConfig {
+                prepared_sequence_tokens: 128,
                 contract: Qwen4Exp::metadata(),
                 identity: [23; 32],
                 model_id: "qwen-worker-phases".into(),
@@ -1157,6 +1158,31 @@ fn host_hit_holds_the_request_inbound_until_the_restore_completes() {
         RequestPhase::Decode
     );
     assert_eq!(fixture.metrics.snapshot(false).prefill_tokens, 0);
+}
+
+#[test]
+fn host_hit_recomputes_when_snapshot_backing_would_prevent_admission() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
+    let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+    history.append(&incoming.prompt.tokens, &[]).unwrap();
+    sender.send(vec![incoming]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker
+        .scheduler
+        .share_snapshot_pages(&vec![0..16; 16])
+        .unwrap();
+    worker.attach_store(Some(Box::new(FakeStore::new(Some(host_hit(&history, 70))))));
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let handle = worker.active[0].as_ref().unwrap().request;
+    assert_eq!(
+        worker.scheduler.request(handle).unwrap().phase,
+        RequestPhase::Initialize
+    );
+    assert_eq!(worker.scheduler.free_page_count(), 14);
+    assert_eq!(worker.scheduler.free_snapshot_count(), 16);
+    assert!(fake_store(&mut worker).fetched.is_empty());
 }
 
 #[test]

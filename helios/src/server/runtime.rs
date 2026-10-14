@@ -270,6 +270,12 @@ impl<M: ModelContract> ModelRuntime<M> {
                 };
                 if let Err(error) = scheduler
                     .graph_durations(&executor.manifest().graphs)
+                    .and_then(|()| match &executor.manifest().cache {
+                        Some(cache) if !cache.snapshot_pages.is_empty() => {
+                            scheduler.share_snapshot_pages(&cache.snapshot_pages)
+                        }
+                        _ => Ok(()),
+                    })
                     .and_then(|()| scheduler.enable_speculation(&worker_config.speculative_widths))
                     .and_then(|()| {
                         scheduler.proposal_source(worker_config.speculative_proposal_source)
@@ -1360,7 +1366,11 @@ fn admit_with_host_store(
         consumed_tokens: hit.consumed_tokens,
         pages: hit.pages,
     };
-    let admitted = scheduler.admit_planned(spec.clone(), plan, Some(inbound))?;
+    let admitted = match scheduler.admit_planned(spec.clone(), plan, Some(inbound)) {
+        Ok(admitted) => admitted,
+        Err(Error::Admission(AdmissionError::Capacity(_))) => return scheduler.admit(spec),
+        Err(error) => return Err(error),
+    };
     let Some(ticket) = admitted.ticket else {
         return Ok(admitted.handle);
     };
@@ -1649,6 +1659,7 @@ mod tests {
                 },
 
                 draft_pages_per_request: 1,
+                host_decode_tokens: false,
 
                 state_rows_per_request: None,
             },
@@ -1798,6 +1809,7 @@ mod tests {
                 vision: Qwen4Exp::metadata().vision,
 
                 draft_pages_per_request: 0,
+                host_decode_tokens: false,
 
                 state_rows_per_request: None,
             },
@@ -2303,6 +2315,7 @@ mod tests {
                 },
 
                 draft_pages_per_request: 1,
+                host_decode_tokens: false,
 
                 state_rows_per_request: None,
             },
@@ -2337,7 +2350,7 @@ mod tests {
         assert_eq!(incoming.metrics.failed.load(Ordering::Relaxed), 1);
         assert_eq!(scheduler.stats().active_requests, 1);
         assert_eq!(scheduler.free_page_count(), 0);
-        assert_eq!(scheduler.free_snapshot_count(), 0);
+        assert_eq!(scheduler.free_snapshot_count(), 2);
 
         let (execution, mut generation) = stream(2);
         execution.fail(rejected.clone());

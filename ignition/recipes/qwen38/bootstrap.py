@@ -72,6 +72,9 @@ class PreparationConfig:
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
     history_drafts: bool = False
+    # Run shared experts, small-batch attention projections and selection, and GDN input projections
+    # on an auxiliary stream; without overlap every branch runs serially on the main stream.
+    stream_overlap: bool = True
 
     def __post_init__(self):
         if self.devices is not None and (
@@ -92,8 +95,8 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
-        if type(self.mtp) is not bool or type(self.history_drafts) is not bool:
-            raise TypeError("MTP and history draft switches must be booleans")
+        if type(self.mtp) is not bool or type(self.history_drafts) is not bool or type(self.stream_overlap) is not bool:
+            raise TypeError("MTP, history draft, and stream overlap switches must be booleans")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
             world_size=1 if self.devices is None else len(self.devices)).row_bytes
         if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
@@ -237,7 +240,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             requests = DeviceRequestState.allocate(device, capacity=slots)
             inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.prefill_chunk_size, capacity=slots)
             scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=sample_rows, world_size=shard.world_size)
-            workspaces = ScratchArena(device)
+            workspaces = ScratchArena(device, overlap=config.stream_overlap)
             rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
             cache = {index: QSAState.allocate(pages=1, slots=slots + 1, device=device, draft_tokens=speculative_tokens, kv_heads=max(1, 2 // shard.world_size))
                      for index in (*range(3, 48, 4), *((48,) if has_mtp else ()))}

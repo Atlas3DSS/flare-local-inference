@@ -348,9 +348,9 @@ vision weights.
 
 [pyproject.toml](../pyproject.toml) and [uv.lock](../uv.lock) declare the
 preparation dependencies. Transformers supplies canonical architecture and
-processor semantics. FlashInfer is an editable sibling checkout at
-`../flashinfer`; its b12x operators and FlashInfer sampling supply the
-prepared GPU computation.
+processor semantics. FlashInfer targets `main` in
+`local-inference-lab/flashinfer`, with its resolved commit recorded in `uv.lock`;
+its b12x operators and FlashInfer sampling supply the prepared GPU computation.
 
 ### Runtime contract
 
@@ -613,8 +613,8 @@ if the requested capacities cannot fit.
 ### Gated DeltaNet convolution
 
 b12x's GDN packages treat convolution as external. The prepared
-`sequence.short_conv` operator comes from the editable sibling `../flashinfer`
-checkout. The PLE implementation in `sequence/ple` supplies
+`sequence.short_conv` operator comes from the LIL FlashInfer dependency.
+The PLE implementation in `sequence/ple` supplies
 reusable history and state machinery: caller-owned state sized by dilation and
 kernel width, state-slot ids, a fresh-state flag, accepted-token counts,
 device-resident sequence and token counts, and a mixed prefill-plus-decode mode.
@@ -758,6 +758,9 @@ forks, joins, input lifetimes, and tensor mutations through forward compilation.
 Every branch rejoins before dependent outputs or reused scratch are consumed.
 Python captures these dependencies inside one CUDA graph; Rust submits that
 graph without calling Python or managing the internal streams.
+Preparation with `--no-stream-overlap` creates no auxiliary stream: recipes
+compose each branch on the main stream with the same kernels and register no
+concurrent scratch, to test whether a fault depends on overlap.
 
 Startup compiles complete text forwards with Inductor before capture, including
 prefill absorption, ordinary decode, resume sampling, and speculative rounds.

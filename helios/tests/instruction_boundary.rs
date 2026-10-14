@@ -57,6 +57,7 @@ impl Fixture {
         )
         .unwrap();
         let config = ModelConfig {
+            prepared_sequence_tokens: 262144,
             contract: Qwen4Exp::metadata(),
             model_id: "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD".into(),
             identity: [0; 32],

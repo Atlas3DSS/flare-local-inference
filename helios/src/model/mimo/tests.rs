@@ -9,6 +9,7 @@ use crate::{
 fn mixed_prefill_vision_indices_follow_packed_decode_tokens() {
     for width in [1, 3, 8] {
         let config = ModelConfig {
+            prepared_sequence_tokens: 2048,
             contract: MiMo::metadata(),
             identity: [0; 32],
             model_id: "mimo".into(),

@@ -61,7 +61,7 @@ pub struct Run {
     /// Additional publisher verification profiles (JSON); does not grant execution trust.
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     pub publisher_keys: Vec<PathBuf>,
-    /// Verify the complete stored allocation and table region before CUDA initialization.
+    /// Verify the stored allocation and table ranges of the ranks served before CUDA initialization.
     #[arg(long)]
     pub verify_weights: bool,
     /// Permanently accept this exact signing key together with --dangerously-accept-publisher.
@@ -129,8 +129,7 @@ pub struct Run {
     #[arg(long, value_name = "N", help_heading = "Serving options")]
     pub max_concurrency: Option<NonZeroUsize>,
 
-    /// Storage for auxiliary embedding tables (PLE/Engram) [default: RAM on a discrete GPU
-    /// when the tables take at most half of available memory, otherwise disk].
+    /// Storage for auxiliary embedding tables (PLE/Engram) [default: disk].
     #[arg(long, value_name = "MODE", help_heading = "Serving options",
         value_parser = PossibleValuesParser::new(["disk", "ram"])
             .map(|value| if value == "disk" { Storage::Disk } else { Storage::Ram }))]

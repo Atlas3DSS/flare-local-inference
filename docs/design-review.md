@@ -34,7 +34,8 @@ Consult those specifications for details relevant to the change.
 5. **Finish preparation before capture.** Constructors declare operations; one
    preparation batch tunes the complete shape catalog. Size scratch from tuned
    plans, refresh bindings, compile complete forwards, and warm every variant
-   before capture. TP forwards compile on rank zero; peers bind and capture.
+   before capture. TP forwards compile once, sharded across ranks; every rank
+   binds the same artifacts and captures.
 6. **Make storage and lifetimes explicit.** Concurrent work has disjoint scratch
    and preserved fork/join dependencies. Values surviving graph boundaries use
    persistent storage. Never reuse inputs, pages, or slots while queued work or

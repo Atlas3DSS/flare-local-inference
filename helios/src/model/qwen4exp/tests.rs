@@ -18,6 +18,7 @@ use crate::{
 
 fn config() -> ModelConfig {
     ModelConfig {
+        prepared_sequence_tokens: 2048,
         contract: Qwen4Exp::metadata(),
         identity: [1; 32],
         model_id: "qwen38".into(),
@@ -628,6 +629,7 @@ fn configured_prefill_catalog_and_backing_extents_are_required_before_cuda() {
     for chunk_size in [64, 3072, 4096, 8192] {
         let mut config = config();
         config.limits.max_sequence_tokens = 32768;
+        config.prepared_sequence_tokens = 32768;
         config.limits.prefill_chunk_size = chunk_size;
         let original = manifest(&config);
         validate::<Qwen4Exp>(&config, &original).unwrap();
@@ -689,6 +691,7 @@ fn bootstrap_defaults_to_4096_and_explicit_chunk_size_wins_before_asset_loading(
 
     let mut config = config();
     config.limits.max_sequence_tokens = 8192;
+    config.prepared_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
     let mut body = json!({"model_contract": metadata_json(),"model_id": "qwen38", "identity": "01".repeat(32),
         "max_sequence_tokens": 8192, "pages": 64, "snapshots": 8, "frontend":{"tokenizer":{},"eos_token_ids":[]},"sampling_defaults":config.sampling_defaults});
@@ -869,6 +872,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
 fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_padding() {
     let mut config = config();
     config.limits.max_sequence_tokens = 8192;
+    config.prepared_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
     config.limits.pages = 128;
     let mut scheduler = RequestScheduler::new(
@@ -2056,4 +2060,19 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
             .is_err()
         );
     }
+}
+
+#[test]
+fn runtime_context_shrinks_without_changing_captured_page_table_geometry() {
+    let mut config = config();
+    let captured = manifest(&config);
+    let prepared = config.limits.max_sequence_tokens;
+    let page_tokens = Qwen4Exp::scheduler_capabilities(&config).page_tokens;
+    config.limits.pages = (prepared / page_tokens / 2) as u32;
+    config.fit_context::<Qwen4Exp>();
+    assert_eq!(config.limits.max_sequence_tokens, prepared / 2);
+    assert_eq!(config.prepared_sequence_tokens, prepared);
+    validate::<Qwen4Exp>(&config, &captured).unwrap();
+    config.prepared_sequence_tokens = config.limits.max_sequence_tokens;
+    assert!(validate::<Qwen4Exp>(&config, &captured).is_err());
 }

@@ -28,7 +28,7 @@ into a **runtime package**: a single `.safetensors` file with two `U8` tensors.
 The protobuf describes independently addressed resources. Tensor-parallel
 packages contain one resource bundle per rank, with all ranks' storage before
 execution resources.
-Final packages use a format-3 signed envelope and encrypted cubins and graph
+Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
 is absent. `ignition run` passes the exact export key and publisher to Flare for
 unattended approval; direct `flare run` needs the corresponding publisher profile
@@ -56,10 +56,15 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation environment uses the sibling `../flashinfer` checkout through
-`pyproject.toml`. Inspect that checkout and its local changes before updating
-dependencies. After changing Rust code in `heliopause/`, or Helios code used by
-the extension, rebuild the installed extension explicitly:
+The preparation dependency targets `main` in `local-inference-lab/flashinfer`;
+`uv.lock` records the resolved commit. Run
+`uv lock --upgrade-package flashinfer-python` to advance it to the branch tip,
+then sync the environment. For local FlashInfer development, install the sibling
+checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
+`uv sync --locked --extra prepare --extra test` restores the Git dependency.
+Inspect that checkout and its local changes before modifying it. After changing
+Rust code in `heliopause/`, or Helios code used by the extension, rebuild the
+installed extension explicitly:
 
 ```sh
 uv pip install --python .venv/bin/python --no-deps ./heliopause
@@ -96,9 +101,9 @@ Changing this default does not change an already exported package.
 
 N-gram tables use indirect delivery exclusively: every graph consumes compact
 GPU row buffers filled by Helios. Qwen PLE tables are stored once in the package.
-Without the flag, a discrete GPU keeps the 26.8 GiB table in resident host memory
-when it takes at most half of available memory (an integrated GPU reads it from
-disk); `flare run --embedding-table-storage disk|ram` overrides that. The graph publishes GPU-produced lookup IDs before layer
+Helios reads the 26.8 GiB table from disk by default on every GPU;
+`flare run --embedding-table-storage ram` keeps it in resident host memory.
+The graph publishes GPU-produced lookup IDs before layer
 0 and waits for row delivery at the layer-1 consumer. Disk and RAM delivery
 use the same prepared model graphs; the flag selects table storage only.
 
@@ -107,9 +112,9 @@ DSpark is its learned draft method, defaulting to five draft tokens per round
 with adaptive verification based on observed acceptance and GPU round cost;
 vision graphs are not prepared. Its 188.8 GiB of Engram tables are
 stored once in the package and read on demand through bounded direct-I/O
-staging unless at least twice their size is available, in which case they load into
-ordinary RAM by default (`flare run --embedding-table-storage disk|ram` overrides);
-both modes gather compact rows into shared pinned buffers, copy them to each
+staging by default; `flare run --embedding-table-storage ram` loads them into
+ordinary resident memory instead.
+Both modes gather compact rows into shared pinned buffers, copy them to each
 rank, and signal captured consumer events. Preparation appends the immutable
 checkpoint slices without materializing the tables. Select four available
 GPUs explicitly:
@@ -514,14 +519,17 @@ for resource ownership and [the CLI design](docs/cli-design.md) for configuratio
   available system RAM. Recipes pass byte headroom, not hardware flags. Forward
   compilation uses memory-bounded parallel workers on both integrated and discrete
   GPUs; artifact binding starts no additional compiler pool.
-- **Compile tensor-parallel forwards on rank zero.** Pass the preparation
-  coordinator to `capture_forwards`. Peers load the compiled forwards, bind their
-  tensors and native handles, and participate in ordered warmup and local capture.
-  Keep shard offsets and native handles in runtime bindings when they do not
-  change the computation. For distinct rank behavior, expose
-  `compilation_variants()` on the rank-zero forward and select its key through
-  `compilation_variant` on each rank. Rank zero must supply every selected variant
-  before collective warmup; peers must not retrace or compile on a binding mismatch.
+- **Compile tensor-parallel forwards once, sharded across ranks.** Pass the
+  preparation coordinator to `capture_forwards`. Each forward variant compiles on
+  one rank that selects it, from that rank's own forward, with a compiler pool
+  budgeted for its host's ranks. Ranks on one host share its cache directory;
+  ranks on other hosts receive the artifacts they lack. Every rank loads the same
+  artifacts, binds its tensors and native handles, and participates in ordered
+  warmup and local capture. Keep shard offsets and native handles in runtime
+  bindings when they do not change the computation. For distinct rank behavior,
+  select a variant key through `compilation_variant` on each rank. Every
+  selected variant must compile before collective warmup; ranks must not retrace
+  or compile on a binding mismatch.
 - **Capture zero-draft rounds as decode.** Verification width one contains only
   the pending target token. Use ordinary decode attention and direct cache updates;
   do not inherit prefill kernels, speculative staging, or draft rollback work

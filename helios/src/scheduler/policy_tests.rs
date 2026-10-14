@@ -19,6 +19,7 @@ fn engine(active: usize, speculative: bool) -> RequestScheduler {
             page_tokens: 64,
             vision: crate::model::VisionCapabilities::disabled(),
             draft_pages_per_request: 0,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )
@@ -998,6 +999,7 @@ fn interactive_engine(active: usize, speculative: bool) -> RequestScheduler {
             page_tokens: 64,
             vision: crate::model::VisionCapabilities::disabled(),
             draft_pages_per_request: 0,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )

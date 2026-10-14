@@ -98,7 +98,7 @@ impl Inputs {
                         mask.iter().copied(),
                     );
                 }
-                let capacity = config.limits.max_sequence_tokens / 64;
+                let capacity = config.prepared_sequence_tokens / 64;
                 let live = scheduler.request(lane.request)?;
                 for (name, skip, counts) in [
                     ("page_tables", 0, &mut self.page_counts),

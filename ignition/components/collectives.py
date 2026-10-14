@@ -215,6 +215,52 @@ class PreparedAllGather:
         return self.output
 
 
+@torch.library.custom_op("flare::roce_all_gather_varlen", mutates_args=("output",))
+def _all_gather_varlen(counts: torch.Tensor, output: torch.Tensor, handle: int) -> None:
+    owner = _OWNERS[handle]
+    owner.runtime.all_gather_varlen(owner.source, counts, out=output, plan=owner.plan)
+
+
+@_all_gather_varlen.register_fake
+def _fake_all_gather_varlen(counts, output, handle):
+    pass
+
+
+class PreparedVarlenGather:
+    """Gather byte prefixes of every rank's row of `output` [world, capacity] to every rank over RoCEnante.
+
+    Each rank writes its contribution into its own row in place; `counts` is a [world] int64 device
+    tensor of each rank's bytes, a multiple of 16, holding the same values on every rank and free to
+    change between replays. Row r then holds rank r's first counts[r] bytes on every rank; bytes
+    past them keep their values. Operations sharing the runtime must execute serially on every rank.
+    """
+
+    def __init__(self, output, counts, *, runtime, session, coordinator, name):
+        import torch.distributed as dist
+
+        if not _roce(runtime):
+            raise ValueError("variable-length gathers run over RoCEnante")
+        ranks = tuple(dist.get_process_group_ranks(runtime._group))
+        if (output.shape[0] != len(ranks) or not output.is_contiguous() or counts.shape != (len(ranks),)
+                or counts.dtype != torch.int64 or output[0].numel() * output.element_size() % 16):
+            raise ValueError("variable-length gathers require one contiguous 16-byte-multiple row per rank")
+        self.runtime, self.output, self.counts = runtime, output, counts
+        # A rank's own row is its source, so the gather leaves it in place.
+        self.source = output[ranks.index(dist.get_rank())]
+        self.plan = _roce_plan(runtime, coordinator, "AllReduce.all_gather_varlen")
+        declare(session, (self.plan.request(name=name,
+            prepare_call=lambda state: PreparedCall(
+                run=lambda: runtime._run_prepared_all_gather_varlen(self.source, counts, prepared=state, out=output),
+                output=output, owners=(runtime, self.source, counts, output)),
+            collective=CollectiveRequirement(key=name, ranks=ranks)),), coordinator=coordinator)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
+
+    def __call__(self):
+        _all_gather_varlen(self.counts, self.output, self.handle)
+        return self.output
+
+
 @torch.library.custom_op("flare::pcie_lse_reduce_scatter", mutates_args=("output",))
 def _lse_reduce_scatter(partial: torch.Tensor, lse: torch.Tensor, output: torch.Tensor, handle: int) -> None:
     owner = _OWNERS[handle]
@@ -231,14 +277,36 @@ class PreparedLseReduceScatter:
 
     Partial outputs are [rows, heads, dim] over all heads with FP32 [rows, heads] LSE;
     the output holds this rank's contiguous head shard. Operations sharing the
-    channel must execute serially on every rank.
+    channel must execute serially on every rank. Over RoCEnante, ranks all-gather
+    the shards each peer keeps through `staging` (send [rows, width] and received
+    [rows, W * width] BF16, from head_exchange.pack_width) and merge locally;
+    `rank` is this rank as a one-element device tensor.
     """
 
-    def __init__(self, partial, lse, output, *, runtime, session, coordinator, name):
+    def __init__(self, partial, lse, output, *, runtime, session, coordinator, name, staging=None, rank=None):
         import torch.distributed as dist
         from b12x.comm import pcie
 
         rows = partial.shape[0]
+        self.roce = _roce(runtime)
+        if self.roce:
+            from .head_exchange import pack_width
+
+            heads, dim = partial.shape[1:]
+            world = runtime.world_size
+            width = pack_width(world, heads, dim)
+            send, received = (None, None) if staging is None else staging
+            if (rank is None or send is None or heads % world or partial.dtype != torch.bfloat16
+                    or lse.shape != (rows, heads) or lse.dtype != torch.float32
+                    or output.shape != (rows, heads // world, dim) or output.dtype != torch.bfloat16
+                    or send.shape[1:] != (width,) or received.shape[1:] != (world * width,)
+                    or min(send.shape[0], received.shape[0]) < rows):
+                raise ValueError("RoCE head combination requires BF16 partials, FP32 LSE, staging and the rank")
+            self.output, self.rank, self.world = output, rank, world
+            self.send, self.received = send[:rows], received[:rows]
+            self.gather = PreparedAllGather(self.send, self.received, runtime=runtime, session=session,
+                                            coordinator=coordinator, name=f"{name}.gather")
+            return
         if (partial.shape != (rows, runtime.total_heads, runtime.query_head_dim) or partial.dtype != torch.bfloat16
                 or lse.shape != (rows, runtime.total_heads) or lse.dtype != torch.float32
                 or output.shape != (rows, runtime.heads_per_rank, runtime.query_head_dim)
@@ -257,5 +325,12 @@ class PreparedLseReduceScatter:
         _OWNERS[self.handle] = self
 
     def __call__(self, partial, lse):
+        if self.roce:
+            from .head_exchange import merge, pack
+
+            pack(partial, lse, self.send, self.rank, self.world)
+            self.gather(self.send)
+            merge(self.received, partial, lse, self.output, self.rank, self.world)
+            return self.output
         _lse_reduce_scatter(partial, lse, self.output, self.handle)
         return self.output

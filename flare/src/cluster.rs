@@ -11,7 +11,7 @@ use flare_helios::{
 
 type Failure = Box<dyn std::error::Error>;
 
-// Every host loads its rank before joining; the slowest load bounds the wait.
+// Ranks join before loading; rank zero starts its peers first, so the slowest start bounds the wait.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -40,52 +40,121 @@ pub fn health(transport: &Arc<RoceTransport>) -> CollectiveHealth {
     }
 }
 
+/// Open this rank's transport over the fabric every rank discovered, from their endpoint lists in
+/// rank order.
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-fn open(owner: &NativeModel) -> Result<RoceTransport, Failure> {
+fn open(
+    owner: &NativeModel,
+    fabric: &flare_helios::execution::roce_fabric::Fabric,
+    endpoints: &[Vec<u8>],
+) -> Result<RoceTransport, Failure> {
+    use flare_helios::execution::roce_fabric;
+
     let spec = owner
         .roce(0)
         .ok_or("multi-host package rank has no RoCE transport")?;
+    let endpoints = endpoints
+        .iter()
+        .map(|bytes| roce_fabric::decode(bytes))
+        .collect::<flare_helios::Result<Vec<_>>>()?;
+    let topology = fabric.topology(&endpoints, spec.rank)?;
     // SAFETY: The package restored the region at its recorded address; owner outlives the
     // transport, and no graph runs before every rank connected.
-    Ok(unsafe { RoceTransport::open(spec)? })
+    Ok(unsafe { RoceTransport::open(spec, &topology)? })
 }
 
-/// Rank zero: admit every peer at `address`, exchange transport records, and wait until every
-/// rank's transport is connected.
-pub fn rank_zero(
-    owner: &mut NativeModel,
-    cluster: &ClusterRank,
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn connected(transport: &RoceTransport) -> String {
+    format!(
+        "{} rails per peer over {}",
+        transport.topology().rails,
+        transport.topology().hcas.join(",")
+    )
+}
+
+/// A rank's admitted connections to the rest of its cluster, made before it loads.
+pub enum Membership {
+    /// Rank zero's connection to each peer, ranks 1 onward.
+    Zero(Vec<RankStream>),
+    /// A peer's connection to rank zero.
+    Peer(RankStream),
+}
+
+/// Join rank zero's rendezvous at `address` before loading: rank zero admits every peer of its
+/// export, and a peer knocks until admitted.
+pub fn join(
+    rank: usize,
+    world: usize,
+    export_id: &str,
     address: &str,
     progress: &StartupProgress,
-) -> Result<Joined<Vec<RankStream>>, Failure> {
+) -> Result<Membership, Failure> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
         use flare_helios::execution::rendezvous;
 
-        let mut transport = open(owner)?;
-        let phase = progress.phase("Wait for tensor-parallel hosts", None);
-        let mut streams = rendezvous::accept(
-            address,
-            cluster.world,
-            &cluster.export_id,
-            JOIN_TIMEOUT,
-            |rank| eprintln!("Rank {rank} joined"),
-        )?;
-        phase.finish(format!("{} peer ranks at {address}", streams.len()));
-        let phase = progress.phase("Agree cache capacity", None);
-        let capacity = rendezvous::share_cache_capacity(&mut streams, owner.cache_capacity()?)?;
-        // SAFETY: No manifests have been handed to execution and no graph has run.
-        unsafe { owner.limit_cache_capacity(capacity)? };
-        phase.finish(format!("{} state rows · {} KV pages", capacity[0], capacity[1]));
+        if rank == 0 {
+            let phase = progress.phase("Wait for tensor-parallel hosts", None);
+            let streams = rendezvous::accept(address, world, export_id, JOIN_TIMEOUT, |rank| {
+                eprintln!("Rank {rank} joined")
+            })?;
+            phase.finish(format!("{} peer ranks at {address}", streams.len()));
+            Ok(Membership::Zero(streams))
+        } else {
+            let phase = progress.phase("Join rank zero", None);
+            let stream = rendezvous::knock(address, rank, world, export_id, JOIN_TIMEOUT)?;
+            phase.finish(format!("rank {rank} of {world} at {address}"));
+            Ok(Membership::Peer(stream))
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+    {
+        let _ = (rank, world, export_id, address, progress);
+        Err("this flare build has no RoCE transport for multi-host packages".into())
+    }
+}
+
+impl Membership {
+    /// The continuation rows and KV pages every rank allocates: the fewest any rank can back.
+    pub fn agree(&mut self, local: (u64, u64)) -> flare_helios::Result<(u64, u64)> {
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            use flare_helios::execution::rendezvous;
+
+            match self {
+                Membership::Zero(peers) => rendezvous::agree_capacity(peers, local),
+                Membership::Peer(stream) => rendezvous::propose_capacity(stream, local),
+            }
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+        {
+            let _ = local;
+            unreachable!("no membership without RoCE support")
+        }
+    }
+}
+
+/// Rank zero: exchange transport records with every admitted peer and wait until every rank's
+/// transport is connected.
+pub fn rank_zero(
+    owner: &NativeModel,
+    mut streams: Vec<RankStream>,
+    progress: &StartupProgress,
+) -> Result<Joined<Vec<RankStream>>, Failure> {
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        use flare_helios::execution::{rendezvous, roce_fabric};
+
         let phase = progress.phase("Connect RoCE transport", None);
+        // Every rank learns every rank's devices, then plans the same routes from them.
+        let fabric = roce_fabric::discover()?;
+        let endpoints =
+            rendezvous::share_records(&mut streams, roce_fabric::encode(&fabric.endpoints))?;
+        let mut transport = open(owner, &fabric, &endpoints)?;
         let records = rendezvous::share_records(&mut streams, transport.local_record()?)?;
         transport.connect(&records)?;
         rendezvous::await_connected(&mut streams)?;
-        phase.finish(format!(
-            "{} rails per peer over {}",
-            transport.spec().rails,
-            transport.spec().hcas.join(",")
-        ));
+        phase.finish(connected(&transport));
         Ok(Joined {
             streams,
             transport: Arc::new(transport),
@@ -93,50 +162,35 @@ pub fn rank_zero(
     }
     #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
     {
-        let _ = (owner, cluster, address, progress);
+        let _ = (owner, streams, progress);
         Err("this flare build has no RoCE transport for multi-host packages".into())
     }
 }
 
-/// A peer rank: join rank zero at `address`, exchange transport records, and connect.
+/// A peer rank: exchange transport records with rank zero over its admitted stream, and connect.
 pub fn peer(
-    owner: &mut NativeModel,
+    owner: &NativeModel,
     cluster: &ClusterRank,
-    address: &str,
+    mut stream: RankStream,
     progress: &StartupProgress,
 ) -> Result<Joined<RankStream>, Failure> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        use flare_helios::execution::rendezvous;
+        use flare_helios::execution::{rendezvous, roce_fabric};
 
-        let mut transport = open(owner)?;
-        let phase = progress.phase("Join rank zero", None);
-        let mut stream = rendezvous::knock(
-            address,
-            cluster.rank,
-            cluster.world,
-            &cluster.export_id,
-            JOIN_TIMEOUT,
-        )?;
-        phase.finish(format!(
-            "rank {} of {} at {address}",
-            cluster.rank, cluster.world
-        ));
-        let phase = progress.phase("Agree cache capacity", None);
-        let capacity = rendezvous::exchange_cache_capacity(&mut stream, owner.cache_capacity()?)?;
-        // SAFETY: No manifests have been handed to execution and no graph has run.
-        unsafe { owner.limit_cache_capacity(capacity)? };
-        phase.finish(format!("{} state rows · {} KV pages", capacity[0], capacity[1]));
         let phase = progress.phase("Connect RoCE transport", None);
+        let fabric = roce_fabric::discover()?;
+        let endpoints = rendezvous::exchange_record(
+            &mut stream,
+            &roce_fabric::encode(&fabric.endpoints),
+            cluster.world,
+        )?;
+        let mut transport = open(owner, &fabric, &endpoints)?;
         let records =
             rendezvous::exchange_record(&mut stream, &transport.local_record()?, cluster.world)?;
         transport.connect(&records)?;
         rendezvous::report_connected(&mut stream)?;
-        phase.finish(format!(
-            "{} rails per peer over {}",
-            transport.spec().rails,
-            transport.spec().hcas.join(",")
-        ));
+        phase.finish(connected(&transport));
         Ok(Joined {
             streams: stream,
             transport: Arc::new(transport),
@@ -144,7 +198,7 @@ pub fn peer(
     }
     #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
     {
-        let _ = (owner, cluster, address, progress);
+        let _ = (owner, cluster, stream, progress);
         Err("this flare build has no RoCE transport for multi-host packages".into())
     }
 }

@@ -25,6 +25,7 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
                 patch_capacities: vec![256, 1024, 4096, 16384],
             },
             draft_pages_per_request: 1,
+            host_decode_tokens: false,
             state_rows_per_request: None,
         },
     )
@@ -117,6 +118,48 @@ fn finish(s: &mut RequestScheduler, h: RequestHandle) -> CheckpointId {
         run_step(s);
     }
     panic!("request failed to finish");
+}
+
+#[test]
+fn duplicate_finished_boundary_needs_no_terminal_snapshot() {
+    let mut s = scheduler(2, false);
+    let a = s.admit(spec(Some(70), 70, 1)).unwrap();
+    let b = s.admit(spec(Some(70), 70, 1)).unwrap();
+    let mut pending = vec![a, b];
+    for _ in 0..20 {
+        run_step(&mut s);
+        let finished: Vec<_> = pending
+            .iter()
+            .copied()
+            .filter(|&h| s.request(h).unwrap().phase == RequestPhase::Finishing)
+            .collect();
+        for h in finished {
+            s.finish(h).unwrap();
+            pending.retain(|&other| other != h);
+        }
+        if pending.is_empty() {
+            break;
+        }
+    }
+    assert!(pending.is_empty());
+    assert_eq!(s.stats().snapshot_publications, 1);
+    assert_eq!(s.free_snapshot_count(), 1);
+    assert_eq!(s.free_page_count(), 255);
+}
+
+#[test]
+fn requests_finish_when_no_checkpoint_storage_is_available() {
+    let mut s = scheduler(0, false);
+    let handle = s.admit(spec(Some(10), 70, 3)).unwrap();
+    for _ in 0..20 {
+        if s.request(handle).unwrap().phase == RequestPhase::Finishing {
+            break;
+        }
+        assert_ne!(run_step(&mut s).kind, GraphKind::Snapshot);
+    }
+    assert_eq!(s.request(handle).unwrap().generated_tokens, 3);
+    assert_eq!(s.finish(handle).unwrap(), None);
+    assert_eq!(s.free_page_count(), 256);
 }
 
 #[test]
@@ -222,23 +265,21 @@ fn prompt_6459_retains_exact_prompt_and_terminal_with_immutable_admission_reuse(
 }
 
 #[test]
-fn required_boundary_reservations_fail_transactionally_and_cancel_behind_fence() {
+fn boundary_snapshots_are_optional_and_cancel_behind_fence() {
     let mut s = scheduler(2, false);
-    let before = s.stats();
-    assert!(s.admit(spec(Some(10), 70, 3)).is_err());
-    assert_eq!(s.free_page_count(), before.free_pages);
+    let h = s.admit(spec(Some(10), 70, 3)).unwrap();
     assert_eq!(s.free_snapshot_count(), 2);
-    assert_eq!(s.stats().active_requests, 0);
+    assert_eq!(s.stats().active_requests, 1);
+    finish(&mut s, h);
     let mut s = scheduler(3, false);
     let h = s.admit(spec(Some(10), 70, 3)).unwrap();
-    assert_eq!(s.free_snapshot_count(), 0);
+    assert_eq!(s.free_snapshot_count(), 3);
     stop_at_capture(&mut s, h, 10);
     let step = s.plan().unwrap();
     let fence = Fence(s.submitted.0 + 1);
     s.commit(&step, fence).unwrap();
     s.cancel(h).unwrap();
-    assert_eq!(s.free_snapshot_count(), 0);
-    assert!(s.admit(spec(Some(10), 70, 3)).is_err());
+    assert_eq!(s.free_snapshot_count(), 2);
     let mut record = [CompletionRecord::default(); 4];
     record[h.slot as usize] = CompletionRecord {
         generation: h.generation as i64,
@@ -269,7 +310,7 @@ fn duplicate_boundary_publication_does_not_remap_live_partial_pages() {
     assert!(s.request(a).unwrap().prefix_tokens >= 10);
     assert_eq!(s.cache.lookup(&history(10)).unwrap().consumed_tokens, 10);
     assert!(s.request(b).unwrap().system_snapshot.is_none());
-    assert_eq!(s.free_snapshot_count(), 1);
+    assert_eq!(s.free_snapshot_count(), 3);
 }
 
 #[test]
@@ -345,10 +386,10 @@ fn runtime_concurrency_and_loaded_width_assign_fixed_execution_rows() {
                 for column in 0..width {
                     assert!(owned.insert(request.state_slot.0 + column as u32));
                 }
-                assert!(owned.insert(s.snapshot_slot(request.terminal_snapshot).0));
+                assert!(request.terminal_snapshot.is_none());
                 handles.push(handle);
             }
-            assert_eq!(s.free_snapshot_count(), 256 - active);
+            assert_eq!(s.free_snapshot_count(), 256);
             for handle in handles {
                 s.cancel(handle).unwrap();
             }

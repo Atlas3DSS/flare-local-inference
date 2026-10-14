@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from cuda.bindings import driver as cuda
 
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.recurrent import DeltaMetadata, DeltaState
@@ -17,6 +18,33 @@ from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.recipes.glm53.kda import KDAScratch, PreparedGlmKDA
 from ignition.recipes.glm53.model import create_model_tree
 from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
+
+
+def runs_concurrently(graph):
+    """Whether two nodes of a retained captured graph can run at once: unordered by any dependency path.
+
+    Redundant dependencies, such as an event wait on the stream that recorded it, are not concurrency.
+    """
+    raw = cuda.CUgraph(graph.raw_cuda_graph())
+    status, _, _, _, count = cuda.cuGraphGetEdges(raw)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, parents, children, _, _ = cuda.cuGraphGetEdges(raw, count)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, nodes, _ = cuda.cuGraphGetNodes(raw, cuda.cuGraphGetNodes(raw)[2])
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    edges = [(int(parent), int(child)) for parent, child in zip(parents, children, strict=True)]
+    waiting = {int(node): 0 for node in nodes}
+    for _, child in edges:
+        waiting[child] += 1
+    ready = [node for node, count in waiting.items() if not count]
+    while len(ready) == 1:
+        node = ready.pop()
+        for parent, child in edges:
+            if parent == node:
+                waiting[child] -= 1
+                if not waiting[child]:
+                    ready.append(child)
+    return bool(ready)
 
 
 @pytest.mark.parametrize("world", [2, 4])
@@ -32,9 +60,11 @@ def test_rank_state_and_scratch_geometry(world):
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                    reason="requires an explicitly assigned CUDA device and FLARE_RUN_CUDA_TESTS=1")
-@pytest.mark.parametrize("world,tokens,decode_capacity", [(2, 65, 2), (2, 65, 1), (4, 129, 2), (4, 4096, 2)])
+# Without stream overlap the output-gate projections follow the input projections on the main stream.
+@pytest.mark.parametrize("world,tokens,decode_capacity,overlap", [
+    (2, 65, 2, True), (2, 65, 1, True), (4, 129, 2, True), (4, 4096, 2, True), (2, 65, 2, False), (4, 129, 2, False)])
 @torch.no_grad()
-def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity):
+def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity, overlap):
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
     snapshot = Path(os.environ.get("FLARE_GLM53_SNAPSHOT",
         "/data/checkpoint-releases/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD"))
@@ -49,7 +79,7 @@ def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity):
         weights = loader.load_attention(0)
     heads = 64 // world
     state = DeltaState.allocate(6, device, heads=heads, channels=3 * heads * 128)
-    arena = ScratchArena(device)
+    arena = ScratchArena(device, overlap=overlap)
     metadata = {mode: DeltaMetadata.allocate(2, device) for mode in ("prefill", "decode")}
     prefill_capacity = 1 << (tokens - 1).bit_length()
     inputs = {mode: torch.zeros((capacity, 4096), dtype=torch.bfloat16, device=device)
@@ -64,6 +94,7 @@ def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity):
         for mode, source in working.items():
             operators[mode] = PreparedGlmKDA(module, weights, source, scratch[mode], state, metadata[mode],
                 mode=mode, session=session, name=f"kda.{mode}", workspace=arena, checkpoint_export=mode == "prefill")
+            assert (operators[mode].gate_overlap is not None) is overlap
         session.tune()
         try:
             for mode, operator in operators.items():
@@ -78,9 +109,12 @@ def test_actual_kda_native_prefill_and_decode(world, tokens, decode_capacity):
                 compiled[mode] = compile_forward(forward)
                 compiled[mode]()
                 torch.cuda.synchronize()
-                graphs[mode] = torch.cuda.CUDAGraph()
+                graphs[mode] = torch.cuda.CUDAGraph(keep_graph=True)
                 with session.capture(), torch.cuda.graph(graphs[mode]):
                     compiled[mode]()
+                graphs[mode].instantiate()
+                # The output-gate chain runs beside the input projections, or every node runs in order.
+                assert runs_concurrently(graphs[mode]) is overlap
                 torch.cuda.synchronize()
             session.freeze()
             control = {"frame_index": torch.zeros(1, dtype=torch.int32, device=device),

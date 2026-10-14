@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 from b12x.attention import sparse_mla
+from cuda.bindings import driver as cuda
 
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
@@ -21,6 +22,33 @@ from ignition.recipes.glm53.weights import TEXT_PREFIX, GlmWeightLoader
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")
+
+
+def runs_concurrently(graph):
+    """Whether two nodes of a retained captured graph can run at once: unordered by any dependency path.
+
+    Redundant dependencies, such as an event wait on the stream that recorded it, are not concurrency.
+    """
+    raw = cuda.CUgraph(graph.raw_cuda_graph())
+    status, _, _, _, count = cuda.cuGraphGetEdges(raw)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, parents, children, _, _ = cuda.cuGraphGetEdges(raw, count)
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    status, nodes, _ = cuda.cuGraphGetNodes(raw, cuda.cuGraphGetNodes(raw)[2])
+    assert status == cuda.CUresult.CUDA_SUCCESS
+    edges = [(int(parent), int(child)) for parent, child in zip(parents, children, strict=True)]
+    waiting = {int(node): 0 for node in nodes}
+    for _, child in edges:
+        waiting[child] += 1
+    ready = [node for node, count in waiting.items() if not count]
+    while len(ready) == 1:
+        node = ready.pop()
+        for parent, child in edges:
+            if parent == node:
+                waiting[child] -= 1
+                if not waiting[child]:
+                    ready.append(child)
+    return bool(ready)
 
 
 def assert_selection(actual, expected, indexer):
@@ -66,9 +94,10 @@ def model_weights(request):
     return tree.model.language_model.layers[3].self_attn, weights, world
 
 
-@pytest.mark.parametrize("mode,rows", [("decode", 1), ("decode", 2), ("prefill", 65), ("prefill", 4096)])
+@pytest.mark.parametrize("mode,rows,overlap", [("decode", 1, True), ("decode", 2, True), ("decode", 1, False),
+                                               ("decode", 2, False), ("prefill", 65, True), ("prefill", 4096, True)])
 @torch.no_grad()
-def test_glm_mla_checkpoint_native_replay(model_weights, mode, rows):
+def test_glm_mla_checkpoint_native_replay(model_weights, mode, rows, overlap):
     module, weights, world = model_weights
     device = torch.device("cuda:0")
     capacity = 1 << (rows - 1).bit_length()
@@ -77,15 +106,24 @@ def test_glm_mla_checkpoint_native_replay(model_weights, mode, rows):
     scratch = MLAScratch.allocate(capacity, 64 // world, 64, mode, device)
     state = MLAState.allocate(128, 4, device)
     metadata = IndexMetadata.allocate(capacity, sequences, 64, device)
-    arena = ScratchArena(device)
-    graph, worker = torch.cuda.CUDAGraph(), None
+    arena = ScratchArena(device, overlap=overlap)
+    graph, worker = torch.cuda.CUDAGraph(keep_graph=True), None
     with RecordedPreparationSession(device=device, checkpoint="GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
             workload_schema="glm-mla-v1", numerical_policy="default") as session:
         try:
             session.register_scratch(arena)
             attention = PreparedGlmMLA(module, weights, source, scratch, state, metadata,
                 mode=mode, session=session, name="mla", workspace=arena)
+            # Decode projects and absorbs queries on an auxiliary stream unless overlap is disabled.
+            assert (attention.query_chain is not None) is (overlap and mode == "decode")
             session.tune()
+
+            value_expansion = attention.value_expansion
+            def record_attended(values):
+                # Observe the attention output before serial scratch reuse overwrites it.
+                scratch.attended.copy_(values.transpose(0, 1))
+                return value_expansion(values)
+            attention.value_expansion = record_attended
 
             def forward():
                 attention(source)
@@ -96,6 +134,8 @@ def test_glm_mla_checkpoint_native_replay(model_weights, mode, rows):
             torch.cuda.synchronize(device)
             with session.capture(), torch.cuda.graph(graph):
                 compiled()
+            graph.instantiate()
+            assert runs_concurrently(graph) is (overlap and mode == "decode")
             session.freeze()
             control = {"frame_index": torch.zeros(1, dtype=torch.int32, device=device),
                        "submission_sequence": torch.zeros(1, dtype=torch.int64, device=device),

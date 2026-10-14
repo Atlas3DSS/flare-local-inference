@@ -54,8 +54,12 @@ class PreparationConfig:
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
+    stream_overlap: bool = True
 
     def __post_init__(self):
+        if type(self.stream_overlap) is not bool:
+            raise TypeError("stream_overlap must be a boolean")
         if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
             raise ValueError("DeepSeek V4.1 Flash preparation requires four distinct GPUs")
         if not PAGE_TOKENS <= self.context <= 1048576 or self.context % PAGE_TOKENS:
@@ -150,7 +154,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             headroom_bytes=config.headroom_bytes)
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device)
+        arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device)
         decoder_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, shard.world_size, device)

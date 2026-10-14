@@ -97,6 +97,73 @@ def test_export_never_overwrites_an_existing_directory(tmp_path):
         package().write(tmp_path, {})
 
 
+def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    from ignition.preparation import runtime_package
+    from ignition.preparation.package_file import extend_cluster, read_index
+    from ignition.recipes.declaration import SamplingDefaults
+
+    class Cuda:
+        lib = SimpleNamespace(cuCtxGetLimit=lambda *args: 215, cuFuncGetParamInfo=lambda *args: 1)
+
+        def call(self, name, *args):
+            if name == "cuGraphGetNodes":
+                args[2]._obj.value = 1
+                if args[1] is not None:
+                    args[1][0] = 1
+            elif name == "cuGraphKernelNodeGetParams_v2":
+                args[1]._obj.func = 1
+            elif name == "cuFuncGetName":
+                args[0]._obj.value = b"fixture"
+
+    cuda = Cuda()
+    monkeypatch.setattr(runtime_package, "_Cuda", lambda: cuda)
+    monkeypatch.setattr(RuntimePackage, "_graph", lambda self, cuda, name, graph:
+                        {"name": name, "nodes": [], "edges": []})
+    from ignition.preparation import module_images
+
+    monkeypatch.setattr(module_images, "strip_debug", lambda image: image)
+    monkeypatch.setattr(module_images, "global_symbols", lambda image: [])
+    assets = {}
+    for name in ("tokenizer", "chat_template"):
+        path = tmp_path / name
+        path.write_text(name)
+        assets[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
+    address = 0x100000000000
+    prepared = SimpleNamespace(_consumed=False, export_zero_ranges=[(address, 4096)], graphs={"decode": graph},
+        buffers={}, export_events={}, package_data=None,
+        server_config={"model_id": "fixture", "assets": assets,
+                       "sampling_defaults": SamplingDefaults(temperature=1., top_p=.95, top_k=-1).as_dict(),
+                       "frontend": {"eos_token_ids": [17]}},
+        manifest=lambda **kwargs: {"context": {}, "device": 0, "buffers": [], "graphs": []})
+    storage = SimpleNamespace(error=None, dynamic_regions=[], transports=[],
+        mappings={address: SimpleNamespace(address=address, nbytes=4096)},
+        peer_storage=None, host_regions=[], granularity=4096, DEVICE_BASE=0x100000000000,
+        RESERVATION_BYTES=1 << 20, unused_ranges=lambda: [], low_allocations=lambda outside: {},
+        graph_pool=SimpleNamespace(snapshot=lambda **kwargs: []),
+        numeric_storage=SimpleNamespace(ranges=lambda: []))
+    images = SimpleNamespace(allocations={}, image_for=lambda cuda, function: b"\x7fELFfixture")
+    paths = [tmp_path / f"rank-{rank}.safetensors" for rank in range(2)]
+    for rank, path in enumerate(paths):
+        runtime_package.export_model(prepared, images, storage, path, options={}, bundle_only=rank > 0)
+    peer, _ = read_index(paths[1])
+    assert not peer.assets and not peer.server.fields
+    assert not peer.HasField("frontend") and not peer.HasField("sampling_defaults")
+    assert [graph.name for graph in peer.ranks[0].graphs] == ["decode"]
+    with paths[1].open("rb") as stream:
+        extend_cluster(paths[0], [stream], (2, "fixture"))
+    combined, _ = read_index(paths[0])
+    assert len(combined.ranks) == 2
+    assert {asset.name for asset in combined.assets} == {"tokenizer", "chat_template"}
+    assert combined.server["model_id"] == "fixture"
+    assert list(combined.frontend.eos_token_ids) == [17]
+    assert combined.sampling_defaults.temperature == 1.
+    assert prepared.server_config["assets"] == assets
+
+
 def test_external_allocations_share_pages_without_reading_unallocated_bytes():
     allocations = _external_allocations([(0x1300, 512), (0x1F00, 512), (0x5800, 256)], 4096)
     assert [(a.address, a.nbytes) for a in allocations] == [(0x1000, 8192), (0x5000, 4096)]
@@ -237,7 +304,10 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         assert tensors.keys() == ["flare.metadata", "flare.payload"]
         from ignition.preparation import runtime_package_pb2 as proto
         protected = proto.ProtectedIndex.FromString(tensors.get_tensor("flare.metadata").tobytes())
-        assert proto.PublisherMetadata.FromString(protected.groups[0].body).index == index
+        shared = proto.PublisherMetadata.FromString(protected.groups[0].body).index
+        signed = proto.RankProtection.FromString(protected.ranks[0].body)
+        shared.ranks.add().CopyFrom(signed.bundle)
+        assert shared == index
     document = index.ranks[0]
     storage = {allocation.file for allocation in document.allocations if allocation.HasField("file")}
     storage_end = max((document.resources[key].offset + document.resources[key].nbytes for key in storage), default=0)
@@ -247,8 +317,7 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         with package_path.open("rb") as source:
             source.seek(start + span.offset)
             stored = source.read(span.nbytes)
-        catalog = proto.ResourceCatalog.FromString(protected.groups[1].body)
-        resource = next((item for item in catalog.resources if item.offset == span.offset), None)
+        resource = next((item for item in signed.executables.resources if item.offset == span.offset), None)
         if resource is None:
             return stored
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM

@@ -84,6 +84,10 @@ def _preparation_arguments(running):
     advanced.add_argument("--no-context-parallel", action="store_true",
                           help="keep each rank's attention context whole instead of sharding it across"
                                " tensor-parallel ranks; fewer cached tokens (default: the recipe's)")
+    advanced.add_argument("--no-stream-overlap", action="store_true",
+                          help="run every concurrent branch (shared experts, projection chains, query chains)"
+                               " serially on the main stream, to diagnose scheduling-dependent faults; slower"
+                               " (default: overlap)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
 

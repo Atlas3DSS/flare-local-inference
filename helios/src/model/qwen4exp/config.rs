@@ -7,7 +7,7 @@ use crate::{
 
 pub(super) fn validate_config(config: &ModelConfig, _: &ExecutionManifest) -> Result<()> {
     Qwen4Exp::validate_metadata(&config.contract)?;
-    if config.limits.max_sequence_tokens > 262144 || config.limits.prefill_chunk_size > 262144 {
+    if config.prepared_sequence_tokens > 262144 || config.limits.prefill_chunk_size > 262144 {
         return Err("invalid prepared Qwen4Exp context capacity".into());
     }
     Ok(())
@@ -16,7 +16,7 @@ pub(super) fn validate_config(config: &ModelConfig, _: &ExecutionManifest) -> Re
 pub(super) fn required_buffers(config: &ModelConfig) -> Vec<(&'static str, Dtype, Vec<usize>)> {
     let slots = config.limits.request_capacity();
     use Dtype::{Float32 as F32, Int32 as I32, Int64 as I64};
-    let context = config.limits.max_sequence_tokens;
+    let context = config.prepared_sequence_tokens;
     let prefill_chunk_size = config.limits.prefill_chunk_size;
     let patch_capacity = *config.contract.vision.patch_capacities.last().unwrap();
     let mut buffers = vec![

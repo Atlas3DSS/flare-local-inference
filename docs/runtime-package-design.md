@@ -111,9 +111,9 @@ limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
 `flare.payload` covers the resource bytes, including alignment padding, from
 the start of the data buffer. `flare.metadata` immediately follows it and
 contains a serialized `ProtectedIndex` from `helios/proto/runtime_package.proto`.
-The envelope and its authenticated `ModelIndex` use version 3. Unsigned rank
-staging uses `format: flare-staging` and cannot be loaded by Helios. Incompatible
-packages require re-export.
+The envelope uses version 4 and its authenticated `ModelIndex` version 3.
+Unsigned rank staging uses `format: flare-staging` and cannot be loaded by
+Helios. Incompatible packages require re-export.
 These tensors cover the entire data buffer without gaps or overlap. The
 protobuf is the authoritative resource description; safetensors describes
 only the two byte tensors.
@@ -194,7 +194,7 @@ sequence with an acquire operation before accessing the IDs. Both models publish
 after input-state preparation, before target layer 0. Qwen consumes rows at
 layer 1; DeepSeek V4.1 consumes its two tables at layers 1 and 14.
 
-A shared reader gathers each step's rows once. `--embedding-table-storage disk` uses
+A shared reader gathers each step's rows once. The default, `--embedding-table-storage disk`, uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
 registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
 resident memory and gathers the same rows; on GB300, Qwen's disk reads lengthened
@@ -259,16 +259,24 @@ them and relies on identical addresses instead.
 
 ### Publisher authentication and executable access
 
-Every final package carries four ordered Ed25519 signature groups:
+Every final package carries three ordered Ed25519 signature groups for what
+every rank shares, and one signed `RankProtection` per rank for that rank's
+resources:
 
 | Group | Authenticated contents | Payload checks |
 |---|---|---|
-| 1 | Model index, publisher namespace, source URL, development marker, and SHA-256 commitments to groups 2–4 | Before publisher acceptance or CUDA initialization |
-| 2 | Cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes | Each selected resource chunk before decryption |
-| 3 | Module globals and frontend asset spans and hashes | Before those contents are consumed |
-| 4 | Length and SHA-256 of the complete stored allocation/table region, including padding | With `flare run --verify-weights` |
+| 1 | Model index without rank bundles, publisher namespace, source URL, development marker, rank count, and SHA-256 commitments to groups 2–3 | Before publisher acceptance or CUDA initialization |
+| 2 | Frontend asset spans and hashes | Before those contents are consumed |
+| 3 | Range and SHA-256 of the stored embedding tables, including padding | With `flare run --verify-weights` |
+| Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the range and SHA-256 of its stored allocations, including padding | Bundle before loading; resources as for groups 2–3 |
 
-All four signatures are mandatory even when the stored-data scan is omitted.
+Stored data comes first: the tables, then each rank's allocations, each part one
+contiguous range. Executables and supporting resources follow. Every signature
+of the ranks a process serves is mandatory even when the stored-data scan is
+omitted. A process verifies every rank, except a host serving one rank of a
+multi-host package, which verifies the shared groups and its own rank only, so
+a copy holding only that rank's bytes verifies completely and other ranks'
+bytes or signatures do not affect it.
 Resource classification follows actual consumers in the signed index. Missing,
 overlapping, unclassified, or incorrectly classified spans fail loading. The
 128 MiB metadata limit applies to the complete signed envelope. The package
@@ -288,7 +296,8 @@ in `ignition/preparation/protection.py` and
 key or namespace does not produce a loadable package. Weights and tables stay
 plaintext and retain direct-I/O compatibility and storage deduplication.
 
-`VerifiedPackage::open` authenticates the index and publisher binding.
+`VerifiedPackage::open` authenticates the index and publisher binding, for
+every rank or for one rank of a multi-host package.
 `VerifiedPackage::authorize` requires the exact accepted namespace and optionally
 checks the stored-data contents. Only its `AuthorizedPackage` result can enter
 `NativeModel::load` or `NativeResources::load`. Executable resources are
@@ -445,20 +454,54 @@ On integrated GPUs such as GB10, that budget is Linux `MemAvailable`, capped
 by CUDA's device total. CPU allocations, registered buffers, and GPU allocations
 share physical DRAM; reclaimable page cache contributes to available memory,
 while swap does not. Discrete GPUs use CUDA's free device-memory query.
-Rows comprise one null row, `concurrency * verification_width` execution rows,
-three admission checkpoint destinations per active request, and a prefix cache.
-The prefix cache targets eight rows per request, with an eight-row floor and a
-quarter-share memory limit. KV pages receive the remaining budget, within their
-virtual maximum. The planner accounts for each allocation's mapping alignment
-and requires at least 8,192 cached tokens per active request.
+Dedicated rows comprise one null row and the selected request capacity times
+the recipe's execution rows per request. KV pages receive the remaining budget,
+within their virtual maximum. The planner accounts for mapping alignment and
+requires at least 8,192 cached tokens per active request.
+
+Up to eight immutable snapshot slots per active request share physical backing
+with KV pages. At load, CUDA virtual mappings expose the same allocation chunks
+through the page planes and the snapshot part of the continuation range. Small
+interleaved runs of dense page planes keep each snapshot's conflicting page range
+close to its byte cost. Planes whose allocation granules span more pages than a
+row's byte cost remain dedicated to KV; the densest planes always participate.
+Across ranks, the scheduler uses the union of conflicting ranges.
+Ranks loaded in separate processes must report identical cache capacities and
+snapshot exclusions during the control-channel handshake; a mismatch rejects
+startup before replay. Before cache allocation, hosts agree on the smallest row
+and page capacities that all ranks can back.
+An owned snapshot excludes all conflicting page ids; overlapping exclusions
+are reference-counted. A snapshot fitting entirely in execution-allocation
+alignment padding excludes no pages. Execution rows never alias KV pages.
+
+Admission reserves the request's KV pages. System, prompt, and terminal snapshots
+acquire backing at their capture boundaries, evicting unpinned checkpoints when
+needed. If active requests or transfers hold all suitable backing, optional
+retention is skipped. An inbound host restore reserves both its row and pages
+before transfer; if its snapshot prevents admission, the request recomputes its
+prompt. Snapshot and page ownership remain exclusive through graph
+and transfer completion, including cancellation and duplicate publication.
+Once generation drains, unused output-page reservations are released before
+retaining the final checkpoint.
 
 The loader writes the chosen physical row and page counts into `memory_capacity`.
 Maintenance kernels consume those device scalars; kernels preserve fixed row
 strides and base addresses. Request-to-row bindings separate transport slots
-from execution rows. Execution and prefix-cache partitions are fixed at load
-time, with no row leasing or steady-state remapping. Model recipes declare row
+from execution rows. Virtual addresses and all physical mappings are fixed at
+load; changing ownership requires no CUDA allocation or remapping. Model recipes declare row
 contents and KV geometry; the memory planner does not depend on recurrent or
 attention architecture.
+
+The prepared context extent determines page-table shapes and captured workspace
+sizes. The runtime sequence limit is the smaller of that extent and loaded KV
+capacity after the model's per-request draft-page allowance. Runtime input packing
+preserves the prepared strides. Existing packages retain their prepared ceiling;
+raising that ceiling requires export.
+
+The `flare_snapshot_backing_pages` metric counts page ids excluded by owned
+snapshots, including rows awaiting retirement. It counts overlapping exclusions
+once. `flare_free_snapshots` counts unowned virtual slots; their backing may be
+occupied by KV pages.
 
 The loading display separates allocation capacity from payload bytes.
 `Allocate model memory` reports GPU and host capacity. `Load weights` counts

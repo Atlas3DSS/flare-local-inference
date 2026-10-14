@@ -40,6 +40,7 @@ def prepare(
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes,
         kernel_cache=kernel_cache,
         dspark=speculation is not None,
+        stream_overlap=plan.stream_overlap,
         **drafting,
     )
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
@@ -75,6 +76,8 @@ RECIPE = Recipe(
     prefill_chunk=4096,
     speculation=Speculation(draft_tokens=5),
     max_draft_tokens=5,
+    # Single-row decode runs the shared expert on an auxiliary stream.
+    stream_overlap=True,
     max_images=4,
     image_bytes=32 << 20,
     ranks=MappingProxyType({4: RankCosts(16_142_080, 467_904, 24 << 30)}),

@@ -1,6 +1,7 @@
 """Checkpoint GLM index production and state advance through native graph replay."""
 
 import os
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -40,12 +41,15 @@ def model_weights():
     return module, weights
 
 
-@pytest.mark.parametrize("mode,rows", [("decode", 2), ("prefill", 65), ("prefill", 4096)])
+@pytest.mark.parametrize("mode,rows", [("decode", 2), ("decode", 32), ("prefill", 65), ("prefill", 4096)])
 @torch.no_grad()
 def test_glm_indexer_checkpoint_native_replay(model_weights, mode, rows):
     module, weights = model_weights
     device = torch.device("cuda:0")
     sequences = 2 if mode == "decode" else 1
+    # Decode rows belong to two requests, as speculative verification packs them; above 16 rows b12x
+    # selects through its tiled route.
+    per_request = rows // sequences
     source = torch.zeros((rows, 4096), dtype=torch.bfloat16, device=device)
     query_residual = torch.zeros((rows, 1536), dtype=torch.bfloat16, device=device)
     scratch = IndexScratch.allocate(rows, 64, mode, device)
@@ -81,30 +85,37 @@ def test_glm_indexer_checkpoint_native_replay(model_weights, mode, rows):
                 buffers={"source": source, "query": query_residual, "cache": state.cache, "tail": state.tail},
                 resources=(compiled, indexer, session, arena))
             worker = bundle.start_worker()
-            state.cache.zero_()
+            # Valid FP8 index pages (64 pools' keys, then their 64 scales) give candidate pools distinct scores.
+            pages = state.cache.view(state.cache.shape[0], -1)
+            pages[:, :64 * 128].copy_(torch.randn((pages.shape[0], 64 * 128), device=device)
+                                      .to(torch.float8_e4m3fn).view(torch.uint8))
+            pages[:, 64 * 128:].view(torch.float32).copy_(torch.rand((pages.shape[0], 64), device=device) * .2 + .05)
             state.tail.normal_(std=.1)
             metadata.block_table.copy_(torch.randperm(128, device=device, dtype=torch.int32)
                                        .reshape(2, 64)[:sequences])
             metadata.state_slots.copy_(torch.tensor([2, 1][:sequences], dtype=torch.int64, device=device))
             if mode == "decode":
-                metadata.query_start_loc.copy_(torch.tensor([0, 1, 2], dtype=torch.int32, device=device))
-                metadata.requests.copy_(torch.arange(2, dtype=torch.int32, device=device))
+                metadata.query_start_loc.copy_(torch.arange(3, dtype=torch.int32, device=device) * per_request)
+                metadata.requests.copy_(torch.arange(rows, dtype=torch.int32, device=device) // per_request)
             else:
                 metadata.query_start_loc[1] = rows
-            intermediates = ("query", "query_fp8", "query_scales", "key", "normalized_key", "gate", "weights")
+            intermediates = ("query", "query_fp8", "query_scales", "normalized_key", "gate", "weights")
             for step in range(3):
                 source.normal_(std=.1)
                 query_residual.normal_(std=.1)
                 if mode == "decode":
-                    metadata.positions.copy_(torch.tensor([255 + step, 3 + step], dtype=torch.int64, device=device))
+                    # Past 2,048 tokens each row has more pools than the 512 it selects.
+                    starts = torch.tensor([4351, 2303], dtype=torch.int64, device=device) + step * per_request
+                    metadata.positions.copy_(starts[metadata.requests.long()]
+                                             + torch.arange(rows, device=device) % per_request)
                 else:
                     metadata.positions.copy_(torch.arange(rows, device=device, dtype=torch.int64) + 3 + step * rows)
                 metadata.token_slots.copy_(metadata.block_table[metadata.requests.long(), metadata.positions // 256].long()
                                           * 256 + metadata.positions % 256)
                 if mode == "decode" and step == 2:
                     metadata.state_slots[-1] = -1
-                    metadata.positions[-1] = -1
-                    metadata.token_slots[-1] = -1
+                    metadata.positions[-per_request:] = -1
+                    metadata.token_slots[-per_request:] = -1
                 before_cache, before_tail = state.cache.clone(), state.tail.clone()
                 forward()
                 expected = tuple(getattr(scratch, name).clone() for name in intermediates)
@@ -112,6 +123,9 @@ def test_glm_indexer_checkpoint_native_replay(model_weights, mode, rows):
                 expected_indices, expected_lengths = scratch.physical.clone(), scratch.selected_lengths.clone()
                 state.cache.copy_(before_cache)
                 state.tail.copy_(before_tail)
+                # Package export zeroes index scratch; the graph must rebuild everything it reads there.
+                for field in fields(scratch):
+                    getattr(scratch, field.name).view(torch.uint8).zero_()
                 torch.cuda.synchronize(device)
                 before = torch.cuda.memory_stats(device)
                 ticket = worker.submit(0)

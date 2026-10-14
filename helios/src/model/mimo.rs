@@ -51,7 +51,7 @@ impl ModelContract for MiMo {
         if config.contract != Self::metadata()
             || !matches!(manifest.abi_version, ABI_VERSION | SPECULATIVE_ABI_VERSION)
             || config.state_rows_per_request != Some(1)
-            || config.limits.max_sequence_tokens > 1048576
+            || config.prepared_sequence_tokens > 1048576
             || manifest.engram.is_some()
         {
             return Err(
@@ -117,6 +117,7 @@ impl ModelContract for MiMo {
             page_tokens: PAGE_TOKENS,
             vision: config.contract.vision.clone(),
             draft_pages_per_request: 0,
+            host_decode_tokens: true,
             state_rows_per_request: config.state_rows_per_request,
         }
     }

@@ -12,8 +12,9 @@ _TUNING_GROWTH_BYTES = 1 << 30
 # One Inductor compile subprocess inside a forward compiler.
 _COMPILE_THREAD_BYTES = 512 << 20
 # Host memory a preparing process holds for each compiled forward it restores to warm and capture:
-# its generated module and kernel launchers. GLM's TP4 ranks peak at 9.3 GB with 65 restored forwards.
-COMPILED_FORWARD_BYTES = 128 << 20
+# its generated module and kernel launchers. On GB10, both GLM TP2 ranks grew 3.47-3.50 GB (62 MiB
+# per forward) from KV allocation through loading 56 forwards, warmup and capturing 80 graphs.
+COMPILED_FORWARD_BYTES = 80 << 20
 
 
 def release_unused():

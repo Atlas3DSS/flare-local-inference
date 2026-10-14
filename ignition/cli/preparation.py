@@ -40,23 +40,33 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
            concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
-           context_parallel: bool = True) -> planning.Plan:
+           context_parallel: bool = True, stream_overlap: bool = True) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     return planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
-        prefill_chunk=prefill_chunk, context_parallel=context_parallel)
+        prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap)
 
 
-def context_parallel(args, model: ResolvedModel, *, spans_hosts: bool = False) -> bool:
-    """Whether a plan may shard attention context across its ranks, which ranks on separate hosts never do.
+def context_parallel(args, model: ResolvedModel) -> bool:
+    """Whether a plan may shard attention context across its ranks, on one host or several.
 
     Planning shards only recipes that declare context-parallel page costs, and
     --no-context-parallel applies only to those.
     """
     if args.no_context_parallel and not any(costs.page_tokens for costs in model.recipe.ranks.values()):
         raise UsageError(f"--no-context-parallel: {model.checkpoint.alias} does not shard attention context")
-    return not args.no_context_parallel and not spans_hosts
+    return not args.no_context_parallel
+
+
+def stream_overlap(args, model: ResolvedModel) -> bool:
+    """Whether a plan may run independent branches on an auxiliary stream.
+
+    --no-stream-overlap applies only to recipes that declare stream overlap.
+    """
+    if args.no_stream_overlap and not model.recipe.stream_overlap:
+        raise UsageError(f"--no-stream-overlap: {model.checkpoint.alias} runs no branches concurrently")
+    return not args.no_stream_overlap
 
 
 def speculation(args, model: ResolvedModel) -> Speculation | None:

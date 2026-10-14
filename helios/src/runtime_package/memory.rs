@@ -140,7 +140,6 @@ pub(super) fn capacities(
         return Err(invalid("invalid cache planning geometry"));
     }
     let execution = 1 + active * width;
-    let admission = active * 3;
     let minimum_pages = active * 8192u64.div_ceil(page_tokens);
     let mut cached = active * 8;
     let mut maximum_pages = u64::MAX;
@@ -160,19 +159,19 @@ pub(super) fn capacities(
                 "model requires continuation-row and KV-page allocations",
             ));
         }
-        let fixed = bytes(package, 0, execution + admission)?;
+        let fixed = bytes(package, 0, execution)?;
         if fixed > budget {
             return Err(invalid(
                 "selected concurrency and verification width exceed available memory",
             ));
         }
-        cached = cached.min(((budget - fixed) / 4 / rows[0].unit_bytes).max(8));
-        if rows[0].maximum < execution + admission + 8 {
+        cached = cached.min((budget - fixed) / rows[0].unit_bytes);
+        if rows[0].maximum < execution {
             return Err(invalid(
                 "continuation virtual extent cannot hold execution state and prefix cache",
             ));
         }
-        cached = cached.min(rows[0].maximum - execution - admission);
+        cached = cached.min(rows[0].maximum - execution);
         maximum_pages = maximum_pages.min(pages.iter().map(|s| s.maximum).min().unwrap());
     }
     let fits = |rows, pages| {
@@ -185,87 +184,69 @@ pub(super) fn capacities(
                 .is_ok_and(|n| n <= budget)
         })
     };
-    loop {
-        let rows = execution + admission + cached;
-        if fits(rows, minimum_pages) {
-            break;
-        }
-        if cached <= 8 {
-            return Err(invalid(
-                "available memory cannot hold execution state, prefix cache, and minimum KV capacity",
-            ));
-        }
-        cached -= 1;
+    if !fits(execution, minimum_pages) {
+        return Err(invalid(
+            "available memory cannot hold execution state and minimum KV capacity",
+        ));
     }
-    let rows = execution + admission + cached;
     let (mut low, mut high) = (minimum_pages, maximum_pages);
     while low < high {
         let mid = low + (high - low).div_ceil(2);
-        if fits(rows, mid) {
+        if fits(execution, mid) {
             low = mid;
         } else {
             high = mid - 1;
         }
     }
-    Ok((rows, low, admission + cached))
+    // Snapshot virtual rows alias KV backing; they do not consume another physical budget.
+    for package in packages {
+        let row = package
+            .allocations
+            .iter()
+            .find(|a| a.sizing.as_ref().is_some_and(|s| s.capacity == 0))
+            .unwrap();
+        let unit = row.sizing.as_ref().unwrap().unit_bytes;
+        let planes: Vec<_> = package
+            .allocations
+            .iter()
+            .filter_map(|a| {
+                a.sizing
+                    .as_ref()
+                    .filter(|s| s.capacity == 1)
+                    .map(|s| (a, s))
+            })
+            .collect();
+        let largest = planes.iter().map(|(_, s)| s.unit_bytes).max().unwrap();
+        let page: u64 = planes.iter().map(|(_, s)| s.unit_bytes).sum();
+        let borrowed: u64 = planes
+            .iter()
+            .filter(|(a, s)| {
+                super::cache_memory::alias_plane(
+                    s.unit_bytes,
+                    largest,
+                    unit,
+                    page,
+                    a.alignment as u64,
+                )
+            })
+            .map(|(a, s)| (low * s.unit_bytes).div_ceil(a.alignment as u64) * a.alignment as u64)
+            .sum();
+        let mapped = bytes(package, 0, execution)? + borrowed;
+        cached = cached.min(mapped / unit - execution);
+        while cached > 0 && bytes(package, 0, execution + cached)? > mapped {
+            cached -= 1;
+        }
+    }
+    Ok((execution + cached, low, cached))
 }
 
 impl NativeModel {
-    /// Backed [state rows including the sentinel, KV pages] on this cluster host.
-    pub fn cache_capacity(&self) -> Result<[u64; 2]> {
-        if self.cluster().is_none() || self.ranks.len() != 1 {
-            return Err(invalid(
-                "cache negotiation requires one rank of a multi-host package",
-            ));
-        }
-        let cache = self.ranks[0]
-            .cache
-            .as_ref()
-            .ok_or_else(|| invalid("rank lacks allocated cache geometry"))?;
-        Ok([cache.row_capacity, cache.page_capacity])
-    }
-
-    /// Limit the logical cache to capacities backed on every host. Retain the existing
-    /// allocations and addresses; only the usable extents change.
-    ///
-    /// # Safety
-    /// Call before obtaining serving manifests or starting any graph replay or cache transfer.
-    pub unsafe fn limit_cache_capacity(&mut self, capacity: [u64; 2]) -> Result<()> {
-        self.cache_capacity()?;
-        let rank = &mut self.ranks[0];
-        let mut execution = rank
-            .execution
-            .clone()
-            .ok_or_else(|| invalid("rank lacks an execution contract"))?;
-        let mut cache = rank.cache.clone().unwrap();
-        let mut config = self.server_config.clone();
-        limit_cache_plan(&mut config, &mut execution, &mut cache, capacity)?;
-        let manifest = rank.execution_manifest()?;
-        let binding = manifest
-            .buffers
-            .iter()
-            .find(|b| b.name == "memory_capacity")
-            .filter(|b| b.dtype == crate::execution::Dtype::Int64 && b.shape == [2] && b.nbytes == 16)
-            .ok_or_else(|| invalid("model lacks runtime memory capacity binding"))?;
-        unsafe {
-            rank.driver
-                .check("cuCtxSetCurrent", (rank.driver.context_set)(rank.context))?;
-            rank.driver.check(
-                "cuMemcpyHtoD_v2",
-                (rank.driver.upload)(binding.address as u64, capacity.as_ptr().cast(), 16),
-            )?;
-        }
-        rank.execution = Some(execution);
-        rank.cache = Some(cache);
-        self.server_config = config;
-        Ok(())
-    }
-
     pub(super) unsafe fn allocate_caches(
         &mut self,
         packages: &mut [Package],
         progress: &StartupProgress,
         active: usize,
+        agree: super::model::CacheAgreement<'_>,
     ) -> Result<()> {
         let reserve = headroom(&self.server_config)?;
         let page_tokens = self.server_config["page_tokens"]
@@ -303,26 +284,78 @@ impl NativeModel {
             };
             available.push(budget(free, total, reserve, rank.integrated));
         }
-        let (rows, pages, snapshots) =
+        let (local_rows, local_pages, _) =
             capacities(packages, &available, active as u64, width, page_tokens)?;
+        // Fewer pages only shrink KV, and fewer rows only the snapshot slots aliased into it, so
+        // the smallest capacity any rank can back fits every rank. Snapshot rows need no
+        // dedicated backing; the alias layout below rejects rows the agreed pages cannot back.
+        let (rows, pages) = agree((local_rows, local_pages))?;
+        let execution = 1 + active as u64 * width;
+        if rows > local_rows || pages > local_pages || rows < execution {
+            return Err(invalid(
+                "ranks agreed on a cache capacity this rank cannot back",
+            ));
+        }
+        let snapshots = rows - execution;
         // Scheduler page ids count the model contract's tokens per page, which
         // exceeds the physical page when pages are sharded across ranks.
         let logical_page_tokens = self.server_config["model_contract"]["page_tokens"]
             .as_u64()
             .unwrap_or(page_tokens);
-        let geometry = packages
+        let mut geometry = packages
             .iter()
             .map(|package| cache_geometry(package, logical_page_tokens, rows, pages))
             .collect::<Result<Vec<_>>>()?;
+        let layouts = packages
+            .iter()
+            .zip(&geometry)
+            .map(|(package, geometry)| {
+                let alignment = |name: &str| {
+                    package
+                        .allocations
+                        .iter()
+                        .find(|a| a.name == name)
+                        .unwrap()
+                        .alignment as u64
+                };
+                super::cache_memory::Layout::new(
+                    geometry,
+                    rows - snapshots,
+                    &geometry
+                        .planes
+                        .iter()
+                        .map(|p| alignment(&p.name))
+                        .collect::<Vec<_>>(),
+                    alignment(&geometry.row.name),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut aliases = vec![u32::MAX..0; snapshots as usize];
+        for layout in &layouts {
+            for (union, range) in aliases.iter_mut().zip(&layout.aliases) {
+                if !range.is_empty() {
+                    union.start = union.start.min(range.start);
+                    union.end = union.end.max(range.end);
+                }
+            }
+        }
+        for range in &mut aliases {
+            if range.start >= range.end {
+                *range = 0..0;
+            }
+        }
+        for geometry in &mut geometry {
+            geometry.snapshot_pages = aliases.clone();
+        }
         let mut gpu_bytes = 0;
         for package in packages.iter_mut() {
+            gpu_bytes += bytes(package, 0, rows - snapshots)? + bytes(package, 1, pages)?;
             for allocation in &mut package.allocations {
                 if let Some(sizing) = allocation.sizing.take() {
                     let units = if sizing.capacity == 0 { rows } else { pages };
                     allocation.nbytes =
                         (units * sizing.unit_bytes).div_ceil(allocation.alignment as u64) as usize
                             * allocation.alignment;
-                    gpu_bytes += allocation.nbytes as u64;
                 }
             }
             let pool = package
@@ -337,10 +370,16 @@ impl NativeModel {
             pool.nbytes = rows * pool.shape[1];
         }
         let phase = progress.phase("Allocate cache", Some(gpu_bytes));
-        for ((rank, package), geometry) in self.ranks.iter_mut().zip(packages).zip(geometry) {
-            rank.cache = Some(geometry);
+        for (((rank, package), geometry), layout) in self
+            .ranks
+            .iter_mut()
+            .zip(packages)
+            .zip(geometry)
+            .zip(layouts)
+        {
             unsafe {
-                rank.allocate(package, &phase)?;
+                rank.allocate_shared_cache(package, &geometry, &layout)?;
+                rank.cache = Some(geometry);
                 let binding = package
                     .execution
                     .as_ref()
@@ -367,74 +406,12 @@ impl NativeModel {
         self.server_config["snapshots"] = snapshots.into();
         self.server_config["pages"] = pages.into();
         phase.finish(format!(
-            "{:.1} GiB · {} cached tokens · {snapshots} state rows",
+            "{:.1} GiB · {} KV tokens before checkpoint retention · {snapshots} shared snapshot slots",
             gpu_bytes as f64 / (1u64 << 30) as f64,
-            pages * page_tokens
+            pages * logical_page_tokens
         ));
         Ok(())
     }
-}
-
-fn limit_cache_plan(
-    config: &mut serde_json::Value,
-    execution: &mut super::protobuf::wire::Execution,
-    cache: &mut CacheGeometry,
-    [rows, pages]: [u64; 2],
-) -> Result<()> {
-    let snapshots = config["snapshots"]
-        .as_u64()
-        .ok_or_else(|| invalid("model lacks snapshot capacity"))?;
-    let page_tokens = config["page_tokens"]
-        .as_u64()
-        .filter(|n| *n > 0)
-        .ok_or_else(|| invalid("model lacks physical page geometry"))?;
-    let active = execution.max_active;
-    if !(1..=64).contains(&active)
-        || rows == 0
-        || rows > cache.row_capacity
-        || pages == 0
-        || pages > cache.page_capacity
-        || pages < active * 8192u64.div_ceil(page_tokens)
-        || config["state_rows"]
-            .as_u64()
-            .and_then(|n| n.checked_add(1))
-            != Some(cache.row_capacity)
-        || config["pages"].as_u64() != Some(cache.page_capacity)
-    {
-        return Err(invalid(
-            "negotiated cache capacity is outside this rank's serving bounds",
-        ));
-    }
-    // Keep every execution row and the admission reserve; reduce only cached snapshots.
-    let snapshots = snapshots
-        .checked_sub(cache.row_capacity - rows)
-        .filter(|n| *n >= active * 3 + 8)
-        .ok_or_else(|| invalid("negotiated cache cannot hold execution and admission state"))?;
-    let pool = execution
-        .buffers
-        .iter_mut()
-        .find(|b| b.name == "state_pool")
-        .ok_or_else(|| invalid("model lacks continuation storage binding"))?;
-    let nbytes = rows
-        .checked_mul(cache.row.unit_bytes)
-        .ok_or_else(|| invalid("negotiated state pool size overflows"))?;
-    if pool.dtype != "uint8"
-        || pool.shape != [cache.row_capacity, cache.row.unit_bytes]
-        || pool.strides != [cache.row.unit_bytes, 1]
-        || nbytes > pool.nbytes
-    {
-        return Err(invalid(
-            "continuation pool differs from its allocated cache geometry",
-        ));
-    }
-    pool.shape[0] = rows;
-    pool.nbytes = nbytes;
-    cache.row_capacity = rows;
-    cache.page_capacity = pages;
-    config["state_rows"] = (rows - 1).into();
-    config["snapshots"] = snapshots.into();
-    config["pages"] = pages.into();
-    Ok(())
 }
 
 /// The row plane and page planes of one rank in name order, read before
@@ -470,6 +447,7 @@ fn cache_geometry(
     }
     planes.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let geometry = CacheGeometry {
+        snapshot_pages: Vec::new(),
         page_tokens,
         page_capacity: pages,
         row_capacity: rows,
@@ -487,69 +465,6 @@ mod tests {
         protobuf::wire::Sizing,
     };
     use super::*;
-
-    fn cache_plan(
-        rows: u64,
-        pages: u64,
-    ) -> (serde_json::Value, super::super::protobuf::wire::Execution, CacheGeometry) {
-        use super::super::protobuf::wire::{Buffer, Execution};
-
-        let config = serde_json::json!({
-            "state_rows": rows - 1, "snapshots": rows - 9, "pages": pages, "page_tokens": 128,
-        });
-        let execution = Execution {
-            max_active: 8,
-            buffers: vec![Buffer {
-                name: "state_pool".into(),
-                dtype: "uint8".into(),
-                shape: vec![rows, 4096],
-                strides: vec![4096, 1],
-                nbytes: rows * 4096,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let cache = cache_geometry(&package(4096, 4096, 20000), 128, rows, pages).unwrap();
-        (config, execution, cache)
-    }
-
-    #[test]
-    fn negotiated_limits_match_rank_manifests_and_preserve_execution_rows() {
-        let (mut config, mut execution, mut cache) = cache_plan(84, 14428);
-        let original = (config.clone(), execution.clone(), cache.clone());
-        for capacity in [[85, 13560], [80, 14429], [40, 13560], [80, 511], [0, 13560]] {
-            assert!(limit_cache_plan(&mut config, &mut execution, &mut cache, capacity).is_err());
-            assert_eq!(
-                (&config, &execution, &cache),
-                (&original.0, &original.1, &original.2)
-            );
-        }
-        limit_cache_plan(&mut config, &mut execution, &mut cache, [80, 13560]).unwrap();
-        assert_eq!(config["state_rows"], 79);
-        assert_eq!(config["snapshots"], 71);
-        assert_eq!(config["pages"], 13560);
-        assert_eq!(cache.row_capacity - config["snapshots"].as_u64().unwrap(), 9);
-        assert_eq!(execution.buffers[0].shape, [80, 4096]);
-        assert_eq!(execution.buffers[0].nbytes, 80 * 4096);
-        assert_eq!(cache.page_capacity, 13560);
-        assert_eq!(cache.row, original.2.row);
-        assert_eq!(cache.planes, original.2.planes);
-        // An independently sized peer now has the same logical manifest and scheduler limits.
-        let (mut peer_config, mut peer_execution, mut peer_cache) = cache_plan(80, 13560);
-        limit_cache_plan(
-            &mut peer_config, &mut peer_execution, &mut peer_cache, [80, 13560],
-        ).unwrap();
-        assert_eq!(
-            (&config, &execution, &cache),
-            (&peer_config, &peer_execution, &peer_cache)
-        );
-        // Reapplying the agreed limits must not consume more snapshot rows.
-        limit_cache_plan(&mut config, &mut execution, &mut cache, [80, 13560]).unwrap();
-        assert_eq!(
-            (config, execution, cache),
-            (peer_config, peer_execution, peer_cache)
-        );
-    }
 
     #[test]
     fn integrated_memory_includes_reclaimable_ram_but_not_swap() {
@@ -718,8 +633,8 @@ mod tests {
         assert!(full.0 > reduced.0 && reduced.0 > target_only.0);
         assert!(full.1 < reduced.1 && reduced.1 < target_only.1);
         assert_eq!(reduced.0, 1 + 4 * 6 + reduced.2);
-        for (rows, pages, _) in [full, reduced, target_only] {
-            let used = bytes(&p[0], 0, rows).unwrap() + bytes(&p[0], 1, pages).unwrap();
+        for (rows, pages, snapshots) in [full, reduced, target_only] {
+            let used = bytes(&p[0], 0, rows - snapshots).unwrap() + bytes(&p[0], 1, pages).unwrap();
             assert!(used <= budget[0] && budget[0] - used < 2 << 20);
         }
         // Capture concurrency is deliberately absent from the allocation policy.
@@ -729,10 +644,10 @@ mod tests {
     #[test]
     fn ranks_share_capacities_and_respect_alignment_and_virtual_extents() {
         let p = [package(123456, 45678, 1000), package(246912, 91356, 1000)];
-        let (rows, pages, _) = capacities(&p, &[256 << 20, 80 << 20], 4, 3, 256).unwrap();
+        let (rows, pages, snapshots) = capacities(&p, &[256 << 20, 80 << 20], 4, 3, 256).unwrap();
         assert!(pages <= 1000);
         for (p, budget) in p.iter().zip([256 << 20, 80 << 20]) {
-            assert!(bytes(p, 0, rows).unwrap() + bytes(p, 1, pages).unwrap() <= budget);
+            assert!(bytes(p, 0, rows - snapshots).unwrap() + bytes(p, 1, pages).unwrap() <= budget);
         }
         assert!(capacities(&p, &[256 << 20, 1 << 20], 4, 3, 256).is_err());
         let (_, pages, _) = capacities(&[package(1024, 1024, 1024)], &[1 << 30], 1, 1, 64).unwrap();

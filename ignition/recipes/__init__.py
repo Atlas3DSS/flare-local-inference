@@ -25,6 +25,12 @@ def recipes() -> tuple[Recipe, ...]:
     return qwen38, glm53, deepseek41, deepseek4, mimo_v2
 
 
+def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:
+    """Where a Hugging Face cache holds a checkpoint's revision."""
+    return (Path(hub_cache) / f"models--{checkpoint.repository.replace('/', '--')}"
+            / "snapshots" / checkpoint.revision)
+
+
 @dataclass(frozen=True)
 class ResolvedModel:
     """A recipe, the checkpoint it serves, and that checkpoint's local directory when the user named one."""
@@ -50,8 +56,7 @@ class ResolvedModel:
         """Return the checkpoint directory, which exists only once the revision is cached."""
         if self.directory is not None:
             return self.directory
-        return (Path(hub_cache) / f"models--{self.checkpoint.repository.replace('/', '--')}"
-                / "snapshots" / self.checkpoint.revision)
+        return snapshot_directory(hub_cache, self.checkpoint)
 
     def verify(self, hub_cache: Path) -> None:
         """Check index metadata; recipes validate tensor storage and geometry."""

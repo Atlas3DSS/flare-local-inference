@@ -111,7 +111,7 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Check the complete stored allocation/table region; `run` only | off |
+| `--verify-weights` | Check the stored allocation and table ranges of the ranks served; `run` only | off |
 
 Advanced flags appear in their own section of `--help`. Recipe values apply when flags are omitted; explicit flags take precedence.
 
@@ -123,12 +123,15 @@ Advanced flags appear in their own section of `--help`. Recipe values apply when
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
+| `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
 others. The `Select GPUs.` startup line states the settings in effect: `up to
 N draft tokens` while verification adapts, `exactly N draft tokens` when it is
-fixed.
+fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
+recorded in the plan and the package cache key; it changes graph scheduling,
+not kernel selection, so its packages share tuned kernels with overlapped ones.
 
 Both Ignition commands accept `--config`.
 
@@ -148,14 +151,14 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Verify the complete stored allocation/table region before CUDA initialization | off |
+| `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before CUDA initialization | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
 | `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
 | `--max-concurrency N` | Reduce concurrency within captured batch capacities | Package default |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
-| `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | RAM on a discrete GPU when the tables take at most half of available host memory; otherwise `disk` |
+| `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
@@ -258,13 +261,13 @@ reserve.
 
 The GPU prefix cache is derived. It holds model states at instruction,
 prompt, and answer boundaries so that later requests repeating a prefix skip
-recomputing it. A finished exchange keeps its prompt and answer states, so the
-engine sizes the cache at eight states per concurrent request, about four
-recent exchanges each, and gives it at most a quarter of the memory left after
-weights, graphs, and live state. A state costs about 117 MiB on the Qwen3.8
-recipe. Each active request additionally holds three states while it runs,
-counted as live state. Under memory pressure, KV pages shrink first and the prefix cache has a
-floor of 8 states.
+recomputing it. A finished exchange can retain its prompt and answer states, so the
+engine exposes up to eight snapshot slots per concurrent request, about four
+recent exchanges each. Snapshot slots share physical backing with KV pages and
+acquire it only when retaining a checkpoint. Unpinned checkpoints are evicted
+to admit requests. If active requests or transfers own all suitable backing,
+the engine skips optional checkpoint retention. There is no dedicated snapshot
+memory fraction or minimum resident checkpoint count.
 
 ### 3.4 Configuration boundaries
 
@@ -283,6 +286,7 @@ Configuration assigns each decision to one owner:
 | Serving driver margin | 64 MiB after graph upload |
 | Prefill chunk | Recipe default, overridden by `--prefill-chunk-size` |
 | Speculation | Recipe default, overridden by `--no-mtp` and the advanced speculation flags |
+| Branch overlap | Recipe declaration, serialized by `--no-stream-overlap` |
 | Weight format, KV precision, page geometry, kernel plans | Checkpoint metadata and recipe preparation |
 | Queue, frontend workers, event capacity, body limit | Concurrency and recipe image limits |
 | Compiler workers | Host CPU capacity |
@@ -305,10 +309,10 @@ disk settings require the implementation and measurements defined there.
 | Setting | Derived from |
 |---|---|
 | Tensor-parallel size | Count of `--gpus`, or the smallest recipe-supported size whose estimate fits the first GPUs with enough free memory |
-| Context limit | The checkpoint maximum |
-| KV pages | All remaining supply: free GPU memory minus engine headroom, `memory.reserve`, weights, graphs and scratch, live state, and the prefix cache; divided by the recipe's per-token page cost. Active requests are guaranteed an equal share, up to the checkpoint's maximum context; the rest holds cached prefixes |
-| Prefix cache | Eight states per `--max-concurrency` request, at most a quarter of the memory left after weights, graphs, and live state; floor 8 states under pressure |
-| Live state | The recipe's state rows for `--max-concurrency` requests: one row per request slot, the recipe's speculative rows per slot while speculating, and three checkpoint rows per active request |
+| Context limit | The smaller of the prepared context ceiling and loaded KV capacity after per-request draft-page storage; admission also checks available shared capacity |
+| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports KV capacity before checkpoint retention |
+| Prefix cache | Up to eight snapshot slots per `--max-concurrency` request, acquired on demand from shared KV backing and evicted under pressure |
+| Live state | One null row plus the recipe's execution rows per active request slot; GLM verification commits into one live row |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |
 | Prefill chunk | The recipe's chunk, 4,096 tokens for Qwen, GLM, and DeepSeek; `--prefill-chunk-size` overrides |
 | Speculative catalog and draft counts | Recipe, overridden by `--no-mtp` and the `--mtp-*` flags; the draft count adapts from measured rounds unless fixed |

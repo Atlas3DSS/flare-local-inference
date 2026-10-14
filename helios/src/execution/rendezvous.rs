@@ -2,9 +2,10 @@
 //!
 //! Every host runs `flare run` on its own rank's file. Rank zero listens on the rendezvous address
 //! and each peer knocks there with its rank, the world size and its file's export identifier; rank
-//! zero admits every rank once and only from the same export. The admitted connection first agrees
-//! on cache capacities, then carries transport records and confirmation that every peer connected its
-//! transport, and finally the coordinated execution protocol.
+//! zero admits every rank once and only from the same export. Ranks join before loading. The
+//! admitted connection first carries the cache capacity every rank allocates, then the transport
+//! records the ranks exchange, then confirmation that every peer connected its transport, and
+//! finally the coordinated execution protocol.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -13,7 +14,8 @@ use std::time::{Duration, Instant};
 use super::RankStream;
 use crate::{Error, ExecutionError, Result};
 
-const MAGIC: &[u8; 8] = b"FLARERV2";
+// Version 3 negotiates capacity before loading and exchanges discovered fabric endpoints.
+const MAGIC: &[u8; 8] = b"FLARERV3";
 const ADMITTED: u8 = 0;
 const REFUSED: u8 = 1;
 const CONNECTED: &[u8] = b"connected";
@@ -112,9 +114,9 @@ pub fn accept(
             continue;
         };
         let refusal = match parse_hello(&bytes) {
-            None if bytes.starts_with(b"FLARERV") => Some(
-                "incompatible rendezvous protocol; rebuild Flare on every host".to_owned(),
-            ),
+            None if bytes.starts_with(b"FLARERV") => {
+                Some("incompatible rendezvous protocol; rebuild Flare on every host".to_owned())
+            }
             None => Some("not a flare rank".to_owned()),
             Some((_, peer_world, _)) if peer_world != world => Some(format!(
                 "its file has {peer_world} ranks, rank zero's has {world}"
@@ -204,58 +206,53 @@ pub fn knock(
     }
 }
 
-fn read_capacity(stream: &mut impl Read) -> Result<[u64; 2]> {
-    let bytes = read_frame(stream)?;
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| failure("invalid rank cache capacity"))?;
-    let capacity = [
-        u64::from_le_bytes(bytes[..8].try_into().unwrap()),
-        u64::from_le_bytes(bytes[8..].try_into().unwrap()),
-    ];
-    if capacity.contains(&0) {
+fn encode_capacity((rows, pages): (u64, u64)) -> Vec<u8> {
+    [rows.to_le_bytes(), pages.to_le_bytes()].concat()
+}
+
+fn decode_capacity(bytes: &[u8]) -> Result<(u64, u64)> {
+    if bytes.len() != 16 {
+        return Err(failure("rendezvous cache capacity is malformed"));
+    }
+    let word = |range: std::ops::Range<usize>| u64::from_le_bytes(bytes[range].try_into().unwrap());
+    let capacity = (word(0..8), word(8..16));
+    if capacity.0 == 0 || capacity.1 == 0 {
         return Err(failure("rank cache capacity must be positive"));
     }
     Ok(capacity)
 }
 
-fn write_capacity(stream: &mut impl Write, capacity: [u64; 2]) -> Result<()> {
-    if capacity.contains(&0) {
+/// Rank zero: agree on the continuation rows and KV pages every rank allocates, the smallest any
+/// rank can back, and send them to each peer. Ranks size from their own free memory, but every
+/// rank must hold the same rows and pages: rank zero's scheduler addresses all of them.
+pub fn agree_capacity(peers: &mut [RankStream], local: (u64, u64)) -> Result<(u64, u64)> {
+    if local.0 == 0 || local.1 == 0 {
         return Err(failure("rank cache capacity must be positive"));
     }
-    let bytes: Vec<_> = capacity.into_iter().flat_map(u64::to_le_bytes).collect();
-    write_frame(stream, &bytes)
+    let mut agreed = local;
+    for peer in peers.iter_mut() {
+        let (rows, pages) = decode_capacity(&read_frame(peer)?)?;
+        agreed = (agreed.0.min(rows), agreed.1.min(pages));
+    }
+    for peer in peers.iter_mut() {
+        write_frame(peer, &encode_capacity(agreed))?;
+    }
+    Ok(agreed)
 }
 
-/// Rank zero: agree on the minimum backed [state rows, KV pages] across hosts.
-pub fn share_cache_capacity(peers: &mut [RankStream], mut capacity: [u64; 2]) -> Result<[u64; 2]> {
-    if capacity.contains(&0) {
+/// A peer: propose the rows and pages this rank can back and receive what every rank allocates.
+pub fn propose_capacity(stream: &mut RankStream, local: (u64, u64)) -> Result<(u64, u64)> {
+    if local.0 == 0 || local.1 == 0 {
         return Err(failure("rank cache capacity must be positive"));
     }
-    for peer in peers.iter_mut() {
-        peer.set_read_timeout(Some(HELLO_TIMEOUT))
-            .and_then(|_| peer.set_write_timeout(Some(HELLO_TIMEOUT)))
-            .map_err(|e| io("cache negotiation timeout", e))?;
-        let offered = read_capacity(peer)?;
-        capacity = [capacity[0].min(offered[0]), capacity[1].min(offered[1])];
-    }
-    for peer in peers.iter_mut() {
-        write_capacity(peer, capacity)?;
-    }
-    Ok(capacity)
-}
-
-/// A peer: offer its backed capacity and receive limits no larger than its allocation.
-pub fn exchange_cache_capacity(stream: &mut RankStream, local: [u64; 2]) -> Result<[u64; 2]> {
-    // Rank zero may still be waiting for the remaining hosts to finish loading.
-    write_capacity(stream, local)?;
-    let capacity = read_capacity(stream)?;
-    if capacity[0] > local[0] || capacity[1] > local[1] {
+    write_frame(stream, &encode_capacity(local))?;
+    let agreed = decode_capacity(&read_frame(stream)?)?;
+    if agreed.0 > local.0 || agreed.1 > local.1 {
         return Err(failure(
-            "negotiated cache capacity exceeds this rank's allocation",
+            "rank zero agreed on more cache than this rank can back",
         ));
     }
-    Ok(capacity)
+    Ok(agreed)
 }
 
 /// Rank zero: collect every peer's transport record and send all of them, in rank order, to each.
@@ -344,13 +341,10 @@ mod tests {
             std::thread::spawn(move || {
                 let mut peers =
                     accept(&address, 3, "export-a", Duration::from_secs(20), |_| {}).unwrap();
-                assert_eq!(
-                    share_cache_capacity(&mut peers, [84, 14428]).unwrap(),
-                    [80, 12000]
-                );
+                let capacity = agree_capacity(&mut peers, (54, 4096)).unwrap();
                 let records = share_records(&mut peers, b"zero".to_vec()).unwrap();
                 await_connected(&mut peers).unwrap();
-                records
+                (capacity, records)
             })
         };
         // A rank from another export is refused, then the real ranks join out of order.
@@ -365,43 +359,80 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut stream =
                         knock(&address, rank, 3, "export-a", Duration::from_secs(20)).unwrap();
-                    let local = if rank == 1 { [80, 13560] } else { [90, 12000] };
-                    assert_eq!(
-                        exchange_cache_capacity(&mut stream, local).unwrap(),
-                        [80, 12000]
-                    );
+                    // Every rank allocates the fewest rows and pages any rank can back.
+                    let local = [(0, 0), (50, 4352), (60, 3840)][rank];
+                    let capacity = propose_capacity(&mut stream, local).unwrap();
                     let records =
                         exchange_record(&mut stream, format!("rank{rank}").as_bytes(), 3).unwrap();
                     report_connected(&mut stream).unwrap();
-                    records
+                    (capacity, records)
                 })
             })
             .collect();
         let expected: Vec<Vec<u8>> = vec![b"zero".to_vec(), b"rank1".to_vec(), b"rank2".to_vec()];
-        assert_eq!(zero.join().unwrap(), expected);
+        assert_eq!(zero.join().unwrap(), ((50, 3840), expected.clone()));
         for join in joins {
-            assert_eq!(join.join().unwrap(), expected);
+            assert_eq!(join.join().unwrap(), ((50, 3840), expected.clone()));
         }
     }
 
     #[test]
-    fn cache_negotiation_rejects_malformed_or_oversized_limits() {
+    fn a_peer_refuses_more_cache_than_it_can_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let zero = {
+            let address = address.clone();
+            std::thread::spawn(move || {
+                let mut peers =
+                    accept(&address, 2, "export", Duration::from_secs(20), |_| {}).unwrap();
+                // A corrupted rank zero answers with more than the peer proposed.
+                let _ = read_frame(&mut peers[0]).unwrap();
+                write_frame(&mut peers[0], &encode_capacity((64, 4096))).unwrap();
+            })
+        };
+        let mut stream = knock(&address, 1, 2, "export", Duration::from_secs(20)).unwrap();
+        let error = propose_capacity(&mut stream, (54, 4096)).unwrap_err();
+        assert!(error.to_string().contains("more cache"), "{error}");
+        zero.join().unwrap();
+    }
+
+    #[test]
+    fn cache_negotiation_rejects_malformed_or_invalid_limits() {
         use std::os::unix::net::UnixStream;
 
-        for capacity in [[81, 100], [80, 101], [0, 100]] {
+        for capacity in [(81, 100), (80, 101), (0, 100), (80, 0)] {
             let (root, peer) = UnixStream::pair().unwrap();
             let sender = std::thread::spawn(move || {
                 let mut root = RankStream::from(root);
-                assert_eq!(read_capacity(&mut root).unwrap(), [80, 100]);
-                let bytes: Vec<_> = capacity.into_iter().flat_map(u64::to_le_bytes).collect();
-                write_frame(&mut root, &bytes).unwrap();
+                assert_eq!(
+                    decode_capacity(&read_frame(&mut root).unwrap()).unwrap(),
+                    (80, 100)
+                );
+                write_frame(&mut root, &encode_capacity(capacity)).unwrap();
             });
-            assert!(exchange_cache_capacity(&mut peer.into(), [80, 100]).is_err());
+            assert!(propose_capacity(&mut peer.into(), (80, 100)).is_err());
             sender.join().unwrap();
         }
-        let mut frame = Vec::new();
-        write_frame(&mut frame, &[0; 15]).unwrap();
-        assert!(read_capacity(&mut frame.as_slice()).is_err());
-        assert!(parse_hello(b"FLARERV1\x02\0\0\0\x01\0\0\0export-a").is_none());
+        for capacity in [(0, 100), (80, 0)] {
+            assert!(agree_capacity(&mut [], capacity).is_err());
+            let (_root, peer) = UnixStream::pair().unwrap();
+            assert!(propose_capacity(&mut peer.into(), capacity).is_err());
+        }
+        assert!(decode_capacity(&[0; 15]).is_err());
+        assert!(decode_capacity(&[0; 17]).is_err());
+    }
+
+    #[test]
+    fn rendezvous_version_matches_the_capacity_and_fabric_exchange() {
+        assert_eq!(
+            parse_hello(&hello(1, 2, "export-a")),
+            Some((1, 2, "export-a"))
+        );
+        for version in [b"FLARERV1", b"FLARERV2"] {
+            let mut old = hello(1, 2, "export-a");
+            old[..8].copy_from_slice(version);
+            assert!(parse_hello(&old).is_none());
+        }
     }
 }

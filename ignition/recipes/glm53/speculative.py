@@ -150,7 +150,7 @@ class SpeculativePreparation:
                 prefill_scratch.rows(prefill_tokens, "prefill", sample_rows=1))
         if decode_tokens:
             self.draft_scratch["decode"] = MTPScratch.allocate(decode_tokens, weights.shard.world_size, blocks,
-                                                               "decode", device, context_ranks=self.shards.world)
+                "decode", device, context_ranks=self.shards.world, remote=context is not None and context.remote)
         self.scratch, self.session, self.workspace = scratch, session, workspace
         self.records, self.frame, self.sequence = records, frame, sequence
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
