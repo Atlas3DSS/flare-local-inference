@@ -45,7 +45,13 @@ produced every row. The 10K prompt is the script's default `--size 8000`
 with a one-token request, then sends N copies at once with different seeds, so
 every row of the speculative batch is a live request restored from the same
 checkpoint. "Uncached" sends prompts that begin with distinct nonces, one at a
-time.
+time. The script classifies each reply as `correct`, `neighbour` (the code
+with record 197 or 199), `misplaced` (the code with another record, usually
+99) or `corrupt` (empty, or a wrong, garbled or invented code). Neighbour and
+misplaced answers are model-level misses that also occur on unaffected
+servers; corrupt answers are the defect. It also reports the speculative
+rounds the test ran by batch × width, read from the server's `/metrics`, and
+how many of them were in graphs above 16 query rows.
 
 | Server | Test | Correct |
 | --- | --- | --- |
@@ -128,8 +134,9 @@ Two Sparks suffice. Host names and addresses below are examples.
    python3 scripts/repro_glm_batched_speculation.py cached --url http://spark1:8000 --concurrency 8
    ```
 
-   A healthy server answers nearly all eight. The defect gives zero or one,
-   mostly empty.
+   A healthy server returns no `corrupt` replies (the GB300 gives 7 correct
+   and 1 neighbour). The defect gives six to eight `corrupt` of eight, and the
+   round report shows most rounds in graphs above 16 query rows.
 
 4. Controls. Restart the server with one option at a time and repeat step 3:
    - `--mtp-draft-tokens 0`: correct (8/8 at TP2).

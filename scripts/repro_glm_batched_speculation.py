@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """Reproduce GLM-5.3 Flash answer corruption under batched speculative decoding.
 
-Standard library only; point it at any Flare server's OpenAI-compatible endpoint.
+Standard library only; point it at a Flare server's OpenAI-compatible endpoint.
 
 ``cached`` publishes one retrieval prompt (a single-token request), then sends
 ``--concurrency`` copies at once with distinct seeds. Every copy restores the
 same checkpoint, so all rows of the speculative batch are live and decode
 together. ``cold`` sends prompts that cannot reuse a cached prefix (a nonce
 leads each prompt), one at a time, so each request decodes right after its own
-prefill. Both print one line per request and a final hit count, and save full
-requests and replies with ``--output``.
+prefill. Full requests and replies are saved with ``--output``.
 
-    python3 scripts/repro_glm_batched_speculation.py cached --url http://host:8000 --concurrency 16
+    python3 scripts/repro_glm_batched_speculation.py cached --url http://host:8000 --concurrency 8
     python3 scripts/repro_glm_batched_speculation.py cold --url http://host:8000 --size 70000 --count 3
 
 The answer to the default ``--size 8000`` prompt (about 10.5K tokens) is
-``2U2GYCZF, 198``. Sampling uses the model card's T=1, top-p .95.
+``2U2GYCZF, 198``. Sampling uses the model card's T=1, top-p .95. Each reply is
+classified as:
+
+- ``correct``: the code and record 198, and no other code-like token;
+- ``neighbour``: the code with record 197 or 199;
+- ``misplaced``: the code with another record (record 99 is the usual one);
+- ``corrupt``: empty, or a wrong, garbled or additional invented code.
+
+Neighbour and misplaced answers are model-level misses that also occur without
+speculation and on unaffected servers. Corrupt answers are the defect.
+
+The script also reads the server's speculative round counters before and after
+the test and reports how many rounds ran in graphs with more than 16 query rows
+(batch capacity times verification width); the corruption appears in those.
 """
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -29,6 +42,8 @@ import urllib.error
 import urllib.request
 
 WORDS = 'the of and to in is was for on with as by at from that this which are be or an it not'.split()
+CODE_LIKE = re.compile(r'\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9][A-Z0-9-]{3,13}\b')
+ROUNDS = re.compile(r'^flare_speculative_rounds_total\{batch="(\d+)",width="(\d+)"\} (\d+)', re.M)
 
 
 def fixture(size, nonce, seed, max_tokens, model):
@@ -54,11 +69,28 @@ def send(url, body):
         return {'error': error.read().decode(errors='replace')[:500]}
 
 
-def score(response, code, record):
+def rounds(url):
+    """Speculative rounds by (batch, width), or None when the server has no Flare metrics."""
+    try:
+        text = urllib.request.urlopen(url + '/metrics', timeout=10).read().decode()
+    except (OSError, ValueError):
+        return None
+    return {(int(b), int(w)): int(n) for b, w, n in ROUNDS.findall(text)}
+
+
+def classify(response, code, record):
     if 'error' in response:
-        return False, response['error']
+        return 'error', response['error']
     content = response['choices'][0]['message'].get('content') or ''
-    return code in content and re.search(rf'\b{record}\b', content) is not None, content
+    others = {token for token in CODE_LIKE.findall(content) if token != code}
+    numbers = {int(n) for n in re.findall(r'\b\d{1,6}\b', content)}
+    if code in content and not others:
+        if record in numbers:
+            return 'correct', content
+        if numbers & {record - 1, record + 1}:
+            return 'neighbour', content
+        return 'misplaced', content
+    return 'corrupt', content
 
 
 def main():
@@ -67,7 +99,7 @@ def main():
     parser.add_argument('--url', default='http://127.0.0.1:8000', help='server origin, without /v1')
     parser.add_argument('--model', default='glm-5.3-flash')
     parser.add_argument('--size', type=int, default=8000, help='fixture size; 8000 gives about 10.5K prompt tokens')
-    parser.add_argument('--concurrency', type=int, default=16, help='cached: simultaneous requests')
+    parser.add_argument('--concurrency', type=int, default=8, help='cached: simultaneous requests')
     parser.add_argument('--count', type=int, default=3, help='cold: sequential requests')
     parser.add_argument('--max-tokens', type=int, default=1024, help='a correct answer takes about 150 tokens')
     parser.add_argument('--seed', type=int, default=1101)
@@ -79,6 +111,7 @@ def main():
     started = time.monotonic()
     if args.mode == 'cached':
         send(args.url, fixture(args.size, nonce, args.seed, 1, args.model)[0])
+        before = rounds(args.url)
         bodies = [fixture(args.size, nonce, args.seed + i, args.max_tokens, args.model)[0]
                   for i in range(args.concurrency)]
         _, code, record = fixture(args.size, nonce, args.seed, 1, args.model)
@@ -86,21 +119,31 @@ def main():
             responses = list(pool.map(lambda body: send(args.url, body), bodies))
         results = list(zip(bodies, responses))
     else:
+        before = rounds(args.url)
         for i in range(args.count):
             body, code, record = fixture(args.size, f'{nonce}-{i}', args.seed, args.max_tokens, args.model)
             results.append((body, send(args.url, body)))
-    hits = 0
+    after = rounds(args.url)
+    counts = Counter()
     saved = []
     for i, (body, response) in enumerate(results):
-        hit, content = score(response, code, record)
-        hits += hit
+        verdict, content = classify(response, code, record)
+        counts[verdict] += 1
         usage = response.get('usage', {})
-        print(f'{i:2d} {"HIT " if hit else "MISS"} completion_tokens={usage.get("completion_tokens")} '
-              f'{content[-120:]!r}', flush=True)
-        saved.append(dict(request=body, response=response, hit=hit))
-    print(f'{hits}/{len(results)} correct ({code}, {record}) in {time.monotonic() - started:.1f}s')
+        print(f'{i:2d} {verdict:9s} completion_tokens={usage.get("completion_tokens")} {content[-120:]!r}', flush=True)
+        saved.append(dict(request=body, response=response, verdict=verdict))
+    summary = ', '.join(f'{counts[k]} {k}' for k in ('correct', 'neighbour', 'misplaced', 'corrupt', 'error') if counts[k])
+    print(f'{summary} of {len(results)} (answer {code}, {record}) in {time.monotonic() - started:.1f}s')
+    shapes = {}
+    if before is not None and after is not None:
+        shapes = {key: after[key] - before.get(key, 0) for key in after if after[key] > before.get(key, 0)}
+        wide = sum(n for (b, w), n in shapes.items() if b * w > 16)
+        listed = ' '.join(f'{b}x{w}:{n}' for (b, w), n in sorted(shapes.items()))
+        print(f'speculative rounds by batch x width: {listed or "none"}; '
+              f'{wide} of {sum(shapes.values())} in graphs above 16 query rows')
     if args.output:
-        args.output.write_text(json.dumps(saved, indent=2))
+        args.output.write_text(json.dumps(dict(results=saved, rounds={f'{b}x{w}': n for (b, w), n in shapes.items()},
+                                               counts=dict(counts)), indent=2))
 
 
 if __name__ == '__main__':
