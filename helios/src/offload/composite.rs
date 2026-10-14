@@ -1773,6 +1773,7 @@ mod tests {
         );
         assert_eq!((stats.memory_records, stats.disk_records), (0, 0));
         small.close().unwrap();
+        drop(small);
 
         // A parent that left the disk index fails the child, whose memory copy
         // holds only its tail pages.

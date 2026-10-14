@@ -997,7 +997,12 @@ impl Ring {
                     }
                     Err(error) => {
                         self.free.push(slot);
-                        failure = Some(io_failure("submit direct I/O", error));
+                        failure = Some(Self::transfer_error(
+                            "submit direct I/O",
+                            error,
+                            chunk,
+                            write,
+                        ));
                         self.queue.cancel();
                     }
                 }
@@ -1021,7 +1026,9 @@ impl Ring {
                             });
                         }
                         Err(error) => {
-                            failure.get_or_insert_with(|| io_failure("complete direct I/O", error));
+                            failure.get_or_insert_with(|| {
+                                Self::transfer_error("complete direct I/O", error, chunk, write)
+                            });
                         }
                     }
                     if failure.is_some() {
@@ -1038,6 +1045,19 @@ impl Ring {
         match failure {
             Some(error) => Err(error),
             None => Ok(moved),
+        }
+    }
+
+    fn transfer_error(action: &str, error: io::Error, chunk: Chunk, write: bool) -> crate::Error {
+        if !write
+            && error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_HANDLE_EOF as i32)
+        {
+            invalid(format!(
+                "short direct read of 0 bytes at file offset {}; {} were requested",
+                chunk.offset, chunk.length
+            ))
+        } else {
+            io_failure(action, error)
         }
     }
 }
@@ -1466,7 +1486,8 @@ mod tests {
         assert_eq!(replies[0].header, Some(expected));
         succeeded(&replies[1]);
         assert_eq!(fresh[0].as_slice(), pages[0].as_slice());
-        assert!(failed(&replies[2]).contains("short direct read"));
+        let message = failed(&replies[2]);
+        assert!(message.contains("short direct read"), "{message}");
         succeeded(&replies[3]);
         assert_eq!(replies[4].operation, Operation::Unlink);
         succeeded(&replies[4]);
