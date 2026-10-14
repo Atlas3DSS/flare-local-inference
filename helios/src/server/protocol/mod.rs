@@ -4,7 +4,7 @@ mod decode;
 mod encode;
 use super::{inference, observation::ObservationOptions};
 pub(super) use decode::decode;
-pub(super) use encode::{Encoder, Frame};
+pub(super) use encode::{Encoder, Frame, PromptUsage};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

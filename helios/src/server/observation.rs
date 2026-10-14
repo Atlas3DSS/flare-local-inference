@@ -47,8 +47,7 @@ impl ObservationOptions {
     pub fn finish(
         &self,
         response: &mut Value,
-        prompt: usize,
-        generated: u32,
+        usage: &Value,
         reused: u64,
         timing: (Option<u64>, Option<u64>),
         stream: bool,
@@ -56,7 +55,7 @@ impl ObservationOptions {
         if self.token_ids {
             response["reused_prompt_tokens"] = json!(reused);
             if !stream || !self.include_usage {
-                response["usage"] = usage(prompt, generated);
+                response["usage"] = usage.clone();
             }
         }
         if self.timestamps {
@@ -73,10 +72,6 @@ fn flag(value: Option<&Value>, name: &str) -> Result<bool> {
         Some(Value::Bool(value)) => Ok(*value),
         _ => Err(format!("{name} must be boolean or null").into()),
     }
-}
-
-pub(super) fn usage(prompt: usize, generated: u32) -> Value {
-    json!({"prompt_tokens":prompt,"completion_tokens":generated,"total_tokens":prompt+generated as usize})
 }
 
 #[cfg(test)]
@@ -111,20 +106,19 @@ mod tests {
     #[test]
     fn terminal_metadata_preserves_presentation_and_counts_raw_tokens() {
         let original = json!({"choices":[{"message":{"content":"answer"},"finish_reason":"stop"}]});
+        let usage = json!({"prompt_tokens":17,"completion_tokens":3,"total_tokens":20,
+            "prompt_tokens_details":{"cached_tokens":16,"multimodal_tokens":{"image":8}}});
         let mut value = original.clone();
-        ObservationOptions::default().finish(&mut value, 17, 3, 16, (None, None), true);
+        ObservationOptions::default().finish(&mut value, &usage, 16, (None, None), true);
         assert_eq!(value, original);
         let options = ObservationOptions {
             token_ids: true,
             timestamps: true,
             include_usage: false,
         };
-        options.finish(&mut value, 17, 3, 16, (Some(10), Some(20)), true);
+        options.finish(&mut value, &usage, 16, (Some(10), Some(20)), true);
         assert_eq!(value["choices"], original["choices"]);
-        assert_eq!(
-            value["usage"],
-            json!({"prompt_tokens":17,"completion_tokens":3,"total_tokens":20})
-        );
+        assert_eq!(value["usage"], usage);
         assert_eq!(
             value["performance"],
             json!({"ingress_ns":10,"enqueue_ns":20,"reused_prompt_tokens":16})
@@ -135,7 +129,9 @@ mod tests {
             include_usage: true,
             ..options
         }
-        .finish(&mut separate, 17, 3, 16, (Some(10), Some(20)), true);
+        .finish(&mut separate, &usage, 16, (Some(10), Some(20)), true);
         assert!(separate.get("usage").is_none());
+        options.finish(&mut value, &usage, 16, (Some(10), Some(20)), false);
+        assert_eq!(value["usage"], usage);
     }
 }

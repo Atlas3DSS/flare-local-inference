@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use super::RankStream;
 use crate::{Error, ExecutionError, Result};
 
-const MAGIC: &[u8; 8] = b"FLARERV1";
+// Version 3 negotiates capacity before loading and exchanges discovered fabric endpoints.
+const MAGIC: &[u8; 8] = b"FLARERV3";
 const ADMITTED: u8 = 0;
 const REFUSED: u8 = 1;
 const CONNECTED: &[u8] = b"connected";
@@ -113,6 +114,9 @@ pub fn accept(
             continue;
         };
         let refusal = match parse_hello(&bytes) {
+            None if bytes.starts_with(b"FLARERV") => {
+                Some("incompatible rendezvous protocol; rebuild Flare on every host".to_owned())
+            }
             None => Some("not a flare rank".to_owned()),
             Some((_, peer_world, _)) if peer_world != world => Some(format!(
                 "its file has {peer_world} ranks, rank zero's has {world}"
@@ -211,13 +215,20 @@ fn decode_capacity(bytes: &[u8]) -> Result<(u64, u64)> {
         return Err(failure("rendezvous cache capacity is malformed"));
     }
     let word = |range: std::ops::Range<usize>| u64::from_le_bytes(bytes[range].try_into().unwrap());
-    Ok((word(0..8), word(8..16)))
+    let capacity = (word(0..8), word(8..16));
+    if capacity.0 == 0 || capacity.1 == 0 {
+        return Err(failure("rank cache capacity must be positive"));
+    }
+    Ok(capacity)
 }
 
 /// Rank zero: agree on the continuation rows and KV pages every rank allocates, the smallest any
 /// rank can back, and send them to each peer. Ranks size from their own free memory, but every
 /// rank must hold the same rows and pages: rank zero's scheduler addresses all of them.
 pub fn agree_capacity(peers: &mut [RankStream], local: (u64, u64)) -> Result<(u64, u64)> {
+    if local.0 == 0 || local.1 == 0 {
+        return Err(failure("rank cache capacity must be positive"));
+    }
     let mut agreed = local;
     for peer in peers.iter_mut() {
         let (rows, pages) = decode_capacity(&read_frame(peer)?)?;
@@ -231,6 +242,9 @@ pub fn agree_capacity(peers: &mut [RankStream], local: (u64, u64)) -> Result<(u6
 
 /// A peer: propose the rows and pages this rank can back and receive what every rank allocates.
 pub fn propose_capacity(stream: &mut RankStream, local: (u64, u64)) -> Result<(u64, u64)> {
+    if local.0 == 0 || local.1 == 0 {
+        return Err(failure("rank cache capacity must be positive"));
+    }
     write_frame(stream, &encode_capacity(local))?;
     let agreed = decode_capacity(&read_frame(stream)?)?;
     if agreed.0 > local.0 || agreed.1 > local.1 {
@@ -381,5 +395,44 @@ mod tests {
         let error = propose_capacity(&mut stream, (54, 4096)).unwrap_err();
         assert!(error.to_string().contains("more cache"), "{error}");
         zero.join().unwrap();
+    }
+
+    #[test]
+    fn cache_negotiation_rejects_malformed_or_invalid_limits() {
+        use std::os::unix::net::UnixStream;
+
+        for capacity in [(81, 100), (80, 101), (0, 100), (80, 0)] {
+            let (root, peer) = UnixStream::pair().unwrap();
+            let sender = std::thread::spawn(move || {
+                let mut root = RankStream::from(root);
+                assert_eq!(
+                    decode_capacity(&read_frame(&mut root).unwrap()).unwrap(),
+                    (80, 100)
+                );
+                write_frame(&mut root, &encode_capacity(capacity)).unwrap();
+            });
+            assert!(propose_capacity(&mut peer.into(), (80, 100)).is_err());
+            sender.join().unwrap();
+        }
+        for capacity in [(0, 100), (80, 0)] {
+            assert!(agree_capacity(&mut [], capacity).is_err());
+            let (_root, peer) = UnixStream::pair().unwrap();
+            assert!(propose_capacity(&mut peer.into(), capacity).is_err());
+        }
+        assert!(decode_capacity(&[0; 15]).is_err());
+        assert!(decode_capacity(&[0; 17]).is_err());
+    }
+
+    #[test]
+    fn rendezvous_version_matches_the_capacity_and_fabric_exchange() {
+        assert_eq!(
+            parse_hello(&hello(1, 2, "export-a")),
+            Some((1, 2, "export-a"))
+        );
+        for version in [b"FLARERV1", b"FLARERV2"] {
+            let mut old = hello(1, 2, "export-a");
+            old[..8].copy_from_slice(version);
+            assert!(parse_hello(&old).is_none());
+        }
     }
 }

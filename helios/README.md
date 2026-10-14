@@ -85,8 +85,13 @@ Execution and presentation failures return 500. SSE terminal failures and diagno
 messages. Failed CUDA drains retain prepared resources. Worker recovery is unsupported.
 
 The server exposes `/health`, `/v1/models`, `/v1/chat/completions`, and `/metrics`.
-`/v1/models` lists the model identifier and each configured `served_names` entry;
-requests may use any of them.
+`/v1/models` lists one card, using the first nonempty `served_names` entry as its
+`id`, or the checkpoint identifier when none is set. The card includes the
+effective context limit in `max_model_len` and prepared capabilities, with the
+checkpoint identifier in `root`. `/v1/models/{model}` returns the same card for
+the checkpoint identifier or any alias, including repository IDs with slashes.
+Unknown names return a JSON 404.
+See [the API reference](../docs/api.md) for discovery fields and generation routes.
 HTTP admission reserves at most `queue_capacity + max_active` requests before
 reading JSON bodies. Admitted requests await a bounded CPU preparation worker;
 the default two workers can prepare four simultaneous generation requests.

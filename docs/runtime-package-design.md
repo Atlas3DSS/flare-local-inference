@@ -471,7 +471,8 @@ row's byte cost remain dedicated to KV; the densest planes always participate.
 Across ranks, the scheduler uses the union of conflicting ranges.
 Ranks loaded in separate processes must report identical cache capacities and
 snapshot exclusions during the control-channel handshake; a mismatch rejects
-startup before replay. Independent hosts do not negotiate a common cache budget.
+startup before replay. Before cache allocation, hosts agree on the smallest row
+and page capacities that all ranks can back.
 An owned snapshot excludes all conflicting page ids; overlapping exclusions
 are reference-counted. A snapshot fitting entirely in execution-allocation
 alignment padding excludes no pages. Execution rows never alias KV pages.

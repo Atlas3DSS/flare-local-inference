@@ -142,4 +142,3 @@ def test_decode_rounds_match_helios(name):
     difference = next((index for index, (a, b) in enumerate(zip(actual, expected)) if a != b), None)
     assert actual == expected, f"first differing run {difference}: direct {actual[difference:difference + 3]}" \
                                f" Helios {expected[difference:difference + 3]}"
-

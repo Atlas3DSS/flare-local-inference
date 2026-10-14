@@ -1,4 +1,4 @@
-use super::protocol::{Encoder, Frame, Protocol};
+use super::protocol::{Encoder, Frame, PromptUsage, Protocol};
 use super::*;
 use futures_util::StreamExt;
 use std::{io::Read, task::Poll};
@@ -231,11 +231,16 @@ pub(super) async fn generate<M: ModelContract>(
     if count {
         return Json(json!({"input_tokens":prepared[0].prompt.tokens.len()})).into_response();
     }
-    let prompt_tokens = prepared
+    let prompt_usage = prepared
         .iter()
         .step_by(decoded.request.choices)
-        .map(|p| p.prompt.tokens.len())
-        .sum();
+        .map(|p| PromptUsage {
+            tokens: p.prompt.tokens.len(),
+            image_tokens: p.prompt.images.as_ref().map_or(0, |images| {
+                images.geometry.iter().map(|geometry| geometry.tokens).sum()
+            }),
+        })
+        .collect();
     let observation = decoded.observation;
     let ingress_ns = observation.timestamps.then_some(ingress_ns);
     let prompt_ids = observation
@@ -294,8 +299,8 @@ pub(super) async fn generate<M: ModelContract>(
         id.clone(),
         state.model.config().model_id.clone(),
         created,
-        size,
-        prompt_tokens,
+        decoded.request.choices,
+        prompt_usage,
         decoded.request.tools,
         decoded.request.tool_choice,
         decoded.request.parallel_tool_calls,
@@ -411,7 +416,6 @@ pub(super) async fn generate<M: ModelContract>(
                     Ok(vec![])
                 }
                 GenerationEvent::Finished {
-                    prompt_tokens,
                     generated_tokens,
                     reused_prompt_tokens,
                     termination,
@@ -437,8 +441,7 @@ pub(super) async fn generate<M: ModelContract>(
                                     {
                                         observation.finish(
                                             &mut frame.data,
-                                            prompt_tokens,
-                                            generated_tokens,
+                                            &encoder.usage_value(),
                                             reused_prompt_tokens,
                                             (ingress_ns, enqueue_ns),
                                             true,
@@ -476,11 +479,9 @@ pub(super) async fn generate<M: ModelContract>(
             if observation.timestamps {
                 response["choices"][0]["token_timestamps_ns"] = json!(timestamps);
             }
-            let generated = response["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
             observation.finish(
                 &mut response,
-                prompt_tokens,
-                generated,
+                &encoder.usage_value(),
                 reused_total,
                 (ingress_ns, enqueue_ns),
                 false,
