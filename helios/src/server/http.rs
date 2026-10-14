@@ -297,6 +297,8 @@ pub(super) async fn generate<M: ModelContract>(
         size,
         prompt_tokens,
         decoded.request.tools,
+        decoded.request.tool_choice,
+        decoded.request.parallel_tool_calls,
         observation.include_usage,
         decoded.metadata,
     );
@@ -489,7 +491,9 @@ pub(super) async fn generate<M: ModelContract>(
     if streaming {
         let events = delivery.filter_map(|event| async move {
             match event {
-                Delivery::Frame(frame) | Delivery::Failed(_, frame) => {
+                Delivery::Frame(frame) => Some(Ok::<_, Infallible>(frame.sse())),
+                Delivery::Failed(error, frame) => {
+                    eprintln!("streaming generation failed: {error}");
                     Some(Ok::<_, Infallible>(frame.sse()))
                 }
                 Delivery::Complete(_) => None,

@@ -251,11 +251,8 @@ impl ModelContract for DeepSeek4 {
         let reasoning = prefix
             .rfind("<think>")
             .is_some_and(|open| prefix.rfind("</think>").is_none_or(|close| open > close));
-        if structured && reasoning {
-            return Err("DeepSeek structured output requires non-thinking mode".into());
-        }
         Ok(output::OutputConfig {
-            verbatim: structured,
+            structured,
             reasoning,
             tools: options
                 .get("tools")

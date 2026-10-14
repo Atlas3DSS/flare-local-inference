@@ -1392,13 +1392,16 @@ the contracts established by the preceding stages.
    after calibrated component and continuation checks. Attribute graph cost to
    kernels and dependencies before changing fusion, precision, or overlap.
 
-Combined tool calls and structured output remain an admission limitation in
-[request.rs](../helios/src/server/request.rs). The required extension is one
-llguidance union grammar containing the checkpoint's tool-call envelope with
-each admitted tool's JSON argument schema and the final-content schema.
-`tool_choice=required` selects only tool alternatives; a named tool selects
-its schema; `tool_choice=none` selects content. Copy speculation must clone
-this same grammar state and upload masks for each candidate prefix.
+Structured output composes the answer grammar with the output protocol's
+reasoning and tool delimiters. The grammar constrains the answer, while tool
+payloads retain their normal parsing and validation. The native sampling mask
+and speculative grammar advancement apply to the complete composed grammar.
+`tool_choice=required` adds a prompt
+instruction and validates that the model produced a completed call to a declared
+tool. Generation uses ordinary sampling; an unsatisfied requirement fails the
+response. `tool_choice=none` removes tools from the template. Named tool selection
+and strict function schemas are unsupported. See [the API contracts](api.md) for
+protocol mappings and streamed errors.
 
 Bounded top-k sampling and compact recurrent commit require separate component
 and full-graph measurements. They cannot weaken threshold-tie handling,

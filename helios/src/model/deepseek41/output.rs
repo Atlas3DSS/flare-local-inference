@@ -33,7 +33,7 @@ mod tests {
         let text = "thought</think><｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"city\" string=\"true\">東京</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\"><｜DSML｜ parameter name=\"n\" string=\"false\">3</｜DSML｜ parameter></｜DSML｜ invoke>\n</｜DSML｜ calls>";
         for split in text.char_indices().map(|(offset, _)| offset) {
             let mut parser = DeepSeekOutput::new(OutputConfig {
-                verbatim: false,
+                structured: false,
                 reasoning: true,
                 tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
             });

@@ -59,6 +59,13 @@ pub struct ToolGrammar {
     pub syntax: String,
     pub source: String,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoice {
+    Auto,
+    None,
+    Required,
+}
 impl Tool {
     pub fn native_name(&self) -> String {
         match &self.namespace {
@@ -114,7 +121,8 @@ pub struct Request {
     pub input: Input,
     pub options: Options,
     pub tools: Vec<Tool>,
-    pub tools_disabled: bool,
+    pub tool_choice: ToolChoice,
+    pub parallel_tool_calls: bool,
     pub choices: usize,
 }
 impl Request {
@@ -130,10 +138,8 @@ impl Request {
                 );
             }
         }
-        if self.options.constraint.is_some() && !self.tools_disabled && !self.tools.is_empty() {
-            return Err(unsupported(
-                "structured output cannot be combined with tool-call generation",
-            ));
+        if self.tool_choice == ToolChoice::Required && self.tools.is_empty() {
+            return Err("required tool choice needs at least one tool".into());
         }
         Ok(())
     }
@@ -173,7 +179,7 @@ fn content(parts: &[Part]) -> Result<Value> {
 }
 
 /// Converts semantic parts to the message context consumed by prepared templates.
-pub fn template_messages(messages: &[Message]) -> Result<Vec<Value>> {
+pub fn template_messages(messages: &[Message], tool_choice: ToolChoice) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let lower_instructions = messages
         .iter()
@@ -283,5 +289,28 @@ pub fn template_messages(messages: &[Message]) -> Result<Vec<Value>> {
             out.push(json!({"role":message.role,"content":""}));
         }
     }
+    if tool_choice == ToolChoice::Required {
+        let instruction = "You must call at least one of the provided tools in your next response. Choose the appropriate tool and arguments.";
+        append_system_instruction(&mut out, instruction)?;
+    }
     Ok(out)
+}
+
+pub(super) fn append_system_instruction(
+    messages: &mut Vec<Value>,
+    instruction: &str,
+) -> Result<()> {
+    if let Some(message) = messages.first_mut().filter(|m| m["role"] == "system") {
+        match &mut message["content"] {
+            Value::String(text) => {
+                text.push_str("\n\n");
+                text.push_str(instruction);
+            }
+            Value::Array(parts) => parts.push(json!({"type":"text","text":instruction})),
+            _ => return Err("system instructions require text".into()),
+        }
+    } else {
+        messages.insert(0, json!({"role":"system","content":instruction}));
+    }
+    Ok(())
 }

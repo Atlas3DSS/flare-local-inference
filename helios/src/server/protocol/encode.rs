@@ -3,7 +3,7 @@ use crate::{
     Result,
     output::{Event, Termination},
     server::{
-        inference::Tool,
+        inference::{Tool, ToolChoice},
         output::{Accumulator, Block, Change, ResponseOutput},
     },
 };
@@ -60,6 +60,8 @@ pub(crate) struct Encoder {
     pub outputs: Vec<ResponseOutput>,
     chats: Vec<Accumulator>,
     tools: Vec<Tool>,
+    tool_choice: ToolChoice,
+    parallel_tool_calls: bool,
     tool_grammars: std::collections::HashMap<String, crate::grammar::TextGrammar>,
     prompt_tokens: usize,
     usage: Vec<Usage>,
@@ -78,6 +80,8 @@ impl Encoder {
         choices: usize,
         prompt_tokens: usize,
         tools: Vec<Tool>,
+        tool_choice: ToolChoice,
+        parallel_tool_calls: bool,
         include_usage: bool,
         metadata: Value,
     ) -> Self {
@@ -93,6 +97,8 @@ impl Encoder {
             model,
             created,
             tools,
+            tool_choice,
+            parallel_tool_calls,
             tool_grammars: Default::default(),
             prompt_tokens,
             include_usage,
@@ -331,7 +337,12 @@ impl Encoder {
         let mut frames = vec![];
         for event in events {
             if let Event::ToolBegin { name, .. } = &event {
-                if self.protocol != Protocol::Chat && self.tool(name).is_none() {
+                if !self.parallel_tool_calls && self.outputs[index].has_tools() {
+                    return Err("parallel tool calls are disabled, but the model produced more than one tool call".into());
+                }
+                if (self.protocol != Protocol::Chat || self.tool_choice == ToolChoice::Required)
+                    && self.tool(name).is_none()
+                {
                     return Err(format!("model emitted undeclared tool {name}").into());
                 }
             }
@@ -369,6 +380,9 @@ impl Encoder {
                 }
             }
             frames.extend(self.change(change)?);
+        }
+        if self.tool_choice == ToolChoice::Required && !self.outputs[index].has_tools() {
+            return Err("required tool choice was not satisfied: the model did not produce a completed tool call".into());
         }
         let reason = if cause == Termination::OutputLimit {
             "length"
@@ -455,7 +469,7 @@ impl Encoder {
             Protocol::Responses => {
                 let complete = self.reasons[0].is_some();
                 let incomplete = self.reasons[0] == Some("length");
-                json!({"id":self.id,"object":"response","created_at":self.created,"model":self.model,"status":if !complete{"in_progress"}else if incomplete{"incomplete"}else{"completed"},"error":null,"incomplete_details":if incomplete{json!({"reason":"max_output_tokens"})}else{Value::Null},"output":(0..self.outputs[0].blocks.len()).map(|i|self.item(i,complete)).collect::<Vec<_>>(),"usage":if complete{self.usage_value()}else{Value::Null},"store":false,"metadata":self.metadata,"parallel_tool_calls":true,"tool_choice":"auto","tools":[],"text":{"format":{"type":"text"}}})
+                json!({"id":self.id,"object":"response","created_at":self.created,"model":self.model,"status":if !complete{"in_progress"}else if incomplete{"incomplete"}else{"completed"},"error":null,"incomplete_details":if incomplete{json!({"reason":"max_output_tokens"})}else{Value::Null},"output":(0..self.outputs[0].blocks.len()).map(|i|self.item(i,complete)).collect::<Vec<_>>(),"usage":if complete{self.usage_value()}else{Value::Null},"store":false,"metadata":self.metadata,"parallel_tool_calls":self.parallel_tool_calls,"tool_choice":self.tool_choice,"tools":[],"text":{"format":{"type":"text"}}})
             }
         }
     }

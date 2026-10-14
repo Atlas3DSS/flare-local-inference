@@ -264,7 +264,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         json!({"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"code":{"enum":["A","B"]}},"required":["code"],"additionalProperties":false}}}),
         json!({"type":"json_object"}),
     ] {
-        let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."}],"response_format":format,"add_generation_prompt":true});
+        let body = json!({"model":config.model_id,"messages":[{"role":"user","content":"Return JSON."}],"response_format":format,"add_generation_prompt":true,"enable_thinking":false});
         let mut prepared = prepare_request::<Qwen4Exp>(
             &frontend,
             Some(&processor),
@@ -272,7 +272,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &config,
             body.clone(),
         )?;
-        if prepared.output.reasoning || !prepared.output.verbatim {
+        if prepared.output.reasoning || !prepared.output.structured {
             return Err("structured request entered reasoning mode".into());
         }
         let grammar = prepared

@@ -52,7 +52,13 @@ When developer instructions are present, system and developer instructions becom
 one leading system message. Instruction sections retain their role labels and
 request order; ordinary conversation messages retain their relative order.
 Conversations without developer messages use the template's native system-role
-rules.
+rules where supported. The shared frontend probes the prepared template once for
+inline system-message support. If the template rejects or omits inline system
+text, noninitial system messages become user messages at the same positions,
+with their text wrapped in `<system>...</system>`. Text blocks are joined with
+blank lines. The leading system message and preceding conversation remain
+unchanged. This conversion supplies a textual role cue; it does not provide a
+native system role to models whose templates cannot represent one inline.
 
 Model output parsers emit neutral semantic events. The ordered accumulator in
 `server/output.rs` retains text, reasoning, and tool blocks. Protocol encoders use
@@ -62,8 +68,24 @@ they are complete, so argument events do not imply incremental generation of an
 unfinished call. Truncated tool envelopes are omitted and the response reports
 its output limit; malformed envelopes at natural completion are errors.
 
-Supported tools are client-executed JSON functions with automatic selection or
-`tool_choice: "none"`. Responses also supports text custom tools by presenting a
+Qwen treats `<tool_call>` as an implicit end to reasoning. Function-tag calls
+complete at `</function>` and accept omitted outer tool tags in answer content.
+A missing `</parameter>` is closed by the next parameter or function boundary.
+Parameter schemas guide
+best-effort type conversion; non-strict schemas do not reject invalid values.
+Qwen removes one leading and one trailing wrapping newline from parameter values;
+MiMo's compact tags preserve their values verbatim, including indentation and
+newlines.
+
+Supported tools are client-executed JSON functions with `tool_choice` set to
+`"auto"`, `"none"`, or `"required"`. Anthropic's `{"type":"any"}` selects the same
+required mode. Required mode needs at least one declared tool, adds an instruction
+to call a tool to the prompt, and validates that generation produced at least one
+completed call to a declared tool. Sampling is unchanged; no calls are fabricated
+and no retries are attempted. Missing calls, including output truncated before a
+complete call, produce HTTP 500 for buffered requests or a terminal error event
+for streams. A stream may deliver partial text before that error, but does not
+emit a success terminator. Responses also supports text custom tools by presenting a
 JSON `{ "input": string }` function to the model and restoring the custom call on
 output. Anthropic's `type: "custom"` uses its ordinary `input_schema` contract.
 Responses namespaces become unique `namespace__name` names in the model template
@@ -76,14 +98,23 @@ call. Invalid output fails the response; generation is not constrained to the
 grammar and no automatic repair is attempted. Grammar compilation uses the same
 bounded llguidance compiler as structured output.
 
-Forced, required, or named selection, strict function schemas, and disabling
-parallel calls are rejected. Hosted search, computer execution,
-file stores, audio, and remote image downloads are unsupported. Images must be
+`parallel_tool_calls: false` permits at most one tool call per response.
+Anthropic's `tool_choice.disable_parallel_tool_use: true` applies the same limit.
+The output validator fails the response when a second call begins, before emitting
+that call. Buffered requests receive HTTP 500; streams receive a terminal error
+and may already have delivered the first call. Combined with required mode, a
+successful response contains exactly one call. Generation uses ordinary sampling.
+
+Named tool selection and strict function schemas are rejected. Hosted search,
+computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
 base64 PNG/JPEG data and fit the loaded package's prepared image capacities.
 
-Anthropic histories preserve text, thinking, tool use/results, errors, and image
-blocks. Assistant-prefill messages use the packaged template's continuation
-support. `context_management` may request preservation of all thinking blocks
+Anthropic histories accept inline system text and preserve text, thinking, tool
+use/results, errors, and image blocks. Message-level control metadata, including
+`output_config.effort`, is ignored; top-level generation controls apply to the
+request. Empty system messages produce no prompt text. Assistant-prefill messages
+use the packaged template's continuation support. `context_management` may
+request preservation of all thinking blocks
 (`clear_thinking_20251015` with `keep: "all"`); active context edits are rejected.
 Cache-control hints do not alter the native prefix-cache policy.
 
@@ -116,8 +147,12 @@ model’s probability distribution, and is not appropriate for most use cases”
 Omit temperature to use the model default, or provide a positive value. The request is never silently clamped or replaced.
 Native extensions such as `top_k`, `min_p`, repetition penalties, token stops,
 `grammar`, and `chat_template_kwargs` remain available. JSON output formats and
-Lark output grammars use the existing constrained decoder and cannot be combined
-with active tools, thinking, assistant continuation, or custom stops.
+Lark output grammars constrain the final answer while permitting the model's
+reasoning and tool-call envelopes. Tool arguments do not use the final-answer
+schema. Active tools and thinking remain available; assistant continuation and
+custom stops cannot be combined with output constraints.
+For conversational JSON output, the schema and a JSON-only formatting instruction
+are included in the system prompt as well as enforced by token masks.
 
 Anthropic thinking budgets are advisory effort hints, not independent token
 budgets. Budgets up to 5,000 map to low effort, up to 20,000 to high effort, and
@@ -172,8 +207,9 @@ configured through its CLI, configuration file, and prepared package.
 search, and describe local model capabilities. Set the catalog's context limit
 to the loaded package's capacity. The catalog uses Codex's freeform `apply_patch`
 tool with completed-input grammar validation.
-The coding-client tests exercise Codex 0.162.1 and Claude Code 2.1.296 with actual
-file inspection, editing, and test execution in temporary repositories.
+The coding-client tests exercise Codex 0.162.1 and Claude Code 2.1.296 in normal
+and bare modes with actual file inspection, editing, and test execution in
+temporary repositories.
 
 Install SDK test dependencies and run against an idle native service:
 

@@ -75,6 +75,10 @@ pub trait ModelOutput {
     type Reasoning: ReasoningParser;
     type Tools: ToolCallParser;
     fn new(config: Self::Config) -> Self;
+    #[cfg(feature = "server")]
+    fn grammar_envelope(_: &Self::Config) -> Option<crate::grammar::OutputEnvelope> {
+        None
+    }
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>>;
     fn finish(&mut self, cause: Termination) -> Result<Vec<Event>>;
 }

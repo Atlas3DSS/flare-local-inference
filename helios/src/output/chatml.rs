@@ -4,21 +4,24 @@ pub use crate::output::tagged::OutputConfig;
 use crate::{
     Result,
     frontend::{Frontend, RenderedPrompt},
-    output::tagged::{TaggedOutput, ToolDialect, parameter_value},
+    output::tagged::{TaggedOutput, ToolDialect},
 };
 use serde_json::{Map, Value};
 
-pub struct FunctionTags;
-impl ToolDialect for FunctionTags {
+pub struct FunctionTags<const WRAPPING_NEWLINES: bool>;
+impl<const WRAPPING_NEWLINES: bool> ToolDialect for FunctionTags<WRAPPING_NEWLINES> {
     const NAME: &'static str = "function-tag";
-    const TRIM_NEWLINES: bool = true;
+    const TRIM_NEWLINES: bool = WRAPPING_NEWLINES;
     const OPEN: &'static str = "<tool_call>";
     const CLOSE: &'static str = "</tool_call>";
+    const FUNCTION: Option<(&'static str, &'static str)> = Some(("<function=", "</function>"));
+    const TOOL_ENDS_REASONING: bool = true;
     fn parse(body: &str, tools: &[Value]) -> Result<Vec<(String, String)>> {
-        Ok(vec![parse_tool(body, tools)?])
+        Ok(vec![parse_tool(body, tools, WRAPPING_NEWLINES)?])
     }
 }
-pub type ChatMlOutput = TaggedOutput<FunctionTags>;
+pub type ChatMlOutput = TaggedOutput<FunctionTags<true>>;
+pub type CompactChatMlOutput = TaggedOutput<FunctionTags<false>>;
 
 /// Initialize from the open assistant envelope, never an earlier message body.
 pub fn prepare_output(
@@ -52,7 +55,7 @@ pub fn prepare_output(
             .is_some_and(|open| text.rfind("</think>").is_none_or(|close| open > close))
     });
     OutputConfig {
-        verbatim: structured,
+        structured,
         reasoning,
         tools: effective("tools")
             .and_then(Value::as_array)
@@ -61,7 +64,7 @@ pub fn prepare_output(
     }
 }
 
-fn parse_tool(body: &str, tools: &[Value]) -> Result<(String, String)> {
+fn parse_tool(body: &str, tools: &[Value], wrapped_parameters: bool) -> Result<(String, String)> {
     let body = body
         .trim()
         .strip_prefix("<function=")
@@ -88,20 +91,31 @@ fn parse_tool(body: &str, tools: &[Value]) -> Result<(String, String)> {
             }
             break;
         }
-        rest = rest
-            .strip_prefix("<parameter=")
-            .ok_or("tool function requires parameter or closing tag")?;
-        let (parameter, tail) = rest
-            .split_once('>')
-            .ok_or("unterminated tool parameter name")?;
+        let (parameter, tail) =
+            parameter_start(rest).ok_or("tool function requires parameter or closing tag")?;
         if parameter.is_empty() || arguments.contains_key(parameter) {
             return Err("tool parameter names must be nonempty and unique".into());
         }
-        let (value, tail) = tail
-            .split_once("</parameter>")
+        let (end, consumed) = tail
+            .match_indices('<')
+            .find_map(|(at, _)| {
+                let suffix = &tail[at..];
+                if let Some(rest) = parameter_end(suffix) {
+                    Some((at, suffix.len() - rest.len()))
+                } else if parameter_start(suffix).is_some() || suffix.starts_with("</function>") {
+                    Some((at, 0))
+                } else {
+                    None
+                }
+            })
             .ok_or("unterminated tool parameter value")?;
-        let value = value.strip_prefix('\n').unwrap_or(value);
-        let value = value.strip_suffix('\n').unwrap_or(value);
+        let (value, tail) = (&tail[..end], &tail[end + consumed..]);
+        let value = if wrapped_parameters {
+            let value = value.strip_prefix('\n').unwrap_or(value);
+            value.strip_suffix('\n').unwrap_or(value)
+        } else {
+            value
+        };
         let schema = properties.and_then(|properties| properties.get(parameter));
         arguments.insert(parameter.into(), parameter_value(value, schema)?);
         rest = tail;
@@ -112,6 +126,130 @@ fn parse_tool(body: &str, tools: &[Value]) -> Result<(String, String)> {
             crate::FrontendError::Input(crate::Failure::caused_by(error.to_string(), error))
         })?,
     ))
+}
+
+fn parameter_start(text: &str) -> Option<(&str, &str)> {
+    text.strip_prefix('<')?
+        .trim_start()
+        .strip_prefix("parameter")?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start()
+        .split_once('>')
+}
+
+fn parameter_end(text: &str) -> Option<&str> {
+    text.strip_prefix('<')?
+        .trim_start()
+        .strip_prefix('/')?
+        .trim_start()
+        .strip_prefix("parameter")?
+        .trim_start()
+        .strip_prefix('>')
+}
+
+fn parameter_value(raw: &str, schema: Option<&Value>) -> Result<Value> {
+    let mut kinds = Vec::new();
+    parameter_types(schema, &mut kinds);
+    let parsed = serde_json::from_str::<Value>(raw);
+    let mut value = None;
+    for kind in [
+        "null", "integer", "number", "boolean", "object", "array", "string",
+    ] {
+        if !kinds.contains(&kind) {
+            continue;
+        }
+        value = match kind {
+            "null" if raw.eq_ignore_ascii_case("null") => Some(Value::Null),
+            "integer" => raw
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .map(Value::from)
+                .or_else(|| raw.trim().parse::<u64>().ok().map(Value::from)),
+            "number" => raw
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            "boolean" => match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Some(Value::Bool(true)),
+                "false" | "0" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            "object" | "array" => parsed.as_ref().ok().cloned(),
+            "string" => Some(Value::String(raw.into())),
+            _ => None,
+        };
+        if value.is_some() {
+            break;
+        }
+    }
+    // Tool schemas guide tag-to-JSON conversion; non-strict calls retain invalid values.
+    let mut value = value
+        .or_else(|| parsed.ok())
+        .unwrap_or_else(|| Value::String(raw.into()));
+    if let Some(schema) = schema {
+        match &mut value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if let Some(property) = schema.get("properties").and_then(|p| p.get(key)) {
+                        let raw = match value {
+                            Value::String(text) => text.clone(),
+                            _ => value.to_string(),
+                        };
+                        *value = parameter_value(&raw, Some(property))?;
+                    }
+                }
+            }
+            Value::Array(items) => {
+                if let Some(item_schema) = schema.get("items").filter(|v| v.is_object()) {
+                    for value in items {
+                        let raw = match value {
+                            Value::String(text) => text.clone(),
+                            _ => value.to_string(),
+                        };
+                        *value = parameter_value(&raw, Some(item_schema))?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(value)
+}
+
+fn parameter_types<'a>(schema: Option<&'a Value>, kinds: &mut Vec<&'a str>) {
+    let start = kinds.len();
+    if let Some(schema) = schema {
+        match schema.get("type") {
+            Some(Value::String(kind)) => kinds.push(kind),
+            Some(Value::Array(types)) => kinds.extend(types.iter().filter_map(Value::as_str)),
+            _ => {}
+        }
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            kinds.extend(values.iter().map(|value| match value {
+                Value::Null => "null",
+                Value::Bool(_) => "boolean",
+                Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            }));
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            if let Some(branches) = schema.get(key).and_then(Value::as_array) {
+                for branch in branches {
+                    parameter_types(Some(branch), kinds);
+                }
+            }
+        }
+    }
+    if kinds.len() == start {
+        kinds.push("string");
+    }
 }
 
 #[cfg(test)]
@@ -149,7 +287,7 @@ mod tests {
 
     fn config() -> OutputConfig {
         OutputConfig {
-            verbatim: false,
+            structured: false,
             reasoning: true,
             tools: vec![
                 json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"city":{"type":"string"},"n":{"type":"integer"},"data":{"type":"object"}}}}}),
@@ -195,7 +333,7 @@ mod tests {
     fn incomplete_unknown_and_duplicate_calls_fail() {
         let mut parser = Harness::new(
             OutputConfig {
-                verbatim: false,
+                structured: false,
                 reasoning: false,
                 ..config()
             },
@@ -203,20 +341,146 @@ mod tests {
         );
         parser.push("<tool_call><function=lookup>").unwrap();
         assert!(parser.finish().is_err());
-        assert!(parse_tool("<function=unknown></function>", &config().tools).is_err());
+        assert!(parse_tool("<function=unknown></function>", &config().tools, true).is_err());
         assert!(
             parse_tool(
                 "<function=lookup><parameter=n>1</parameter><parameter=n>2</parameter></function>",
-                &config().tools
+                &config().tools,
+                true
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn qwen_function_boundaries_match_vllm_recovery_cases_at_every_split() {
+        for text in [
+            "<function=lookup><parameter=city>Paris</parameter></function>",
+            "<tool_call><function=lookup><parameter=city>Paris</function></tool_call>",
+            "<tool_call><function=lookup><parameter=city>Paris<parameter=n>3</function></tool_call>",
+            "<tool_call><function=lookup>< parameter = city>Paris< / parameter ></function></tool_call>",
+            "<tool_call><function=lookup><parameter=city>Paris</parameter></function><tool_call><function=lookup><parameter=city>Paris</parameter></function></tool_call>",
+        ] {
+            for split in text.char_indices().map(|(index, _)| index) {
+                let mut parser = Harness::new(
+                    OutputConfig {
+                        reasoning: false,
+                        ..config()
+                    },
+                    "quirk".into(),
+                );
+                parser.push(&text[..split]).unwrap();
+                parser.push(&text[split..]).unwrap();
+                parser.finish().unwrap();
+                let message = parser.message();
+                let calls = message["tool_calls"].as_array().unwrap();
+                assert_eq!(
+                    calls.len(),
+                    text.matches("<function=").count(),
+                    "{text} at {split}"
+                );
+                for call in calls {
+                    let args: Value =
+                        serde_json::from_str(call["function"]["arguments"].as_str().unwrap())
+                            .unwrap();
+                    assert_eq!(args["city"], "Paris");
+                    if text.contains("<parameter=n>") {
+                        assert_eq!(args["n"], 3);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn qwen_tools_end_reasoning_and_duplicate_think_markers_do_not_leak() {
+        for text in [
+            "<think>Look up Paris.<tool_call><function=lookup><parameter=city>Paris</parameter></function></tool_call>",
+            "Look up Paris.</think></think><tool_call><function=lookup><parameter=city>Paris</parameter></function></tool_call>",
+        ] {
+            for split in text.char_indices().map(|(index, _)| index) {
+                let mut parser = Harness::new(config(), "implicit".into());
+                parser.push(&text[..split]).unwrap();
+                parser.push(&text[split..]).unwrap();
+                parser.finish().unwrap();
+                let message = parser.message();
+                assert_eq!(
+                    message["reasoning_content"], "Look up Paris.",
+                    "{text} at {split}"
+                );
+                assert!(message["content"].is_null() || message["content"] == "");
+                assert_eq!(message["tool_calls"].as_array().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn qwen_parameter_conversion_prioritizes_types_and_preserves_invalid_values() {
+        for (raw, schema, expected) in [
+            (
+                "3",
+                json!({"anyOf":[{"type":"string"},{"type":"integer"}]}),
+                json!(3),
+            ),
+            ("null", json!({"type":["string","null"]}), Value::Null),
+            ("TRUE", json!({"type":"boolean"}), json!(true)),
+            ("1", json!({"type":"boolean"}), json!(true)),
+            ("0003", json!({"type":"integer"}), json!(3)),
+            ("wrong", json!({"type":"integer"}), json!("wrong")),
+            ("inf", json!({"type":"number"}), json!("inf")),
+            ("3", json!({"enum":[1,2,3]}), json!(3)),
+            (
+                "  exact \\n",
+                json!({"type":"string"}),
+                json!("  exact \\n"),
+            ),
+            (
+                r#"{"count":"3"}"#,
+                json!({"type":"object","properties":{"count":{"type":"integer"}}}),
+                json!({"count":3}),
+            ),
+        ] {
+            assert_eq!(
+                parameter_value(raw, Some(&schema)).unwrap(),
+                expected,
+                "{raw} / {schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_envelopes_preserve_newlines_and_indentation() {
+        let text = "\nreason\n</think>\n\nContent\n<tool_call><function=lookup><parameter=city>\n    café\n\n</parameter></function></tool_call>";
+        for split in text.char_indices().map(|(at, _)| at) {
+            let mut parser = CompactChatMlOutput::new(config());
+            let mut output = Accumulator::new("compact".into());
+            output
+                .apply(parser.push(Input::Text(&text[..split])).unwrap())
+                .unwrap();
+            output
+                .apply(parser.push(Input::Text(&text[split..])).unwrap())
+                .unwrap();
+            output
+                .apply(parser.finish(Termination::Eos).unwrap())
+                .unwrap();
+            output.finish().unwrap();
+            let message = output.message();
+            assert_eq!(message["reasoning_content"], "\nreason\n", "split {split}");
+            assert_eq!(message["content"], "\n\nContent\n", "split {split}");
+            let args: Value = serde_json::from_str(
+                message["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(args["city"], "\n    café\n\n", "split {split}");
+        }
     }
     #[test]
     fn tag_like_text_is_preserved_without_registered_tools() {
         let mut parser = Harness::new(
             OutputConfig {
-                verbatim: false,
+                structured: false,
                 reasoning: false,
                 tools: vec![],
             },
@@ -249,7 +513,7 @@ mod tests {
             OutputConfig {
                 reasoning: false,
                 tools: case["options"]["tools"].as_array().unwrap().clone(),
-                verbatim: false,
+                structured: false,
             },
             "canonical".into(),
         );
@@ -279,7 +543,8 @@ mod tests {
         for split in text.char_indices().map(|(index, _)| index) {
             let mut parser = Harness::new(
                 OutputConfig {
-                    verbatim: true,
+                    structured: true,
+                    reasoning: false,
                     ..config()
                 },
                 "json".into(),
@@ -290,6 +555,31 @@ mod tests {
             assert_eq!(parser.message()["content"], text);
             assert!(parser.message().get("reasoning_content").is_none());
             assert!(!parser.has_tools());
+        }
+    }
+    #[test]
+    fn structured_answers_follow_reasoning_and_tools_without_parsing_literal_tags() {
+        let answer = r#"{"literal":"<think>世界</think><tool_call>literal</tool_call>"}"#;
+        let text = format!(
+            "Check sources.</think>\n\n<tool_call><function=lookup><parameter=query>alpha</parameter></function></tool_call>\n{answer}"
+        );
+        for split in text.char_indices().map(|(index, _)| index) {
+            let mut parser = Harness::new(
+                OutputConfig {
+                    structured: true,
+                    reasoning: true,
+                    ..config()
+                },
+                "structured".into(),
+            );
+            parser.push(&text[..split]).unwrap();
+            parser.push(&text[split..]).unwrap();
+            parser.finish().unwrap();
+            let message = parser.message();
+            assert_eq!(message["reasoning_content"], "Check sources.");
+            assert_eq!(message["content"].as_str().unwrap().trim(), answer);
+            assert_eq!(message["tool_calls"].as_array().unwrap().len(), 1);
+            assert_eq!(message["tool_calls"][0]["function"]["name"], "lookup");
         }
     }
     #[test]
