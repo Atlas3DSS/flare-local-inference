@@ -118,6 +118,43 @@ class PreparedCompressor:
         save_hidden(tags, self.pool.region(f"layer{self.layer}.pending_position"), m.state_rows, counts > 0)
 
 
+class PreparedGlobalKV:
+    """Project and store every source row before decoder queries are packed."""
+
+    def __init__(self, layer, weights, source, scratch, metadata, pool, rotary, *,
+                 session, name, deferred=False):
+        self.layer, self.metadata, self.pool, self.rotary = layer, metadata, pool, rotary
+        self.ratio = pool.config.text["compress_ratios"][layer]
+        self.slots = torch.full((source.shape[0],), -1, dtype=torch.int64, device=source.device)
+        self.compressor = PreparedCompressor(layer, weights["compressor"], source, metadata,
+            pool, self.slots, session=session, name=f"{name}.compress", deferred=deferred)
+        self.keys, self.normalized_keys = scratch.index_keys, scratch.normalized_keys
+        self.index_key = UnquantizedProjection(self.compressor.output, weights["index_k"], self.keys,
+            session=session, name=f"{name}.index_key")
+        self.index_norm = PreparedRMSNorm(self.keys, weights["index_norm"], self.normalized_keys,
+            eps=pool.config.text["rms_norm_eps"], session=session, name=name + ".index_norm")
+        self.writer = PreparedCompressedCacheWriter(self.compressor.output,
+            pool.pages[f"layer{layer}.latent_page"], self.compressor.slots,
+            page_size=PAGE_TOKENS // self.ratio, kind="indexed", session=session,
+            name=f"{name}.compressed_write")
+
+    def __call__(self, source, indexer):
+        m = self.metadata
+        live = m.positions >= 0
+        position = m.positions.clamp(min=0)
+        pages = m.page_table[m.requests, (position // PAGE_TOKENS).clamp(max=m.page_table.shape[1] - 1)]
+        self.slots.copy_(torch.where(live,
+            pages.long() * (PAGE_TOKENS // self.ratio) + (position % PAGE_TOKENS) // self.ratio, -1))
+        latent = self.compressor(source)
+        self.index_key(latent)
+        self.index_norm(self.keys)
+        compressed_position = (position + 1) // self.ratio * self.ratio - self.ratio
+        self.rotary.apply(self.normalized_keys, compressed_position, compressed=True)
+        indexer.write_keys(self.normalized_keys, self.compressor.slots)
+        self.rotary.apply(latent, compressed_position, compressed=True)
+        self.writer(latent)
+
+
 @triton.jit
 def _commit_window(Staged, Window, State, Starts, Lengths, STRIDE: tl.constexpr,
                    STAGED_STRIDE: tl.constexpr, BLOCK: tl.constexpr):
@@ -133,9 +170,10 @@ def _commit_window(Staged, Window, State, Starts, Lengths, STRIDE: tl.constexpr,
 
 class PreparedAttention:
     def __init__(self, layer, weights, source, scratch, metadata, pool, rotary, *, mode,
-                 world, session, name, workspace):
+                 world, session, name, workspace, replay_start=None, window_staging=None):
         self.layer, self.weights, self.scratch, self.metadata = layer, weights, scratch, metadata
         self.pool, self.rotary, self.mode = pool, rotary, mode
+        self.replay_start = replay_start
         config = pool.config
         draft = mode == "draft"
         self.ratio = 0 if draft else config.text["compress_ratios"][layer]
@@ -145,8 +183,15 @@ class PreparedAttention:
         rows = metadata.starts.numel()
         self.window_page_size = 128 if mode == "decode" else 128 + tokens // rows
         self.window = pool.window(layer, draft=draft)
-        self.window_cache = self.window if mode == "decode" else torch.zeros(
-            (rows, self.window_page_size * 528), dtype=torch.uint8, device=device)
+        if window_staging is not None:
+            if (mode != "verify" or window_staging.shape != (rows, self.window_page_size * 528)
+                    or window_staging.dtype != torch.uint8 or window_staging.device != device
+                    or not window_staging.is_contiguous()):
+                raise ValueError("verification window staging must match the contiguous cache geometry")
+            self.window_cache = window_staging
+        else:
+            self.window_cache = self.window if mode == "decode" else torch.zeros(
+                (rows, self.window_page_size * 528), dtype=torch.uint8, device=device)
         self.window_slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
         window_width = self.window_page_size if draft else 128
         self.window_indices = torch.full((tokens, window_width), -1, dtype=torch.int32, device=device)
@@ -156,7 +201,6 @@ class PreparedAttention:
         self.lengths = torch.zeros(tokens, dtype=torch.int32, device=device)
         self.active_width = torch.zeros(1, dtype=torch.int32, device=device)
         self.index_lengths = torch.zeros(tokens, dtype=torch.int32, device=device)
-        self.compressed_slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
         self.page_table = metadata.token_page_table
         self.projections = {}
         for key, values, out in (
@@ -173,18 +217,11 @@ class PreparedAttention:
         self.window_writer = PreparedCompressedCacheWriter(scratch.window_values, self.window_cache,
             self.window_slots, page_size=self.window_page_size, kind="swa", session=session,
             name=f"{name}.window_write")
-        self.compressor = self.compressed_writer = None
+        self.global_kv = None
         self.selectors = []
         if "compressor" in weights:
-            self.compressor = PreparedCompressor(layer, weights["compressor"], source, metadata,
-                pool, self.compressed_slots, session=session, name=f"{name}.compress", deferred=mode == "verify")
-            self.index_key = UnquantizedProjection(self.compressor.output, weights["index_k"], scratch.index_keys,
-                session=session, name=f"{name}.index_key")
-            self.index_norm = PreparedRMSNorm(scratch.index_keys, weights["index_norm"], scratch.normalized_keys,
-                eps=self.eps, session=session, name=name + ".index_norm")
-            self.compressed_writer = PreparedCompressedCacheWriter(self.compressor.output,
-                pool.pages[f"layer{layer}.latent_page"], self.compressor.slots,
-                page_size=128 // self.ratio, kind="indexed", session=session, name=f"{name}.compressed_write")
+            self.global_kv = PreparedGlobalKV(layer, weights, source, scratch, metadata, pool, rotary,
+                session=session, name=name, deferred=mode == "verify")
         if "index_q" in weights:
             self.index_query = QuantizedProjection(scratch.query_low, weights["index_q"],
                 scratch.index_query.view(tokens, -1), session=session, name=f"{name}.index_query",
@@ -212,7 +249,10 @@ class PreparedAttention:
         self.attention = PreparedCompressedMLA(scratch.query, self.window_cache, self.window_indices,
             self.window_lengths, weights["sink"], scratch.attended,
             window_page_size=self.window_page_size,
-            mode="decode" if mode == "decode" else "extend", session=session, name=f"{name}.attention",
+            # Small speculative queries retain their staged caches and explicit
+            # indices while using the low-row MLA implementation.
+            mode="decode" if mode == "decode" or (mode in ("verify", "draft") and tokens <= 8) else "extend",
+            session=session, name=f"{name}.attention",
             workspace=workspace, **indexed)
 
     def __call__(self, source):
@@ -221,7 +261,10 @@ class PreparedAttention:
         position = m.positions.clamp(min=0)
         rows = m.state_rows[m.requests]
         starts = m.starts[m.requests]
-        self.window_lengths.copy_(torch.where(live, (position + 1).clamp(max=128), 0))
+        available = position + 1
+        if self.replay_start is not None:
+            available = available - self.replay_start[m.requests]
+        self.window_lengths.copy_(torch.where(live, available.clamp(0, 128), 0))
         positions = position[:, None] - self.window_lengths[:, None] + 1 + self.offsets
         if self.mode == "decode":
             slots = rows * 128 + position % 128
@@ -250,18 +293,8 @@ class PreparedAttention:
             self.lengths.copy_(torch.where(live, (position + 1) // self.ratio, 0))
             self.index_lengths.copy_(self.lengths.clamp(max=512))
             self.active_width.copy_(self.lengths.amax().view(1))
-            pages = m.page_table[m.requests, (position // PAGE_TOKENS).clamp(max=m.page_table.shape[1] - 1)]
-            self.compressed_slots.copy_(torch.where(live,
-                pages.long() * (128 // self.ratio) + (position % 128) // self.ratio, -1))
-            if self.compressor is not None:
-                latent = self.compressor(source)
-                self.index_key(latent)
-                self.index_norm(s.index_keys)
-                compressed_position = (position + 1) // self.ratio * self.ratio - self.ratio
-                self.rotary.apply(s.normalized_keys, compressed_position, compressed=True)
-                self.selectors[0].write_keys(s.normalized_keys, self.compressor.slots)
-                self.rotary.apply(latent, compressed_position, compressed=True)
-                self.compressed_writer(latent)
+            if self.global_kv is not None:
+                self.global_kv(source, self.selectors[0])
             if self.selectors:
                 self.index_query(s.query_low)
                 self.rotary.apply(s.index_query, position, compressed=True)
@@ -280,5 +313,8 @@ class PreparedAttention:
         m = self.metadata
         torch.library.wrap_triton(_commit_window)[(128, m.starts.numel())](self.window_cache, self.window,
             m.state_rows, m.starts, counts, self.window.stride(0), self.window_cache.stride(0), 1024)
-        if self.mode == "verify" and self.compressor is not None:
-            self.compressor.commit(counts)
+        self.commit_pending(counts)
+
+    def commit_pending(self, counts):
+        if self.mode == "verify" and self.global_kv is not None:
+            self.global_kv.compressor.commit(counts)

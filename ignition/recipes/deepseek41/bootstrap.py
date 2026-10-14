@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -38,6 +39,9 @@ from ignition.components.paged_maintenance import PreparedMaintenance
 from .pool import ContinuationPool, PAGE_TOKENS, continuation_layout, page_bytes
 from ignition.components.paged_resume import PreparedResume
 from .weights import ModelWeights
+
+
+_CONTEXT = partial(PreparedContext, compact_prefill=True)
 
 
 @dataclass(frozen=True)
@@ -171,7 +175,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
                 markov_runtime=markov_collective, coordinator=coordinator,
-                forwards=DSparkForwards(PreparedDecoder,Scratch,PreparedContext,PreparedDraft,PreparedMarkov))
+                forwards=DSparkForwards(PreparedDecoder,Scratch,_CONTEXT,PreparedDraft,PreparedMarkov))
 
     del manifest
     modes = (True, False) if config.dspark else (False,)
@@ -196,12 +200,12 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     storage = prefill_storage if mode == "prefill" else decoder_storage
                     scratch[name] = storage.rows(capacity, rows)
                     decoder = PreparedDecoder(mode_weights, tables, scratch[name], metadata[name], pool,
-                        mode=mode, runtime=prefill_collective if mode == "prefill" and capacity >= 1024 else collective,
+                        mode=mode, runtime=prefill_collective if mode == "prefill" and capacity >= 128 else collective,
                         vocabulary_runtime=vocabulary_collective,
                         coordinator=coordinator, session=session, name=name, workspace=arena)
                     batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pool=pool)
                     forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
-                        coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=PreparedContext)
+                        coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=_CONTEXT)
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
         if speculation is not None:
             from ignition.components.parallel_draft import PreparedParallelDraftRound
