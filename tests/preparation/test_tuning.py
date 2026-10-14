@@ -195,6 +195,29 @@ def test_standalone_preparation_still_precedes_binding(backend):
 
 
 
+def test_benchmark_fixture_cache_releases_completed_shapes_but_keeps_live_owners(backend):
+    session = make_session(device=0, checkpoint="revision")
+
+    class Fixture:
+        nbytes = 16
+
+    registered = Fixture()
+    restored = []
+    session.register_benchmark_resource("state", registered, restore=lambda: restored.append(True))
+    session._tune_status = "tuning"
+    first = benchmark_resource(session, "shape-a", Fixture)
+    reference = weakref.ref(first)
+    second = benchmark_resource(session, "shape-b", Fixture)
+    assert reference() is first
+    assert benchmark_resource(session, "shape-b", Fixture) is second
+    assert benchmark_resource(session, "state", Fixture) is registered
+    del first
+    assert reference() is None
+    session._restore_benchmark_resources()
+    assert restored == [True]
+    session.close()
+
+
 def test_benchmark_resource_shared_across_requests_and_released_before_capture(backend):
     session = make_session(device=0, checkpoint="revision")
     observed = []
