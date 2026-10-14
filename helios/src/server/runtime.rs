@@ -166,6 +166,20 @@ struct Carried {
     prompt_tokens: Option<usize>,
     reused_prompt_tokens: Option<u64>,
     generated_tokens: u32,
+    /// The request's own sampling seed, from which each continuation's seed derives.
+    seed: Option<u64>,
+}
+
+/// The sampling seed of a preempted request's continuation after `generated` tokens.
+/// Readmission restarts the device's random streams, so the continuation draws from
+/// a stream that depends on the seed and the preemption point instead of repeating
+/// the first one; the same preemption point gives the same continuation.
+fn continuation_seed(seed: u64, generated: u32) -> u64 {
+    // SplitMix64 over the seed and the generated-token count.
+    let mut value = seed ^ u64::from(generated).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 /// The output state of a preempted request whose history waits for readmission.
@@ -1225,6 +1239,9 @@ impl<'a, M: ModelContract> Worker<'a, M> {
         incoming.prompt.tokens = tokens;
         incoming.prompt.max_new_tokens -= generated;
         incoming.readmitted = true;
+        let seed = active.carried.seed.unwrap_or(incoming.prompt.sampling.seed);
+        let generated_tokens = active.carried.generated_tokens + generated;
+        incoming.prompt.sampling.seed = continuation_seed(seed, generated_tokens);
         let parked = Parked {
             last_token: active.last_token,
             next_image: active.next_image,
@@ -1233,7 +1250,8 @@ impl<'a, M: ModelContract> Worker<'a, M> {
             carried: Carried {
                 prompt_tokens: Some(active.carried.prompt_tokens.unwrap_or(prompt_tokens)),
                 reused_prompt_tokens: Some(active.carried.reused_prompt_tokens.unwrap_or(reused)),
-                generated_tokens: active.carried.generated_tokens + generated,
+                generated_tokens,
+                seed: Some(seed),
             },
         };
         self.parked.push_back((incoming, parked));
@@ -1968,6 +1986,14 @@ mod tests {
             .measured_graph_durations(&crate::scheduler::tests::duration_graphs(2))
             .unwrap();
         scheduler
+    }
+
+    #[test]
+    fn continuation_seeds_depend_on_the_seed_and_the_preemption_point() {
+        assert_eq!(continuation_seed(7, 100), continuation_seed(7, 100));
+        assert_ne!(continuation_seed(7, 100), continuation_seed(7, 101));
+        assert_ne!(continuation_seed(7, 100), continuation_seed(8, 100));
+        assert_ne!(continuation_seed(7, 100), 7);
     }
 
     fn retirement_spec(grammar_constrained: bool) -> RequestSpec {

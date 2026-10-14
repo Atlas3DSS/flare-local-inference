@@ -433,8 +433,9 @@ waits while pages are short. When a running request still cannot continue, the
 newest one finishes through its terminal checkpoint and is readmitted with its
 history as the prompt and the rest of its output limit, restoring that
 checkpoint from the GPU or the host prefix store unless both evicted it. Its
-output stream, stop and grammar state, and penalty counts continue, but its
-sampling restarts from the request's seed. A request whose history exceeds the
+output stream, stop and grammar state, and penalty counts continue; its
+random streams restart on the device, so it samples with a seed derived from
+the request's seed and the number of tokens generated before preemption. A request whose history exceeds the
 whole pool ends at that length instead. Other models, and requests with
 images, reserve prompt and output capacity at admission.
 For Qwen's target cache, BF16 KV and compressed selector keys cost 24.75 KiB
