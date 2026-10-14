@@ -98,10 +98,17 @@ impl ResidentMapping {
             )
             .into());
         }
-        Ok(Self {
+        let mapping = Self {
             address: address as usize,
             nbytes,
-        })
+        };
+        // The sealed read-only remap has its own page tables, even after loading
+        // populated the backing RAM. Prepare them before row delivery starts.
+        if !writable && unsafe { libc::madvise(address, nbytes, libc::MADV_POPULATE_READ) } != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(format!("populate resident embedding page tables: {error}").into());
+        }
+        Ok(mapping)
     }
 }
 
@@ -449,6 +456,72 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_resident_rows_are_readable_without_first_access_page_faults() {
+        let path = std::env::temp_dir().join(format!(
+            "helios-engram-populated-{}.bin",
+            std::process::id()
+        ));
+        let rows = 65536;
+        let second = rows * 256;
+        let bytes: Vec<_> = (0..second + rows * 8)
+            .map(|i| (i * 19 + i / 7) as u8)
+            .collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let planes = [
+            Plane {
+                offset: 0,
+                nbytes: second,
+                row_bytes: 256,
+            },
+            Plane {
+                offset: second as u64,
+                nbytes: rows * 8,
+                row_bytes: 8,
+            },
+        ];
+        let file = open_file(&path).unwrap();
+        let original = planes.map(|plane| Arc::new(Resident::load(&file, plane).unwrap()));
+        let shared = std::array::from_fn(|i| {
+            Arc::new(
+                Resident::from_shared(original[i].file.try_clone().unwrap(), planes[i]).unwrap(),
+            )
+        });
+        std::fs::remove_file(path).unwrap();
+        let ids: Vec<_> = (0..128).map(|i| ((i * 509 + 17) % rows) as i64).collect();
+        let mut output = vec![0; ids.len() * 264];
+        let mut expected = Vec::with_capacity(output.len());
+        for plane in &planes {
+            for &id in &ids {
+                let first = plane.offset as usize + id as usize * plane.row_bytes;
+                expected.extend_from_slice(&bytes[first..first + plane.row_bytes]);
+            }
+        }
+        for data in [original, shared] {
+            let mut reader = Reader::Ram(data);
+            // Prime the copy code and output storage without touching the selected table pages.
+            reader.gather(&planes, &[0], &mut output[..264]).unwrap();
+            output.fill(0xA5);
+            let mut before = unsafe { std::mem::zeroed::<libc::rusage>() };
+            let mut after = unsafe { std::mem::zeroed::<libc::rusage>() };
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut before) },
+                0
+            );
+            reader.gather(&planes, &ids, &mut output).unwrap();
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut after) },
+                0
+            );
+            assert_eq!(
+                after.ru_minflt, before.ru_minflt,
+                "row gathering faulted resident pages"
+            );
+            assert_eq!(after.ru_majflt, before.ru_majflt);
+            assert_eq!(output, expected);
+        }
+    }
 
     #[test]
     fn shared_resident_plane_outlives_source_and_loader_and_rejects_mutation() {
